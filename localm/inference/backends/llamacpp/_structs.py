@@ -659,6 +659,42 @@ class LlamaSamplerChainParams(ctypes.Structure):
     ]
 
 
+class LlamaTokenData(ctypes.Structure):
+    """
+    typedef struct llama_token_data {
+        llama_token id;
+        float logit;
+        float p;
+    } llama_token_data;                 (12 bytes)
+    """
+    _fields_ = [
+        ("id",    ctypes.c_int32),
+        ("logit", ctypes.c_float),
+        ("p",     ctypes.c_float),
+    ]
+
+
+class LlamaTokenDataArray(ctypes.Structure):
+    """
+    typedef struct llama_token_data_array {
+        llama_token_data * data;        a sampler may repoint this
+        size_t size;
+        int64_t selected;               index into data, not a token id
+        bool sorted;
+    } llama_token_data_array;           (32 bytes)
+    """
+    _fields_ = [
+        ("data",     ctypes.POINTER(LlamaTokenData)),
+        ("size",     ctypes.c_size_t),
+        ("selected", ctypes.c_int64),
+        ("sorted",   ctypes.c_bool),
+    ]
+
+
+assert ctypes.sizeof(LlamaTokenData) == 12
+assert ctypes.sizeof(LlamaTokenDataArray) == 32
+
+
 # llama_batch  (56 bytes)
 #
 # struct llama_batch {

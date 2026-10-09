@@ -152,7 +152,7 @@ The pip package covers the CLI, the server, and every plugin. It does not includ
 
 ### Docker (API server)
 
-Release images are published to `ghcr.io/matlan1/localm` (CPU and Vulkan; see the package page for the tags that exist), and `docker build --platform linux/amd64 -f docker/Dockerfile -t localm .` builds one from a clone. The container runs `localm serve`, keeps its data in the `/data` volume, and refuses to start without an API key:
+Release images are published to `ghcr.io/matlan1/localm` (CPU, Vulkan and NVIDIA CUDA; see the package page for the tags that exist), and `docker build --platform linux/amd64 -f docker/Dockerfile -t localm .` builds one from a clone. The container runs `localm serve`, keeps its data in the `/data` volume, and refuses to start without an API key:
 
 ```bash
 docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate    # prints a key once

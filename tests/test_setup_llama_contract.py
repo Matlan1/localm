@@ -377,6 +377,7 @@ Usage: setup-llama [OPTIONS]
     localm setup-llama --backend cuda         # NVIDIA: checks the driver, fetches a
                                               #   self-contained CUDA runtime (no Toolkit)
     localm setup-llama --backend cpu          # no GPU
+    localm setup-llama --backend cuda --cuda-line cuda-12   # image build, no GPU
     localm setup-llama --from /path/to/llama.cpp/build/bin
     localm setup-llama --url https://.../llama-...zip
     localm setup-llama --sha256 <hex>         # pin the expected archive digest
@@ -410,6 +411,12 @@ Options:
   --rollback                      Go back to the previous llama.cpp build recorded for this backend
                                   and pin it. For when an upstream release turns out to be broken on
                                   your hardware. See 'localm doctor' for what is installed now.
+  --cuda-line [cuda-12|cuda-13]   With --backend cuda on Linux: fetch the CUDA build and runtime
+                                  libraries of this line without an NVIDIA GPU present, for building
+                                  container images. cuda-12 covers every architecture before
+                                  Blackwell, cuda-13 is for Blackwell. The driver check and the load
+                                  test are skipped, the runtime is recorded as not load-tested, and
+                                  the container's start check tests it on the GPU host.
   -y, --yes                       Non-interactive: accept the recommended action at every prompt
                                   (e.g. fetch the self-contained CUDA runtime). Used by the one-
                                   click installer and for scripted setups.
@@ -431,6 +438,7 @@ def test_cli_surface_is_unchanged():
         ("force", ("--force",), "BoolParamType", None, True),
         ("tag", ("--tag",), "StringParamType", None, False),
         ("rollback", ("--rollback",), "BoolParamType", None, True),
+        ("cuda_line", ("--cuda-line",), "Choice", ("cuda-12", "cuda-13"), False),
         ("assume_yes", ("--yes", "-y"), "BoolParamType", None, True),
     ]
     result = CliRunner().invoke(sl.main, ["--help"], terminal_width=100)

@@ -292,6 +292,10 @@ NETWORK_BIND_OWNER_KEYS = {"bind_host", "tls_enabled", "tls_cert", "tls_key"}
 # SCHEMA_ONLY_CREDENTIAL_KEYS.
 MODEL_SOURCE_CREDENTIAL_KEYS = {"hf_token", "civitai_api_key"}
 
+# Whether the Prometheus /metrics endpoint is served: it exposes operational
+# figures, so only the owner may switch it on.
+METRICS_OWNER_KEYS = {"metrics_enabled"}
+
 
 def test_admin_only_keys_lists_the_owner_only_settings():
     # The rag_* folder keys widen a filesystem-read boundary; net_allow_private
@@ -336,7 +340,8 @@ def test_admin_only_keys_lists_the_owner_only_settings():
            "browser_allow", "browser_deny"}
         # gui_preview_* decide whether a reply's own HTML is rendered at all
         # and who it is rendered for.
-        | {"gui_preview_enabled", "gui_preview_owner_only"})
+        | {"gui_preview_enabled", "gui_preview_owner_only"}
+        | METRICS_OWNER_KEYS)
 
 
 def test_outbound_endpoint_keys_are_owner_only():

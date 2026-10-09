@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""What a GGUF IS comes from its own header: chat model, embedding, vision
-projector, or one of the llama.cpp architectures that load but cannot chat
-(speculative-decoding draft heads, diffusion language models, T5, audio codec).
+"""What a GGUF IS comes from its own header: chat model (diffusion language
+models included), embedding, vision projector, or one of the llama.cpp
+architectures that load but cannot chat (speculative-decoding draft heads, T5,
+audio codec).
 
 The architecture names are the ones in llama.cpp's own architecture table.
 """
@@ -20,6 +21,7 @@ from localm.inference.backends.gguf import GgufBackend, _load_failure_message
 from localm.model_manager import (
     gguf_architecture, gguf_chat_refusal, gguf_embedding_signal,
 )
+from localm.model_manager.gguf import gguf_tool_use_signal
 from localm.model_manager.registry import _detect_local_model_type
 
 _T_BOOL, _T_UINT32, _T_STRING = 7, 4, 8
@@ -67,9 +69,10 @@ EMBEDDING_ARCHITECTURES = [
     "llama-embed",
 ]
 NON_CHAT_ARCHITECTURES = [
-    "eagle3", "dflash", "gemma4-assistant", "dream", "llada", "llada-moe", "rnd1",
+    "eagle3", "dflash", "gemma4-assistant",
     "wavtokenizer-dec", "qwen3tts", "pockettts",
 ]
+DIFFUSION_LM_ARCHITECTURES = ["dream", "llada", "llada-moe", "rnd1"]
 
 
 IMAGE_ARCHITECTURES = [
@@ -114,10 +117,27 @@ class TestArchitectureRoles:
         f = _gguf(tmp_path / "m.gguf", "llama", [("llama.attention.causal", _kv_bool(True))])
         assert _type_of(f) == "llm"
 
-    def test_diffusion_lm_declaring_non_causal_is_not_an_embedding(self, tmp_path):
-        f = _gguf(tmp_path / "m.gguf", "llada", [("llada.attention.causal", _kv_bool(False))])
+    @pytest.mark.parametrize("arch", DIFFUSION_LM_ARCHITECTURES)
+    def test_diffusion_lms_are_chat_models(self, tmp_path, arch):
+        assert _type_of(_gguf(tmp_path / "m.gguf", arch)) == "llm"
+        assert gguf_chat_refusal(arch) is None
+
+    @pytest.mark.parametrize("arch", DIFFUSION_LM_ARCHITECTURES)
+    def test_diffusion_lm_declaring_non_causal_is_never_an_embedding(self, tmp_path, arch):
+        f = _gguf(tmp_path / "m.gguf", arch, [
+            (f"{arch}.attention.causal", _kv_bool(False)),
+            (f"{arch}.pooling_type", _kv_uint32(1)),
+        ])
         assert gguf_embedding_signal(f) is False
-        assert _type_of(f) == "unknown"
+        assert _type_of(f) == "llm"
+
+    @pytest.mark.parametrize("arch", DIFFUSION_LM_ARCHITECTURES)
+    def test_diffusion_lms_are_not_tool_callers(self, tmp_path, arch):
+        f = _gguf(tmp_path / "m.gguf", arch, [
+            ("tokenizer.chat_template",
+             _kv_string("{% if tools %}<tool_call>{% endif %}{{ messages }}")),
+        ])
+        assert gguf_tool_use_signal(f) is False
 
     def test_encoder_decoder_declaring_non_causal_stays_llm(self, tmp_path):
         f = _gguf(tmp_path / "m.gguf", "t5", [("t5.attention.causal", _kv_bool(False))])
@@ -131,7 +151,6 @@ class TestArchitectureRoles:
 class TestChatRefusal:
     @pytest.mark.parametrize("arch,what", [
         ("eagle3", "draft head"), ("dflash", "draft head"), ("gemma4-assistant", "draft head"),
-        ("dream", "diffusion language model"), ("llada", "diffusion language model"),
         ("wavtokenizer-dec", "audio codec"),
         ("qwen3tts", "text-to-speech"), ("flux", "image or video generation"),
     ])
@@ -139,7 +158,8 @@ class TestChatRefusal:
         msg = gguf_chat_refusal(arch)
         assert f"'{arch}'" in msg and what in msg
 
-    @pytest.mark.parametrize("arch", CHAT_ARCHITECTURES + EMBEDDING_ARCHITECTURES + ["clip", "", None])
+    @pytest.mark.parametrize("arch", CHAT_ARCHITECTURES + EMBEDDING_ARCHITECTURES
+                             + DIFFUSION_LM_ARCHITECTURES + ["clip", "", None])
     def test_no_refusal_for_anything_else(self, arch):
         assert gguf_chat_refusal(arch) is None
 
@@ -149,7 +169,7 @@ class TestChatRefusal:
 
 
 class TestBackendRefusesBeforeLoading:
-    @pytest.mark.parametrize("arch", ["eagle3", "llada", "wavtokenizer-dec", "flux"])
+    @pytest.mark.parametrize("arch", ["eagle3", "wavtokenizer-dec", "flux"])
     def test_load_raises_before_any_vram_probe_or_worker(self, tmp_path, monkeypatch, arch):
         f = _gguf(tmp_path / "m.gguf", arch)
         backend = GgufBackend(str(f))

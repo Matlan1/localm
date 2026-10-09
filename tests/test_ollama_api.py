@@ -323,9 +323,17 @@ def test_chat_format_json_reaches_the_engine_as_a_grammar(client, engine):
     engine.validate_grammar.assert_called()
 
 
-def test_chat_format_schema_is_refused_with_a_clear_message(client):
-    r = _chat(client, format={"type": "object", "properties": {}})
-    assert r.status_code == 400 and "schema" in _error_of(r)
+def test_chat_format_schema_reaches_the_engine_as_a_grammar(client, engine):
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    r = _chat(client, stream=False, format=schema)
+    assert r.status_code == 200
+    _messages, kwargs = engine.seen["calls"][-1]
+    assert kwargs["grammar"].startswith("root ::=") and "name" in kwargs["grammar"]
+
+
+def test_chat_format_schema_the_grammar_cannot_enforce_is_a_400(client):
+    r = _chat(client, format={"type": "string", "pattern": "^a"})
+    assert r.status_code == 400 and "pattern" in _error_of(r)
 
 
 def test_chat_tools_are_refused_not_dropped(client):

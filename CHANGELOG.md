@@ -12,10 +12,31 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The Ollama API's `format` takes a JSON schema.** The reply is constrained, token by
+  token, to documents that satisfy the schema: objects with required and optional
+  properties, arrays with length bounds, enums, integer ranges, `anyOf`, recursive `$ref`
+  and more. A keyword that cannot be enforced (`pattern`, `multipleOf`, number bounds)
+  is refused with a 400 naming it rather than ignored.
 - **`stop` sequences on `/v1/chat/completions` and `/v1/completions`.** A string or a list
   of up to 16: the reply is cut before the first match, the generation ends there instead of
   running to its token budget, and `finish_reason` is `stop`. A stop sequence inside a
   reasoning model's `<think>` block is not applied. The Ollama API's `options.stop` uses it.
+- **Prometheus metrics at `/metrics`.** Turn on "Prometheus metrics" in Settings > Server
+  (or set `metrics_enabled`) and restart to serve request counts and latency by route,
+  prompt and generated tokens, tokens per second, time to first token, queue depth, loaded
+  models and GPU memory in Prometheus text format. It needs an admin API key, answers only
+  on a loopback bind when no key exists, and carries no prompt, reply, model name or model
+  path in any label. Off by default.
+- **Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) run as chat models.**
+  A GGUF of one of these architectures now loads and answers through `localm run`,
+  the GUI chat and `/v1/chat/completions`, instead of being refused. These models
+  write the whole reply at once over a number of denoising steps, so the reply
+  appears when it is finished and the status line shows the progress meanwhile.
+  Two settings control them: "Diffusion steps" (`diffusion_steps`, more steps give
+  better text and a slower reply) and "Diffusion reply length"
+  (`diffusion_max_tokens`, 256 by default). Grammar-constrained output, images and
+  speculative decoding are not available with these models; a request for a
+  grammar is refused with a message saying so.
 - **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5 and other `t5`
   GGUFs register as chat models and answer through `localm run`, the GUI chat and
   `/v1/chat/completions`, where they were refused before.
@@ -54,7 +75,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
   answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies
   stream as NDJSON, `format: "json"`, `options.stop`, `think` and images work, and the same
-  API keys and scopes apply. Tool calling and a JSON-schema `format` are not supported yet.
+  API keys and scopes apply. Tool calling is not supported yet.
   `/api/copy` makes an alias; pulling, deleting and creating models stay in `localm`. See
   docs/ollama-api.md.
 - **Release files carry build provenance and a software bill of materials.** The release
@@ -62,6 +83,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the release workflow, so `gh attestation verify` proves which workflow built a file and
   from which commit. SECURITY.md has the commands.
 - **Docker images for the API server.** Releases publish CPU and Vulkan images to `ghcr.io/matlan1/localm`, and `docker/Dockerfile` builds the same image from a clone. The container keeps its data in a `/data` volume, serves HTTPS, and refuses to start until an API key exists (`docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate`). See docs/docker.md.
+- **NVIDIA CUDA Docker images.** Releases also publish `cuda` (every NVIDIA architecture before Blackwell) and `cuda13` (Blackwell) images, started with `docker run --gpus all`. On start the container checks that the CUDA runtime loads on the GPU it can see, and exits with the cause instead of serving on the CPU when it does not, for example with no GPU attached or with the wrong tag for the GPU. `localm setup-llama --backend cuda --cuda-line cuda-12` (or `cuda-13`) fetches the CUDA runtime on a machine without a GPU, which is how the images are built. See docs/docker.md.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing

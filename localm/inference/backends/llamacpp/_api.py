@@ -18,6 +18,7 @@ from ._structs import (
     LlamaBatch,
     LlamaChatMessage,
     LlamaSamplerChainParams,
+    LlamaTokenDataArray,
     llama_token,
 )
 
@@ -244,6 +245,12 @@ def llama_n_ctx(ctx: ctypes.c_void_p) -> int:
     return _bind("llama_n_ctx", ctypes.c_uint32, LlamaContext)(ctx)
 
 
+def llama_set_causal_attn(ctx: ctypes.c_void_p, causal: bool) -> None:
+    """Switch the context between causal and bidirectional attention. Only call
+    after has_diffusion_api()."""
+    _bind("llama_set_causal_attn", None, LlamaContext, ctypes.c_bool)(ctx, causal)
+
+
 def llama_n_ctx_seq(ctx: ctypes.c_void_p) -> Optional[int]:
     """The effective per-SEQUENCE context window, or None on a build old
     enough to predate this accessor (optional, like llama_model_has_mtp
@@ -365,6 +372,27 @@ def llama_model_is_hybrid(model: ctypes.c_void_p) -> bool:
     Falcon-H1 ...), where only SOME layers attend and the rest keep a fixed-size
     recurrent state. Only call after has_hybrid_api()."""
     return bool(_bind("llama_model_is_hybrid", ctypes.c_bool, LlamaModel)(model))
+
+
+_DIFFUSION_SYMBOLS = ("llama_model_is_diffusion", "llama_vocab_mask",
+                      "llama_set_causal_attn", "llama_sampler_apply",
+                      "llama_n_ubatch", "llama_encode")
+
+
+def has_diffusion_api() -> bool:
+    """True when this llama.dll exports every call the diffusion sampler
+    (``_diffusion.py``) needs. False on a build without them; never raises."""
+    lib = load_lib()
+    return all(hasattr(lib, fn) for fn in _DIFFUSION_SYMBOLS)
+
+
+def llama_model_is_diffusion(model: ctypes.c_void_p) -> bool:
+    """True for a diffusion language model (Dream, LLaDA, LLaDA-MoE, RND1),
+    which keeps no KV cache and is denoised over a whole canvas rather than
+    decoded token by token. False on a build that does not export the call."""
+    if not hasattr(load_lib(), "llama_model_is_diffusion"):
+        return False
+    return bool(_bind("llama_model_is_diffusion", ctypes.c_bool, LlamaModel)(model))
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +518,12 @@ def llama_vocab_is_eog(vocab: ctypes.c_void_p, token: int) -> bool:
 
 def llama_token_is_eog(vocab: ctypes.c_void_p, token: int) -> bool:
     return bool(_bind("llama_token_is_eog", ctypes.c_bool, LlamaVocab, llama_token)(vocab, token))
+
+
+def llama_vocab_mask(vocab: ctypes.c_void_p) -> int:
+    """The vocabulary's mask token, or -1 (LLAMA_TOKEN_NULL) when it declares
+    none. Only call after has_diffusion_api()."""
+    return int(_bind("llama_vocab_mask", llama_token, LlamaVocab)(vocab))
 
 
 # ---------------------------------------------------------------------------
@@ -632,8 +666,9 @@ def llama_model_decoder_start_token(model: ctypes.c_void_p) -> int:
 
 
 def llama_encode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
-    """Run the encoder of an encoder-decoder model on *batch*, the whole input
-    sequence starting at position 0. Returns 0 on success, nonzero on error.
+    """Run the encoder of an encoder-decoder model, or a diffusion model's whole
+    canvas (every position output), on *batch*, the whole input sequence
+    starting at position 0. Returns 0 on success, nonzero on error.
 
     The native side ABORTS THE PROCESS (GGML_ASSERT, not an error return) when
     *batch* holds more tokens than the context's n_ubatch, so the caller must
@@ -748,6 +783,15 @@ def llama_sampler_sample(sampler: ctypes.c_void_p, ctx: ctypes.c_void_p, idx: in
 
 def llama_sampler_accept(sampler: ctypes.c_void_p, token: int) -> None:
     _bind("llama_sampler_accept", None, LlamaSampler, llama_token)(sampler, token)
+
+
+def llama_sampler_apply(sampler: ctypes.c_void_p, cur_p) -> None:
+    """Run *sampler* over the candidate array *cur_p* (a
+    ``LlamaTokenDataArray`` or a pointer to one) in place: it may reorder,
+    truncate and repoint ``cur_p.data``, fill ``p`` and set ``selected``.
+    Only call after has_diffusion_api()."""
+    _bind("llama_sampler_apply", None, LlamaSampler,
+          ctypes.POINTER(LlamaTokenDataArray))(sampler, cur_p)
 
 
 def has_backend_sampling() -> bool:

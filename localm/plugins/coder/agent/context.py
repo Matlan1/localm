@@ -876,11 +876,15 @@ ws     ::= [ \t\n\r]*
         ``can_force_tool_calls()`` true: a backend that cannot apply a grammar
         from a trigger may still apply one from the first token.
 
-        Matched on the exact refusal message rather than on exception type, since
-        CoderServerError also wraps InvalidGrammarError. The lazy message is
-        tested BEFORE the general one, and the two are asserted mutually
-        non-containing."""
+        A diffusion-model refusal is a blanket refusal: such a model cannot
+        follow a grammar in either form.
+
+        Matched on the exact refusal messages rather than on exception type,
+        since CoderServerError also wraps InvalidGrammarError. The lazy message
+        is tested BEFORE the blanket ones, and the messages are asserted
+        mutually non-containing."""
         from localm.inference.backends.base import (
+            GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE,
             GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
             GRAMMAR_UNSUPPORTED_MESSAGE,
         )
@@ -897,7 +901,8 @@ ws     ::= [ \t\n\r]*
             return True
         if getattr(self, "_grammar_confirmed_unsupported", False):
             return False   # already disabled; a repeat means something else is wrong
-        if GRAMMAR_UNSUPPORTED_MESSAGE not in str(e):
+        if (GRAMMAR_UNSUPPORTED_MESSAGE not in str(e)
+                and GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE not in str(e)):
             return False
         self._grammar_confirmed_unsupported = True
         self._force_tool_grammar = False

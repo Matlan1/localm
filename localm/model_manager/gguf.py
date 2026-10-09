@@ -678,16 +678,23 @@ _GGUF_EMBEDDING_ARCHITECTURES = frozenset({
     "t5encoder", "llama-embed", "gemma-embedding2",
 })
 
-# Architectures llama.cpp loads that are not causal chat models, each with the
+# llama.cpp's diffusion language models: chat models that denoise a whole reply
+# canvas with bidirectional attention instead of decoding token by token, and
+# keep no KV cache.
+GGUF_DIFFUSION_ARCHITECTURES = frozenset({"dream", "llada", "llada-moe", "rnd1"})
+
+
+def gguf_is_diffusion_architecture(architecture: Optional[str]) -> bool:
+    """True when ``general.architecture`` names a diffusion language model."""
+    return architecture in GGUF_DIFFUSION_ARCHITECTURES
+
+
+# Architectures llama.cpp loads that are not chat models, each with the
 # user-facing description of what the file is.
 _GGUF_NON_CHAT_ARCHITECTURES = {
     "eagle3": "a speculative-decoding draft head",
     "dflash": "a speculative-decoding draft head",
     "gemma4-assistant": "a speculative-decoding draft head",
-    "dream": "a diffusion language model",
-    "llada": "a diffusion language model",
-    "llada-moe": "a diffusion language model",
-    "rnd1": "a diffusion language model",
     "wavtokenizer-dec": "an audio codec decoder",
     "qwen3tts": "a text-to-speech model",
     "pockettts": "a text-to-speech model",
@@ -2084,7 +2091,9 @@ def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
     gte-Qwen2, e5-mistral all reuse a decoder architecture whose
     general.architecture is unchanged from the chat variant, so the pooling-type
     key is the only signal that catches them), or it declares
-    ``"<architecture>.attention.causal"`` false. All are hard metadata baked
+    ``"<architecture>.attention.causal"`` false. A diffusion language model
+    (``GGUF_DIFFUSION_ARCHITECTURES``) is never an embedding model, whatever it
+    declares. All are hard metadata baked
     into the file itself - never a filename guess. Used by
     ``_detect_local_model_type`` (local add + folder auto-sync) and by
     ``pull.py`` (a freshly-downloaded remote GGUF).
@@ -2096,6 +2105,8 @@ def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
     if meta is None:
         meta = _gguf_metadata_probe(path)
     arch = meta.get("architecture")
+    if arch in GGUF_DIFFUSION_ARCHITECTURES:
+        return False
     if arch in _GGUF_EMBEDDING_ARCHITECTURES:
         return True
     if meta.get("has_pooling_type"):
@@ -2562,7 +2573,8 @@ def _gguf_capability_probe(path: Path) -> dict:
     context-length capability signals.
 
     Returns ``{"chat_template": Optional[str], "context_length": Optional[int],
-    "complete": bool}``. ``complete`` is True only when the KV walk visited
+    "complete": bool}``, plus ``"architecture"`` (``general.architecture`` or
+    None) once the header has been opened as a GGUF. ``complete`` is True only when the KV walk visited
     every declared entry without truncating or hitting a malformed value, and it
     is the whole point of this return shape: with it, a ``chat_template`` of
     None means the file DECLARES no template (a real answer), and without it the
@@ -2626,7 +2638,7 @@ def _gguf_capability_probe(path: Path) -> dict:
         if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
             context_length = raw
     return {"chat_template": chat_template, "context_length": context_length,
-            "complete": complete}
+            "complete": complete, "architecture": architecture}
 
 
 def gguf_tool_use_signal(path: Path, meta: Optional[dict] = None) -> Optional[bool]:
@@ -2635,7 +2647,9 @@ def gguf_tool_use_signal(path: Path, meta: Optional[dict] = None) -> Optional[bo
 
     ``True``  its template renders tool calls.
     ``False`` its template was read and renders none, OR the header was walked
-              in full and declares no template at all.
+              in full and declares no template at all, OR the file is a
+              diffusion language model, which writes its whole reply at once
+              and is not driven by a tool-call grammar.
     ``None``  the header could not be read far enough to tell.
 
     llama.cpp's converter copies the source model's HuggingFace chat template
@@ -2653,6 +2667,8 @@ def gguf_tool_use_signal(path: Path, meta: Optional[dict] = None) -> Optional[bo
     result, so a caller reading both capabilities pays one read."""
     if meta is None:
         meta = _gguf_capability_probe(path)
+    if meta.get("architecture") in GGUF_DIFFUSION_ARCHITECTURES:
+        return False
     template = meta.get("chat_template")
     if template is None:
         return False if meta.get("complete") else None

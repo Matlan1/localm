@@ -524,6 +524,49 @@ scope dependency still rejects an unauthorised caller before the handler runs.
 **Only the update check honours `net_mode: off`.** `GET /api/issues` reaches the
 network regardless, and `GET /api/changelog` makes no network call at all.
 
+### `GET /metrics`
+
+Scope: `admin`. Off by default.
+
+Prometheus text-format metrics. The route does not exist until you turn on the
+`metrics_enabled` setting (Settings > Server, or `localm config metrics_enabled
+true`; `LOCALM_METRICS=1` does the same for one run) and restart. With it off
+nothing is collected and `/metrics` answers 404.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `localm_http_requests_total` | counter | `method`, `route`, `status` |
+| `localm_http_request_duration_seconds` | histogram | `method`, `route` |
+| `localm_http_requests_in_flight` | gauge | none |
+| `localm_prompt_tokens_total`, `localm_generated_tokens_total` | counter | none |
+| `localm_time_to_first_token_seconds` | histogram | none |
+| `localm_tokens_per_second` | histogram | none |
+| `localm_inference_queue_depth` | gauge | none |
+| `localm_models_loaded` | gauge | none |
+| `localm_vram_used_bytes`, `localm_vram_total_bytes` | gauge | none |
+
+`route` is the route template (`/v1/models/{model_id}`), never the requested
+path; anything that is not a plain route is `other`. No metric carries a prompt,
+a reply, a model name or a model path. The VRAM gauges come from the cached GPU
+reading and are left out until a trustworthy one exists;
+`localm_inference_queue_depth` counts requests waiting for a model's slot.
+Counters live in memory and start from zero at every server start.
+
+Access: a server with an API key needs an `admin` key (the owner key from
+`localm key generate`, or `LOCALM_API_KEY`). A server with no key answers only
+on a loopback bind, and then only with the per-process shell token the local GUI
+holds, so a scraper on a keyless server needs a key first. A cross-origin
+browser request is refused.
+
+```yaml
+scrape_configs:
+  - job_name: localm
+    authorization:
+      credentials: <admin key>
+    static_configs:
+      - targets: ["127.0.0.1:8642"]
+```
+
 ### `POST /api/bug-report`
 
 Scope: `config:write`.

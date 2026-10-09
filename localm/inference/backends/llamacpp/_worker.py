@@ -15,9 +15,16 @@ abort only ever kills this process, never the server."""
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from ._sizing import VramSizingMixin
+
+
+def _diffusion_default_reply_tokens() -> int:
+    """The reply length a diffusion model uses when none is configured."""
+    from ._diffusion import DEFAULT_MAX_TOKENS
+    return DEFAULT_MAX_TOKENS
 
 
 class GgufWorker(VramSizingMixin):
@@ -32,6 +39,10 @@ class GgufWorker(VramSizingMixin):
     ``_free_vram_bytes()`` - and only later, mid-generation, when the
     context genuinely needs to grow).
     """
+
+    # Set by the runner: a threading.Event that asks the current generation
+    # to stop. Polled between denoising steps of a diffusion model.
+    stream_cancel: Optional[threading.Event] = None
 
     def __init__(
         self,
@@ -54,6 +65,8 @@ class GgufWorker(VramSizingMixin):
         spec_draft_gpu: bool = True,
         use_mmap: Optional[bool] = None,
         adapters: Optional[list] = None,
+        diffusion_steps: Optional[int] = None,
+        diffusion_max_tokens: Optional[int] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -91,6 +104,10 @@ class GgufWorker(VramSizingMixin):
         # The parent's mmap decision: True or False forces it, None keeps the
         # build's default.
         self.use_mmap = use_mmap
+        # Diffusion language models only: steps and reply canvas length, None
+        # for LlamaCpp's defaults.
+        self.diffusion_steps = diffusion_steps
+        self.diffusion_max_tokens = diffusion_max_tokens
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False
@@ -185,11 +202,11 @@ class GgufWorker(VramSizingMixin):
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
         "weight_placement", "moe_skip_reason", "mmap", "adapters",
-        "encoder_decoder", "encoder_input_limit"}``. ``adapters`` lists the
-        ``{"path", "scale"}`` of each LoRA adapter applied to the context.
-        ``encoder_decoder`` is True for a model that
-        encodes its prompt before decoding (T5), and ``encoder_input_limit`` is
-        then the most prompt tokens one request may carry (0 otherwise).
+        "encoder_decoder", "encoder_input_limit", "diffusion"}``. ``adapters``
+        lists the ``{"path", "scale"}`` of each LoRA adapter applied to the
+        context. ``encoder_decoder`` is True for a model that encodes its
+        prompt before decoding (T5), and ``encoder_input_limit`` is then the
+        most prompt tokens one request may carry (0 otherwise).
         ``weight_placement`` is llama.cpp's own per-backend load report (VRAM vs
         system RAM), the only ground truth for whether ``n_cpu_moe`` actually
         moved anything - this worker is the only process that can see it, since
@@ -201,6 +218,10 @@ class GgufWorker(VramSizingMixin):
         isolated child and only the parent (GgufBackend) may render a
         user-facing message. ``mmap`` is whether the load memory-mapped the
         model file, read from the native load log (None when not reported).
+        ``diffusion`` is True for a diffusion language model, and then
+        ``diffusion_capacity`` is the most tokens (prompt plus reply) one
+        generation can hold and ``diffusion_reply_tokens`` the reply length it
+        is configured for.
 
         Raises :class:`~localm.inference.backends.base.ModelLoadCancelled` if
         ``cancel_event`` was set during the load (native progress-callback
@@ -247,6 +268,8 @@ class GgufWorker(VramSizingMixin):
                 ("spec_source", self.spec_source),
                 ("spec_draft_tokens", self.spec_draft_tokens),
                 ("spec_draft_model", self.spec_draft_model),
+                ("diffusion_steps", self.diffusion_steps),
+                ("diffusion_max_tokens", self.diffusion_max_tokens),
             ) if value is not None}
         self._llm = LlamaCpp(
             model_path=self.model_path,
@@ -268,7 +291,7 @@ class GgufWorker(VramSizingMixin):
             **optional,
         )
         self._loaded = True
-        return {
+        meta = {
             "n_layers": getattr(self._llm, "n_layers", None),
             "kv_bytes_per_token": getattr(self._llm, "kv_bytes_per_token", 0),
             "supports_images": bool(self._llm.supports_images),
@@ -279,7 +302,14 @@ class GgufWorker(VramSizingMixin):
             "adapters": [dict(a) for a in getattr(self._llm, "applied_adapters", ())],
             "encoder_decoder": bool(getattr(self._llm, "is_encoder_decoder", False)),
             "encoder_input_limit": int(getattr(self._llm, "encoder_input_limit", 0) or 0),
+            "diffusion": bool(getattr(self._llm, "is_diffusion", False)),
         }
+        if meta["diffusion"]:
+            meta["diffusion_capacity"] = int(getattr(self._llm, "_diffusion_capacity", 0) or 0)
+            meta["diffusion_reply_tokens"] = int(
+                getattr(self._llm, "_diffusion_max_tokens", None)
+                or _diffusion_default_reply_tokens())
+        return meta
 
     def close(self) -> None:
         if self._llm is not None and hasattr(self._llm, "close"):
@@ -394,6 +424,8 @@ class GgufWorker(VramSizingMixin):
                 kw["seed"] = seed
             if thinking is not None:
                 kw["thinking"] = thinking
+            if self.stream_cancel is not None:
+                kw["should_stop"] = self.stream_cancel.is_set
             return kw
 
         def _stream(g: Optional[str]):

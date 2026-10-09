@@ -18,6 +18,8 @@ from typing import Any, AsyncIterator, Iterable, Optional, TypeGuard, Union
 
 from pydantic import BaseModel, ConfigDict
 
+from localm.inference.json_schema_grammar import SchemaGrammarError, schema_to_grammar
+
 INFERENCE_POST_PATHS = frozenset(
     {"/api/chat", "/api/generate", "/api/embed", "/api/embeddings"})
 SHOW_PATH = "/api/show"
@@ -33,9 +35,6 @@ OPEN_MODE_GET_PATHS = READ_GET_PATHS
 TOOLS_UNSUPPORTED = (
     "tools and tool_calls are not supported on the Ollama API yet; "
     "send the request without them")
-SCHEMA_FORMAT_UNSUPPORTED = (
-    "format as a JSON schema is not supported yet; use format \"json\" or "
-    "omit format")
 
 
 class OllamaError(Exception):
@@ -206,14 +205,18 @@ ws ::= | " " | "\n" [ \t]{0,20}
 def format_to_grammar(fmt: Any) -> Optional[str]:
     """The GBNF grammar a ``format`` value asks for, or ``None`` for no format.
 
-    ``"json"`` constrains the reply to a JSON object. A JSON-schema ``format``
-    is refused until schema-constrained output exists in the chat path."""
+    ``"json"`` constrains the reply to a JSON object; a JSON-schema ``format``
+    constrains it to that schema. A schema the grammar cannot enforce is a 400
+    naming the keyword."""
     if fmt is None or fmt == "":
         return None
     if fmt == "json":
         return JSON_GRAMMAR
     if isinstance(fmt, dict):
-        raise OllamaError(400, SCHEMA_FORMAT_UNSUPPORTED)
+        try:
+            return schema_to_grammar(fmt)
+        except SchemaGrammarError as exc:
+            raise OllamaError(400, f"format: {exc}") from None
     raise OllamaError(400, f"unsupported format {fmt!r}: expected \"json\"")
 
 

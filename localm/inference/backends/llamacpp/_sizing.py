@@ -825,17 +825,17 @@ class VramSizingMixin:
 
     def _draft_model_charge_bytes(self) -> int:
         """VRAM the draft source's second model needs on the GPU for THIS load,
-        0 unless ``spec_source`` is "draft", this model is not an
-        encoder-decoder model (which never drafts), and ``spec_draft_model`` is
-        a readable GGUF that ``_draft_model_rejected_by_metadata`` does not
-        reject.
+        0 unless ``spec_source`` is "draft", this model is neither an
+        encoder-decoder nor a diffusion model (neither drafts), and
+        ``spec_draft_model`` is a readable GGUF that
+        ``_draft_model_rejected_by_metadata`` does not reject.
 
         The draft model's file size (its weights), its KV cache for
         ``self.n_ctx`` tokens, the logits buffer of a context whose batch is
         ``DRAFT_CONTEXT_BATCH``, and ``DRAFT_COMPUTE_MARGIN_BYTES``; the draft
         context is created at the main context's size. Never raises: a probe
         failure charges 0. Memoised per instance."""
-        if getattr(self, "spec_source", None) != "draft":
+        if getattr(self, "spec_source", None) != "draft" or self._keeps_no_kv_cache():
             return 0
         cached = getattr(self, "_draft_model_charge_bytes_cached", None)
         if cached is not None:
@@ -1209,8 +1209,11 @@ class VramSizingMixin:
            only for a file whose header cannot be read.
 
         Step 2 is memoised per instance: it reads a bounded prefix of the file.
-        Never returns 0 - step 3's floor is 16 KB - so callers can divide by
-        it."""
+        Returns 0 for a model that keeps no KV cache at all (a diffusion
+        language model, see :meth:`_keeps_no_kv_cache`); never 0 otherwise -
+        step 3's floor is 16 KB."""
+        if self._keeps_no_kv_cache():
+            return 0
         accurate = getattr(getattr(self, "_llm", None), "kv_bytes_per_token", 0)
         if accurate:
             return int(accurate)
@@ -1228,6 +1231,27 @@ class VramSizingMixin:
         if cached:
             return cached
         return self._bytes_per_token(self._model_bytes())
+
+    def _keeps_no_kv_cache(self) -> bool:
+        """True for a model llama.cpp creates no KV cache for: a diffusion
+        language model, which re-reads its whole canvas every step. True once a
+        load reported one (``_diffusion_loaded``); otherwise read from the
+        loaded model when there is one, else from the file's
+        ``general.architecture`` (memoised per instance)."""
+        if getattr(self, "_diffusion_loaded", False) is True:
+            return True
+        loaded = getattr(getattr(self, "_llm", None), "is_diffusion", None)
+        if isinstance(loaded, bool):
+            return loaded
+        cached = getattr(self, "_no_kv_cache", None)
+        if cached is None:
+            from localm.model_manager.gguf import (gguf_architecture,
+                                                   gguf_is_diffusion_architecture)
+            path = getattr(self, "model_path", None)
+            cached = bool(path) and gguf_is_diffusion_architecture(
+                gguf_architecture(Path(path)))
+            self._no_kv_cache = cached
+        return cached
 
     def _check_vram(self) -> None:
         """
@@ -1510,9 +1534,10 @@ class VramSizingMixin:
                   - embedder_ctx_reservation_bytes()
                   - self._spec_extra_vram_bytes()
                   - self._recurrent_state_vram_bytes())
-        if budget <= 0:
+        per_token = self._kv_bytes_per_token()
+        if budget <= 0 or per_token <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN)
-        auto = budget // self._kv_bytes_per_token()
+        auto = budget // per_token
         auto = (auto // 1024) * 1024
         hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
         return int(max(self._AUTO_CTX_MIN, hi))
@@ -1526,7 +1551,11 @@ class VramSizingMixin:
         that lifts the conservative _AUTO_CTX_MAX safety clamp so the window can
         use the full VRAM-derived budget. When ctx_auto is off, n_ctx_max is used
         verbatim (0/None already mean unlimited downstream). ``split_budget`` is
-        passed to :meth:`_auto_ctx_max`."""
+        passed to :meth:`_auto_ctx_max`. A model that keeps no KV cache (a
+        diffusion model) gets None: its fixed window is reported by the worker
+        at load."""
+        if self._keeps_no_kv_cache():
+            return None
         if self.ctx_auto:
             unlimited = (self.n_ctx_max == 0)
             auto = self._auto_ctx_max(capped=not unlimited, split_budget=split_budget)

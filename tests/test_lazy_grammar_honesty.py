@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import inspect
 import sys
+from pathlib import Path
 from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
 from localm.inference.backends.base import (
+    GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE,
+    GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE,
     GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
     GRAMMAR_LOAD_FAILED_MESSAGE,
     GRAMMAR_UNSUPPORTED_MESSAGE,
@@ -357,3 +360,21 @@ def test_the_two_refusal_messages_cannot_be_confused():
     assert GRAMMAR_LAZY_UNSUPPORTED_MESSAGE not in GRAMMAR_UNSUPPORTED_MESSAGE
     assert GRAMMAR_UNSUPPORTED_MESSAGE not in GRAMMAR_LAZY_UNSUPPORTED_MESSAGE
     assert "lazy" in GRAMMAR_LAZY_UNSUPPORTED_MESSAGE.lower()
+    assert GRAMMAR_LAZY_UNSUPPORTED_MESSAGE not in GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE
+    assert GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE not in GRAMMAR_LAZY_UNSUPPORTED_MESSAGE
+
+
+_SETTINGS_PERF_JS = (Path(__file__).resolve().parents[1] / "localm" / "plugins" / "gui"
+                     / "static" / "app" / "settings-perf.js")
+
+
+def test_grammar_refusals_carry_the_retry_phrase():
+    """The GUI's web-tool turn retries without its lazy grammar only when the
+    400 detail contains "would be ignored". Every capability refusal carries
+    that phrase; the lazy-without-triggers 400 is a caller error and does not."""
+    with open(_SETTINGS_PERF_JS, encoding="utf-8") as f:
+        assert 'String(e.detail).includes("would be ignored")' in f.read()
+    for message in (GRAMMAR_UNSUPPORTED_MESSAGE, GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
+                    GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE):
+        assert "would be ignored" in message
+    assert "would be ignored" not in GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE
