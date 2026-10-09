@@ -319,7 +319,7 @@ def network_targets(*, mdns_name: Optional[str] = None,
 
     from localm.netlisten import is_wildcard_host
     if bind_host is not None and not is_wildcard_host(bind_host):
-        kept = [(label, t) for (label, t) in out if t == bind_host or t == mdns_name]
+        kept = [(label, t) for (label, t) in out if t in (bind_host, mdns_name)]
         if not any(t == bind_host for _label, t in kept):
             kept.append(("on this network (IP)", bind_host))
         return kept

@@ -200,7 +200,7 @@ def _compute_sw_cache_value() -> str:
                 "sw.js cache digest: could not read %s (%s) - forcing a "
                 "cache-bust rather than silently serving a stale digest",
                 rel, e)
-            h.update(f"MISSING:{rel}: {e}".encode("utf-8"))
+            h.update(f"MISSING:{rel}: {e}".encode())
         h.update(b"\0")
     return f"localm-shell-{h.hexdigest()[:16]}"
 

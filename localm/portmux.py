@@ -739,8 +739,7 @@ async def _redirect_to_https(first, c_reader, c_writer, public_port) -> None:
     the same host:port, plus a small HTML catch page."""
     try:
         rest = await asyncio.wait_for(c_reader.readuntil(b"\r\n\r\n"), timeout=5)
-    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError,
-            asyncio.TimeoutError, ConnectionError, OSError) as exc:
+    except (TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, OSError) as exc:
         rest = getattr(exc, "partial", b"") or b""
 
     head = (first + rest).decode("latin-1", "replace")
@@ -780,7 +779,7 @@ async def _redirect_to_https(first, c_reader, c_writer, public_port) -> None:
             f"<a style=\"color:#4f9cf9\" href=\"{safe}\">{safe}</a> ...</p>"
             "<p style=\"color:#8b94a5\">If your browser does not redirect, "
             "tap the link above.</p></body></html>"
-        ).encode("utf-8")
+        ).encode()
         head_bytes = (
             "HTTP/1.1 308 Permanent Redirect\r\n"
             f"Location: {location}\r\n"
@@ -792,14 +791,14 @@ async def _redirect_to_https(first, c_reader, c_writer, public_port) -> None:
         # No usable Host header (e.g. HTTP/1.0 without one): cannot build a
         # redirect target, so just explain the situation.
         body = (
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-            "<title>localm - secure connection</title></head>"
-            "<body style=\"font-family:system-ui,Segoe UI,sans-serif;"
-            "background:#0f1115;color:#d7dde7;padding:2rem\">"
-            "<h2 style=\"color:#4f9cf9\">localm uses a secure connection</h2>"
-            "<p>This server speaks <b>https</b>, not http. Reopen this address "
-            "with <b>https://</b> in front.</p></body></html>"
-        ).encode("utf-8")
+            b"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            b"<title>localm - secure connection</title></head>"
+            b"<body style=\"font-family:system-ui,Segoe UI,sans-serif;"
+            b"background:#0f1115;color:#d7dde7;padding:2rem\">"
+            b"<h2 style=\"color:#4f9cf9\">localm uses a secure connection</h2>"
+            b"<p>This server speaks <b>https</b>, not http. Reopen this address "
+            b"with <b>https://</b> in front.</p></body></html>"
+        )
         head_bytes = (
             "HTTP/1.1 400 Bad Request\r\n"
             "Content-Type: text/html; charset=utf-8\r\n"

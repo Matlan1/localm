@@ -2944,7 +2944,7 @@ class _BodyStreamCapMiddleware:
                     break
                 try:
                     message = await asyncio.wait_for(receive(), timeout=remaining)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
                 if message["type"] == "http.disconnect":
                     real_stream_done = True

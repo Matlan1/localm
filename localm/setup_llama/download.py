@@ -135,7 +135,7 @@ def _download(url: str, dest: Path) -> _DownloadResult:
             "or provision from a local build with 'localm setup-llama --from "
             "<build-dir>'."
         ) from e
-    except (socket.timeout, TimeoutError) as e:
+    except TimeoutError as e:
         raise ArtifactError(
             f"download stalled (no data for {_DOWNLOAD_STALL_TIMEOUT}s, after "
             f"{nread} of {total or 'an unknown number of'} bytes) - the "

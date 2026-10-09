@@ -144,7 +144,7 @@ def _load_receipt(path: Path, tag: str, commit: str) -> dict | None:
 
 
 def _save_receipt(path: Path, receipt: dict) -> None:
-    receipt["written_at"] = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    receipt["written_at"] = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(receipt, indent=2, default=str), encoding="utf-8")
 
