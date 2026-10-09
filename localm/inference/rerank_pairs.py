@@ -32,6 +32,7 @@ Tokenize = Callable[[str, bool, bool], list[int]]
 _CHARS_PER_WINDOW_TOKEN = 32
 
 _TEMPLATE_FIELD_RE = re.compile(r"\{query\}|\{document\}")
+_TEMPLATE_SPLIT_RE = re.compile(r"(\{query\}|\{document\})")
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,10 @@ def build_pair(tokenize: Tokenize, specials: VocabSpecials,
     *template* is the model's ``rerank`` chat template, or None for the
     explicit special-token layout. Raises :class:`RerankInputError` when the
     query alone leaves no room for the document."""
+    if len(query) > window * _CHARS_PER_WINDOW_TOKEN:
+        raise RerankInputError(
+            f"the query is {len(query)} characters, far beyond this model's "
+            f"{window}-token window; shorten the query")
     if template is not None:
         return _build_templated(tokenize, template, window, query, document)
     return _build_plain(tokenize, specials, window, query, document)
@@ -117,10 +122,19 @@ def _build_plain(tokenize: Tokenize, sp: VocabSpecials, window: int,
     return PairTokens(head + body + tail, truncated)
 
 
+def _special_free(tokenize: Tokenize, text: str) -> bool:
+    """True when *text* tokenises the same whether special-token strings are
+    parsed or not, i.e. it contains none."""
+    return not text or tokenize(text, False, True) == tokenize(text, False, False)
+
+
 def _build_templated(tokenize: Tokenize, template: str, window: int,
                      query: str, document: str) -> PairTokens:
     clipped = _clip_chars(document, window)
     pre_cut = len(clipped) < len(document)
+    if not (_special_free(tokenize, query) and _special_free(tokenize, clipped)):
+        return _build_templated_isolated(tokenize, template, window, query,
+                                         clipped, pre_cut)
     tokens = tokenize(fill_template(template, query, clipped), False, True)
     if len(tokens) <= window:
         return PairTokens(tokens, pre_cut)
@@ -135,5 +149,34 @@ def _build_templated(tokenize: Tokenize, template: str, window: int,
             fits = mid
         else:
             over = mid
+    if fits == 0 and clipped:
+        raise _query_too_long(len(base), window)
     return PairTokens(
         tokenize(fill_template(template, query, clipped[:fits]), False, True), True)
+
+
+def _build_templated_isolated(tokenize: Tokenize, template: str, window: int,
+                              query: str, clipped: str, pre_cut: bool) -> PairTokens:
+    """A templated pair whose query or document contains a special-token string
+    (``<|im_end|>`` and the like): the template's own text is tokenised with
+    special tokens parsed, the query and document as plain text, so they cannot
+    produce control tokens that steer the score."""
+    parts = []
+    for part in _TEMPLATE_SPLIT_RE.split(template):
+        if part == "{query}":
+            parts.append(tokenize(query, False, False))
+        elif part == "{document}":
+            parts.append(None)
+        elif part:
+            parts.append(tokenize(part, False, True))
+    fixed = sum(len(p) for p in parts if p is not None)
+    n_document = sum(1 for p in parts if p is None)
+    if n_document == 0:
+        return PairTokens([t for p in parts for t in p], pre_cut)
+    room = (window - fixed) // n_document
+    if room < 1:
+        raise _query_too_long(fixed, window)
+    body = tokenize(clipped, False, False)
+    truncated = pre_cut or len(body) > room
+    body = body[:room]
+    return PairTokens([t for p in parts for t in (body if p is None else p)], truncated)

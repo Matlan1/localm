@@ -2092,12 +2092,16 @@ def gguf_classifier_head_tensors(path: Path) -> Optional[frozenset]:
                      if name in _GGUF_CLASSIFIER_HEAD_TENSORS)
 
 
-def gguf_reranker_signal(path: Path, meta: Optional[dict] = None) -> bool:
-    """True when *path*'s own GGUF marks it as a reranker / classifier: it
-    declares ``<architecture>.pooling_type`` = rank, or carries
+def gguf_reranker_state(path: Path, meta: Optional[dict] = None) -> Optional[bool]:
+    """Whether *path*'s own GGUF marks it as a reranker / classifier: it declares
+    ``<architecture>.pooling_type`` = rank, or carries
     ``<architecture>.classifier.output_labels``, or - for an embedding-style
     file that declares neither, as community conversions often do - carries a
     classification-head tensor. All hard header facts, never a filename guess.
+
+    None when the answer depends on a tensor list that could not be read in full
+    (see :func:`gguf_classifier_head_tensors`): "could not tell", which a caller
+    must not record as "not a reranker".
 
     *meta* is an already-computed ``_gguf_metadata_probe(path)`` result. The
     tensor list is read only for a file that already classifies as an
@@ -2109,7 +2113,14 @@ def gguf_reranker_signal(path: Path, meta: Optional[dict] = None) -> bool:
         return True
     if not gguf_embedding_signal(path, meta=meta):
         return False
-    return bool(gguf_classifier_head_tensors(path))
+    heads = gguf_classifier_head_tensors(path)
+    return None if heads is None else bool(heads)
+
+
+def gguf_reranker_signal(path: Path, meta: Optional[dict] = None) -> bool:
+    """True when :func:`gguf_reranker_state` is True; an undecidable file reads as
+    False."""
+    return gguf_reranker_state(path, meta) is True
 
 
 def gguf_architecture(path: Path, meta: Optional[dict] = None) -> Optional[str]:

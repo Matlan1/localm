@@ -470,6 +470,13 @@ def register(app: FastAPI, ctx) -> None:
         _entry = _reg.get((resolved_model or "").strip()) if _reg else None
         _is_registered_embedder = isinstance(_entry, dict) and _entry.get("model_type") == "embedding"
         _is_configured_embedder = bool(_emb_cfg_name) and (resolved_model or "").strip() == _emb_cfg_name
+        if _is_registered_embedder and not _is_configured_embedder:
+            from localm.model_manager.registry import entry_is_reranker
+            if await asyncio.get_running_loop().run_in_executor(
+                    None, entry_is_reranker, resolved_model.strip(), _entry):
+                raise HTTPException(
+                    422, f"Model {resolved_model!r} is a reranker, not an embedding "
+                    "model: it scores query and document pairs (POST /v1/rerank).")
         if _is_registered_embedder or _is_configured_embedder:
             from localm.inference.embedder import embed_texts, last_error
             loop = asyncio.get_running_loop()

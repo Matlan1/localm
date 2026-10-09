@@ -44,7 +44,7 @@ from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_non_chat_model_type
 from .gguf import gguf_embedding_signal
-from .gguf import gguf_reranker_signal
+from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
 from .gguf import gguf_adapter_incompatibility, gguf_adapter_kind
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
@@ -1876,7 +1876,9 @@ def _register(
     if context_length is not None:
         entry["context_length"] = context_length
     if model_type == "embedding" and path.suffix.lower() == ".gguf":
-        entry["reranker"] = gguf_reranker_signal(path)
+        reranker = gguf_reranker_state(path)
+        if reranker is not None:
+            entry["reranker"] = reranker
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
     # a parallel pull, sync_models_dir) can't clobber this entry.
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
@@ -1885,12 +1887,13 @@ def _register(
 def entry_is_reranker(name: str, entry: dict) -> bool:
     """True when the registered model *name* is a reranker or classifier: an
     ``embedding``-type model whose GGUF header marks it so (see
-    ``gguf_reranker_signal``).
+    ``gguf_reranker_state``).
 
     Reads the stored ``reranker`` flag. An entry registered before the flag
     existed has none, so the GGUF is classified once here and the answer is
-    written back to the registry. A file that cannot be read answers False and
-    stores nothing."""
+    written back to the registry. A file that cannot be read, or whose tensor
+    list cannot be read in full, answers False and stores nothing, so the next
+    call tries again."""
     if entry.get("model_type") != "embedding":
         return False
     flag = entry.get("reranker")
@@ -1899,7 +1902,9 @@ def entry_is_reranker(name: str, entry: dict) -> bool:
     path = _entry_path(entry)
     if path is None or not Path(path).is_file():
         return False
-    flag = gguf_reranker_signal(Path(path))
+    flag = gguf_reranker_state(Path(path))
+    if flag is None:
+        return False
 
     def _store(reg: dict) -> None:
         stored = reg.get(name)

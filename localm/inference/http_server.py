@@ -4033,6 +4033,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         embedder_had_something = _embedder_mod.loaded_path() is not None
     except Exception:
         _dbg_swallow("embedder loaded-state check during restart failed (non-fatal)")
+    try:
+        from localm.inference import reranker as _reranker_mod
+        embedder_had_something = embedder_had_something or _reranker_mod.is_resident()
+    except Exception:
+        _dbg_swallow("reranker loaded-state check during restart failed (non-fatal)")
 
     # A subprocess-isolated GPU probe when torch is not resident. See
     # test_do_restart_skips_vram_wait_when_nothing_was_loaded.
@@ -4075,6 +4080,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         released_embedder = _embedder_mod.release_for_exit()
     except Exception:
         _dbg_swallow("embedder release during restart failed (non-fatal)")
+    try:
+        from localm.inference import reranker as _reranker_mod
+        released_embedder = _reranker_mod.release_for_exit() or released_embedder
+    except Exception:
+        _dbg_swallow("reranker release during restart failed (non-fatal)")
 
     # Wait for the frees above to actually land before re-exec. The re-exec'd
     # process spawns a brand-new GGUF worker that constructs a fresh

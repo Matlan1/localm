@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import atexit
 import threading
+import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -35,10 +36,11 @@ _LOCK = threading.RLock()
 _RERANKER = None
 # _file_key of the file _RERANKER was loaded from, taken when it was loaded.
 _RERANKER_KEY: Optional[tuple[str, int, int]] = None
-# (resolved path, mtime_ns, size) -> why that file failed to load. A file that
-# failed once is refused again without respawning a worker until it changes or
-# reset_reranker() runs.
-_LOAD_FAILED: dict[tuple[str, int, int], str] = {}
+# (resolved path, mtime_ns, size) -> (why that file failed to load, when). A file
+# that failed is refused again without respawning a worker for _LOAD_RETRY_AFTER_S
+# seconds, until it changes, or until reset_reranker() runs.
+_LOAD_FAILED: dict[tuple[str, int, int], tuple[str, float]] = {}
+_LOAD_RETRY_AFTER_S = 60.0
 
 
 class RerankerModelError(Exception):
@@ -62,6 +64,19 @@ def _file_key(path: str) -> tuple[str, int, int]:
         return (str(path), 0, 0)
 
 
+def _latched_failure(key: tuple[str, int, int]) -> Optional[str]:
+    """Why a recent load of the file with this key failed, or None once the retry
+    window has passed. Call with _LOCK held."""
+    failed = _LOAD_FAILED.get(key)
+    if failed is None:
+        return None
+    reason, at = failed
+    if time.monotonic() - at < _LOAD_RETRY_AFTER_S:
+        return reason
+    del _LOAD_FAILED[key]
+    return None
+
+
 def _registered_gguf_path(name: str) -> Optional[str]:
     """The GGUF file registered under *name*, or None when it names no single
     existing local file."""
@@ -74,6 +89,17 @@ def _registered_gguf_path(name: str) -> Optional[str]:
     if not path or is_unc_or_device_path(str(path)):
         return None
     return str(path) if Path(path).is_file() else None
+
+
+_KIND_WORDS = {
+    "llm": "a chat model",
+    "mmproj": "a vision projector",
+    "diffusion-unet": "an image or video checkpoint",
+    "text-encoder": "a text encoder",
+    "vae": "a VAE",
+    "lora": "a LoRA adapter",
+    "unknown": "a model of unknown type",
+}
 
 
 def registered_rerankers() -> list[str]:
@@ -111,9 +137,11 @@ def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
     entry = reg.get(name)
     if not isinstance(entry, dict):
         raise RerankerModelError(f"Model {name!r} is not registered.", 404)
-    kind = entry.get("model_type")
+    kind = entry.get("model_type") or "llm"
+    if not isinstance(kind, str):
+        kind = "unknown"
     if kind != "embedding":
-        what = {"llm": "a chat model"}.get(kind, f"a {kind} model")
+        what = _KIND_WORDS.get(kind, f"a {kind} model")
         raise RerankerModelError(
             f"Model {name!r} is {what}, not a reranker; /v1/rerank needs a "
             "reranker GGUF.", 422)
@@ -146,8 +174,9 @@ def get_reranker(path: str):
     """The resident reranker for the GGUF at *path*, loading it first (and
     releasing a different resident reranker). Raises
     :class:`RerankerHeadMissingError` for a model without a classifier head and
-    :class:`RerankerUnavailableError` when the load fails; a failed file is not
-    retried until it changes."""
+    :class:`RerankerUnavailableError` when the load fails (a failed file is not
+    retried for a minute unless it changes) or a different reranker is still
+    busy."""
     global _RERANKER, _RERANKER_KEY
     from localm.config import load_config
     from localm.inference import embedder as emb
@@ -155,7 +184,7 @@ def get_reranker(path: str):
     with _LOCK:
         if _RERANKER is not None and _RERANKER_KEY == key:
             return _RERANKER
-        failed = _LOAD_FAILED.get(key)
+        failed = _latched_failure(key)
         if failed is not None:
             raise RerankerUnavailableError(failed)
     _check_head(path)
@@ -170,7 +199,13 @@ def get_reranker(path: str):
         with _LOCK:
             if _RERANKER is not None and _RERANKER_KEY == key:
                 return _RERANKER
+            failed = _latched_failure(key)
+            if failed is not None:
+                raise RerankerUnavailableError(failed)
             current = _RERANKER
+            if current is not None and current.active_requests > 0:
+                raise RerankerUnavailableError(
+                    "another reranker is still scoring a request; retry shortly")
             if current is not None:
                 _RERANKER = None
                 _RERANKER_KEY = None
@@ -181,7 +216,7 @@ def get_reranker(path: str):
                     gpu_fallback_reason=placement_reason)
             except Exception as e:
                 reason = pathscrub.scrub_paths(str(e))
-                _LOAD_FAILED[key] = reason
+                _LOAD_FAILED[key] = (reason, time.monotonic())
                 logger.warning("could not load reranker %s (%s)",
                                Path(path).name, e)
                 raise RerankerUnavailableError(reason) from e
@@ -218,6 +253,12 @@ def is_loaded() -> bool:
     """True while a reranker is resident. Does not load."""
     with _LOCK:
         return _RERANKER is not None
+
+
+def is_resident() -> bool:
+    """True while a reranker is resident. Takes no lock, so an exit path can ask
+    while a load is running; the answer is a snapshot."""
+    return _RERANKER is not None
 
 
 def active_requests() -> int:

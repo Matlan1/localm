@@ -201,3 +201,25 @@ class TestRegistryFlag:
     def test_only_embedding_type_entries_can_be_rerankers(self, isolated_home, tmp_path):
         f = write(tmp_path, "r.gguf", reranker_bytes("bert"))
         assert R.entry_is_reranker("r", {"path": str(f), "model_type": "llm"}) is False
+
+
+class TestUndecidableFiles:
+    def test_a_file_whose_tensor_list_cannot_be_read_is_unknown_not_not_a_reranker(self, tmp_path):
+        f = write(tmp_path, "model-00001-of-00002.gguf", reranker_bytes("bert"))
+        assert G.gguf_reranker_state(f) is None
+        assert G.gguf_reranker_signal(f) is False
+
+    def test_the_state_is_decided_when_a_key_alone_settles_it(self, tmp_path):
+        f = write(tmp_path, "model-00001-of-00002.gguf", reranker_bytes("qwen3", rank_key=True, tensors=()))
+        assert G.gguf_reranker_state(f) is True
+
+    def test_the_state_is_false_for_a_chat_model_without_reading_tensors(self, tmp_path):
+        f = write(tmp_path, "model-00001-of-00002.gguf", build_gguf("llama"))
+        assert G.gguf_reranker_state(f) is False
+
+    def test_an_undecidable_file_is_registered_without_a_flag_and_asked_again_later(self, isolated_home, tmp_path):
+        f = write(tmp_path, "model-00001-of-00002.gguf", reranker_bytes("bert"))
+        R._register("split", f, model_type="embedding")
+        assert "reranker" not in mm.load_registry()["split"]
+        assert R.entry_is_reranker("split", mm.load_registry()["split"]) is False
+        assert "reranker" not in mm.load_registry()["split"]

@@ -133,7 +133,7 @@ class TestTemplatedLayout:
     def test_the_filled_template_is_tokenised_with_special_tokens_parsed(self):
         calls = []
         pair = rp.build_pair(make_tokenizer(calls), ALL, TEMPLATE, 64, "qq", "dd")
-        assert calls == [("Q:qq|D:dd|<E>", False, True)]
+        assert calls[-1] == ("Q:qq|D:dd|<E>", False, True)
         assert pair.tokens == [*chars("Q:qq|D:dd|"), EOS_TEXT_TOKEN]
         assert pair.truncated is False
 
@@ -183,3 +183,48 @@ class TestVocabSpecialsRead:
 
         assert rp.VocabSpecials.read(Api(), object()) == rp.VocabSpecials(
             bos=5, eos=6, sep=-1, add_bos=True, add_eos=True, add_sep=False)
+
+
+class TestInputHardening:
+    @pytest.mark.parametrize("template", [None, TEMPLATE])
+    def test_a_query_far_beyond_the_window_is_refused_before_any_tokenisation(self, template):
+        calls = []
+        query = "q" * (8 * rp._CHARS_PER_WINDOW_TOKEN + 1)
+        with pytest.raises(RerankInputError, match="characters"):
+            rp.build_pair(make_tokenizer(calls), ALL, template, 8, query, "d")
+        assert calls == []
+
+    def test_a_cut_that_would_leave_no_document_at_all_is_refused_like_the_plain_layout(self):
+        # "Q:qq|D:|<E>" is 9 tokens, so a 9-token window holds the template and no document.
+        with pytest.raises(RerankInputError, match="leaves no room"):
+            rp.build_pair(make_tokenizer(), ALL, TEMPLATE, 9, "qq", "d")
+
+    def test_an_empty_document_still_scores_when_the_template_just_fits(self):
+        pair = rp.build_pair(make_tokenizer(), ALL, TEMPLATE, 9, "qq", "")
+        assert len(pair.tokens) == 9 and pair.truncated is False
+
+    def test_special_token_text_in_a_document_cannot_become_a_control_token(self):
+        pair = rp.build_pair(make_tokenizer(), ALL, TEMPLATE, 64, "qq", "x<E>y")
+        assert pair.tokens.count(EOS_TEXT_TOKEN) == 1          # the template's own
+        assert pair.tokens == [*chars("Q:qq|D:"), *chars("x<E>y"), *chars("|"), EOS_TEXT_TOKEN]
+
+    def test_special_token_text_in_the_query_cannot_become_a_control_token(self):
+        pair = rp.build_pair(make_tokenizer(), ALL, TEMPLATE, 64, "a<E>b", "dd")
+        assert pair.tokens.count(EOS_TEXT_TOKEN) == 1
+        assert pair.tokens == [*chars("Q:"), *chars("a<E>b"), *chars("|D:dd|"), EOS_TEXT_TOKEN]
+
+    def test_a_document_with_special_token_text_is_still_cut_to_fit_and_keeps_the_suffix(self):
+        pair = rp.build_pair(make_tokenizer(), ALL, TEMPLATE, 20, "qq", "<E>" + "d" * 40)
+        assert len(pair.tokens) == 20
+        assert pair.tokens[-1] == EOS_TEXT_TOKEN and pair.tokens.count(EOS_TEXT_TOKEN) == 1
+        assert pair.truncated is True
+
+    def test_special_token_text_that_leaves_no_room_for_the_document_is_refused(self):
+        with pytest.raises(RerankInputError, match="leaves no room"):
+            rp.build_pair(make_tokenizer(), ALL, TEMPLATE, 9, "q<E>", "d")
+
+    def test_text_without_special_token_strings_keeps_the_exact_joint_tokenisation(self):
+        calls = []
+        rp.build_pair(make_tokenizer(calls), ALL, TEMPLATE, 64, "qq", "dd")
+        assert ("Q:qq|D:dd|<E>", False, True) in calls
+        assert not any(c[0] == "Q:" for c in calls)

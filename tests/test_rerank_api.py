@@ -112,6 +112,24 @@ class TestResolve:
             rr.resolve_reranker("chat-a")
         assert e.value.status == 422
 
+    @pytest.mark.parametrize("model_type,words", [
+        (None, "a chat model"),
+        ("", "a chat model"),
+        ("llm", "a chat model"),
+        ("lora", "a LoRA adapter"),
+        ("mmproj", "a vision projector"),
+        ("unknown", "a model of unknown type"),
+        (["x"], "a model of unknown type"),
+    ])
+    def test_the_refusal_names_what_the_model_is(self, library, model_type, words):
+        entry = {"path": str(library["chat-a"]), "source": "local"}
+        if model_type is not None:
+            entry["model_type"] = model_type
+        mm.update_registry(lambda r: r.update({"odd": entry}))
+        with pytest.raises(rr.RerankerModelError, match=f"is {words}, not a reranker") as e:
+            rr.resolve_reranker("odd")
+        assert e.value.status == 422
+
     def test_a_reranker_whose_file_is_gone_is_refused(self, library):
         library["rerank-a"].unlink()
         with pytest.raises(rr.RerankerModelError, match="missing") as e:
@@ -235,6 +253,74 @@ class TestResidentReranker:
         with pytest.raises(rr.RerankerUnavailableError):
             rr.get_reranker(path)
         assert len(attempts) == 2
+
+    def _failing_loader(self, monkeypatch, attempts):
+        from localm.inference import embedder as emb
+
+        def boom(path, **kw):
+            attempts.append(path)
+            raise RuntimeError("worker exited during load")
+
+        monkeypatch.setattr(emb, "IsolatedEmbedder", boom)
+        monkeypatch.setattr(emb, "_maybe_swap_for_embedder", lambda *a, **k: None)
+        monkeypatch.setattr(emb, "_choose_embedder_gpu_layers", lambda path, cfg: (99, None))
+
+    def test_a_failed_load_is_retried_once_the_window_has_passed(self, library, isolated_home, monkeypatch):
+        attempts = []
+        self._failing_loader(monkeypatch, attempts)
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(rr.time, "monotonic", lambda: clock["now"])
+        path = str(library["rerank-a"])
+        with pytest.raises(rr.RerankerUnavailableError):
+            rr.get_reranker(path)
+        clock["now"] += rr._LOAD_RETRY_AFTER_S - 1
+        with pytest.raises(rr.RerankerUnavailableError):
+            rr.get_reranker(path)
+        assert len(attempts) == 1
+        clock["now"] += 2
+        with pytest.raises(rr.RerankerUnavailableError):
+            rr.get_reranker(path)
+        assert len(attempts) == 2
+
+    def test_a_retry_after_the_window_can_succeed(self, library, isolated_home, monkeypatch):
+        from localm.inference import embedder as emb
+        attempts = []
+        self._failing_loader(monkeypatch, attempts)
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(rr.time, "monotonic", lambda: clock["now"])
+        path = str(library["rerank-a"])
+        with pytest.raises(rr.RerankerUnavailableError):
+            rr.get_reranker(path)
+        monkeypatch.setattr(emb, "IsolatedEmbedder", FakeIsolated)
+        clock["now"] += rr._LOAD_RETRY_AFTER_S + 1
+        assert rr.get_reranker(path).model_path == path
+
+    def test_a_failure_latched_while_waiting_for_the_load_lock_is_not_retried(self, library, isolated_home, monkeypatch):
+        attempts = []
+        self._failing_loader(monkeypatch, attempts)
+        path = str(library["rerank-a"])
+        key = rr._file_key(path)
+        real_check = rr._check_head
+
+        def check_then_latch(p):
+            real_check(p)
+            rr._LOAD_FAILED[key] = ("latched by the caller that held the lock first", rr.time.monotonic())
+
+        monkeypatch.setattr(rr, "_check_head", check_then_latch)
+        with pytest.raises(rr.RerankerUnavailableError, match="latched by the caller"):
+            rr.get_reranker(path)
+        assert attempts == []
+
+    def test_a_different_reranker_is_not_swapped_in_under_a_request_in_flight(self, library, fake_worker, tmp_path):
+        other = register(tmp_path, "rerank-b", reranker_bytes("qwen3", rank_key=True), "embedding")
+        a = rr.get_reranker(str(library["rerank-a"]))
+        a.active_requests = 1
+        with pytest.raises(rr.RerankerUnavailableError, match="still scoring"):
+            rr.get_reranker(str(other))
+        assert not a.closed and rr.reranker_info()["path"] == str(library["rerank-a"])
+        a.active_requests = 0
+        b = rr.get_reranker(str(other))
+        assert a.closed and b.model_path == str(other)
 
     def test_a_load_failure_message_goes_through_the_path_scrubber(self, isolated_home, monkeypatch):
         from localm import pathscrub
@@ -399,6 +485,25 @@ class TestRerankRoute:
         r = client.post("/v1/rerank", json={"model": "rerank-a", "query": "q", "documents": ["a"]},
                         headers={"Origin": "http://localhost:9999"})
         assert r.status_code == 200
+
+
+class TestEmbeddingsRouteRefusesARerankerByName:
+    def test_a_registered_reranker_is_refused_instead_of_answered_by_another_embedder(self, client, monkeypatch):
+        monkeypatch.setattr("localm.config.load_config", lambda: {"embedding_model": "embed-a"})
+        called = []
+        monkeypatch.setattr("localm.inference.embedder.embed_texts",
+                            lambda texts: called.append(texts) or [[0.0] for _ in texts])
+        r = client.post("/v1/embeddings", json={"model": "rerank-a", "input": "hello"})
+        assert r.status_code == 422
+        assert "rerank-a" in r.json()["detail"] and "/v1/rerank" in r.json()["detail"]
+        assert called == []
+
+    def test_a_plain_embedding_model_is_still_served(self, client, monkeypatch):
+        monkeypatch.setattr("localm.config.load_config", lambda: {"embedding_model": "embed-a"})
+        monkeypatch.setattr("localm.inference.embedder.embed_texts",
+                            lambda texts: [[0.5, 0.5] for _ in texts])
+        r = client.post("/v1/embeddings", json={"model": "embed-a", "input": "hello"})
+        assert r.status_code == 200 and r.json()["data"][0]["embedding"] == [0.5, 0.5]
 
 
 class TestCli:
