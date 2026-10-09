@@ -2721,6 +2721,16 @@ div:has(> .data-table) { overflow-x: auto; }
    border + a "?" in the label + a title tooltip, so it never reads as equally
    certain as a confirmed badge (see discover.py's _moe_signal). */
 .moe-badge.moe-likely { border: 1px dashed var(--border); }
+/* GGUF LoRA adapter state on a Models row: attached / running / needs reload. */
+.adapter-badge {
+  font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 9px;
+  letter-spacing: 0.02em; white-space: nowrap; flex: 0 0 auto;
+  color: var(--text-dim); border: 1px solid var(--text-dim);
+}
+.adapter-badge.adapter-active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.adapter-badge.adapter-idle { border-style: dashed; border-color: var(--border); }
+.adapter-badge.adapter-warn { color: var(--warn, #f59e0b); border-color: var(--warn, #f59e0b); }
+.adapter-error { color: var(--red); margin: 8px 0; }
 /* Model CAPABILITY pills - what a model can DO. Its OWN palette (--accent),
    deliberately not the .fit.fits/.tight/.too-big green/yellow/red scale, which
    is a SIZE-against-VRAM verdict and would read as one here; and not a --cat-*

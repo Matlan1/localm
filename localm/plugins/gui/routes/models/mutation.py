@@ -16,9 +16,34 @@ import localm.inference.http_server as _hs
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import (ModelRouteContext,
                                                        _require_registered)
-from localm.plugins.gui.web import (AliasRequest, RelocateModelRequest,
+from localm.plugins.gui.web import (AdapterAttachRequest, AdapterDetachRequest,
+                                    AliasRequest, RelocateModelRequest,
                                     RemoveModelRequest, RenameModelRequest,
                                     SetTypeRequest)
+
+
+def _base_is_resident(base: str, registry: dict) -> bool:
+    """True when a loaded engine in this process runs the model file that the
+    registered name *base* points at, under any of its names. Does filesystem
+    I/O; callers on the event loop use the executor."""
+    from pathlib import Path
+
+    from localm.model_manager import _entry_path, names_same_model
+    base_path = _entry_path(registry.get(base))
+    for key, engine in list(_hs._engines.items()):
+        if not getattr(engine, "loaded", False):
+            continue
+        if names_same_model(key, base, registry):
+            return True
+        model_path = getattr(engine, "model_path", None)
+        if model_path is None or base_path is None:
+            continue
+        try:
+            if Path(str(model_path)).resolve() == Path(base_path).resolve():
+                return True
+        except (OSError, ValueError):
+            return True
+    return False
 
 
 def register(app: FastAPI, context: ModelRouteContext) -> None:
@@ -116,6 +141,45 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         if not ok:
             raise HTTPException(400, f"Could not set type for {req.model}")
         return {"status": "typed", "model": req.model, "model_type": req.model_type}
+
+    @app.post("/api/models/adapters/attach", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_adapter_attach(req: AdapterAttachRequest):
+        """GUI form of `localm adapter attach ADAPTER BASE --scale S`. A refusal
+        (different architecture, not a GGUF chat base, invalid scale) is a 400
+        carrying the registry's own message. `needs_reload` is true when BASE
+        may be resident: adapters are applied when a model loads, so a loaded
+        base keeps its previous adapters until it is unloaded and loaded again."""
+        from localm.model_manager import AdapterError, attach_adapter
+        _require_registered(req.adapter)
+        registry = _require_registered(req.base)
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                get_plugin_executor(), attach_adapter, req.adapter, req.base, req.scale)
+        except AdapterError as e:
+            raise HTTPException(400, str(e)) from e
+        resident = await loop.run_in_executor(
+            get_plugin_executor(), _base_is_resident, req.base, registry)
+        return {"status": "attached", "adapter": req.adapter, "base": req.base,
+                "scale": req.scale, "needs_reload": resident}
+
+    @app.post("/api/models/adapters/detach", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_adapter_detach(req: AdapterDetachRequest):
+        """GUI form of `localm adapter detach ADAPTER`; the adapter stays
+        registered. 404 when it is not attached."""
+        from localm.model_manager import detach_adapter
+        registry = _require_registered(req.adapter)
+        base = registry[req.adapter].get("base") if isinstance(registry[req.adapter], dict) else None
+        loop = asyncio.get_running_loop()
+        detached = await loop.run_in_executor(
+            get_plugin_executor(), detach_adapter, req.adapter)
+        if not detached:
+            raise HTTPException(404, f"'{req.adapter}' is not an attached adapter")
+        needs_reload = False
+        if isinstance(base, str) and base in registry:
+            needs_reload = await loop.run_in_executor(
+                get_plugin_executor(), _base_is_resident, base, registry)
+        return {"status": "detached", "adapter": req.adapter, "needs_reload": needs_reload}
 
     @app.post("/api/models/relocate", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_relocate(req: RelocateModelRequest, request: Request):
