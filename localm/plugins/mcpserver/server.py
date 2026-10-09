@@ -1029,8 +1029,10 @@ class MCPStdioServer:
 
         if method == "tools/call":
             params = msg.get("params", {}) or {}
+            if not isinstance(params, dict):
+                return self._error(mid, -32602, "Invalid params: expected a JSON object")
             name = params.get("name", "")
-            spec = self.tools.get(name)
+            spec = self.tools.get(name) if isinstance(name, str) else None
             if spec is None:
                 return self._error(mid, -32602, f"Unknown tool: {name}")
             meta = params.get("_meta")
@@ -1064,6 +1066,9 @@ class MCPStdioServer:
         stdin = stdin or sys.stdin
         stdout = stdout or sys.stdout
         self._out = stdout
+        reconfigure = getattr(stdin, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="replace")
         _log("ready - waiting for MCP client")
         for line in stdin:
             line = line.strip()
@@ -1071,7 +1076,7 @@ class MCPStdioServer:
                 continue
             try:
                 msg = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 _log("skipping non-JSON input line")
                 continue
             # A JSON-RPC payload may be a single request object or a batch

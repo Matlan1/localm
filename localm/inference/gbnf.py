@@ -164,6 +164,16 @@ MAX_GRAMMAR_REPEAT_COUNT = 1900
 _REPEAT_COUNT_RE = re.compile(r"\{(\d+)(?:,(\d+))?\}")
 
 
+def _repeat_count_exceeds_limit(digits: str) -> bool:
+    """True when the decimal *digits* are above MAX_GRAMMAR_REPEAT_COUNT. A run
+    wider than the limit is over it without being converted: int() refuses a
+    string past Python's integer-conversion digit limit."""
+    significant = digits.lstrip("0")
+    if len(significant) > len(str(MAX_GRAMMAR_REPEAT_COUNT)):
+        return True
+    return bool(significant) and int(significant) > MAX_GRAMMAR_REPEAT_COUNT
+
+
 def check_grammar_structure(grammar: str) -> None:
     """Reject a grammar whose size or structural complexity could drive the
     native GBNF parser into stack overflow, BEFORE any of it reaches that
@@ -194,9 +204,12 @@ def check_grammar_structure(grammar: str) -> None:
 
     for m in _REPEAT_COUNT_RE.finditer(grammar):
         for group in m.groups():
-            if group is not None and int(group) > MAX_GRAMMAR_REPEAT_COUNT:
+            if group is not None and _repeat_count_exceeds_limit(group):
+                shown = m.group(0)
+                if len(shown) > 24:
+                    shown = shown[:21] + "..."
                 raise InvalidGrammarError(
-                    f"grammar repeat count {{{m.group(0)}}} exceeds the "
+                    f"grammar repeat count {{{shown}}} exceeds the "
                     f"{MAX_GRAMMAR_REPEAT_COUNT} limit (llama.cpp's native "
                     "GBNF parser rejects repeat counts above roughly 2000 "
                     "as unreasonable; reduce this repeat count)")

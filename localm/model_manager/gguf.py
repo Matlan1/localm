@@ -836,6 +836,8 @@ def _gguf_skip_value(buf: bytes, off: int, vtype: int) -> int:
         size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
         if size is None:
             raise struct.error(f"unsupported gguf array element type {elem_type}")
+        if size * count > len(buf) - off:
+            raise struct.error("gguf array runs past the end of the buffer")
         return off + size * count
     size = _GGUF_FIXED_TYPE_SIZES.get(vtype)
     if size is None:
@@ -1454,7 +1456,10 @@ def _gguf_skip_value_stream(f, vtype: int) -> None:
         size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
         if size is None:
             raise struct.error(f"unsupported gguf array element type {elem_type}")
-        f.seek(size * count, 1)
+        try:
+            f.seek(size * count, 1)
+        except (OSError, ValueError, OverflowError) as exc:
+            raise struct.error("gguf array runs past the end of the file") from exc
         return
     size = _GGUF_FIXED_TYPE_SIZES.get(vtype)
     if size is None:
@@ -1466,6 +1471,10 @@ def _gguf_skip_value_stream(f, vtype: int) -> None:
 # begins (the format's default; a file may override it via a general.alignment
 # KV key). gguf_moe_pinned_expert_bytes does not read that key.
 _GGUF_DEFAULT_ALIGNMENT = 32
+
+# Largest general.alignment _gguf_header_layout accepts. The padding the
+# rewriter appends is at most one alignment unit, so this bounds it.
+_GGUF_MAX_ALIGNMENT = 1 << 20
 
 # Sanity ceiling on a single tensor's dimension count, generous against
 # GGML_MAX_DIMS (4 in every real ggml build) - guards against a corrupt/
@@ -2236,6 +2245,8 @@ def _gguf_header_layout(f) -> _GgufLayout:
             (alignment,) = struct.unpack("<I", f.read(4))
             if not alignment:
                 raise struct.error("general.alignment is 0")
+            if alignment > _GGUF_MAX_ALIGNMENT:
+                raise struct.error(f"implausible general.alignment {alignment}")
             continue
         if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
             architecture = _gguf_read_string_stream(f)

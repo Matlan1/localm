@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from localm import pathscrub
+from localm.bugreport._common import MAINTAINER_EMAIL
 
 
 # The home/username policy lives in localm.pathscrub, shared with the
@@ -167,13 +168,60 @@ _BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 
+# Characters that end an address token: ASCII whitespace and controls, C1
+# controls, no-break space, the double quote, backtick, ``< > ( ) [ ]`` and
+# ``, ; : / \ = ? & *``. Every other character, non-ASCII and the single quote
+# included, belongs to the token.
+_EMAIL_TOKEN_END = r"\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*"
+
+# A whole token that contains ``local@domain.tld`` (or ``local%40domain.tld``),
+# matched from the token's first character to its last. The TLD is at least two
+# letters, ASCII or non-ASCII. Same pattern as scripts/report_issue.py and
+# scripts/report_issue.ps1. See test_email_pattern_does_not_grow_superlinearly.
+_EMAIL_RE = re.compile(
+    "(?<![^" + _EMAIL_TOKEN_END + "])"
+    "[^" + _EMAIL_TOKEN_END + "]*?"
+    "[^@" + _EMAIL_TOKEN_END + "](?:@|%40)"
+    "[^@.%+" + _EMAIL_TOKEN_END + "]+"
+    r"(?:\.[^@.%+" + _EMAIL_TOKEN_END + "]+)*"
+    r"\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}"
+    "[^" + _EMAIL_TOKEN_END + "]*"
+)
+
+
+def _email_replacement(m: re.Match) -> str:
+    token = m.group(0)
+    core = token.lstrip("'")
+    lead = token[:len(token) - len(core)]
+    core = core.rstrip("'.")
+    trail = token[len(lead) + len(core):]
+    address = core.replace("%40", "@")
+    if address.isascii() and address.lower() == MAINTAINER_EMAIL.lower():
+        return token
+    return lead + "<redacted-email>" + trail
+
+
+def _scrub_emails(text: str) -> str:
+    """Replace every token that contains an email address with
+    ``<redacted-email>``, keeping its leading single quotes and its trailing
+    single quotes and periods. A token that is exactly ``MAINTAINER_EMAIL``
+    once those are set aside (ASCII, compared case-insensitively, ``%40`` read
+    as ``@``) is kept as written. Idempotent: the
+    replacement contains no ``@``. A ``user@`` URL credential already rewritten
+    to ``<redacted>@`` by ``_scrub_url_creds`` is left as it is."""
+    if not text:
+        return text
+    return _EMAIL_RE.sub(_email_replacement, text)
+
+
 def _scrub_secrets(text: str) -> str:
     """Run every scrubber over untrusted text: home paths (username), URL
     ``user:pass@`` credentials, credential-named query params / header lines,
-    and bearer / API-key tokens. Used for client-supplied fields and the
-    bundled log tails / activity ring a share-intended report carries - each
-    of which is untrusted, free-form text that could contain a secret the
-    plain home-scrub alone would leave in."""
+    bearer / API-key tokens, and email addresses other than the maintainer's.
+    Used for client-supplied fields and the bundled log tails / activity ring
+    a share-intended report carries - each of which is untrusted, free-form
+    text that could contain a secret the plain home-scrub alone would leave
+    in."""
     if not text:
         return text
     text = _scrub_home(text)
@@ -181,4 +229,5 @@ def _scrub_secrets(text: str) -> str:
     text = _scrub_query_and_header_secrets(text)
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)
+    text = _scrub_emails(text)
     return text

@@ -311,7 +311,7 @@ def _lib_entries(lib_dir: Optional[Path]) -> list:
 def load(root) -> Optional[dict]:
     try:
         data = json.loads(manifest_path(root).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -497,7 +497,7 @@ def read_marker(folder) -> Optional[dict]:
     it; ``host`` is "" when the marker did not record one."""
     try:
         data = json.loads((Path(folder) / DATA_MARKER).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict):
         return None
@@ -1468,7 +1468,7 @@ def _pointers_into(root: Path) -> list[_Item]:
     for receipt in _uv_receipts():
         try:
             data = json.loads(receipt.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         prefix = data.get("install_prefix") if isinstance(data, dict) else ""
         if isinstance(prefix, str) and prefix and _inside(prefix, root):
@@ -1630,7 +1630,7 @@ def _coder_project_dirs(data_dir: Path) -> list[str]:
     project list that has one."""
     try:
         entries = json.loads((data_dir / "coder-projects.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return []
     out = []
     for e in entries if isinstance(entries, list) else []:

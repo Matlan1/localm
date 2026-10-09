@@ -411,7 +411,7 @@ def _stored_temp_location(home: Path) -> str:
     runs while ``localm.config`` is still being imported."""
     try:
         data = json.loads((Path(home) / "config.json").read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return ""
     value = data.get(TEMP_LOCATION_KEY) if isinstance(data, dict) else None
     return value.strip() if isinstance(value, str) else ""

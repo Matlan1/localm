@@ -93,6 +93,12 @@ def parse_manifest(plugin_dir: Path, *,
         data = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise PluginError(f"Invalid TOML in {manifest_path}: {e}") from e
+    except UnicodeDecodeError as e:
+        raise PluginError(f"{manifest_path} is not valid UTF-8: {e}") from e
+    except RecursionError as e:
+        raise PluginError(f"Invalid TOML in {manifest_path}: nested too deeply") from e
+    except OSError as e:
+        raise PluginError(f"Cannot read {manifest_path}: {e}") from e
 
     plugin = data.get("plugin")
     if not isinstance(plugin, dict):
@@ -106,7 +112,7 @@ def parse_manifest(plugin_dir: Path, *,
         raise PluginError(f"{manifest_path}: invalid plugin name {name!r}")
     if name in _RESERVED_NAMES:
         raise PluginError(f"{manifest_path}: name {name!r} clashes with a built-in command")
-    if not entry or ":" not in entry:
+    if not isinstance(entry, str) or ":" not in entry:
         raise PluginError(f"{manifest_path}: [plugin] entry must be '<module>:<attr>'")
 
     tools = data.get("tools", {})
@@ -172,7 +178,7 @@ def _is_engine_plugin(plugin_dir: Path) -> bool:
     ``engine.PluginManager``."""
     try:
         data = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, RecursionError, tomllib.TOMLDecodeError):
         return False
     plugin = data.get("plugin")
     if not isinstance(plugin, dict):
