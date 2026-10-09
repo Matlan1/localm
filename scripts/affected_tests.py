@@ -74,7 +74,7 @@ _ROUTE_METHODS = {"get", "post", "put", "delete", "patch", "websocket", "api_rou
 _EVERYTHING = {"tests/conftest.py"}
 # Packages whose callers import and patch the package itself, which re-exports
 # its submodules' names.
-_REEXPORT_FACADES = ("localm.setup_llama",)
+_REEXPORT_FACADES = ("localm.setup_llama", "localm.bugreport")
 _DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")

@@ -2799,7 +2799,7 @@ def _diagnostics_allowed() -> bool:
     """Whether localm may write an AUTOMATIC diagnostic trace right now: the
     log/full session modes, or privacy mode with ``keep_diagnostics`` on.
     Alias of :func:`localm.audit.diagnostics_allowed`, which also gates the
-    crash guard's trace file and crash report (bugreport.py)."""
+    crash guard's trace file and crash report (localm.bugreport)."""
     from localm.audit import diagnostics_allowed
     return diagnostics_allowed()
 
@@ -3618,9 +3618,10 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     Safe to run twice: every step tolerates already-stopped state.
 
     *instance_id* (app.state.instance_id, set by instances.advertise()) scopes
-    the crash-marker clear to THIS instance only - see bugreport.py's
-    per-instance-scoping note; omitting it falls back to the legacy shared
-    marker name rather than silently skipping the clear."""
+    the crash-marker clear to THIS instance only - see
+    localm/bugreport/crash_guard.py's per-instance-scoping note; omitting it
+    falls back to the legacy shared marker name rather than silently skipping
+    the clear."""
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os._exit below bypasses atexit, the job worker
@@ -3888,9 +3889,10 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     from the route so it can be tested without actually re-execing.
 
     *instance_id* (app.state.instance_id, set by instances.advertise()) scopes
-    the crash-marker clear to THIS instance only - see _do_shutdown/bugreport.py's
-    per-instance-scoping note. The re-exec'd process re-advertises and gets a
-    fresh instance_id of its own, so no persistence across the restart is needed.
+    the crash-marker clear to THIS instance only - see _do_shutdown and
+    localm/bugreport/crash_guard.py's per-instance-scoping note. The re-exec'd
+    process re-advertises and gets a fresh instance_id of its own, so no
+    persistence across the restart is needed.
 
     *port* is the port this instance is actually bound to (app.state.instance_port,
     set by advertise()); it is pinned into the re-exec command line so "comes back
@@ -5803,8 +5805,8 @@ def inference_error_text(exc: BaseException) -> str:
     loader raises `Failed to load model: <absolute path>` with a native stderr
     tail appended, and an auto-reload inside chat_stream can surface exactly
     that here. Handing a client the machine's directory layout is the
-    disclosure `pathscrub` exists for, and `bugreport.py` already names
-    scrub_paths as the rule for a response to a lower-privileged caller.
+    disclosure `pathscrub` exists for, and `localm/bugreport/scrub.py` already
+    names scrub_paths as the rule for a response to a lower-privileged caller.
 
     scrub_paths REDACTS, it does not mute: the cause, the file name and the
     line number survive, and only the leading directories are replaced. A caller

@@ -318,7 +318,7 @@ def test_a_change_inside_a_reexport_facade_counts_as_a_change_to_the_package(fac
     assert at_one["tests/test_facade_caller.py"] == [
         "imports localm.updater (1 hop(s) from a change)"]
     assert "tests/test_none.py" not in at_one
-    assert mod._REEXPORT_FACADES == ("localm.setup_llama",)
+    assert mod._REEXPORT_FACADES == ("localm.setup_llama", "localm.bugreport")
 
 
 # --------------------------------------------------------------------------- #

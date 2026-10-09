@@ -73,7 +73,7 @@ def test_scrub_strips_bearer_and_api_keys():
 
 
 def test_scrub_strips_url_credentials():
-    """The standalone scrub() must mirror localm/bugreport.py _scrub_secrets, which
+    """The standalone scrub() must mirror localm/bugreport/scrub.py _scrub_secrets, which
     strips user:pass@ from URLs - otherwise a credentialed URL pasted into --summary
     or --detail is scrubbed by the in-app reporter but leaks through this fallback."""
     out = ri.scrub("POST http://admin:SECRETPASS@api.corp.local/v1 failed")
@@ -82,7 +82,7 @@ def test_scrub_strips_url_credentials():
 
 
 def test_scrub_strips_query_string_and_header_credentials():
-    """Mirrors localm/bugreport.py's _scrub_query_and_header_secrets: a
+    """Mirrors localm/bugreport/scrub.py's _scrub_query_and_header_secrets: a
     credential is at least as often carried as a URL query parameter or a
     pasted header line as via user:pass@ syntax. Same assertion block as the
     user:pass@ case, deliberately - if a regression deletes the query/header
@@ -100,7 +100,7 @@ def test_scrub_strips_query_string_and_header_credentials():
 
 
 def test_scrub_redacts_authorization_header_regardless_of_scheme():
-    """Mirrors localm/bugreport.py's _HEADER_SECRET_RE fix: an "Authorization"
+    """Mirrors localm/bugreport/scrub.py's _HEADER_SECRET_RE fix: an "Authorization"
     header is redacted by NAME, not only when its value happens to start with
     "Bearer". A raw token and a Basic-auth (base64 user:pass) value are
     asserted in one block so a regression in either shape is caught. The
@@ -120,7 +120,7 @@ def test_scrub_strips_bare_and_prefixed_credential_assignments():
     """ri.scrub redacts a credential written as a plain name=value line (a .env
     fragment, a shell line) or behind a prefix (OPENAI_API_KEY=, pull_token=),
     matching the bare-name widening of _QUERY_SECRET_RE in
-    localm/bugreport.py.
+    localm/bugreport/scrub.py.
 
     Both directions are asserted in one block: the credential assignments are
     redacted, and ordinary config text (n_gpu_layers=35, key=value, monkey=13)
@@ -141,7 +141,7 @@ def test_scrub_strips_bare_and_prefixed_credential_assignments():
 
 
 def test_scrub_keeps_assignments_whose_value_cannot_be_a_secret():
-    """Mirrors the non-secret-literal suppressor in localm/bugreport.py. Asserted
+    """Mirrors the non-secret-literal suppressor in localm/bugreport/scrub.py. Asserted
     in the same block as a real redaction so a regression that deletes the
     suppressor and one that deletes the scrub are both caught here."""
     out = ri.scrub(
@@ -237,7 +237,7 @@ def test_powershell_scrub_redacts_authorization_header_when_actually_executed(tm
 
 
 def test_scrub_strips_a_quoted_credential_value():
-    """Mirrors the quoted-value fix in localm/bugreport.py. A .env writes the
+    """Mirrors the quoted-value fix in localm/bugreport/scrub.py. A .env writes the
     value quoted more often than bare, and stopping at the opening quote left
     the secret in the report next to a marker claiming it had gone."""
     out = ri.scrub(

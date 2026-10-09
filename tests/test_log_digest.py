@@ -324,7 +324,7 @@ class TestContentNeverLeaks:
         assert "debug record(s) withheld" in digest
 
     def test_truncated_tail_starting_mid_content_is_withheld_via_start_tainted(self):
-        # bugreport.py's _recent_log_tail truncates a huge log file to its last N
+        # localm/bugreport/logs.py's _recent_log_tail truncates a huge log file to its last N
         # bytes before ever calling build_digest, so the surviving text can start
         # mid-way through a content write with NO header at all (parse_records gives
         # it level=="" - the "file starts mid-record" branch). Without

@@ -399,7 +399,7 @@ def test_scrub_secrets_never_eats_a_non_secret_value_out_of_the_real_docs():
     Asserts a STRUCTURAL property (no assignment whose value is a non-secret
     literal is ever redacted) rather than specific content, so ordinary edits to
     the docs cannot break it."""
-    docs = pathlib.Path(bugreport.__file__).resolve().parents[1] / "docs"
+    docs = pathlib.Path(bugreport.__file__).resolve().parents[2] / "docs"
     assert docs.is_dir(), f"docs/ not found next to the package: {docs}"
     files = sorted(docs.rglob("*.md"))
     assert len(files) > 5, f"instrument broken: only found {len(files)} docs"
