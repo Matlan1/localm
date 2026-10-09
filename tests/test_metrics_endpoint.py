@@ -198,18 +198,20 @@ def test_chat_shows_up_in_requests_tokens_and_ttft(enabled):
     assert re.search(r"localm_http_requests_in_flight 1\b", body)
 
 
-@pytest.mark.parametrize("path, body", [
+@pytest.mark.parametrize("path, body, ttft", [
     ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}],
-                              "stream": True}),
-    ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
-    ("/v1/completions", {"prompt": "hi", "stream": True}),
-], ids=["chat-stream", "chat-full", "completions-stream"])
-def test_every_generation_path_reports_its_tokens(enabled, path, body):
+                              "stream": True}, True),
+    ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}, True),
+    ("/v1/completions", {"prompt": "hi", "stream": True}, True),
+    ("/v1/completions", {"prompt": "hi"}, False),
+], ids=["chat-stream", "chat-full", "completions-stream", "completions-full"])
+def test_every_generation_path_reports_its_tokens(enabled, path, body, ttft):
     app, client = _client()
     assert client.post(path, json={"model": "test-model", **body}).status_code == 200
     text = _scrape(app, client).text
     assert re.search(r"^localm_generated_tokens_total 7$", text, re.M)
-    assert "localm_time_to_first_token_seconds_count 1" in text
+    assert re.search(r"^localm_prompt_tokens_total \d+$", text, re.M)
+    assert ("localm_time_to_first_token_seconds_count 1" in text) is ttft
 
 
 def test_error_status_is_counted(enabled):
