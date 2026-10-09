@@ -60,6 +60,13 @@ def test_it_registers_as_a_chat_model(model_path):
     assert mtype == "llm"
 
 
+def test_it_is_recorded_as_not_formatting_tool_calls(model_path):
+    from pathlib import Path
+
+    from localm.model_manager.gguf import gguf_tool_use_signal
+    assert gguf_tool_use_signal(Path(model_path)) is False
+
+
 def test_it_loads_as_an_encoder_decoder_model(backend):
     assert backend.loaded and backend.encoder_decoder is True
     assert backend.effective_ctx_max == 2048

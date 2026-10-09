@@ -12,9 +12,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
-- **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5, MADLAD-400
-  translation models and other `t5` GGUFs register as chat models and answer through
-  `localm run`, the GUI chat and `/v1/chat/completions`, where they were refused before.
+- **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5 and other `t5`
+  GGUFs register as chat models and answer through `localm run`, the GUI chat and
+  `/v1/chat/completions`, where they were refused before.
   These models have no chat template: a single message is read as typed, and a
   conversation is read as one labelled transcript. A prompt can be up to 2,048 tokens
   (fewer when the context window is smaller); a longer one is refused with that limit

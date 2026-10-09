@@ -342,6 +342,27 @@ class TestGeneration:
         _run(llm, FakeT5(llm), _user("x"), on_status=seen.append)
         assert seen == ["Processing prompt...", "Generating response..."]
 
+    def test_without_the_memory_api_the_context_is_recreated_before_encoding(self):
+        llm = _llama()
+        fake = FakeT5(llm)
+        recreated = []
+
+        def fresh(tokens, needed):
+            recreated.append((list(tokens), needed))
+            fake.kv.clear()
+        llm._prefill_fresh_context = fresh
+        msgs = _user("What is the capital of France?")
+        with patch.object(llama_mod, "api") as mock_api,                 patch.object(llama_mod, "_build_sampler", return_value=SAMPLER):
+            fake.install(mock_api)
+            mock_api.has_memory_api.return_value = False
+            tokens = list(llm._generate_encoder_decoder(
+                msgs, max_new_tokens=64, temperature=0.0, top_k=40, top_p=0.95,
+                repeat_penalty=1.0))
+        assert recreated == [([], 4096)]
+        mock_api.llama_memory_clear.assert_not_called()
+        assert fake.calls[0] == ("encode", _expected_encoder_input(msgs))
+        assert tokens == reply_for(_expected_encoder_input(msgs))
+
     def test_a_closed_model_ends_the_reply_without_native_calls(self):
         llm = _llama()
         llm._stop.set()
@@ -545,20 +566,36 @@ class TestWorkerAndParent:
             backend._load_native()
 
     def test_the_parent_takes_the_encoder_limit_as_the_context_capacity(self, tmp_path):
-        from localm.inference.engine import InferenceEngine
+        from localm.inference.engine import Engine
         b = self._backend(tmp_path)
         self._load(b, {"n_layers": 8, "kv_bytes_per_token": 0, "supports_images": False,
                        "encoder_decoder": True, "encoder_input_limit": 512})
         assert b.encoder_decoder is True and b.effective_ctx_max == 512
-        engine = InferenceEngine.__new__(InferenceEngine)
+        engine = Engine.__new__(Engine)
         engine._backend = b
         assert engine.encoder_decoder is True and engine.context_capacity() == 512
 
     def test_a_decoder_only_load_keeps_its_ceiling(self, tmp_path):
         b = self._backend(tmp_path)
         self._load(b, {"n_layers": 8, "kv_bytes_per_token": 0, "supports_images": False,
-                       "encoder_decoder": False, "encoder_input_limit": 0})
+                       "encoder_decoder": False, "encoder_input_limit": 512})
         assert b.encoder_decoder is False and b.effective_ctx_max != 512
+
+    def test_an_encoder_decoder_chat_is_compacted_only_when_its_prompt_overflows(self):
+        from localm.inference.http_server import _needs_compaction
+        five = _user("a") * 5
+        assert _needs_compaction(2048, 60, five) is True
+        assert _needs_compaction(2048, 60, five, True) is False
+        assert _needs_compaction(2048, 2048, five, True) is False
+        assert _needs_compaction(2048, 2049, five, True) is True
+        assert _needs_compaction(2048, 5000, _user("a") * 3, True) is False
+
+    def test_only_a_real_true_marks_an_engine_encoder_decoder(self):
+        from localm.inference.http_server import _engine_is_encoder_decoder
+        assert _engine_is_encoder_decoder(SimpleNamespace(encoder_decoder=True)) is True
+        assert _engine_is_encoder_decoder(SimpleNamespace(encoder_decoder=False)) is False
+        assert _engine_is_encoder_decoder(MagicMock()) is False
+        assert _engine_is_encoder_decoder(object()) is False
 
     def test_the_overflow_refusal_names_the_one_pass_limit(self):
         from localm.inference.http_server import context_overflow_detail
