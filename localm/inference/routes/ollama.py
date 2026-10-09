@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Optional
 
@@ -60,11 +61,12 @@ class OllamaRoute(APIRoute):
         return handler
 
 
-def _error(status: int, message: str, headers: Optional[dict] = None) -> JSONResponse:
+def _error(status: int, message: str,
+           headers: Optional[Mapping[str, str]] = None) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": message}, headers=headers)
 
 
-def _validation_text(errors: list) -> str:
+def _validation_text(errors: Sequence[Any]) -> str:
     if not errors:
         return "request is invalid"
     first = errors[0]
@@ -100,7 +102,7 @@ def _derived_request(request: Request, path: str, body: bytes) -> Request:
 
 def _endpoint(app: FastAPI, path: str):
     for route in app.router.routes:
-        if getattr(route, "path", None) == path and "POST" in getattr(route, "methods", ()):
+        if isinstance(route, APIRoute) and route.path == path and "POST" in (route.methods or ()):
             return route.endpoint
     raise P.OllamaError(500, f"{path} is not mounted on this server")
 
@@ -351,7 +353,7 @@ def register(app: FastAPI, ctx) -> None:
             headers.update({"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
             return StreamingResponse(lines, media_type=_NDJSON, headers=headers)
         raw = (await _collect_body(body_iterator)
-               if body_iterator is not None else inner.body)
+               if body_iterator is not None else bytes(inner.body))
         try:
             data = json.loads(raw)
         except ValueError:
@@ -371,7 +373,7 @@ def register(app: FastAPI, ctx) -> None:
     async def _error_text(inner: Response) -> str:
         body_iterator = getattr(inner, "body_iterator", None)
         raw = (await _collect_body(body_iterator)
-               if body_iterator is not None else inner.body)
+               if body_iterator is not None else bytes(inner.body))
         try:
             data = json.loads(raw)
         except ValueError:
