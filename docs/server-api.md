@@ -623,7 +623,10 @@ nothing is collected and `/metrics` answers 404.
 path; anything that is not a plain route is `other`. No metric carries a prompt,
 a reply, a model name or a model path. The VRAM gauges come from the cached GPU
 reading and are left out until a trustworthy one exists;
-`localm_inference_queue_depth` counts requests waiting for a model's slot.
+`localm_inference_queue_depth` counts requests waiting for a loaded model's
+inference slot (not requests still waiting on a model that was just evicted).
+A request that ends before any response is sent (the client left first) is
+counted with status `499`.
 A reply the client abandons partway (a closed connection or a stop button) still
 counts its prompt, the tokens generated before it stopped, and its time to first
 token; a streamed request that leaves while still queued generated nothing and
@@ -632,7 +635,8 @@ counts nothing. Counters live in memory and start from zero at every server star
 Access: a server with an API key needs an `admin` key (the owner key from
 `localm key generate`, or `LOCALM_API_KEY`). A server with no key answers only
 on a loopback bind, and then only with the per-process shell token the local GUI
-holds, so a scraper on a keyless server needs a key first. A cross-origin
+holds or this instance's local attach token, so a scraper on a keyless server
+needs a key first. A cross-origin
 browser request is refused.
 
 ```yaml

@@ -361,3 +361,56 @@ def test_route_label_for_a_non_route_is_other():
     ("GET", "GET"), ("PROPFIND", "OTHER"), (None, "OTHER"), ("get", "OTHER")])
 def test_method_label_is_a_closed_set(method, expected):
     assert metrics.method_label(method) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Review follow-ups
+# --------------------------------------------------------------------------- #
+
+
+def test_another_app_with_metrics_off_does_not_ungate_this_one(monkeypatch):
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setenv("LOCALM_METRICS", "1")
+    app, client = _client()
+    monkeypatch.delenv("LOCALM_METRICS")
+    create_app(_engine())
+    assert not metrics.is_enabled()
+    assert client.get("/metrics").status_code == 403
+    assert client.get("/metrics", headers={
+        "Authorization": f"Bearer {app.state.shell_token}",
+        "Origin": "http://localhost:5173"}).status_code == 403
+    assert _scrape(app, client).status_code == 200
+
+
+def test_a_request_that_sends_no_response_is_counted_as_499():
+    metrics.configure(True)
+
+    async def silent_app(scope, receive, send):
+        return
+
+    async def drive():
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            pass
+
+        await assembly.MetricsMiddleware(silent_app)(
+            {"type": "http", "method": "GET", "path": "/x"}, receive, send)
+
+    asyncio.run(drive())
+    text = metrics.render()
+    assert 'status="499"' in text
+    assert 'status="500"' not in text
+
+
+def test_missing_semaphore_waiters_warn_once(monkeypatch, caplog):
+    class Opaque:
+        pass
+    monkeypatch.setattr(hs, "_inference_sems", {"m": Opaque()})
+    monkeypatch.setattr(hs, "_inference_sem", None)
+    monkeypatch.setattr(assembly, "_warned_no_waiters", False)
+    with caplog.at_level("WARNING", logger="localm"):
+        assert assembly._queue_depth() is None
+        assert assembly._queue_depth() is None
+    assert caplog.text.count("no _waiters") == 1

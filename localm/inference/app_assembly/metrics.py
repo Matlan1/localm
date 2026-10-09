@@ -39,7 +39,8 @@ def metrics_enabled() -> bool:
 
 class MetricsMiddleware:
     """Pure-ASGI request counter and timer. Records the route TEMPLATE the
-    router matched, never the requested path."""
+    router matched, never the requested path, and status 499 for a request
+    that ended before any response was sent."""
 
     def __init__(self, app) -> None:
         self.app = app
@@ -48,7 +49,7 @@ class MetricsMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        status = 500
+        status = 499
         started = time.perf_counter()
 
         async def _send(message):
@@ -68,15 +69,21 @@ class MetricsMiddleware:
                 status, time.perf_counter() - started)
 
 
+_warned_no_waiters = False
+
+
 def _queue_depth() -> Optional[int]:
     """Requests waiting on any model's inference slot, or None when the
     semaphore does not expose its waiters (the series is then left out)."""
     sems = {id(s): s for s in (*_hs._inference_sems.values(), _hs._inference_sem)
             if s is not None}
     if not all(hasattr(s, "_waiters") for s in sems.values()):
-        from localm.debuglog import logger as _dbg
-        _dbg.warning("metrics: asyncio.Semaphore has no _waiters; "
-                     "queue depth not reported")
+        global _warned_no_waiters
+        if not _warned_no_waiters:
+            _warned_no_waiters = True
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("metrics: asyncio.Semaphore has no _waiters; "
+                         "queue depth not reported")
         return None
     return sum(len(s._waiters or ()) for s in sems.values())
 
@@ -106,6 +113,7 @@ def add_metrics(app: FastAPI) -> None:
     layer."""
     if not metrics.is_enabled():
         return
+    app.state.metrics_enabled = True
 
     # Keyless servers (no API key anywhere) answer only on a loopback bind,
     # decided on app.state.bind_host and never on the request peer; the
