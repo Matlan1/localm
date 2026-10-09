@@ -14,8 +14,10 @@ from typing import Callable, Dict, List, Tuple
 
 # Target batch sizes the load-time measurement times; others are interpolated.
 VERIFY_MEASURE_SIZES = (2, 3, 5, 9, 17)
-# A one-token target decode at most this slow is measured with the full plan.
-MEASURE_FAST_DECODE_S = 0.05
+# A one-token target decode at most this slow is measured with 3 warm-up and 5
+# timed decodes per figure, at most MEASURE_MEDIUM_DECODE_S with 1 and 3.
+MEASURE_FAST_DECODE_S = 0.02
+MEASURE_MEDIUM_DECODE_S = 0.05
 # Prior acceptance evidence: a draft accepted with probability 0.6, worth two steps.
 ACCEPTANCE_PRIOR_ACCEPTED = 1.2
 ACCEPTANCE_PRIOR_REJECTED = 0.8
@@ -59,14 +61,18 @@ def best_length(p: float, k_max: int, step_cost: Callable[[int], float]) -> int:
 
 def measure_plan(probe_s: float, top: int) -> Tuple[int, int, List[int]]:
     """``(warm, reps, sizes)`` for measuring a target whose one-token decode
-    took *probe_s* seconds with verification batches up to *top* tokens: 3
-    warm-up and 5 timed decodes of every ``VERIFY_MEASURE_SIZES`` size below
-    *top* plus *top* when *probe_s* is at most ``MEASURE_FAST_DECODE_S``, else
-    1 and 1 of sizes 2 and *top* only. No sizes when *top* is below 2."""
+    took *probe_s* seconds with verification batches up to *top* tokens: every
+    ``VERIFY_MEASURE_SIZES`` size below *top* plus *top*, with 3 warm-up and 5
+    timed decodes when *probe_s* is at most ``MEASURE_FAST_DECODE_S`` and 1
+    and 3 when it is at most ``MEASURE_MEDIUM_DECODE_S``; otherwise 1 and 1 of
+    sizes 2 and *top* only. No sizes when *top* is below 2."""
     if top < 2:
         return 1, 1, []
+    sizes = sorted({n for n in VERIFY_MEASURE_SIZES if n < top} | {top})
     if probe_s <= MEASURE_FAST_DECODE_S:
-        return 3, 5, sorted({n for n in VERIFY_MEASURE_SIZES if n < top} | {top})
+        return 3, 5, sizes
+    if probe_s <= MEASURE_MEDIUM_DECODE_S:
+        return 1, 3, sizes
     return 1, 1, sorted({2, top})
 
 

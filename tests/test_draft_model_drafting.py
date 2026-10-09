@@ -434,8 +434,9 @@ def test_paying_is_judged_at_the_given_acceptance():
 
 
 @pytest.mark.parametrize("probe,top,plan", [
-    (0.01, 9, (3, 5, [2, 3, 5, 9])), (0.05, 5, (3, 5, [2, 3, 5])),
+    (0.01, 9, (3, 5, [2, 3, 5, 9])), (0.02, 5, (3, 5, [2, 3, 5])),
     (0.01, 17, (3, 5, [2, 3, 5, 9, 17])), (0.01, 12, (3, 5, [2, 3, 5, 9, 12])),
+    (0.03, 9, (1, 3, [2, 3, 5, 9])), (0.05, 5, (1, 3, [2, 3, 5])),
     (0.06, 9, (1, 1, [2, 9])), (2.0, 2, (1, 1, [2])), (0.01, 1, (1, 1, []))])
 def test_a_slow_target_is_measured_with_fewer_decodes(probe, top, plan):
     from localm.inference.backends.llamacpp._stepcosts import measure_plan

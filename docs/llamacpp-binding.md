@@ -606,9 +606,10 @@ Once the draft model has loaded, its costs on this machine are measured
 (`LlamaCpp._measure_step_costs`, a few dozen decodes): the target's one-token
 decode, its verification batches of 2, 3, 5, 9 and 17 tokens up to
 `spec_draft_tokens + 1` (others interpolated), the draft model's one-token
-decode and its batched decode per token. A target whose one-token decode takes
-more than 50 ms is measured with one decode per figure and only the batches of
-2 and `spec_draft_tokens + 1`. A draft model that cannot beat plain decoding at
+decode and its batched decode per token, each the median of repeated timed
+decodes. A target whose one-token decode takes more than 20 ms is measured with
+fewer repetitions, and one taking more than 50 ms with one decode per figure and
+only the batches of 2 and `spec_draft_tokens + 1`. A draft model that cannot beat plain decoding at
 an acceptance of 0.85 (`DRAFT_GATE_ACCEPTANCE`) is freed with status
 `draft-cannot-pay`. Each step then drafts the length k up to `spec_draft_tokens`
 (default 8, at most 16) with the most expected tokens per second,
