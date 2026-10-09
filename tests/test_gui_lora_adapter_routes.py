@@ -140,10 +140,23 @@ class TestAttachRoute:
 
     def test_a_resident_alias_of_the_base_counts(self, registered, client, monkeypatch):
         assert mm.alias_model("base", "base-alias")
-        engine = SimpleNamespace(loaded=True, model_path=str(registered.base),
-                                 applied_adapters=[])
+        engine = SimpleNamespace(loaded=True, applied_adapters=[])
         monkeypatch.setitem(_hs._engines, "base-alias", engine)
         assert _attach(client).json()["needs_reload"] is True
+
+    def test_an_engine_keyed_under_a_name_the_registry_no_longer_has_counts(
+            self, registered, client, monkeypatch):
+        engine = SimpleNamespace(loaded=True, model_path=str(registered.base),
+                                 applied_adapters=[])
+        monkeypatch.setitem(_hs._engines, "renamed-by-another-process", engine)
+        assert _attach(client).json()["needs_reload"] is True
+
+    def test_an_engine_that_is_not_loaded_does_not_count(
+            self, registered, client, monkeypatch):
+        engine = SimpleNamespace(loaded=False, model_path=str(registered.base),
+                                 applied_adapters=[])
+        monkeypatch.setitem(_hs._engines, "base", engine)
+        assert _attach(client).json()["needs_reload"] is False
 
     def test_a_resident_other_model_does_not_count(self, registered, client, monkeypatch):
         other = _write(registered.base.parent / "tiny.gguf", _gguf("llama", "model"))
