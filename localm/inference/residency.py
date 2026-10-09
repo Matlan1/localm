@@ -48,7 +48,7 @@ UNKNOWN_FOOTPRINT_BYTES = 4 * 1024 ** 3
 _FOOTPRINT_MAX_FILES = 10_000
 
 
-def alternate_layout_files(folder: Path) -> "frozenset[Path]":
+def alternate_layout_files(folder: Path) -> frozenset[Path]:
     """The ``consolidated*.safetensors`` files at the top of *folder* when it is a
     HuggingFace folder (``config.json``) that also holds ``model*.safetensors``
     shards: Mistral's second copy of the same weights, which no load reads and

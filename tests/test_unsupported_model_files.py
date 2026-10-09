@@ -270,7 +270,7 @@ class TestGgufVersionAndEndianness:
         f = _gguf(tmp_path / "m.gguf", **kw)
         backend = GgufBackend(str(f))
         for hook in ("_check_vram", "_load_native", "_effective_gpu_layers"):
-            monkeypatch.setattr(backend, hook, lambda *a, **k: pytest.fail(
+            monkeypatch.setattr(backend, hook, lambda *a, hook=hook, **k: pytest.fail(
                 f"{hook} ran for an unloadable GGUF"))
         with pytest.raises(UnsupportedModelRoleError) as caught:
             backend.load()
