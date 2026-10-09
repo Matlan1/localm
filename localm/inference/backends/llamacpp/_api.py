@@ -407,6 +407,25 @@ def llama_vocab_n_tokens(vocab: ctypes.c_void_p) -> int:
     return _bind("llama_vocab_n_tokens", ctypes.c_int32, LlamaVocab)(vocab)
 
 
+def llama_vocab_type(vocab: ctypes.c_void_p) -> int:
+    """The vocabulary's tokenizer type (``enum llama_vocab_type``)."""
+    return _bind("llama_vocab_type", ctypes.c_int32, LlamaVocab)(vocab)
+
+
+def llama_vocab_get_text(vocab: ctypes.c_void_p, token: int) -> bytes:
+    """The stored text of *token*, b"" when the runtime returns none."""
+    out = _bind("llama_vocab_get_text", ctypes.c_char_p, LlamaVocab, llama_token)(vocab, token)
+    return out or b""
+
+
+def llama_vocab_bos(vocab: ctypes.c_void_p) -> int:
+    return _bind("llama_vocab_bos", llama_token, LlamaVocab)(vocab)
+
+
+def llama_vocab_eos(vocab: ctypes.c_void_p) -> int:
+    return _bind("llama_vocab_eos", llama_token, LlamaVocab)(vocab)
+
+
 def llama_tokenize(
     vocab: ctypes.c_void_p,
     text: bytes,

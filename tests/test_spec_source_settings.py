@@ -134,7 +134,7 @@ def test_a_grown_context_keeps_the_snapshots_its_source_needs(source, draft, mtp
     llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1))
     llm._spec_source_name = source
     llm._mtp_enabled = mtp_on
-    llm._ngram_draft_max = draft
+    llm._spec_draft_max = draft
     assert _fresh_context_n_rs_seq(llm) == expected
 
 
@@ -187,6 +187,8 @@ def _report(**kw):
 @pytest.mark.parametrize("report,state,reason", [
     (_report(active=True, drafted=10, accepted=7, steps=4), "on", None),
     (_report(), "idle", None),
+    (_report(held_steps=12), "idle", "not-paying"),
+    (_report(active=True, drafted=3, accepted=3, steps=1, held_steps=12), "on", None),
     (_report(skipped="image"), "off", "image"),
     (_report(status="rewind-unsupported"), "unavailable", "rewind-unsupported"),
     (_report(status="rewind-unsupported", active=True, drafted=4, steps=1), "stopped",
@@ -263,7 +265,8 @@ def test_the_worker_hands_the_report_to_the_done_envelope():
 
 def _spec_arm(rates_off, rates_on, *, usable=True, status=None, counts=(20, 15),
               greedy_on="g", seen=None):
-    def _arm(model_path, display, source, gen_tokens, ctx, gpu_layers, draft_tokens=None):
+    def _arm(model_path, display, source, gen_tokens, ctx, gpu_layers, draft_tokens=None,
+             draft_model=None):
         if seen is not None:
             seen.append((source, draft_tokens))
         if source == "off":
@@ -350,7 +353,7 @@ def test_bench_spec_never_writes_the_setting(cli_runner):
 def test_the_model_drives_the_source_it_was_configured_with(source, expected):
     llm = make_bare_llama()
     llm._spec_source_name = source
-    llm._ngram_draft_max = 5 if source == "ngram" else 0
+    llm._spec_draft_max = 5 if source == "ngram" else 0
     llm._source = None
     picked = llm._draft_source()
     assert type(picked).__name__ == expected

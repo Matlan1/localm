@@ -1781,6 +1781,74 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
     return block_count, n_vocab
 
 
+_VOCAB_SIGNATURE_KEYS = {
+    "tokenizer.ggml.model": "model",
+    "tokenizer.ggml.add_bos_token": "add_bos",
+    "tokenizer.ggml.add_eos_token": "add_eos",
+    "tokenizer.ggml.bos_token_id": "bos",
+    "tokenizer.ggml.eos_token_id": "eos",
+}
+
+
+def gguf_file_bytes(path: Path) -> int:
+    """Bytes of the GGUF at *path* on disk, every part of a split GGUF summed;
+    0 when no part exists. Never raises."""
+    try:
+        path = Path(path)
+        parts = split_gguf_parts(path.name)
+        if parts:
+            return sum((path.parent / part).stat().st_size
+                       for part in parts if (path.parent / part).is_file())
+        return path.stat().st_size if path.is_file() else 0
+    except OSError:
+        return 0
+
+
+def gguf_vocab_signature(path: Path) -> Optional[dict]:
+    """The vocabulary a GGUF declares, from its metadata, without loading it:
+    ``{"model", "tokens", "add_bos", "add_eos", "bos", "eos"}`` where
+    ``model`` is ``tokenizer.ggml.model``, ``tokens`` the
+    ``tokenizer.ggml.tokens`` list and the rest the matching ``tokenizer.ggml.*``
+    values, None for a key the file does not carry. None when the file has no
+    token list or the header does not parse. Never raises."""
+    out: dict = {name: None for name in _VOCAB_SIGNATURE_KEYS.values()}
+    out["tokens"] = None
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            (version,) = struct.unpack("<I", f.read(4))
+            if version < 2:
+                return None
+            _tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
+            for _ in range(kv_count):
+                key = _gguf_read_string_stream(f)
+                (vtype,) = struct.unpack("<I", f.read(4))
+                if key == "tokenizer.ggml.tokens" and vtype == _GGUF_TYPE_ARRAY:
+                    (elem_type,) = struct.unpack("<I", f.read(4))
+                    (count,) = struct.unpack("<Q", f.read(8))
+                    if elem_type != _GGUF_TYPE_STRING:
+                        return None
+                    out["tokens"] = [_gguf_read_string_stream(f) for _ in range(count)]
+                    continue
+                name = _VOCAB_SIGNATURE_KEYS.get(key)
+                if name == "model" and vtype == _GGUF_TYPE_STRING:
+                    out[name] = _gguf_read_string_stream(f)
+                    continue
+                if name is not None and vtype in _GGUF_SCALAR_FORMATS:
+                    fmt = _GGUF_SCALAR_FORMATS[vtype]
+                    (out[name],) = struct.unpack(fmt, f.read(_GGUF_FIXED_TYPE_SIZES[vtype]))
+                    continue
+                _gguf_skip_value_stream(f, vtype)
+    except (OSError, struct.error, IndexError, UnicodeDecodeError, ValueError) as exc:
+        logger.debug("gguf vocab probe: could not parse %s (%s)", Path(path).name,
+                     type(exc).__name__)
+        return None
+    if not out["tokens"]:
+        return None
+    return out
+
+
 def gguf_split_layout(path: Path) -> Optional[dict]:
     """What llama.cpp's layer split places, read from *path*'s own GGUF
     header(s): ``{"block_count", "n_vocab", "tensor_bytes"}``, where

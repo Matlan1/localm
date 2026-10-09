@@ -16,7 +16,7 @@ abort only ever kills this process, never the server."""
 from __future__ import annotations
 
 import threading
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ._sizing import VramSizingMixin
 
@@ -61,6 +61,8 @@ class GgufWorker(VramSizingMixin):
         mtp_draft_tokens: Optional[int] = None,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
+        spec_draft_model: Optional[str] = None,
+        spec_draft_gpu: bool = True,
         use_mmap: Optional[bool] = None,
         adapters: Optional[list] = None,
         diffusion_steps: Optional[int] = None,
@@ -74,7 +76,9 @@ class GgufWorker(VramSizingMixin):
         self.mtp_enabled = mtp_enabled
         self.mtp_draft_tokens = mtp_draft_tokens   # None = LlamaCpp's default
         self.spec_source = spec_source             # None = follow mtp_enabled
-        self.spec_draft_tokens = spec_draft_tokens # None = the n-gram default
+        self.spec_draft_tokens = spec_draft_tokens # None = the source's default
+        self.spec_draft_model = spec_draft_model   # draft GGUF path for the draft source
+        self._draft_gpu = spec_draft_gpu           # where the parent placed the draft model
         # Already resolved by the parent - VramSizingMixin's _check_context_fit
         # reads this in preference to n_gpu_layers, matching GgufBackend's shape.
         self.effective_gpu_layers = n_gpu_layers
@@ -184,6 +188,16 @@ class GgufWorker(VramSizingMixin):
         report = getattr(self._llm, "speculation_report", None)
         return report() if callable(report) else None
 
+    @property
+    def draft_model_on_gpu(self) -> bool:
+        """Whether a draft model is on the GPU for the context-growth charge:
+        the parent's placement, and once the model is loaded, only while its
+        draft source still holds a loaded draft model."""
+        if not self._draft_gpu:
+            return False
+        source = getattr(self._llm, "_source", None) if self._llm is not None else None
+        return source is None or bool(getattr(source, "loaded", True))
+
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
@@ -248,6 +262,15 @@ class GgufWorker(VramSizingMixin):
 
         from localm.inference.backends.llamacpp import LlamaCpp
 
+        optional: Dict[str, Any] = {
+            name: value for name, value in (
+                ("mtp_draft_tokens", self.mtp_draft_tokens),
+                ("spec_source", self.spec_source),
+                ("spec_draft_tokens", self.spec_draft_tokens),
+                ("spec_draft_model", self.spec_draft_model),
+                ("diffusion_steps", self.diffusion_steps),
+                ("diffusion_max_tokens", self.diffusion_max_tokens),
+            ) if value is not None}
         self._llm = LlamaCpp(
             model_path=self.model_path,
             n_ctx=self.n_ctx,
@@ -264,16 +287,8 @@ class GgufWorker(VramSizingMixin):
             use_mmap=self.use_mmap,
             verbose=False,
             adapters=self.adapters or None,
-            **({"mtp_draft_tokens": self.mtp_draft_tokens}
-               if self.mtp_draft_tokens is not None else {}),
-            **({"spec_source": self.spec_source}
-               if self.spec_source is not None else {}),
-            **({"spec_draft_tokens": self.spec_draft_tokens}
-               if self.spec_draft_tokens is not None else {}),
-            **({"diffusion_steps": self.diffusion_steps}
-               if self.diffusion_steps is not None else {}),
-            **({"diffusion_max_tokens": self.diffusion_max_tokens}
-               if self.diffusion_max_tokens is not None else {}),
+            spec_draft_gpu=self._draft_gpu,
+            **optional,
         )
         self._loaded = True
         meta = {
