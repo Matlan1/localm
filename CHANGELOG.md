@@ -156,6 +156,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for it, including an older one kept in the project's `.localcoder` folder;
   your project files are left alone. A session that is open, or a project
   with an open session, has to be ended first.
+- **A browsable documentation site, with an API reference generated from the
+  server's OpenAPI schema.** The `docs/` guides are built into a searchable site,
+  and the API reference lists every route, parameter and schema the server
+  declares. `scripts/export_openapi.py` writes the schema without loading a model.
+  The site is published with each release.
 
 ### Changed
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU

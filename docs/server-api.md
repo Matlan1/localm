@@ -424,7 +424,7 @@ present on a headless `localm serve` with no plugins installed, not only under
 | `GET /api/issues` | `config:read` | List the project's issues through the bug-report proxy. Takes `?state=` (default `all`). |
 | `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. |
 | `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. |
-| `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](../SECURITY.md) for the signing and rollback model. |
+| `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. |
 | `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. |
 | `POST /api/update/rollback` | `admin` | Restore the previous build from the last update's local backup and restart into it. No signature check and no network request - it restores files, not a download. Requires `admin` specifically (not merely `config:write`), and restores files only, not a deps-class update's package installs. |
 | `POST /api/bug-report` | `config:write` | Generate a bug report, and optionally file it. |
@@ -468,7 +468,7 @@ the report, so a client cannot inflate a report with arbitrary content.
 
 The `bugreport_upload_*` and `update_*` config keys that back these routes widen
 a trust boundary and are owner-only; see the note under
-[`GET /v1/config`](#get-v1config--patch-v1config) above.
+[`GET /v1/config`](#get-v1config-patch-v1config) above.
 
 ## Plugin management endpoints
 
