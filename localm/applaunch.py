@@ -207,10 +207,10 @@ def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
                 old.unlink()
             dst.rename(old)
             shutil.copy2(src, dst)
-        except OSError:
+        except OSError as e:
             # Surface the original failure as the primary error; the fallback's
             # own error rides along as __context__.
-            raise copy_err
+            raise copy_err from e
         try:
             old.unlink()
         except OSError:

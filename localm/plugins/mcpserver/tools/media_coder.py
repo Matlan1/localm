@@ -219,9 +219,9 @@ def build(engines: EngineCache) -> Dict[str, dict]:
             expanded = str(Path(raw).expanduser())
             try:
                 return pathsafe.confined_absolute_or_under(home, expanded)
-            except ValueError:
+            except ValueError as e:
                 raise ValueError(
-                    f"{label} must stay within the localm data dir ({home})")
+                    f"{label} must stay within the localm data dir ({home})") from e
 
         try:
             out_arg = args.get("output_path")

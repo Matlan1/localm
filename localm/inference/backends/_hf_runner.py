@@ -710,12 +710,12 @@ class HFRunner:
         while result is None:
             try:
                 result = self._resp_q.get(timeout=_POLL_INTERVAL)
-            except _queue.Empty:
+            except _queue.Empty as e:
                 if not self._proc.is_alive():
                     raise RuntimeError(
                         f"The HuggingFace model-loading process crashed (exit "
                         f"code {self._exit_reason()}) while loading. The server "
-                        "stayed up." + self._crash_detail())
+                        "stayed up." + self._crash_detail()) from e
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
                     from localm.debuglog import native_fault_hint
@@ -724,7 +724,7 @@ class HFRunner:
                         f"- the worker process may be hung ({native_fault_hint()}). "
                         "The server stayed up and the load was aborted; retry, "
                         "or raise hf_load_timeout_s if this model genuinely "
-                        "needs longer to load.")
+                        "needs longer to load.") from e
         kind = result[0]
         if kind == "ok":
             return result[1]
@@ -778,7 +778,7 @@ class HFRunner:
                             return
                         try:
                             result = self._resp_q.get(timeout=_POLL_INTERVAL)
-                        except (ValueError, _queue.Empty):
+                        except (ValueError, _queue.Empty) as e:
                             if self._shutdown_requested:
                                 logger.debug("hf: shutdown requested during queue get, ending chat_stream")
                                 return
@@ -799,7 +799,7 @@ class HFRunner:
                                     f"{opening} (worker exit "
                                     f"{self._exit_reason()}). The model has been "
                                     "unloaded and will reload on the next "
-                                    "request." + detail)
+                                    "request." + detail) from e
                             if time.monotonic() > deadline:
                                 self.shutdown(grace=0)
                                 if awaiting_first:
@@ -810,11 +810,11 @@ class HFRunner:
                                         "processing. It has been unloaded and "
                                         "will reload on the next request. Raise "
                                         "hf_first_token_timeout_s if this prompt "
-                                        "genuinely needs longer on this hardware.")
+                                        "genuinely needs longer on this hardware.") from e
                                 raise RuntimeError(
                                     "Generation stalled: the model process "
                                     "stopped responding. It has been unloaded "
-                                    "and will reload on the next request.")
+                                    "and will reload on the next request.") from e
                     kind = result[0]
                     if kind == "status":
                         status_text = result[1]
@@ -940,15 +940,15 @@ class HFRunner:
                 wait = max(0.01, min(0.5, deadline - time.monotonic()))
                 try:
                     result = self._resp_q.get(timeout=wait)
-                except _queue.Empty:
+                except _queue.Empty as e:
                     if not self.is_alive():
                         raise RuntimeError(
                             f"The HF model process crashed (exit code "
                             f"{self._exit_reason()}) while handling '{name}'."
-                            + self._crash_detail())
+                            + self._crash_detail()) from e
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)
-                        raise RuntimeError(f"'{name}' timed out waiting for the HF model process.")
+                        raise RuntimeError(f"'{name}' timed out waiting for the HF model process.") from e
             kind = result[0]
             if kind == "ok":
                 return result[1]

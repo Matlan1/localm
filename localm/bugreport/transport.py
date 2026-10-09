@@ -211,19 +211,19 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                 if e.code == 429:
                     raise RateLimitedError(
                         _retry_after_from(getattr(e, "headers", None), detail),
-                        reason=detail)
+                        reason=detail) from None
                 raise LocalmError(
                     "the bug-report server rejected the upload",
                     reason=f"HTTP {e.code}: {detail}".strip(),
                     stage="server_rejected",
                     hint=(f"The bug-report server received the report but rejected it "
                           f"(HTTP {e.code}). This is likely a temporary server-side "
-                          f"issue, not your connection."))
+                          f"issue, not your connection.")) from None
             except (urllib.error.URLError, OSError) as e:
                 stage, hint = _classify_url_error(e)
                 raise LocalmError("could not reach the bug-report server",
                                   reason=str(getattr(e, "reason", e)),
-                                  stage=stage, hint=hint)
+                                  stage=stage, hint=hint) from None
 
     status, raw = opener(url, payload, headers, timeout)
     if int(status) == 429:

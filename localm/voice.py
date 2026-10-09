@@ -613,7 +613,7 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
         except Exception as e:
             _kill_worker()
             raise VoiceError(f"Could not start the speech-to-text worker: {e}",
-                             code="spawn")
+                             code="spawn") from e
         proc, req_q, resp_q = _proc, _req_q, _resp_q
         try:
             req_q.put((data, name, language, str(stt_cache_dir()),
@@ -621,7 +621,7 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
         except Exception as e:
             _kill_worker()
             raise VoiceError(f"Could not dispatch transcription to the STT worker: {e}",
-                             code="spawn")
+                             code="spawn") from e
 
         deadline = time.monotonic() + timeout
         result = None
@@ -637,14 +637,14 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
             try:
                 result = resp_q.get(timeout=min(0.5, remaining))
                 break
-            except _queue.Empty:
+            except _queue.Empty as exc:
                 if not proc.is_alive():          # native crash: worker vanished
                     code = proc.exitcode
                     _kill_worker()
                     raise VoiceError(
                         f"The speech-to-text engine crashed (worker exit {code}) "
                         "on this recording. The server stayed up and STT was "
-                        "restarted - please try again.", code="crash")
+                        "restarted - please try again.", code="crash") from exc
                 continue
 
     kind = result[0]

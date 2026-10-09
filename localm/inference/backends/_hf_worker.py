@@ -543,13 +543,13 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         import xgrammar as xgr
         from xgrammar.contrib.hf import LogitsProcessor
         from transformers import LogitsProcessorList
-    except ImportError:
+    except ImportError as exc:
         # Normally unreachable: HFBackend.supports_grammar is False without the
         # extra, so the up-front check in the chat routes already refused this
         # request. Reaching it anyway means the parent's check was bypassed or
         # the install changed under a live worker, and the same error that check
         # would have raised is raised here.
-        raise GrammarUnsupportedError(GRAMMAR_UNSUPPORTED_MESSAGE)
+        raise GrammarUnsupportedError(GRAMMAR_UNSUPPORTED_MESSAGE) from exc
     except Exception as e:
         # Installed but not loadable, e.g. its native bindings refuse to load.
         logger.warning("xgrammar is installed but failed to load: %s: %s",

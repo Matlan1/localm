@@ -337,7 +337,7 @@ def _run(cmd: list[str], emit: Callable[[str], None], plan: Plan,
         if allow_fail:
             emit(f"[!] could not start: {e}")
             return 1
-        raise StepFailed(f"could not start {cmd[0]}: {e}")
+        raise StepFailed(f"could not start {cmd[0]}: {e}") from e
     assert proc.stdout is not None
     for line in proc.stdout:
         emit(line.rstrip())
@@ -416,7 +416,7 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
             (ROOT / ".venv" / ".localm-venv").write_text("", encoding="utf-8")
         except OSError as e:
             raise StepFailed(f"the environment was not created where it was "
-                             f"expected: {e}")
+                             f"expected: {e}") from e
         # Recorded now; the manifest step at the end records again.
         try:
             install_manifest().record(ROOT, venv=str(ROOT / ".venv"),
@@ -436,7 +436,7 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
             else:
                 target = install_manifest().prepare_data(ROOT, data_dir=plan.data_path)
         except (OSError, ValueError) as e:
-            raise StepFailed(f"could not use that data folder: {e}")
+            raise StepFailed(f"could not use that data folder: {e}") from e
         state["data_dir"] = str(target)
         emit(f"Data directory: {target}" + (" (portable)" if plan.portable_data else ""))
     steps.append(Step("Recording where data lives", data_dir, key="data-folder"))
@@ -647,7 +647,7 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
         f.write_text(text, encoding="utf-8")
         f.chmod(0o755)
     except OSError as e:
-        raise StepFailed(f"no desktop entry could be written: {e}")
+        raise StepFailed(f"no desktop entry could be written: {e}") from e
     emit(f"Wrote {f}")
     return str(f)
 
