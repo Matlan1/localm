@@ -33,7 +33,8 @@ from localm.textguard import (
 )
 
 from . import _api as api
-from ._drafting import DraftSource, MtpSource
+from ._drafting import SPEC_MTP, SPEC_NGRAM, DraftSource, MtpSource, resolve_spec_source
+from ._ngram import NgramSource, ngram_draft_cap, ngram_rs_seq
 from ._structs import (
     llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
     set_use_mmap)
@@ -1078,6 +1079,8 @@ class LlamaCpp:
     mtp_skipped = ""             # why THIS generation could not draft at all: "image" or ""
     _draft_pacer = None          # _DraftPacer for this model, created on first use
     _source = None               # the DraftSource for this model, created on first use
+    _spec_source_name = SPEC_MTP # the configured draft source: off, mtp or ngram
+    _ngram_draft_max = 0         # draft tokens per n-gram step, 0 unless the source is ngram
     _clock = time.perf_counter
     _draft_pos = 0               # the draft cache holds positions [0, _draft_pos)
     _queued_tokens: Tuple[int, ...] = ()  # tokens at _draft_pos.. not yet in the draft cache
@@ -1123,10 +1126,15 @@ class LlamaCpp:
         mtp_enabled: bool = False,
         main_gpu: Optional[int] = None,
         mtp_draft_tokens: int = MTP_DRAFT_TOKENS_DEFAULT,
+        spec_source: Optional[str] = None,
+        spec_draft_tokens: Optional[int] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
-        self._mtp_enabled = mtp_enabled
+        # spec_source names the draft source (off, mtp, ngram); None follows
+        # mtp_enabled. MTP is enabled exactly when the source is mtp.
+        self._spec_source_name = resolve_spec_source(spec_source, mtp_enabled)
+        self._mtp_enabled = self._spec_source_name == SPEC_MTP
         self._mtp_draft_max = max(1, min(int(mtp_draft_tokens), MTP_DRAFT_TOKENS_MAX))
         self._n_threads = n_threads
         # Optional preflight consulted by _prefill_fresh_context() before
@@ -1195,7 +1203,7 @@ class LlamaCpp:
         # --- load model ---
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
-        if hasattr(mp, "load_mtp") and mtp_enabled:
+        if hasattr(mp, "load_mtp") and self._mtp_enabled:
             mp.load_mtp = True
         if n_gpu_layers >= 99:
             # Newer builds replaced use_mmap/use_mlock/use_direct_io with a
@@ -1411,8 +1419,11 @@ class LlamaCpp:
         # snapshots, and a step that proposes k drafts can reject all k.
         # Costs nothing on a model with no recurrent layers.
         # See test_recurrent_rollback_is_requested_when_mtp_is_enabled.
-        if self._mtp_enabled and hasattr(cp, "n_rs_seq"):
-            cp.n_rs_seq = self._mtp_rollback_snapshots(cp)
+        if self._spec_source_name == SPEC_NGRAM:
+            self._ngram_draft_max = ngram_draft_cap(
+                spec_draft_tokens, self._model_has_recurrent_layers())
+        if self._spec_rollback_wanted() and hasattr(cp, "n_rs_seq"):
+            cp.n_rs_seq = self._spec_rollback_snapshots(cp)
         cp.flash_attn_type   = -1  # keep default (unspecified)
         if n_threads is not None:
             cp.n_threads       = n_threads
@@ -1460,6 +1471,13 @@ class LlamaCpp:
                 self.mtp_status = f"error:{type(exc).__name__}"
         from localm.debuglog import logger as _mtp_log
         _mtp_log.info("MTP: active=%s status=%s", self.supports_mtp, self.mtp_status)
+        if self._spec_source_name == SPEC_NGRAM:
+            source = self._draft_source()
+            if not self._cache_can_drop_a_speculative_token():
+                source.usable = False
+                source.status = "rewind-unsupported"
+            _mtp_log.info("n-gram drafting: status=%s draft_max=%d",
+                          source.status, self._ngram_draft_max)
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
 
@@ -2047,7 +2065,7 @@ class LlamaCpp:
                                     self._cached_tokens.append(token)
                                     pos += 1
                                     if timed:
-                                        step = (step_t0, speculate, 1)
+                                        step = (step_t0, speculate and not source.free_miss, 1)
                                 finally:
                                     # Always release the native batch - including when
                                     # _prefill_fresh_context above raises mid-growth.
@@ -2153,6 +2171,7 @@ class LlamaCpp:
             self.mtp_accepted = 0
             self.mtp_steps = 0
             self.mtp_paused_steps = 0
+            self._draft_source().skip_call("image")
             logger.info("gguf generate (vision): prefill starting")
             _t0 = time.monotonic()
             tokens_generated = 0
@@ -2668,10 +2687,47 @@ class LlamaCpp:
         self._capture_h(n, pos + n)
 
     def _draft_source(self) -> DraftSource:
-        """The draft source the decode loop drives for this model."""
+        """The draft source the decode loop drives for this model: an
+        NgramSource when the configured source is ngram, else the MtpSource,
+        which drafts only when an MTP draft context exists."""
         if self._source is None:
-            self._source = MtpSource(self)
+            if self._spec_source_name == SPEC_NGRAM:
+                self._source = NgramSource(self, self._ngram_draft_max or 1)
+            else:
+                self._source = MtpSource(self)
         return self._source
+
+    def speculation_report(self) -> dict:
+        """The configured draft source as ``source`` plus its
+        ``DraftSource.report()``: the model's speculation state and the
+        figures of the reply that finished last."""
+        return {"source": self._spec_source_name, **self._draft_source().report()}
+
+    def _spec_rollback_wanted(self) -> bool:
+        """Whether contexts keep recurrent-state snapshots for rejected drafts:
+        True while the configured source drafts (mtp or ngram)."""
+        return self._spec_source_name == SPEC_NGRAM or self._mtp_enabled
+
+    def _spec_rollback_snapshots(self, cp) -> int:
+        """Recurrent-state snapshots a context keeps so a step whose drafts are
+        all rejected can still be rolled back, for the configured source."""
+        if self._spec_source_name == SPEC_NGRAM:
+            return ngram_rs_seq(getattr(cp, "n_rs_seq", 0), self._ngram_draft_max)
+        return self._mtp_rollback_snapshots(cp)
+
+    def _model_has_recurrent_layers(self) -> bool:
+        """Whether the loaded model has recurrent layers (fully recurrent or
+        hybrid). False when the runtime cannot say."""
+        try:
+            if not api.has_hybrid_api():
+                return False
+            return bool(api.llama_model_is_recurrent(self._model_ptr)
+                        or api.llama_model_is_hybrid(self._model_ptr))
+        except Exception as exc:
+            from localm.debuglog import logger
+            logger.debug("recurrent-layer probe failed (%s); treating the model "
+                         "as attention-only", type(exc).__name__)
+            return False
 
     def _mtp_draft_budget(self, pos: int, tokens_left: Optional[int]) -> int:
         """How many drafts the step at *pos* may propose: the configured count,
@@ -3100,8 +3156,8 @@ class LlamaCpp:
         cp.offload_kqv = offload_kqv  # False -> KV cache in system RAM (VRAM was tight)
         # The grown context must keep the rollback snapshots too, or speculation
         # stops working the moment a conversation outgrows its first context.
-        if self._mtp_enabled and hasattr(cp, "n_rs_seq"):
-            cp.n_rs_seq = self._mtp_rollback_snapshots(cp)
+        if self._spec_rollback_wanted() and hasattr(cp, "n_rs_seq"):
+            cp.n_rs_seq = self._spec_rollback_snapshots(cp)
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
         if not self._ctx_ptr:

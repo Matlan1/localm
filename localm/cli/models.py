@@ -186,6 +186,220 @@ def _mtp_probe_arm(model_path, display, mtp_enabled, gen_tokens, ctx,
         engine.unload()
 
 
+# A prompt whose answer mostly repeats text the prompt already holds, the kind
+# of work (rewriting a file, quoting a passage) n-gram drafting is built for.
+_SPEC_REPEAT_PROMPT = (
+    "Here is a Python function:\n\n"
+    "def total_price(items, tax_rate):\n"
+    "    subtotal = 0\n"
+    "    for item in items:\n"
+    "        subtotal += item.price * item.quantity\n"
+    "    tax = subtotal * tax_rate\n"
+    "    return subtotal + tax\n\n"
+    "Rename `subtotal` to `net_total` everywhere and output the complete "
+    "function in a code block. Change nothing else.")
+_SPEC_PROBE_PROMPTS = _MTP_PROBE_PROMPTS + (_SPEC_REPEAT_PROMPT,)
+
+# The label bench output uses for each draft source.
+_SPEC_LABELS = {"mtp": "MTP", "ngram": "N-gram drafting"}
+
+
+def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
+                    draft_tokens=None):
+    """Load *model_path* with draft source *source* ("off", "mtp" or "ngram")
+    and return ``(decode rates, usable, status, gpu_placement, (drafted,
+    accepted), texts, greedy_text)``: ``usable`` is False when the source cannot
+    draft on this model (``status`` says why), ``texts`` is the seeded reply
+    per prompt in prompt order and ``greedy_text`` a temperature-0 reply to the
+    repetition prompt."""
+    import time as _time
+
+    from ..inference.engine import Engine
+
+    kw = {}
+    if source == "mtp" and draft_tokens is not None:
+        kw["mtp_draft_tokens"] = draft_tokens
+    if source == "ngram" and draft_tokens is not None:
+        kw["spec_draft_tokens"] = draft_tokens
+    engine = Engine(str(model_path), n_ctx=ctx, n_gpu_layers=gpu_layers,
+                    display_name=display, spec_source=source, **kw)
+    engine.load()
+    rates = []
+    texts = []
+    drafted = accepted = 0
+    try:
+        for _ in engine.chat_stream([{"role": "user", "content": "Say hello."}],
+                                    max_tokens=8, seed=_MTP_PROBE_SEED,
+                                    **_MTP_PROBE_SAMPLING):
+            pass
+        usage = engine.speculation_usage() or {}
+        status = usage.get("reason")
+        usable = source == "off" or usage.get("state") not in (None, "unavailable")
+        if not usable:
+            return ([], False, status, engine.gpu_placement, (0, 0), [], "")
+        for prompt in _SPEC_PROBE_PROMPTS:
+            first_at = None
+            generated = 0
+            pieces = []
+            for piece in engine.chat_stream(
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=gen_tokens, seed=_MTP_PROBE_SEED,
+                    **_MTP_PROBE_SAMPLING):
+                if first_at is None:
+                    first_at = _time.perf_counter()
+                generated += 1
+                pieces.append(piece)
+            texts.append("".join(pieces))
+            usage = engine.speculation_usage() or {}
+            drafted += int(usage.get("drafted") or 0)
+            accepted += int(usage.get("accepted") or 0)
+            if first_at is None or generated < 2:
+                continue
+            decode_s = _time.perf_counter() - first_at
+            if decode_s > 0:
+                rates.append((generated - 1) / decode_s)
+        greedy = "".join(engine.chat_stream(
+            [{"role": "user", "content": _SPEC_REPEAT_PROMPT}],
+            max_tokens=gen_tokens, seed=_MTP_PROBE_SEED, temperature=0.0,
+            top_p=1.0, top_k=1, repeat_penalty=1.0))
+        return (rates, True, status, engine.gpu_placement, (drafted, accepted),
+                texts, greedy)
+    finally:
+        engine.unload()
+
+
+def _run_spec_bench(model, label, arm, rounds):
+    """Run *rounds* paired off/on measurements with ``arm(enabled)`` (the
+    _mtp_probe_arm result shape, optionally with a greedy text appended) and
+    print the comparison and the verdict for *label*. Writes no config."""
+    import statistics as _stats
+
+    from rich.markup import escape
+
+    off_rates, on_rates = [], []
+    placement = None
+    drafted = accepted = 0
+    texts_off, texts_on = [], []
+    greedy_off, greedy_on = [], []
+    for rnd in range(rounds):
+        for enabled in (False, True):
+            console.print(f"  round {rnd + 1}, {label} "
+                          f"{'on' if enabled else 'off'} … ", end="")
+            try:
+                result = arm(enabled)
+            except Exception as e:
+                console.print()
+                console.print(f"[red]Run failed:[/red] {escape(str(e))}")
+                sys.exit(1)
+            rates, sup, st, plc, counts, texts = result[:6]
+            greedy = result[6] if len(result) > 6 else None
+            console.print("done")
+            placement = plc or placement
+            if enabled:
+                drafted += counts[0]
+                accepted += counts[1]
+                texts_on += texts
+                on_rates += rates
+                if greedy is not None:
+                    greedy_on.append(greedy)
+                if not sup:
+                    if label == "MTP":
+                        console.print(
+                            f"\n[yellow]{escape(model)} has no usable MTP draft "
+                            f"head[/yellow]"
+                            + (f" ({escape(str(st))})" if st else "")
+                            + ".\nMTP would stay inactive for this model, so the "
+                              "setting makes no difference to it.")
+                    else:
+                        console.print(
+                            f"\n[yellow]{label} cannot run on "
+                            f"{escape(model)}[/yellow]"
+                            + (f" ({escape(str(st))})" if st else "")
+                            + ".\nThe setting would make no difference to it.")
+                    return
+            else:
+                texts_off += texts
+                off_rates += rates
+                if greedy is not None:
+                    greedy_off.append(greedy)
+
+    if not off_rates or not on_rates:
+        console.print("[red]Not enough generated tokens to time.[/red] "
+                      "Try a larger --gen-tokens.")
+        sys.exit(1)
+
+    off_med = _stats.median(off_rates)
+    on_med = _stats.median(on_rates)
+    ratio = on_med / off_med if off_med > 0 else 0.0
+
+    from rich.table import Table
+    table = Table(title=f"{label} comparison - {escape(model)}")
+    table.add_column(label, justify="left")
+    table.add_column("decode tok/s", justify="right")
+    table.add_column("spread", justify="right")
+    for name, vals in (("off", off_rates), ("on", on_rates)):
+        table.add_row(name, f"{_stats.median(vals):.1f}",
+                      f"{min(vals):.1f} - {max(vals):.1f}")
+    console.print(table)
+    if drafted:
+        console.print(f"Drafts accepted: {accepted} of {drafted} "
+                      f"({100.0 * accepted / drafted:.0f}%).")
+    else:
+        console.print(f"[yellow]No draft tokens were verified in the {label} "
+                      "runs.[/yellow]")
+    same = sum(1 for a, b in zip(texts_off, texts_on) if a == b)
+    pairs = min(len(texts_off), len(texts_on))
+    if pairs:
+        if same == pairs:
+            console.print(f"Output identical to {label} off: {same} of {pairs} replies.")
+        else:
+            console.print(
+                f"[yellow]Output differs from {label} off in {pairs - same} of "
+                f"{pairs} replies.[/yellow] {label} checks several tokens in one "
+                "batch, whose arithmetic can round slightly differently, so "
+                "where two tokens are almost equally likely the reply can take "
+                "the other one. It is still the same model's reply; with more "
+                "draft tokens this happens more often.")
+    greedy_pairs = min(len(greedy_off), len(greedy_on))
+    if greedy_pairs:
+        greedy_same = sum(1 for a, b in zip(greedy_off, greedy_on) if a == b)
+        console.print(f"Greedy replies matched: {greedy_same} of {greedy_pairs}.")
+
+    # 3% either way is inside the run-to-run spread seen on an idle machine, so
+    # a smaller difference is reported as no difference rather than a winner.
+    if ratio >= 1.03:
+        if label == "MTP":
+            how = ("Turn it on in Settings > Engine > Multi-Token Prediction, or "
+                   "set [cyan]mtp_enabled[/cyan] to true.")
+        else:
+            how = ("Choose it in Settings > Engine > Speculative drafting, or set "
+                   "[cyan]spec_source[/cyan].")
+        console.print(
+            f"[green]{label} is {ratio:.2f}x faster for this model[/green] "
+            f"({on_med:.1f} vs {off_med:.1f} tok/s).\n" + how)
+    elif ratio <= 0.97:
+        console.print(
+            f"[yellow]{label} is slower for this model[/yellow] "
+            f"({on_med:.1f} vs {off_med:.1f} tok/s, {ratio:.2f}x). "
+            "Leave it off.")
+        if placement and placement.get("degraded"):
+            from localm.inference.engine import describe_gpu_placement
+            console.print(
+                f"[dim]This load has {describe_gpu_placement(placement)}. "
+                "Speculation pays when checking two tokens costs about what "
+                "checking one costs, which stops holding once weights run on "
+                "the CPU. Fitting the whole model on the GPU, or a smaller "
+                "quantisation, changes this answer.[/dim]")
+    else:
+        console.print(
+            f"[dim]No meaningful difference for this model "
+            f"({on_med:.1f} vs {off_med:.1f} tok/s, {ratio:.2f}x).[/dim]")
+    console.print("[dim]Measured on this machine only. Another model, "
+                  "quantisation, or GPU can give the opposite answer, and a "
+                  "busy machine skews the result - close other heavy work "
+                  "before trusting a close call.[/dim]")
+
+
 @main.command()
 @click.argument("model", shell_complete=_complete_model_name)
 @click.option("-n", "--gen-tokens", default=160, show_default=True,
@@ -209,10 +423,9 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
     Whether speculation pays depends on the model, the quantisation, how much
     of it fits on the GPU, and the speed of this specific machine, so it is
     measured here rather than predicted. Nothing is written to your config:
-    the MTP setting is left exactly as it was.
+    the MTP setting is left exactly as it was. Same as
+    ``localm bench-spec --source mtp`` with the original three prompts.
     """
-    import statistics as _stats
-
     from rich.markup import escape
 
     info = get_operator_model_info(model)
@@ -223,109 +436,59 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
 
     console.print(f"Comparing MTP on/off for [cyan]{escape(model)}[/cyan] "
                   f"({rounds} round(s), {len(_MTP_PROBE_PROMPTS)} prompts each)…")
+    _run_spec_bench(
+        model, "MTP",
+        lambda enabled: _mtp_probe_arm(
+            model_path, model, enabled, gen_tokens, ctx, gpu_layers,
+            draft_tokens=draft_tokens if enabled else None),
+        rounds)
 
-    off_rates, on_rates = [], []
-    placement = None
-    drafted = accepted = 0
-    texts_off, texts_on = [], []
-    for rnd in range(rounds):
-        for enabled in (False, True):
-            console.print(f"  round {rnd + 1}, MTP "
-                          f"{'on' if enabled else 'off'} … ", end="")
-            try:
-                rates, sup, st, plc, counts, texts = _mtp_probe_arm(
-                    model_path, model, enabled, gen_tokens, ctx, gpu_layers,
-                    draft_tokens=draft_tokens if enabled else None)
-            except Exception as e:
-                console.print()
-                console.print(f"[red]Run failed:[/red] {escape(str(e))}")
-                sys.exit(1)
-            console.print("done")
-            placement = plc or placement
-            if enabled:
-                drafted += counts[0]
-                accepted += counts[1]
-                texts_on += texts
-                on_rates += rates
-                if not sup:
-                    console.print(
-                        f"\n[yellow]{escape(model)} has no usable MTP draft "
-                        f"head[/yellow]"
-                        + (f" ({escape(str(st))})" if st else "")
-                        + ".\nMTP would stay inactive for this model, so the "
-                          "setting makes no difference to it.")
-                    return
-            else:
-                texts_off += texts
-                off_rates += rates
 
-    if not off_rates or not on_rates:
-        console.print("[red]Not enough generated tokens to time.[/red] "
-                      "Try a larger --gen-tokens.")
+@main.command("bench-spec")
+@click.argument("model", shell_complete=_complete_model_name)
+@click.option("-s", "--source", default="ngram", show_default=True,
+              type=click.Choice(["ngram", "mtp"]),
+              help="Draft source to compare against no speculation.")
+@click.option("-n", "--gen-tokens", default=160, show_default=True,
+              help="Tokens to generate per prompt.")
+@click.option("--rounds", default=2, show_default=True,
+              type=click.IntRange(1, 5),
+              help="Times to repeat the paired measurement.")
+@click.option("-c", "--ctx",        default=None, type=int)
+@click.option("-g", "--gpu-layers", default=None, type=click.IntRange(0, 1000))
+@click.option("-d", "--draft-tokens", default=None, type=click.IntRange(1, 16),
+              help="Draft tokens per step for the 'on' runs (MTP: 1-3, default "
+                   "mtp_draft_tokens; n-gram: 1-16, default spec_draft_tokens).")
+def bench_spec(model, source, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
+    """Measure whether speculative drafting makes MODEL faster on this machine.
+
+    Loads MODEL twice per round, once with no speculation and once with the
+    draft SOURCE (ngram: drafts from repeats of earlier text in the prompt and
+    reply; mtp: the model's own MTP head), and generates the same prompts
+    through each, one of them a rewrite that repeats its input. Reports the
+    decode throughput of both, which won, how many drafted tokens were
+    accepted, whether the replies differ, and whether a greedy reply matched.
+
+    Nothing is written to your config.
+    """
+    from rich.markup import escape
+
+    if source == "mtp" and draft_tokens is not None and draft_tokens > 3:
+        raise click.BadParameter("MTP takes 1-3 draft tokens", param_hint="--draft-tokens")
+    info = get_operator_model_info(model)
+    if info is None:
+        console.print(f"[red]Model not found:[/red] {escape(model)}")
         sys.exit(1)
-
-    off_med = _stats.median(off_rates)
-    on_med = _stats.median(on_rates)
-    ratio = on_med / off_med if off_med > 0 else 0.0
-
-    from rich.table import Table
-    table = Table(title=f"MTP comparison - {escape(model)}")
-    table.add_column("MTP", justify="left")
-    table.add_column("decode tok/s", justify="right")
-    table.add_column("spread", justify="right")
-    for name, vals in (("off", off_rates), ("on", on_rates)):
-        table.add_row(name, f"{_stats.median(vals):.1f}",
-                      f"{min(vals):.1f} - {max(vals):.1f}")
-    console.print(table)
-    if drafted:
-        console.print(f"Drafts accepted: {accepted} of {drafted} "
-                      f"({100.0 * accepted / drafted:.0f}%).")
-    else:
-        console.print("[yellow]No draft tokens were verified in the MTP runs."
-                      "[/yellow]")
-    same = sum(1 for a, b in zip(texts_off, texts_on) if a == b)
-    pairs = min(len(texts_off), len(texts_on))
-    if pairs:
-        if same == pairs:
-            console.print(f"Output identical to MTP off: {same} of {pairs} replies.")
-        else:
-            console.print(
-                f"[yellow]Output differs from MTP off in {pairs - same} of "
-                f"{pairs} replies.[/yellow] MTP checks several tokens in one "
-                "batch, whose arithmetic can round slightly differently, so "
-                "where two tokens are almost equally likely the reply can take "
-                "the other one. It is still the same model's reply; with more "
-                "draft tokens this happens more often.")
-
-    # 3% either way is inside the run-to-run spread seen on an idle machine, so
-    # a smaller difference is reported as no difference rather than a winner.
-    if ratio >= 1.03:
-        console.print(
-            f"[green]MTP is {ratio:.2f}x faster for this model[/green] "
-            f"({on_med:.1f} vs {off_med:.1f} tok/s).\n"
-            "Turn it on in Settings > Engine > Multi-Token Prediction, or set "
-            "[cyan]mtp_enabled[/cyan] to true.")
-    elif ratio <= 0.97:
-        console.print(
-            f"[yellow]MTP is slower for this model[/yellow] "
-            f"({on_med:.1f} vs {off_med:.1f} tok/s, {ratio:.2f}x). "
-            "Leave it off.")
-        if placement and placement.get("degraded"):
-            from localm.inference.engine import describe_gpu_placement
-            console.print(
-                f"[dim]This load has {describe_gpu_placement(placement)}. "
-                "Speculation pays when checking two tokens costs about what "
-                "checking one costs, which stops holding once weights run on "
-                "the CPU. Fitting the whole model on the GPU, or a smaller "
-                "quantisation, changes this answer.[/dim]")
-    else:
-        console.print(
-            f"[dim]No meaningful difference for this model "
-            f"({on_med:.1f} vs {off_med:.1f} tok/s, {ratio:.2f}x).[/dim]")
-    console.print("[dim]Measured on this machine only. Another model, "
-                  "quantisation, or GPU can give the opposite answer, and a "
-                  "busy machine skews the result - close other heavy work "
-                  "before trusting a close call.[/dim]")
+    model_path, _hint = info
+    label = _SPEC_LABELS[source]
+    console.print(f"Comparing {label} on/off for [cyan]{escape(model)}[/cyan] "
+                  f"({rounds} round(s), {len(_SPEC_PROBE_PROMPTS)} prompts each)…")
+    _run_spec_bench(
+        model, label,
+        lambda enabled: _spec_probe_arm(
+            model_path, model, source if enabled else "off", gen_tokens, ctx,
+            gpu_layers, draft_tokens=draft_tokens if enabled else None),
+        rounds)
 
 
 # ------------------------------------------------------------------ #

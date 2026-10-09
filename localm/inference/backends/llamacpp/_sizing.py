@@ -718,10 +718,12 @@ class VramSizingMixin:
         A hybrid (linear-attention / state-space) stack keeps a fixed-size state
         per recurrent layer that does not grow with the context.
         ``gguf_recurrent_state_bytes`` is one copy of it; the context allocates
-        ``1 + n_rs_seq`` copies. ``n_rs_seq`` is 0 without MTP, and with MTP
-        enabled ``llama.mtp_rs_seq`` of the draft-token count (the same call
-        LlamaCpp makes when it creates the context). Never raises: a probe
-        failure charges 0. Memoised per instance."""
+        ``1 + n_rs_seq`` copies. ``n_rs_seq`` is 0 without speculation; with
+        MTP enabled it is ``llama.mtp_rs_seq`` of the draft-token count, and
+        with the ngram draft source ``_ngram.ngram_rs_seq`` of the n-gram draft
+        cap for a recurrent model (the same calls LlamaCpp makes when it
+        creates the context). Never raises: a probe failure charges 0.
+        Memoised per instance."""
         cached = getattr(self, "_recurrent_state_vram_bytes_cached", None)
         if cached is not None:
             return cached
@@ -732,7 +734,12 @@ class VramSizingMixin:
                 Path(self.model_path), _parsed=self._gguf_parsed_tensor_entries())
             if per_copy:
                 n_rs_seq = 0
-                if getattr(self, "mtp_enabled", False):
+                if getattr(self, "spec_source", None) == "ngram":
+                    from localm.inference.backends.llamacpp._ngram import (
+                        ngram_draft_cap, ngram_rs_seq)
+                    n_rs_seq = ngram_rs_seq(0, ngram_draft_cap(
+                        getattr(self, "spec_draft_tokens", None), True))
+                elif getattr(self, "mtp_enabled", False):
                     from localm.inference.backends.llamacpp.llama import (
                         MTP_DRAFT_TOKENS_DEFAULT, mtp_rs_seq)
                     draft = getattr(self, "mtp_draft_tokens", None)

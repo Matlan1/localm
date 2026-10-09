@@ -162,6 +162,35 @@ test("the usage line shows MTP acceptance, a pause, a stop, an off reply or unav
     "a reply that verified no drafts has no acceptance rate to show");
 });
 
+test("the usage line shows n-gram drafting from usage.speculation and leaves an mtp source to usage.mtp", async () => {
+  const { window } = loadApp();
+  const usage = $id => window.document.getElementById($id);
+  window.updateUsageDisplay({ total_tokens: 7, tokens_per_sec: 3,
+    speculation: { source: "ngram", state: "on", drafted: 20, accepted: 15, reason: null } });
+  assert.match(usage("chat-usage").textContent, /3 tok\/s · N-gram 75% accepted/);
+  assert.match(usage("chat-usage").title, /15 of 20/);
+
+  window.updateUsageDisplay({ total_tokens: 7, speculation: { source: "ngram", state: "unavailable",
+                                                              drafted: 0, accepted: 0, reason: "rewind-unsupported" } });
+  assert.match(usage("chat-usage").textContent, /N-gram unavailable/);
+  assert.match(usage("chat-usage").title, /rewind-unsupported/);
+
+  window.updateUsageDisplay({ total_tokens: 7, speculation: { source: "ngram", state: "off",
+                                                              drafted: 0, accepted: 0, reason: "image" } });
+  assert.match(usage("chat-usage").title, /with an image/);
+
+  window.updateUsageDisplay({ total_tokens: 7, speculation: { source: "ngram", state: "idle",
+                                                              drafted: 0, accepted: 0 } });
+  assert.doesNotMatch(usage("chat-usage").textContent, /N-gram/);
+
+  window.updateUsageDisplay({ total_tokens: 7,
+    mtp: { state: "on", drafted: 40, accepted: 30 },
+    speculation: { source: "mtp", state: "on", drafted: 40, accepted: 30 } });
+  assert.match(usage("chat-usage").textContent, /MTP 75% accepted/);
+  assert.doesNotMatch(usage("chat-usage").textContent, /N-gram/,
+    "an mtp source is shown once, from usage.mtp");
+});
+
 test("updateUsageDisplay renders tok/s and clears it back out for a null usage", async () => {
   const { window } = loadApp();
   window.updateUsageDisplay({ total_tokens: 7, tokens_per_sec: 3 });

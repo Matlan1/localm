@@ -244,6 +244,17 @@ CORE_FIELDS: list = [
                  "when most drafts are accepted; `localm bench-mtp <model> "
                  "--draft-tokens N` measures it.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=3),
+    SettingField("spec_source", Widget.SELECT, "Speculative drafting",
+                 "Where draft tokens come from. mtp = the model's own MTP head; "
+                 "ngram = repeats of earlier text in the chat, no second model; "
+                 "off = none. Inherit follows the MTP toggle. Run `localm "
+                 "bench-spec <model>` to check yours.",
+                 group="Engine", applies=Applies.NEXT_LOAD,
+                 options=["", "off", "mtp", "ngram"]),
+    SettingField("spec_draft_tokens", Widget.NUMBER, "N-gram draft tokens",
+                 "Most tokens one n-gram step proposes. Blank uses 8; models "
+                 "with recurrent layers use at most 4.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=16),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.

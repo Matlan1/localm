@@ -105,6 +105,47 @@ def _resolve_mtp_draft_tokens(cfg: dict, override: Optional[int]) -> int:
     return max(1, min(value, MTP_DRAFT_TOKENS_MAX))
 
 
+def resolve_spec_source(cfg: dict, mtp_enabled: Optional[bool] = None,
+                        spec_source: Optional[str] = None) -> str:
+    """The draft source a load uses, one of ``off``, ``mtp``, ``ngram``.
+
+    In order: *spec_source* when given; then *mtp_enabled* when given (True
+    means ``mtp``, False ``off``); then the ``spec_source`` config key; then the
+    ``mtp_enabled`` config key. A config value that is not a source name is
+    logged under --debug and the ``mtp_enabled`` key decides. An invalid
+    *spec_source* argument raises ValueError."""
+    from localm.inference.backends.llamacpp._drafting import SPEC_MTP, SPEC_OFF
+    from localm.inference.backends.llamacpp._drafting import resolve_spec_source as _resolve
+    if spec_source is not None and spec_source != "":
+        return _resolve(spec_source, False)
+    if mtp_enabled is not None:
+        return SPEC_MTP if mtp_enabled else SPEC_OFF
+    cfg_mtp = bool(cfg.get("mtp_enabled", False))
+    try:
+        return _resolve(cfg.get("spec_source"), cfg_mtp)
+    except ValueError:
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("spec_source is set but not a valid source (%r); "
+                     "following mtp_enabled", cfg.get("spec_source"))
+        return _resolve(None, cfg_mtp)
+
+
+def _resolve_spec_draft_tokens(cfg: dict, override: Optional[int]) -> Optional[int]:
+    """Draft tokens per n-gram step: *override* when given, else the
+    ``spec_draft_tokens`` config key, else None (the source's default). A value
+    that is not a number is logged under --debug and None is used."""
+    raw = override if override is not None else cfg.get("spec_draft_tokens")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("spec_draft_tokens is set but not a valid number (%r); "
+                     "using the default", raw)
+        return None
+
+
 def create_backend(
     model_path: str,
     *,
@@ -114,6 +155,8 @@ def create_backend(
     device: Optional[str] = None,
     mtp_enabled: Optional[bool] = None,
     mtp_draft_tokens: Optional[int] = None,
+    spec_source: Optional[str] = None,
+    spec_draft_tokens: Optional[int] = None,
 ) -> BaseBackend:
     """
     Return the appropriate backend for the given model path, without loading it.
@@ -126,6 +169,11 @@ def create_backend(
                   setting untouched.
     mtp_draft_tokens: None reads the ``mtp_draft_tokens`` config key; an int
                   overrides it the same way.
+    spec_source:  None resolves the draft source from *mtp_enabled* and the
+                  config (see resolve_spec_source); a source name overrides
+                  both for this backend only.
+    spec_draft_tokens: None reads the ``spec_draft_tokens`` config key; an int
+                  overrides it the same way.
     """
     cfg = load_config()
 
@@ -135,6 +183,7 @@ def create_backend(
 
     if _is_gguf(model_path):
         from localm.inference.backends.gguf import GgufBackend
+        source = resolve_spec_source(cfg, mtp_enabled, spec_source)
         return GgufBackend(
             model_path,
             mmproj_path=mmproj_path,
@@ -145,8 +194,9 @@ def create_backend(
             ctx_auto=bool(cfg.get("ctx_auto", False)),
             n_gpu_layers_auto=bool(cfg.get("n_gpu_layers_auto", True)),
             n_cpu_moe=int(cfg.get("n_cpu_moe", 0) or 0),
-            mtp_enabled=(bool(cfg.get("mtp_enabled", False))
-                         if mtp_enabled is None else bool(mtp_enabled)),
+            mtp_enabled=source == "mtp",
+            spec_source=source,
+            spec_draft_tokens=_resolve_spec_draft_tokens(cfg, spec_draft_tokens),
             mtp_draft_tokens=_resolve_mtp_draft_tokens(cfg, mtp_draft_tokens),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
         )
@@ -244,6 +294,8 @@ class Engine:
         display_name: Optional[str] = None,
         mtp_enabled: Optional[bool] = None,
         mtp_draft_tokens: Optional[int] = None,
+        spec_source: Optional[str] = None,
+        spec_draft_tokens: Optional[int] = None,
     ) -> None:
         self.model_path = model_path
         self.display_name = display_name or model_display_name(model_path)
@@ -259,6 +311,8 @@ class Engine:
             device=device,
             mtp_enabled=mtp_enabled,
             mtp_draft_tokens=mtp_draft_tokens,
+            spec_source=spec_source,
+            spec_draft_tokens=spec_draft_tokens,
         )
         self.active_requests = 0
         # Set by http_server.switch_engine after a load placed partly on the
@@ -387,6 +441,13 @@ class Engine:
         """MTP figures for the reply that just finished (see GgufBackend.last_mtp_usage),
         or None when the backend reports none."""
         usage = getattr(self._backend, "last_mtp_usage", None)
+        return usage if isinstance(usage, dict) else None
+
+    def speculation_usage(self) -> Optional[dict]:
+        """Speculative-drafting figures for the reply that just finished, for
+        any draft source (see GgufBackend.last_speculation_usage), or None when
+        the backend reports none."""
+        usage = getattr(self._backend, "last_speculation_usage", None)
         return usage if isinstance(usage, dict) else None
 
     def count_tokens(self, text: str) -> int:

@@ -52,7 +52,7 @@ from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
 from localm.inference.protocol import (
     COMPACTING_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
-    FullChoice, Message, MtpUsage, PROCESSING_PROMPT_STATUS, STATUS_CODE_BY_TEXT,
+    FullChoice, Message, MtpUsage, PROCESSING_PROMPT_STATUS, SpeculationUsage, STATUS_CODE_BY_TEXT,
     StreamChoice, UsageInfo, WAITING_FOR_MODEL_STATUS, make_chunk_id,
 )
 
@@ -4557,6 +4557,23 @@ def _mtp_usage(engine) -> Optional[MtpUsage]:
         return None
 
 
+def _speculation_usage(engine) -> Optional[SpeculationUsage]:
+    """The last reply's speculative-drafting figures for any draft source, or
+    None when the engine reports none (no draft source, a non-GGUF backend, or
+    a minimal engine without the method)."""
+    fn = getattr(engine, "speculation_usage", None)
+    data = fn() if callable(fn) else None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return SpeculationUsage(**data)
+    except (TypeError, ValueError) as exc:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("usage.speculation left out: the engine's figures did not "
+                   "validate (%s)", type(exc).__name__)
+        return None
+
+
 def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[float]:
     """Time to first token in milliseconds, or None if nothing was generated."""
     if first_token_at is None:
@@ -5209,6 +5226,7 @@ async def _stream_sse(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         context_capacity=engine.context_capacity(),
         mtp=_mtp_usage(engine),
+        speculation=_speculation_usage(engine),
     )
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
                           finish_reason=finish_reason)
@@ -5896,6 +5914,7 @@ async def _complete(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         context_capacity=capacity,
         mtp=_mtp_usage(engine),
+        speculation=_speculation_usage(engine),
     )
 
     response = ChatResponse(

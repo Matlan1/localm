@@ -115,6 +115,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
         mtp_draft_tokens: Optional[int] = None,
+        spec_source: Optional[str] = None,
+        spec_draft_tokens: Optional[int] = None,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -123,8 +125,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # Opt-in MoE expert placement: keep the expert weights of the first N
         # layers in system RAM (llama.cpp's --n-cpu-moe). 0 = off, the default.
         self.n_cpu_moe = n_cpu_moe
-        self.mtp_enabled = mtp_enabled
+        # The draft source (off, mtp, ngram); None follows mtp_enabled. MTP is
+        # enabled exactly when the source is mtp.
+        from .llamacpp._drafting import SPEC_MTP, resolve_spec_source
+        self.spec_source = resolve_spec_source(spec_source, mtp_enabled)
+        self.mtp_enabled = self.spec_source == SPEC_MTP
         self.mtp_draft_tokens = mtp_draft_tokens   # None = the native default
+        self.spec_draft_tokens = spec_draft_tokens  # None = the n-gram default
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
@@ -175,6 +182,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_mtp_paused_steps = 0  # steps it ran plain because drafting was slower
         self.last_mtp_skipped = ""     # why the last call could not draft at all
         self._mtp_stopped_this_call = False  # the last call turned MTP off for the model
+        self.last_speculation = None   # the child's speculation report for the last call
         # Always None in production; the real LlamaCpp instance lives in the
         # child process.
         self._llm = None
@@ -294,6 +302,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.last_mtp_paused_steps = 0
         self.last_mtp_skipped = ""
         self._mtp_stopped_this_call = False
+        self.last_speculation = None
 
     def _record_mtp(self, done: dict) -> None:
         """Take the speculation state from one call's done envelope.
@@ -306,6 +315,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         A status whose kind (the part before ':') is outside _MTP_STOPPED never re-enables anything - a model that
         stopped speculating does not start again on the next reply.
         """
+        spec = done.get("speculation")
+        self.last_speculation = spec if isinstance(spec, dict) else None
         if "mtp_status" not in done:
             return          # an older child, or a path that does not report it
         self.last_mtp_status = done.get("mtp_status")
@@ -357,6 +368,50 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         return {"state": state, "drafted": self.last_mtp_drafted,
                 "accepted": self.last_mtp_accepted, "paused_steps": paused,
                 "reason": reason}
+
+    @property
+    def last_speculation_usage(self) -> Optional[dict]:
+        """Speculative-drafting figures for the reply that just finished, for
+        any draft source, or None when the source is off or no model is loaded.
+
+        ``source`` is the draft source. For ``mtp`` the other fields are those
+        of ``last_mtp_usage``. For ``ngram``, ``state`` is "stopped" when the
+        reply stopped drafting partway (``reason`` names why), "unavailable"
+        when the model cannot speculate (``reason`` is the model status, e.g.
+        "rewind-unsupported"), "paused" when drafting was measured slower than
+        one-token decoding for at least as many steps as it ran, "on" when it
+        speculated, "off" when this reply could not draft (``reason`` "image"),
+        and "idle" when nothing matched. ``drafted``, ``accepted`` and
+        ``paused_steps`` count as in ``last_mtp_usage``.
+        """
+        source = getattr(self, "spec_source",
+                         "mtp" if getattr(self, "mtp_enabled", False) else "off")
+        if not self.loaded or source not in ("mtp", "ngram"):
+            return None
+        if source == "mtp":
+            usage = self.last_mtp_usage
+            return {"source": "mtp", **usage} if usage is not None else None
+        rep = getattr(self, "last_speculation", None) or {}
+        status = str(rep.get("status") or "")
+        call_status = str(rep.get("call_status") or "")
+        paused = _count(rep.get("paused_steps"))
+        steps = _count(rep.get("steps"))
+        if call_status:
+            state, reason = "stopped", call_status
+        elif status and not status.startswith("ok"):
+            state, reason = "unavailable", status
+        elif paused and paused >= steps:
+            state, reason = "paused", "slower-than-plain"
+        elif rep.get("active"):
+            state, reason = "on", None
+        elif rep.get("skipped"):
+            state, reason = "off", str(rep.get("skipped"))
+        else:
+            state, reason = "idle", None
+        return {"source": "ngram", "state": state,
+                "drafted": _count(rep.get("drafted")),
+                "accepted": _count(rep.get("accepted")),
+                "paused_steps": paused, "reason": reason}
 
     @property
     def supports_mtp(self) -> bool:
@@ -570,6 +625,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         )
         if self.mtp_draft_tokens is not None:
             params["mtp_draft_tokens"] = int(self.mtp_draft_tokens)
+        source = getattr(self, "spec_source", None)
+        if source is not None and source != ("mtp" if self.mtp_enabled else "off"):
+            params["spec_source"] = source
+        if getattr(self, "spec_draft_tokens", None) is not None:
+            params["spec_draft_tokens"] = int(self.spec_draft_tokens)
         if main_gpu is not None:
             params["main_gpu"] = main_gpu
         timeout = self._load_timeout_seconds()

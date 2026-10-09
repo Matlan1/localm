@@ -547,6 +547,14 @@ DEFAULT_CONFIG: dict = {
     # Draft tokens one MTP speculation step proposes (1-3). Each step costs one
     # small draft decode per token plus one verification decode of all of them.
     "mtp_draft_tokens": 1,
+    # Where speculative drafts come from: "off", "mtp" (the model's own MTP
+    # head) or "ngram" (tokens that followed the same few tokens earlier in the
+    # conversation; no second model, no extra VRAM). None follows mtp_enabled:
+    # true means "mtp", false means "off". `localm bench-spec` measures it.
+    "spec_source": None,
+    # Draft tokens one n-gram step may propose (1-16). None uses the default (8);
+    # a model with recurrent layers is capped at 4.
+    "spec_draft_tokens": None,
     # VRAM (MB) that n_gpu_layers_auto/ctx_auto/_check_vram always reserve beyond
     # model weights for the GGUF backend, before deciding how many layers fit or
     # refusing outright. This is NOT a discardable safety margin - it funds the

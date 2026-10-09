@@ -1764,6 +1764,38 @@ export function mtpUsageText(mtp) {
   return { text: "", title: "" };
 }
 
+// The n-gram drafting part of the usage line for a reply's usage.speculation,
+// as {text, title}, in the same states as mtpUsageText. Empty when the source
+// is mtp (usage.mtp already covers it), for no figures, or for an idle turn.
+export function speculationUsageText(spec) {
+  if (!spec || typeof spec !== "object" || spec.source !== "ngram") {
+    return { text: "", title: "" };
+  }
+  if (spec.state === "on" && spec.drafted > 0) {
+    const pct = Math.round((100 * spec.accepted) / spec.drafted);
+    return { text: t("chat.usage.ngramOn", { pct }),
+             title: t("chat.usage.ngramOn.title", { accepted: spec.accepted, drafted: spec.drafted }) };
+  }
+  if (spec.state === "paused") {
+    return { text: t("chat.usage.ngramPaused"),
+             title: t("chat.usage.ngramPaused.title", { steps: spec.paused_steps || 0 }) };
+  }
+  if (spec.state === "off") {
+    const why = { image: "chat.usage.ngramOff.image" }[spec.reason];
+    return { text: t("chat.usage.ngramOff"),
+             title: why ? t(why) : t("chat.usage.ngramReason", { reason: spec.reason || "" }) };
+  }
+  if (spec.state === "stopped") {
+    return { text: t("chat.usage.ngramStopped"),
+             title: t("chat.usage.ngramReason", { reason: spec.reason || "" }) };
+  }
+  if (spec.state === "unavailable") {
+    return { text: t("chat.usage.ngramUnavailable"),
+             title: t("chat.usage.ngramReason", { reason: spec.reason || "" }) };
+  }
+  return { text: "", title: "" };
+}
+
 export function updateUsageDisplay(usage) {
   const gaugeContainer = $("context-gauge-container");
   const gaugeBar = $("context-gauge-bar");
@@ -1778,8 +1810,10 @@ export function updateUsageDisplay(usage) {
   if (usage.tokens_per_sec != null) bits.push(`${usage.tokens_per_sec} tok/s`);
   const mtp = mtpUsageText(usage.mtp);
   if (mtp.text) bits.push(mtp.text);
+  const spec = speculationUsageText(usage.speculation);
+  if (spec.text) bits.push(spec.text);
   $("chat-usage").textContent = bits.join(" · ");
-  $("chat-usage").title = mtp.title;
+  $("chat-usage").title = mtp.title || spec.title;
   if (gaugeContainer && gaugeBar && usage.context_capacity) {
     const pct = Math.min(100, Math.max(0, (usage.total_tokens / usage.context_capacity) * 100));
     gaugeBar.style.width = pct + "%";
