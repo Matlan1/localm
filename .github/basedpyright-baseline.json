@@ -4038,14 +4038,6 @@
                 }
             },
             {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 24,
-                    "endColumn": 68,
-                    "lineCount": 2
-                }
-            },
-            {
                 "code": "reportAttributeAccessIssue",
                 "range": {
                     "startColumn": 63,

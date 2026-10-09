@@ -43,6 +43,7 @@ request extras:
 | `top_k`, `repeat_penalty` | extra sampling controls |
 | `seed` | reproducible generation |
 | `stop` | A string or a list of up to 16 strings (each up to 1024 characters). The reply is cut before the first match, the generation ends there, and `finish_reason` is `stop`. A stop sequence inside a model's `<think>` block is not applied. Also accepted by `POST /v1/completions`. |
+| `tools`, `tool_choice`, `parallel_tool_calls` | OpenAI function tools; see [Tool calling](#tool-calling). |
 | `grammar`, `grammar_lazy`, `grammar_triggers` | GBNF grammar constraining the output (local models); a lazy grammar stays unconstrained until a trigger pattern appears, and requires `grammar_triggers` |
 | `chat_template_kwargs` | `{"enable_thinking": false}` asks a reasoning model that uses `<think>` blocks to answer without reasoning. Only `enable_thinking` is applied and must be a boolean (otherwise 422); other keys are accepted and ignored. A model without a `<think>` convention is unaffected. |
 
@@ -161,6 +162,43 @@ when a draft decode failed partway through the reply. An `on` reply carries
 `reason` `draft-on-cpu` when the draft model runs on the CPU (the model runs on
 the CPU, or the draft model did not fit in VRAM beside it). The field is `null` when no draft source is on.
 
+#### Tool calling
+
+`tools` takes OpenAI function tools (up to 64) and works with any chat model:
+the model is told about the functions in its system prompt, and its calls come
+back in `message.tool_calls`, with `finish_reason` `"tool_calls"`. A streamed
+reply sends each call whole in one `delta.tool_calls` entry carrying its
+`index`, `id`, `type` and `function`; the call text never appears in `content`.
+A reply can hold text before its calls, and more than one call.
+
+| Request | Behaviour |
+|---|---|
+| `tool_choice` | `auto` (the default when `tools` is sent): the model may answer in text or call. `none`: the functions are not shown to the model and the reply is not read for calls. `required`: the reply is one or more calls. `{"type": "function", "function": {"name": "..."}}`: the reply is calls to that function. |
+| `parallel_tool_calls` | `false` limits the reply to one call. |
+| earlier turns | An assistant message with `tool_calls` (its `content` may be `null`) and the `tool` messages that follow it are given to the model as text, in order. A tool result is untrusted text: control tokens in it are defused and it cannot close its own fence. |
+
+With `required` or a named function the arguments are constrained, token by
+token, to the function's `parameters` JSON schema (the keywords listed for
+`format` in [ollama-api.md](ollama-api.md)). A keyword that cannot be enforced
+(`pattern`, bounds on a non-integer number, ...) is left out of that function's
+schema and everything else in it is still enforced; a function whose schema
+cannot be compiled, or a tool list too large for one grammar, takes any JSON
+object as its arguments. Each case is written to the debug log. With `auto` the
+arguments are constrained from the moment the model opens a call. A forced
+choice starts with the call, so the model has no room to reason before it.
+Whether a model opens a call under `auto` is the model's decision: a model
+that does not follow the call instruction answers in prose, and `required` or a
+named function is how to force a call. A call to a function that was not
+offered is left in the text.
+
+`stop` sequences apply to the visible text only, never inside a call, and a
+call after a matched stop sequence is dropped. `tools` cannot be combined with
+`grammar` (400). On a model whose backend cannot apply grammars, `auto` still
+works, with calls read from the reply without a constraint, and `required` or
+a named function is a 400. A llama.cpp runtime too old to apply lazy grammars
+refuses `auto` at generation time with a 400 that says so; `localm setup-llama`
+installs a current one. A malformed `tools` or `tool_choice` is a 400.
+
 #### How a generation failure is reported
 
 Both generation endpoints answer failures the same way on both routes and in
@@ -169,7 +207,7 @@ failure happens, not on which endpoint you called:
 
 | Failure | Reported as |
 |---|---|
-| The request is refused before generation starts (unsupported input, an undecodable image, a grammar this model cannot apply, a malformed grammar or trigger pattern) | An HTTP error status with the reason in `detail`: `400`, `501` when the server lacks an image decoder, `413` when an embedding batch is too large, `503` when the trigger-pattern validator was too busy to check your pattern |
+| The request is refused before generation starts (unsupported input, an undecodable image, a grammar this model cannot apply, a malformed grammar or trigger pattern, malformed `tools`) | An HTTP error status with the reason in `detail`: `400`, `501` when the server lacks an image decoder, `413` when an embedding batch is too large, `503` when the trigger-pattern validator was too busy to check your pattern |
 | Generation started and then failed (not enough free VRAM for this prompt, a conversation that outgrew the context window, a native decode error) | `200` whose text is `\n[inference error: <reason>]` (a leading newline, then the bracketed reason) and whose `finish_reason` is `"error"` |
 
 The second row is a `200` on purpose. A streaming response has already sent its

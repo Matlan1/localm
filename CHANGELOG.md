@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Tool calling with any chat model.** `/v1/chat/completions` takes OpenAI `tools`,
+  `tool_choice` and `parallel_tool_calls`, and the Ollama API takes `tools` and
+  `tool_calls`. The model's calls come back in `message.tool_calls` (a streamed call arrives
+  whole in one delta) with `finish_reason` `tool_calls`. `required` or a named function
+  constrains the reply to a well-formed call whose arguments follow the function's JSON
+  schema; `auto` constrains a call once the model starts one. Earlier calls and tool results
+  in the conversation are given back to the model, with tool output treated as untrusted
+  text.
 - **Reranker models rank documents.** A reranker GGUF (bge-reranker-v2-m3, Qwen3-Reranker,
   a BERT or XLM-R cross-encoder) added with `localm add` or `localm pull` scores documents
   against a query. `POST /v1/rerank` takes `query`, `documents` and `top_n` in the Jina /

@@ -12,6 +12,7 @@ import codecs
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, AsyncIterator, Iterable, Optional, TypeGuard, Union
@@ -31,11 +32,6 @@ BLOBS_PREFIX = "/api/blobs/"
 # /api/embedding/warmup from the origin guard.
 CROSS_ORIGIN_OK_PATHS = INFERENCE_POST_PATHS | {SHOW_PATH}
 OPEN_MODE_GET_PATHS = READ_GET_PATHS
-
-TOOLS_UNSUPPORTED = (
-    "tools and tool_calls are not supported on the Ollama API yet; "
-    "send the request without them")
-
 
 class OllamaError(Exception):
     """A request the Ollama layer refuses; rendered as ``{"error": message}``."""
@@ -259,22 +255,71 @@ def image_data_url(image: str) -> str:
     return f"data:{_sniff_mime(head)};base64,{b64}"
 
 
+def tool_call_to_openai(call: Any, position: int) -> dict[str, Any]:
+    """One Ollama ``tool_calls`` entry (arguments as an object) as an OpenAI one
+    (arguments as a JSON string)."""
+    fn = call.get("function") if isinstance(call, dict) else None
+    name = fn.get("name") if isinstance(fn, dict) else None
+    if not isinstance(fn, dict) or not isinstance(name, str) or not name:
+        raise OllamaError(400, f"tool_calls[{position}] needs a function with a name")
+    args = fn.get("arguments")
+    if isinstance(args, str):
+        text = args
+    else:
+        text = json.dumps({} if args is None else args, ensure_ascii=False)
+    call_id = call.get("id")
+    if not isinstance(call_id, str) or not call_id:
+        call_id = "call_" + uuid.uuid4().hex[:24]
+    return {"id": call_id, "type": "function",
+            "function": {"name": name, "arguments": text}}
+
+
+def tool_calls_to_ollama(calls: Any) -> list[dict[str, Any]]:
+    """An OpenAI ``tool_calls`` list (a reply's, or a stream delta's) as Ollama's:
+    arguments as an object, each call carrying its ``id`` and ``index``."""
+    out: list[dict[str, Any]] = []
+    for position, call in enumerate(calls if isinstance(calls, list) else []):
+        fn = call.get("function") if isinstance(call, dict) else None
+        if not isinstance(fn, dict):
+            continue
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except ValueError:
+                args = {}
+        index = call.get("index")
+        out.append({
+            "id": call.get("id") or "",
+            "function": {
+                "index": index if isinstance(index, int) else position,
+                "name": fn.get("name") or "",
+                "arguments": args if isinstance(args, dict) else {},
+            }})
+    return out
+
+
 def message_to_openai(msg: OllamaMessage) -> dict[str, Any]:
     """One Ollama chat message as an OpenAI-shaped message dict."""
     if msg.role not in ("system", "user", "assistant", "tool"):
         raise OllamaError(400, f"unsupported message role {msg.role!r}")
-    if msg.tool_calls:
-        raise OllamaError(400, TOOLS_UNSUPPORTED)
     text = msg.content or ""
+    out: dict[str, Any]
     if not msg.images:
-        return {"role": msg.role, "content": text}
-    parts: list[dict[str, Any]] = []
-    if text:
-        parts.append({"type": "text", "text": text})
-    for image in msg.images:
-        parts.append({"type": "image_url",
-                      "image_url": {"url": image_data_url(image)}})
-    return {"role": msg.role, "content": parts}
+        out = {"role": msg.role, "content": text}
+    else:
+        parts: list[dict[str, Any]] = []
+        if text:
+            parts.append({"type": "text", "text": text})
+        for image in msg.images:
+            parts.append({"type": "image_url",
+                          "image_url": {"url": image_data_url(image)}})
+        out = {"role": msg.role, "content": parts}
+    if msg.tool_calls:
+        if msg.role != "assistant":
+            raise OllamaError(400, "tool_calls belong on an assistant message")
+        out["tool_calls"] = [tool_call_to_openai(c, i) for i, c in enumerate(msg.tool_calls)]
+    return out
 
 
 @dataclass
@@ -307,10 +352,10 @@ def _common_fields(req: _Base, resolved_model: str) -> tuple[dict[str, Any], Pla
 def plan_chat(req: OllamaChatRequest, resolved_model: str) -> Plan:
     """Translate an ``/api/chat`` request. The caller handles the load/unload
     idiom (no messages) before calling this."""
-    if req.tools:
-        raise OllamaError(400, TOOLS_UNSUPPORTED)
     body, plan = _common_fields(req, resolved_model)
     body["messages"] = [message_to_openai(m) for m in (req.messages or [])]
+    if req.tools:
+        body["tools"] = req.tools
     return plan
 
 
@@ -397,11 +442,14 @@ def done_reason(finish_reason: Optional[str]) -> str:
     return "length" if finish_reason == "length" else "stop"
 
 
-def _body_fields(kind: str, content: str, thinking: str, done: bool) -> dict[str, Any]:
+def _body_fields(kind: str, content: str, thinking: str, done: bool,
+                 tool_calls: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     if kind == "chat":
         message: dict[str, Any] = {"role": "assistant", "content": content}
         if thinking:
             message["thinking"] = thinking
+        if tool_calls:
+            message["tool_calls"] = tool_calls
         return {"message": message}
     out: dict[str, Any] = {"response": content}
     if thinking:
@@ -411,10 +459,11 @@ def _body_fields(kind: str, content: str, thinking: str, done: bool) -> dict[str
 
 def reply_object(kind: str, model: str, *, content: str = "", thinking: str = "",
                  done: bool = False, reason: Optional[str] = None,
-                 stats: Optional[dict[str, int]] = None) -> dict[str, Any]:
+                 stats: Optional[dict[str, int]] = None,
+                 tool_calls: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     """One response object (a stream line, or the whole non-streaming reply)."""
     out: dict[str, Any] = {"model": model, "created_at": now_iso()}
-    out.update(_body_fields(kind, content, thinking, done))
+    out.update(_body_fields(kind, content, thinking, done, tool_calls))
     out["done"] = done
     if done:
         out["done_reason"] = reason or "stop"
@@ -452,7 +501,8 @@ def completion_to_reply(kind: str, data: dict[str, Any], model: str, *,
     return reply_object(
         kind, model, content=text, thinking=thinking, done=True,
         reason=done_reason(finish),
-        stats=usage_stats(data.get("usage"), total_ns))
+        stats=usage_stats(data.get("usage"), total_ns),
+        tool_calls=tool_calls_to_ollama(message.get("tool_calls")))
 
 
 # ------------------------------------------------------------------ #
@@ -535,6 +585,12 @@ async def ndjson_stream(events: AsyncIterator[dict[str, Any]], *, kind: str,
                     held = text
                 else:
                     yield encode_line(reply_object(kind, model, content=text))
+            calls = tool_calls_to_ollama(delta.get("tool_calls"))
+            if calls:
+                if held is not None:
+                    yield encode_line(reply_object(kind, model, content=held))
+                    held = None
+                yield encode_line(reply_object(kind, model, tool_calls=calls))
             reason = choice.get("finish_reason")
             if reason:
                 finish = reason

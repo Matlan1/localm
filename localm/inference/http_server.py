@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import AsyncIterator, Callable, NamedTuple, Optional
+from typing import Any, AsyncIterator, Callable, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -51,6 +51,7 @@ from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
 from localm.inference.stop_sequences import StopFilter, apply_stop
+from localm.inference.tool_calling import ToolCallStream
 from localm.inference.protocol import (
     COMPACTING_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
     FullChoice, Message, MtpUsage, PROCESSING_PROMPT_STATUS, SpeculationUsage, STATUS_CODE_BY_TEXT,
@@ -4787,20 +4788,20 @@ def _audit_exchange(audit, transcript, messages: list, reply: str,
         pass  # auditing must never break serving
 
 
-def _reason_sse(content: str, reasoning: str,
-                model_id: str, chunk_id: str, ts: int) -> list:
-    """SSE ``data:`` lines for a (content, reasoning) split. Reasoning is
-    emitted before content (it precedes the answer); empty parts produce
-    nothing, so an ordinary content-only token yields exactly one chunk."""
+def _events_sse(events: list, model_id: str, chunk_id: str, ts: int) -> list:
+    """SSE ``data:`` lines for the ``("reasoning" | "text" | "call", value)``
+    events of a :class:`_ReplyRouter`, one chunk per event. A call is sent whole,
+    in one ``delta.tool_calls`` entry."""
     from localm.inference.protocol import ChatChunk, ChoiceDelta, StreamChoice
     out = []
-    for field, value in (("reasoning_content", reasoning), ("content", content)):
-        if not value:
-            continue
-        chunk = ChatChunk(
-            id=chunk_id, created=ts, model=model_id,
-            choices=[StreamChoice(delta=ChoiceDelta(**{field: value}))],
-        )
+    for kind, value in events:
+        if kind == "call":
+            delta = ChoiceDelta(tool_calls=[value.as_openai(with_index=True)])
+        else:
+            delta = ChoiceDelta(**{
+                "reasoning_content" if kind == "reasoning" else "content": value})
+        chunk = ChatChunk(id=chunk_id, created=ts, model=model_id,
+                          choices=[StreamChoice(delta=delta)])
         out.append(f"data: {chunk.model_dump_json()}\n\n")
     return out
 
@@ -5051,20 +5052,15 @@ async def _stream_sse(
     that still does not fit, or whose recount is refused, ends the stream with
     the refusal as an error reply and no generation."""
     from localm.inference.compact import compactable
-    from localm.inference.gbnf import think_exit_marker
-    from localm.textnorm import ThinkSplitter
 
     chunk_id = chunk_id or make_chunk_id()
     ts = int(time.time())
-    # route <think> reasoning into delta.reasoning_content; a tool call the lazy
-    # grammar forced inside an open think block is the reply, not reasoning
-    think = ThinkSplitter(exit_marker=think_exit_marker(
-        gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+    # Reasoning goes to delta.reasoning_content, tool calls to delta.tool_calls,
+    # and the stop sequences apply to the visible text only.
+    tool_names = gen_kwargs.pop("tool_names", None)
     stop = gen_kwargs.pop("stop", None)
-    stopper = StopFilter(stop) if stop else None
-    stopped = False
-    emitted_content: list[str] = []
-    emitted_reasoning: list[str] = []
+    router = _ReplyRouter(stop, tool_names, gen_kwargs)
+    gen_kwargs.pop("max_tool_calls", None)
 
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
@@ -5237,16 +5233,10 @@ async def _stream_sse(
                     # so usage reflects exactly what the client receives.
                     if pipeline is not None and ctx is not None and pipeline.has("stream"):
                         token = pipeline.run_stream(token, ctx)
-                    content, reasoning = think.feed(token)
-                    if stopper is not None:
-                        content = stopper.feed(content)
-                        stopped = stopper.hit
-                        emitted_content.append(content)
-                        emitted_reasoning.append(reasoning)
                     completion_parts.append(token)
-                    for data in _reason_sse(content, reasoning, model_id, chunk_id, ts):
+                    for data in _events_sse(router.feed(token), model_id, chunk_id, ts):
                         yield data
-                    if stopped:
+                    if router.stopped:
                         break
                 drained = True
             finally:
@@ -5270,17 +5260,10 @@ async def _stream_sse(
             # stops being reachable, same as an unpin with nothing pinned).
             residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
-        # Release any tail held back while disambiguating a partial <think> tag
-        # or a partial stop sequence.
-        if not stopped:
-            tail_content, tail_reasoning = think.flush()
-            if stopper is not None:
-                tail_content = stopper.feed(tail_content)
-                stopped = stopper.hit
-                if not stopped:
-                    tail_content += stopper.flush()
-            for data in _reason_sse(tail_content, tail_reasoning, model_id, chunk_id, ts):
-                yield data
+        # Release any tail held back while disambiguating a partial <think> tag,
+        # a partial tool call or a partial stop sequence.
+        for data in _events_sse(router.flush(), model_id, chunk_id, ts):
+            yield data
 
     error_text = ""
     if gen_error is not None:
@@ -5289,15 +5272,17 @@ async def _stream_sse(
         yield f"data: {err_chunk.model_dump_json()}\n\n"
 
     streamed = "".join(completion_parts)
-    if stopped:
-        reasoning_text = "".join(emitted_reasoning)
+    if router.stopped:
+        reasoning_text = "".join(router.reasoning)
         streamed = (f"<think>{reasoning_text}</think>" if reasoning_text else "") \
-            + "".join(emitted_content)
+            + "".join(router.content)
     # finish_reason is fixed before the outlet phase; ctx.outcome, the audit
     # record and the terminal frame all carry the same value. A mid-stream
     # error reports "error", never a clean "stop".
     finish_reason = ("error" if gen_error is not None
-                     else "stop" if stopped else _engine_finish_reason(engine))
+                     else "stop" if router.stopped else _engine_finish_reason(engine))
+    if router.calls and finish_reason == "stop":
+        finish_reason = "tool_calls"
     outcome = _turn_outcome(gen_error, finish_reason)
     if ctx is not None:
         ctx.outcome = outcome
@@ -5694,21 +5679,97 @@ async def _compact_for_capacity(engine, messages: list, request=None
 
 
 class _StopDetector:
-    """Watches a non-streamed generation for a stop sequence in the visible
-    reply (reasoning inside ``<think>`` is not searched), so the generation can
-    end at the token that completes it."""
+    """Watches a non-streamed generation for the end of the reply: a stop
+    sequence in the visible text (reasoning inside ``<think>`` and tool calls are
+    not searched), or the call that reaches ``max_tool_calls``. The generation
+    can then end at the token that completes it."""
 
-    def __init__(self, stops, gen_kwargs: dict) -> None:
+    def __init__(self, stops, tool_names, gen_kwargs: dict) -> None:
+        self._router = _ReplyRouter(stops, tool_names, gen_kwargs)
+
+    def feed(self, token: str) -> bool:
+        self._router.feed(token)
+        return self._router.stopped
+
+
+class _ReplyRouter:
+    """Splits one reply into reasoning, visible text and tool calls, and applies
+    the stop sequences to the visible text only.
+
+    ``feed`` takes a generated piece and ``flush`` ends the reply; both return
+    ``("reasoning" | "text" | "call", value)`` events (a call's value is a
+    ``ParsedCall``). After a stop sequence matches, nothing more is returned.
+    ``content`` holds the visible text and the calls (as the model wrote them) in
+    order, ``reasoning`` the reasoning, ``calls`` the calls."""
+
+    def __init__(self, stops, tool_names, gen_kwargs: dict) -> None:
         from localm.inference.gbnf import think_exit_marker
         from localm.textnorm import ThinkSplitter
         self._think = ThinkSplitter(exit_marker=think_exit_marker(
             gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
-        self._stop = StopFilter(stops)
+        self._tools = ToolCallStream(tool_names) if tool_names else None
+        self._stop = StopFilter(stops) if stops else None
+        self._max_calls = gen_kwargs.get("max_tool_calls")
+        self.calls: list = []
+        self.content: list[str] = []
+        self.reasoning: list[str] = []
 
-    def feed(self, token: str) -> bool:
-        content, _reasoning = self._think.feed(token)
-        self._stop.feed(content)
-        return self._stop.hit
+    @property
+    def stopped(self) -> bool:
+        if self._max_calls is not None and len(self.calls) >= self._max_calls:
+            return True
+        return self._stop is not None and self._stop.hit
+
+    def feed(self, token: str) -> list:
+        content, reasoning = self._think.feed(token)
+        return self._route(content, reasoning, final=False)
+
+    def flush(self) -> list:
+        if self.stopped:
+            return []
+        content, reasoning = self._think.flush()
+        return self._route(content, reasoning, final=True)
+
+    def _cut(self, text: str) -> str:
+        return self._stop.feed(text) if self._stop is not None else text
+
+    def _release(self) -> str:
+        if self._stop is None or self._stop.hit:
+            return ""
+        return self._stop.flush()
+
+    def _text(self, text: str) -> list:
+        if not text:
+            return []
+        self.content.append(text)
+        return [("text", text)]
+
+    def _route(self, content: str, reasoning: str, final: bool) -> list:
+        out: list = []
+        if reasoning:
+            self.reasoning.append(reasoning)
+            out.append(("reasoning", reasoning))
+        events: list[tuple[str, Any]]
+        if self._tools is None:
+            events = [("text", content)]
+        else:
+            events = self._tools.feed(content)
+            if final:
+                events += self._tools.finish()
+        for kind, value in events:
+            if self.stopped:
+                break
+            if kind == "text":
+                out += self._text(self._cut(value))
+                continue
+            out += self._text(self._release())
+            value.index = len(self.calls)
+            self.calls.append(value)
+            self.content.append(value.block())
+            out.append(("call", value))
+        if final and not self.stopped:
+            out += self._text(self._release())
+        return out
 
 
 async def _generate_full(engine, messages: list, request=None, *,
@@ -5745,7 +5806,10 @@ async def _generate_full(engine, messages: list, request=None, *,
     residency.register_cancel(engine.display_name, cancel_event)
     poll = _resolve_disconnect_poll(request)
     stop = gen_kwargs.pop("stop", None)
-    stop_detector = _StopDetector(stop, gen_kwargs) if stop else None
+    tool_names = gen_kwargs.pop("tool_names", None)
+    ends_early = bool(stop) or bool(tool_names and gen_kwargs.get("max_tool_calls"))
+    stop_detector = _StopDetector(stop, tool_names, gen_kwargs) if ends_early else None
+    gen_kwargs.pop("max_tool_calls", None)
 
     def _run() -> str:
         from localm.inference.backends.base import stream_stop_check
@@ -6076,8 +6140,20 @@ async def _complete(
     first_token_at = timing.get("first_token_at")
 
     stop = gen_kwargs.get("stop")
+    tool_names = gen_kwargs.get("tool_names")
     stopped = False
-    if stop and gen_error is None:
+    has_calls = False
+    if tool_names and gen_error is None:
+        routed = _ReplyRouter(stop, tool_names, gen_kwargs)
+        routed.feed(text)
+        routed.flush()
+        stopped = routed.stopped
+        has_calls = bool(routed.calls)
+        if stopped:
+            reasoning_text = "".join(routed.reasoning)
+            text = (f"<think>{reasoning_text}</think>" if reasoning_text else "") \
+                + "".join(routed.content)
+    elif stop and gen_error is None:
         from localm.inference.gbnf import think_exit_marker
         from localm.textnorm import split_think
         visible, reasoning_text = split_think(text, exit_marker=think_exit_marker(
@@ -6088,6 +6164,8 @@ async def _complete(
 
     finish_reason = ("error" if gen_error is not None
                      else "stop" if stopped else _engine_finish_reason(engine))
+    if has_calls and finish_reason == "stop":
+        finish_reason = "tool_calls"
     outcome = _turn_outcome(gen_error, finish_reason)
     if ctx is not None:
         ctx.outcome = outcome
@@ -6102,10 +6180,23 @@ async def _complete(
     # Split the model's <think> reasoning out of the visible answer into a
     # separate field, so API clients get clean content (token count stays on
     # the full generated text - reasoning was still generated).
-    from localm.inference.gbnf import think_exit_marker
-    from localm.textnorm import split_think
-    answer, reasoning = split_think(text, exit_marker=think_exit_marker(
-        gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+    tool_calls = None
+    if tool_names and gen_error is None:
+        final = _ReplyRouter(None, tool_names, gen_kwargs)
+        events = final.feed(text) + final.flush()
+        answer = "".join(value for kind, value in events if kind == "text")
+        reasoning = "".join(final.reasoning)
+        if final.calls:
+            tool_calls = [call.as_openai() for call in final.calls]
+            if not answer.strip():
+                answer = ""
+        elif finish_reason == "tool_calls":
+            finish_reason = "stop"
+    else:
+        from localm.inference.gbnf import think_exit_marker
+        from localm.textnorm import split_think
+        answer, reasoning = split_think(text, exit_marker=think_exit_marker(
+            gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
 
     completion_tokens = await _count_streamed_tokens(engine, text)
     usage = UsageInfo(
@@ -6133,7 +6224,8 @@ async def _complete(
         choices=[
             FullChoice(
                 message=Message(role="assistant", content=answer,
-                                reasoning_content=reasoning or None),
+                                reasoning_content=reasoning or None,
+                                tool_calls=tool_calls),
                 finish_reason=finish_reason,
             )
         ],
@@ -6178,6 +6270,8 @@ def _protocol_messages_to_dicts(messages: list[Message]) -> list:
         origin = getattr(msg, "origin", None)
         if origin:
             result[-1]["origin"] = origin
+        if msg.tool_calls:
+            result[-1]["tool_calls"] = msg.tool_calls
     return result
 
 

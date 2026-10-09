@@ -302,16 +302,15 @@ def main(
     if hasattr(backend, "on_routing_note"):
         backend.on_routing_note = print_warning
 
-    # --native-tools asked for a protocol the chosen server does not implement.
-    # localm's own /v1/chat/completions declares no tools/tool_choice fields, so a
-    # request body carrying them is accepted and the fields dropped, and the run
-    # proceeds on the XML tool-call convention. Warned, not an error.
+    # --native-tools asked for a protocol the chosen backend does not send. A
+    # localm server is driven on the XML tool-call convention, so the run
+    # proceeds on that. Warned, not an error.
     if native_tools and not getattr(backend, "supports_native_tools", True):
         print_warning(
-            "--native-tools was ignored: this server does not implement the "
-            "OpenAI tools API. The session uses localm's own tool-call "
-            "convention (grammar-constrained where the loaded model supports "
-            "it). Use --native-tools with --url against a server that does, "
+            "--native-tools was ignored: this session talks to localm's own "
+            "server, where it uses localm's tool-call convention "
+            "(grammar-constrained where the loaded model supports it). "
+            "Use --native-tools with --url against another server, "
             "e.g. Ollama.")
 
     # Opt-in episodic consolidation needs a model, so it runs after the backend is
