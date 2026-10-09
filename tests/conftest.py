@@ -856,6 +856,42 @@ def _reset_http_server_model_name_state():
     hs._last_active_model_name = None
 
 
+_HTTP_SERVER_SCALAR_STATE = (
+    "_engine", "_inference_sem", "_embedder_sem", "_server_loop", "_gpu_coord",
+    "_switch_desired", "_switch_loading", "_switch_cancel", "_last_activity",
+    "_gui_mounted_live", "_engine_factory", "_coder_session_manager",
+    "_hang_alarm_instance")
+_HTTP_SERVER_CONTAINER_STATE = (
+    "_engines", "_engines_lru", "_inference_sems", "_last_activity_per_model")
+
+
+@pytest.fixture(autouse=True)
+def _restore_http_server_state():
+    """Put http_server's module-level engine state back to what it was when the
+    test started.
+
+    Tests assign these globals directly. One that is not undone by the test
+    that set it is read by whichever test runs next on the same worker, and
+    which test that is depends on how the run is split. Snapshotting at the
+    start of each test keeps state a module-scoped fixture set up for the
+    whole module."""
+    from localm.inference import http_server as hs
+    scalars = {n: getattr(hs, n) for n in _HTTP_SERVER_SCALAR_STATE if hasattr(hs, n)}
+    containers = {n: (getattr(hs, n), list(getattr(hs, n).items())
+                      if isinstance(getattr(hs, n), dict) else list(getattr(hs, n)))
+                  for n in _HTTP_SERVER_CONTAINER_STATE if hasattr(hs, n)}
+    yield
+    for name, value in scalars.items():
+        setattr(hs, name, value)
+    for name, (container, items) in containers.items():
+        setattr(hs, name, container)
+        container.clear()
+        if isinstance(container, dict):
+            container.update(items)
+        else:
+            container.extend(items)
+
+
 @pytest.fixture(autouse=True)
 def _neutralise_bare_llama_pointers():
     """tests/_bare_llama.py's make_bare_llama() registers every instance it
