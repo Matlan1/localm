@@ -54,10 +54,10 @@ class _MockBackend(BaseBackend):
         # 1 char = 1 token for deterministic testing
         return len(text)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         return sum(len(str(m.get("content", ""))) for m in messages)
 
-    def chat_stream(self, messages: List[dict], **kwargs) -> Iterator[str]:
+    def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
         prompt_len = self.count_messages_tokens(messages)
         if self.effective_ctx_max and prompt_len > self.effective_ctx_max:
             raise ContextCapacityExceededError(

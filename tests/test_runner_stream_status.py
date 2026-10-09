@@ -31,7 +31,7 @@ def _make_runner() -> ModelRunner:
     return r
 
 
-def _fake_child_with_status(r, stop, *, statuses: List[str], tokens: List[str]):
+def _fake_child_with_status(r, stop, *, statuses: list[str], tokens: list[str]):
     while not stop.is_set():
         try:
             cmd = r._req_q.get(timeout=0.05)

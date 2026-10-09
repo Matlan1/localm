@@ -209,7 +209,7 @@ class World:
     def platform(self, plat: str) -> None:
         self.mp.setattr(sys, "platform", plat)
 
-    def seed_target(self, *names: str, marker: "str | None" = None) -> None:
+    def seed_target(self, *names: str, marker: str | None = None) -> None:
         self.lib.mkdir(parents=True, exist_ok=True)
         for n in names:
             (self.lib / n).write_bytes(b"old:" + n.encode())
@@ -222,7 +222,7 @@ class World:
         return sorted(p.relative_to(self.lib).as_posix()
                       for p in self.lib.rglob("*") if p.is_file())
 
-    def marker(self) -> "str | None":
+    def marker(self) -> str | None:
         p = self.lib / ".localm-backend"
         return p.read_text(encoding="utf-8") if p.exists() else None
 

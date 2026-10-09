@@ -93,14 +93,14 @@ class _VisionCalls:
     """Counts the vision tower's forward calls and their batch sizes."""
 
     def __init__(self, model):
-        self.batches: List[int] = []
+        self.batches: list[int] = []
         model.model.vision_tower.register_forward_pre_hook(self._pre, with_kwargs=True)
 
     def _pre(self, _module, args, kwargs):
         pixel_values = args[0] if args else kwargs["pixel_values"]
         self.batches.append(int(pixel_values.shape[0]))
 
-    def take(self) -> List[int]:
+    def take(self) -> list[int]:
         out, self.batches = self.batches, []
         return out
 
@@ -191,7 +191,7 @@ class TestFollowUpTurns:
         assert calls.take() == [1]
         messages += [{"role": "assistant", "content": "the circle"},
                      {"role": "user", "content": "and now ?"}]
-        status: List[str] = []
+        status: list[str] = []
         _run(worker, messages, status)
         assert calls.take() == []
         assert "Encoding image..." not in status
@@ -206,7 +206,7 @@ class TestFollowUpTurns:
         calls.take()
         messages += [{"role": "assistant", "content": "red"},
                      _user("and this ?", blue)]
-        status: List[str] = []
+        status: list[str] = []
         _run(worker, messages, status)
         assert calls.take() == [1]
         assert status[0] == "Encoding image..."

@@ -55,7 +55,7 @@ class _RecordingBackend(BaseBackend):
     supports_grammar = True
 
     def __init__(self) -> None:
-        self.chat_stream_calls: List[dict] = []
+        self.chat_stream_calls: list[dict] = []
 
     def load(self) -> None: ...
     def unload(self) -> None: ...
@@ -64,7 +64,7 @@ class _RecordingBackend(BaseBackend):
     def loaded(self) -> bool:
         return True
 
-    def chat_stream(self, messages: List[dict], **kwargs) -> Iterator[str]:
+    def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
         self.chat_stream_calls.append(dict(kwargs))
         yield "unconstrained text"
 
@@ -86,7 +86,7 @@ class _HFLikeBackend(HFBackend):
         self._supports_images = False
         self._can_embed = False
         self._is_multimodal = False
-        self.chat_stream_calls: List[dict] = []
+        self.chat_stream_calls: list[dict] = []
 
     @property
     def loaded(self) -> bool:
@@ -100,7 +100,7 @@ class _HFLikeRecording(_HFLikeBackend):
     """As above, but generation is a recorder so the route tests can prove it never
     ran. ``HFBackend.chat_stream``'s own guard is tested separately, unstubbed."""
 
-    def chat_stream(self, messages: List[dict], **kwargs) -> Iterator[str]:
+    def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
         self.chat_stream_calls.append(dict(kwargs))
         yield "unconstrained text"
 
