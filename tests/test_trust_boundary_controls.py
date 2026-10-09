@@ -38,6 +38,8 @@ _REVIEWED_CROSS_ORIGIN_OK = (
     "/v1/chat/completions",
     "/v1/completions",
     "/v1/embeddings",
+    "/v1/audio/transcriptions",
+    "/v1/images/generations",
     "/v1/surfaces/gui",
     "/v1/instances/cooperate-unload",
     "/v1/instances/vouch",
