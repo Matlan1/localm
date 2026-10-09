@@ -55,6 +55,9 @@ CONTRACTS = {
     "embed": (
         {"texts": _STR_ARRAY, "model": _MODEL},
         ("texts",), None),
+    "rerank": (
+        {"query": _STR, "documents": _STR_ARRAY, "top_n": _INT, "model": _STR},
+        ("query", "documents"), None),
     "memory_recall": (
         {"query": _STR, "limit": _INT},
         ("query",), _READ_ONLY),
@@ -387,6 +390,7 @@ def _complete_args(name, tmp_dir):
     return {
         "chat": {"prompt": "hi"},
         "embed": {"texts": ["a"]},
+        "rerank": {"query": "q", "documents": ["d"]},
         "memory_recall": {"query": "q"},
         "memory_append": {"text": "t"},
         "list_model_files": {"repo": "owner/name"},
@@ -775,7 +779,7 @@ class TestPluginAdministration:
 # Family module -> the tools it owns. Together the families partition the
 # whole table; build_tools() only merges them and applies the gates.
 FAMILIES = {
-    "chat": {"chat", "embed"},
+    "chat": {"chat", "embed", "rerank"},
     "memory": {"memory_recall", "memory_append"},
     "models": {"list_models", "search_models", "list_model_files", "pull_model",
                "setup_embeddings", "remove_model"},
@@ -808,7 +812,7 @@ class TestComposition:
 
     def test_a_family_builds_every_tool_it_owns_regardless_of_the_gates(self):
         """Gating is the server's job: a family never hides its own tools."""
-        assert set(_build_family("chat", _engines())) == {"chat", "embed"}
+        assert set(_build_family("chat", _engines())) == {"chat", "embed", "rerank"}
         mod = importlib.import_module("localm.plugins.mcpserver.tools.memory")
         assert set(mod.build(enable_memory_write=False)) == {"memory_recall", "memory_append"}
 

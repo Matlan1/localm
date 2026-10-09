@@ -251,14 +251,32 @@ CORE_FIELDS: list = [
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=3),
     SettingField("spec_source", Widget.SELECT, "Speculative drafting",
                  "Where drafts come from: mtp (the model's MTP head), ngram "
-                 "(repeats of earlier text, no second model) or off. Inherit "
-                 "follows the MTP toggle. Check: `localm bench-spec <model>`.",
+                 "(repeats of earlier text), draft (a smaller model, Draft "
+                 "model) or off. Inherit follows the MTP toggle. Check: `localm "
+                 "bench-spec <model>`.",
                  group="Engine", applies=Applies.NEXT_LOAD,
-                 options=["", "off", "mtp", "ngram"]),
-    SettingField("spec_draft_tokens", Widget.NUMBER, "N-gram draft tokens",
-                 "Most tokens one n-gram step proposes. Blank uses 8; models "
-                 "with recurrent layers use at most 4.",
+                 options=["", "off", "mtp", "ngram", "draft"]),
+    SettingField("spec_draft_tokens", Widget.NUMBER, "Draft tokens per step",
+                 "Most tokens one n-gram or draft-model step proposes. Blank "
+                 "uses 8; a draft model picks a shorter length when its measured "
+                 "costs pay better. Models with recurrent layers use at most 4.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=16),
+    SettingField("spec_draft_model", Widget.TEXT, "Draft model",
+                 "For Speculative drafting = draft: a smaller model with the same "
+                 "vocabulary, by name or GGUF path. `localm spec-drafts <model>` "
+                 "lists the ones you have.",
+                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+    SettingField("diffusion_steps", Widget.NUMBER, "Diffusion steps",
+                 "Denoising steps per reply for diffusion language models "
+                 "(Dream, LLaDA, RND1). More steps: better text, slower reply. "
+                 "Blank uses 128, or the reply length when shorter.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=4096),
+    SettingField("diffusion_max_tokens", Widget.NUMBER, "Diffusion reply length",
+                 "Tokens a diffusion language model writes per reply. It fills "
+                 "the whole length every time, so longer is slower. Shortened "
+                 "when the prompt leaves less room in the model's window (2048 "
+                 "tokens at most).",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=16, max=4096),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.
@@ -516,6 +534,11 @@ CORE_FIELDS: list = [
                  "<name>.local, so there is no IP to type. Letters, digits and "
                  "hyphens only.",
                  group="Server", applies=Applies.RESTART),
+    SettingField("metrics_enabled", Widget.TOGGLE, "Prometheus metrics",
+                 "Serve request, token and GPU-memory counters at /metrics for "
+                 "Prometheus. Needs an admin API key; carries no prompts, "
+                 "replies or model names.",
+                 group="Server", applies=Applies.RESTART, admin_only=True),
     SettingField("mdns_enabled", Widget.TOGGLE, "Advertise on the network (mDNS)",
                  "Broadcast <name>.local over mDNS/Bonjour when bound past loopback "
                  "so devices can reach localm by name. Off = reachable by IP "
@@ -1416,7 +1439,7 @@ def _validate_user_name(key: str, val) -> str:
 
 # NUMBER fields whose default is None (unset) and whose value is an integer;
 # a blank value clears them.
-_NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens"})
+_NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens", "diffusion_steps"})
 
 
 def _validate_one(key: str, val, field: "SettingField", default):

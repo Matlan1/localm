@@ -20,6 +20,46 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `--no-rerank`, and the query API reports whether a query was reranked. With no
   reranker installed nothing changes; if the reranker fails, the unreranked order is
   kept and the reason is shown.
+- **Tool calling with any chat model.** `/v1/chat/completions` takes OpenAI `tools`,
+  `tool_choice` and `parallel_tool_calls`, and the Ollama API takes `tools` and
+  `tool_calls`. The model's calls come back in `message.tool_calls` (a streamed call arrives
+  whole in one delta) with `finish_reason` `tool_calls`. `required` or a named function
+  constrains the reply to a well-formed call whose arguments follow the function's JSON
+  schema; `auto` constrains a call once the model starts one. Earlier calls and tool results
+  in the conversation are given back to the model, with tool output treated as untrusted
+  text.
+- **Reranker models rank documents.** A reranker GGUF (bge-reranker-v2-m3, Qwen3-Reranker,
+  a BERT or XLM-R cross-encoder) added with `localm add` or `localm pull` scores documents
+  against a query. `POST /v1/rerank` takes `query`, `documents` and `top_n` in the Jina /
+  Cohere / llama-server shape, `localm rerank` does the same from the command line, and the
+  MCP server has a `rerank` tool. A file without a classifier head is refused instead of
+  returning arbitrary scores, and a reranker chosen as the embedding model says what it is
+  instead of producing vectors.
+- **The Ollama API's `format` takes a JSON schema.** The reply is constrained, token by
+  token, to documents that satisfy the schema: objects with required and optional
+  properties, arrays with length bounds, enums, integer ranges, `anyOf`, recursive `$ref`
+  and more. A keyword that cannot be enforced (`pattern`, `multipleOf`, number bounds)
+  is refused with a 400 naming it rather than ignored.
+- **`stop` sequences on `/v1/chat/completions` and `/v1/completions`.** A string or a list
+  of up to 16: the reply is cut before the first match, the generation ends there instead of
+  running to its token budget, and `finish_reason` is `stop`. A stop sequence inside a
+  reasoning model's `<think>` block is not applied. The Ollama API's `options.stop` uses it.
+- **Prometheus metrics at `/metrics`.** Turn on "Prometheus metrics" in Settings > Server
+  (or set `metrics_enabled`) and restart to serve request counts and latency by route,
+  prompt and generated tokens, tokens per second, time to first token, queue depth, loaded
+  models and GPU memory in Prometheus text format. It needs an admin API key, answers only
+  on a loopback bind when no key exists, and carries no prompt, reply, model name or model
+  path in any label. Off by default.
+- **Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) run as chat models.**
+  A GGUF of one of these architectures now loads and answers through `localm run`,
+  the GUI chat and `/v1/chat/completions`, instead of being refused. These models
+  write the whole reply at once over a number of denoising steps, so the reply
+  appears when it is finished and the status line shows the progress meanwhile.
+  Two settings control them: "Diffusion steps" (`diffusion_steps`, more steps give
+  better text and a slower reply) and "Diffusion reply length"
+  (`diffusion_max_tokens`, 256 by default). Grammar-constrained output, images and
+  speculative decoding are not available with these models; a request for a
+  grammar is refused with a message saying so.
 - **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5 and other `t5`
   GGUFs register as chat models and answer through `localm run`, the GUI chat and
   `/v1/chat/completions`, where they were refused before.
@@ -58,7 +98,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
   answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies
   stream as NDJSON, `format: "json"`, `options.stop`, `think` and images work, and the same
-  API keys and scopes apply. Tool calling and a JSON-schema `format` are not supported yet.
+  API keys and scopes apply. Tool calling is not supported yet.
   `/api/copy` makes an alias; pulling, deleting and creating models stay in `localm`. See
   docs/ollama-api.md.
 - **Release files carry build provenance and a software bill of materials.** The release
@@ -66,6 +106,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the release workflow, so `gh attestation verify` proves which workflow built a file and
   from which commit. SECURITY.md has the commands.
 - **Docker images for the API server.** Releases publish CPU and Vulkan images to `ghcr.io/matlan1/localm`, and `docker/Dockerfile` builds the same image from a clone. The container keeps its data in a `/data` volume, serves HTTPS, and refuses to start until an API key exists (`docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate`). See docs/docker.md.
+- **NVIDIA CUDA Docker images.** Releases also publish `cuda` (every NVIDIA architecture before Blackwell) and `cuda13` (Blackwell) images, started with `docker run --gpus all`. On start the container checks that the CUDA runtime loads on the GPU it can see, and exits with the cause instead of serving on the CPU when it does not, for example with no GPU attached or with the wrong tag for the GPU. `localm setup-llama --backend cuda --cuda-line cuda-12` (or `cuda-13`) fetches the CUDA runtime on a machine without a GPU, which is how the images are built. See docs/docker.md.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing
@@ -76,9 +117,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Speculative drafting setting (`spec_source`) adds `ngram`: the model drafts the
   tokens that followed the same few tokens earlier in the conversation and checks
   them in one pass, so replies that rewrite a file, quote a passage or repeat
-  tool-call JSON come out faster. Replies are the same model's replies. It is off
-  by default; `localm bench-spec <model>` measures whether it pays on your machine,
-  and the reply's usage line shows how many drafted tokens were accepted.
+  tool-call JSON come out faster. Replies are the same model's replies. It
+  measures your model when it loads and drafts only as many tokens as pay off, so
+  on models where checking drafts is expensive, such as Mixture-of-Experts models,
+  it holds back where drafting would not pay instead of slowing replies down. It is
+  off by default; `localm bench-spec <model>` measures whether it pays on your
+  machine, and the reply's usage line shows how many drafted tokens were accepted.
+- **Speculative decoding with a draft model.** Speculative drafting can now use a
+  smaller model of the same family (`spec_source` `draft`, with the Draft model
+  setting): it drafts a few tokens and your model checks them in one pass, so
+  ordinary replies can come out faster too, not only ones that repeat earlier
+  text. Replies are the same model's replies. It measures the draft and your
+  model on your hardware when it loads and drafts only as many tokens as pay off,
+  so a draft that cannot help is switched off instead of slowing replies down.
+  It is off by default; `localm spec-drafts <model>` lists the downloaded models
+  that can draft for yours, and `localm bench-spec <model> --source draft`
+  measures whether it pays on your machine.
 - **A "Model autoswitch" setting controls when a chat may be answered by a different
   model.** `off` never switches; `image` (the default) switches only for an image
   your model cannot read; `ask` keeps your model and offers the better one on the
@@ -215,6 +269,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and the API reference lists every route, parameter and schema the server
   declares. `scripts/export_openapi.py` writes the schema without loading a model.
   The site is published with each release.
+- **GGUF LoRA adapters can be attached to a base model.** A GGUF adapter file (made by
+  llama.cpp's `convert_lora_to_gguf.py`, or downloaded) now registers as type `lora`
+  instead of a chat model that cannot load. `localm adapter attach ADAPTER BASE
+  [--scale S]` ties it to a registered GGUF model, and `localm run BASE`, the server
+  and the GUI then load BASE with the adapter applied; `localm adapter detach` and
+  `localm adapter list` manage them. An adapter made for a different architecture is
+  refused with both architectures named, and a loaded model's load response lists the
+  adapters it runs with.
+- **LoRA adapters are managed from the Models page.** An adapter row shows what it is
+  attached to and its scale, with attach, change and detach controls; a refusal such as a
+  mismatched architecture appears inside the dialog. A base model shows the adapters it
+  will run with, the ones it is running, and asks for an unload and reload when they
+  differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU

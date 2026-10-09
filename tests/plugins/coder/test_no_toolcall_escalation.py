@@ -550,6 +550,36 @@ def test_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
     assert _notice_kinds(agent).count("grammar_unsupported") == 1
 
 
+def test_diffusion_grammar_refusal_degrades_and_disables_forcing(tmp_path):
+    """A server whose loaded model is a diffusion language model refuses every
+    grammar, lazy or forced. The turn retries unconstrained and the forced
+    rung goes away too."""
+    from localm.inference.backends.base import GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE
+    from localm.plugins.coder.backends.http import CoderServerError
+
+    agent = _make_agent(tmp_path)
+    calls = []
+
+    def _chat(messages, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise CoderServerError(
+                "HTTP 400 error from http://x/v1/chat/completions: "
+                + GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE)
+        return "ok"
+
+    agent.backend.chat = _chat
+    result = agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+
+    assert result == "ok"
+    assert len(calls) == 2
+    assert "grammar" in calls[0]
+    assert "grammar" not in calls[1]
+    assert agent._grammar_confirmed_unsupported is True
+    assert agent.can_force_tool_calls() is False
+    assert _notice_kinds(agent).count("grammar_unsupported") == 1
+
+
 def test_grammar_unsupported_disables_forcing_too(tmp_path):
     """Once the server has authoritatively refused, the forced (rung-2)
     grammar must not be offered either - can_force_tool_calls() must report

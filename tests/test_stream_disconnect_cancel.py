@@ -816,3 +816,90 @@ def test_registration_is_removed_once_the_generation_ends():
 
     signaled = asyncio.run(scenario())
     assert signaled == 0, "a finished generation left its cancel_event registered"
+
+
+class _StatusOnlyEngine(_LockingEngine):
+    """Like a diffusion language model: yields nothing until the reply is done,
+    which here is never, while reporting progress through on_status when it is
+    given one. It stops only when the caller's published stop check asks it to
+    (stream_stop_requested), which is what the GGUF runner polls for such a
+    model. Without the HTTP layer publishing the check, it runs out its 8 s
+    budget with ``cancelled`` still False."""
+
+    cancelled = False
+
+    def chat_stream(self, messages, on_status=None, **kwargs):
+        return self._denoise(on_status)
+
+    def _denoise(self, on_status):
+        from localm.inference.backends.base import stream_stop_requested
+        deadline = time.monotonic() + 8.0
+        with self.inference_lock:
+            self.entered.set()
+            step = 0
+            while time.monotonic() < deadline:
+                if stream_stop_requested():
+                    self.cancelled = True
+                    return
+                if on_status is not None:
+                    on_status(f"Denoising reply ({step % 10 * 10}%)...")
+                step += 1
+                time.sleep(0.01)
+        yield  # pragma: no cover - makes this a generator, as the real one is
+
+
+@pytest.mark.parametrize("producer,lead", [(_stream_sse, 2), (_stream_sse_completion, 0)])
+def test_disconnect_while_only_status_flows_stops_the_generation(producer, lead):
+    async def scenario():
+        eng = _StatusOnlyEngine()
+        sem = asyncio.Semaphore(1)
+
+        agen = producer(eng, _MSG, "lock-model", sem)
+        for _ in range(lead):
+            await agen.__anext__()           # role and "Processing prompt..."
+        status = await agen.__anext__()
+        assert "Denoising reply" in status
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        await agen.aclose()                   # disconnect
+
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "a generation reporting only status kept running after the disconnect"
+        assert eng.cancelled is True
+
+    asyncio.run(scenario())
+
+
+def test_cancel_all_stops_a_non_streaming_generation_that_yields_nothing():
+    from localm.inference.http_server import _generate_full
+
+    async def scenario():
+        eng = _StatusOnlyEngine()
+        task = asyncio.ensure_future(_generate_full(eng, _MSG, None, max_tokens=0))
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        assert residency.cancel_all("lock-model") == 1
+        text = await asyncio.wait_for(task, timeout=3.0)
+        assert text == ""
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "a non-streaming generation that yields nothing ignored cancel_all"
+        assert eng.cancelled is True
+
+    asyncio.run(scenario())
+
+
+def test_cancel_all_stops_a_compaction_summary_that_yields_nothing():
+    from localm.inference.http_server import _compact_for_capacity
+
+    async def scenario():
+        eng = _StatusOnlyEngine()
+        task = asyncio.ensure_future(_compact_for_capacity(eng, _MSG_MANY, None))
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        assert residency.cancel_all("lock-model") == 1
+        await asyncio.wait_for(task, timeout=3.0)
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "a compaction summary that yields nothing ignored cancel_all"
+        assert eng.cancelled is True
+
+    asyncio.run(scenario())

@@ -112,7 +112,8 @@ def answer_with(engines: EngineCache, decision, run):
 
 
 def build(engines: EngineCache) -> dict[str, dict]:
-    """``chat`` and ``embed``, both served from *engines*."""
+    """``chat`` and ``embed``, both served from *engines*, and ``rerank``,
+    served by the reranker model."""
     def chat(args: dict) -> dict:
         prompt = args.get("prompt", "")
         if not prompt:
@@ -169,6 +170,37 @@ def build(engines: EngineCache) -> dict[str, dict]:
             return _text_result(str(e), is_error=True)
         return _text_result(json.dumps(vecs))
 
+    def rerank(args: dict) -> dict:
+        from localm.inference import reranker
+        from localm.inference.backends.base import (
+            PretokenizerUnsafeInputError, RerankerHeadMissingError,
+            RerankInputError)
+        query = args.get("query")
+        documents = args.get("documents")
+        if isinstance(documents, str):
+            documents = [documents]
+        if not isinstance(query, str) or not query.strip():
+            return _text_result("'query' is required", is_error=True)
+        if (not isinstance(documents, list) or not documents
+                or not all(isinstance(d, str) for d in documents)):
+            return _text_result(
+                "'documents' is required (a list of strings)", is_error=True)
+        top_n = args.get("top_n")
+        if top_n is not None and (
+                isinstance(top_n, bool) or not isinstance(top_n, int) or top_n < 1):
+            return _text_result("'top_n' must be a positive integer", is_error=True)
+        # A fresh reranker load can print to stdout too, like chat() above.
+        try:
+            with _quiet_stdout():
+                name, path = reranker.resolve_reranker(args.get("model"))
+                outcome = reranker.rerank(path, query, documents)
+        except (reranker.RerankerModelError, RerankInputError,
+                PretokenizerUnsafeInputError, RerankerHeadMissingError,
+                RuntimeError) as e:
+            return _text_result(str(e), is_error=True)
+        results = reranker.rank_results(outcome.scored, top_n, outcome.labels)
+        return _text_result(json.dumps({"model": name, "results": results}))
+
     return {
         "chat": {
             "description": (
@@ -208,5 +240,26 @@ def build(engines: EngineCache) -> dict[str, dict]:
                 "required": ["texts"],
             },
             "handler": embed,
+        },
+        "rerank": {
+            "description": (
+                "Rank documents by relevance to a query with a local reranker "
+                "model. Returns each document's index and relevance_score, best "
+                "first; a higher score is more relevant."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The query"},
+                    "documents": {"type": "array", "description": "Documents to rank",
+                                  "items": {"type": "string"}},
+                    "top_n": {"type": "integer",
+                              "description": "Return only the best N documents"},
+                    "model": {"type": "string",
+                              "description": "Registered reranker model name "
+                                             "(default: the only registered reranker)"},
+                },
+                "required": ["query", "documents"],
+            },
+            "handler": rerank,
         },
     }

@@ -131,6 +131,85 @@ class TestEntrypoint:
 
 
 @posix_only
+class TestEntrypointCudaCheck:
+    """Serving from a cuda image runs the runtime check first. The check itself is
+    covered in test_cuda_staged_runtime.py; here `python` is a stand-in that
+    answers it with a chosen status."""
+
+    @pytest.fixture
+    def cuda_container(self, container, tmp_path):
+        stubbin = tmp_path / "stubbin"
+        stubbin.mkdir()
+        log = tmp_path / "check-calls.txt"
+        python = stubbin / "python"
+        python.write_text(
+            "#!/bin/sh\n"
+            'case "$2" in\n'
+            f'  *cuda_container_check*) echo ran >> "{log}"; echo "stub: $STUB_CUDA_MESSAGE" >&2;'
+            ' exit "$STUB_CUDA_RC" ;;\n'
+            f'  *) exec "{sys.executable}" "$@" ;;\n'
+            "esac\n", encoding="utf-8")
+        python.chmod(python.stat().st_mode | stat.S_IEXEC)
+        path = f"{stubbin}{os.pathsep}{container.env['PATH']}"
+
+        def run(*args, rc=0, backend="cuda", **extra):
+            env = {"PATH": path, "STUB_CUDA_RC": str(rc), "STUB_CUDA_MESSAGE": "checked"}
+            if backend:
+                env["LOCALM_IMAGE_BACKEND"] = backend
+            env.update(extra)
+            proc, invoked = container(*args, **env)
+            return proc, invoked, log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+        return run
+
+    @pytest.mark.parametrize("backend", ["cuda", "cuda13"])
+    def test_serves_after_the_check_passes(self, cuda_container, backend):
+        proc, invoked, checks = cuda_container(LOCALM_API_KEY="a-long-enough-key", backend=backend)
+        assert proc.returncode == 0, proc.stderr
+        assert checks == ["ran"]
+        assert invoked == ["serve -H 0.0.0.0 -p 8642"]
+
+    def test_exit_3_from_the_check_stops_the_container_before_the_server(self, cuda_container):
+        proc, invoked, checks = cuda_container(LOCALM_API_KEY="a-long-enough-key", rc=3)
+        assert proc.returncode == 3
+        assert "stub: checked" in proc.stderr
+        assert checks == ["ran"]
+        assert invoked == []
+
+    def test_a_crashing_check_is_reported_not_treated_as_passing(self, cuda_container):
+        proc, invoked, _ = cuda_container(LOCALM_API_KEY="a-long-enough-key", rc=1)
+        assert proc.returncode == 1
+        assert "could not check the CUDA runtime" in proc.stderr
+        assert invoked == []
+
+    def test_insecure_serving_is_still_checked(self, cuda_container):
+        proc, invoked, checks = cuda_container("serve", "--insecure", rc=3)
+        assert proc.returncode == 3
+        assert checks == ["ran"]
+        assert invoked == []
+
+    def test_a_missing_key_is_refused_before_the_gpu_is_looked_at(self, cuda_container):
+        proc, invoked, checks = cuda_container(rc=3)
+        assert proc.returncode == 2
+        assert checks == []
+        assert invoked == []
+
+    def test_other_commands_need_no_gpu(self, cuda_container):
+        proc, invoked, checks = cuda_container("key", "generate", rc=3)
+        assert proc.returncode == 0, proc.stderr
+        assert checks == []
+        assert invoked == ["key generate"]
+
+    @pytest.mark.parametrize("backend", ["", "cpu", "vulkan"])
+    def test_other_images_never_run_the_check(self, cuda_container, backend):
+        proc, invoked, checks = cuda_container(LOCALM_API_KEY="a-long-enough-key", rc=3,
+                                               backend=backend)
+        assert proc.returncode == 0, proc.stderr
+        assert checks == []
+        assert invoked == ["serve -H 0.0.0.0 -p 8642"]
+
+
+@posix_only
 class TestHealthcheck:
     @staticmethod
     def _run(tmp_path, https, http):
@@ -276,9 +355,17 @@ class TestDockerfile:
         assert re.search(r"^ARG UV_SHA256=[0-9a-f]{64}$", self.text, re.M)
         assert "sha256sum -c" in self.text
 
-    def test_only_cpu_and_vulkan_backends_build(self):
-        assert "cpu|vulkan" in self.text
-        assert 'setup-llama --backend "${BACKEND}"' in self.text
+    def test_only_the_four_backends_build(self):
+        assert "cpu|vulkan|cuda|cuda13) ;;" in self.text
+
+    def test_the_cuda_images_stage_their_line_without_a_gpu(self):
+        assert 'cuda)   backend_args="--backend cuda --cuda-line cuda-12"' in self.text
+        assert 'cuda13) backend_args="--backend cuda --cuda-line cuda-13"' in self.text
+        assert '*)      backend_args="--backend ${BACKEND}"' in self.text
+        assert "setup-llama ${backend_args} --yes" in self.text
+
+    def test_the_image_tells_the_entrypoint_which_backend_it_carries(self):
+        assert "LOCALM_IMAGE_BACKEND=${BACKEND}" in self.text
 
     def test_server_does_not_run_as_root(self):
         lines = [ln.strip() for ln in self.text.splitlines()]
@@ -331,6 +418,22 @@ class TestWorkflow:
         assert login["if"] == "needs.prepare.outputs.push == 'true'"
         push = next(s for s in steps if s.get("id") == "push")
         assert 'if [ "$PUSH" = "true" ]; then' in push["run"]
+
+    def test_every_backend_is_built_published_and_attested(self):
+        wf = _workflow()
+        expected = ["cpu", "vulkan", "cuda", "cuda13"]
+        assert wf["jobs"]["build"]["strategy"]["matrix"]["backend"] == expected
+        assert wf["jobs"]["attest"]["strategy"]["matrix"]["backend"] == expected
+        push = next(s for s in wf["jobs"]["publish"]["steps"] if s.get("id") == "push")
+        assert "for backend in cpu vulkan cuda cuda13; do" in push["run"]
+
+    def test_publishing_loads_one_image_at_a_time_and_frees_it(self):
+        steps = _workflow()["jobs"]["publish"]["steps"]
+        assert not any(s.get("name") == "Load the tested images" for s in steps)
+        push = next(s for s in steps if s.get("id") == "push")["run"]
+        assert 'docker load' in push
+        assert 'rm "image-$backend.tar.gz"' in push
+        assert 'docker image rm "localm:$backend"' in push
 
     def test_the_smoke_test_the_workflow_runs_exists(self):
         assert "docker/smoke-test.sh" in WORKFLOW.read_text(encoding="utf-8")

@@ -678,16 +678,23 @@ _GGUF_EMBEDDING_ARCHITECTURES = frozenset({
     "t5encoder", "llama-embed", "gemma-embedding2",
 })
 
-# Architectures llama.cpp loads that are not causal chat models, each with the
+# llama.cpp's diffusion language models: chat models that denoise a whole reply
+# canvas with bidirectional attention instead of decoding token by token, and
+# keep no KV cache.
+GGUF_DIFFUSION_ARCHITECTURES = frozenset({"dream", "llada", "llada-moe", "rnd1"})
+
+
+def gguf_is_diffusion_architecture(architecture: Optional[str]) -> bool:
+    """True when ``general.architecture`` names a diffusion language model."""
+    return architecture in GGUF_DIFFUSION_ARCHITECTURES
+
+
+# Architectures llama.cpp loads that are not chat models, each with the
 # user-facing description of what the file is.
 _GGUF_NON_CHAT_ARCHITECTURES = {
     "eagle3": "a speculative-decoding draft head",
     "dflash": "a speculative-decoding draft head",
     "gemma4-assistant": "a speculative-decoding draft head",
-    "dream": "a diffusion language model",
-    "llada": "a diffusion language model",
-    "llada-moe": "a diffusion language model",
-    "rnd1": "a diffusion language model",
     "wavtokenizer-dec": "an audio codec decoder",
     "qwen3tts": "a text-to-speech model",
     "pockettts": "a text-to-speech model",
@@ -733,9 +740,16 @@ def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
 _GGUF_FIXED_TYPE_SIZES = {
     0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8,
 }
+_GGUF_TYPE_UINT32 = 4
+_GGUF_TYPE_INT32 = 5
 _GGUF_TYPE_BOOL = 7
 _GGUF_TYPE_STRING = 8
 _GGUF_TYPE_ARRAY = 9
+_GGUF_INT32_TYPES = (_GGUF_TYPE_UINT32, _GGUF_TYPE_INT32)
+
+# llama.cpp's LLAMA_POOLING_TYPE_RANK: the value a reranker / classifier GGUF
+# writes under "<architecture>.pooling_type".
+_GGUF_POOLING_RANK = 4
 
 # struct formats for the same fixed-width types, keyed identically to
 # _GGUF_FIXED_TYPE_SIZES so the two tables cannot drift apart.
@@ -1767,6 +1781,74 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
     return block_count, n_vocab
 
 
+_VOCAB_SIGNATURE_KEYS = {
+    "tokenizer.ggml.model": "model",
+    "tokenizer.ggml.add_bos_token": "add_bos",
+    "tokenizer.ggml.add_eos_token": "add_eos",
+    "tokenizer.ggml.bos_token_id": "bos",
+    "tokenizer.ggml.eos_token_id": "eos",
+}
+
+
+def gguf_file_bytes(path: Path) -> int:
+    """Bytes of the GGUF at *path* on disk, every part of a split GGUF summed;
+    0 when no part exists. Never raises."""
+    try:
+        path = Path(path)
+        parts = split_gguf_parts(path.name)
+        if parts:
+            return sum((path.parent / part).stat().st_size
+                       for part in parts if (path.parent / part).is_file())
+        return path.stat().st_size if path.is_file() else 0
+    except OSError:
+        return 0
+
+
+def gguf_vocab_signature(path: Path) -> Optional[dict]:
+    """The vocabulary a GGUF declares, from its metadata, without loading it:
+    ``{"model", "tokens", "add_bos", "add_eos", "bos", "eos"}`` where
+    ``model`` is ``tokenizer.ggml.model``, ``tokens`` the
+    ``tokenizer.ggml.tokens`` list and the rest the matching ``tokenizer.ggml.*``
+    values, None for a key the file does not carry. None when the file has no
+    token list or the header does not parse. Never raises."""
+    out: dict = {name: None for name in _VOCAB_SIGNATURE_KEYS.values()}
+    out["tokens"] = None
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return None
+            (version,) = struct.unpack("<I", f.read(4))
+            if version < 2:
+                return None
+            _tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
+            for _ in range(kv_count):
+                key = _gguf_read_string_stream(f)
+                (vtype,) = struct.unpack("<I", f.read(4))
+                if key == "tokenizer.ggml.tokens" and vtype == _GGUF_TYPE_ARRAY:
+                    (elem_type,) = struct.unpack("<I", f.read(4))
+                    (count,) = struct.unpack("<Q", f.read(8))
+                    if elem_type != _GGUF_TYPE_STRING:
+                        return None
+                    out["tokens"] = [_gguf_read_string_stream(f) for _ in range(count)]
+                    continue
+                name = _VOCAB_SIGNATURE_KEYS.get(key)
+                if name == "model" and vtype == _GGUF_TYPE_STRING:
+                    out[name] = _gguf_read_string_stream(f)
+                    continue
+                if name is not None and vtype in _GGUF_SCALAR_FORMATS:
+                    fmt = _GGUF_SCALAR_FORMATS[vtype]
+                    (out[name],) = struct.unpack(fmt, f.read(_GGUF_FIXED_TYPE_SIZES[vtype]))
+                    continue
+                _gguf_skip_value_stream(f, vtype)
+    except (OSError, struct.error, IndexError, UnicodeDecodeError, ValueError) as exc:
+        logger.debug("gguf vocab probe: could not parse %s (%s)", Path(path).name,
+                     type(exc).__name__)
+        return None
+    if not out["tokens"]:
+        return None
+    return out
+
+
 def gguf_split_layout(path: Path) -> Optional[dict]:
     """What llama.cpp's layer split places, read from *path*'s own GGUF
     header(s): ``{"block_count", "n_vocab", "tensor_bytes"}``, where
@@ -1854,9 +1936,12 @@ def _gguf_declared_min_size(path: Path) -> Optional[int]:
 
 
 def _gguf_metadata_probe(path: Path) -> dict:
-    """Best-effort read of the GGUF header metadata needed for embedding-model
-    detection: ``general.architecture`` and whether any ``*.pooling_type`` key
-    is present. Reads only a bounded prefix of the file (see
+    """Best-effort read of the GGUF header metadata needed for model-role
+    detection: ``general.architecture``, ``general.type``, ``adapter.type`` and
+    whether any ``*.pooling_type`` key is present. The result carries the keys
+    ``architecture``, ``general_type``, ``adapter_type``, ``has_pooling_type``
+    and ``non_causal``; a string key the file does not declare is None. Reads
+    only a bounded prefix of the file (see
     ``_GGUF_META_PROBE_BYTES`` - real metadata always precedes the large
     tokenizer vocab arrays and tensor data), never the whole model. Returns
     ``{}`` on any parse failure or truncation within that bound; it never
@@ -1871,7 +1956,11 @@ def _gguf_metadata_probe(path: Path) -> dict:
     except OSError:
         return {}
     architecture = None
+    general_type = None
+    adapter_type = None
     has_pooling_type = False
+    pooling_type = None
+    has_classifier_labels = False
     non_causal = False
     try:
         if buf[:4] != b"GGUF":
@@ -1886,20 +1975,36 @@ def _gguf_metadata_probe(path: Path) -> dict:
         off = 24
         for _ in range(kv_count):
             key, off = _gguf_read_string(buf, off)
+            # The classification is decided (an embedding architecture or a
+            # pooling_type key was seen), so only the model-parameter keys that
+            # precede the tokenizer arrays remain worth reading.
+            if (key.startswith("tokenizer.ggml.")
+                    and (has_pooling_type
+                         or architecture in _GGUF_EMBEDDING_ARCHITECTURES)):
+                break
             (vtype,) = struct.unpack_from("<I", buf, off)
             off += 4
             if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
                 architecture, off = _gguf_read_string(buf, off)
+            elif key == "general.type" and vtype == _GGUF_TYPE_STRING:
+                general_type, off = _gguf_read_string(buf, off)
+            elif key == "adapter.type" and vtype == _GGUF_TYPE_STRING:
+                adapter_type, off = _gguf_read_string(buf, off)
             else:
                 if key.endswith(".pooling_type"):
                     has_pooling_type = True
+                    if (architecture is not None
+                            and key == f"{architecture}.pooling_type"
+                            and vtype in _GGUF_INT32_TYPES):
+                        pooling_type = struct.unpack_from(
+                            "<i" if vtype == _GGUF_TYPE_INT32 else "<I",
+                            buf, off)[0]
+                elif key.endswith(".classifier.output_labels"):
+                    has_classifier_labels = True
                 elif key.endswith(".attention.causal") and vtype == _GGUF_TYPE_BOOL:
                     non_causal = not struct.unpack_from("<?", buf, off)[0]
                 off = _gguf_skip_value(buf, off, vtype)
-            # Stop as soon as the answer is decided: a definitive embedding
-            # architecture, or any pooling_type key at all, makes the rest of
-            # the KV block irrelevant to classification.
-            if has_pooling_type or architecture in _GGUF_EMBEDDING_ARCHITECTURES:
+            if pooling_type == _GGUF_POOLING_RANK:
                 break
     except (struct.error, IndexError, UnicodeDecodeError):
         # Truncated within our bounded read, or a malformed/unexpected layout -
@@ -1907,7 +2012,10 @@ def _gguf_metadata_probe(path: Path) -> dict:
         # failure, rather than discarding a signal found earlier in the walk.
         pass
     return {"architecture": architecture, "has_pooling_type": has_pooling_type,
-            "non_causal": non_causal}
+            "pooling_type": pooling_type,
+            "has_classifier_labels": has_classifier_labels,
+            "non_causal": non_causal, "general_type": general_type,
+            "adapter_type": adapter_type}
 
 
 _GGUF_PRE_TOKENIZER_KEY = "tokenizer.ggml.pre"
@@ -2003,7 +2111,9 @@ def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
     gte-Qwen2, e5-mistral all reuse a decoder architecture whose
     general.architecture is unchanged from the chat variant, so the pooling-type
     key is the only signal that catches them), or it declares
-    ``"<architecture>.attention.causal"`` false. All are hard metadata baked
+    ``"<architecture>.attention.causal"`` false. A diffusion language model
+    (``GGUF_DIFFUSION_ARCHITECTURES``) is never an embedding model, whatever it
+    declares. All are hard metadata baked
     into the file itself - never a filename guess. Used by
     ``_detect_local_model_type`` (local add + folder auto-sync) and by
     ``pull.py`` (a freshly-downloaded remote GGUF).
@@ -2015,14 +2125,70 @@ def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
     if meta is None:
         meta = _gguf_metadata_probe(path)
     arch = meta.get("architecture")
+    if arch in GGUF_DIFFUSION_ARCHITECTURES:
+        return False
     if arch in _GGUF_EMBEDDING_ARCHITECTURES:
         return True
-    if meta.get("has_pooling_type"):
+    if meta.get("has_pooling_type") or meta.get("has_classifier_labels"):
         return True
     # llama.cpp reads "<arch>.attention.causal"; a file declaring it false is
     # an encoder, not a text generator.
     return (bool(meta.get("non_causal")) and arch not in _GGUF_NON_CHAT_ARCHITECTURES
             and arch not in _GGUF_ENCODER_DECODER_ARCHITECTURES)
+
+
+# The tensors llama.cpp loads as the classification head of a reranker or
+# classifier ("cls" and "cls.output" in its tensor table). A model with either
+# one produces a score; a model with neither pools to a plain embedding.
+_GGUF_CLASSIFIER_HEAD_TENSORS = frozenset({"cls.weight", "cls.output.weight"})
+
+
+def gguf_classifier_head_tensors(path: Path) -> Optional[frozenset]:
+    """The classification-head tensors (``cls.weight`` / ``cls.output.weight``)
+    present in the GGUF at *path*, as a possibly empty frozenset.
+
+    None - "could not tell" - when the tensor list cannot be read in full: an
+    unreadable or malformed header, or one part of a split GGUF (the head may sit
+    in another part). An empty frozenset is a confirmed answer: the complete
+    tensor list was read and holds no head."""
+    if _SPLIT_GGUF_RE.match(Path(path).name):
+        return None
+    parsed = _gguf_tensor_offset_entries(Path(path))
+    if parsed is None:
+        return None
+    return frozenset(name for name, _offset in parsed[0]
+                     if name in _GGUF_CLASSIFIER_HEAD_TENSORS)
+
+
+def gguf_reranker_state(path: Path, meta: Optional[dict] = None) -> Optional[bool]:
+    """Whether *path*'s own GGUF marks it as a reranker / classifier: it declares
+    ``<architecture>.pooling_type`` = rank, or carries
+    ``<architecture>.classifier.output_labels``, or - for an embedding-style
+    file that declares neither, as community conversions often do - carries a
+    classification-head tensor. All hard header facts, never a filename guess.
+
+    None when the answer depends on a tensor list that could not be read in full
+    (see :func:`gguf_classifier_head_tensors`): "could not tell", which a caller
+    must not record as "not a reranker".
+
+    *meta* is an already-computed ``_gguf_metadata_probe(path)`` result. The
+    tensor list is read only for a file that already classifies as an
+    embedding model."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    if (meta.get("pooling_type") == _GGUF_POOLING_RANK
+            or meta.get("has_classifier_labels")):
+        return True
+    if not gguf_embedding_signal(path, meta=meta):
+        return False
+    heads = gguf_classifier_head_tensors(path)
+    return None if heads is None else bool(heads)
+
+
+def gguf_reranker_signal(path: Path, meta: Optional[dict] = None) -> bool:
+    """True when :func:`gguf_reranker_state` is True; an undecidable file reads as
+    False."""
+    return gguf_reranker_state(path, meta) is True
 
 
 def gguf_architecture(path: Path, meta: Optional[dict] = None) -> Optional[str]:
@@ -2060,6 +2226,76 @@ def gguf_is_mmproj(path: Path, meta: Optional[dict] = None) -> bool:
     if meta is None:
         meta = _gguf_metadata_probe(path)
     return meta.get("architecture") == _GGUF_MMPROJ_ARCHITECTURE
+
+
+_GGUF_ADAPTER_GENERAL_TYPE = "adapter"
+GGUF_LORA_ADAPTER_KIND = "lora"
+
+
+def _starts_with_gguf_magic(path: Path) -> bool:
+    """True when *path* is a readable file that begins with the GGUF magic. A
+    folder, a missing file or an unreadable one is False. The name's extension
+    is not consulted: an Ollama blob is a GGUF with no extension."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+
+def gguf_adapter_kind(path: Path, meta: Optional[dict] = None) -> Optional[str]:
+    """The ``adapter.type`` of a GGUF adapter file (``"lora"`` for a LoRA), or
+    None when *path* is not an adapter, i.e. its ``general.type`` is not
+    ``"adapter"``. An adapter that declares no ``adapter.type`` reports
+    ``"unknown"``. Hard metadata from the file's own header, never a filename
+    guess.
+
+    *meta*, when given, is an already-computed ``_gguf_metadata_probe(path)``
+    result (see ``gguf_embedding_signal``)."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    if meta.get("general_type") != _GGUF_ADAPTER_GENERAL_TYPE:
+        return None
+    return meta.get("adapter_type") or "unknown"
+
+
+def gguf_adapter_chat_refusal(path: Path) -> Optional[str]:
+    """The reason the GGUF at *path* cannot be chatted with because it is an
+    adapter rather than a model, or None when it is not an adapter."""
+    kind = gguf_adapter_kind(path)
+    if kind is None:
+        return None
+    return (f"{Path(path).name} is a GGUF {kind} adapter, not a chat model, so localm "
+            "cannot load it on its own. Attach it to its base model with "
+            "'localm adapter attach <adapter> <base>' and run the base model.")
+
+
+def gguf_adapter_incompatibility(adapter_path: Path, base_path: Path) -> Optional[str]:
+    """Why the GGUF adapter at *adapter_path* cannot be applied to the model at
+    *base_path*, or None when no certain reason exists. Refuses only on a
+    certain signature: a file that is not a GGUF LoRA adapter, a base that is
+    not a GGUF file, or two declared ``general.architecture`` values that
+    differ (both are named). A header that cannot be read yields no refusal
+    here; the native loader judges tensor shapes itself."""
+    adapter_path, base_path = Path(adapter_path), Path(base_path)
+    if not _starts_with_gguf_magic(base_path):
+        return (f"{base_path.name} is not a GGUF file; GGUF adapters apply to "
+                "GGUF base models only.")
+    adapter_meta = _gguf_metadata_probe(adapter_path)
+    kind = gguf_adapter_kind(adapter_path, meta=adapter_meta)
+    if kind is None:
+        found = adapter_meta.get("general_type")
+        what = f"general.type '{found}'" if found else "no general.type"
+        return f"{adapter_path.name} is not a GGUF adapter (it declares {what})."
+    if kind != GGUF_LORA_ADAPTER_KIND:
+        return (f"{adapter_path.name} is a GGUF adapter of type '{kind}'; only "
+                f"'{GGUF_LORA_ADAPTER_KIND}' adapters are supported.")
+    adapter_arch = adapter_meta.get("architecture")
+    base_arch = _gguf_metadata_probe(base_path).get("architecture")
+    if adapter_arch and base_arch and adapter_arch != base_arch:
+        return (f"{adapter_path.name} was made for the '{adapter_arch}' architecture "
+                f"but {base_path.name} is '{base_arch}'.")
+    return None
 
 
 # Projector types whose output width llama.cpp's clip_n_mmproj_embd reads from
@@ -2411,7 +2647,8 @@ def _gguf_capability_probe(path: Path) -> dict:
     context-length capability signals.
 
     Returns ``{"chat_template": Optional[str], "context_length": Optional[int],
-    "complete": bool}``. ``complete`` is True only when the KV walk visited
+    "complete": bool}``, plus ``"architecture"`` (``general.architecture`` or
+    None) once the header has been opened as a GGUF. ``complete`` is True only when the KV walk visited
     every declared entry without truncating or hitting a malformed value, and it
     is the whole point of this return shape: with it, a ``chat_template`` of
     None means the file DECLARES no template (a real answer), and without it the
@@ -2475,7 +2712,7 @@ def _gguf_capability_probe(path: Path) -> dict:
         if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
             context_length = raw
     return {"chat_template": chat_template, "context_length": context_length,
-            "complete": complete}
+            "complete": complete, "architecture": architecture}
 
 
 def gguf_tool_use_signal(path: Path, meta: Optional[dict] = None) -> Optional[bool]:
@@ -2484,7 +2721,9 @@ def gguf_tool_use_signal(path: Path, meta: Optional[dict] = None) -> Optional[bo
 
     ``True``  its template renders tool calls.
     ``False`` its template was read and renders none, OR the header was walked
-              in full and declares no template at all.
+              in full and declares no template at all, OR the file is a
+              diffusion language model, which writes its whole reply at once
+              and is not driven by a tool-call grammar.
     ``None``  the header could not be read far enough to tell.
 
     llama.cpp's converter copies the source model's HuggingFace chat template
@@ -2502,6 +2741,8 @@ def gguf_tool_use_signal(path: Path, meta: Optional[dict] = None) -> Optional[bo
     result, so a caller reading both capabilities pays one read."""
     if meta is None:
         meta = _gguf_capability_probe(path)
+    if meta.get("architecture") in GGUF_DIFFUSION_ARCHITECTURES:
+        return False
     template = meta.get("chat_template")
     if template is None:
         return False if meta.get("complete") else None

@@ -20,6 +20,7 @@ import asyncio
 import functools
 import time
 from types import SimpleNamespace
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -27,16 +28,21 @@ from fastapi.responses import StreamingResponse
 import localm.inference.http_server as _hs
 from localm.inference.backends.base import (
     EmbedBatchTooLargeError, GrammarUnsupportedError, InvalidGrammarError,
-    PretokenizerUnsafeInputError, TriggerValidatorUnavailableError,
-    messages_contain_image,
+    PretokenizerUnsafeInputError, RerankerHeadMissingError, RerankInputError,
+    TriggerValidatorUnavailableError, messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
 from localm.inference.pretokenizer_guard import count_tokens_or_estimate
+from localm.inference.stop_sequences import apply_stop
+from localm.inference.tool_calling import (
+    ToolChoice, ToolsError, has_tool_history, parse_tool_choice, render_messages,
+    tool_grammar, validate_tools,
+)
 from localm.inference.protocol import (
     CHECKING_GRAMMAR_STATUS, LOADING_MODEL_STATUS, PROCESSING_PROMPT_STATUS,
     RUNNING_CHAT_HOOKS_STATUS, ChatRequest, CompletionRequest, EmbeddingRequest,
-    make_chunk_id,
+    RerankRequest, make_chunk_id,
 )
 
 
@@ -68,12 +74,15 @@ def register(app: FastAPI, ctx) -> None:
         return None
 
     async def _prepare_chat(req: ChatRequest, request: Request, messages: list,
-                            route, say) -> SimpleNamespace:
+                            route, say, tools=(),
+                            choice: Optional[ToolChoice] = None) -> SimpleNamespace:
         """Resolve (loading if needed) the engine that answers *req*, run the
         inlet hooks and every pre-generation check. Returns the prepared request,
         which holds an engine pin the caller must release; raises HTTPException
         for a refused request, holding no pin. ``say(text)`` is called with the
-        status of each phase as it starts, on the event loop thread."""
+        status of each phase as it starts, on the event loop thread. *tools* and
+        *choice* are the request's validated tools and tool_choice."""
+        choice = choice or ToolChoice("none")
         say(LOADING_MODEL_STATUS)
         engine = None
         if route.routed:
@@ -155,6 +164,9 @@ def register(app: FastAPI, ctx) -> None:
                     say(RUNNING_CHAT_HOOKS_STATUS)
                     messages = await pipeline.run_inlet(messages, ctx)
 
+            if tools or has_tool_history(messages):
+                messages = render_messages(messages, list(tools), choice)
+
             sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
 
             # Reject image input on a text-only model with a 400 instead of dropping
@@ -183,15 +195,30 @@ def register(app: FastAPI, ctx) -> None:
                                    + "; ".join(route.load_errors))
                     raise HTTPException(400, detail)
 
+            grammar, grammar_lazy, grammar_triggers = (
+                req.grammar, req.grammar_lazy, req.grammar_triggers)
+            from_tools = bool(tools) and choice.kind != "none"
+            tool_names = None
+            if from_tools:
+                tool_names = ({choice.name} if choice.kind == "function"
+                              else {t.name for t in tools})
+                try:
+                    grammar, grammar_lazy, grammar_triggers = tool_grammar(
+                        list(tools), choice, parallel=req.parallel_tool_calls is not False)
+                except ToolsError as e:
+                    raise HTTPException(400, str(e)) from e
             gen_kwargs = dict(
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
                 top_k=req.top_k,
                 repeat_penalty=req.repeat_penalty,
-                grammar=req.grammar,
+                grammar=grammar,
                 seed=req.seed,
+                stop=req.stop,
                 thinking=(req.chat_template_kwargs or {}).get("enable_thinking"),
+                tool_names=tool_names,
+                max_tool_calls=1 if tool_names and req.parallel_tool_calls is False else None,
             )
             # Strip None so Engine uses its config defaults
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
@@ -200,7 +227,10 @@ def register(app: FastAPI, ctx) -> None:
             if ignored:
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("chat_template_kwargs keys ignored: %s", ignored)
-            if req.grammar_lazy:
+            if from_tools and grammar_lazy:
+                gen_kwargs["grammar_lazy"] = True
+                gen_kwargs["grammar_triggers"] = grammar_triggers
+            elif req.grammar_lazy:
                 # A lazy grammar without its trigger patterns can never engage.
                 if not req.grammar or not req.grammar_triggers:
                     raise HTTPException(
@@ -224,14 +254,14 @@ def register(app: FastAPI, ctx) -> None:
 
             # Reject a malformed grammar with a 400 up front, before streaming starts,
             # so both the stream and non-stream paths get a real 4xx.
-            if req.grammar:
+            if grammar:
                 say(CHECKING_GRAMMAR_STATUS)
                 try:
                     # Pure-Python structural check first and unconditionally, with no
                     # RPC, so it also covers the RunnerBusy-deferred path below.
                     # Rejects a deeply unbalanced grammar before the native GBNF
                     # parser sees it.
-                    check_grammar_structure(req.grammar)
+                    check_grammar_structure(grammar)
                     # Off the event loop, for the same reason the trigger probe
                     # above is: validate_grammar's backend RPC waits on the
                     # isolated model worker, so a direct call here would freeze
@@ -241,15 +271,27 @@ def register(app: FastAPI, ctx) -> None:
                     # below still catches exactly what it caught before.
                     await asyncio.get_running_loop().run_in_executor(
                         None, lambda: engine.validate_grammar(
-                            req.grammar, lazy=bool(req.grammar_lazy)))
+                            grammar, lazy=bool(grammar_lazy)))
                 except GrammarUnsupportedError as e:
                     # The backend cannot apply a grammar at all. Separate from the
                     # InvalidGrammarError arm below, and above the `if req.stream:`
                     # branch so the streaming and non-streaming paths get the same
                     # status and reason.
-                    raise HTTPException(400, str(e)) from e
+                    if from_tools and choice.kind == "auto":
+                        for key in ("grammar", "grammar_lazy", "grammar_triggers"):
+                            gen_kwargs.pop(key, None)
+                        from localm.debuglog import logger as _dbg
+                        _dbg.info("tools: %s cannot apply a grammar; tool calls are "
+                                  "read from the reply without one", engine.display_name)
+                    elif from_tools:
+                        raise HTTPException(
+                            400, f"tool_choice {choice.kind!r} needs grammar-constrained "
+                                 f"sampling, which this model cannot do: {e}") from e
+                    else:
+                        raise HTTPException(400, str(e)) from e
                 except InvalidGrammarError as e:
-                    raise HTTPException(400, f"Invalid grammar: {e}") from e
+                    raise HTTPException(
+                        400, f"Invalid {'tool grammar' if from_tools else 'grammar'}: {e}") from e
                 except RuntimeError as e:
                     # A bare RuntimeError means the isolated worker crashed, timed
                     # out, or returned something unexpected while checking the
@@ -278,7 +320,8 @@ def register(app: FastAPI, ctx) -> None:
             compacted_here = False
             compact_in_stream = False
             if (_hs._needs_compaction(capacity, prompt_tokens, messages,
-                                      _hs._engine_is_encoder_decoder(engine))
+                                      encoder_decoder=_hs._engine_is_encoder_decoder(engine),
+                                      reply_reserve=_hs._engine_reply_reserve(engine))
                     and compactable(messages)):
                 if req.stream:
                     # The stream compacts after its role chunk, behind a
@@ -308,7 +351,8 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(
                     413, _hs.context_overflow_detail(
                         prompt_tokens, capacity,
-                        _hs._engine_is_encoder_decoder(engine)))
+                        encoder_decoder=_hs._engine_is_encoder_decoder(engine),
+                        reply_reserve=_hs._engine_reply_reserve(engine)))
 
         except BaseException:
             _hs._unpin(engine)
@@ -407,8 +451,17 @@ def register(app: FastAPI, ctx) -> None:
                 body=peer_routing.forward_body(_peer, await request.body()),
                 headers=_capability_route_header(route))
 
+        try:
+            tools = validate_tools(req.tools)
+            choice = parse_tool_choice(req.tool_choice, tools)
+        except ToolsError as e:
+            raise HTTPException(400, str(e)) from e
+        if tools and choice.kind != "none" and req.grammar:
+            raise HTTPException(400, "tools cannot be combined with a grammar")
+
         if not req.stream:
-            prepared = await _prepare_chat(req, request, messages, route, _no_status)
+            prepared = await _prepare_chat(req, request, messages, route, _no_status,
+                                           tools, choice)
             try:
                 return await _respond_complete(prepared, request)
             finally:
@@ -418,7 +471,7 @@ def register(app: FastAPI, ctx) -> None:
         # stream opens at once and reports each phase until the reply starts.
         progress = _hs.PrepProgress()
         task = asyncio.ensure_future(
-            _prepare_chat(req, request, messages, route, progress.set))
+            _prepare_chat(req, request, messages, route, progress.set, tools, choice))
         try:
             done, _pending = await asyncio.wait({task}, timeout=_hs.PREP_STATUS_GRACE_S)
         except BaseException:
@@ -466,6 +519,14 @@ def register(app: FastAPI, ctx) -> None:
         _entry = _reg.get((resolved_model or "").strip()) if _reg else None
         _is_registered_embedder = isinstance(_entry, dict) and _entry.get("model_type") == "embedding"
         _is_configured_embedder = bool(_emb_cfg_name) and (resolved_model or "").strip() == _emb_cfg_name
+        if (_is_registered_embedder and not _is_configured_embedder
+                and isinstance(_entry, dict)):
+            from localm.model_manager.registry import entry_is_reranker
+            if await asyncio.get_running_loop().run_in_executor(
+                    None, entry_is_reranker, (resolved_model or "").strip(), _entry):
+                raise HTTPException(
+                    422, f"Model {resolved_model!r} is a reranker, not an embedding "
+                    "model: it scores query and document pairs (POST /v1/rerank).")
         if _is_registered_embedder or _is_configured_embedder:
             from localm.inference.embedder import embed_texts, last_error
             loop = asyncio.get_running_loop()
@@ -587,6 +648,44 @@ def register(app: FastAPI, ctx) -> None:
             "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
         }
 
+    @app.post("/v1/rerank", dependencies=[Depends(_require_auth)])
+    async def rerank(req: RerankRequest):
+        from localm.inference import reranker as _rr
+        if not req.query.strip():
+            raise HTTPException(400, '"query" must not be empty')
+        texts = [d if isinstance(d, str) else d.text for d in req.documents]
+        loop = asyncio.get_running_loop()
+        try:
+            name, path = await loop.run_in_executor(
+                None, _rr.resolve_reranker, req.model)
+        except _rr.RerankerModelError as e:
+            raise HTTPException(e.status, str(e)) from e
+        # The reranker shares the embedder's one-worker bound: further requests
+        # queue here on the loop, holding no default-pool worker.
+        try:
+            async with _hs._get_embedder_sem():
+                outcome = await loop.run_in_executor(
+                    None, lambda: _rr.rerank(path, req.query, texts))
+        except (RerankInputError, PretokenizerUnsafeInputError) as e:
+            raise HTTPException(400, str(e)) from e
+        except RerankerHeadMissingError as e:
+            raise HTTPException(422, str(e)) from e
+        except _rr.RerankerUnavailableError as e:
+            raise HTTPException(503, f"Reranker unavailable: {e}") from e
+        except RuntimeError as e:
+            raise HTTPException(503, f"Reranking failed: {e}") from e
+        results = _rr.rank_results(outcome.scored, req.top_n, outcome.labels)
+        if req.return_documents:
+            for row in results:
+                row["document"] = {"text": texts[row["index"]]}
+        total_tokens = sum(item["tokens"] for item in outcome.scored)
+        return {
+            "object": "list",
+            "model": name,
+            "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+            "results": results,
+        }
+
     @app.post("/v1/completions", dependencies=[Depends(_require_auth)])
     async def completions(req: CompletionRequest, request: Request):
         # Same peer-routing short-circuit as /v1/chat/completions above.
@@ -648,6 +747,7 @@ def register(app: FastAPI, ctx) -> None:
                 repeat_penalty=req.repeat_penalty,
                 grammar=req.grammar,
                 seed=req.seed,
+                stop=req.stop,
             )
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
             if req.grammar_lazy:
@@ -748,6 +848,8 @@ def register(app: FastAPI, ctx) -> None:
                     # text, which a model-load RuntimeError carries verbatim.
                     text = _hs.inference_error_text(e)
 
+            if gen_error is None and req.stop:
+                text, _stopped = apply_stop(text, req.stop)
             outcome = "error" if gen_error is not None else "success"
             if ctx is not None:
                 ctx.outcome = outcome
@@ -762,6 +864,7 @@ def register(app: FastAPI, ctx) -> None:
             completion_tokens = await loop.run_in_executor(
                 None, count_tokens_or_estimate, engine.count_tokens, text,
                 "the generated text")
+            _hs._record_generation_metrics(prompt_tokens, completion_tokens, None, None)
             ts  = int(time.time())
             cid = make_chunk_id()
             return {

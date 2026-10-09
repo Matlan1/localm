@@ -586,7 +586,7 @@ def test_the_ci_job_runs_on_every_pull_request_and_cannot_be_skipped_green():
         !contains(github.event.pull_request.labels.*.name, 'full-ci')"""), (
         "every unlabelled PR, and never a labelled one, whose whole suite the matrix runs")
     assert isinstance(job.get("timeout-minutes"), int)
-    assert job["timeout-minutes"] >= ci["jobs"]["test"]["timeout-minutes"], (
+    assert job["timeout-minutes"] >= ci["jobs"]["test-shard"]["timeout-minutes"], (
         "a change to a hub module runs most of what the matrix job runs, on one host")
     assert "strategy" not in job, "one host: a subset cannot be measured per platform"
 

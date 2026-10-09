@@ -21,14 +21,16 @@ without paying a process-spawn cost.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional, Sequence, Tuple
 
 from localm.console import console
 
-from .base import (BaseBackend, ModelLoadCancelled, PretokenizerUnsafeInputError,
-                   PretokenizerUnusableModelError, UnsupportedModelRoleError)
+from .base import (AdapterLoadError, BaseBackend, ModelLoadCancelled,
+                   PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
+                   UnsupportedModelRoleError)
 from .llamacpp._runner import RunnerBusy
 from .llamacpp._sizing import VramSizingMixin
 
@@ -114,6 +116,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     load() raises; there is no degraded fallback path.
     """
 
+    # GGUF LoRA adapters to apply to the model: (path, scale) pairs, in order.
+    adapters: Sequence[Tuple[str, float]] = ()
+    # The {"path", "scale"} of each adapter the last load applied.
+    applied_adapters: Sequence[dict] = ()
+
     def __init__(
         self,
         model_path: str,
@@ -130,10 +137,14 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         mtp_draft_tokens: Optional[int] = None,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
+        spec_draft_model: Optional[str] = None,
         use_mmap: str = "auto",
+        adapters: Optional[list] = None,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
+        self.adapters = [(os.path.abspath(p), float(s)) for p, s in (adapters or [])]
+        self.applied_adapters = []
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
         # Opt-in MoE expert placement: keep the expert weights of the first N
@@ -155,7 +166,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.spec_source = resolve_spec_source(spec_source, mtp_enabled)
         self.mtp_enabled = self.spec_source == SPEC_MTP
         self.mtp_draft_tokens = mtp_draft_tokens   # None = the native default
-        self.spec_draft_tokens = spec_draft_tokens  # None = the n-gram default
+        self.spec_draft_tokens = spec_draft_tokens  # None = the source's default
+        self.spec_draft_model = spec_draft_model    # draft GGUF path for the draft source
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
@@ -407,13 +419,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         (``reason`` names why), "unavailable" when the model cannot speculate
         (``reason`` is the model status, e.g. "rewind-unsupported"), "paused" when drafting was measured slower than
         one-token decoding for at least as many steps as it ran, "on" when it
-        speculated, "off" when this reply could not draft (``reason`` "image"),
-        and "idle" when nothing matched. ``drafted``, ``accepted`` and
-        ``paused_steps`` count as in ``last_mtp_usage``.
+        speculated (``reason`` "draft-on-cpu" when the draft model runs on the
+        CPU), "off" when this reply could not draft (``reason`` "image"),
+        and "idle" when it drafted nothing (``reason`` "not-paying" when the
+        measured step costs held drafting back on at least one step, else
+        None). ``drafted``, ``accepted`` and ``paused_steps`` count as in
+        ``last_mtp_usage``.
         """
         source = getattr(self, "spec_source",
                          "mtp" if getattr(self, "mtp_enabled", False) else "off")
-        if not self.loaded or source not in ("mtp", "ngram"):
+        if not self.loaded or source not in ("mtp", "ngram", "draft"):
             return None
         if source == "mtp":
             usage = self.last_mtp_usage
@@ -431,12 +446,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         elif paused and paused >= steps:
             state, reason = "paused", "slower-than-plain"
         elif rep.get("active"):
-            state, reason = "on", None
+            state, reason = "on", ("draft-on-cpu" if status == "ok-cpu" else None)
         elif rep.get("skipped"):
             state, reason = "off", str(rep.get("skipped"))
         else:
-            state, reason = "idle", None
-        return {"source": "ngram", "state": state,
+            state = "idle"
+            reason = "not-paying" if _count(rep.get("held_steps")) else None
+        return {"source": source, "state": state,
                 "drafted": _count(rep.get("drafted")),
                 "accepted": _count(rep.get("accepted")),
                 "paused_steps": paused, "reason": reason}
@@ -485,12 +501,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         unusable = gguf_unusable_reason(Path(self.model_path))
         if unusable is not None:
             raise UnsupportedModelRoleError(unusable)
-        # A file that is not a chat model (draft head, diffusion LM, codec) is
-        # refused here, before any VRAM probe or worker spawn.
+        # A file that is not a chat model (draft head, codec, TTS, image
+        # checkpoint) is refused here, before any VRAM probe or worker spawn.
         from localm.model_manager import gguf_architecture, gguf_chat_refusal
         role_refusal = gguf_chat_refusal(gguf_architecture(Path(self.model_path)))
         if role_refusal is not None:
             raise UnsupportedModelRoleError(role_refusal)
+        from localm.model_manager import gguf_adapter_chat_refusal
+        adapter_refusal = gguf_adapter_chat_refusal(Path(self.model_path))
+        if adapter_refusal is not None:
+            raise UnsupportedModelRoleError(adapter_refusal)
+        self._check_adapters()
         # A model whose declared pre-tokenizer cannot hold a conversation is
         # refused here, before any VRAM probe or worker spawn. The worker's own
         # metadata read refuses it again when the header read reports None.
@@ -500,6 +521,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             gguf_pretokenizer(Path(self.model_path)))
         if refusal is not None:
             raise PretokenizerUnusableModelError(refusal)
+        # Place the draft model before the target's GPU layers are sized.
+        if (getattr(self, "spec_source", None) == "draft"
+                and not self._decide_draft_placement()):
+            from localm.debuglog import logger as _dbg
+            if self.n_gpu_layers <= 0:
+                _dbg.info("draft model %s runs on the CPU with %s",
+                          Path(str(self.spec_draft_model)).name, Path(self.model_path).name)
+            else:
+                _dbg.warning("draft model %s does not fit in VRAM beside %s; it runs "
+                             "on the CPU", Path(str(self.spec_draft_model)).name,
+                             Path(self.model_path).name)
         # Resolve the effective GPU-layer count once, so _check_vram and
         # _load_native both read the same value.
         self.effective_gpu_layers = self._effective_gpu_layers()
@@ -508,7 +540,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         try:
             self._load_native()
         except (ModelLoadCancelled, PretokenizerUnusableModelError,
-                UnsupportedModelRoleError, GpuSplitConfigError):
+                UnsupportedModelRoleError, AdapterLoadError, GpuSplitConfigError):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:
@@ -527,6 +559,23 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             if split_note:
                 vram_hint += f" {split_note}"
             raise RuntimeError(_load_failure_message(exc, vram_hint)) from exc
+
+    def _check_adapters(self) -> None:
+        """Refuse a load whose attached LoRA adapters cannot be applied: a
+        missing file, or a header that is not a GGUF LoRA adapter for this
+        model's architecture. Raises :class:`AdapterLoadError` naming the
+        adapter and the reason, before any VRAM probe or worker spawn."""
+        from localm.model_manager import gguf_adapter_incompatibility
+        for path, _scale in self.adapters:
+            name = Path(path).name
+            if not Path(path).is_file():
+                raise AdapterLoadError(
+                    f"LoRA adapter {name} is attached to this model but its file "
+                    f"is missing ({path}). Detach it with 'localm adapter detach' "
+                    "or restore the file.")
+            reason = gguf_adapter_incompatibility(Path(path), Path(self.model_path))
+            if reason is not None:
+                raise AdapterLoadError(f"LoRA adapter {name} cannot be applied: {reason}")
 
     def _load_native(self) -> None:
         """Load by spawning an isolated worker process and handing it the
@@ -669,15 +718,25 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             mtp_enabled=self.mtp_enabled,
             use_mmap=mmap_decision.use_mmap,
         )
+        if self.adapters:
+            params["adapters"] = [[p, s] for p, s in self.adapters]
         if self.mtp_draft_tokens is not None:
             params["mtp_draft_tokens"] = int(self.mtp_draft_tokens)
         source = getattr(self, "spec_source", None)
         if source is not None and source != ("mtp" if self.mtp_enabled else "off"):
             params["spec_source"] = source
+        if source == "draft":
+            params["spec_draft_model"] = getattr(self, "spec_draft_model", None)
+            params["spec_draft_gpu"] = bool(getattr(self, "draft_model_on_gpu", True))
         if getattr(self, "spec_draft_tokens", None) is not None:
             params["spec_draft_tokens"] = int(self.spec_draft_tokens)
         if main_gpu is not None:
             params["main_gpu"] = main_gpu
+        if self.is_diffusion:
+            for key in ("diffusion_steps", "diffusion_max_tokens"):
+                value = cfg.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    params[key] = value
         timeout = self._load_timeout_seconds()
 
         cap_label = f"→{ctx_max}" if ctx_max else "→∞"
@@ -702,6 +761,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._loaded = True
         self._supports_images = bool(meta.get("supports_images"))
         self._supports_mtp = bool(meta.get("supports_mtp"))
+        reported = meta.get("adapters")
+        self.applied_adapters = list(reported) if isinstance(reported, list) else []
+        if meta.get("diffusion") is True:
+            self._diffusion_loaded = True
+            capacity = meta.get("diffusion_capacity")
+            if isinstance(capacity, int) and capacity > 0:
+                self.effective_ctx_max = capacity
+            reply = meta.get("diffusion_reply_tokens")
+            if isinstance(reply, int) and reply > 0:
+                self.diffusion_reply_tokens = min(reply, self.effective_ctx_max or reply)
 
         # An encoder-decoder model reads at most encoder_input_limit prompt
         # tokens per request, which becomes this load's context capacity.
@@ -891,6 +960,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._runner = None
         self._llm = None
         self._loaded = False
+        self.applied_adapters = []
 
     @property
     def loaded(self) -> bool:
@@ -902,10 +972,27 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         is_alive = getattr(self._runner, "is_alive", None)
         return True if is_alive is None else bool(is_alive())
 
-    # llama.cpp applies a GBNF grammar natively in the sampler, so this backend can
-    # always honour one. A plain class attribute, shadowing BaseBackend's
-    # deny-by-default property.
-    supports_grammar: bool = True
+    @property
+    def is_diffusion(self) -> bool:
+        """True when the model is a diffusion language model: read from the
+        file's own GGUF header, or reported by the worker that loaded it."""
+        return self._keeps_no_kv_cache()
+
+    @property
+    def reply_reserve(self) -> Optional[int]:
+        """For a loaded diffusion model, the reply length every generation
+        takes out of ``effective_ctx_max``; None otherwise."""
+        reserve = getattr(self, "diffusion_reply_tokens", None)
+        if self.loaded and self.is_diffusion and isinstance(reserve, int) and reserve > 0:
+            return reserve
+        return None
+
+    @property
+    def supports_grammar(self) -> bool:
+        """llama.cpp applies a GBNF grammar natively in the sampler, so True for
+        every model except a diffusion language model, which writes its reply
+        all at once."""
+        return not self.is_diffusion
 
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
@@ -930,7 +1017,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         carries that type across the worker IPC as a tagged envelope, so the
         caller gets the same clean 400 an up-front check would have given - one
         request later, and never a reply that silently does not match the
-        grammar."""
+        grammar.
+
+        A diffusion language model refuses any grammar with
+        :class:`GrammarUnsupportedError`, loaded or not."""
+        if grammar and self.is_diffusion:
+            from .base import GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
+            raise GrammarUnsupportedError(GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE)
         if grammar and self.loaded and self._runner is not None:   # the loaded property, not the raw flag
             try:
                 self._runner.check_grammar(grammar)
@@ -1105,6 +1198,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             yield from self._runner.chat_stream(
                 first_chunk_timeout=self._first_token_timeout_seconds(),
                 on_status=on_status,
+                stop_on_request=self.is_diffusion,
                 **kwargs)
         except RuntimeError:
             # The isolated worker crashed or stalled and the model is gone. Drop it

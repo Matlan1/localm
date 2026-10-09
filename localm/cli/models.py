@@ -202,12 +202,13 @@ _SPEC_PROBE_PROMPTS = _MTP_PROBE_PROMPTS + (_SPEC_REPEAT_PROMPT,)
 _SPEC_PROBE_KINDS = ("prose", "code", "explanation", "rewrite")
 
 # The label bench output uses for each draft source.
-_SPEC_LABELS = {"mtp": "MTP", "ngram": "N-gram drafting"}
+_SPEC_LABELS = {"mtp": "MTP", "ngram": "N-gram drafting", "draft": "Draft model"}
 
 
 def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
-                    draft_tokens=None):
-    """Load *model_path* with draft source *source* ("off", "mtp" or "ngram")
+                    draft_tokens=None, draft_model=None):
+    """Load *model_path* with draft source *source* ("off", "mtp", "ngram" or
+    "draft", with *draft_model*)
     and return ``(decode rates, usable, status, gpu_placement, (drafted,
     accepted), texts, greedy_text, per_prompt)``: ``usable`` is False when the
     source cannot draft on this model (``status`` says why), ``texts`` is the
@@ -221,8 +222,10 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
     kw = {}
     if source == "mtp" and draft_tokens is not None:
         kw["mtp_draft_tokens"] = draft_tokens
-    if source == "ngram" and draft_tokens is not None:
+    if source in ("ngram", "draft") and draft_tokens is not None:
         kw["spec_draft_tokens"] = draft_tokens
+    if source == "draft":
+        kw["spec_draft_model"] = draft_model
     engine = Engine(str(model_path), n_ctx=ctx, n_gpu_layers=gpu_layers,
                     display_name=display, spec_source=source, **kw)
     engine.load()
@@ -237,6 +240,20 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
         usage = engine.speculation_usage() or {}
         status = usage.get("reason")
         usable = source == "off" or usage.get("state") not in (None, "unavailable")
+        if source == "draft" and engine.draft_model_on_gpu() is False:
+            console.print("[yellow]The draft model runs on the CPU (the model "
+                          "runs on the CPU, or the draft model does not fit in "
+                          "VRAM beside it).[/yellow]")
+        if source in ("draft", "ngram"):
+            costs = engine.draft_step_costs()
+            if costs:
+                verify = ", ".join("%s: %.1f" % (n, ms)
+                                   for n, ms in sorted(costs.get("verify_ms", {}).items(),
+                                                       key=lambda kv: int(kv[0])))
+                draft_ms = (f", draft {costs.get('draft_ms', 0):.1f}"
+                            if source == "draft" else "")
+                console.print(f"[dim]Measured step ms: model {costs.get('target_ms', 0):.1f}, "
+                              f"checking n tokens {{{verify}}}{draft_ms}[/dim]")
         if not usable:
             return ([], False, status, engine.gpu_placement, (0, 0), [], "", [])
         per_prompt = []
@@ -269,6 +286,12 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
             [{"role": "user", "content": _SPEC_REPEAT_PROMPT}],
             max_tokens=gen_tokens, seed=_MTP_PROBE_SEED, temperature=0.0,
             top_p=1.0, top_k=1, repeat_penalty=1.0))
+        if source in ("draft", "ngram"):
+            observed = (engine.draft_step_costs() or {}).get("observed_ms") or {}
+            if observed:
+                shown = ", ".join("%s: %.1f" % (k, ms) for k, ms in
+                                  sorted(observed.items(), key=lambda kv: int(kv[0])))
+                console.print(f"[dim]Step ms seen by drafts per step: {{{shown}}}[/dim]")
         return (rates, True, status, engine.gpu_placement, (drafted, accepted),
                 texts, greedy, per_prompt)
     finally:
@@ -489,8 +512,11 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
 @main.command("bench-spec")
 @click.argument("model", shell_complete=_complete_model_name)
 @click.option("-s", "--source", default="ngram", show_default=True,
-              type=click.Choice(["ngram", "mtp"]),
+              type=click.Choice(["ngram", "mtp", "draft"]),
               help="Draft source to compare against no speculation.")
+@click.option("-m", "--draft-model", default=None, shell_complete=_complete_model_name,
+              help="Draft model for --source draft (default: the "
+                   "spec_draft_model setting).")
 @click.option("-n", "--gen-tokens", default=160, show_default=True,
               help="Tokens to generate per prompt.")
 @click.option("--rounds", default=3, show_default=True,
@@ -500,13 +526,16 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
 @click.option("-g", "--gpu-layers", default=None, type=click.IntRange(0, 1000))
 @click.option("-d", "--draft-tokens", default=None, type=click.IntRange(1, 16),
               help="Draft tokens per step for the 'on' runs (MTP: 1-3, default "
-                   "mtp_draft_tokens; n-gram: 1-16, default spec_draft_tokens).")
-def bench_spec(model, source, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
+                   "mtp_draft_tokens; n-gram and draft model: 1-16, default "
+                   "spec_draft_tokens).")
+def bench_spec(model, source, draft_model, gen_tokens, rounds, ctx, gpu_layers,
+               draft_tokens):
     """Measure whether speculative drafting makes MODEL faster on this machine.
 
     Loads MODEL twice per round, once with no speculation and once with the
     draft SOURCE (ngram: drafts from repeats of earlier text in the prompt and
-    reply; mtp: the model's own MTP head), and generates the same prompts
+    reply; mtp: the model's own MTP head; draft: a smaller model, --draft-model),
+    and generates the same prompts
     through each, one of them a rewrite that repeats its input. Reports the
     decode throughput of both, which won, how many drafted tokens were
     accepted, whether the replies differ, and whether a greedy reply matched.
@@ -522,15 +551,91 @@ def bench_spec(model, source, gen_tokens, rounds, ctx, gpu_layers, draft_tokens)
         console.print(f"[red]Model not found:[/red] {escape(model)}")
         sys.exit(1)
     model_path, _hint = info
+    draft_path = None
+    if source == "draft":
+        from ..inference.engine import resolve_spec_draft_model
+        draft_path = resolve_spec_draft_model(load_config(), draft_model)
+        if not draft_path:
+            console.print("[red]No draft model:[/red] pass --draft-model or set "
+                          "spec_draft_model. `localm spec-drafts "
+                          f"{escape(model)}` lists the ones that fit.")
+            sys.exit(1)
     label = _SPEC_LABELS[source]
     console.print(f"Comparing {label} on/off for [cyan]{escape(model)}[/cyan] "
                   f"({rounds} round(s), {len(_SPEC_PROBE_PROMPTS)} prompts each)…")
+    from ..model_manager.gguf import gguf_expert_counts
+    n_expert, n_used = gguf_expert_counts(Path(model_path))
+    if n_expert:
+        console.print(f"[dim]Mixture of experts: {n_used} of {n_expert} experts "
+                      "per token[/dim]")
     _run_spec_bench(
         model, label,
         lambda enabled: _spec_probe_arm(
             model_path, model, source if enabled else "off", gen_tokens, ctx,
-            gpu_layers, draft_tokens=draft_tokens if enabled else None),
+            gpu_layers, draft_tokens=draft_tokens if enabled else None,
+            draft_model=draft_path if enabled else None),
         rounds, kinds=_SPEC_PROBE_KINDS)
+
+
+@main.command("spec-drafts")
+@click.argument("model", shell_complete=_complete_model_name)
+def spec_drafts(model):
+    """List downloaded GGUF models that can be MODEL's draft model.
+
+    A draft model must be a causal chat model and share MODEL's vocabulary:
+    the same tokenizer type, the same BOS/EOS handling, sizes at most 128
+    tokens apart and the same token text. Read from each file's metadata;
+    nothing is loaded. Smaller files are listed first, since a draft only pays
+    when it runs much faster than MODEL.
+    """
+    from rich.markup import escape
+
+    from ..inference.backends.llamacpp._draftmodel import (
+        draft_role_refusal, draft_vocab_mismatch, gguf_vocab_view)
+    from localm.model_manager import load_registry
+    from ..model_manager.gguf import gguf_file_bytes, gguf_vocab_signature
+
+    info = get_operator_model_info(model)
+    if info is None:
+        console.print(f"[red]Model not found:[/red] {escape(model)}")
+        sys.exit(1)
+    target_path = Path(info[0])
+    target_sig = gguf_vocab_signature(target_path)
+    if target_sig is None:
+        console.print(f"[red]{escape(model)} is not a GGUF with a vocabulary localm "
+                      "can read.[/red]")
+        sys.exit(1)
+    target = gguf_vocab_view(target_sig)
+    target_size = gguf_file_bytes(target_path) or 1
+    fits = []
+    for name, entry in sorted(load_registry().items()):
+        path = Path(str(entry.get("path") or "")) if isinstance(entry, dict) else None
+        if (path is None or path.suffix.lower() != ".gguf" or not path.is_file()
+                or path.resolve() == target_path.resolve()
+                or entry.get("model_type", "llm") != "llm"):
+            continue
+        sig = gguf_vocab_signature(path)
+        if sig is None or draft_vocab_mismatch(target, gguf_vocab_view(sig)) is not None:
+            continue
+        if draft_role_refusal(path) is not None:
+            continue
+        fits.append((gguf_file_bytes(path), name))
+    if not fits:
+        console.print(f"No downloaded causal chat model shares {escape(model)}'s vocabulary. "
+                      "A smaller model of the same family usually does.")
+        return
+    from rich.table import Table
+    table = Table(title=f"draft models for {escape(model)}")
+    table.add_column("model")
+    table.add_column("size", justify="right")
+    table.add_column("of target", justify="right")
+    for size, name in sorted(fits):
+        table.add_row(escape(name), f"{size / 1024 ** 3:.2f} GB",
+                      f"{100.0 * size / target_size:.0f}%")
+    console.print(table)
+    console.print("[dim]Use one with: localm config spec_source draft, and "
+                  "localm config spec_draft_model <name>. Check it pays with "
+                  "localm bench-spec <model> --source draft --draft-model <name>.[/dim]")
 
 
 # ------------------------------------------------------------------ #
@@ -954,6 +1059,87 @@ def alias(existing, new_name):
 
     if not alias_model(existing, new_name):
         sys.exit(1)
+
+
+@main.group("adapter")
+def adapter_group():
+    """Attach GGUF LoRA adapters to a base model.
+
+    An adapter is a GGUF file with general.type 'adapter' (made by llama.cpp's
+    convert_lora_to_gguf.py, or downloaded); 'localm add' and 'localm pull'
+    register it as type 'lora'. Attached adapters are applied every time the
+    base model loads.
+
+    \b
+    Example:
+      localm add my-lora.gguf -n my-lora
+      localm adapter attach my-lora qwen3-0.6b --scale 0.8
+      localm run qwen3-0.6b
+    """
+
+
+@adapter_group.command("attach")
+@click.argument("adapter", shell_complete=_complete_model_name)
+@click.argument("base", shell_complete=_complete_model_name)
+@click.option("--scale", default=1.0, show_default=True, type=float,
+              help="Multiplier applied to the adapter's effect (negative subtracts it).")
+def adapter_attach_cmd(adapter, base, scale):
+    """Apply ADAPTER to BASE whenever BASE loads.
+
+    Refuses an adapter whose architecture differs from BASE's, naming both.
+    An adapter belongs to one base; attaching it again moves it.
+    """
+    from rich.markup import escape
+
+    from ..model_manager import AdapterError, attach_adapter
+
+    try:
+        attach_adapter(adapter, base, scale)
+    except AdapterError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        sys.exit(1)
+    console.print(
+        f"[green]✓[/green] [bold]{escape(adapter)}[/bold] is attached to "
+        f"[bold]{escape(base)}[/bold] (scale {scale:g}).")
+    console.print(
+        f"[dim]It is applied the next time {escape(base)} loads; if it is loaded "
+        f"in a running server, run 'localm unload {escape(base)}' first.[/dim]")
+
+
+@adapter_group.command("detach")
+@click.argument("adapter", shell_complete=_complete_model_name)
+def adapter_detach_cmd(adapter):
+    """Stop applying ADAPTER to its base model (the adapter stays registered)."""
+    from rich.markup import escape
+
+    from ..model_manager import detach_adapter
+
+    if not detach_adapter(adapter):
+        console.print(f"[red]'{escape(adapter)}' is not an attached adapter.[/red]")
+        sys.exit(1)
+    console.print(f"[green]✓[/green] [bold]{escape(adapter)}[/bold] is detached.")
+
+
+@adapter_group.command("list")
+def adapter_list_cmd():
+    """List the registered GGUF LoRA adapters and what each is attached to."""
+    from rich.markup import escape
+
+    from localm.model_manager import list_adapters, load_registry
+
+    adapters = list_adapters()
+    if not adapters:
+        console.print("[dim]No adapters registered. Add one with 'localm add <file.gguf>'.[/dim]")
+        return
+    registered = load_registry()
+    for a in adapters:
+        if a["base"] is None:
+            where = "[dim]not attached[/dim]"
+        else:
+            note = "" if a["base"] in registered else " [yellow](base is not registered)[/yellow]"
+            where = (f"attached to [bold]{escape(a['base'])}[/bold] "
+                     f"(scale {a['scale'] if a['scale'] is not None else '?'}){note}")
+        console.print(f"  [bold]{escape(a['name'])}[/bold]  {where}")
 
 
 def _rename_on_running_server(old_name: str, new_name: str):

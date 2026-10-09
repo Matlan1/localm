@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import socket
 import struct
 import subprocess
@@ -38,6 +39,18 @@ def _load(path: Path, name: str):
 @pytest.fixture(scope="module")
 def confirm():
     return _load(_CONFIRM, "confirm_comfyui_runtime")
+
+
+@pytest.fixture(autouse=True)
+def _scratch_env_is_scoped_to_the_test(monkeypatch):
+    """run_teardown_phase points LOCALM_HOME, TEMP, TMP and TMPDIR at the
+    scratch directory it then deletes; put them back after every test."""
+    for name in ("LOCALM_HOME", "TEMP", "TMP", "TMPDIR"):
+        if name in os.environ:
+            monkeypatch.setenv(name, os.environ[name])
+        else:
+            monkeypatch.setenv(name, "")
+            monkeypatch.delenv(name)
 
 
 # --------------------------------------------------------------------------- #

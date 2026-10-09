@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import AsyncIterator, Callable, NamedTuple, Optional
+from typing import Any, AsyncIterator, Callable, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -50,6 +50,8 @@ from localm.inference.backends.base import (
 from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
+from localm.inference.stop_sequences import StopFilter, apply_stop
+from localm.inference.tool_calling import ToolCallStream
 from localm.inference.protocol import (
     COMPACTING_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
     FullChoice, Message, MtpUsage, PROCESSING_PROMPT_STATUS, SpeculationUsage, STATUS_CODE_BY_TEXT,
@@ -522,7 +524,8 @@ def _gpu_placement_fields(engine) -> dict:
     current load, or {} when the backend cannot report placement (no load
     yet, or a backend without a layer-count knob - see Engine.gpu_placement),
     plus the ``Engine.mmap_state`` fields (``use_mmap``, ``mmap``,
-    ``mmap_from_disk``, ``mmap_note``) when the load reported them.
+    ``mmap_from_disk``, ``mmap_note``) when the load reported them, plus
+    ``adapters`` (``Engine.applied_adapters``) when LoRA adapters are applied.
     Merged into every switch_engine()/load-route success payload so a caller
     can tell a full GPU load from a silent CPU fallback instead of a bare
     "loaded"/"already_active" that hides it."""
@@ -531,6 +534,9 @@ def _gpu_placement_fields(engine) -> dict:
     mmap_state = getattr(engine, "mmap_state", None)
     if isinstance(mmap_state, dict):
         fields.update(mmap_state)
+    adapters = getattr(engine, "applied_adapters", None)
+    if isinstance(adapters, list) and adapters:
+        fields["adapters"] = adapters
     return fields
 
 
@@ -1010,12 +1016,20 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     from localm.debuglog import logger as _dbg
     from localm.vram import wait_for_vram_release
 
+    from localm.inference import reranker as _reranker_mod
     embedder_dim = await loop.run_in_executor(None, embedder_mod.loaded_dim)
-    if embedder_dim is None:
+    reranker_loaded = await loop.run_in_executor(None, _reranker_mod.is_loaded)
+    if embedder_dim is None and not reranker_loaded:
         return False
     attempt.embedder_attempted = True
-    cleared = await loop.run_in_executor(
-        None, functools.partial(embedder_mod.reset_embedder, force=False))
+    cleared = False
+    if embedder_dim is not None:
+        cleared = await loop.run_in_executor(
+            None, functools.partial(embedder_mod.reset_embedder, force=False))
+    if reranker_loaded:
+        cleared = await loop.run_in_executor(
+            None, functools.partial(_reranker_mod.reset_reranker, force=False)
+        ) or cleared
     if not cleared:
         return False
     if probe.measurable:
@@ -2033,6 +2047,15 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
             embedder_was_loaded = True
         else:
             skipped_in_use.append("embedding model")
+    # The resident reranker is the same kind of separate lifecycle, released the
+    # same way: loaded()/reset off the event loop, a request in flight pins it.
+    from localm.inference import reranker as _reranker_mod
+    if await loop.run_in_executor(None, _reranker_mod.is_loaded):
+        if await loop.run_in_executor(
+                None, functools.partial(_reranker_mod.reset_reranker, force=False)):
+            embedder_was_loaded = True
+        else:
+            skipped_in_use.append("reranker model")
     return embedder_was_loaded
 
 
@@ -2782,6 +2805,11 @@ def _hang_restart_action(app) -> None:
         _embedder_mod.release_for_exit()
     except Exception:
         _dbg_swallow("embedder release during forced restart failed")
+    try:
+        from localm.inference import reranker as _reranker_mod
+        _reranker_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("reranker release during forced restart failed")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
@@ -3727,6 +3755,11 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     except Exception:
         _dbg_swallow("embedder release during shutdown failed (non-fatal)")
     try:
+        from localm.inference import reranker as _reranker_mod
+        _reranker_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("reranker release during shutdown failed (non-fatal)")
+    try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
     except Exception:
@@ -4001,6 +4034,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         embedder_had_something = _embedder_mod.loaded_path() is not None
     except Exception:
         _dbg_swallow("embedder loaded-state check during restart failed (non-fatal)")
+    try:
+        from localm.inference import reranker as _reranker_mod
+        embedder_had_something = embedder_had_something or _reranker_mod.is_resident()
+    except Exception:
+        _dbg_swallow("reranker loaded-state check during restart failed (non-fatal)")
 
     # A subprocess-isolated GPU probe when torch is not resident. See
     # test_do_restart_skips_vram_wait_when_nothing_was_loaded.
@@ -4043,6 +4081,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         released_embedder = _embedder_mod.release_for_exit()
     except Exception:
         _dbg_swallow("embedder release during restart failed (non-fatal)")
+    try:
+        from localm.inference import reranker as _reranker_mod
+        released_embedder = _reranker_mod.release_for_exit() or released_embedder
+    except Exception:
+        _dbg_swallow("reranker release during restart failed (non-fatal)")
 
     # Wait for the frees above to actually land before re-exec. The re-exec'd
     # process spawns a brand-new GGUF worker that constructs a fresh
@@ -4511,6 +4554,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     pin the resulting stack."""
     from localm.inference.app_assembly import (
         context, diagnostics, errors, mounting, security, transport)
+    from localm.inference.app_assembly import metrics as metrics_assembly
 
     # 1. Process state: the engine registry and the server's session audit.
     _init_engine_state(engine)
@@ -4527,6 +4571,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # 3. Exception handlers, then the app.state the middleware and routes read.
     errors.register_exception_handlers(app)
     context.init_app_state(app)
+    metrics_assembly.configure_metrics()
 
     # 4. Kernel routes and middleware, innermost middleware first.
     if api_landing:
@@ -4537,7 +4582,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     security.add_origin_guard(app, cors_cfg)
     security.add_security_headers(app)
     security.add_docs_loopback_gate(app)
-    transport.add_transport_middleware(app)  # outermost
+    transport.add_transport_middleware(app)
+    metrics_assembly.add_metrics(app)        # outermost; only when enabled
 
     # 5. Route groups (localm/inference/routes/*.py).
     mounting.mount_route_groups(app, ctx)
@@ -4586,6 +4632,14 @@ def _speculation_usage(engine) -> Optional[SpeculationUsage]:
         _dbg.debug("usage.speculation left out: the engine's figures did not "
                    "validate (%s)", type(exc).__name__)
         return None
+
+
+def _record_generation_metrics(prompt_tokens, completion_tokens, ttft_ms,
+                               tokens_per_sec) -> None:
+    """Hand one finished generation's figures to the metrics collector."""
+    from localm.inference import metrics
+    metrics.observe_generation(prompt_tokens, completion_tokens, ttft_ms,
+                               tokens_per_sec)
 
 
 def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[float]:
@@ -4734,20 +4788,20 @@ def _audit_exchange(audit, transcript, messages: list, reply: str,
         pass  # auditing must never break serving
 
 
-def _reason_sse(content: str, reasoning: str,
-                model_id: str, chunk_id: str, ts: int) -> list:
-    """SSE ``data:`` lines for a (content, reasoning) split. Reasoning is
-    emitted before content (it precedes the answer); empty parts produce
-    nothing, so an ordinary content-only token yields exactly one chunk."""
+def _events_sse(events: list, model_id: str, chunk_id: str, ts: int) -> list:
+    """SSE ``data:`` lines for the ``("reasoning" | "text" | "call", value)``
+    events of a :class:`_ReplyRouter`, one chunk per event. A call is sent whole,
+    in one ``delta.tool_calls`` entry."""
     from localm.inference.protocol import ChatChunk, ChoiceDelta, StreamChoice
     out = []
-    for field, value in (("reasoning_content", reasoning), ("content", content)):
-        if not value:
-            continue
-        chunk = ChatChunk(
-            id=chunk_id, created=ts, model=model_id,
-            choices=[StreamChoice(delta=ChoiceDelta(**{field: value}))],
-        )
+    for kind, value in events:
+        if kind == "call":
+            delta = ChoiceDelta(tool_calls=[value.as_openai(with_index=True)])
+        else:
+            delta = ChoiceDelta(**{
+                "reasoning_content" if kind == "reasoning" else "content": value})
+        chunk = ChatChunk(id=chunk_id, created=ts, model=model_id,
+                          choices=[StreamChoice(delta=delta)])
         out.append(f"data: {chunk.model_dump_json()}\n\n")
     return out
 
@@ -4998,21 +5052,22 @@ async def _stream_sse(
     that still does not fit, or whose recount is refused, ends the stream with
     the refusal as an error reply and no generation."""
     from localm.inference.compact import compactable
-    from localm.inference.gbnf import think_exit_marker
-    from localm.textnorm import ThinkSplitter
 
     chunk_id = chunk_id or make_chunk_id()
     ts = int(time.time())
-    # route <think> reasoning into delta.reasoning_content; a tool call the lazy
-    # grammar forced inside an open think block is the reply, not reasoning
-    think = ThinkSplitter(exit_marker=think_exit_marker(
-        gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+    # Reasoning goes to delta.reasoning_content, tool calls to delta.tool_calls,
+    # and the stop sequences apply to the visible text only.
+    tool_names = gen_kwargs.pop("tool_names", None)
+    stop = gen_kwargs.pop("stop", None)
+    router = _ReplyRouter(stop, tool_names, gen_kwargs)
+    gen_kwargs.pop("max_tool_calls", None)
 
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
         compact = compact or (
             _needs_compaction(engine.context_capacity(), prompt_tokens, messages,
-                              _engine_is_encoder_decoder(engine))
+                              encoder_decoder=_engine_is_encoder_decoder(engine),
+                              reply_reserve=_engine_reply_reserve(engine))
             and compactable(messages))
 
     if not role_sent:
@@ -5046,7 +5101,9 @@ async def _stream_sse(
         if (not refusal and isinstance(capacity, int) and capacity > 0
                 and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
             refusal = context_overflow_detail(
-                prompt_tokens, capacity, _engine_is_encoder_decoder(engine))
+                prompt_tokens, capacity,
+                encoder_decoder=_engine_is_encoder_decoder(engine),
+                reply_reserve=_engine_reply_reserve(engine))
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
@@ -5099,14 +5156,16 @@ async def _stream_sse(
         def _on_status(s: str) -> None:
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
 
+        from localm.inference.backends.base import stream_stop_check
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
-            gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
-            for token in gen:
-                if cancel_event.is_set():
-                    break
-                loop.call_soon_threadsafe(token_queue.put_nowait, token)
+            with stream_stop_check(cancel_event.is_set):
+                gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
+                for token in gen:
+                    if cancel_event.is_set():
+                        break
+                    loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
             # Log (full traceback to the debug log) and surface to the client - a
             # silent thread death looks like an empty reply. NOT
@@ -5175,8 +5234,10 @@ async def _stream_sse(
                     if pipeline is not None and ctx is not None and pipeline.has("stream"):
                         token = pipeline.run_stream(token, ctx)
                     completion_parts.append(token)
-                    for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
+                    for data in _events_sse(router.feed(token), model_id, chunk_id, ts):
                         yield data
+                    if router.stopped:
+                        break
                 drained = True
             finally:
                 # Signal the producer to stop. On a clean finish this is a no-op: the
@@ -5199,8 +5260,9 @@ async def _stream_sse(
             # stops being reachable, same as an unpin with nothing pinned).
             residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
-        # Release any tail held back while disambiguating a partial <think> tag.
-        for data in _reason_sse(*think.flush(), model_id, chunk_id, ts):
+        # Release any tail held back while disambiguating a partial <think> tag,
+        # a partial tool call or a partial stop sequence.
+        for data in _events_sse(router.flush(), model_id, chunk_id, ts):
             yield data
 
     error_text = ""
@@ -5210,10 +5272,17 @@ async def _stream_sse(
         yield f"data: {err_chunk.model_dump_json()}\n\n"
 
     streamed = "".join(completion_parts)
+    if router.stopped:
+        reasoning_text = "".join(router.reasoning)
+        streamed = (f"<think>{reasoning_text}</think>" if reasoning_text else "") \
+            + "".join(router.content)
     # finish_reason is fixed before the outlet phase; ctx.outcome, the audit
     # record and the terminal frame all carry the same value. A mid-stream
     # error reports "error", never a clean "stop".
-    finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
+    finish_reason = ("error" if gen_error is not None
+                     else "stop" if router.stopped else _engine_finish_reason(engine))
+    if router.calls and finish_reason == "stop":
+        finish_reason = "tool_calls"
     outcome = _turn_outcome(gen_error, finish_reason)
     if ctx is not None:
         ctx.outcome = outcome
@@ -5244,6 +5313,8 @@ async def _stream_sse(
         mtp=_mtp_usage(engine),
         speculation=_speculation_usage(engine),
     )
+    _record_generation_metrics(usage.prompt_tokens, usage.completion_tokens,
+                               usage.ttft_ms, usage.tokens_per_sec)
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
                           finish_reason=finish_reason)
     yield f"data: {done.model_dump_json()}\n\n"
@@ -5264,6 +5335,10 @@ async def _stream_sse_completion(
 ) -> AsyncIterator[str]:
     chunk_id = make_chunk_id()
     ts = int(time.time())
+    stop = gen_kwargs.pop("stop", None)
+    stopper = StopFilter(stop) if stop else None
+    stopped = False
+    emitted: list[str] = []
     # *messages* arrive already inlet-transformed; count tokens on what
     # inference sees (matches the chat path) if not already provided.
     if prompt_tokens is None:
@@ -5293,14 +5368,16 @@ async def _stream_sse_completion(
         def _on_status(s: str) -> None:
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
 
+        from localm.inference.backends.base import stream_stop_check
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
-            gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
-            for token in gen:
-                if cancel_event.is_set():
-                    break
-                loop.call_soon_threadsafe(token_queue.put_nowait, token)
+            with stream_stop_check(cancel_event.is_set):
+                gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
+                for token in gen:
+                    if cancel_event.is_set():
+                        break
+                    loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
             # Surface an inference failure to the client instead of letting this
             # daemon thread die (an uncaught death fires a crash report and looks
@@ -5362,13 +5439,21 @@ async def _stream_sse_completion(
                     # so usage and the audit trail reflect what the client receives.
                     if pipeline is not None and ctx is not None and pipeline.has("stream"):
                         token = pipeline.run_stream(token, ctx)
+                    piece = token
+                    if stopper is not None:
+                        piece = stopper.feed(token)
+                        stopped = stopper.hit
+                        emitted.append(piece)
                     completion_parts.append(token)
-                    chunk = {
-                        "id": chunk_id, "object": "text_completion.chunk",
-                        "created": ts, "model": model_id,
-                        "choices": [{"text": token, "index": 0, "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    if piece or stopper is None:
+                        chunk = {
+                            "id": chunk_id, "object": "text_completion.chunk",
+                            "created": ts, "model": model_id,
+                            "choices": [{"text": piece, "index": 0, "finish_reason": None}],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                    if stopped:
+                        break
                 drained = True
             finally:
                 # No-op on a clean finish (thread already exited after the sentinel);
@@ -5382,6 +5467,16 @@ async def _stream_sse_completion(
             residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
 
+    if stopper is not None and not stopped:
+        tail = stopper.flush()
+        if tail:
+            tail_chunk = {
+                "id": chunk_id, "object": "text_completion.chunk",
+                "created": ts, "model": model_id,
+                "choices": [{"text": tail, "index": 0, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(tail_chunk)}\n\n"
+
     error_text = ""
     if gen_error is not None:
         error_text = inference_error_text(gen_error)
@@ -5392,7 +5487,7 @@ async def _stream_sse_completion(
         }
         yield f"data: {json.dumps(err)}\n\n"
 
-    streamed = "".join(completion_parts)
+    streamed = "".join(emitted if stopped else completion_parts)
     outcome = _turn_outcome(gen_error, "stop")
     if ctx is not None:
         ctx.outcome = outcome
@@ -5424,6 +5519,9 @@ async def _stream_sse_completion(
                 completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         },
     }
+    _record_generation_metrics(prompt_tokens, completion_tokens,
+                               done["usage"]["ttft_ms"],
+                               done["usage"]["tokens_per_sec"])
     yield f"data: {json.dumps(done)}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -5433,17 +5531,21 @@ COMPACTION_DISCONNECT_DETAIL = (
 
 
 def _needs_compaction(capacity, prompt_tokens, messages,
-                      encoder_decoder: bool = False) -> bool:
+                      encoder_decoder: bool = False,
+                      reply_reserve: Optional[int] = None) -> bool:
     """True when *prompt_tokens* leaves less than the reply buffer (2048 tokens
     or 10% of *capacity*, whichever is larger) free in *capacity*, for a
     conversation of more than three messages. With *encoder_decoder* the reply
     does not occupy *capacity*, so it is True only when the prompt itself is
-    larger than *capacity*."""
+    larger than *capacity*. *reply_reserve*, when given, is the reply buffer
+    instead (a diffusion model's whole reply canvas)."""
     if not (isinstance(capacity, int) and capacity > 0
             and isinstance(prompt_tokens, int) and len(messages) > 3):
         return False
     if encoder_decoder:
         return prompt_tokens > capacity
+    if reply_reserve is not None:
+        return capacity - prompt_tokens < reply_reserve
     return capacity - prompt_tokens < max(2048, int(capacity * 0.10))
 
 
@@ -5453,15 +5555,30 @@ def _engine_is_encoder_decoder(engine) -> bool:
     return getattr(engine, "encoder_decoder", False) is True
 
 
+def _engine_reply_reserve(engine) -> Optional[int]:
+    """The reply buffer *engine*'s model needs inside its context capacity when
+    that is fixed by the model (a diffusion model's reply canvas), else None."""
+    reserve = getattr(engine, "reply_reserve", None)
+    if isinstance(reserve, int) and not isinstance(reserve, bool) and reserve > 0:
+        return reserve
+    return None
+
+
 def context_overflow_detail(prompt_tokens: int, capacity: int,
-                            encoder_decoder: bool = False) -> str:
+                            encoder_decoder: bool = False,
+                            reply_reserve: Optional[int] = None) -> str:
     """The refusal text for a prompt larger than the context capacity. With
-    *encoder_decoder* the text names the model's one-pass prompt limit instead
-    of the context window settings."""
+    *encoder_decoder* the text names the model's one-pass prompt limit, and with
+    *reply_reserve* (a diffusion model) the fixed window that holds prompt and
+    reply together, instead of the context window settings."""
     if encoder_decoder:
         return (f"Prompt ({prompt_tokens} tokens) exceeds the {capacity} tokens "
                 f"this encoder-decoder model reads in one pass. Shorten the "
                 f"message or start a new chat.")
+    if reply_reserve is not None:
+        return (f"Prompt ({prompt_tokens} tokens) does not fit the {capacity} "
+                f"tokens this diffusion model reads at once, prompt and reply "
+                f"together. Start a new chat or shorten the message.")
     return (f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
             f"context capacity ({capacity} tokens). Start a new chat, "
             f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
@@ -5510,14 +5627,16 @@ async def _compact_for_capacity(engine, messages: list, request=None
     disconnected = {"v": False}
 
     def _gen_for_compact(ms: list[dict], max_t: int) -> str:
+        from localm.inference.backends.base import stream_stop_check
         parts = []
         gen = engine.chat_stream(ms, max_tokens=max_t, temperature=0.3,
                                  thinking=False)
         try:
-            for tok in gen:
-                if cancel.is_set():
-                    break
-                parts.append(tok)
+            with stream_stop_check(cancel.is_set):
+                for tok in gen:
+                    if cancel.is_set():
+                        break
+                    parts.append(tok)
         finally:
             gen.close()
         if cancel.is_set():
@@ -5559,6 +5678,100 @@ async def _compact_for_capacity(engine, messages: list, request=None
     return new_messages, changed, disconnected["v"]
 
 
+class _StopDetector:
+    """Watches a non-streamed generation for the end of the reply: a stop
+    sequence in the visible text (reasoning inside ``<think>`` and tool calls are
+    not searched), or the call that reaches ``max_tool_calls``. The generation
+    can then end at the token that completes it."""
+
+    def __init__(self, stops, tool_names, gen_kwargs: dict) -> None:
+        self._router = _ReplyRouter(stops, tool_names, gen_kwargs)
+
+    def feed(self, token: str) -> bool:
+        self._router.feed(token)
+        return self._router.stopped
+
+
+class _ReplyRouter:
+    """Splits one reply into reasoning, visible text and tool calls, and applies
+    the stop sequences to the visible text only.
+
+    ``feed`` takes a generated piece and ``flush`` ends the reply; both return
+    ``("reasoning" | "text" | "call", value)`` events (a call's value is a
+    ``ParsedCall``). After a stop sequence matches, nothing more is returned.
+    ``content`` holds the visible text and the calls (as the model wrote them) in
+    order, ``reasoning`` the reasoning, ``calls`` the calls."""
+
+    def __init__(self, stops, tool_names, gen_kwargs: dict) -> None:
+        from localm.inference.gbnf import think_exit_marker
+        from localm.textnorm import ThinkSplitter
+        self._think = ThinkSplitter(exit_marker=think_exit_marker(
+            gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+        self._tools = ToolCallStream(tool_names) if tool_names else None
+        self._stop = StopFilter(stops) if stops else None
+        self._max_calls = gen_kwargs.get("max_tool_calls")
+        self.calls: list = []
+        self.content: list[str] = []
+        self.reasoning: list[str] = []
+
+    @property
+    def stopped(self) -> bool:
+        if self._max_calls is not None and len(self.calls) >= self._max_calls:
+            return True
+        return self._stop is not None and self._stop.hit
+
+    def feed(self, token: str) -> list:
+        content, reasoning = self._think.feed(token)
+        return self._route(content, reasoning, final=False)
+
+    def flush(self) -> list:
+        if self.stopped:
+            return []
+        content, reasoning = self._think.flush()
+        return self._route(content, reasoning, final=True)
+
+    def _cut(self, text: str) -> str:
+        return self._stop.feed(text) if self._stop is not None else text
+
+    def _release(self) -> str:
+        if self._stop is None or self._stop.hit:
+            return ""
+        return self._stop.flush()
+
+    def _text(self, text: str) -> list:
+        if not text:
+            return []
+        self.content.append(text)
+        return [("text", text)]
+
+    def _route(self, content: str, reasoning: str, final: bool) -> list:
+        out: list = []
+        if reasoning:
+            self.reasoning.append(reasoning)
+            out.append(("reasoning", reasoning))
+        events: list[tuple[str, Any]]
+        if self._tools is None:
+            events = [("text", content)]
+        else:
+            events = self._tools.feed(content)
+            if final:
+                events += self._tools.finish()
+        for kind, value in events:
+            if self.stopped:
+                break
+            if kind == "text":
+                out += self._text(self._cut(value))
+                continue
+            out += self._text(self._release())
+            value.index = len(self.calls)
+            self.calls.append(value)
+            self.content.append(value.block())
+            out.append(("call", value))
+        if final and not self.stopped:
+            out += self._text(self._release())
+        return out
+
+
 async def _generate_full(engine, messages: list, request=None, *,
                          timing: Optional[dict] = None, **gen_kwargs) -> str:
     """Consume a whole (non-streaming) generation in an executor while watching for
@@ -5592,18 +5805,27 @@ async def _generate_full(engine, messages: list, request=None, *,
     cancel_event = threading.Event()
     residency.register_cancel(engine.display_name, cancel_event)
     poll = _resolve_disconnect_poll(request)
+    stop = gen_kwargs.pop("stop", None)
+    tool_names = gen_kwargs.pop("tool_names", None)
+    ends_early = bool(stop) or bool(tool_names and gen_kwargs.get("max_tool_calls"))
+    stop_detector = _StopDetector(stop, tool_names, gen_kwargs) if ends_early else None
+    gen_kwargs.pop("max_tool_calls", None)
 
     def _run() -> str:
+        from localm.inference.backends.base import stream_stop_check
         _log_assembled_prompt(messages)
         gen = engine.chat_stream(messages, **gen_kwargs)
         parts: list[str] = []
         try:
-            for token in gen:
-                if cancel_event.is_set():
-                    break
-                if timing is not None and "first_token_at" not in timing:
-                    timing["first_token_at"] = time.perf_counter()
-                parts.append(token)
+            with stream_stop_check(cancel_event.is_set):
+                for token in gen:
+                    if cancel_event.is_set():
+                        break
+                    if timing is not None and "first_token_at" not in timing:
+                        timing["first_token_at"] = time.perf_counter()
+                    parts.append(token)
+                    if stop_detector is not None and stop_detector.feed(token):
+                        break
         finally:
             # Close from THIS (suspended) worker thread so GeneratorExit propagates
             # through the backend wrappers into llama.py _generate, whose
@@ -5860,7 +6082,8 @@ async def _complete(
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
         if _needs_compaction(capacity, prompt_tokens, messages,
-                             _engine_is_encoder_decoder(engine)):
+                             encoder_decoder=_engine_is_encoder_decoder(engine),
+                             reply_reserve=_engine_reply_reserve(engine)):
             new_messages, changed, gone = await _compact_for_capacity(
                 engine, messages, request)
             if gone:
@@ -5916,7 +6139,33 @@ async def _complete(
         gen_end = time.perf_counter()
     first_token_at = timing.get("first_token_at")
 
-    finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
+    stop = gen_kwargs.get("stop")
+    tool_names = gen_kwargs.get("tool_names")
+    stopped = False
+    has_calls = False
+    if tool_names and gen_error is None:
+        routed = _ReplyRouter(stop, tool_names, gen_kwargs)
+        routed.feed(text)
+        routed.flush()
+        stopped = routed.stopped
+        has_calls = bool(routed.calls)
+        if stopped:
+            reasoning_text = "".join(routed.reasoning)
+            text = (f"<think>{reasoning_text}</think>" if reasoning_text else "") \
+                + "".join(routed.content)
+    elif stop and gen_error is None:
+        from localm.inference.gbnf import think_exit_marker
+        from localm.textnorm import split_think
+        visible, reasoning_text = split_think(text, exit_marker=think_exit_marker(
+            gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+        visible, stopped = apply_stop(visible, stop)
+        if stopped:
+            text = (f"<think>{reasoning_text}</think>" if reasoning_text else "") + visible
+
+    finish_reason = ("error" if gen_error is not None
+                     else "stop" if stopped else _engine_finish_reason(engine))
+    if has_calls and finish_reason == "stop":
+        finish_reason = "tool_calls"
     outcome = _turn_outcome(gen_error, finish_reason)
     if ctx is not None:
         ctx.outcome = outcome
@@ -5931,10 +6180,23 @@ async def _complete(
     # Split the model's <think> reasoning out of the visible answer into a
     # separate field, so API clients get clean content (token count stays on
     # the full generated text - reasoning was still generated).
-    from localm.inference.gbnf import think_exit_marker
-    from localm.textnorm import split_think
-    answer, reasoning = split_think(text, exit_marker=think_exit_marker(
-        gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+    tool_calls = None
+    if tool_names and gen_error is None:
+        final = _ReplyRouter(None, tool_names, gen_kwargs)
+        events = final.feed(text) + final.flush()
+        answer = "".join(value for kind, value in events if kind == "text")
+        reasoning = "".join(final.reasoning)
+        if final.calls:
+            tool_calls = [call.as_openai() for call in final.calls]
+            if not answer.strip():
+                answer = ""
+        elif finish_reason == "tool_calls":
+            finish_reason = "stop"
+    else:
+        from localm.inference.gbnf import think_exit_marker
+        from localm.textnorm import split_think
+        answer, reasoning = split_think(text, exit_marker=think_exit_marker(
+            gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
 
     completion_tokens = await _count_streamed_tokens(engine, text)
     usage = UsageInfo(
@@ -5952,6 +6214,9 @@ async def _complete(
         speculation=_speculation_usage(engine),
     )
 
+    _record_generation_metrics(usage.prompt_tokens, usage.completion_tokens,
+                               usage.ttft_ms, usage.tokens_per_sec)
+
     response = ChatResponse(
         id=make_chunk_id(),
         created=int(time.time()),
@@ -5959,7 +6224,8 @@ async def _complete(
         choices=[
             FullChoice(
                 message=Message(role="assistant", content=answer,
-                                reasoning_content=reasoning or None),
+                                reasoning_content=reasoning or None,
+                                tool_calls=tool_calls),
                 finish_reason=finish_reason,
             )
         ],
@@ -6004,6 +6270,8 @@ def _protocol_messages_to_dicts(messages: list[Message]) -> list:
         origin = getattr(msg, "origin", None)
         if origin:
             result[-1]["origin"] = origin
+        if msg.tool_calls:
+            result[-1]["tool_calls"] = msg.tool_calls
     return result
 
 

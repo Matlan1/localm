@@ -2625,7 +2625,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       await postAndRead(body);
     } catch (e) {
       // The backend refused the grammar itself (this exact wording is shared by
-      // GRAMMAR_UNSUPPORTED_MESSAGE and GRAMMAR_LAZY_UNSUPPORTED_MESSAGE in
+      // GRAMMAR_UNSUPPORTED_MESSAGE, GRAMMAR_LAZY_UNSUPPORTED_MESSAGE and
+      // GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE in
       // localm/inference/backends/base.py, and by neither of the route's other
       // grammar 400s) - retry this turn unconstrained, and stop asking for the
       // rest of this page's session.

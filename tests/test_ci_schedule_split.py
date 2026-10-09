@@ -21,7 +21,7 @@ _CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 NIGHTLY = "23 3 * * *"
 WEEKLY = "37 6 * * 1"
 
-NIGHTLY_JOBS = {"test", "gui-tests", "optional-stacks", "lint"}
+NIGHTLY_JOBS = {"test-shard", "test", "gui-tests", "optional-stacks", "lint"}
 WEEKLY_JOBS = NIGHTLY_JOBS | {
     "abi-check", "comfyui-pin-check", "llama-rocm-pin-check",
     "mutation-run", "mutation-test", "web-search-canary", "voice-stack",

@@ -140,6 +140,10 @@ class VramSizingMixin:
     mutable one-time-hint guard).
     """
 
+    model_path: str
+    n_ctx: int
+    n_gpu_layers: int
+
     # Rough VRAM headroom for KV cache + compute buffers beyond model weights,
     # single-sourced from localm.vram.
     _VRAM_OVERHEAD_BYTES = VRAM_OVERHEAD_BYTES
@@ -546,7 +550,10 @@ class VramSizingMixin:
         them otherwise; with MTP enabled the MTP draft context
         (:meth:`_mtp_draft_context_vram_bytes`) is charged as the KV cache of
         those layers. The recurrent state (:meth:`_recurrent_state_vram_bytes`)
-        is charged in equal parts to the layers that keep one. A plan that writes a split or reports a shortfall is
+        is charged in equal parts to the layers that keep one. A draft model on
+        the GPU (:meth:`_draft_model_vram_bytes`) is split over the same devices
+        as the target, so it is charged to them in proportion to their shares.
+        A plan that writes a split or reports a shortfall is
         returned only when :func:`localm.discover.runtime_split_devices_match`
         confirms the device numbering; when the runtime instead keeps the
         integrated GPUs (:func:`localm.discover.runtime_identity_split_devices`),
@@ -624,7 +631,8 @@ class VramSizingMixin:
                 "fit_kw": dict(output_bytes=int(output_bytes),
                                layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
                                logits_bytes=logits,
-                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES)),
+                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES),
+                               spread_bytes=int(self._draft_model_vram_bytes())),
             }
         except Exception as e:
             from localm.debuglog import logger as _dbg
@@ -776,8 +784,8 @@ class VramSizingMixin:
         ``gguf_recurrent_state_bytes`` is one copy of it; the context allocates
         ``1 + n_rs_seq`` copies. ``n_rs_seq`` is 0 without speculation; with
         MTP enabled it is ``llama.mtp_rs_seq`` of the draft-token count, and
-        with the ngram draft source ``_ngram.ngram_rs_seq`` of the n-gram draft
-        cap for a recurrent model (the same calls LlamaCpp makes when it
+        with the ngram or draft source ``_ngram.ngram_rs_seq`` of that source's
+        draft cap for a recurrent model (the same calls LlamaCpp makes when it
         creates the context). Never raises: a probe failure charges 0.
         Memoised per instance."""
         cached = getattr(self, "_recurrent_state_vram_bytes_cached", None)
@@ -790,11 +798,16 @@ class VramSizingMixin:
                 Path(self.model_path), _parsed=self._gguf_parsed_tensor_entries())
             if per_copy:
                 n_rs_seq = 0
-                if getattr(self, "spec_source", None) == "ngram":
+                source = getattr(self, "spec_source", None)
+                if source in ("ngram", "draft"):
+                    from localm.inference.backends.llamacpp._draftmodel import (
+                        DRAFT_MODEL_DRAFT_TOKENS_DEFAULT)
                     from localm.inference.backends.llamacpp._ngram import (
-                        ngram_draft_cap, ngram_rs_seq)
+                        NGRAM_DRAFT_TOKENS_DEFAULT, ngram_draft_cap, ngram_rs_seq)
                     n_rs_seq = ngram_rs_seq(0, ngram_draft_cap(
-                        getattr(self, "spec_draft_tokens", None), True))
+                        getattr(self, "spec_draft_tokens", None), True,
+                        default=(NGRAM_DRAFT_TOKENS_DEFAULT if source == "ngram"
+                                 else DRAFT_MODEL_DRAFT_TOKENS_DEFAULT)))
                 elif getattr(self, "mtp_enabled", False):
                     from localm.inference.backends.llamacpp.llama import (
                         MTP_DRAFT_TOKENS_DEFAULT, mtp_rs_seq)
@@ -809,6 +822,150 @@ class VramSizingMixin:
             charge = 0
         self._recurrent_state_vram_bytes_cached = charge
         return charge
+
+    def _draft_model_charge_bytes(self) -> int:
+        """VRAM the draft source's second model needs on the GPU for THIS load,
+        0 unless ``spec_source`` is "draft", this model is neither an
+        encoder-decoder nor a diffusion model (neither drafts), and
+        ``spec_draft_model`` is a readable GGUF that
+        ``_draft_model_rejected_by_metadata`` does not reject.
+
+        The draft model's file size (its weights), its KV cache for
+        ``self.n_ctx`` tokens, the logits buffer of a context whose batch is
+        ``DRAFT_CONTEXT_BATCH``, and ``DRAFT_COMPUTE_MARGIN_BYTES``; the draft
+        context is created at the main context's size. Never raises: a probe
+        failure charges 0. Memoised per instance."""
+        if getattr(self, "spec_source", None) != "draft" or self._keeps_no_kv_cache():
+            return 0
+        cached = getattr(self, "_draft_model_charge_bytes_cached", None)
+        if cached is not None:
+            return cached
+        charge = 0
+        try:
+            from localm.inference.backends.llamacpp._draftmodel import (
+                DRAFT_COMPUTE_MARGIN_BYTES, DRAFT_CONTEXT_BATCH)
+            from localm.inference.backends.llamacpp._split_fit import logits_buffer_bytes
+            from localm.model_manager.gguf import (
+                _GGUF_ENCODER_DECODER_ARCHITECTURES, _gguf_split_layout_meta, gguf_architecture,
+                gguf_file_bytes, gguf_kv_bytes_per_token)
+            raw = getattr(self, "spec_draft_model", None)
+            path = Path(raw) if raw else None
+            encoder_decoder = (gguf_architecture(Path(self.model_path))
+                               in _GGUF_ENCODER_DECODER_ARCHITECTURES)
+            if (path is not None and path.is_file() and not encoder_decoder
+                    and not self._draft_model_rejected_by_metadata(path)):
+                kv_per_token = int(gguf_kv_bytes_per_token(path))
+                meta = _gguf_split_layout_meta(path)
+                n_vocab = meta[1] if meta else 0
+                self._draft_kv_per_token_cached = kv_per_token
+                charge = (gguf_file_bytes(path) + self.n_ctx * kv_per_token
+                          + logits_buffer_bytes(n_vocab, self.n_ctx,
+                                                max_batch=DRAFT_CONTEXT_BATCH)
+                          + DRAFT_COMPUTE_MARGIN_BYTES)
+        except Exception as exc:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("draft-model VRAM probe failed (%s); charging nothing "
+                       "extra for it", type(exc).__name__)
+            charge = 0
+        self._draft_model_charge_bytes_cached = charge
+        return charge
+
+    def _draft_model_rejected_by_metadata(self, path: Path) -> bool:
+        """Whether *path*'s GGUF metadata already shows the load would reject it
+        as this model's draft model: not a causal chat model
+        (``draft_role_refusal``), recurrent-state layers, or a vocabulary
+        ``draft_vocab_mismatch`` refuses against this model's. False when the
+        metadata cannot be read. Never raises."""
+        try:
+            from localm.inference.backends.llamacpp._draftmodel import (
+                draft_role_refusal, draft_vocab_mismatch, gguf_vocab_view)
+            from localm.model_manager.gguf import (
+                gguf_recurrent_state_bytes, gguf_vocab_signature)
+            if draft_role_refusal(path) is not None:
+                return True
+            if gguf_recurrent_state_bytes(path) > 0:
+                return True
+            target = gguf_vocab_signature(Path(self.model_path))
+            draft = gguf_vocab_signature(path)
+            if target is None or draft is None:
+                return False
+            return draft_vocab_mismatch(gguf_vocab_view(target),
+                                        gguf_vocab_view(draft)) is not None
+        except Exception as exc:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("draft-model metadata check failed (%s); charging it",
+                       type(exc).__name__)
+            return False
+
+    def _draft_model_vram_bytes(self) -> int:
+        """VRAM the draft model takes for THIS load: ``_draft_model_charge_bytes``
+        while ``draft_model_on_gpu`` is True (the default until
+        ``_decide_draft_placement`` runs), else 0."""
+        if not getattr(self, "draft_model_on_gpu", True):
+            return 0
+        return self._draft_model_charge_bytes()
+
+    def _decide_draft_placement(self) -> bool:
+        """Whether the draft model goes on the GPU, recorded in
+        ``draft_model_on_gpu`` and returned.
+
+        True when the draft source is not configured, its charge is 0, or free
+        VRAM cannot be read. False when the target runs on the CPU
+        (``n_gpu_layers`` 0). Under llama.cpp's implicit split over 2+ devices
+        (:meth:`_implicit_split_fit` applies), True exactly when the per-device
+        plan with the draft split over the target's devices keeps the
+        target's split and fits every device. Otherwise True exactly when free
+        VRAM covers the target's GPU weights (every layer, or ``n_gpu_layers``
+        of them when fewer are configured), its KV cache for ``self.n_ctx``
+        tokens, the compute overhead, any MTP draft context, the recurrent
+        state and the draft charge. A draft model that does not fit runs on the
+        CPU, so it never takes GPU layers or devices from the target. Reads
+        free VRAM, so it must not run on an event loop thread."""
+        on_gpu = True
+        charge = self._draft_model_charge_bytes()
+        if getattr(self, "spec_source", None) == "draft" and charge > 0:
+            self.draft_model_on_gpu = True
+            with_draft = (self._implicit_split_fit(self.n_gpu_layers)
+                          if self.n_gpu_layers > 0 else None)
+            if self.n_gpu_layers <= 0:
+                on_gpu = False
+            elif with_draft is not None:
+                self.draft_model_on_gpu = False
+                without = self._implicit_split_fit(self.n_gpu_layers)
+                charges = with_draft.chosen or with_draft.default
+                on_gpu = (without is not None
+                          and with_draft.tensor_split == without.tensor_split
+                          and all(c.fits for c in charges))
+            else:
+                free, _total, split_devices = self._split_free_total_bytes()
+                if free is None:
+                    free, split_devices = self._free_vram_bytes(), 1
+                if free is not None:
+                    model = self._vram_model_bytes(int(getattr(self, "n_cpu_moe", 0) or 0))
+                    if self.n_gpu_layers < self._DEFAULT_GPU_LAYERS:
+                        layers = self._cached_layer_count() or self._ASSUMED_LAYERS
+                        model = model * min(self.n_gpu_layers, layers) // layers
+                    need = (model + self.n_ctx * self._kv_bytes_per_token()
+                            + self._split_overhead_bytes(split_devices or 1)
+                            + self._mtp_draft_context_vram_bytes()
+                            + self._recurrent_state_vram_bytes() + charge)
+                    on_gpu = free >= need
+        self.draft_model_on_gpu = on_gpu
+        return on_gpu
+
+    def _spec_extra_vram_bytes(self) -> int:
+        """VRAM the configured draft source needs beyond the main model and
+        context: the MTP draft context or the draft model."""
+        return self._mtp_draft_context_vram_bytes() + self._draft_model_vram_bytes()
+
+    def _spec_kv_per_token(self) -> int:
+        """KV bytes per token of context a draft source adds on the GPU: the MTP
+        draft context's or the draft model's while it is on the GPU, both of
+        which grow with the main one."""
+        draft = 0
+        if self._draft_model_vram_bytes():
+            draft = int(getattr(self, "_draft_kv_per_token_cached", 0) or 0)
+        return self._mtp_draft_kv_per_token() + draft
 
     def _mtp_draft_kv_per_token(self) -> int:
         """Draft-context KV bytes per token of context, 0 when this load has no
@@ -857,15 +1014,8 @@ class VramSizingMixin:
 
     def _model_bytes(self) -> int:
         """Total size of the model on disk (all parts of a split GGUF)."""
-        from localm.model_manager import split_gguf_parts
-        p = Path(self.model_path)
-        parts = split_gguf_parts(p.name)
-        if parts:
-            return sum(
-                (p.parent / part).stat().st_size
-                for part in parts if (p.parent / part).is_file()
-            )
-        return p.stat().st_size if p.is_file() else 0
+        from localm.model_manager.gguf import gguf_file_bytes
+        return gguf_file_bytes(Path(self.model_path))
 
     def _gguf_parsed_tensor_entries(self):
         """This load's own ``_gguf_tensor_offset_entries(model_path)`` result
@@ -969,7 +1119,7 @@ class VramSizingMixin:
         from localm.model_manager.gguf import gguf_input_layer_bytes
         input_bytes = self._gguf_excluded_bytes(
             "_gguf_input_layer_bytes",
-            lambda: gguf_input_layer_bytes(self.model_path, _parsed=parsed),
+            lambda: gguf_input_layer_bytes(Path(self.model_path), _parsed=parsed),
             "input-layer byte")
         model_bytes = max(0, model_bytes - input_bytes)
         return max(0, model_bytes - self._moe_pinned_bytes(n_cpu_moe))
@@ -1059,8 +1209,11 @@ class VramSizingMixin:
            only for a file whose header cannot be read.
 
         Step 2 is memoised per instance: it reads a bounded prefix of the file.
-        Never returns 0 - step 3's floor is 16 KB - so callers can divide by
-        it."""
+        Returns 0 for a model that keeps no KV cache at all (a diffusion
+        language model, see :meth:`_keeps_no_kv_cache`); never 0 otherwise -
+        step 3's floor is 16 KB."""
+        if self._keeps_no_kv_cache():
+            return 0
         accurate = getattr(getattr(self, "_llm", None), "kv_bytes_per_token", 0)
         if accurate:
             return int(accurate)
@@ -1078,6 +1231,27 @@ class VramSizingMixin:
         if cached:
             return cached
         return self._bytes_per_token(self._model_bytes())
+
+    def _keeps_no_kv_cache(self) -> bool:
+        """True for a model llama.cpp creates no KV cache for: a diffusion
+        language model, which re-reads its whole canvas every step. True once a
+        load reported one (``_diffusion_loaded``); otherwise read from the
+        loaded model when there is one, else from the file's
+        ``general.architecture`` (memoised per instance)."""
+        if getattr(self, "_diffusion_loaded", False) is True:
+            return True
+        loaded = getattr(getattr(self, "_llm", None), "is_diffusion", None)
+        if isinstance(loaded, bool):
+            return loaded
+        cached = getattr(self, "_no_kv_cache", None)
+        if cached is None:
+            from localm.model_manager.gguf import (gguf_architecture,
+                                                   gguf_is_diffusion_architecture)
+            path = getattr(self, "model_path", None)
+            cached = bool(path) and gguf_is_diffusion_architecture(
+                gguf_architecture(Path(path)))
+            self._no_kv_cache = cached
+        return cached
 
     def _check_vram(self) -> None:
         """
@@ -1124,7 +1298,7 @@ class VramSizingMixin:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             weights = int(model_bytes * min(1.0, gpu_layers / layers))
         overhead = (self._split_overhead_bytes(split_devices)
-                    + self._mtp_draft_context_vram_bytes()
+                    + self._spec_extra_vram_bytes()
                     + self._recurrent_state_vram_bytes())
         need = weights + kv_cache + overhead
         ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
@@ -1193,8 +1367,8 @@ class VramSizingMixin:
           above this load's;
         - fewer GPU layers."""
         options = []
-        per_token = self._kv_bytes_per_token() + self._mtp_draft_kv_per_token()
-        fixed = need - kv_cache - self.n_ctx * self._mtp_draft_kv_per_token()
+        per_token = self._kv_bytes_per_token() + self._spec_kv_per_token()
+        fixed = need - kv_cache - self.n_ctx * self._spec_kv_per_token()
         if per_token > 0 and budget > fixed:
             ctx = ((budget - fixed) // per_token // 1024) * 1024
             ctx = min(ctx, ((self.n_ctx - 1) // 1024) * 1024)
@@ -1268,7 +1442,7 @@ class VramSizingMixin:
         if gpu_layers < self._DEFAULT_GPU_LAYERS:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             per_token = int(per_token * min(1.0, gpu_layers / layers))
-        per_token += self._mtp_draft_kv_per_token()
+        per_token += self._spec_kv_per_token()
         if per_token <= 0:
             return None
         # How much NEW KV must land in VRAM to grow to n_ctx depends on WHERE the
@@ -1358,11 +1532,12 @@ class VramSizingMixin:
         model = self._effective_model_bytes_for_vram()
         budget = (free - model - self._split_overhead_bytes(split_devices)
                   - embedder_ctx_reservation_bytes()
-                  - self._mtp_draft_context_vram_bytes()
+                  - self._spec_extra_vram_bytes()
                   - self._recurrent_state_vram_bytes())
-        if budget <= 0:
+        per_token = self._kv_bytes_per_token()
+        if budget <= 0 or per_token <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN)
-        auto = budget // self._kv_bytes_per_token()
+        auto = budget // per_token
         auto = (auto // 1024) * 1024
         hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
         return int(max(self._AUTO_CTX_MIN, hi))
@@ -1376,7 +1551,11 @@ class VramSizingMixin:
         that lifts the conservative _AUTO_CTX_MAX safety clamp so the window can
         use the full VRAM-derived budget. When ctx_auto is off, n_ctx_max is used
         verbatim (0/None already mean unlimited downstream). ``split_budget`` is
-        passed to :meth:`_auto_ctx_max`."""
+        passed to :meth:`_auto_ctx_max`. A model that keeps no KV cache (a
+        diffusion model) gets None: its fixed window is reported by the worker
+        at load."""
+        if self._keeps_no_kv_cache():
+            return None
         if self.ctx_auto:
             unlimited = (self.n_ctx_max == 0)
             auto = self._auto_ctx_max(capped=not unlimited, split_budget=split_budget)
@@ -1407,12 +1586,12 @@ class VramSizingMixin:
         charges: the VRAM-resident weights with the CONFIGURED n_cpu_moe
         (``_vram_model_bytes``; never an automatic choice of an earlier
         load), the KV cache for ``self.n_ctx`` tokens, and the compute overhead
-        for *split_devices* devices plus the MTP draft context and the
-        recurrent state."""
+        for *split_devices* devices plus the draft source (MTP draft context or
+        draft model) and the recurrent state."""
         model = self._vram_model_bytes(int(getattr(self, "n_cpu_moe", 0) or 0))
         kv = self.n_ctx * self._kv_bytes_per_token()
         overhead = (self._split_overhead_bytes(split_devices)
-                    + self._mtp_draft_context_vram_bytes()
+                    + self._spec_extra_vram_bytes()
                     + self._recurrent_state_vram_bytes())
         return model, kv, overhead
 

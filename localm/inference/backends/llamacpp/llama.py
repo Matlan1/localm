@@ -24,7 +24,8 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional, Tuple
+from typing import (Any, Callable, Dict, Generator, Iterable, Iterator, List, Optional,
+                    Sequence, Tuple)
 
 from localm.inference import pretokenizer_guard
 from localm.textguard import (
@@ -33,8 +34,10 @@ from localm.textguard import (
 )
 
 from . import _api as api
+from . import _diffusion
 from ._drafting import (
-    SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource, resolve_spec_source)
+    SPEC_DRAFT, SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource,
+    resolve_spec_source)
 from ._ngram import NgramSource, ngram_draft_cap, ngram_rs_seq
 from ._structs import (
     llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
@@ -194,6 +197,18 @@ class _CapturedStderr:
         if any(b["backend"] == "CPU_Mapped" for b in self.model_buffers()):
             return True
         return None
+
+
+_ADAPTER_LOG_LINE = re.compile(r"lora|adapter|fail|error|incorrect|mismatch", re.I)
+
+
+def _adapter_failure_detail(log: str) -> str:
+    """The lines of the native *log* that explain an adapter load failure: those
+    naming the adapter, a failure or an error, else the last lines of the log.
+    At most six lines."""
+    lines = [line.strip() for line in log.splitlines() if line.strip()]
+    relevant = [line for line in lines if _ADAPTER_LOG_LINE.search(line)]
+    return "\n".join((relevant or lines)[-6:])
 
 
 @contextlib.contextmanager
@@ -794,6 +809,14 @@ def mtp_rs_seq(default_n_rs_seq, draft_tokens) -> int:
 _MTP_QUEUED_ROWS_MAX = 32
 
 
+# Speculation status of a diffusion language model, which never drafts.
+_DIFFUSION_SPEC_STATUS = "diffusion-model"
+
+
+class _DiffusionStopped(Exception):
+    """The model is being unloaded under a running diffusion generation."""
+
+
 def _greedy_chain():
     """A sampler chain holding one greedy sampler; it reuses its candidate
     buffer from one sample to the next."""
@@ -1172,13 +1195,16 @@ class LlamaCpp:
     mtp_steps = 0                # verification batches THIS generation decoded
     mtp_paused_steps = 0         # steps THIS generation ran plain because drafting was slower
     mtp_skipped = ""             # why THIS generation could not draft at all: "image" or ""
+    _adapter_specs: Sequence[Tuple[str, float]] = ()   # (path, scale) of each LoRA adapter this model loads
+    _adapter_handles: Sequence[Any] = ()   # native handles of the loaded adapters, in the same order
+    applied_adapters: Sequence[dict] = ()  # {"path", "scale"} of each adapter applied to the context
     is_encoder_decoder = False   # the model runs llama_encode before decoding (T5)
     encoder_input_limit = 0      # most tokens one llama_encode call takes, 0 unless encoder-decoder
     _draft_pacer = None          # _DraftPacer for this model, created on first use
     _source = None               # the DraftSource for this model, created on first use
-    _spec_source_name = SPEC_MTP # the configured draft source: off, mtp or ngram
-    _ngram_draft_max = 0         # draft tokens per n-gram step, 0 unless the source is ngram
-    _clock = time.perf_counter
+    _spec_source_name = SPEC_MTP # the configured draft source: off, mtp, ngram or draft
+    _spec_draft_max = 0          # draft tokens per step of an ngram or draft source, else 0
+    _clock = staticmethod(time.perf_counter)
     _draft_pos = 0               # the draft cache holds positions [0, _draft_pos)
     _queued_tokens: Tuple[int, ...] = ()  # tokens at _draft_pos.. not yet in the draft cache
     _queued_h = None             # their hidden-state rows, one per queued token
@@ -1192,6 +1218,14 @@ class LlamaCpp:
     # chunk's key with its n_pos. The reply decoded after it is not recorded.
     # None when the KV cache does not start with such a prompt.
     _vision_kv: Optional[List[Tuple[object, int]]] = None
+    # Diffusion language model state, set by _detect_diffusion() at load.
+    is_diffusion = False
+    architecture: Optional[str] = None
+    _diffusion_mask = _diffusion.LLAMA_TOKEN_NULL
+    _diffusion_shift_logits = True
+    _diffusion_capacity = 0
+    _diffusion_steps: Optional[int] = None
+    _diffusion_max_tokens: Optional[int] = None
 
     @property
     def _cached_tokens(self) -> List[int]:
@@ -1225,14 +1259,28 @@ class LlamaCpp:
         mtp_draft_tokens: int = MTP_DRAFT_TOKENS_DEFAULT,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
+        spec_draft_model: Optional[str] = None,
+        spec_draft_gpu: bool = True,
         use_mmap: Optional[bool] = None,
+        adapters: Optional[List[Tuple[str, float]]] = None,
+        diffusion_steps: Optional[int] = None,
+        diffusion_max_tokens: Optional[int] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
-        # spec_source names the draft source (off, mtp, ngram); None follows
-        # mtp_enabled. MTP is enabled exactly when the source is mtp.
+        self._diffusion_steps = diffusion_steps
+        self._diffusion_max_tokens = diffusion_max_tokens
+        # spec_source names the draft source (off, mtp, ngram, draft); None
+        # follows mtp_enabled. MTP is enabled exactly when the source is mtp.
+        # spec_draft_model is the draft GGUF's path for the draft source;
+        # spec_draft_gpu False loads it on the CPU.
         self._spec_source_name = resolve_spec_source(spec_source, mtp_enabled)
         self._mtp_enabled = self._spec_source_name == SPEC_MTP
+        self._main_gpu_arg = main_gpu
+        self._gpu_split_ratios_arg = gpu_split_ratios
+        self._adapter_specs = [(str(p), float(s)) for p, s in (adapters or [])]
+        self._adapter_handles = []
+        self.applied_adapters = []
         self._mtp_draft_max = max(1, min(int(mtp_draft_tokens), MTP_DRAFT_TOKENS_MAX))
         self._n_threads = n_threads
         # Optional preflight consulted by _prefill_fresh_context() before
@@ -1477,15 +1525,19 @@ class LlamaCpp:
 
         try:
             self.is_encoder_decoder = self._detect_encoder_decoder()
+            self._detect_diffusion()
         except Exception:
             api.llama_free_model(self._model_ptr)
             self._model_ptr = None
             raise
-        if self.is_encoder_decoder:
-            # No draft source runs on an encoder-decoder model, and nothing
-            # below may decode on its context before llama_encode has run.
+        if self.is_encoder_decoder or self.is_diffusion:
+            # No draft source runs on an encoder-decoder or a diffusion
+            # model, and nothing below may decode on its context.
             self._spec_source_name = SPEC_OFF
             self._mtp_enabled = False
+
+        if self._adapter_specs:
+            self._load_adapters(verbose)
 
         # Model's true transformer layer count, read once here from the loaded
         # model. This is the only place it is currently EXPOSED, which is NOT the
@@ -1509,7 +1561,8 @@ class LlamaCpp:
         # decision (GgufBackend._check_context_fit, which reads this attribute) uses
         # it instead of a file-size heuristic that under-counted wide-KV models by
         # ~2.6x.
-        self.kv_bytes_per_token: int = self._read_kv_bytes_per_token()
+        self.kv_bytes_per_token: int = (
+            0 if self.is_diffusion else self._read_kv_bytes_per_token())
 
         # llama.cpp already offloads min(n_gpu_layers, actual), so an over-large
         # value is harmless - but silently clamping a SPECIFIC number is
@@ -1549,15 +1602,33 @@ class LlamaCpp:
         _ctx = _quiet_stderr if not verbose else contextlib.nullcontext
         with _ctx():
             self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+            if self._ctx_ptr and self.is_diffusion:
+                api.llama_set_causal_attn(self._ctx_ptr, False)
         if not self._ctx_ptr:
+            self._free_adapters()
             api.llama_free_model(self._model_ptr)
             raise RuntimeError("Failed to create llama context")
+        if self._adapter_handles:
+            try:
+                with _ctx():
+                    self._apply_adapters(self._ctx_ptr)
+            except Exception:
+                api.llama_free(self._ctx_ptr)
+                self._ctx_ptr = None
+                self._free_adapters()
+                api.llama_free_model(self._model_ptr)
+                self._model_ptr = None
+                raise
         if self.is_encoder_decoder:
             self.encoder_input_limit = self._read_encoder_input_limit(cp)
+        if self.is_diffusion:
+            self._diffusion_capacity = self._read_diffusion_capacity()
 
         # Multi-Token Prediction (MTP) draft context initialization
         if self.is_encoder_decoder:
             self.mtp_status = "encoder-decoder"
+        elif self.is_diffusion:
+            self.mtp_status = _DIFFUSION_SPEC_STATUS
         elif not self._mtp_enabled:
             self.mtp_status = "disabled"
         else:
@@ -1587,13 +1658,8 @@ class LlamaCpp:
                 self.mtp_status = f"error:{type(exc).__name__}"
         from localm.debuglog import logger as _mtp_log
         _mtp_log.info("MTP: active=%s status=%s", self.supports_mtp, self.mtp_status)
-        if self._spec_source_name == SPEC_NGRAM:
-            source = self._draft_source()
-            if not self._cache_can_drop_a_speculative_token():
-                source.usable = False
-                source.status = "rewind-unsupported"
-            _mtp_log.info("n-gram drafting: status=%s draft_max=%d",
-                          source.status, self._ngram_draft_max)
+        if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
+            self._set_up_spec_source(spec_draft_model, n_threads, verbose, spec_draft_gpu)
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
 
@@ -1604,8 +1670,63 @@ class LlamaCpp:
             _mtp_log.warning(
                 "vision: an encoder-decoder model reads text only, so the "
                 "projector %s was not loaded", os.path.basename(mmproj_path))
+        elif mmproj_path and self.is_diffusion:
+            _mtp_log.warning(
+                "vision: a diffusion language model reads text only, so the "
+                "projector %s was not loaded", os.path.basename(mmproj_path))
         elif mmproj_path:
             self._load_mmproj(mmproj_path, verbose)
+
+    def _detect_diffusion(self) -> None:
+        """Set ``is_diffusion``, ``architecture`` and the diffusion settings the
+        loaded model declares (mask token, ``diffusion.shift_logits``).
+
+        Raises RuntimeError when the runtime lacks the calls the sampler needs,
+        and UnsupportedModelRoleError for a diffusion model whose vocabulary
+        declares no mask token."""
+        from localm.model_manager.gguf import gguf_is_diffusion_architecture
+        model = self._model_ptr
+        if model is None:
+            return
+        arch = None
+        if api.has_model_meta_api():
+            arch = api.llama_model_meta_val_str(model, "general.architecture")
+        if not isinstance(arch, str):
+            arch = None
+        self.architecture = arch
+        self.is_diffusion = (api.llama_model_is_diffusion(model) is True
+                             or gguf_is_diffusion_architecture(arch))
+        if not self.is_diffusion:
+            return
+        if not api.has_diffusion_api():
+            raise RuntimeError(
+                f"This model ('{arch}') is a diffusion language model and this llama "
+                "runtime does not export the calls needed to run one. Update the "
+                "runtime with: localm setup-llama")
+        vocab = api.llama_model_get_vocab(model)
+        self._diffusion_mask = api.llama_vocab_mask(vocab)
+        if self._diffusion_mask == _diffusion.LLAMA_TOKEN_NULL:
+            from localm.inference.backends.base import UnsupportedModelRoleError
+            raise UnsupportedModelRoleError(
+                f"This diffusion language model ('{arch}') declares no mask token, "
+                "so it cannot be run.")
+        shift = None
+        if api.has_model_meta_api():
+            shift = api.llama_model_meta_val_str(model, "diffusion.shift_logits")
+        self._diffusion_shift_logits = True if shift is None else shift == "true"
+
+    def _read_diffusion_capacity(self) -> int:
+        """The most tokens (prompt plus reply canvas) one diffusion decode may
+        hold: the context's micro-batch, bounded by the trained context."""
+        ctx, model = self._ctx_ptr, self._model_ptr
+        if ctx is None or model is None:
+            return 0
+        capacity = int(api.llama_n_ubatch(ctx) or 0)
+        try:
+            trained = int(api.llama_model_n_ctx_train(model))
+        except Exception:
+            trained = 0
+        return min(capacity, trained) if trained > 0 else capacity
 
     def _load_mmproj(self, mmproj_path: str, verbose: bool) -> None:
         """Load *mmproj_path* via mtmd and set self._mtmd, or leave it None on
@@ -1657,6 +1778,73 @@ class LlamaCpp:
             logger.warning(
                 "mmproj load failed (%s); model stays text-only%s", exc, suffix)
             self._mtmd = None
+
+    def _load_adapters(self, verbose: bool) -> None:
+        """Load every LoRA adapter in ``self._adapter_specs`` for the loaded model.
+
+        On any failure frees what was loaded and the model, then raises
+        :class:`AdapterLoadError` naming the adapter and the reason (the native
+        loader's own log text when it refused the file)."""
+        from localm.debuglog import suppress_console_mirror
+        from localm.inference.backends.base import AdapterLoadError
+        _capture = _capture_stderr if not verbose else contextlib.nullcontext
+        _mirror = suppress_console_mirror if not verbose else contextlib.nullcontext
+        model = self._model_ptr
+        if model is None:
+            return
+        failure = ""
+        try:
+            if not api.has_lora_api():
+                failure = ("this llama runtime does not export the LoRA adapter "
+                           "functions; run 'localm setup-llama' to update it")
+            else:
+                for path, _scale in self._adapter_specs:
+                    detail = ""
+                    with _mirror(), _capture() as captured:
+                        handle = api.llama_adapter_lora_init(model, path)
+                        if handle is None and captured is not None:
+                            detail = _adapter_failure_detail(captured.tail())
+                    if handle is None:
+                        failure = (f"the llama runtime refused LoRA adapter "
+                                   f"{os.path.basename(path)}"
+                                   + (f":\n{detail}" if detail else
+                                      " (run with LOCALM_DEBUG=1 for the native log)"))
+                        break
+                    self._adapter_handles = [*self._adapter_handles, handle]
+        except Exception as exc:
+            failure = f"loading LoRA adapters failed: {exc}"
+        if failure:
+            self._free_adapters()
+            api.llama_free_model(model)
+            self._model_ptr = None
+            raise AdapterLoadError(failure)
+
+    def _apply_adapters(self, ctx) -> None:
+        """Make the loaded adapters active on *ctx* with their scales.
+
+        Called after every creation of the main context. Raises
+        :class:`AdapterLoadError` when the native call reports failure."""
+        from localm.inference.backends.base import AdapterLoadError
+        if not self._adapter_handles:
+            return
+        rc = api.llama_set_adapters_lora(
+            ctx, list(self._adapter_handles), [s for _p, s in self._adapter_specs])
+        if rc != 0:
+            raise AdapterLoadError(
+                f"the llama runtime could not apply the LoRA adapters (code {rc})")
+        self.applied_adapters = [{"path": p, "scale": s} for p, s in self._adapter_specs]
+
+    def _free_adapters(self) -> None:
+        """Free every loaded adapter. Call after the contexts using them are
+        freed and before the model is."""
+        handles, self._adapter_handles = list(self._adapter_handles), []
+        self.applied_adapters = []
+        for handle in handles:
+            try:
+                api.llama_adapter_lora_free(handle)
+            except Exception as exc:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("freeing a LoRA adapter raised %s", type(exc).__name__)
 
     def _read_kv_bytes_per_token(self) -> int:
         """Architecture-accurate KV-cache size PER TOKEN in bytes, from the loaded
@@ -1807,6 +1995,13 @@ class LlamaCpp:
                 self._free_native()
 
     def _free_native(self) -> None:
+        source = getattr(self, "_source", None)
+        if source is not None:
+            try:
+                source.close()
+            except Exception as exc:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("freeing the draft source raised %s", type(exc).__name__)
         if getattr(self, "_mtmd", None) is not None:
             self._mtmd.free()
             self._mtmd = None
@@ -1820,6 +2015,7 @@ class LlamaCpp:
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
+        self._free_adapters()
         if self._model_ptr:
             api.llama_free_model(self._model_ptr)
             self._model_ptr = None
@@ -2010,8 +2206,9 @@ class LlamaCpp:
                 pacer = self._draft_pacer
                 clock = self._clock
                 # The step whose cost is still being measured: (start, drafted,
-                # tokens it makes available); its time ends when the next token
-                # is in hand and excludes time spent in the consumer.
+                # tokens it makes available, drafts verified or None, timed for
+                # the pacer); its time ends when the next token is in hand and
+                # excludes time spent in the consumer.
                 step = None
                 consumer_s = 0.0
                 pos = n_prompt
@@ -2064,7 +2261,10 @@ class LlamaCpp:
                             eog = self._tokenizer.is_eog(token)
 
                         if step is not None:
-                            pacer.record(step[1], clock() - step[0] - consumer_s, step[2])
+                            step_s = clock() - step[0] - consumer_s
+                            if step[4] and pacer is not None:
+                                pacer.record(step[1], step_s, step[2])
+                            source.on_step_seconds(step[3], step_s)
                             step = None
 
                         # Stop when the model signals end-of-generation via the vocabulary
@@ -2122,8 +2322,9 @@ class LlamaCpp:
                         # --- Speculative drafting (while the source drafts) ---
                         drafts: List[int] = []
                         accepted: List[int] = []
-                        timed = speculate = False
+                        timed = speculate = verify_ok = observed = grew = False
                         if source.drafting():
+                            observed = source.observes_steps
                             if pacer.paused:
                                 timed = True
                                 pacer.speculate()
@@ -2171,6 +2372,7 @@ class LlamaCpp:
                                                 break
                                             accepted.append(draft)
                                         n_acc = len(accepted)
+                                        verify_ok = True
                                         source.on_verify(len(drafts), n_acc)
                                         removed = True
                                         if n_acc < len(drafts):
@@ -2214,7 +2416,8 @@ class LlamaCpp:
                                     if batch is not None:
                                         api.llama_batch_free(batch)
                             if timed:
-                                step = (step_t0, True, 1 + len(accepted))
+                                step = (step_t0, True, 1 + len(accepted),
+                                        len(drafts) if verify_ok else None, True)
                             for draft in accepted:
                                 yield_t0 = clock()
                                 yield draft
@@ -2236,6 +2439,7 @@ class LlamaCpp:
                                         current_needed = pos + 512
                                         target = self._target_ctx(current_needed)
                                         if target > self._ctx_capacity:
+                                            grew = True
                                             # We can grow! Re-prefill the context. Free the
                                             # old batch (its layout matches the OLD context)
                                             # BEFORE the re-prefill, because
@@ -2262,8 +2466,10 @@ class LlamaCpp:
                                     source.after_single_token(token, pos)
                                     self._cached_tokens.append(token)
                                     pos += 1
-                                    if timed:
-                                        step = (step_t0, speculate and not source.free_miss, 1)
+                                    if timed or observed:
+                                        step = (step_t0, speculate and not source.free_miss, 1,
+                                                None if grew or (speculate and not source.free_miss)
+                                                else 0, timed)
                                 finally:
                                     # Always release the native batch - including when
                                     # _prefill_fresh_context above raises mid-growth.
@@ -2502,6 +2708,121 @@ class LlamaCpp:
             finally:
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
+
+    def _generate_diffusion(
+        self,
+        prompt_tokens: List[int],
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        seed: Optional[int] = None,
+        grammar: Optional[str] = None,
+        on_status: Optional[Callable[[str], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> Iterator[int]:
+        """Yield a diffusion model's reply tokens, all of them after the canvas
+        is fully denoised (a diffusion model has no token stream).
+
+        While denoising, *on_status* receives ``"Denoising reply (N%)..."`` at
+        every 10% of the steps. *should_stop* is polled before every step; a
+        True return ends the generation with nothing yielded. The reply ends at
+        the first end-of-generation token and is cut to *max_new_tokens*
+        (``last_finish_reason`` "stop", or "length" when no end token appeared
+        or the cut applied). Repetition penalty does not apply.
+
+        Raises GrammarUnsupportedError when *grammar* is set, and
+        ContextCapacityExceededError when the prompt leaves too little of the
+        diffusion window for a reply; both before any native call."""
+        from localm.debuglog import logger
+        from localm.inference.backends.base import (
+            GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE, ContextCapacityExceededError,
+            GrammarUnsupportedError)
+        if grammar:
+            raise GrammarUnsupportedError(GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE)
+        with self._inference_lock:
+            if not self._model_ptr:
+                raise RuntimeError("Model not loaded")
+            self.last_finish_reason = "stop"
+            n_input = len(prompt_tokens)
+            if n_input == 0:
+                return
+            try:
+                params = _diffusion.resolve_params(
+                    architecture=self.architecture, n_input=n_input,
+                    max_tokens=(max_new_tokens if max_new_tokens > 0
+                                else _diffusion.DEFAULT_MAX_TOKENS),
+                    canvas_tokens=self._diffusion_max_tokens,
+                    steps=self._diffusion_steps,
+                    capacity=self._diffusion_capacity,
+                    mask_token_id=self._diffusion_mask,
+                    shift_logits=self._diffusion_shift_logits,
+                    temperature=temperature, top_k=top_k, top_p=top_p,
+                    seed=self._seed if seed is None else seed)
+            except _diffusion.DiffusionConfigError as exc:
+                raise ContextCapacityExceededError(
+                    f"{exc}. Start a new chat or shorten the message.") from exc
+            params.validate(n_input)
+            reply_total = max(1, _diffusion.reply_steps(params, n_input))
+            logger.info(
+                "gguf diffusion: %d prompt token(s), canvas %d, %d step(s), "
+                "algorithm %d, schedule %d", n_input, params.max_length - n_input,
+                params.steps, params.algorithm, params.schedule)
+
+            last_tenth = [-1]
+
+            def _on_step(step: int, _total: int, _canvas: List[int]) -> bool:
+                if self._stop.is_set() or (should_stop is not None and should_stop()):
+                    return False
+                if on_status is not None:
+                    tenth = min(10, step * 10 // reply_total)
+                    if tenth != last_tenth[0]:
+                        last_tenth[0] = tenth
+                        on_status(f"Denoising reply ({tenth * 10}%)...")
+                return True
+
+            @contextlib.contextmanager
+            def _guard():
+                with self._gen_lock:
+                    if self._stop.is_set() or self._ctx_ptr is None:
+                        raise _DiffusionStopped()
+                    yield
+
+            native = None
+            _ctx = _stderr_ctx_for_generate(self._verbose)
+            _t0 = time.monotonic()
+            try:
+                with self._gen_lock:
+                    tokenizer = self._tokenizer
+                    if self._stop.is_set() or self._ctx_ptr is None or tokenizer is None:
+                        self.last_finish_reason = "error"
+                        return
+                    native = _diffusion.NativeCanvas(
+                        api, self._ctx_ptr, tokenizer._vocab,
+                        api.llama_vocab_n_tokens(tokenizer._vocab),
+                        params, _guard)
+                with _ctx():
+                    canvas = _diffusion.denoise(native, prompt_tokens, params, _on_step)
+            except _DiffusionStopped:
+                self.last_finish_reason = "error"
+                return
+            finally:
+                if native is not None:
+                    with self._gen_lock:
+                        native.close()
+            if canvas is None:
+                logger.info("gguf diffusion: stopped before the reply was complete")
+                self.last_finish_reason = "error" if self._stop.is_set() else "stop"
+                return
+            reply, ended = _diffusion.reply_tokens(
+                canvas, n_input, params.mask_token_id, tokenizer.is_eog)
+            if max_new_tokens > 0 and len(reply) > max_new_tokens:
+                reply = reply[:max_new_tokens]
+                ended = False
+            self.last_finish_reason = "stop" if ended else "length"
+            logger.info("gguf diffusion: %d reply token(s) in %.2fs (finish=%s)",
+                        len(reply), time.monotonic() - _t0, self.last_finish_reason)
+        yield from reply
 
     @staticmethod
     def _messages_with_markers(messages: List[Dict], marker: str):
@@ -3099,7 +3420,10 @@ class LlamaCpp:
         which drafts only when an MTP draft context exists."""
         if self._source is None:
             if self._spec_source_name == SPEC_NGRAM:
-                self._source = NgramSource(self, self._ngram_draft_max or 1)
+                self._source = NgramSource(self, self._spec_draft_max or 1)
+            elif self._spec_source_name == SPEC_DRAFT:
+                from ._draftmodel import DraftModelSource
+                self._source = DraftModelSource(self, None, self._spec_draft_max or 1)
             else:
                 self._source = MtpSource(self)
         return self._source
@@ -3112,24 +3436,259 @@ class LlamaCpp:
 
     def _spec_rollback_wanted(self) -> bool:
         """Whether contexts keep recurrent-state snapshots for rejected drafts:
-        True while the configured source drafts (mtp or ngram)."""
-        return self._spec_source_name == SPEC_NGRAM or self._mtp_enabled
+        True while the configured source drafts (mtp, ngram or draft)."""
+        return self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT) or self._mtp_enabled
 
     def _spec_rollback_snapshots(self, cp) -> int:
         """Recurrent-state snapshots a context keeps so a step whose drafts are
         all rejected can still be rolled back, for the configured source."""
-        if self._spec_source_name == SPEC_NGRAM:
-            return ngram_rs_seq(getattr(cp, "n_rs_seq", 0), self._ngram_draft_max)
+        if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
+            return ngram_rs_seq(getattr(cp, "n_rs_seq", 0), self._spec_draft_max)
         return self._mtp_rollback_snapshots(cp)
 
     def _apply_initial_spec_params(self, cp, spec_draft_tokens: Optional[int]) -> None:
-        """Set the n-gram draft cap for the loaded model, then the recurrent
-        snapshots the first context keeps for the configured source."""
-        if self._spec_source_name == SPEC_NGRAM:
-            self._ngram_draft_max = ngram_draft_cap(
-                spec_draft_tokens, self._model_has_recurrent_layers() is not False)
+        """Set the draft cap of an ngram or draft source for the loaded model,
+        then the recurrent snapshots the first context keeps for the source."""
+        if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
+            from ._draftmodel import DRAFT_MODEL_DRAFT_TOKENS_DEFAULT
+            from ._ngram import NGRAM_DRAFT_TOKENS_DEFAULT
+            self._spec_draft_max = ngram_draft_cap(
+                spec_draft_tokens, self._model_has_recurrent_layers() is not False,
+                default=(NGRAM_DRAFT_TOKENS_DEFAULT if self._spec_source_name == SPEC_NGRAM
+                         else DRAFT_MODEL_DRAFT_TOKENS_DEFAULT))
         if self._spec_rollback_wanted() and hasattr(cp, "n_rs_seq"):
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
+
+    def _set_up_spec_source(self, spec_draft_model: Optional[str],
+                            n_threads: Optional[int], verbose: bool,
+                            spec_draft_gpu: bool) -> None:
+        """Create the ngram or draft source for the loaded model. The main
+        cache is probed first; when it cannot drop a rejected draft the source
+        is created unusable with status "rewind-unsupported" and no draft
+        model is loaded. Otherwise the draft source loads its draft model
+        (``_load_draft_model``), and the step costs of either source are
+        measured (``_measure_step_costs``). A draft model that cannot beat
+        plain decoding at an acceptance of ``DRAFT_GATE_ACCEPTANCE`` is freed
+        with status "draft-cannot-pay"; an n-gram source that cannot beat it
+        at ``ACCEPTANCE_PROBE_P`` is turned off with status
+        "ngram-cannot-pay"."""
+        from localm.debuglog import logger
+
+        from ._drafting import CountedSource
+        from ._draftmodel import DRAFT_MODEL_UNMEASURED_TOKENS, DraftModelSource
+        from ._stepcosts import ACCEPTANCE_PROBE_P, DRAFT_GATE_ACCEPTANCE
+        can_drop = self._cache_can_drop_a_speculative_token()
+        draft = self._spec_source_name == SPEC_DRAFT
+        if draft and can_drop:
+            self._load_draft_model(spec_draft_model, n_threads, verbose,
+                                   on_gpu=spec_draft_gpu)
+        source = self._draft_source()
+        if not isinstance(source, CountedSource):
+            return
+        loaded = not draft or (isinstance(source, DraftModelSource) and source.loaded)
+        if can_drop and source.usable and loaded:
+            gate_p = DRAFT_GATE_ACCEPTANCE if draft else ACCEPTANCE_PROBE_P
+            quiet = _quiet_stderr if not verbose else contextlib.nullcontext
+            with quiet():
+                costs = self._measure_step_costs(source)
+                pays = costs is None or costs.can_pay(source.draft_max, gate_p)
+                if draft and not pays:
+                    source.close()
+            if costs is None:
+                logger.info("%s: step costs could not be measured; drafting at most "
+                            "%d tokens per step", source.label,
+                            min(source.draft_max, DRAFT_MODEL_UNMEASURED_TOKENS)
+                            if draft else source.draft_max)
+            else:
+                source.costs = costs
+                logger.info("%s: step costs %s", source.label, costs.report())
+                if not pays:
+                    source.disable("%s-cannot-pay" % source.name)
+        if source.usable and not can_drop:
+            source.usable = False
+            source.status = "rewind-unsupported"
+        logger.info("%s: status=%s draft_max=%d", source.label,
+                    source.status, self._spec_draft_max)
+
+    def _time_decode(self, ctx, prefix: List[int], tokens: List[int],
+                     all_logits: bool, warm: int, reps: int) -> float:
+        """Median seconds of decoding *tokens* after *prefix* on *ctx*, over
+        *reps* timed decodes after *warm* untimed ones. Each decode is waited
+        for by reading its last logits row and then removed from the cache.
+        Leaves the cache empty. Raises RuntimeError when a decode fails."""
+        mem = api.llama_get_memory(ctx)
+        times: List[float] = []
+
+        def decode(toks: List[int], start: int, every_row: bool) -> None:
+            batch = self._create_batch(toks, start, logits_at_last_only=not every_row)
+            try:
+                if api.llama_decode(ctx, batch) != 0:
+                    raise RuntimeError("decode failed")
+            finally:
+                api.llama_batch_free(batch)
+
+        api.llama_memory_clear(mem, True)
+        decode(prefix, 0, False)
+        start = len(prefix)
+        try:
+            for i in range(warm + reps):
+                t0 = self._clock()
+                decode(tokens, start, all_logits)
+                api.llama_get_logits_ith(ctx, -1)
+                if i >= warm:
+                    times.append(self._clock() - t0)
+                if not api.llama_memory_seq_rm(mem, 0, start, -1):
+                    api.llama_memory_clear(mem, True)
+                    decode(prefix, 0, False)
+        finally:
+            api.llama_memory_clear(mem, True)
+        return statistics.median(times)
+
+    def _measure_step_costs(self, source):
+        """The ``_stepcosts.StepCosts`` of this load for *source*: the target's
+        one-token decode and its verification batches up to
+        ``source.draft_max + 1`` tokens, with the sizes and repetitions
+        ``measure_plan`` sets from a first one-token decode, and for a
+        draft-model source the draft model's one-token and batched decodes;
+        each after a short shared prefix of tokens spread over the vocabulary.
+        The main cache and any draft cache are left empty. None when a decode
+        fails, a target figure is not above 0, or the vocabulary has fewer than
+        256 tokens."""
+        from localm.debuglog import logger
+
+        from ._stepcosts import StepCosts, measure_plan
+        draft_ctx = source._ctx if source.name == SPEC_DRAFT else None
+        try:
+            model = self._model_ptr
+            if model is None:
+                return None
+            vocab = api.llama_model_get_vocab(model)
+            n_vocab = int(api.llama_vocab_n_tokens(vocab))
+            if n_vocab < 256:
+                return None
+
+            def spread(n: int, offset: int) -> List[int]:
+                return [16 + (offset + 7919 * i) % (n_vocab - 32) for i in range(n)]
+
+            prefix = spread(32, 1)
+            probe = self._time_decode(self._ctx_ptr, prefix, spread(1, 5), False, 1, 1)
+            warm, reps, sizes = measure_plan(probe, source.draft_max + 1)
+            target = self._time_decode(self._ctx_ptr, prefix, spread(1, 5), False, warm, reps)
+            verify = {n: self._time_decode(self._ctx_ptr, prefix, spread(n, 5), True, warm, reps)
+                      for n in sizes}
+            draft = draft_prefill = 0.0
+            if draft_ctx is not None:
+                draft = self._time_decode(draft_ctx, prefix, spread(1, 5), False, 3, 5)
+                batch = 64
+                draft_prefill = self._time_decode(draft_ctx, prefix, spread(batch, 9),
+                                                  False, 1, 3) / batch
+                source._reset_cache()
+            if min([target, *verify.values()]) <= 0.0:
+                return None
+            return StepCosts(target=target, verify=verify, draft=draft,
+                             draft_prefill=draft_prefill)
+        except Exception as exc:
+            logger.debug("%s: step-cost measurement failed (%s)", source.label,
+                         type(exc).__name__)
+            if draft_ctx is not None:
+                source._reset_cache()
+            return None
+
+    def _load_draft_model(self, path: Optional[str], n_threads: Optional[int],
+                          verbose: bool, on_gpu: bool = True) -> None:
+        """Load the draft GGUF at *path* and attach a DraftModelSource drafting
+        with it on its own context: on the GPU split over the same devices as
+        the target (the same ``main_gpu`` and ``gpu_split_ratios`` through
+        ``discover.apply_main_gpu`` and ``apply_gpu_split``), or, when *on_gpu*
+        is False, with an empty device list so neither the model nor its
+        context allocates GPU memory, which sets the source's status to
+        "ok-cpu".
+
+        Any failure leaves the model working without drafting, with the
+        source's status naming why: "draft-model-missing",
+        "draft-unsupported-role" (a file whose metadata shows it is not a
+        causal chat model, ``draft_role_refusal``; nothing is loaded),
+        "draft-load-failed", "draft-vocab-mismatch", "draft-rewind-unsupported"
+        (a draft with recurrent layers) or "draft-context-refused". A load the cancel event
+        stopped frees everything this instance loaded and raises
+        ModelLoadCancelled. Unless *verbose*, llama.cpp's output while the draft
+        context is created or anything is freed goes where ``_quiet_stderr``
+        sends it."""
+        from localm.debuglog import logger
+        quiet = _quiet_stderr if not verbose else contextlib.nullcontext
+
+        from ._draftmodel import DraftModelSource, draft_vocab_mismatch, native_vocab_view
+        source = DraftModelSource(self, None, self._spec_draft_max or 1, n_threads)
+        self._source = source
+        if not path or not os.path.isfile(path):
+            source.disable("draft-model-missing")
+            return
+        from ._draftmodel import draft_role_refusal
+        role = draft_role_refusal(path)
+        if role is not None:
+            logger.warning("draft model %s cannot draft: %s", os.path.basename(path), role)
+            source.disable("draft-unsupported-role")
+            return
+        mp = api.llama_model_default_params()
+        mp.n_gpu_layers = 99 if on_gpu else 0
+        _tensor_split_keepalive = None
+        _no_devices = (ctypes.c_void_p * 1)(None)
+        if not on_gpu:
+            mp.devices = ctypes.cast(_no_devices, ctypes.c_void_p).value
+        else:
+            from localm.discover import apply_gpu_split, apply_main_gpu
+            if self._main_gpu_arg is not None:
+                apply_main_gpu(mp, slot=self._main_gpu_arg)
+            else:
+                apply_main_gpu(mp)
+            _tensor_split_keepalive = apply_gpu_split(
+                mp, ratios_override=self._gpu_split_ratios_arg)
+        set_use_mmap(mp, False)
+        if self._load_progress_cb is not None:
+            mp.progress_callback = ctypes.cast(self._load_progress_cb, ctypes.c_void_p)
+        _load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
+        detail = ""
+        with _load_ctx() as captured:
+            model = api.llama_load_model_from_file(path, mp)
+            if captured is not None and not model:
+                detail = captured.tail()
+        if not model:
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                with quiet():
+                    self._free_native()
+                from localm.inference.backends.base import ModelLoadCancelled
+                raise ModelLoadCancelled(f"Model load aborted (superseded): {path}")
+            logger.warning("draft model failed to load: %s %s", os.path.basename(path), detail)
+            source.disable("draft-load-failed")
+            return
+        source._model = model
+        mismatch = draft_vocab_mismatch(native_vocab_view(api, self._model_ptr),
+                                        native_vocab_view(api, model))
+        if mismatch:
+            logger.warning("draft model %s does not share this model's vocabulary (%s)",
+                           os.path.basename(path), mismatch)
+            with quiet():
+                source.close()
+            source.disable("draft-vocab-mismatch")
+            return
+        try:
+            draft_recurrent = api.has_hybrid_api() and (
+                api.llama_model_is_recurrent(model) or api.llama_model_is_hybrid(model))
+        except Exception:
+            draft_recurrent = True
+        if draft_recurrent:
+            with quiet():
+                source.close()
+            source.disable("draft-rewind-unsupported")
+            return
+        with quiet():
+            failure = source.create_context(self._ctx_capacity, self._offload_kqv and on_gpu)
+            if failure:
+                source.close()
+        if failure:
+            source.disable(failure)
+        elif not on_gpu:
+            source.status = "ok-cpu"
 
     def _model_has_recurrent_layers(self) -> Optional[bool]:
         """Whether the loaded model has recurrent layers (fully recurrent or
@@ -3578,6 +4137,15 @@ class LlamaCpp:
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+        if self._ctx_ptr and self.is_diffusion:
+            api.llama_set_causal_attn(self._ctx_ptr, False)
+        if self._ctx_ptr:
+            try:
+                self._apply_adapters(self._ctx_ptr)
+            except Exception:
+                api.llama_free(self._ctx_ptr)
+                self._ctx_ptr = None
+                raise
         if not self._ctx_ptr:
             if had_draft_context:
                 self._disable_mtp("context-refused",
@@ -3660,6 +4228,7 @@ class LlamaCpp:
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
         **_ignored,
     ):
         """
@@ -3677,6 +4246,9 @@ class LlamaCpp:
         An encoder-decoder model generates through
         ``_generate_encoder_decoder``; ``thinking`` does not apply to it and is
         ignored.
+
+        A diffusion language model answers through ``_generate_diffusion``,
+        which polls *should_stop* between denoising steps.
         """
         if self.is_encoder_decoder:
             return self._completion_result(self._generate_encoder_decoder(
@@ -3727,7 +4299,19 @@ class LlamaCpp:
         tokens = self._tokenizer.encode(
             prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges)
 
-        if going_to_vision:
+        if self.is_diffusion:
+            gen = self._generate_diffusion(
+                tokens,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                seed=seed,
+                grammar=grammar,
+                on_status=on_status,
+                should_stop=should_stop,
+            )
+        elif going_to_vision:
             # Image present + an mmproj is loaded: evaluate the image+text via mtmd
             # instead of the text-only prefill. The text path below is untouched.
             gen = self._generate_image(

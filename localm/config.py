@@ -553,13 +553,27 @@ DEFAULT_CONFIG: dict = {
     # small draft decode per token plus one verification decode of all of them.
     "mtp_draft_tokens": 1,
     # Where speculative drafts come from: "off", "mtp" (the model's own MTP
-    # head) or "ngram" (tokens that followed the same few tokens earlier in the
-    # conversation; no second model, no extra VRAM). None follows mtp_enabled:
-    # true means "mtp", false means "off". `localm bench-spec` measures it.
+    # head), "ngram" (tokens that followed the same few tokens earlier in the
+    # conversation; no second model, no extra VRAM) or "draft" (a smaller
+    # model sharing the vocabulary, spec_draft_model). None follows
+    # mtp_enabled: true means "mtp", false means "off". `localm bench-spec`
+    # measures it.
     "spec_source": None,
-    # Draft tokens one n-gram step may propose (1-16). None uses the default (8);
-    # a model with recurrent layers is capped at 4.
+    # Draft tokens one ngram or draft step may propose (1-16). None uses the
+    # default (8; a draft model picks shorter lengths from its measured step
+    # costs); a model with recurrent layers is
+    # capped at 4.
     "spec_draft_tokens": None,
+    # The draft model for spec_source "draft": a registered model name or a
+    # GGUF path. `localm spec-drafts MODEL` lists downloaded models that fit.
+    "spec_draft_model": "",
+    # Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) write a whole
+    # reply at once over a number of denoising steps. diffusion_steps: steps
+    # per reply, None for 128 (or the reply length when shorter).
+    # diffusion_max_tokens: the reply length in tokens; a request's max_tokens
+    # caps it further.
+    "diffusion_steps": None,
+    "diffusion_max_tokens": 256,
     # VRAM (MB) that n_gpu_layers_auto/ctx_auto/_check_vram always reserve beyond
     # model weights for the GGUF backend, before deciding how many layers fit or
     # refusing outright. This is NOT a discardable safety margin - it funds the
@@ -1039,6 +1053,7 @@ DEFAULT_CONFIG: dict = {
     # Loopback binds never advertise.
     "mdns_name": "localm",      # the .local name; sanitized to a DNS label on use
     "mdns_enabled": True,       # advertise the name over mDNS on network binds
+    "metrics_enabled": False,   # serve Prometheus GET /metrics (admin key; restart to apply)
     # Speech-to-text (GUI mic button; needs the [voice] extra).
     # Model sizes: tiny / base / small / medium - bigger = better + slower.
     "voice_stt_model": "base",

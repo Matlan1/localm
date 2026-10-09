@@ -18,6 +18,7 @@ from ._structs import (
     LlamaBatch,
     LlamaChatMessage,
     LlamaSamplerChainParams,
+    LlamaTokenDataArray,
     llama_token,
 )
 
@@ -177,6 +178,62 @@ def llama_free(ctx: ctypes.c_void_p) -> None:
 
 
 # ---------------------------------------------------------------------------
+#  LoRA adapters
+# ---------------------------------------------------------------------------
+
+LlamaAdapterLora = ctypes.c_void_p   # struct llama_adapter_lora*
+
+
+def has_lora_api() -> bool:
+    """True when this llama.dll exports the LoRA adapter functions
+    (``llama_adapter_lora_init`` / ``_free`` and ``llama_set_adapters_lora``),
+    so a caller can load adapters instead of raising AttributeError on a
+    stripped build."""
+    lib = load_lib()
+    return all(hasattr(lib, fn) for fn in (
+        "llama_adapter_lora_init", "llama_adapter_lora_free",
+        "llama_set_adapters_lora"))
+
+
+def llama_adapter_lora_init(model: ctypes.c_void_p, path: str) -> Optional[ctypes.c_void_p]:
+    """Load the GGUF LoRA adapter at *path* for *model*, or None when the
+    native loader refused it (it logs the reason). The adapter stays valid
+    until ``llama_adapter_lora_free`` or the model is freed. Only call after
+    has_lora_api()."""
+    fn = _bind("llama_adapter_lora_init", LlamaAdapterLora, LlamaModel, ctypes.c_char_p)
+    result = fn(model, path.encode("utf-8"))
+    return result if result else None
+
+
+def llama_adapter_lora_free(adapter: ctypes.c_void_p) -> None:
+    """Free an adapter returned by llama_adapter_lora_init. Only call after
+    has_lora_api()."""
+    _bind("llama_adapter_lora_free", None, LlamaAdapterLora)(adapter)
+
+
+def llama_set_adapters_lora(ctx: ctypes.c_void_p, adapters: list, scales: list) -> int:
+    """Make exactly *adapters* (handles from llama_adapter_lora_init) active on
+    *ctx*, each multiplied by the matching entry of *scales*, replacing whatever
+    was active. Returns 0 on success. An adapter with scale 0 is not applied.
+    An empty list clears every adapter. Only call after has_lora_api().
+
+    The two lists must have equal length; the native call aborts the process on
+    a null array with a non-zero count, so a mismatch raises ValueError here."""
+    if len(adapters) != len(scales):
+        raise ValueError(
+            f"{len(adapters)} adapters but {len(scales)} scales")
+    fn = _bind("llama_set_adapters_lora", ctypes.c_int32, LlamaContext,
+               ctypes.POINTER(LlamaAdapterLora), ctypes.c_size_t,
+               ctypes.POINTER(ctypes.c_float))
+    n = len(adapters)
+    if n == 0:
+        return int(fn(ctx, None, 0, None))
+    handles = (LlamaAdapterLora * n)(*adapters)
+    factors = (ctypes.c_float * n)(*scales)
+    return int(fn(ctx, handles, n, factors))
+
+
+# ---------------------------------------------------------------------------
 #  Context / model accessors
 # ---------------------------------------------------------------------------
 
@@ -186,6 +243,12 @@ def llama_get_model(ctx: ctypes.c_void_p) -> ctypes.c_void_p:
 
 def llama_n_ctx(ctx: ctypes.c_void_p) -> int:
     return _bind("llama_n_ctx", ctypes.c_uint32, LlamaContext)(ctx)
+
+
+def llama_set_causal_attn(ctx: ctypes.c_void_p, causal: bool) -> None:
+    """Switch the context between causal and bidirectional attention. Only call
+    after has_diffusion_api()."""
+    _bind("llama_set_causal_attn", None, LlamaContext, ctypes.c_bool)(ctx, causal)
 
 
 def llama_n_ctx_seq(ctx: ctypes.c_void_p) -> Optional[int]:
@@ -311,6 +374,27 @@ def llama_model_is_hybrid(model: ctypes.c_void_p) -> bool:
     return bool(_bind("llama_model_is_hybrid", ctypes.c_bool, LlamaModel)(model))
 
 
+_DIFFUSION_SYMBOLS = ("llama_model_is_diffusion", "llama_vocab_mask",
+                      "llama_set_causal_attn", "llama_sampler_apply",
+                      "llama_n_ubatch", "llama_encode")
+
+
+def has_diffusion_api() -> bool:
+    """True when this llama.dll exports every call the diffusion sampler
+    (``_diffusion.py``) needs. False on a build without them; never raises."""
+    lib = load_lib()
+    return all(hasattr(lib, fn) for fn in _DIFFUSION_SYMBOLS)
+
+
+def llama_model_is_diffusion(model: ctypes.c_void_p) -> bool:
+    """True for a diffusion language model (Dream, LLaDA, LLaDA-MoE, RND1),
+    which keeps no KV cache and is denoised over a whole canvas rather than
+    decoded token by token. False on a build that does not export the call."""
+    if not hasattr(load_lib(), "llama_model_is_diffusion"):
+        return False
+    return bool(_bind("llama_model_is_diffusion", ctypes.c_bool, LlamaModel)(model))
+
+
 # ---------------------------------------------------------------------------
 #  Vocabulary / tokenisation
 # ---------------------------------------------------------------------------
@@ -321,6 +405,25 @@ def llama_model_get_vocab(model: ctypes.c_void_p) -> ctypes.c_void_p:
 
 def llama_vocab_n_tokens(vocab: ctypes.c_void_p) -> int:
     return _bind("llama_vocab_n_tokens", ctypes.c_int32, LlamaVocab)(vocab)
+
+
+def llama_vocab_type(vocab: ctypes.c_void_p) -> int:
+    """The vocabulary's tokenizer type (``enum llama_vocab_type``)."""
+    return _bind("llama_vocab_type", ctypes.c_int32, LlamaVocab)(vocab)
+
+
+def llama_vocab_get_text(vocab: ctypes.c_void_p, token: int) -> bytes:
+    """The stored text of *token*, b"" when the runtime returns none."""
+    out = _bind("llama_vocab_get_text", ctypes.c_char_p, LlamaVocab, llama_token)(vocab, token)
+    return out or b""
+
+
+def llama_vocab_bos(vocab: ctypes.c_void_p) -> int:
+    return _bind("llama_vocab_bos", llama_token, LlamaVocab)(vocab)
+
+
+def llama_vocab_eos(vocab: ctypes.c_void_p) -> int:
+    return _bind("llama_vocab_eos", llama_token, LlamaVocab)(vocab)
 
 
 def llama_tokenize(
@@ -409,12 +512,54 @@ def llama_token_eos(vocab: ctypes.c_void_p) -> int:
     return _bind("llama_token_eos", llama_token, LlamaVocab)(vocab)
 
 
+def has_rerank_api() -> bool:
+    """True when this llama.dll exports the vocabulary special-token accessors and
+    the classifier-head accessors a reranker needs to build and read a query /
+    document pair. Every current build exports them; the probe lets an exotic
+    stripped build refuse reranking instead of raising AttributeError."""
+    lib = load_lib()
+    return all(hasattr(lib, fn) for fn in (
+        "llama_vocab_bos", "llama_vocab_eos", "llama_vocab_sep",
+        "llama_vocab_get_add_bos", "llama_vocab_get_add_eos",
+        "llama_vocab_get_add_sep", "llama_model_n_cls_out",
+        "llama_model_cls_label"))
+
+
+def llama_vocab_sep(vocab: ctypes.c_void_p) -> int:
+    """Sentence-separator token id, or -1 when the vocabulary has none."""
+    return _bind("llama_vocab_sep", llama_token, LlamaVocab)(vocab)
+
+
+def llama_vocab_get_add_sep(vocab: ctypes.c_void_p) -> bool:
+    return bool(_bind("llama_vocab_get_add_sep", ctypes.c_bool, LlamaVocab)(vocab))
+
+
+def llama_model_n_cls_out(model: ctypes.c_void_p) -> int:
+    """Number of values the classifier head produces per sequence: the count of
+    ``<arch>.classifier.output_labels``, or 1 when the model declares none."""
+    return int(_bind("llama_model_n_cls_out", ctypes.c_uint32, LlamaModel)(model))
+
+
+def llama_model_cls_label(model: ctypes.c_void_p, i: int) -> Optional[str]:
+    """Label *i* of the classifier head, or None when the model declares no
+    label at that index."""
+    fn = _bind("llama_model_cls_label", ctypes.c_char_p, LlamaModel, ctypes.c_uint32)
+    result = fn(model, i)
+    return result.decode("utf-8", "replace") if result else None
+
+
 def llama_vocab_is_eog(vocab: ctypes.c_void_p, token: int) -> bool:
     return bool(_bind("llama_vocab_is_eog", ctypes.c_bool, LlamaVocab, llama_token)(vocab, token))
 
 
 def llama_token_is_eog(vocab: ctypes.c_void_p, token: int) -> bool:
     return bool(_bind("llama_token_is_eog", ctypes.c_bool, LlamaVocab, llama_token)(vocab, token))
+
+
+def llama_vocab_mask(vocab: ctypes.c_void_p) -> int:
+    """The vocabulary's mask token, or -1 (LLAMA_TOKEN_NULL) when it declares
+    none. Only call after has_diffusion_api()."""
+    return int(_bind("llama_vocab_mask", llama_token, LlamaVocab)(vocab))
 
 
 # ---------------------------------------------------------------------------
@@ -557,8 +702,9 @@ def llama_model_decoder_start_token(model: ctypes.c_void_p) -> int:
 
 
 def llama_encode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
-    """Run the encoder of an encoder-decoder model on *batch*, the whole input
-    sequence starting at position 0. Returns 0 on success, nonzero on error.
+    """Run the encoder of an encoder-decoder model, or a diffusion model's whole
+    canvas (every position output), on *batch*, the whole input sequence
+    starting at position 0. Returns 0 on success, nonzero on error.
 
     The native side ABORTS THE PROCESS (GGML_ASSERT, not an error return) when
     *batch* holds more tokens than the context's n_ubatch, so the caller must
@@ -673,6 +819,15 @@ def llama_sampler_sample(sampler: ctypes.c_void_p, ctx: ctypes.c_void_p, idx: in
 
 def llama_sampler_accept(sampler: ctypes.c_void_p, token: int) -> None:
     _bind("llama_sampler_accept", None, LlamaSampler, llama_token)(sampler, token)
+
+
+def llama_sampler_apply(sampler: ctypes.c_void_p, cur_p) -> None:
+    """Run *sampler* over the candidate array *cur_p* (a
+    ``LlamaTokenDataArray`` or a pointer to one) in place: it may reorder,
+    truncate and repoint ``cur_p.data``, fill ``p`` and set ``selected``.
+    Only call after has_diffusion_api()."""
+    _bind("llama_sampler_apply", None, LlamaSampler,
+          ctypes.POINTER(LlamaTokenDataArray))(sampler, cur_p)
 
 
 def has_backend_sampling() -> bool:

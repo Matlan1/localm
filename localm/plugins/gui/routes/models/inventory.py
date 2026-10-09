@@ -21,9 +21,50 @@ from localm.inference.http_server import (principal_id, require_fs_host,
 import localm.inference.http_server as _hs
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import (ModelRouteContext,
-                                                       _require_registered)
+                                                       _require_registered,
+                                                       resident_engine)
 from localm.plugins.gui.web import (LoadModelRequest, ScanRequest,
                                     UnloadModelRequest)
+
+
+def _adapter_maps(registry: dict, row_names: list) -> tuple:
+    """Adapter facts for the model list, computed off the event loop.
+
+    Returns ``(adapter_info, attached_to, resident)``: *adapter_info* maps each
+    GGUF LoRA adapter's name to its ``adapter`` / ``base`` / ``scale`` row
+    fields, *attached_to* maps each non-adapter row name to the adapters applied
+    whenever it loads, as ``{"name", "file", "scale"}`` (an adapter attached to
+    any registered name of the same model file counts, and one adapter file
+    counts once), and *resident* maps each of those row names to the loaded
+    engine that runs its file under any name."""
+    from pathlib import Path as _P
+
+    from localm.model_manager import (list_adapters, names_same_model)
+    adapters = list_adapters(reg=registry)
+    adapter_info: dict = {}
+    for a in adapters:
+        info = {"adapter": True, "adapter_file": _P(str(a["path"])).name}
+        if a["base"]:
+            info["base"] = a["base"]
+            info["base_registered"] = a["base"] in registry
+            if a["scale"] is not None:
+                info["scale"] = a["scale"]
+        adapter_info[a["name"]] = info
+    attached_to: dict = {}
+    seen: dict = {}
+    for a in adapters:
+        if not a["base"]:
+            continue
+        for name in row_names:
+            if name in adapter_info or a["path"] in seen.get(name, ()):
+                continue
+            if name == a["base"] or names_same_model(name, a["base"], registry):
+                seen.setdefault(name, set()).add(a["path"])
+                attached_to.setdefault(name, []).append(
+                    {"name": a["name"], "file": _P(str(a["path"])).name,
+                     "scale": a["scale"]})
+    resident = {name: resident_engine(name, registry) for name in attached_to}
+    return adapter_info, attached_to, resident
 
 
 def register(app: FastAPI, context: ModelRouteContext) -> None:
@@ -129,6 +170,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
          context_lens, tool_caps) = await loop.run_in_executor(
             get_plugin_executor(), _probe_rows)
 
+        adapter_info, attached_to, resident = await loop.run_in_executor(
+            get_plugin_executor(), _adapter_maps, registry,
+            [name for name, _e, _m, _p in rows])
+
         models = []
         for name, entry, mtype, epath in rows:
             size = sizes.get(epath)
@@ -182,6 +227,20 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if missing_flags.get(epath):
                 row_out["missing"] = True
                 row_out["last_path"] = epath
+            if name in adapter_info:
+                row_out.update(adapter_info[name])
+            elif attached_to.get(name):
+                row_out["adapters"] = attached_to[name]
+                live = engine if loaded else resident.get(name)
+                if live is not None and not loaded:
+                    row_out["adapter_resident"] = True
+                applied = getattr(live, "applied_adapters", None) if live is not None else None
+                if isinstance(applied, list):
+                    row_out["applied_adapters"] = applied
+            elif loaded and engine is not None:
+                applied = getattr(engine, "applied_adapters", None)
+                if isinstance(applied, list) and applied:
+                    row_out["applied_adapters"] = applied
             models.append(row_out)
         out = {"models": models, "active": current}
         # Models this instance answers through a peer instance on the same
@@ -393,8 +452,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_meta import cached_n_layers
         from localm.model_manager import _entry_path
         from localm.model_manager.gguf import (
-            gguf_input_layer_bytes, gguf_kv_bytes_per_token,
-            gguf_moe_pinned_expert_bytes)
+            gguf_architecture, gguf_input_layer_bytes, gguf_is_diffusion_architecture,
+            gguf_kv_bytes_per_token, gguf_moe_pinned_expert_bytes)
         from localm.sysstats import estimate_vram
         name = model or active_model()
         model_bytes = 0
@@ -402,6 +461,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         kv_bytes_per_token = 0
         moe_pinned_bytes = 0
         input_layer_bytes = 0
+        keeps_kv = True
         # n_cpu_moe has no GUI slider of its own (unlike n_ctx / n_gpu_layers, which
         # the caller sends as the sliders' live positions), so it is read from the
         # saved config.
@@ -459,20 +519,22 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                     "%s; the VRAM estimate charges the whole "
                                     "file (today's behavior)",
                                     type(exc).__name__, ep)
+                        kv = not gguf_is_diffusion_architecture(gguf_architecture(p))
                         return (p.stat().st_size, cached_n_layers(str(p)), kv_bpt,
-                                moe_pinned, input_bytes)
+                                moe_pinned, input_bytes, kv)
                 except (OSError, ValueError):
                     pass
                 return (model_bytes, n_layers, kv_bytes_per_token,
-                        moe_pinned_bytes, input_layer_bytes)
+                        moe_pinned_bytes, input_layer_bytes, keeps_kv)
 
             (model_bytes, n_layers, kv_bytes_per_token, moe_pinned_bytes,
-             input_layer_bytes) = await asyncio.get_running_loop().run_in_executor(
+             input_layer_bytes, keeps_kv) = await asyncio.get_running_loop().run_in_executor(
                 get_plugin_executor(), _measure, epath)
         est = estimate_vram(model_bytes, n_ctx, n_gpu_layers, n_layers=n_layers,
                             kv_bytes_per_token=kv_bytes_per_token,
                             moe_pinned_bytes=moe_pinned_bytes,
-                            input_layer_bytes=input_layer_bytes)
+                            input_layer_bytes=input_layer_bytes,
+                            keeps_kv=keeps_kv)
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it off the event
         # loop so a stats read never stalls the WebUI. return_status=True so a stale
         # (timed-out) or process-blind free reading is not weighed as current. When

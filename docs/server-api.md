@@ -19,7 +19,7 @@ localhost by default; widen it with the `cors_origins` config key. See
 [tls.md](tls.md) before exposing the server beyond 127.0.0.1.
 
 The OpenAI-compatible inference routes below (`/v1/chat/completions`,
-`/v1/completions`, `/v1/embeddings`, `/v1/audio/transcriptions` and
+`/v1/completions`, `/v1/embeddings`, `/v1/rerank`, `/v1/audio/transcriptions` and
 `/v1/images/generations`) are the one exception: they accept a
 cross-origin request from any local app - LM Studio/Ollama-style clients and
 AI browsers included - without needing `cors_origins` widened first, so
@@ -42,6 +42,8 @@ request extras:
 |---|---|
 | `top_k`, `repeat_penalty` | extra sampling controls |
 | `seed` | reproducible generation |
+| `stop` | A string or a list of up to 16 strings (each up to 1024 characters). The reply is cut before the first match, the generation ends there, and `finish_reason` is `stop`. A stop sequence inside a model's `<think>` block is not applied. Also accepted by `POST /v1/completions`. |
+| `tools`, `tool_choice`, `parallel_tool_calls` | OpenAI function tools; see [Tool calling](#tool-calling). |
 | `grammar`, `grammar_lazy`, `grammar_triggers` | GBNF grammar constraining the output (local models); a lazy grammar stays unconstrained until a trigger pattern appears, and requires `grammar_triggers` |
 | `chat_template_kwargs` | `{"enable_thinking": false}` asks a reasoning model that uses `<think>` blocks to answer without reasoning. Only `enable_thinking` is applied and must be a boolean (otherwise 422); other keys are accepted and ignored. A model without a `<think>` convention is unaffected. |
 
@@ -138,17 +140,64 @@ draft tokens sent to verification and kept; `paused_steps` counts the steps
 generated without drafting because drafting was slower. The field is `null`
 when `mtp_enabled` is off.
 
-With any draft source on (`spec_source` `mtp` or `ngram`), chat completions
+With any draft source on (`spec_source` `mtp`, `ngram` or `draft`), chat
+completions
 also carry `usage.speculation`, the same object plus the source:
 
 ```json
 {"speculation": {"source": "ngram", "state": "on", "drafted": 96, "accepted": 71, "paused_steps": 0, "reason": null}}
 ```
 
-For `mtp` the other fields equal `usage.mtp`. For `ngram`, `idle` means
-nothing in the reply matched earlier text, and `unavailable` carries the model
-status as `reason` (`rewind-unsupported` when the model's cache cannot drop a
-rejected draft). The field is `null` when no draft source is on.
+For `mtp` the other fields equal `usage.mtp`. For `ngram`, `idle` means the
+reply drafted nothing, with `reason` `not-paying` when the measured step costs
+held drafting back (otherwise nothing in the reply matched earlier text), and
+`unavailable` carries the model status as `reason` (`rewind-unsupported` when
+the model's cache cannot drop a rejected draft, `ngram-cannot-pay` when drafts
+accepted 90% of the time were measured not to beat one-token decoding by 5%).
+`draft` reports the same states; its `unavailable` reasons also include
+`draft-model-missing`, `draft-unsupported-role` (the file is not a causal chat
+model), `draft-load-failed`, `draft-vocab-mismatch`, `draft-context-refused` and
+`draft-cannot-pay` (measured too slow to help at an 85% acceptance), and `stopped` carries `draft-decode-failed:<code>`
+when a draft decode failed partway through the reply. An `on` reply carries
+`reason` `draft-on-cpu` when the draft model runs on the CPU (the model runs on
+the CPU, or the draft model did not fit in VRAM beside it). The field is `null` when no draft source is on.
+
+#### Tool calling
+
+`tools` takes OpenAI function tools (up to 64) and works with any chat model:
+the model is told about the functions in its system prompt, and its calls come
+back in `message.tool_calls`, with `finish_reason` `"tool_calls"`. A streamed
+reply sends each call whole in one `delta.tool_calls` entry carrying its
+`index`, `id`, `type` and `function`; the call text never appears in `content`.
+A reply can hold text before its calls, and more than one call.
+
+| Request | Behaviour |
+|---|---|
+| `tool_choice` | `auto` (the default when `tools` is sent): the model may answer in text or call. `none`: the functions are not shown to the model and the reply is not read for calls. `required`: the reply is one or more calls. `{"type": "function", "function": {"name": "..."}}`: the reply is calls to that function. |
+| `parallel_tool_calls` | `false` limits the reply to one call. |
+| earlier turns | An assistant message with `tool_calls` (its `content` may be `null`) and the `tool` messages that follow it are given to the model as text, in order. A tool result is untrusted text: control tokens in it are defused and it cannot close its own fence. |
+
+With `required` or a named function the arguments are constrained, token by
+token, to the function's `parameters` JSON schema (the keywords listed for
+`format` in [ollama-api.md](ollama-api.md)). A keyword that cannot be enforced
+(`pattern`, bounds on a non-integer number, ...) is left out of that function's
+schema and everything else in it is still enforced; a function whose schema
+cannot be compiled, or a tool list too large for one grammar, takes any JSON
+object as its arguments. Each case is written to the debug log. With `auto` the
+arguments are constrained from the moment the model opens a call. A forced
+choice starts with the call, so the model has no room to reason before it.
+Whether a model opens a call under `auto` is the model's decision: a model
+that does not follow the call instruction answers in prose, and `required` or a
+named function is how to force a call. A call to a function that was not
+offered is left in the text.
+
+`stop` sequences apply to the visible text only, never inside a call, and a
+call after a matched stop sequence is dropped. `tools` cannot be combined with
+`grammar` (400). On a model whose backend cannot apply grammars, `auto` still
+works, with calls read from the reply without a constraint, and `required` or
+a named function is a 400. A llama.cpp runtime too old to apply lazy grammars
+refuses `auto` at generation time with a 400 that says so; `localm setup-llama`
+installs a current one. A malformed `tools` or `tool_choice` is a 400.
 
 #### How a generation failure is reported
 
@@ -158,7 +207,7 @@ failure happens, not on which endpoint you called:
 
 | Failure | Reported as |
 |---|---|
-| The request is refused before generation starts (unsupported input, an undecodable image, a grammar this model cannot apply, a malformed grammar or trigger pattern) | An HTTP error status with the reason in `detail`: `400`, `501` when the server lacks an image decoder, `413` when an embedding batch is too large, `503` when the trigger-pattern validator was too busy to check your pattern |
+| The request is refused before generation starts (unsupported input, an undecodable image, a grammar this model cannot apply, a malformed grammar or trigger pattern, malformed `tools`) | An HTTP error status with the reason in `detail`: `400`, `501` when the server lacks an image decoder, `413` when an embedding batch is too large, `503` when the trigger-pattern validator was too busy to check your pattern |
 | Generation started and then failed (not enough free VRAM for this prompt, a conversation that outgrew the context window, a native decode error) | `200` whose text is `\n[inference error: <reason>]` (a leading newline, then the bracketed reason) and whose `finish_reason` is `"error"` |
 
 The second row is a `200` on purpose. A streaming response has already sent its
@@ -297,6 +346,42 @@ Returns OpenAI-format embedding vectors. 422 when the loaded model cannot
 embed. Against a HuggingFace-format model, 413 when the request exceeds the
 configured text-count or character-count cap (`hf_embed_max_texts`,
 `hf_embed_max_chars`).
+
+### `POST /v1/rerank`
+
+Scope: any valid key (no specific scope required once auth is enabled).
+
+```json
+{"model": "bge-reranker", "query": "what is a panda?",
+ "documents": ["The giant panda is a bear.", {"text": "Pandas is a Python library."}],
+ "top_n": 2, "return_documents": false}
+```
+
+Scores each document against the query with a registered reranker (a GGUF
+cross-encoder such as bge-reranker-v2-m3, or a decoder reranker such as
+Qwen3-Reranker) and returns them best first, in the Jina / Cohere / llama-server
+shape:
+
+```json
+{"object": "list", "model": "bge-reranker",
+ "usage": {"prompt_tokens": 61, "total_tokens": 61},
+ "results": [{"index": 1, "relevance_score": 2.24}, {"index": 0, "relevance_score": 1.58}]}
+```
+
+`index` is the document's position in the request; a higher `relevance_score` is
+more relevant, on a scale that belongs to the model (bge returns an unbounded score,
+Qwen3-Reranker the probability of "yes"). `top_n` keeps the best N and
+`return_documents` adds each document's text. A classifier head with several outputs
+also reports them as `label_scores`, and the first is the relevance score. A document
+longer than the model's window is cut to fit and its result carries `"truncated": true`.
+
+`model` names a registered reranker and may be left out when exactly one is
+registered; a path is never accepted. One reranker is resident at a time and a
+request for another replaces it. Errors: 400 for an empty query, a query too long
+for the model's window, or several rerankers with no `model`; 404 for an unregistered
+model or no reranker at all; 422 for an invalid body, a model that is not a reranker
+(an embedding or chat model), or a file without a classifier head; 503 when the
+model cannot be loaded or its worker fails.
 
 ### `POST /v1/audio/transcriptions`
 
@@ -512,6 +597,49 @@ scope dependency still rejects an unauthorised caller before the handler runs.
 
 **Only the update check honours `net_mode: off`.** `GET /api/issues` reaches the
 network regardless, and `GET /api/changelog` makes no network call at all.
+
+### `GET /metrics`
+
+Scope: `admin`. Off by default.
+
+Prometheus text-format metrics. The route does not exist until you turn on the
+`metrics_enabled` setting (Settings > Server, or `localm config metrics_enabled
+true`; `LOCALM_METRICS=1` does the same for one run) and restart. With it off
+nothing is collected and `/metrics` answers 404.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `localm_http_requests_total` | counter | `method`, `route`, `status` |
+| `localm_http_request_duration_seconds` | histogram | `method`, `route` |
+| `localm_http_requests_in_flight` | gauge | none |
+| `localm_prompt_tokens_total`, `localm_generated_tokens_total` | counter | none |
+| `localm_time_to_first_token_seconds` | histogram | none |
+| `localm_tokens_per_second` | histogram | none |
+| `localm_inference_queue_depth` | gauge | none |
+| `localm_models_loaded` | gauge | none |
+| `localm_vram_used_bytes`, `localm_vram_total_bytes` | gauge | none |
+
+`route` is the route template (`/v1/models/{model_id}`), never the requested
+path; anything that is not a plain route is `other`. No metric carries a prompt,
+a reply, a model name or a model path. The VRAM gauges come from the cached GPU
+reading and are left out until a trustworthy one exists;
+`localm_inference_queue_depth` counts requests waiting for a model's slot.
+Counters live in memory and start from zero at every server start.
+
+Access: a server with an API key needs an `admin` key (the owner key from
+`localm key generate`, or `LOCALM_API_KEY`). A server with no key answers only
+on a loopback bind, and then only with the per-process shell token the local GUI
+holds, so a scraper on a keyless server needs a key first. A cross-origin
+browser request is refused.
+
+```yaml
+scrape_configs:
+  - job_name: localm
+    authorization:
+      credentials: <admin key>
+    static_configs:
+      - targets: ["127.0.0.1:8642"]
+```
 
 ### `POST /api/bug-report`
 

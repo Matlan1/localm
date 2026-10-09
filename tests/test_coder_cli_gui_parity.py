@@ -316,10 +316,10 @@ def test_patch_download_404s_when_nothing_was_captured(tmp_path, monkeypatch):
 
 def test_native_tools_is_reported_as_not_applied_against_localms_own_server(
         tmp_path, monkeypatch):
-    """localm's /v1/chat/completions declares no tools/tool_choice, so the
-    fields are dropped and the run proceeds exactly as if the option had never
-    been passed. Nothing breaks, so silence is the problem. The
-    response must say it did not take effect."""
+    """A localm server is driven on the coder's own tool-call convention, so
+    the run proceeds exactly as if the option had never been passed. Nothing
+    breaks, so silence is the problem. The response must say it did not take
+    effect."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         r = client.post("/api/coder/sessions", headers=owner,
@@ -347,15 +347,23 @@ def test_not_asking_for_native_tools_produces_no_note(tmp_path, monkeypatch):
         assert body["notes"] == []
 
 
-def test_localm_chat_request_really_has_no_tools_field():
-    """The premise the whole native_tools decision rests on. If localm ever DOES
-    implement the tools API, this test fails and the "not applied" note above
-    becomes a lie that needs removing."""
-    from localm.inference.protocol import ChatRequest
-    req = ChatRequest(model="m", messages=[{"role": "user", "content": "hi"}],
-                      tools=[{"type": "function"}], tool_choice="auto")
-    assert not hasattr(req, "tools")
-    assert "tools" not in req.model_dump()
+def test_the_coder_sends_no_tools_fields_to_localms_own_server():
+    """A localm server is driven on the coder's own tool-call convention. A body
+    that also carried tools would make the server describe the tools a second
+    time and refuse the coder's grammar."""
+    from localm.plugins.coder.backends.http import HTTPBackend
+    defs = [{"type": "function", "function": {"name": "f"}}]
+    messages = [{"role": "user", "content": "hi"}]
+    local = HTTPBackend("http://127.0.0.1:9/v1", "m", api_key="k",
+                        localm_server=True, native_tools=True)
+    local._tool_defs = defs
+    body = local._body(messages, False, grammar='root ::= "a"')
+    assert "tools" not in body and "tool_choice" not in body and body["grammar"]
+    remote = HTTPBackend("https://api.openai.com/v1", "gpt-4o", api_key="k",
+                         native_tools=True)
+    remote._tool_defs = defs
+    body = remote._body(messages, False)
+    assert body["tools"] == defs and body["tool_choice"] == "auto"
 
 
 def test_supports_native_tools_is_true_for_a_real_openai_style_endpoint():

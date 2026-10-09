@@ -109,10 +109,12 @@ Loads the model twice per round, once with Multi-Token Prediction off and once o
 ```bash
 localm bench-spec mymodel                    # n-gram drafting vs none
 localm bench-spec mymodel --source mtp       # MTP vs none
+localm bench-spec mymodel --source draft --draft-model small   # a draft model vs none
 localm bench-spec mymodel --draft-tokens 4   # draft tokens per step for the "on" runs
+localm spec-drafts mymodel                   # downloaded models that can draft for mymodel
 ```
 
-Same comparison for any draft source (`--source ngram`, the default, or `mtp`), over the MTP prompts plus a rewrite that repeats its input, and it also reports whether a greedy reply matched. Takes the same `--gen-tokens`, `--rounds`, `--ctx` and `--gpu-layers` options. Nothing is written to your config.
+Same comparison for any draft source (`--source ngram`, the default, `mtp`, or `draft` with `--draft-model`, which defaults to the `spec_draft_model` setting), over the MTP prompts plus a rewrite that repeats its input, and it also reports whether a greedy reply matched. For `ngram` and `draft` it prints the step costs measured at load and the step times seen per draft length. Takes the same `--gen-tokens`, `--rounds`, `--ctx` and `--gpu-layers` options. Nothing is written to your config. `spec-drafts` reads each downloaded GGUF's metadata, loads nothing, and lists the causal chat models that share the model's vocabulary, smallest first.
 
 ---
 
@@ -249,6 +251,45 @@ Registering a lone `.safetensors` file scans its parent directory: if that folde
 is a real HuggingFace model (config plus weights and tokenizer), the folder is
 registered; otherwise the file is rejected with an "incomplete model" message
 rather than added as a half-model.
+
+### Rerankers
+
+A reranker scores each of several documents against a query, so a search result list can be
+reordered by relevance. A GGUF cross-encoder such as bge-reranker-v2-m3, or a decoder reranker
+such as Qwen3-Reranker, registers as type `embedding` and is recognised as a reranker from the
+classification head in its own header. Rank documents with it from the command line, the
+server's `POST /v1/rerank` or the MCP `rerank` tool; `/v1/embeddings` refuses it.
+
+```bash
+localm add bge-reranker-v2-m3-Q8_0.gguf -n bge-reranker
+localm rerank "what is a panda?" "The giant panda is a bear." "Paris is a city." --model bge-reranker
+localm rerank "what is a panda?" --file documents.txt --top-n 5 --json
+```
+
+`--model` can be left out when exactly one reranker is registered. A higher score is more
+relevant; the scale depends on the model (bge returns an unbounded score, Qwen3-Reranker the
+probability of "yes"). Only the best `--top-n` are shown. The model runs in this process; a
+document longer than the model's window is cut to fit and marked.
+
+### LoRA adapters
+
+A GGUF LoRA adapter (a `.gguf` whose header says `general.type = adapter`, as made by
+llama.cpp's `convert_lora_to_gguf.py`) registers as type `lora` and cannot be run on its
+own. Attach it to a registered GGUF chat model and it is applied every time that model loads:
+
+```bash
+localm add my-lora.gguf -n my-lora
+localm adapter attach my-lora qwen3-0.6b --scale 0.8   # refused if the architectures differ
+localm run qwen3-0.6b                                  # runs with the adapter applied
+localm adapter list                                    # adapters and what they are attached to
+localm adapter detach my-lora
+```
+
+An adapter belongs to one base; attaching it again moves it. Several adapters can be attached
+to one base and are applied together, each at its own scale (a negative scale subtracts it).
+A change applies the next time the base loads, so unload a model that is already running
+(`localm unload BASE`). Adapters need a llama runtime that exports the LoRA functions and a GGUF
+base model; they are not supported for HuggingFace-format models.
 
 ### List and remove
 
@@ -837,6 +878,7 @@ localm setup-llama                       # auto-detect the GPU, fetch the right 
 localm setup-llama --backend vulkan      # any GPU (AMD/NVIDIA/Intel), no vendor toolkit
 localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  /  --backend cpu
 localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
+localm setup-llama --backend cuda --cuda-line cuda-12   # Linux: CUDA runtime without a GPU, for building images
 localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
 localm setup-browser                     # download Chromium for the automated browser (coder tool)
 localm setup-browser --force             # reinstall even if already present
@@ -854,6 +896,8 @@ localm stop                              # stop the server serving this director
 localm stop <id>                         # stop one instance by id (or an id prefix, as shown by `ps`)
 localm stop --all                        # stop every running localm instance
 ```
+
+`--cuda-line cuda-12|cuda-13` (Linux, with `--backend cuda`) fetches the CUDA build and runtime libraries of that line on a machine with no NVIDIA GPU, which is how the `cuda` and `cuda13` Docker images are built (see [docs/docker.md](docker.md)). The driver check and the load test are skipped, the runtime is recorded as not load-tested, and `localm doctor` tests it on the machine it runs on. A failed fetch exits with an error; it never falls back to another backend.
 
 `localm run`/`localm gui`/`localm serve` start a background server that keeps running after the command exits; `localm stop` is how you end it - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
 

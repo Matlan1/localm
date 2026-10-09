@@ -208,6 +208,9 @@ class TestCandidateEndpoints:
 #  list_gpu_peers                                                    #
 # ------------------------------------------------------------------ #
 
+_FIND_TIMEOUT = 15.0
+
+
 class TestListGpuPeers:
     def test_a_running_instance_is_found_with_what_it_holds(self, monkeypatch):
         who = localm_whoami("peer-1", root_dir="/proj/x", version="9.9.9")
@@ -216,7 +219,7 @@ class TestListGpuPeers:
         with peer_server(who, status=status) as srv:
             enable_detection(monkeypatch, srv.port)
 
-            peers = gpu_registry.list_gpu_peers()
+            peers = gpu_registry.list_gpu_peers(timeout=_FIND_TIMEOUT)
 
         assert len(peers) == 1
         p = peers[0]
@@ -230,7 +233,7 @@ class TestListGpuPeers:
         with peer_server(localm_whoami("me")) as srv:
             enable_detection(monkeypatch, srv.port)
             assert gpu_registry.list_gpu_peers(exclude_self_id="me") == []
-            assert len(gpu_registry.list_gpu_peers()) == 1
+            assert len(gpu_registry.list_gpu_peers(timeout=_FIND_TIMEOUT)) == 1
 
     def test_this_process_is_excluded_by_pid_even_without_an_id(self, monkeypatch):
         who = localm_whoami("looks-like-a-peer")
@@ -258,13 +261,14 @@ class TestListGpuPeers:
         with peer_server(localm_whoami("p")) as srv:
             port = srv.port
             enable_detection(monkeypatch, port)
-            assert len(gpu_registry.list_gpu_peers()) == 1
+            assert len(gpu_registry.list_gpu_peers(timeout=_FIND_TIMEOUT)) == 1
         assert gpu_registry.list_gpu_peers() == []
 
     def test_several_peers_come_back_sorted_by_instance_id(self, monkeypatch):
         with peer_server(localm_whoami("bbb")) as b, peer_server(localm_whoami("aaa")) as a:
             enable_detection(monkeypatch, a.port, b.port)
-            ids = [p["instance_id"] for p in gpu_registry.list_gpu_peers()]
+            ids = [p["instance_id"]
+                   for p in gpu_registry.list_gpu_peers(timeout=_FIND_TIMEOUT)]
         assert ids == ["aaa", "bbb"]
 
     def test_a_failing_probe_does_not_hide_the_other_peers(self, monkeypatch):
@@ -279,7 +283,8 @@ class TestListGpuPeers:
                 return real(scheme, port, timeout, dial)
 
             monkeypatch.setattr(gpu_registry, "fetch_status", flaky)
-            ids = [p["instance_id"] for p in gpu_registry.list_gpu_peers()]
+            ids = [p["instance_id"]
+                   for p in gpu_registry.list_gpu_peers(timeout=_FIND_TIMEOUT)]
         assert ids == ["good"]
 
     def test_an_unreadable_candidate_list_is_not_an_error(self, monkeypatch):

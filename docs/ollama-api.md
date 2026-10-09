@@ -4,8 +4,8 @@ localm answers the Ollama HTTP API on the same server and port as its
 OpenAI-compatible API, so a tool that speaks Ollama can use a localm model
 without an adapter. The routes are checked against the official `ollama`
 Python client; other clients (Open WebUI, Home Assistant, Continue, Zed) use
-the same wire format, but one that depends on tool calling or on a JSON-schema
-`format` will not work yet (see the end of this page).
+the same wire format, but one that depends on tool calling will not work yet
+(see the end of this page).
 
 ```bash
 localm serve <model> --port 11434     # Ollama's default port, for clients that assume it
@@ -67,14 +67,15 @@ defaults to true, as in Ollama); send `"stream": false` for one JSON document.
 | `images` | Base64 images, on a message or on `/api/generate`. Needs a vision model. |
 | `options.temperature`, `top_p`, `top_k`, `repeat_penalty`, `seed` | Passed to the sampler. |
 | `options.num_predict` | A cap of 1 or more sets the maximum number of new tokens; -1 and -2 mean no cap. |
-| `options.stop` | A string or a list. The reply is cut at the first match and the generation is cancelled (a request with `stop` is answered through the streaming path even with `"stream": false`); `done_reason` is `stop`. A reply cut this way is not written to the audit log or transcript. |
-| `format` | `"json"` constrains the reply to a JSON object. A JSON schema is refused with a 400. |
+| `options.stop` | A string or a list. Sent as the request's `stop` (see [server-api.md](server-api.md)): the reply is cut before the first match, the generation ends there and `done_reason` is `stop`. |
+| `format` | `"json"` constrains the reply to a JSON object. A JSON schema constrains it to that schema: `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `prefixItems`, `minItems`, `maxItems`, `minLength`, `maxLength`, integer `minimum` and `maximum`, `format` (`date`, `time`, `date-time`, `uuid`), `anyOf`, `oneOf`, `allOf` and local `$ref` (recursive schemas included). Properties come out in the order the schema lists them, and an object with listed properties has no others unless `additionalProperties` allows it. A keyword the grammar cannot enforce (`pattern`, `multipleOf`, `not`, number bounds, ...) is a 400 naming it. |
+| `tools` | `/api/chat` only. Function tools, as Ollama sends them. The model's calls come back in `message.tool_calls` (`function.name`, `function.arguments` as an object, `id`, `function.index`); a streamed call is its own line before the `done` line, and `done_reason` is `stop`. An earlier turn's `assistant` message with `tool_calls` and the `tool` messages after it are given back to the model; they are matched to the calls by order, so `tool_name` is accepted and not needed. The rules in [Tool calling](server-api.md#tool-calling) apply, with `tool_choice` always `auto`. |
 | `think` | `true` (or a level string) returns the model's reasoning in `message.thinking` (`thinking` on generate); `false` turns reasoning off. |
 | `keep_alive` | On a request with no messages or prompt: `0` unloads the model, anything else loads it (a model served by another instance is left to that instance). Unloading needs `models:write`; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`. Ignored on a normal request; localm manages residency itself (`idle_unload_seconds`). |
 | other `options` keys, unknown request keys | Accepted and ignored (named in the debug log). |
 
-Refused with a 400, rather than silently dropped: `tools` and `tool_calls`,
-`raw`, `suffix`, a request-level `template`, and a non-empty `context`.
+Refused with a 400, rather than silently dropped: `raw`, `suffix`, a
+request-level `template`, and a non-empty `context`.
 
 Each reply object carries `model`, `created_at`, the content (`message` or
 `response`) and `done`. The last one adds `done_reason` (`stop` or `length`)
@@ -104,8 +105,9 @@ is refused with a 400, and `truncate` is accepted and ignored.
   timeout is set). `size_vram` is not reported.
 - `POST /api/show` returns `details`, `model_info` (`general.architecture` and
   `<architecture>.context_length` when recorded), `capabilities`
-  (`completion` or `embedding`, plus `vision` and `thinking` when known) and
-  empty `modelfile`, `parameters` and `template`. `tools` is not advertised.
+  (`completion` and `tools` for a chat model, `embedding` for an embedding
+  model, plus `vision` and `thinking` when known) and empty `modelfile`,
+  `parameters` and `template`.
 - `GET /api/version` returns localm's own version.
 
 ## Model management
@@ -114,7 +116,3 @@ is refused with a 400, and `truncate` is accepted and ignored.
 `/api/pull`, `/api/push`, `/api/create`, `/api/delete` and `/api/blobs/{digest}`
 answer 501 with the localm equivalent in the message: `localm pull`,
 `localm rm`, or the GUI.
-
-## Not supported yet
-
-Tool calling (`tools`, `tool_calls`) and `format` as a JSON schema.

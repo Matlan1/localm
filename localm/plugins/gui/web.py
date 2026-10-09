@@ -482,6 +482,16 @@ class RenameModelRequest(BaseModel):
     new_name: str
 
 
+class AdapterAttachRequest(BaseModel):
+    adapter: str
+    base: str
+    scale: float = 1.0
+
+
+class AdapterDetachRequest(BaseModel):
+    adapter: str
+
+
 class SetTypeRequest(BaseModel):
     model: str
     model_type: str

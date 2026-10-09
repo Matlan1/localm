@@ -9,6 +9,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 from localm.inference.backends.base import LOADING_MODEL_STATUS, VISION_CPU_FALLBACK_STATUS
+from localm.inference.stop_sequences import normalize_stop
 
 
 # ------------------------------------------------------------------ #
@@ -55,6 +56,10 @@ class Message(BaseModel):
     # assistant responses when the model emitted a <think> block; ignored on
     # input. Clients that do not know the field ignore it.
     reasoning_content: Optional[str] = None
+    # Function calls the assistant made, as OpenAI ``tool_calls`` entries
+    # (``id``, ``type``, ``function.name``, ``function.arguments``). On a request
+    # message they are earlier calls; on a response they are the model's calls.
+    tool_calls: Optional[List[Dict[str, Any]]] = None
     # Character ranges of ``content`` that came from an untrusted source, as
     # ``[[start, end], ...]``. The backend tokenises those ranges with
     # special-token parsing off. Optional and additive: a client that omits it
@@ -74,7 +79,13 @@ class Message(BaseModel):
     # the memory recall query and the audit user line.
     # Optional and additive: a client that omits it gets exactly the previous
     # behaviour. Request-only, so a response message never carries it.
-    origin: Optional[Literal["tool", "client"]] = Field(None, exclude=True)
+    origin: Optional[Literal["tool", "client"]] = Field(default=None, exclude=True)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _null_content_is_empty(cls, v):
+        """An assistant message that only calls functions may send ``content: null``."""
+        return "" if v is None else v
 
     def text_only(self) -> str:
         """Flatten content to plain text (discards media)."""
@@ -120,6 +131,21 @@ class EmbeddingRequest(BaseModel):
                                       # (base64 little-endian float32 buffer)
 
 
+class RerankDocument(BaseModel):
+    """A document object in a rerank request: ``{"text": "..."}``."""
+    text: str
+
+
+class RerankRequest(BaseModel):
+    """Jina / Cohere style /v1/rerank request."""
+    # None for the same reason as EmbeddingRequest.model.
+    model: Optional[str] = None
+    query: str
+    documents: List[Union[str, RerankDocument]] = Field(min_length=1)
+    top_n: Optional[int] = Field(None, ge=1)
+    return_documents: bool = False
+
+
 class CompletionRequest(BaseModel):
     """OpenAI /v1/completions (raw text completion) request."""
     # None, not "localm": "localm" is truthy, so a request that OMITS this
@@ -146,6 +172,15 @@ class CompletionRequest(BaseModel):
     grammar_lazy: bool = False
     grammar_triggers: Optional[List[str]] = None
     seed: Optional[int] = None
+    # Text that ends the reply when generated: one string or a list. The reply
+    # is cut before the first match and finish_reason is "stop".
+    stop: Optional[List[str]] = None
+
+    @field_validator("stop", mode="before")
+    @classmethod
+    def _stop_sequences(cls, v):
+        """Accept one string or a list of strings; reject anything else."""
+        return normalize_stop(v)
 
 
 class ChatRequest(BaseModel):
@@ -169,16 +204,22 @@ class ChatRequest(BaseModel):
     grammar_lazy: bool = False
     grammar_triggers: Optional[List[str]] = None
     seed: Optional[int] = None     # RNG seed for reproducible generation
+    # Text that ends the reply when generated: one string or a list. The reply
+    # is cut before the first match and finish_reason is "stop".
+    stop: Optional[List[str]] = None
+    # OpenAI function tools and how the model may use them: "auto" (default when
+    # tools are given), "none", "required", or {"type": "function", "function":
+    # {"name": ...}}. Calls come back in message.tool_calls (delta.tool_calls
+    # when streaming) with finish_reason "tool_calls".
+    tools: Optional[Any] = None
+    tool_choice: Optional[Any] = None
+    # False: the reply holds at most one call and ends there.
+    parallel_tool_calls: Optional[bool] = None
     # Capabilities the answering model must have, e.g. ["tool_use"]. Consulted
     # ONLY when no model is pinned: with an explicit `model`, a gap is reported
-    # and the pinned model still answers.
-    #
-    # Deliberately not named `tools` and deliberately not the OpenAI
-    # tools/tool_choice schema. Accepting that shape would advertise
-    # tool-calling protocol support this server does not implement; this field
-    # claims only what it does, which is to steer model selection. Vision and
-    # context length need no entry here - both are derived from the request
-    # itself (an image part, the prompt's size).
+    # and the pinned model still answers. Vision and context length need no
+    # entry here - both are derived from the request itself (an image part, the
+    # prompt's size).
     required_capabilities: Optional[List[str]] = None
     # Whether `model` is a pin. Unset: a named model is pinned and an absent,
     # empty or "localm" one is not. False: `model` names the preferred model,
@@ -192,6 +233,12 @@ class ChatRequest(BaseModel):
     # reasoning model to answer without its reasoning channel. Other keys are
     # accepted and ignored.
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+
+    @field_validator("stop", mode="before")
+    @classmethod
+    def _stop_sequences(cls, v):
+        """Accept one string or a list of strings; reject anything else."""
+        return normalize_stop(v)
 
     @field_validator("chat_template_kwargs")
     @classmethod
@@ -233,6 +280,8 @@ class ChoiceDelta(BaseModel):
     # Streamed reasoning tokens, routed out of `content`. A delta carries one
     # or the other; clients that do not know the field ignore it.
     reasoning_content: Optional[str] = None
+    # Complete calls, each with its ``index`` in the reply (see Message.tool_calls).
+    tool_calls: Optional[List[Dict[str, Any]]] = None
     status: Optional[str] = None
     # Stable id for `status` (see STATUS_CODE_BY_TEXT), for a client that
     # localizes the status text instead of displaying it verbatim. None when
@@ -314,10 +363,13 @@ class MtpUsage(BaseModel):
 class SpeculationUsage(BaseModel):
     """Speculative drafting for one reply, for any draft source.
 
-    source is the draft source ("mtp" or "ngram"). state and the counts mean
-    what they mean in MtpUsage; for ngram, "unavailable" carries the model
-    status as reason (e.g. "rewind-unsupported") and "idle" means nothing in
-    the reply matched earlier text.
+    source is the draft source ("mtp", "ngram" or "draft"). state and the
+    counts mean what they mean in MtpUsage; for ngram and draft, "unavailable"
+    carries the model status as reason (e.g. "rewind-unsupported",
+    "ngram-cannot-pay", "draft-cannot-pay"), "on" carries "draft-on-cpu" for a
+    draft model on the CPU, and "idle" carries "not-paying" when the measured
+    step costs held drafting back (for ngram without it, nothing in the reply
+    matched earlier text).
     """
     source: str
     state: str

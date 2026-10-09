@@ -42,9 +42,9 @@ from localm import _mp_spawn
 def _restore_mp_executable():
     # multiprocessing.set_executable mutates module-global state; never leak a
     # test-set value into a later test or the real interpreter's own default.
-    original = multiprocessing.spawn.get_executable()
+    original = multiprocessing.spawn._python_exe
     yield
-    multiprocessing.set_executable(original)
+    multiprocessing.spawn._python_exe = original
 
 
 def test_noop_off_windows(monkeypatch):
