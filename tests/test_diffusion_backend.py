@@ -558,6 +558,7 @@ class TestLoadSetup:
             llm = LlamaCpp("m.gguf", n_ctx=512, n_gpu_layers=99, verbose=True)
             llm.close()
         assert llm.is_diffusion is False and llm.kv_bytes_per_token == 4096
+        api.llama_set_causal_attn.assert_not_called()
 
     def test_a_rebuilt_context_stays_bidirectional(self):
         import ctypes
@@ -576,7 +577,6 @@ class TestLoadSetup:
             llm._prefill_fresh_context([], 10)
         api.llama_set_causal_attn.assert_called_once_with(
             api.llama_init_from_model.return_value, False)
-        api.llama_set_causal_attn.assert_not_called()
 
 
 class TestWindowAndReplyReserve:
