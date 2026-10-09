@@ -84,8 +84,7 @@ jobs:
       - name: Build sdist and wheel
         run: |
           set -euo pipefail
-          python -m pip install --upgrade build
-          python -m build --outdir out/
+          uvx --from "build==1.6.1" pyproject-build --outdir out/
           test -f "out/localm-${VERSION}.tar.gz"
           test -f "out/localm-${VERSION}-py3-none-any.whl"
 
