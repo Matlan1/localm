@@ -2,7 +2,7 @@
 """ComfyUI model directory scanner to auto-discover and register media models."""
 
 from pathlib import Path
-from typing import Optional, NamedTuple, Dict
+from typing import Optional, NamedTuple
 
 from localm.config import load_config, load_registry
 from localm.model_manager.registry import _register_with_dedup, _entry_path

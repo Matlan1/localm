@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from . import registry as _registry
 from .gguf import chat_template_tool_signal

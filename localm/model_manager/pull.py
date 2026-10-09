@@ -19,7 +19,6 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
-from typing import List
 from typing import Optional
 from rich.progress import BarColumn
 from rich.progress import DownloadColumn
