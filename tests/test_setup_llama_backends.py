@@ -303,7 +303,7 @@ def test_download_stall_raises_and_restores_timeout(monkeypatch, tmp_path):
         def read(self, n=-1):
             # the timeout must be armed to the stall value while the fetch runs
             assert restored and restored[-1] == sl._DOWNLOAD_STALL_TIMEOUT
-            raise socket.timeout("timed out")
+            raise TimeoutError("timed out")
 
     patch_https_transport(monkeypatch,
                           lambda req, timeout=None, context=None: _StallResp())

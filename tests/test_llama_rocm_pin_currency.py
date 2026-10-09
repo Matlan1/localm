@@ -48,7 +48,7 @@ def _no_ambient_actions_env(monkeypatch):
 
 
 def _day(n: int) -> dt.datetime:
-    return dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(days=n)
+    return dt.datetime(2026, 1, 1, tzinfo=dt.UTC) + dt.timedelta(days=n)
 
 
 def _releases(*pairs):
@@ -316,7 +316,7 @@ def test_release_date_uses_the_injectable_opener_and_never_raises(currency):
         calls.append((repo, tag))
         return {"published_at": "2026-04-01T00:00:00Z"}
     assert currency.release_date("b1307", "owner/repo", opener=opener) == dt.datetime(
-        2026, 4, 1, tzinfo=dt.timezone.utc)
+        2026, 4, 1, tzinfo=dt.UTC)
     assert calls == [("owner/repo", "b1307")]
 
     def raiser(repo, tag):

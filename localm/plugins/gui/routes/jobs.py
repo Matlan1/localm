@@ -101,7 +101,7 @@ def register(app: FastAPI, jobs) -> None:
                 while True:
                     try:
                         event = await asyncio.wait_for(q.get(), timeout=_web._KEEPALIVE_S)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         yield ": keepalive\n\n"
                         continue
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"

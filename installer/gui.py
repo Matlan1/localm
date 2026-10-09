@@ -40,7 +40,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -542,7 +542,7 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
                 "--path-dir", state.get("path_dir", ""),
                 "--command-shim", state.get("command_shim", ""),
                 "--stamp",
-                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
+                datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")]
         if (ROOT / "LocaLM.desktop").is_file():
             args += ["--file", str(ROOT / "LocaLM.desktop")]
         if state.get("path_modified"):

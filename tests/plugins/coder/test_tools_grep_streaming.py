@@ -341,6 +341,6 @@ class TestStreaming:
         assert "→    2: hit" in r.output
 
     def test_invalid_utf8_does_not_abort_the_search(self, project):
-        (project / "mixed.txt").write_bytes("hit\n".encode() + b"\xff\xfe bad\n")
+        (project / "mixed.txt").write_bytes(b"hit\n" + b"\xff\xfe bad\n")
         r = tool_grep(project, "hit", path="mixed.txt", context=0)
         assert "1 match(es)" in r.summary

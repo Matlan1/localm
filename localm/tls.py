@@ -28,7 +28,7 @@ import json
 import os
 import re
 import socket
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -368,7 +368,7 @@ def _write_private(path: Path, data: bytes) -> None:
 # ------------------------------------------------------------------ #
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _make_ca(home: Path):
