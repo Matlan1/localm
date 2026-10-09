@@ -83,6 +83,9 @@ class RagQueryRequest(BaseModel):
     # Drop hits below the collection's absolute relevance floor
     # (Collection.query relevant_only).
     relevant_only: bool = False
+    # None follows the rag_rerank setting; True or False overrides it for this
+    # query.
+    rerank: Optional[bool] = None
 
 
 class RagRemoveDocRequest(BaseModel):
@@ -881,15 +884,47 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
         # test_confinement_is_decided_on_the_chunks_that_would_be_served.
         if key_roots and not coll.is_confined_to(key_roots):
             raise HTTPException(403, _CONFINED_DETAIL)
-        return _neutralise_hits(coll.query(req.query, k=k, embed_fn=self_embed,
-                                           relevant_only=req.relevant_only))
+        from localm.rag.rerank import rerank_plan
+        plan = rerank_plan(enabled=req.rerank)
+        hits = coll.query(req.query, k=k, embed_fn=self_embed,
+                          relevant_only=req.relevant_only, rerank_fn=plan.fn,
+                          rerank_candidates=plan.candidates)
+        reranked = any("rerank_score" in h for h in hits)
+        return (_neutralise_hits(hits), plan.model if reranked else None,
+                coll.rerank_degrade_reason or plan.note)
 
     # Defang control/frame tokens in the untrusted chunk text before it can be
     # spliced into a chat prompt. Runs inside the executor, with the query and
     # collection load, so unbounded CPU does not stall the event loop.
-    hits = await loop.run_in_executor(get_plugin_executor(), _execute)
+    hits, rerank_model, rerank_note = await loop.run_in_executor(
+        get_plugin_executor(), _execute)
     return {"collection": name, "query": req.query, "hits": hits,
-            "relevant_only": req.relevant_only}
+            "relevant_only": req.relevant_only, "reranked": rerank_model is not None,
+            "rerank_model": rerank_model, "rerank_note": rerank_note}
+
+
+@_router.get("/api/rag/rerank")
+async def rag_rerank_status():
+    """Whether Knowledge results are reranked, for the Knowledge page.
+
+    Reads the config and the model registry; never loads a model. ``enabled`` is
+    the ``rag_rerank`` setting, ``installed`` the registered reranker names,
+    ``model`` the one a query would use (None when it would not rerank) and
+    ``note`` why a wanted rerank cannot run."""
+    loop = asyncio.get_running_loop()
+
+    def _state():
+        from localm.config import load_config
+        from localm.inference import reranker
+        from localm.rag.rerank import rerank_plan
+        cfg = load_config()
+        plan = rerank_plan(cfg)
+        return {"enabled": bool(cfg.get("rag_rerank", True)),
+                "installed": reranker.registered_rerankers(),
+                "model": plan.model, "candidates": plan.candidates,
+                "note": plan.note}
+
+    return await loop.run_in_executor(get_plugin_executor(), _state)
 
 
 @_router.post("/api/rag/collections/{name}/reembed")

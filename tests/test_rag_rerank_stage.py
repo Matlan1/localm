@@ -164,7 +164,7 @@ class TestHarnessMetrics:
         assert base["hit@1"] == 0.0
         fn, _ = _by_text(coll, "doc5.txt")
         better = ev.evaluate(coll, q, k=1, rerank_fn=fn, candidates=5)
-        assert better["hit@1"] == 1.0 and better["mrr@10"] == 1.0
+        assert better["hit@1"] == 1.0 and better["mrr@1"] == 1.0
         assert better["rerank_degraded"] == 0
         failing = ev.evaluate(coll, q, k=1, candidates=5,
                               rerank_fn=lambda a, b: [])

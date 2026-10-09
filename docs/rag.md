@@ -217,6 +217,26 @@ embedder too rather than quietly returning those vectors.
   show the plain ranking; `localm rag query --relevant-only` and the API's
   `"relevant_only": true` apply the floor. Each injected excerpt is the whole
   chunk.
+- **Reranking.** The first search ranks every chunk with a cheap score, so the
+  best excerpt is often present but not first. When a reranker model is
+  installed, the best 20 hits (Settings > Knowledge > Reranker candidates, 5 to
+  100) are re-scored by it against the question and the top few are kept, each
+  carrying a `rerank_score` next to its `score`. It runs on this machine and
+  adds a fraction of a second to a second per question; more candidates find
+  answers that ranked lower and take proportionally longer. The relevance floor
+  is applied to the candidates before the reranker sees them.
+  Install a reranker such as Qwen3-Reranker-0.6B or bge-reranker-v2-m3 with
+  `localm pull` (for example
+  `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`).
+  It is on by default (the `rag_rerank` setting, or the toggle on the Knowledge
+  page) but does nothing while no reranker is installed. With several installed,
+  name one in `rag_rerank_model`. Chat, `localm rag query` (`--rerank` or
+  `--no-rerank` to override the setting) and the query API
+  (`"rerank": true` or `false` to override it for one request) all use it. If
+  the reranker cannot load or score, the query keeps the unreranked order and
+  says so: the API reports it in `rerank_note`, the CLI prints it and the GUI
+  shows a message. Query responses add `reranked`, `rerank_model` and
+  `rerank_note`; `GET /api/rag/rerank` reports the current state.
 
 By default CLI indexing is lexical-only (no running engine); pass `--embed` to
 `localm rag add` / `query` / `resync` / `repair` to compute vectors via a

@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Knowledge results can be reranked.** With a reranker model installed (for example
+  `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
+  the best 20 matches for a Knowledge question are re-scored by it before they reach the
+  chat, so the most relevant excerpt comes first more often. A switch on the Knowledge
+  page and the Reranking settings control it, `localm rag query` takes `--rerank` and
+  `--no-rerank`, and the query API reports whether a query was reranked. With no
+  reranker installed nothing changes; if the reranker fails, the unreranked order is
+  kept and the reason is shown.
 - **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5 and other `t5`
   GGUFs register as chat models and answer through `localm run`, the GUI chat and
   `/v1/chat/completions`, where they were refused before.

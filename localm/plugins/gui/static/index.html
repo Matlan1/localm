@@ -697,6 +697,16 @@
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
+            <div class="card-head-text"><h3 data-i18n="knowledge.rerankCard.title">Reranking</h3></div></div>
+          <div class="sub" data-i18n="knowledge.rerankCard.intro">After the first search, a reranker model re-scores the best
+          matches so the most relevant excerpts come first. It needs a reranker model installed
+          and runs on this machine; without one, results are returned as searched.</div>
+          <div class="check-row"><label><input type="checkbox" id="kb-rerank" disabled>
+            <span data-i18n="knowledge.rerankCard.toggle">Rerank Knowledge results</span></label></div>
+          <div id="kb-rerank-status" class="sub" data-i18n="knowledge.rerank.status.checking">Checking…</div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
             <div class="card-head-text"><h3 data-i18n="knowledge.newCollectionCard.title">New collection</h3></div></div>
           <div class="row">
             <input type="text" id="kb-name" placeholder="name (spaces &amp; emoji ok)" spellcheck="false" style="max-width:260px"

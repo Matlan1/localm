@@ -20,6 +20,7 @@ import math
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -72,11 +73,14 @@ def ndcg_at(rel: list[int], k: int, n_relevant: int) -> float:
 
 
 def build_collection(base: Path, embed_fn: Optional[Callable] = None,
-                     model_name: Optional[str] = None):
-    """Index the fixture corpus into a fresh collection under *base*."""
+                     model_name: Optional[str] = None,
+                     corpus_dir: Optional[Path] = None):
+    """Index the markdown files of *corpus_dir* (default: the fixture corpus)
+    into a fresh collection under *base*."""
     from localm.rag import Collection
     coll = Collection(COLLECTION_NAME, base=base).create()
-    result = coll.add_paths([str(p) for p in sorted(CORPUS_DIR.glob("*.md"))],
+    files = sorted((corpus_dir or CORPUS_DIR).glob("*.md"))
+    result = coll.add_paths([str(p) for p in files],
                             embed_fn=embed_fn, model_name=model_name)
     if result["failed"]:
         raise RuntimeError(f"corpus files failed to index: {result['failed']}")
@@ -96,37 +100,56 @@ def evaluate(coll, queries: list[dict], *, embed_fn: Optional[Callable] = None,
     counts = relevant_chunk_counts(coll, queries)
     rows = []
     for q in queries:
-        hits = coll.query(q["query"], k=max(k, 10), embed_fn=embed_fn,
+        started = time.perf_counter()
+        hits = coll.query(q["query"], k=k, embed_fn=embed_fn,
                           relevant_only=relevant_only, rerank_fn=rerank_fn,
                           rerank_candidates=candidates)
+        elapsed = time.perf_counter() - started
         rel = relevance_vector(hits, q)
         rows.append({
             "id": q["id"], "first_rank": next((i for i, r in enumerate(rel, 1) if r), None),
             "hit1": hit_at(rel, 1), "hitk": hit_at(rel, k),
             "mrr": reciprocal_rank(rel), "ndcg": ndcg_at(rel, k, counts[q["id"]]),
             "degrade": getattr(coll, "rerank_degrade_reason", None),
+            "ms": elapsed * 1000,
         })
     n = len(rows)
     return {
         "n": n, "k": k,
         "hit@1": sum(r["hit1"] for r in rows) / n,
         f"hit@{k}": sum(r["hitk"] for r in rows) / n,
-        "mrr@10": sum(r["mrr"] for r in rows) / n,
+        f"mrr@{k}": sum(r["mrr"] for r in rows) / n,
         f"ndcg@{k}": sum(r["ndcg"] for r in rows) / n,
+        "ms/query": sum(r["ms"] for r in rows) / n,
         "rerank_degraded": sum(1 for r in rows if r["degrade"]),
         "rows": rows,
     }
+
+
+def pool_ceiling(coll, queries: list[dict], *, embed_fn: Optional[Callable] = None,
+                 sizes: tuple = (4, 10, 20, 40)) -> dict[int, float]:
+    """For each pool size N, the share of queries with a relevant chunk in the
+    unreranked top N: the best a reranker over N candidates could reach."""
+    deepest = max(sizes)
+    ranks = []
+    for q in queries:
+        hits = coll.query(q["query"], k=deepest, embed_fn=embed_fn)
+        rel = relevance_vector(hits, q)
+        ranks.append(next((i for i, r in enumerate(rel, 1) if r), None))
+    return {n: sum(1 for r in ranks if r is not None and r <= n) / len(ranks)
+            for n in sizes}
 
 
 def format_table(results: dict[str, dict]) -> str:
     """A fixed-width comparison of named configurations."""
     any_res = next(iter(results.values()))
     k = any_res["k"]
-    cols = ["hit@1", f"hit@{k}", "mrr@10", f"ndcg@{k}"]
-    out = [f"{'config':<28}" + "".join(f"{c:>10}" for c in cols) + f"{'degraded':>10}"]
+    cols = ["hit@1", f"hit@{k}", f"mrr@{k}", f"ndcg@{k}"]
+    out = [f"{'config':<34}" + "".join(f"{c:>10}" for c in cols)
+           + f"{'ms/query':>10}{'degraded':>10}"]
     for name, res in results.items():
-        out.append(f"{name:<28}" + "".join(f"{res[c]:>10.3f}" for c in cols)
-                   + f"{res['rerank_degraded']:>10d}")
+        out.append(f"{name:<34}" + "".join(f"{res[c]:>10.3f}" for c in cols)
+                   + f"{res['ms/query']:>10.1f}{res['rerank_degraded']:>10d}")
     return "\n".join(out)
 
 
@@ -134,11 +157,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--embed", action="store_true",
                     help="embed with the configured embedding model (hybrid retrieval)")
-    ap.add_argument("--reranker", default=None,
-                    help="registered reranker model name to compare against")
+    ap.add_argument("--reranker", action="append", default=[],
+                    help="registered reranker model name to compare against "
+                         "(repeatable)")
     ap.add_argument("--candidates", default="20",
                     help="comma-separated candidate counts to try (default 20)")
     ap.add_argument("-k", type=int, default=4)
+    ap.add_argument("--corpus-dir", default=None,
+                    help="index this folder of .md files instead of the fixture "
+                         "corpus (the labelled documents must be in it)")
     ap.add_argument("--json", dest="json_out", default=None,
                     help="write the full per-query results to this file")
     args = ap.parse_args(argv)
@@ -156,22 +183,26 @@ def main(argv: Optional[list[str]] = None) -> int:
             return out
         model_name = str(load_config().get("embedding_model") or "")
 
-    rerank_fn = None
+    rerankers = {}
     if args.reranker:
         from localm.rag.rerank import make_rerank_fn
-        rerank_fn = make_rerank_fn(args.reranker)
+        rerankers = {name: make_rerank_fn(name)[1] for name in args.reranker}
 
     queries = load_queries()
     results: dict[str, dict] = {}
     with tempfile.TemporaryDirectory(prefix="rerank-eval-") as tmp:
-        coll = build_collection(Path(tmp), embed_fn, model_name)
+        coll = build_collection(Path(tmp), embed_fn, model_name,
+                                Path(args.corpus_dir) if args.corpus_dir else None)
         results["baseline"] = evaluate(coll, queries, embed_fn=embed_fn, k=args.k)
-        if rerank_fn is not None:
+        for name, rerank_fn in rerankers.items():
             for c in [int(x) for x in args.candidates.split(",") if x.strip()]:
-                results[f"rerank candidates={c}"] = evaluate(
+                results[f"{name} candidates={c}"] = evaluate(
                     coll, queries, embed_fn=embed_fn, rerank_fn=rerank_fn,
                     k=args.k, candidates=c)
+        ceiling = pool_ceiling(coll, queries, embed_fn=embed_fn)
     print(format_table(results))
+    print("unreranked recall within top N: "
+          + ", ".join(f"N={n}: {v:.3f}" for n, v in ceiling.items()))
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(results, indent=2), encoding="utf-8")
     return 0

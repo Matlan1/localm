@@ -29,6 +29,7 @@ const RAG_EXTS = [
 
 export async function refreshKnowledgePage() {
   refreshKbSelect();   // keep the chat drawer selector in sync
+  refreshRerankPanel();
   // Fetch the embedding status once and pass it into each row.
   const embedStatus = await refreshEmbeddingPanel();
   const embedReady = !!(embedStatus && embedStatus.status === "ready");
@@ -248,6 +249,67 @@ export async function refreshEmbeddingPanel() {
     sel.appendChild(o);
   }
   return st;
+}
+
+const RERANKER_PULL_HINT =
+  "localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf";
+
+/** Paint the Reranking card from GET /api/rag/rerank: the toggle (the
+ *  rag_rerank setting) and one line saying what retrieval will do. */
+export async function refreshRerankPanel() {
+  const statusEl = $("kb-rerank-status");
+  const box = $("kb-rerank");
+  if (!statusEl || !box) return null;
+  let st;
+  try {
+    const r = await fetch("/api/rag/rerank", { headers: authHeaders() });
+    st = await r.json();
+    if (!r.ok) throw new Error(st.detail || r.statusText);
+  } catch (e) {
+    box.disabled = true;
+    statusEl.textContent = t("knowledge.rerank.statusLoadFailed", { message: e.message });
+    statusEl.style.color = "var(--yellow)";
+    return null;
+  }
+  box.checked = !!st.enabled;
+  box.disabled = false;
+  let color = "var(--text-dim)";
+  let text;
+  if (!st.enabled) {
+    text = t("knowledge.rerank.status.off");
+  } else if (st.model) {
+    text = t("knowledge.rerank.status.on", { model: st.model, n: st.candidates });
+    color = "var(--green)";
+  } else if (st.note) {
+    text = t("knowledge.rerank.status.unusable", { note: st.note });
+    color = "var(--yellow)";
+  } else {
+    text = t("knowledge.rerank.status.noneInstalled", { command: RERANKER_PULL_HINT });
+    color = "var(--yellow)";
+  }
+  statusEl.textContent = text;
+  statusEl.style.color = color;
+  return st;
+}
+
+if ($("kb-rerank")) {
+  $("kb-rerank").onchange = async () => {
+    const box = $("kb-rerank");
+    box.disabled = true;
+    try {
+      const r = await fetch("/v1/config", {
+        method: "PATCH", headers: authHeaders(),
+        body: JSON.stringify({ rag_rerank: box.checked }),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error(e.detail || r.statusText);
+      }
+    } catch (e) {
+      toast(t("knowledge.rerank.saveFailed", { message: e.message }), true);
+    }
+    await refreshRerankPanel();
+  };
 }
 
 async function applyEmbeddingModel(model) {

@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 import operator
 import re
+from pathlib import Path
 from typing import Optional
 
 from localm.debuglog import logger as _log
@@ -64,6 +65,10 @@ LEXICAL_RELEVANCE_COVERAGE = 0.6
 
 class _CollectionSearch:
     """Mixin of ``Collection``: querying a collection."""
+
+    name: str
+    dir: Path
+    _chunks: list[dict]
 
     def query(self, text: str, k: int = 4,
               embed_fn: Optional[EmbedFn] = None, *,
