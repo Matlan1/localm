@@ -468,7 +468,7 @@ def check_staged_cuda_runtime(target: Path, allow_no_gpu: bool = False) -> tuple
     Fails when no NVIDIA GPU is visible (unless *allow_no_gpu*, which reports
     that the GPU is not in use and passes), when the GPU needs the other CUDA
     line, when the driver is too old for the staged line, and when the runtime
-    does not load and register a compute backend. Never raises."""
+    does not load and register a GPU device. Never raises."""
     line = staged_cuda_line(target)
     if line is None:
         return True, []
@@ -502,10 +502,27 @@ def check_staged_cuda_runtime(target: Path, allow_no_gpu: bool = False) -> tuple
             f"the host driver {info.driver_version or 'version unknown'} supports CUDA "
             f"{info.cuda_capability}, and the {line} runtime needs {need[0]}.{need[1]} "
             "or newer. Update the host NVIDIA driver."]
-    ok, detail = _sl._native_loads_ok()
+    ok, detail = _sl._native_gpu_loads_ok()
     if not ok:
         return False, [f"the {line} runtime did not load for {gpu}: {detail}"]
     return True, [f"CUDA runtime ({line}) loaded for {gpu}"]
+
+
+def _check_image_record(target: Path) -> tuple:
+    """When LOCALM_IMAGE_BACKEND names a CUDA image, require *target* to hold the
+    staged-runtime record for that image's line. Returns ``(ok, lines)``; ``(True,
+    [])`` outside a CUDA image."""
+    tag = os.environ.get("LOCALM_IMAGE_BACKEND", "")
+    expected = next((line for line, name in IMAGE_TAG_FOR_LINE.items() if name == tag), None)
+    if expected is None:
+        return True, []
+    found = staged_cuda_line(target)
+    if found == expected:
+        return True, []
+    return False, [
+        f"the {tag} image's CUDA runtime record in {target} is "
+        f"{'missing or unreadable' if found is None else 'for ' + found}, "
+        f"expected {expected}. The image is damaged; pull it again."]
 
 
 def cuda_container_check() -> int:
@@ -515,7 +532,9 @@ def cuda_container_check() -> int:
     lets a container without a GPU start."""
     target = _sl._repo_runtime_lib()
     allow = os.environ.get("LOCALM_ALLOW_NO_GPU", "") == "1"
-    ok, lines = check_staged_cuda_runtime(target, allow_no_gpu=allow)
+    ok, lines = _check_image_record(target)
+    if ok:
+        ok, lines = check_staged_cuda_runtime(target, allow_no_gpu=allow)
     for index, text in enumerate(lines):
         refusal = "refusing to start: " if index == 0 and not ok else ""
         print(f"localm: {refusal}{text}", file=sys.stderr)

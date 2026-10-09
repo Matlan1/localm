@@ -5,6 +5,12 @@ runtime on the GPU host."""
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 import pytest
 from click.testing import CliRunner
 
@@ -34,7 +40,7 @@ def probes(monkeypatch):
         state["load_calls"] += 1
         return state["loads"]
 
-    monkeypatch.setattr(sl, "_native_loads_ok", loads)
+    monkeypatch.setattr(sl, "_native_gpu_loads_ok", loads)
     return state
 
 
@@ -133,7 +139,37 @@ class TestContainerHook:
     def hook(self, tmp_path, monkeypatch, probes):
         monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
         monkeypatch.delenv("LOCALM_ALLOW_NO_GPU", raising=False)
+        monkeypatch.delenv("LOCALM_IMAGE_BACKEND", raising=False)
         return tmp_path
+
+    @pytest.mark.parametrize("tag, line", [("cuda", "cuda-12"), ("cuda13", "cuda-13")])
+    def test_a_cuda_image_without_its_record_is_refused_before_any_probe(
+            self, hook, probes, monkeypatch, capsys, tag, line):
+        monkeypatch.setenv("LOCALM_IMAGE_BACKEND", tag)
+        assert sl.cuda_container_check() == 3
+        err = capsys.readouterr().err
+        assert "refusing to start" in err and "missing or unreadable" in err and line in err
+        assert probes["load_calls"] == 0
+
+    def test_a_cuda_image_holding_the_other_lines_record_is_refused(
+            self, hook, staged, probes, monkeypatch, capsys):
+        staged("cuda-13")
+        monkeypatch.setenv("LOCALM_IMAGE_BACKEND", "cuda")
+        assert sl.cuda_container_check() == 3
+        assert "is for cuda-13, expected cuda-12" in capsys.readouterr().err
+
+    def test_a_cuda_image_with_its_record_goes_on_to_the_gpu_check(
+            self, hook, staged, probes, monkeypatch, capsys):
+        staged("cuda-12")
+        probes["info"] = _gpu()
+        monkeypatch.setenv("LOCALM_IMAGE_BACKEND", "cuda")
+        assert sl.cuda_container_check() == 0
+        assert "loaded for NVIDIA GeForce RTX 4090" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("tag", ["", "cpu", "vulkan"])
+    def test_other_images_need_no_record(self, hook, monkeypatch, tag):
+        monkeypatch.setenv("LOCALM_IMAGE_BACKEND", tag)
+        assert sl.cuda_container_check() == 0
 
     def test_exits_with_the_documented_status_when_refusing(self, hook, staged, capsys):
         staged()
@@ -283,3 +319,76 @@ class TestStagingCommand:
         result = stage("--cuda-line", "cuda-11")
         assert result.exit_code == 2
         assert stage.calls["provision"] == []
+
+
+DRIVER = textwrap.dedent("""\
+    import sys
+    from localm.inference.backends.llamacpp import _loader
+    devices = {devices!r}
+    _loader.load_lib = lambda: None
+    _loader.compute_devices = lambda: devices
+    exec(compile(sys.argv[1], "<probe>", "exec"))
+""")
+
+
+class TestGpuLoadProbe:
+    """The probe code the start check runs, executed in a child interpreter with
+    the loader reporting a chosen device list."""
+
+    @staticmethod
+    def _run(devices):
+        proc = subprocess.run(
+            [sys.executable, "-c", DRIVER.format(devices=devices), sl._GPU_LOAD_PROBE_CODE],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ,
+                 "PYTHONPATH": str(Path(sl.__file__).resolve().parents[2])})
+        return proc
+
+    def test_a_gpu_device_passes(self):
+        from localm.inference.backends.llamacpp import _loader
+        proc = self._run([("CPU", _loader.GGML_DEV_TYPE_CPU), ("CUDA0", _loader.GGML_DEV_TYPE_GPU)])
+        assert proc.returncode == 0, proc.stderr
+
+    def test_only_the_cpu_device_fails_and_is_named(self):
+        from localm.inference.backends.llamacpp import _loader
+        proc = self._run([("CPU", _loader.GGML_DEV_TYPE_CPU)])
+        assert proc.returncode == sl._PROBE_NO_GPU_DEVICE
+        assert proc.stdout.strip() == "CPU"
+
+    def test_no_device_at_all_fails(self):
+        proc = self._run([])
+        assert proc.returncode == sl._PROBE_NO_GPU_DEVICE
+        assert proc.stdout.strip() == "none"
+
+
+class TestGpuLoadVerdict:
+    @staticmethod
+    def _fake_run(monkeypatch, returncode, stdout="", stderr=""):
+        monkeypatch.setattr(sl.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+            a, returncode, stdout=stdout, stderr=stderr))
+
+    def test_passes_on_exit_0(self, monkeypatch):
+        self._fake_run(monkeypatch, 0)
+        assert sl._native_gpu_loads_ok() == (True, "")
+
+    def test_a_cpu_only_runtime_is_a_failure_that_names_what_registered(self, monkeypatch):
+        self._fake_run(monkeypatch, sl._PROBE_NO_GPU_DEVICE, stdout="CPU\n")
+        ok, detail = sl._native_gpu_loads_ok()
+        assert ok is False
+        assert "registered no GPU device (registered: CPU)" in detail
+
+    def test_an_abi_rejection_keeps_the_abi_prefix(self, monkeypatch):
+        self._fake_run(monkeypatch, sl._PROBE_ABI_MISMATCH, stderr="layout drift")
+        ok, detail = sl._native_gpu_loads_ok()
+        assert ok is False and sl._is_abi_rejection(detail)
+
+    def test_a_loader_crash_reports_its_error_line(self, monkeypatch):
+        self._fake_run(monkeypatch, 1, stderr="Traceback\nRuntimeError: libcuda.so.1: cannot open")
+        ok, detail = sl._native_gpu_loads_ok()
+        assert ok is False and "libcuda.so.1: cannot open" in detail
+
+    def test_a_probe_that_cannot_start_is_a_failure(self, monkeypatch):
+        def boom(*a, **k):
+            raise OSError("no interpreter")
+        monkeypatch.setattr(sl.subprocess, "run", boom)
+        assert sl._native_gpu_loads_ok() == (False, "no interpreter")

@@ -164,7 +164,7 @@ image's CUDA line: CUDA 12.4 or newer for `cuda`, CUDA 13.4 or newer for `cuda13
 The image cannot be tested against a GPU while it is built, so the runtime is checked
 when the container starts. Before serving, the container confirms that an NVIDIA GPU is
 visible, that it matches the image's CUDA line, that the driver is new enough, and that
-the CUDA runtime loads and registers a compute device. If any of these fails, the
+the CUDA runtime loads and registers a GPU device (a CPU-only registration does not count). If any of these fails, the
 container prints the cause to its log and exits with status 3 instead of serving on the
 CPU. The causes and their fixes:
 

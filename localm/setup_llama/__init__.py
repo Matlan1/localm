@@ -140,6 +140,7 @@ from localm.setup_llama.load_probe import (
     _EXC_HEADER_RE, _informative_error_line, _KNOWN_SHARED_LIB_PACKAGES, _MISSING_SO_RE,
     _name_missing_shared_lib, _PROBE_NO_BACKENDS, _PROBE_ABI_MISMATCH,
     _ABI_REJECT_PREFIX, _LOAD_PROBE_CODE, _is_abi_rejection, _native_loads_ok,
+    _PROBE_NO_GPU_DEVICE, _GPU_LOAD_PROBE_CODE, _native_gpu_loads_ok,
 )
 from localm.setup_llama.rocm_cpu import (
     CPU_OVERLAY_MARKER, install_rocm_simd_cpu, installed_cpu_overlay, rocm_build,
@@ -182,7 +183,8 @@ __all__ = [
     "nvidia_preflight", "_nvidia_smi", "NvidiaInfo", "_pick_asset", "_PIN_CONFIRMATION",
     "_pin_note_for_backend", "_PINNED_FALLBACK_SHA256", "_PINNED_TAG", "pinned_tag",
     "_platform_key", "_PRESERVED_TARGET_FILES", "previous_tag", "_PROBE_ABI_MISMATCH",
-    "_PROBE_NO_BACKENDS", "_provision_backend", "_provision_lock_holder_pid",
+    "_PROBE_NO_BACKENDS", "_PROBE_NO_GPU_DEVICE", "_GPU_LOAD_PROBE_CODE",
+    "_native_gpu_loads_ok", "_provision_backend", "_provision_lock_holder_pid",
     "_PROVISION_LOCK_OWNER", "_provision_lock_path", "_provision_with_fallback",
     "_provisioned_backend", "_provisioned_build", "_provisioning_lock",
     "ProvisioningBusyError", "_pypi_wheel_url_and_sha", "_read_ar_archive",
