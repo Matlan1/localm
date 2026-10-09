@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 # Bytes per logit: llama.cpp's logits tensor is f32.
 _LOGIT_BYTES = 4
@@ -178,10 +178,10 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
     ``{index: 1.0}``) if it holds the whole charge. When no plan fits,
     ``tensor_split`` is ``None`` and only ``default`` reports the shortfall.
     *spread_bytes* is charged as in :func:`charge_devices`."""
-    kw = dict(layer_bytes=layer_bytes, output_bytes=output_bytes,
-              n_gpu_layers=n_gpu_layers, layer_kv_bytes=layer_kv_bytes,
-              logits_bytes=logits_bytes, reserve_bytes=reserve_bytes,
-              spread_bytes=spread_bytes)
+    kw: Dict[str, Any] = dict(layer_bytes=layer_bytes, output_bytes=output_bytes,
+                              n_gpu_layers=n_gpu_layers, layer_kv_bytes=layer_kv_bytes,
+                              logits_bytes=logits_bytes, reserve_bytes=reserve_bytes,
+                              spread_bytes=spread_bytes)
     frees = [max(0, int(d["free"])) for d in devices]
     default = charge_devices(devices, frees, **kw)
     if all(c.fits for c in default):

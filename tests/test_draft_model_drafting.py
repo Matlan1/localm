@@ -1272,7 +1272,7 @@ def test_the_worker_hands_a_cpu_placement_to_the_draft_load():
         def __init__(self, **kw):
             seen.update(kw)
 
-    for on_gpu, expected in ((False, False), (True, None)):
+    for on_gpu, expected in ((False, False), (True, True)):
         seen.clear()
         w = _worker.GgufWorker("m.gguf", None, 2048, 99, None, 0, spec_source="draft",
                                spec_draft_model="d.gguf", spec_draft_gpu=on_gpu)

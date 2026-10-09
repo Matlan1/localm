@@ -15,7 +15,7 @@ abort only ever kills this process, never the server."""
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ._sizing import VramSizingMixin
 
@@ -234,6 +234,13 @@ class GgufWorker(VramSizingMixin):
 
         from localm.inference.backends.llamacpp import LlamaCpp
 
+        optional: Dict[str, Any] = {
+            name: value for name, value in (
+                ("mtp_draft_tokens", self.mtp_draft_tokens),
+                ("spec_source", self.spec_source),
+                ("spec_draft_tokens", self.spec_draft_tokens),
+                ("spec_draft_model", self.spec_draft_model),
+            ) if value is not None}
         self._llm = LlamaCpp(
             model_path=self.model_path,
             n_ctx=self.n_ctx,
@@ -249,15 +256,8 @@ class GgufWorker(VramSizingMixin):
             mtp_enabled=self.mtp_enabled,
             use_mmap=self.use_mmap,
             verbose=False,
-            **({"mtp_draft_tokens": self.mtp_draft_tokens}
-               if self.mtp_draft_tokens is not None else {}),
-            **({"spec_source": self.spec_source}
-               if self.spec_source is not None else {}),
-            **({"spec_draft_tokens": self.spec_draft_tokens}
-               if self.spec_draft_tokens is not None else {}),
-            **({"spec_draft_model": self.spec_draft_model}
-               if self.spec_draft_model is not None else {}),
-            **({"spec_draft_gpu": False} if not self._draft_gpu else {}),
+            spec_draft_gpu=self._draft_gpu,
+            **optional,
         )
         self._loaded = True
         return {

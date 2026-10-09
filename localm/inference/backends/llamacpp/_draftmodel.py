@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import weakref
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from ._drafting import SPEC_DRAFT, CountedSource
 from ._stepcosts import UNBOUNDED_REPLY_TOKENS, expected_tokens
@@ -151,14 +151,18 @@ class DraftModelSource(CountedSource):
         self._catch_up = 0
 
     @property
-    def _llm(self):
+    def _llm(self) -> Any:
         return self._llm_ref()
 
     def create_context(self, n_ctx: int, offload_kqv: bool) -> str:
         """(Re)create the draft context at *n_ctx* tokens with an empty cache.
-        Returns "" on success, else "draft-context-refused"."""
+        Returns "" on success, else "draft-context-refused" (also when no
+        draft model is loaded)."""
         from .llama import _greedy_chain, api
         self.free_context()
+        model = self._model
+        if model is None:
+            return "draft-context-refused"
         cp = api.llama_context_default_params()
         cp.n_ctx = n_ctx
         cp.n_batch = min(n_ctx, DRAFT_CONTEXT_BATCH)
@@ -167,7 +171,7 @@ class DraftModelSource(CountedSource):
         if self._n_threads is not None:
             cp.n_threads = self._n_threads
             cp.n_threads_batch = self._n_threads
-        ctx = api.llama_init_from_model(self._model, cp)
+        ctx = api.llama_init_from_model(model, cp)
         if not ctx:
             return "draft-context-refused"
         self._ctx = ctx
@@ -241,7 +245,11 @@ class DraftModelSource(CountedSource):
         rest of the reply; always True for a catch-up of at most
         ``CATCH_UP_FREE_TOKENS``. A draft context smaller than the main one,
         which the next proposal recreates empty, lacks every token. Otherwise
-        advances ``_valid`` over the prefix the two share."""
+        advances ``_valid`` over the prefix the two share. True without
+        ``costs``."""
+        costs = self.costs
+        if costs is None:
+            return True
         cached = self._llm._cached_tokens
         if self._llm._ctx_capacity > self._ctx_capacity:
             pending = len(cached) + 1
@@ -257,7 +265,7 @@ class DraftModelSource(CountedSource):
         e = expected_tokens(p, k)
         saved_per_step = e * self.step_cost(0) - self.step_cost(k)
         left = tokens_left if tokens_left is not None else UNBOUNDED_REPLY_TOKENS
-        return pending * self.costs.draft_prefill < saved_per_step * (left / e)
+        return pending * costs.draft_prefill < saved_per_step * (left / e)
 
     def _reset_cache(self) -> None:
         from .llama import api
@@ -267,13 +275,19 @@ class DraftModelSource(CountedSource):
             api.llama_memory_clear(api.llama_get_memory(self._ctx), True)
 
     def _decode(self, tokens: List[int], start: int) -> int:
+        """Decode *tokens* on the draft context from position *start* in
+        batches of at most its batch size; the first nonzero llama_decode
+        result, -1 without a context, else 0."""
         from .llama import api
+        ctx = self._ctx
+        if ctx is None:
+            return -1
         llm = self._llm
         step = max(1, self._ctx_batch)
         for i in range(0, len(tokens), step):
             batch = llm._create_batch(tokens[i:i + step], start + i, logits_at_last_only=True)
             try:
-                ret = api.llama_decode(self._ctx, batch)
+                ret = api.llama_decode(ctx, batch)
             finally:
                 api.llama_batch_free(batch)
             if ret != 0:
@@ -292,12 +306,16 @@ class DraftModelSource(CountedSource):
             if failure:
                 self.disable(failure)
                 return []
+        ctx, sampler = self._ctx, self._sampler
+        if ctx is None or sampler is None:
+            self.disable("draft-context-refused")
+            return []
         p = self._valid
         lim = min(len(self._tokens), len(cached))
         while p < lim and self._tokens[p] == cached[p]:
             p += 1
         if p < len(self._tokens):
-            if not api.llama_memory_seq_rm(api.llama_get_memory(self._ctx), 0, p, -1):
+            if not api.llama_memory_seq_rm(api.llama_get_memory(ctx), 0, p, -1):
                 self.disable("draft-rewind-unsupported")
                 return []
             del self._tokens[p:]
@@ -314,7 +332,7 @@ class DraftModelSource(CountedSource):
             is_eog = llm._tokenizer.is_eog
             drafts: List[int] = []
             while True:
-                d = api.llama_sampler_sample(self._sampler, self._ctx, -1)
+                d = api.llama_sampler_sample(sampler, ctx, -1)
                 if is_eog(d):
                     break
                 drafts.append(d)

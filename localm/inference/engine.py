@@ -500,7 +500,9 @@ class Engine:
         corrected step milliseconds of each draft length seen so far ({} when
         none), or None when it measured none."""
         rep = getattr(self._backend, "last_speculation", None)
-        costs = rep.get("costs") if isinstance(rep, dict) else None
+        if not isinstance(rep, dict):
+            return None
+        costs = rep.get("costs")
         if not isinstance(costs, dict):
             return None
         observed = rep.get("observed_ms")

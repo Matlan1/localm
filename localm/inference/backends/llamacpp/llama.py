@@ -1112,7 +1112,7 @@ class LlamaCpp:
     _source = None               # the DraftSource for this model, created on first use
     _spec_source_name = SPEC_MTP # the configured draft source: off, mtp, ngram or draft
     _spec_draft_max = 0          # draft tokens per step of an ngram or draft source, else 0
-    _clock = time.perf_counter
+    _clock = staticmethod(time.perf_counter)
     _draft_pos = 0               # the draft cache holds positions [0, _draft_pos)
     _queued_tokens: Tuple[int, ...] = ()  # tokens at _draft_pos.. not yet in the draft cache
     _queued_h = None             # their hidden-state rows, one per queued token
@@ -1910,7 +1910,7 @@ class LlamaCpp:
 
                         if step is not None:
                             step_s = clock() - step[0] - consumer_s
-                            if step[4]:
+                            if step[4] and pacer is not None:
                                 pacer.record(step[1], step_s, step[2])
                             source.on_step_seconds(step[3], step_s)
                             step = None
@@ -2798,7 +2798,8 @@ class LlamaCpp:
         "ngram-cannot-pay"."""
         from localm.debuglog import logger
 
-        from ._draftmodel import DRAFT_MODEL_UNMEASURED_TOKENS
+        from ._drafting import CountedSource
+        from ._draftmodel import DRAFT_MODEL_UNMEASURED_TOKENS, DraftModelSource
         from ._stepcosts import ACCEPTANCE_PROBE_P, DRAFT_GATE_ACCEPTANCE
         can_drop = self._cache_can_drop_a_speculative_token()
         draft = self._spec_source_name == SPEC_DRAFT
@@ -2806,7 +2807,10 @@ class LlamaCpp:
             self._load_draft_model(spec_draft_model, n_threads, verbose,
                                    on_gpu=spec_draft_gpu)
         source = self._draft_source()
-        if can_drop and source.usable and (not draft or source.loaded):
+        if not isinstance(source, CountedSource):
+            return
+        loaded = not draft or (isinstance(source, DraftModelSource) and source.loaded)
+        if can_drop and source.usable and loaded:
             gate_p = DRAFT_GATE_ACCEPTANCE if draft else ACCEPTANCE_PROBE_P
             quiet = _quiet_stderr if not verbose else contextlib.nullcontext
             with quiet():
@@ -2879,7 +2883,10 @@ class LlamaCpp:
         from ._stepcosts import StepCosts, measure_plan
         draft_ctx = source._ctx if source.name == SPEC_DRAFT else None
         try:
-            vocab = api.llama_model_get_vocab(self._model_ptr)
+            model = self._model_ptr
+            if model is None:
+                return None
+            vocab = api.llama_model_get_vocab(model)
             n_vocab = int(api.llama_vocab_n_tokens(vocab))
             if n_vocab < 256:
                 return None

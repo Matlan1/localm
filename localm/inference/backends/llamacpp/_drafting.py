@@ -26,7 +26,7 @@ begin_call. ``report`` describes the model's state and the last reply.
 from __future__ import annotations
 
 import weakref
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ._stepcosts import (
     ACCEPTANCE_DECAY, ACCEPTANCE_PRIOR_ACCEPTED, ACCEPTANCE_PRIOR_REJECTED,
@@ -279,8 +279,11 @@ class CountedSource(DraftSource):
         """Seconds of a step drafting *drafted*: the measured ``costs`` plus
         the estimated seconds every step takes beyond them and, per draft, the
         estimated seconds a draft adds beyond that (each never below 0).
-        Requires ``costs``."""
-        return (self.costs.step_cost(drafted) + max(0.0, self._step_over_s)
+        Raises RuntimeError without ``costs``."""
+        costs = self.costs
+        if costs is None:
+            raise RuntimeError("step costs are not measured")
+        return (costs.step_cost(drafted) + max(0.0, self._step_over_s)
                 + max(0.0, self._draft_over_s) * max(0, drafted))
 
     def step_cost(self, drafted: int) -> float:
@@ -311,6 +314,11 @@ class CountedSource(DraftSource):
             per = (extra - max(0.0, self._step_over_s)) / drafted
             self._draft_over_s += OBSERVED_COST_WEIGHT * (per - self._draft_over_s)
         self._observed[drafted] = before + OBSERVED_COST_WEIGHT * (seconds - before)
+
+    @property
+    def _llm(self) -> Any:
+        """The LlamaCpp instance the source drafts for; a subclass provides it."""
+        raise NotImplementedError
 
     def cap_drafts(self, pos: int, tokens_left: Optional[int]) -> int:
         """Most drafts the step at *pos* may propose: ``draft_max``, the

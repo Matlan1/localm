@@ -140,6 +140,10 @@ class VramSizingMixin:
     mutable one-time-hint guard).
     """
 
+    model_path: str
+    n_ctx: int
+    n_gpu_layers: int
+
     # Rough VRAM headroom for KV cache + compute buffers beyond model weights,
     # single-sourced from localm.vram.
     _VRAM_OVERHEAD_BYTES = VRAM_OVERHEAD_BYTES
@@ -1107,7 +1111,7 @@ class VramSizingMixin:
         from localm.model_manager.gguf import gguf_input_layer_bytes
         input_bytes = self._gguf_excluded_bytes(
             "_gguf_input_layer_bytes",
-            lambda: gguf_input_layer_bytes(self.model_path, _parsed=parsed),
+            lambda: gguf_input_layer_bytes(Path(self.model_path), _parsed=parsed),
             "input-layer byte")
         model_bytes = max(0, model_bytes - input_bytes)
         return max(0, model_bytes - self._moe_pinned_bytes(n_cpu_moe))
