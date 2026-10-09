@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from typing import Collection
 from typing import List
 from typing import NamedTuple
 from typing import Optional
@@ -52,7 +53,8 @@ def split_gguf_parts(filename: str) -> Optional[List[str]]:
     if total < 2:
         return None
     stem = m.group("stem")
-    return [f"{stem}-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
+    ext = Path(filename).name[-5:]
+    return [f"{stem}-{i:05d}-of-{total:05d}{ext}" for i in range(1, total + 1)]
 
 
 
@@ -434,26 +436,48 @@ def _is_non_first_split_part(name: str) -> bool:
     return bool(m and split_gguf_parts(name) and int(m.group("idx")) != 1)
 
 
+def _is_hf_model_dir(folder: Path) -> bool:
+    """True for a HuggingFace model directory the HF backend can load: the
+    loader's own ``_is_hf_dir`` (config.json plus weights or a tokenizer), except
+    a folder that holds ``.gguf`` files and none of the HF weight files, which is
+    a GGUF repository download that ships its config.json and tokenizer."""
+    from localm.inference.engine import _HF_WEIGHT_GLOBS, _is_hf_dir
+
+    if not _is_hf_dir(str(folder)):
+        return False
+    try:
+        has_gguf = any(c.name.lower().endswith(".gguf") and c.is_file()
+                       for c in folder.iterdir())
+        has_weights = any(next(folder.glob(g), None) is not None
+                          for g in _HF_WEIGHT_GLOBS)
+    except OSError:
+        return True
+    return not has_gguf or has_weights
+
+
 def _find_model_units(d: Path, max_depth: int = 3, *,
-                      skip_hidden: bool = False) -> Tuple[List[Path], List[Path]]:
+                      skip_hidden: bool = False,
+                      skip_dirs: Collection[str] = ()) -> Tuple[List[Path], List[Path]]:
     """``(gguf_first_parts, hf_model_dirs)`` found inside *d*, up to *max_depth*
     folder levels (*d* itself is level 1, so a model sitting directly in *d* or
     a subfolder two levels down - LM Studio's ``<publisher>/<repo>/<file>`` -
     is within the default of 3).
 
     A GGUF is any ``*.gguf`` file (extension in any case); a split set
-    contributes only its first part. A HuggingFace model directory (config.json
-    plus weights or a tokenizer, the loader's own ``_is_hf_dir``) is ONE unit:
-    the walk does not descend into it, so its files and any folders inside it
-    are never reported separately. *d* itself is never reported as an HF dir -
-    the caller decides what *d* is. *skip_hidden* leaves out folders whose name
-    starts with a dot (staging and cache folders).
+    contributes only its first part. A HuggingFace model directory
+    (``_is_hf_model_dir``) is ONE unit: the walk does not descend into it, so its
+    files and any folders inside it are never reported separately. *d* itself is
+    never reported as an HF dir - the caller decides what *d* is.
+
+    Never walked into and never reported: a diffusers pipeline (a folder holding
+    ``model_index.json``, whose component folders are not models of their own,
+    *d* included) and any folder whose resolved path is in *skip_dirs* (folders
+    that are already registered models). *skip_hidden* leaves out folders whose
+    name starts with a dot (staging and cache folders).
 
     Breadth-first, and never opens a folder past *max_depth*, so an unrelated
     deep or wide subtree is never traversed. An unreadable folder is skipped.
     Both lists are sorted."""
-    from localm.inference.engine import _is_hf_dir
-
     ggufs: List[Path] = []
     hf_dirs: List[Path] = []
     frontier: List[Path] = [d]
@@ -463,9 +487,14 @@ def _find_model_units(d: Path, max_depth: int = 3, *,
         next_frontier: List[Path] = []
         for folder in frontier:
             try:
-                if folder != d and _is_hf_dir(str(folder)):
-                    hf_dirs.append(folder)
+                if (folder / "model_index.json").is_file():
                     continue
+                if folder != d:
+                    if skip_dirs and str(folder.resolve()) in skip_dirs:
+                        continue
+                    if _is_hf_model_dir(folder):
+                        hf_dirs.append(folder)
+                        continue
                 for child in folder.iterdir():
                     if child.is_dir():
                         if not (skip_hidden and child.name.startswith(".")):

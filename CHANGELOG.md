@@ -259,15 +259,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   projector is no longer listed as a chat model, an embedding model is listed as one,
   and the model's architecture is recorded. A `.GGUF` file with an upper-case
   extension is recognised.
-- **GGUF files that are not chat models are no longer listed as chat models.** Draft
+- **GGUF files that are not chat models are no longer added as chat models.** Draft
   heads for speculative decoding (EAGLE3, DFlash, Gemma 4 assistant), diffusion
   language models (Dream, LLaDA, RND1), T5 encoder-decoder models, text-to-speech
-  models (Qwen3-TTS) and the WavTokenizer codec now show as type `unknown`, and image
+  models (Qwen3-TTS) and the WavTokenizer codec are added as type `unknown`, and image
   and video GGUFs (Flux, Wan and the other ComfyUI-GGUF checkpoints) as
   `diffusion-unet`. Trying to load one says what it is, instead of failing in the
-  runtime. `llama-embed` models and any encoder that declares
-  non-causal attention are recognised as embedding models, and openPangu-Embedded,
-  which is a chat model, is no longer mistaken for an embedding model.
+  runtime; models you added earlier keep the type they were registered with.
+  `llama-embed` models and any encoder that declares non-causal attention are
+  recognised as embedding models, and openPangu-Embedded, which is a chat model, is
+  no longer mistaken for an embedding model. A folder downloaded from a GGUF
+  repository (a `config.json` and tokenizer beside the `.gguf` files) registers its
+  GGUF files instead of one model that cannot load, and the component folders of a
+  diffusers pipeline are no longer listed as models of their own.
 - **A model newer than the bundled llama.cpp now says so.** When the runtime does not
   know a model's architecture, the error names the architecture and says the model is
   newer than the runtime (with `localm setup-llama --tag latest` to try a newer build),

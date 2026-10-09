@@ -28,6 +28,7 @@ from ._shared import _verify_digest
 from ._shared import console
 from .gguf import _SPLIT_GGUF_RE
 from .gguf import _find_model_units
+from .gguf import _is_hf_model_dir
 from .gguf import _gguf_declared_min_size
 from .gguf import _has_gguf_magic
 from .gguf import gguf_n_embd
@@ -1844,7 +1845,8 @@ def sync_models_dir(prune: Optional[bool] = None, *,
         # At least two levels, so HF dirs directly under the models folder are
         # always found.
         gguf_first_parts, hf_dirs = _find_model_units(
-            _mm.MODELS_DIR, max_depth=max(2, _import_max_depth()), skip_hidden=True)
+            _mm.MODELS_DIR, max_depth=max(2, _import_max_depth()), skip_hidden=True,
+            skip_dirs=known)
 
         for child in hf_dirs:
             try:
@@ -3577,7 +3579,7 @@ def add_local(
 
     from localm.inference.engine import _is_hf_dir
     is_gguf = p.is_file() and p.suffix.lower() == ".gguf"
-    is_hf   = _is_hf_dir(str(p))  # config.json AND real weights/tokenizer
+    is_hf   = _is_hf_model_dir(p)  # config.json AND real weights/tokenizer, not a GGUF repo
     is_blob = p.is_file() and p.name.startswith("sha256-")  # raw Ollama blob by path
 
     # A lone .safetensors file is not loadable on its own: llama.cpp loads .gguf,

@@ -122,6 +122,50 @@ class TestFindModelUnits:
         _, hf_dirs = _find_model_units(tmp_path, max_depth=3)
         assert [p.name for p in hf_dirs] == ["found"]
 
+    def test_diffusers_pipeline_is_not_walked_into(self, tmp_path):
+        pipe = tmp_path / "sdxl-base"
+        pipe.mkdir()
+        (pipe / "model_index.json").write_text("{}")
+        for comp in ("unet", "vae", "text_encoder"):
+            _write_hf(pipe / comp, weights=("diffusion_pytorch_model.safetensors",),
+                      tokenizer=False)
+        _write_gguf(tmp_path / "beside.gguf")
+        ggufs, hf_dirs = _find_model_units(tmp_path, max_depth=3)
+        assert hf_dirs == []
+        assert [p.name for p in ggufs] == ["beside.gguf"]
+
+    def test_diffusers_pipeline_root_given_directly_yields_nothing(self, tmp_path):
+        (tmp_path / "model_index.json").write_text("{}")
+        _write_hf(tmp_path / "unet", weights=("diffusion_pytorch_model.safetensors",))
+        assert _find_model_units(tmp_path, max_depth=3) == ([], [])
+
+    def test_skip_dirs_are_neither_walked_nor_reported(self, tmp_path):
+        multi = tmp_path / "multi"
+        _write_hf(multi / "part-a")
+        _write_gguf(multi / "inner.gguf")
+        _write_gguf(tmp_path / "outer.gguf")
+        ggufs, hf_dirs = _find_model_units(
+            tmp_path, max_depth=3, skip_dirs=frozenset({str(multi.resolve())}))
+        assert hf_dirs == []
+        assert [p.name for p in ggufs] == ["outer.gguf"]
+
+    def test_gguf_repo_with_config_and_tokenizer_but_no_weights_yields_its_ggufs(self, tmp_path):
+        d = tmp_path / "gemma-qat-gguf"
+        d.mkdir()
+        (d / "config.json").write_text(json.dumps({"architectures": ["Gemma3ForConditionalGeneration"]}))
+        (d / "tokenizer.json").write_text("{}")
+        _write_gguf(d / "gemma-q4_0.gguf", "gemma3")
+        _write_gguf(d / "mmproj-model-f16.gguf", "clip")
+        ggufs, hf_dirs = _find_model_units(tmp_path, max_depth=3)
+        assert hf_dirs == []
+        assert [p.name for p in ggufs] == ["gemma-q4_0.gguf", "mmproj-model-f16.gguf"]
+
+    def test_gguf_beside_real_weights_stays_one_hf_unit(self, tmp_path):
+        d = _write_hf(tmp_path / "repo")
+        _write_gguf(d / "extra.gguf")
+        ggufs, hf_dirs = _find_model_units(tmp_path, max_depth=3)
+        assert hf_dirs == [d] and ggufs == []
+
     def test_hidden_dirs_skipped_only_on_request(self, tmp_path):
         _write_gguf(tmp_path / ".staging" / "x.gguf")
         assert [p.name for p in _find_model_units(tmp_path, 3)[0]] == ["x.gguf"]
@@ -137,6 +181,16 @@ class TestFindModelUnits:
     def test_uppercase_extension_is_a_gguf(self, tmp_path):
         _write_gguf(tmp_path / "Model-Q4.GGUF")
         assert [p.name for p in _find_model_units(tmp_path, 1)[0]] == ["Model-Q4.GGUF"]
+
+
+class TestSplitNames:
+    def test_sibling_names_keep_the_extension_case_of_the_given_part(self):
+        from localm.model_manager.gguf import first_split_part, split_gguf_parts
+        assert split_gguf_parts("Model-00001-of-00002.GGUF") == [
+            "Model-00001-of-00002.GGUF", "Model-00002-of-00002.GGUF"]
+        assert split_gguf_parts("model-00002-of-00002.gguf") == [
+            "model-00001-of-00002.gguf", "model-00002-of-00002.gguf"]
+        assert first_split_part("Model-00002-of-00002.GGUF") == "Model-00001-of-00002.GGUF"
 
 
 class TestFolderImport:
@@ -195,6 +249,40 @@ class TestFolderImport:
         assert add_local(str(src), on_duplicate="skip", no_hash=True) is True
         assert set(load_registry()) == {"shallow"}
 
+    def test_diffusers_pipeline_components_are_not_registered_as_models(self, tmp_path, home):
+        src = tmp_path / "pubs"
+        pipe = src / "sdxl-base"
+        pipe.mkdir(parents=True)
+        (pipe / "model_index.json").write_text("{}")
+        for comp in ("unet", "vae"):
+            _write_hf(pipe / comp, weights=("diffusion_pytorch_model.safetensors",),
+                      tokenizer=False)
+        _write_gguf(src / "chat.gguf")
+        assert add_local(str(src), on_duplicate="skip", no_hash=True) is True
+        assert set(load_registry()) == {"chat"}
+
+    def test_gguf_repo_with_config_and_tokenizer_registers_its_ggufs_not_an_hf_entry(
+            self, tmp_path, home):
+        src = tmp_path / "drop"
+        d = src / "gemma-qat-gguf"
+        d.mkdir(parents=True)
+        (d / "config.json").write_text("{}")
+        (d / "tokenizer.json").write_text("{}")
+        _write_gguf(d / "gemma-q4_0.gguf", "gemma3")
+        assert add_local(str(src), on_duplicate="skip", no_hash=True) is True
+        entry = _by_suffix(load_registry(), "gemma-q4_0.gguf")
+        assert entry["source"] == "local" and entry["model_type"] == "llm"
+        assert len(load_registry()) == 1
+
+    def test_pointing_directly_at_that_gguf_repo_registers_the_ggufs(self, tmp_path, home):
+        d = tmp_path / "gemma-qat-gguf"
+        d.mkdir()
+        (d / "config.json").write_text("{}")
+        (d / "tokenizer.json").write_text("{}")
+        _write_gguf(d / "gemma-q4_0.gguf", "gemma3")
+        assert add_local(str(d), on_duplicate="skip", no_hash=True) is True
+        assert _by_suffix(load_registry(), "gemma-q4_0.gguf")["source"] == "local"
+
     def test_folder_with_no_models_still_refused(self, tmp_path, home):
         d = tmp_path / "junk"
         d.mkdir()
@@ -245,6 +333,33 @@ class TestModelsFolderSync:
         again = mm.sync_models_dir(prune=False, backfill_mmproj=False)
         assert again.added == 0
         assert load_registry() == before
+
+    def test_diffusers_pipeline_components_are_not_registered_as_models(self, home):
+        pipe = home / "models" / "sdxl-base"
+        pipe.mkdir(parents=True)
+        (pipe / "model_index.json").write_text("{}")
+        for comp in ("unet", "vae", "text_encoder"):
+            _write_hf(pipe / comp, weights=("diffusion_pytorch_model.safetensors",),
+                      tokenizer=False)
+        assert mm.sync_models_dir(prune=False, backfill_mmproj=False).added == 0
+        assert load_registry() == {}
+
+    def test_an_already_registered_folder_is_not_walked_into(self, home):
+        multi = home / "models" / "multi"
+        _write_hf(multi / "part-a")
+        _write_hf(multi / "part-b")
+        mm._register("multi", multi, model_type="diffusion-unet")
+        assert mm.sync_models_dir(prune=False, backfill_mmproj=False).added == 0
+        assert set(load_registry()) == {"multi"}
+
+    def test_gguf_repo_with_config_and_tokenizer_registers_its_gguf(self, home):
+        d = home / "models" / "gemma-qat-gguf"
+        d.mkdir(parents=True)
+        (d / "config.json").write_text("{}")
+        (d / "tokenizer.json").write_text("{}")
+        _write_gguf(d / "gemma-q4_0.gguf", "gemma3")
+        mm.sync_models_dir(prune=False, backfill_mmproj=False)
+        assert _by_suffix(load_registry(), "gemma-q4_0.gguf")["source"] == "local"
 
     def test_hidden_staging_dir_is_not_scanned(self, home):
         _write_gguf(home / "models" / ".pull-staging" / "half.gguf")
