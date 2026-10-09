@@ -1499,7 +1499,8 @@ class LlamaCpp:
             raise RuntimeError("Failed to create llama context")
         if self._adapter_handles:
             try:
-                self._apply_adapters(self._ctx_ptr)
+                with _ctx():
+                    self._apply_adapters(self._ctx_ptr)
             except Exception:
                 api.llama_free(self._ctx_ptr)
                 self._ctx_ptr = None
