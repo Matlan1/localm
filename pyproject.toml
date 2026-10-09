@@ -259,6 +259,7 @@ cpu = []
 # Development + CI tooling (lint + tests). Install with:  pip install -e ".[dev]"
 dev = [
     "ruff>=0.16.5",
+    "basedpyright==1.40.2",
     "pytest>=8.0",
     # Coverage measurement (TEST-1). pytest-cov enforces the fail_under floor
     # from [tool.coverage.report] below.
@@ -408,6 +409,17 @@ select = [
 # rest of ruff's default E set. The unused-import/variable backlog has been
 # cleared and CI's ruff step is now blocking (.github/workflows/ci.yml).
 ignore = ["E741", "E701", "E702", "E402"]
+
+# Type checking: basedpyright, ratcheted against .github/basedpyright-baseline.json.
+# Run `basedpyright` (no arguments) to fail on errors absent from the baseline.
+[tool.basedpyright]
+include = ["localm"]
+baselineFile = ".github/basedpyright-baseline.json"
+pythonVersion = "3.12"
+pythonPlatform = "Linux"
+typeCheckingMode = "standard"
+reportMissingImports = false
+reportMissingModuleSource = false
 
 # Coverage measurement (TEST-1). CI writes coverage.xml/coverage.json inside
 # the runner and prints a summary; neither file is uploaded or persisted past
