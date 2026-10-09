@@ -257,8 +257,8 @@ class AbiVerdict:
     """Result of an ABI self-check. ``ok`` is True unless drift was proven."""
 
     status: str                                            # ok|mismatch|skipped|unchecked
-    failures: List[str] = field(default_factory=list)      # structural checks that failed
-    diagnostics: List[str] = field(default_factory=list)   # value drift notes (not fatal)
+    failures: list[str] = field(default_factory=list)      # structural checks that failed
+    diagnostics: list[str] = field(default_factory=list)   # value drift notes (not fatal)
     detail: str = ""                                       # human one-liner
     layout: str = ""                                       # MODEL_PARAMS_V1 / _V2 / _V3
     context_layout: str = ""                                # CONTEXT_PARAMS_V1 / _V2 / _V3
@@ -324,7 +324,7 @@ def _fingerprint_layout(raw: bytes) -> Optional[str]:
 
 def detect_model_params_layout(
     lib: ctypes.CDLL,
-) -> Tuple[str, List[str], Optional[str], bool]:
+) -> tuple[str, list[str], Optional[str], bool]:
     """Decide which ``llama_model_params`` layout *lib* uses.
 
     Returns ``(layout, notes, contradiction, assumed)``. ``assumed`` is True
@@ -352,7 +352,7 @@ def detect_model_params_layout(
     contradict: the family then binds V2 with a note. A contradiction is
     returned to the caller, which turns it into a refusal.
     """
-    notes: List[str] = []
+    notes: list[str] = []
 
     present = [s for s in _V2_MARKER_SYMBOLS if _has_symbol(lib, s)]
     if len(present) == len(_V2_MARKER_SYMBOLS):
@@ -413,7 +413,7 @@ def model_params_class(layout: str):
 
 def detect_context_params_layout(
     lib: ctypes.CDLL,
-) -> Tuple[str, List[str], bool]:
+) -> tuple[str, list[str], bool]:
     """Decide which ``llama_context_params`` layout *lib* uses.
 
     Returns ``(layout, notes, assumed)``. Unlike
@@ -428,7 +428,7 @@ def detect_context_params_layout(
     the second one was. Callers must not treat that as a determination, same
     caveat as :func:`detect_model_params_layout`'s ``assumed``. Never raises: a
     mechanism failure yields the V1 fallback plus a note."""
-    notes: List[str] = []
+    notes: list[str] = []
     layout: Optional[str] = None
     raw = b""
     try:
@@ -462,7 +462,7 @@ def context_params_class(layout: str):
 
 def _read_default_params(
     lib: ctypes.CDLL, layout: str, context_layout: str,
-) -> Tuple[object, object]:
+) -> tuple[object, object]:
     """Call the default-params functions directly off *lib*.
 
     Bound on the handle (not via :mod:`._api`) so this never re-enters
@@ -490,8 +490,8 @@ def evaluate(mp, cp) -> AbiVerdict:
     reads each field at the offset its actual bound layout uses. The checks
     name fields, never raw offsets: ``getattr(cp, name)`` resolves correctly
     regardless of which of the three context_params layouts *cp* actually is."""
-    failures: List[str] = []
-    diags: List[str] = []
+    failures: list[str] = []
+    diags: list[str] = []
     has_load_mode = isinstance(mp, _LOAD_MODE_LAYOUTS)
     is_v3 = isinstance(mp, LlamaModelParamsV3)
 
@@ -648,7 +648,7 @@ def _mismatch_error(verdict: AbiVerdict, lib_path: str = "") -> AbiMismatch:
 
 
 # The verdict verify_abi reached, returned by abi_report().
-_last_verdict: "Optional[AbiVerdict]" = None
+_last_verdict: Optional[AbiVerdict] = None
 
 _detected_layout: Optional[str] = None
 # True when _detected_layout is a FALLBACK rather than a determination.
@@ -689,7 +689,7 @@ def context_params_layout(lib: Optional[ctypes.CDLL] = None) -> str:
     return _detected_context_layout
 
 
-def _ggml_version(lib: ctypes.CDLL) -> Optional[Tuple[int, ...]]:
+def _ggml_version(lib: ctypes.CDLL) -> Optional[tuple[int, ...]]:
     """``ggml_version()`` as a comparable tuple, or None if unavailable.
 
     ``ggml_version`` lives in the ggml base library; on the shipped builds it is

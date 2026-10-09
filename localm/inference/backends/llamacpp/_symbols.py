@@ -39,7 +39,7 @@ from typing import List, Optional
 _cache: dict = {}
 
 
-def _pe_exports(data: bytes) -> List[str]:
+def _pe_exports(data: bytes) -> list[str]:
     """Exported names from a PE image, or [] when there is no export table."""
     if data[:2] != b"MZ":
         return []
@@ -87,7 +87,7 @@ def _pe_exports(data: bytes) -> List[str]:
     return out
 
 
-def _elf_dynsym(data: bytes) -> List[str]:
+def _elf_dynsym(data: bytes) -> list[str]:
     """Names from an ELF `.dynstr`, which is where a shared object's exports live."""
     if data[:4] != b"\x7fELF":
         return []
@@ -117,7 +117,7 @@ def _elf_dynsym(data: bytes) -> List[str]:
     return out
 
 
-def _macho_symbols(data: bytes) -> List[str]:
+def _macho_symbols(data: bytes) -> list[str]:
     """Names from a Mach-O string table (LC_SYMTAB)."""
     magic, = struct.unpack_from("<I", data, 0)
     if magic not in (0xFEEDFACF, 0xCFFAEDFE):
@@ -134,7 +134,7 @@ def _macho_symbols(data: bytes) -> List[str]:
     return []
 
 
-def exported_names(image: Path) -> List[str]:
+def exported_names(image: Path) -> list[str]:
     """Every exported symbol name in *image*, for whichever format it is."""
     key = ("names", str(image))
     if key in _cache:
@@ -142,7 +142,7 @@ def exported_names(image: Path) -> List[str]:
     try:
         data = image.read_bytes()
     except OSError:
-        names: List[str] = []
+        names: list[str] = []
     else:
         names = _pe_exports(data) or _elf_dynsym(data) or _macho_symbols(data)
     _cache[key] = names

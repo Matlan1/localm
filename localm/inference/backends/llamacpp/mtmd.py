@@ -486,7 +486,7 @@ class MtmdChunk:
     returned no id for."""
 
     handle: int
-    tokens: Optional[Tuple[int, ...]]
+    tokens: Optional[tuple[int, ...]]
     key: Optional[tuple]
     n_tokens: int
     n_pos: int
@@ -497,7 +497,7 @@ class MtmdPrompt:
     chunk list and bitmaps they reference. :meth:`free` releases those exactly
     once; the chunk handles are invalid afterwards."""
 
-    def __init__(self, chunks: List[MtmdChunk], release: Callable[[], None]) -> None:
+    def __init__(self, chunks: list[MtmdChunk], release: Callable[[], None]) -> None:
         self.chunks = chunks
         self._release: Optional[Callable[[], None]] = release
 
@@ -554,7 +554,7 @@ class MtmdContext:
     encode_count: int = 0
 
     # Encoded embeddings by MtmdChunk.key (created on first store) and their size.
-    _embd: Optional["OrderedDict[tuple, ctypes.Array]"] = None
+    _embd: Optional[OrderedDict[tuple, ctypes.Array]] = None
     _embd_bytes: int = 0
 
     # Floats per embedding row; 0 until first needed.
@@ -716,7 +716,7 @@ class MtmdContext:
         self._ctx = self._open(use_gpu=False)
         return bool(self._ctx)
 
-    def tokenize(self, prompt: str, images: List[Tuple[int, int, bytes]], *,
+    def tokenize(self, prompt: str, images: list[tuple[int, int, bytes]], *,
                  add_special: bool) -> MtmdPrompt:
         """Tokenize *prompt* (which contains one ``self.marker`` per image, in
         order) against *images* (each ``(width, height, rgb_bytes)``).
@@ -761,10 +761,10 @@ class MtmdContext:
             release()
             raise
 
-    def _describe_chunks(self, chunks) -> List[MtmdChunk]:
+    def _describe_chunks(self, chunks) -> list[MtmdChunk]:
         """Read every chunk of the native list *chunks* into an :class:`MtmdChunk`."""
         m = self._m
-        out: List[MtmdChunk] = []
+        out: list[MtmdChunk] = []
         seen: dict = {}
         for i in range(int(m.mtmd_input_chunks_size(chunks))):
             handle = m.mtmd_input_chunks_get(chunks, i)

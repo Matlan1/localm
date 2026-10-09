@@ -28,7 +28,7 @@ from localm.pathsafe import confined_under
 INDEX_GLOB = "*.index.json"
 
 
-def _index_files(base: Path) -> List[Path]:
+def _index_files(base: Path) -> list[Path]:
     """Index files ``transformers`` can reach for *base*: the directory itself
     and one level down, matching its ``subfolder`` argument."""
     return sorted(set(base.glob(INDEX_GLOB)) | set(base.glob(f"*/{INDEX_GLOB}")))

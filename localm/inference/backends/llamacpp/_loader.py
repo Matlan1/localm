@@ -82,9 +82,9 @@ _last_broken_runtime_warning: Optional[str] = None
 _last_warned_broken_runtime: Optional[str] = None
 
 
-def _candidate_dirs() -> List[Path]:
+def _candidate_dirs() -> list[Path]:
     """Directories that may hold the native library, in priority order."""
-    dirs: List[Path] = []
+    dirs: list[Path] = []
 
     explicit = os.environ.get("LLAMA_CPP_LIB")
     if explicit:
@@ -181,12 +181,12 @@ def last_runtime_resolution_warning() -> Optional[str]:
     return "; ".join(parts) if parts else None
 
 
-def rocm_runtime_dirs() -> List[Path]:
+def rocm_runtime_dirs() -> list[Path]:
     """ROCm runtime library directories: the rocm-sdk wheels in this venv, plus
     ``/opt/rocm`` on Linux. These hold amdhip64/rocblas/hipblas and the other
     libraries a HIP-linked llama build needs at load time. Globbed (not
     hardcoded) so any gfx target's package is picked up."""
-    found: List[Path] = []
+    found: list[Path] = []
     roots = set()
     try:
         import site
@@ -283,7 +283,7 @@ def _preload(path: Path) -> None:
 _GGML_NON_BACKENDS = {"ggml-base", "ggml"}
 
 
-def _ggml_dev_count(handles: "List[ctypes.CDLL]") -> Optional[int]:
+def _ggml_dev_count(handles: list[ctypes.CDLL]) -> Optional[int]:
     """Number of ggml backend DEVICES currently registered, queried from
     whichever handle exports ``ggml_backend_dev_count`` (ggml.dll), or None when
     no handle exports it (an older build without the registry query). A count > 0
@@ -322,7 +322,7 @@ def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
     Returns True when backends are registered (already, or by this call)."""
     # Handles that may export the registry-query / loader symbols (they live in
     # ggml.dll on a split build, possibly the main lib on a monolithic one).
-    candidates: List[ctypes.CDLL] = [lib]
+    candidates: list[ctypes.CDLL] = [lib]
     try:
         for p in sorted(binary_dir.glob(_ggml_glob())):
             try:
@@ -638,12 +638,12 @@ GGML_DEV_TYPE_CPU = 0
 GGML_DEV_TYPE_GPU = 1
 
 
-def _ggml_dev_handles() -> "List[ctypes.CDLL]":
+def _ggml_dev_handles() -> list[ctypes.CDLL]:
     """Every loaded handle that MIGHT export the ggml_backend_dev_* registry
     symbols: the main library on a monolithic build, ggml.dll / ggml-base.dll on a
     split one (the symbols are split across them). Same candidate set as
     _register_ggml_backends."""
-    handles: List[ctypes.CDLL] = []
+    handles: list[ctypes.CDLL] = []
     if _loaded_lib is not None:
         handles.append(_loaded_lib)
     binary_dir = runtime_binary_dir()
@@ -698,7 +698,7 @@ def cpu_buffer_type() -> Optional[int]:
     return None
 
 
-def _ggml_sym(handles: "List[ctypes.CDLL]", name: str):
+def _ggml_sym(handles: list[ctypes.CDLL], name: str):
     for h in handles:
         fn = getattr(h, name, None)
         if fn is not None:
@@ -706,7 +706,7 @@ def _ggml_sym(handles: "List[ctypes.CDLL]", name: str):
     return None
 
 
-def compute_devices() -> "List[tuple]":
+def compute_devices() -> list[tuple]:
     """The ggml compute DEVICES the provisioned runtime registers, as a list of
     ``(name, type)`` where *type* is a raw ``ggml_backend_dev_type`` value.
     COMPARE IT AGAINST :data:`GGML_DEV_TYPE_CPU` / :data:`GGML_DEV_TYPE_GPU`,
@@ -738,7 +738,7 @@ def compute_devices() -> "List[tuple]":
     type_fn.restype = ctypes.c_int
     type_fn.argtypes = [ctypes.c_void_p]
 
-    devices: "List[tuple]" = []
+    devices: list[tuple] = []
     try:
         n = int(cnt())
     except Exception:
@@ -755,7 +755,7 @@ def compute_devices() -> "List[tuple]":
     return devices
 
 
-def native_device_inventory() -> "Optional[list]":
+def native_device_inventory() -> Optional[list]:
     """``[{"index", "name", "description", "type", "free", "total"}, ...]`` for
     every NON-CPU compute device the ACTIVE ggml runtime registers, or ``None``
     when the core registry symbols are unavailable (an older build without
@@ -822,7 +822,7 @@ def native_device_inventory() -> "Optional[list]":
         mem_fn.argtypes = [ctypes.c_void_p,
                            ctypes.POINTER(ctypes.c_size_t),
                            ctypes.POINTER(ctypes.c_size_t)]
-    out: "list" = []
+    out: list = []
     try:
         n = int(cnt())
     except Exception:
@@ -904,7 +904,7 @@ def _resolve_gpu_memory():
     return (gpus[0], mem_fn)
 
 
-def gpu_memory() -> "Optional[tuple]":
+def gpu_memory() -> Optional[tuple]:
     """(free, total) VRAM bytes of the GPU compute device as the ACTIVE ggml
     backend itself sees it (ggml_backend_dev_memory), or None when unavailable.
 
@@ -992,7 +992,7 @@ def _spawn_probe_daemon():
         text=True, bufsize=1)
 
 
-def _readline_with_timeout(stream, timeout: float) -> "Optional[str]":
+def _readline_with_timeout(stream, timeout: float) -> Optional[str]:
     """stream.readline() with a timeout, so a daemon that hangs cannot stall the
     caller. Python's blocking file-object readline() has no native timeout, so
     the read runs in a daemon THREAD (a Windows pipe handle offers no
@@ -1001,7 +1001,7 @@ def _readline_with_timeout(stream, timeout: float) -> "Optional[str]":
     function never blocks past `timeout`. Returns None on timeout, EOF (empty
     read - the daemon exited or crashed), or any read error."""
     import queue
-    q: "queue.Queue" = queue.Queue(maxsize=1)
+    q: queue.Queue = queue.Queue(maxsize=1)
 
     def _reader():
         try:
@@ -1020,7 +1020,7 @@ def _readline_with_timeout(stream, timeout: float) -> "Optional[str]":
     return line
 
 
-def gpu_memory_isolated() -> "Optional[tuple]":
+def gpu_memory_isolated() -> Optional[tuple]:
     """Like gpu_memory(), but SAFE to call automatically: queries the long-lived
     VRAM-probe daemon (spawning or respawning it as needed) so a native abort
     there (see gpu_memory()'s RISK section) only kills that disposable
@@ -1044,7 +1044,7 @@ def gpu_memory_isolated() -> "Optional[tuple]":
     return _probe_roundtrip("q\n", _parse)
 
 
-def gpu_devices_isolated() -> "Optional[list]":
+def gpu_devices_isolated() -> Optional[list]:
     """``native_device_inventory()``, read crash-isolated via the same probe
     daemon as ``gpu_memory_isolated()`` (the "devices" request line - see
     _vram_probe.py's protocol). Returns the inventory list (possibly empty),
@@ -1063,7 +1063,7 @@ def gpu_devices_isolated() -> "Optional[list]":
     return _probe_roundtrip("devices\n", _parse)
 
 
-def _probe_roundtrip(request: str, parse) -> "Optional[object]":
+def _probe_roundtrip(request: str, parse) -> Optional[object]:
     """One request/reply round-trip against the long-lived probe daemon
     (spawning or respawning it as needed), entirely under ``_PROBE_LOCK`` so
     concurrent callers cannot interleave writes/reads on the shared pipe.

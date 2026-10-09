@@ -276,7 +276,7 @@ GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE = (
 )
 
 
-def messages_contain_image(messages: List[dict]) -> bool:
+def messages_contain_image(messages: list[dict]) -> bool:
     """True if any message carries an ``image_url`` content part.
 
     Operates on the plain-dict OpenAI message shape used between the server and
@@ -421,7 +421,7 @@ class BaseBackend(ABC):
     @abstractmethod
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,
@@ -481,7 +481,7 @@ class BaseBackend(ABC):
         """
         return max(1, len(text) // 4)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """
         Return the estimated number of tokens in a list of structured messages,
         including chat template formatting.  Subclasses should override this
@@ -495,7 +495,7 @@ class BaseBackend(ABC):
         )
         return self.count_tokens(text)
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """
         Return embedding vectors for a list of texts.
 

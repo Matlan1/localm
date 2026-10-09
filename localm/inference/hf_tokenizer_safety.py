@@ -107,7 +107,7 @@ def _iter_regex_patterns(node) -> Iterator[str]:
             yield from _iter_regex_patterns(item)
 
 
-def _extract_unique_patterns(model_path: str) -> List[str]:
+def _extract_unique_patterns(model_path: str) -> list[str]:
     """Unique Regex pattern strings from ``<model_path>/tokenizer.json``, in
     first-occurrence order. Returns ``[]`` when the file is absent (a "slow"
     /legacy/sentencepiece-only tokenizer ships no ``tokenizer.json`` and has
@@ -142,7 +142,7 @@ def _readline_with_timeout(stream, timeout: float):
     once the read unblocks or the pipe closes, which killing the probe process
     (done by the caller immediately after a timeout) guarantees. Returns None on
     timeout, EOF, or any read error."""
-    q: "queue.Queue" = queue.Queue(maxsize=1)
+    q: queue.Queue = queue.Queue(maxsize=1)
 
     def _reader():
         try:
@@ -158,7 +158,7 @@ def _readline_with_timeout(stream, timeout: float):
     return line or None
 
 
-def _run_probe_subprocess(patterns: List[str]) -> "List[str] | None":
+def _run_probe_subprocess(patterns: list[str]) -> list[str] | None:
     """Spawn the isolated probe subprocess, feed it *patterns*, and return one
     verdict string per pattern successfully read ("OK" or "BAD <reason>").
 
@@ -192,7 +192,7 @@ def _run_probe_subprocess(patterns: List[str]) -> "List[str] | None":
         proc.kill()
         return None
 
-    verdicts: List[str] = []
+    verdicts: list[str] = []
     try:
         for _ in patterns:
             line = _readline_with_timeout(proc.stdout, _PROBE_TIMEOUT_SECONDS)

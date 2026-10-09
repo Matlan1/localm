@@ -64,7 +64,7 @@ def decode_image_url(url: str):
     return Image.open(io.BytesIO(raw)).convert("RGB")
 
 
-def decode_audio(b64: str, fmt: str) -> Tuple[np.ndarray, int]:
+def decode_audio(b64: str, fmt: str) -> tuple[np.ndarray, int]:
     """Return (samples_float32, sample_rate) from a base64-encoded audio blob."""
     import soundfile as sf
 
