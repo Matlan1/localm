@@ -1084,8 +1084,10 @@ export async function switchModel(model) {
 // success even when the load quietly fell back to (slow) CPU layers -
 // res.degraded (from /api/models/load's gpu_layers_offloaded/gpu_layers_total,
 // and moe_cpu_layers when routed experts stayed in system RAM)
-// says so; warn instead of a bare success toast.
+// says so; warn instead of a bare success toast. res.mmap_from_disk marks a
+// model larger than system RAM that runs from disk-backed memory.
 export function toastLoadResult(res, model) {
+  const fromDisk = !!(res && res.mmap_from_disk);
   if (res && res.degraded) {
     const parts = [];
     if (res.gpu_layers_offloaded < res.gpu_layers_total) {
@@ -1094,7 +1096,10 @@ export function toastLoadResult(res, model) {
     if (res.moe_cpu_layers > 0) {
       parts.push(`experts of ${res.moe_cpu_layers} layers in system RAM`);
     }
-    toast(`Model switched to ${model} (${parts.join(", ") || "partly on CPU"} - slower)`, true);
+    const slow = `${parts.join(", ") || "partly on CPU"} - slower`;
+    toast(`Model switched to ${model} (${fromDisk ? `${slow}; ${t("models.switch.mmapFromDisk")}` : slow})`, true);
+  } else if (fromDisk) {
+    toast(`Model switched to ${model} (${t("models.switch.mmapFromDisk")})`, true);
   } else {
     toast("Model switched to " + model);
   }

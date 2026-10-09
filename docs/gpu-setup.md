@@ -282,6 +282,24 @@ slow from RAM by design. Has no effect on a normal (dense) model, and says so
 instead of silently doing nothing. The Settings page has the same field ("MoE
 expert layers on CPU").
 
+## Memory-mapping: models larger than system RAM
+
+A model whose weights do not fit in system RAM can still load when the file is
+memory-mapped: only the pages a run touches are resident, and the rest are read
+from disk on demand. `use_mmap` chooses:
+
+```bash
+localm config use_mmap auto       # localm decides - the default
+localm config use_mmap on         # always memory-map
+localm config use_mmap off        # always read the whole model into memory first
+```
+
+With `auto`, localm memory-maps the model when the weights that stay in system
+RAM would not fit in available RAM. The load output, the GUI load toast and the
+load response (`mmap`, `mmap_from_disk`) then say it runs from disk-backed
+memory and that first tokens are slower. `on` and `off` are used as given. The
+Settings page has the same field ("Memory-map model files").
+
 ## Vision projector (image understanding) placement
 
 Loading an image runs the vision projector (mtmd) on the GPU by default,

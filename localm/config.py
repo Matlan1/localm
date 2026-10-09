@@ -529,6 +529,11 @@ DEFAULT_CONFIG: dict = {
     # Only affects Mixture-of-Experts models; a dense model has no expert
     # tensors to move, so any value is a no-op there.
     "n_cpu_moe": 0,
+    # Memory-map the model file: "auto" (the loader decides), "on" (only the
+    # pages a run touches are resident, so a model larger than system RAM can
+    # run from disk-backed memory, first tokens slower) or "off" (the whole
+    # model is read into memory first).
+    "use_mmap": "auto",
     # When n_gpu_layers is left at its "everything" default, auto-size how many
     # layers actually go on the GPU from free VRAM at load: a model too big for
     # full GPU offload runs some layers on CPU (slower) and LOADS, instead of
