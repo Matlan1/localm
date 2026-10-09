@@ -395,8 +395,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         one-token decoding for at least as many steps as it ran, "on" when it
         speculated (``reason`` "draft-on-cpu" when the draft model runs on the
         CPU), "off" when this reply could not draft (``reason`` "image"),
-        and "idle" when nothing matched. ``drafted``, ``accepted`` and
-        ``paused_steps`` count as in ``last_mtp_usage``.
+        and "idle" when it drafted nothing (``reason`` "not-paying" when the
+        measured step costs held drafting back on at least one step, else
+        None). ``drafted``, ``accepted`` and ``paused_steps`` count as in
+        ``last_mtp_usage``.
         """
         source = getattr(self, "spec_source",
                          "mtp" if getattr(self, "mtp_enabled", False) else "off")
@@ -422,7 +424,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         elif rep.get("skipped"):
             state, reason = "off", str(rep.get("skipped"))
         else:
-            state, reason = "idle", None
+            state = "idle"
+            reason = "not-paying" if _count(rep.get("held_steps")) else None
         return {"source": source, "state": state,
                 "drafted": _count(rep.get("drafted")),
                 "accepted": _count(rep.get("accepted")),

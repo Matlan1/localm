@@ -187,6 +187,8 @@ def _report(**kw):
 @pytest.mark.parametrize("report,state,reason", [
     (_report(active=True, drafted=10, accepted=7, steps=4), "on", None),
     (_report(), "idle", None),
+    (_report(held_steps=12), "idle", "not-paying"),
+    (_report(active=True, drafted=3, accepted=3, steps=1, held_steps=12), "on", None),
     (_report(skipped="image"), "off", "image"),
     (_report(status="rewind-unsupported"), "unavailable", "rewind-unsupported"),
     (_report(status="rewind-unsupported", active=True, drafted=4, steps=1), "stopped",

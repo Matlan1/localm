@@ -498,6 +498,22 @@ def test_a_draft_that_the_prior_rejects_still_probes_its_acceptance():
     assert probes == [0, ACCEPTANCE_PROBE_EVERY + 1, 2 * ACCEPTANCE_PROBE_EVERY + 2]
 
 
+def test_the_steps_held_back_are_counted_per_reply():
+    marginal = _costs(target=5.78, verify={2: 6.29, 3: 7.0, 5: 8.5}, draft=3.48)
+    llm = _measured_llama(draft_max=4, costs=marginal)
+    src = llm._source
+    llm._cached_tokens = list(range(20))
+    src._tokens = list(range(20))
+    src.begin_call()
+    lengths = [src.budget(20, None) for _ in range(5)]
+    src.on_verify(lengths[0], 0)
+    lengths += [src.budget(20, None) for _ in range(5)]
+    assert src.held_steps == lengths.count(0) == 5
+    assert src.report()["held_steps"] == 5
+    src.begin_call()
+    assert src.held_steps == 0
+
+
 def test_a_probe_that_drafts_nothing_is_tried_again_on_the_next_step():
     from localm.inference.backends.llamacpp._stepcosts import ACCEPTANCE_PROBE_EVERY
     marginal = _costs(target=5.78, verify={2: 6.29, 3: 7.0, 5: 8.5}, draft=3.48)

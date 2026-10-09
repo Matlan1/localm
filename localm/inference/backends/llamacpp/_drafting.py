@@ -139,7 +139,8 @@ class CountedSource(DraftSource):
 
     ``usable`` and ``status`` are model level: ``disable`` clears the first and
     names why in the second, for the rest of the model's life. The counters are
-    reset by ``begin_call`` (through ``reset_call``) and by ``skip_call``.
+    reset by ``begin_call`` (through ``reset_call``) and by ``skip_call``;
+    ``held_steps`` counts the reply's steps ``choose_length`` gave no drafts.
     ``label`` names the source in log lines.
 
     ``costs`` is the ``StepCosts`` measured at load, or None. With costs,
@@ -166,6 +167,7 @@ class CountedSource(DraftSource):
         self.accepted = 0
         self.steps = 0
         self.paused_steps = 0
+        self.held_steps = 0
         self.costs: Optional[StepCosts] = None
         self._observed: Dict[int, float] = {}
         self._row_s = 0.0
@@ -181,19 +183,22 @@ class CountedSource(DraftSource):
         self.accepted = 0
         self.steps = 0
         self.paused_steps = 0
+        self.held_steps = 0
 
     def skip_call(self, reason: str) -> None:
         self.reset_call(reason if self.usable else "")
         self._drafting = False
 
     def report(self) -> dict:
-        """``DraftSource.report`` plus ``acceptance``, and with measured costs
-        ``costs`` (``StepCosts.report``) and ``observed_ms``, the corrected
-        step milliseconds of each draft length seen so far."""
+        """``DraftSource.report`` plus ``held_steps`` and ``acceptance``, and
+        with measured costs ``costs`` (``StepCosts.report``) and
+        ``observed_ms``, the corrected step milliseconds of each draft length
+        seen so far."""
         out = {"status": self.status, "active": self.active_this_call,
                "call_status": self.call_status, "skipped": self.skipped,
                "drafted": self.drafted, "accepted": self.accepted,
                "steps": self.steps, "paused_steps": self.paused_steps,
+               "held_steps": self.held_steps,
                "draft_max": self.draft_max, "acceptance": round(self.acceptance(), 3)}
         if self.costs is not None:
             out["costs"] = self.costs.report()
@@ -293,8 +298,8 @@ class CountedSource(DraftSource):
         When that is 0 and ``ACCEPTANCE_PROBE_EVERY`` or more steps have
         passed since the last verification (and before the first), the length
         sized for ``ACCEPTANCE_PROBE_P`` instead, so the acceptance is
-        measured. 0 when ``length_pays`` refuses the length. Requires
-        ``costs``."""
+        measured. 0 when ``length_pays`` refuses the length; each 0 counts in
+        ``held_steps``. Requires ``costs``."""
         if n <= 0:
             return 0
         p = self.acceptance()
@@ -306,6 +311,7 @@ class CountedSource(DraftSource):
             k = 0
         if k == 0:
             self._since_probe += 1
+            self.held_steps += 1
         return k
 
 

@@ -581,7 +581,13 @@ turn shares with the previous one and indexes only what is new. A step with no
 match decodes one token and is timed by the pacer as a plain step, so a reply
 that never repeats itself costs a dictionary lookup per token. It pays on text
 that repeats earlier text: rewriting a file, quoting a passage, repeated
-tool-call JSON.
+tool-call JSON. At load its step costs are measured as for a draft model (below,
+without the draft figures), and each step proposes at most the length that pays
+at the current acceptance, so on a target whose verification batches are dear,
+such as a Mixture-of-Experts model, it drafts only where the reply really
+repeats. A target on which even fully accepted drafts cannot beat one-token
+decoding turns it off with status `ngram-cannot-pay`. When the costs cannot be
+measured it proposes up to the cap and the pacer alone decides.
 
 **`draft`** (`_draftmodel.py`) drafts with a second, smaller GGUF named by
 `spec_draft_model` (a registered model name or a path). The draft model must
@@ -597,23 +603,33 @@ removes the rest, decodes what is new plus the sampled token, then samples
 drafts greedily, decoding each before sampling the next.
 
 Once the draft model has loaded, its costs on this machine are measured
-(`LlamaCpp._measure_draft_step_costs`, a few dozen decodes): the target's
-one-token decode, its verification batches of 2, 3, 5, 9 and 17 tokens up to
+(`LlamaCpp._measure_step_costs`, a few dozen decodes): the target's one-token
+decode, its verification batches of 2, 3, 5, 9 and 17 tokens up to
 `spec_draft_tokens + 1` (others interpolated), the draft model's one-token
-decode and its batched decode per token. A draft model that cannot beat plain
-decoding even when every draft is accepted is freed with status
+decode and its batched decode per token. A target whose one-token decode takes
+more than 50 ms is measured with one decode per figure and only the batches of
+2 and `spec_draft_tokens + 1`. A draft model that cannot beat plain decoding at
+an acceptance of 0.85 (`DRAFT_GATE_ACCEPTANCE`) is freed with status
 `draft-cannot-pay`. Each step then drafts the length k up to `spec_draft_tokens`
 (default 8, at most 16) with the most expected tokens per second,
-`(1 + p + ... + p^k) / (k * draft + verify(k + 1))`, where p is the decayed
-fraction of drafts accepted so far; k 0 (a plain step) wins unless drafting is
-expected to beat it by 5%. The verification cost curve is what makes this model
-aware: a Mixture-of-Experts target, whose verification batch reads more experts
-per extra token, gets shorter drafts than a dense one, and a target whose
-experts sit in system RAM shorter still. A step skips drafting when catching the
-draft cache up (for a CPU draft model after a long prompt) costs more than the
-rest of the reply is expected to save. Without measurements a step drafts at
-most 2 tokens. The figures are in the speculation report (`costs`,
-`acceptance`) and in the debug log. An end-of-generation draft ends the proposal. A
+`(1 + p + ... + p^k) / cost(k)`, where p is the fraction of drafts accepted,
+each verification weighing 0.9 of the evidence before it; k 0 (a plain step)
+wins unless drafting is expected to beat it by 5%. When the estimate says not
+to draft, the step after 32 such steps drafts the length sized for p 0.9, so a
+draft that turns good is noticed. `cost(k)` starts as the measured
+`k * draft + verify(k + 1)` and follows what steps actually take: the decode
+loop reports each step's seconds, each length keeps a running figure of its
+steps, and a length not seen yet adds the measured overhead per sampled row
+(sampling, the loop) to the measured decodes. The verification cost curve is
+what makes this model aware: a Mixture-of-Experts target, whose verification
+batch reads more experts per extra token, gets shorter drafts than a dense one,
+and a target whose experts sit in system RAM shorter still. A step skips
+drafting when catching the draft cache up (for a CPU draft model after a long
+prompt) costs more than the rest of the reply is expected to save. Without
+measurements a step drafts at most 2 tokens. The figures are in the speculation
+report (`costs`, `observed_ms`, `acceptance`, `held_steps`, the reply's steps
+the costs held back) and in the debug log. An end-of-generation draft ends the
+proposal. A
 failed draft decode clears the draft cache and stops drafting for that reply; a
 draft cache that cannot drop a rejected draft turns drafting off for the model.
 The draft model is freed before the target. Its weights, its KV cache at the
