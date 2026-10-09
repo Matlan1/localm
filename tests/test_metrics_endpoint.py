@@ -92,6 +92,10 @@ def test_disabled_registers_no_route_and_no_middleware(monkeypatch):
     assert "/metrics" not in {getattr(r, "path", None) for r in app.routes}
     assert "MetricsMiddleware" not in {m.cls.__name__ for m in app.user_middleware}
     assert _scrape(app, client).status_code == 404
+    unknown = client.get("/no-such-route")
+    for headers in ({}, {"Origin": "http://localhost:5173"}):
+        r = client.get("/metrics", headers=headers)
+        assert (r.status_code, r.json()) == (unknown.status_code, unknown.json())
     assert not metrics.is_enabled()
 
 

@@ -4533,6 +4533,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # 3. Exception handlers, then the app.state the middleware and routes read.
     errors.register_exception_handlers(app)
     context.init_app_state(app)
+    metrics_assembly.configure_metrics()
 
     # 4. Kernel routes and middleware, innermost middleware first.
     if api_landing:

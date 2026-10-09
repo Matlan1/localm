@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import localm.inference.http_server as _hs
+from localm.inference import metrics as _metrics
 from localm.inference import ollama_protocol as _ollama
 
 
@@ -143,6 +144,11 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
     # below for why answering 403 off loopback would open a new oracle.
     _SHELL_TOKEN_GETS = ("/debug/stacks", "/metrics")
 
+    def _metrics_off(path: str) -> bool:
+        """True for /metrics while metrics are disabled, when the path is just
+        an unknown one and must be treated like any other."""
+        return path == "/metrics" and not _metrics.is_enabled()
+
     def _cross_origin_refused(request) -> bool:
         """True when this request carries an Origin header that is neither
         same-origin nor CORS-allow-listed. Shared by the CSRF check (unsafe
@@ -174,7 +180,8 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
         # check.
         if ((request.method in _UNSAFE_METHODS
              or (request.method == "GET"
-                 and (_path in _CROSS_ORIGIN_GET_REFUSED
+                 and ((_path in _CROSS_ORIGIN_GET_REFUSED
+                       and not _metrics_off(_path))
                       or _path.startswith(_CROSS_ORIGIN_GET_REFUSED_PREFIXES))))
                 and not _path.startswith(_CROSS_ORIGIN_OK)
                 and _path not in _OLLAMA_CROSS_ORIGIN_OK):
@@ -206,6 +213,7 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
         token_gated_get = (
             request.method == "GET"
             and request.url.path in _SHELL_TOKEN_GETS
+            and not _metrics_off(request.url.path)
             and _hs._is_loopback_host(
                 getattr(request.app.state, "bind_host", "127.0.0.1")))
         is_metadata_get = token_gated_get or (

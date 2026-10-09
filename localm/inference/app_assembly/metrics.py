@@ -94,13 +94,17 @@ def _vram_gauges() -> list:
             ("localm_vram_total_bytes", vram.get("total"))]
 
 
+def configure_metrics() -> None:
+    """Decide once whether metrics are on and reset the collector to match.
+    Runs before the security middleware is built, which reads the answer."""
+    metrics.configure(metrics_enabled())
+
+
 def add_metrics(app: FastAPI) -> None:
     """Register /metrics and the timing middleware when metrics are enabled;
-    otherwise reset the collector to off and add nothing. Added last, so the
-    middleware is the outermost layer."""
-    enabled = metrics_enabled()
-    metrics.configure(enabled)
-    if not enabled:
+    otherwise add nothing. Added last, so the middleware is the outermost
+    layer."""
+    if not metrics.is_enabled():
         return
 
     # Keyless servers (no API key anywhere) answer only on a loopback bind,
