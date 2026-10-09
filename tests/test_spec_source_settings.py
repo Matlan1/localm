@@ -134,7 +134,7 @@ def test_a_grown_context_keeps_the_snapshots_its_source_needs(source, draft, mtp
     llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1))
     llm._spec_source_name = source
     llm._mtp_enabled = mtp_on
-    llm._ngram_draft_max = draft
+    llm._spec_draft_max = draft
     assert _fresh_context_n_rs_seq(llm) == expected
 
 
@@ -350,7 +350,7 @@ def test_bench_spec_never_writes_the_setting(cli_runner):
 def test_the_model_drives_the_source_it_was_configured_with(source, expected):
     llm = make_bare_llama()
     llm._spec_source_name = source
-    llm._ngram_draft_max = 5 if source == "ngram" else 0
+    llm._spec_draft_max = 5 if source == "ngram" else 0
     llm._source = None
     picked = llm._draft_source()
     assert type(picked).__name__ == expected

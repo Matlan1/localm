@@ -202,11 +202,11 @@ _SPEC_PROBE_PROMPTS = _MTP_PROBE_PROMPTS + (_SPEC_REPEAT_PROMPT,)
 _SPEC_PROBE_KINDS = ("prose", "code", "explanation", "rewrite")
 
 # The label bench output uses for each draft source.
-_SPEC_LABELS = {"mtp": "MTP", "ngram": "N-gram drafting"}
+_SPEC_LABELS = {"mtp": "MTP", "ngram": "N-gram drafting", "draft": "Draft model"}
 
 
 def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
-                    draft_tokens=None):
+                    draft_tokens=None, draft_model=None):
     """Load *model_path* with draft source *source* ("off", "mtp" or "ngram")
     and return ``(decode rates, usable, status, gpu_placement, (drafted,
     accepted), texts, greedy_text, per_prompt)``: ``usable`` is False when the
@@ -221,8 +221,10 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
     kw = {}
     if source == "mtp" and draft_tokens is not None:
         kw["mtp_draft_tokens"] = draft_tokens
-    if source == "ngram" and draft_tokens is not None:
+    if source in ("ngram", "draft") and draft_tokens is not None:
         kw["spec_draft_tokens"] = draft_tokens
+    if source == "draft":
+        kw["spec_draft_model"] = draft_model
     engine = Engine(str(model_path), n_ctx=ctx, n_gpu_layers=gpu_layers,
                     display_name=display, spec_source=source, **kw)
     engine.load()
@@ -489,8 +491,11 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
 @main.command("bench-spec")
 @click.argument("model", shell_complete=_complete_model_name)
 @click.option("-s", "--source", default="ngram", show_default=True,
-              type=click.Choice(["ngram", "mtp"]),
+              type=click.Choice(["ngram", "mtp", "draft"]),
               help="Draft source to compare against no speculation.")
+@click.option("-m", "--draft-model", default=None, shell_complete=_complete_model_name,
+              help="Draft model for --source draft (default: the "
+                   "spec_draft_model setting).")
 @click.option("-n", "--gen-tokens", default=160, show_default=True,
               help="Tokens to generate per prompt.")
 @click.option("--rounds", default=3, show_default=True,
@@ -501,12 +506,14 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
 @click.option("-d", "--draft-tokens", default=None, type=click.IntRange(1, 16),
               help="Draft tokens per step for the 'on' runs (MTP: 1-3, default "
                    "mtp_draft_tokens; n-gram: 1-16, default spec_draft_tokens).")
-def bench_spec(model, source, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
+def bench_spec(model, source, draft_model, gen_tokens, rounds, ctx, gpu_layers,
+               draft_tokens):
     """Measure whether speculative drafting makes MODEL faster on this machine.
 
     Loads MODEL twice per round, once with no speculation and once with the
     draft SOURCE (ngram: drafts from repeats of earlier text in the prompt and
-    reply; mtp: the model's own MTP head), and generates the same prompts
+    reply; mtp: the model's own MTP head; draft: a smaller model, --draft-model),
+    and generates the same prompts
     through each, one of them a rewrite that repeats its input. Reports the
     decode throughput of both, which won, how many drafted tokens were
     accepted, whether the replies differ, and whether a greedy reply matched.
@@ -522,6 +529,15 @@ def bench_spec(model, source, gen_tokens, rounds, ctx, gpu_layers, draft_tokens)
         console.print(f"[red]Model not found:[/red] {escape(model)}")
         sys.exit(1)
     model_path, _hint = info
+    draft_path = None
+    if source == "draft":
+        from ..inference.engine import resolve_spec_draft_model
+        draft_path = resolve_spec_draft_model(load_config(), draft_model)
+        if not draft_path:
+            console.print("[red]No draft model:[/red] pass --draft-model or set "
+                          "spec_draft_model. `localm spec-drafts "
+                          f"{escape(model)}` lists the ones that fit.")
+            sys.exit(1)
     label = _SPEC_LABELS[source]
     console.print(f"Comparing {label} on/off for [cyan]{escape(model)}[/cyan] "
                   f"({rounds} round(s), {len(_SPEC_PROBE_PROMPTS)} prompts each)…")
@@ -529,8 +545,67 @@ def bench_spec(model, source, gen_tokens, rounds, ctx, gpu_layers, draft_tokens)
         model, label,
         lambda enabled: _spec_probe_arm(
             model_path, model, source if enabled else "off", gen_tokens, ctx,
-            gpu_layers, draft_tokens=draft_tokens if enabled else None),
+            gpu_layers, draft_tokens=draft_tokens if enabled else None,
+            draft_model=draft_path if enabled else None),
         rounds, kinds=_SPEC_PROBE_KINDS)
+
+
+@main.command("spec-drafts")
+@click.argument("model", shell_complete=_complete_model_name)
+def spec_drafts(model):
+    """List downloaded GGUF models that can be MODEL's draft model.
+
+    A draft model must share MODEL's vocabulary: the same tokenizer type, the
+    same BOS/EOS handling, sizes at most 128 tokens apart and the same token
+    text. Read from each file's metadata; nothing is loaded. Smaller files are
+    listed first, since a draft only pays when it runs much faster than MODEL.
+    """
+    from rich.markup import escape
+
+    from ..inference.backends.llamacpp._draftmodel import (
+        draft_vocab_mismatch, gguf_vocab_view)
+    from localm.model_manager import load_registry
+    from ..model_manager.gguf import gguf_vocab_signature
+
+    info = get_operator_model_info(model)
+    if info is None:
+        console.print(f"[red]Model not found:[/red] {escape(model)}")
+        sys.exit(1)
+    target_path = Path(info[0])
+    target_sig = gguf_vocab_signature(target_path)
+    if target_sig is None:
+        console.print(f"[red]{escape(model)} is not a GGUF with a vocabulary localm "
+                      "can read.[/red]")
+        sys.exit(1)
+    target = gguf_vocab_view(target_sig)
+    target_size = target_path.stat().st_size
+    fits = []
+    for name, entry in sorted(load_registry().items()):
+        path = Path(str(entry.get("path") or "")) if isinstance(entry, dict) else None
+        if (path is None or path.suffix.lower() != ".gguf" or not path.is_file()
+                or path.resolve() == target_path.resolve()
+                or entry.get("model_type", "llm") != "llm"):
+            continue
+        sig = gguf_vocab_signature(path)
+        if sig is None or draft_vocab_mismatch(target, gguf_vocab_view(sig)) is not None:
+            continue
+        fits.append((path.stat().st_size, name))
+    if not fits:
+        console.print(f"No downloaded model shares {escape(model)}'s vocabulary. "
+                      "A smaller model of the same family usually does.")
+        return
+    from rich.table import Table
+    table = Table(title=f"draft models for {escape(model)}")
+    table.add_column("model")
+    table.add_column("size", justify="right")
+    table.add_column("of target", justify="right")
+    for size, name in sorted(fits):
+        table.add_row(escape(name), f"{size / 1024 ** 3:.2f} GB",
+                      f"{100.0 * size / target_size:.0f}%")
+    console.print(table)
+    console.print("[dim]Use one with: localm config spec_source draft, and "
+                  "localm config spec_draft_model <name>. Check it pays with "
+                  "localm bench-spec <model> --source draft --draft-model <name>.[/dim]")
 
 
 # ------------------------------------------------------------------ #

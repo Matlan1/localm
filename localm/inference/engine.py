@@ -146,6 +146,20 @@ def _resolve_spec_draft_tokens(cfg: dict, override: Optional[int]) -> Optional[i
         return None
 
 
+def resolve_spec_draft_model(cfg: dict, override: Optional[str] = None) -> Optional[str]:
+    """The draft GGUF path for the draft source: *override* when given, else
+    the ``spec_draft_model`` config key, as a registered model name or a path
+    (``get_operator_model_info``). None when unset; a name that resolves to
+    nothing is returned as given, so the load reports the draft model missing."""
+    raw = override if override is not None else cfg.get("spec_draft_model")
+    name = str(raw or "").strip()
+    if not name:
+        return None
+    from localm.model_manager.registry import get_operator_model_info
+    info = get_operator_model_info(name)
+    return str(info[0]) if info is not None else name
+
+
 def create_backend(
     model_path: str,
     *,
@@ -157,6 +171,7 @@ def create_backend(
     mtp_draft_tokens: Optional[int] = None,
     spec_source: Optional[str] = None,
     spec_draft_tokens: Optional[int] = None,
+    spec_draft_model: Optional[str] = None,
 ) -> BaseBackend:
     """
     Return the appropriate backend for the given model path, without loading it.
@@ -174,6 +189,8 @@ def create_backend(
                   both for this backend only.
     spec_draft_tokens: None reads the ``spec_draft_tokens`` config key; an int
                   overrides it the same way.
+    spec_draft_model: None reads the ``spec_draft_model`` config key; a name
+                  or path overrides it the same way.
     """
     cfg = load_config()
 
@@ -197,6 +214,8 @@ def create_backend(
             mtp_enabled=source == "mtp",
             spec_source=source,
             spec_draft_tokens=_resolve_spec_draft_tokens(cfg, spec_draft_tokens),
+            spec_draft_model=(resolve_spec_draft_model(cfg, spec_draft_model)
+                              if source == "draft" else None),
             mtp_draft_tokens=_resolve_mtp_draft_tokens(cfg, mtp_draft_tokens),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
         )
@@ -296,6 +315,7 @@ class Engine:
         mtp_draft_tokens: Optional[int] = None,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
+        spec_draft_model: Optional[str] = None,
     ) -> None:
         self.model_path = model_path
         self.display_name = display_name or model_display_name(model_path)
@@ -313,6 +333,7 @@ class Engine:
             mtp_draft_tokens=mtp_draft_tokens,
             spec_source=spec_source,
             spec_draft_tokens=spec_draft_tokens,
+            spec_draft_model=spec_draft_model,
         )
         self.active_requests = 0
         # Set by http_server.switch_engine after a load placed partly on the

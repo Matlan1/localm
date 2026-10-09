@@ -33,7 +33,8 @@ from localm.textguard import (
 )
 
 from . import _api as api
-from ._drafting import SPEC_MTP, SPEC_NGRAM, DraftSource, MtpSource, resolve_spec_source
+from ._drafting import (
+    SPEC_DRAFT, SPEC_MTP, SPEC_NGRAM, DraftSource, MtpSource, resolve_spec_source)
 from ._ngram import NgramSource, ngram_draft_cap, ngram_rs_seq
 from ._structs import (
     llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
@@ -1080,7 +1081,7 @@ class LlamaCpp:
     _draft_pacer = None          # _DraftPacer for this model, created on first use
     _source = None               # the DraftSource for this model, created on first use
     _spec_source_name = SPEC_MTP # the configured draft source: off, mtp or ngram
-    _ngram_draft_max = 0         # draft tokens per n-gram step, 0 unless the source is ngram
+    _spec_draft_max = 0          # draft tokens per step of an ngram or draft source, else 0
     _clock = time.perf_counter
     _draft_pos = 0               # the draft cache holds positions [0, _draft_pos)
     _queued_tokens: Tuple[int, ...] = ()  # tokens at _draft_pos.. not yet in the draft cache
@@ -1128,11 +1129,13 @@ class LlamaCpp:
         mtp_draft_tokens: int = MTP_DRAFT_TOKENS_DEFAULT,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
+        spec_draft_model: Optional[str] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
-        # spec_source names the draft source (off, mtp, ngram); None follows
-        # mtp_enabled. MTP is enabled exactly when the source is mtp.
+        # spec_source names the draft source (off, mtp, ngram, draft); None
+        # follows mtp_enabled. MTP is enabled exactly when the source is mtp.
+        # spec_draft_model is the draft GGUF's path for the draft source.
         self._spec_source_name = resolve_spec_source(spec_source, mtp_enabled)
         self._mtp_enabled = self._spec_source_name == SPEC_MTP
         self._mtp_draft_max = max(1, min(int(mtp_draft_tokens), MTP_DRAFT_TOKENS_MAX))
@@ -1467,13 +1470,15 @@ class LlamaCpp:
                 self.mtp_status = f"error:{type(exc).__name__}"
         from localm.debuglog import logger as _mtp_log
         _mtp_log.info("MTP: active=%s status=%s", self.supports_mtp, self.mtp_status)
-        if self._spec_source_name == SPEC_NGRAM:
+        if self._spec_source_name == SPEC_DRAFT:
+            self._load_draft_model(spec_draft_model, n_threads, verbose)
+        if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
             source = self._draft_source()
-            if not self._cache_can_drop_a_speculative_token():
+            if source.usable and not self._cache_can_drop_a_speculative_token():
                 source.usable = False
                 source.status = "rewind-unsupported"
-            _mtp_log.info("n-gram drafting: status=%s draft_max=%d",
-                          source.status, self._ngram_draft_max)
+            _mtp_log.info("%s: status=%s draft_max=%d", source.label,
+                          source.status, self._spec_draft_max)
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
 
@@ -1605,6 +1610,13 @@ class LlamaCpp:
                 self._free_native()
 
     def _free_native(self) -> None:
+        source = getattr(self, "_source", None)
+        if source is not None:
+            try:
+                source.close()
+            except Exception as exc:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("freeing the draft source raised %s", type(exc).__name__)
         if getattr(self, "_mtmd", None) is not None:
             self._mtmd.free()
             self._mtmd = None
@@ -2688,7 +2700,10 @@ class LlamaCpp:
         which drafts only when an MTP draft context exists."""
         if self._source is None:
             if self._spec_source_name == SPEC_NGRAM:
-                self._source = NgramSource(self, self._ngram_draft_max or 1)
+                self._source = NgramSource(self, self._spec_draft_max or 1)
+            elif self._spec_source_name == SPEC_DRAFT:
+                from ._draftmodel import DraftModelSource
+                self._source = DraftModelSource(self, None, self._spec_draft_max or 1)
             else:
                 self._source = MtpSource(self)
         return self._source
@@ -2701,24 +2716,92 @@ class LlamaCpp:
 
     def _spec_rollback_wanted(self) -> bool:
         """Whether contexts keep recurrent-state snapshots for rejected drafts:
-        True while the configured source drafts (mtp or ngram)."""
-        return self._spec_source_name == SPEC_NGRAM or self._mtp_enabled
+        True while the configured source drafts (mtp, ngram or draft)."""
+        return self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT) or self._mtp_enabled
 
     def _spec_rollback_snapshots(self, cp) -> int:
         """Recurrent-state snapshots a context keeps so a step whose drafts are
         all rejected can still be rolled back, for the configured source."""
-        if self._spec_source_name == SPEC_NGRAM:
-            return ngram_rs_seq(getattr(cp, "n_rs_seq", 0), self._ngram_draft_max)
+        if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
+            return ngram_rs_seq(getattr(cp, "n_rs_seq", 0), self._spec_draft_max)
         return self._mtp_rollback_snapshots(cp)
 
     def _apply_initial_spec_params(self, cp, spec_draft_tokens: Optional[int]) -> None:
-        """Set the n-gram draft cap for the loaded model, then the recurrent
-        snapshots the first context keeps for the configured source."""
-        if self._spec_source_name == SPEC_NGRAM:
-            self._ngram_draft_max = ngram_draft_cap(
-                spec_draft_tokens, self._model_has_recurrent_layers() is not False)
+        """Set the draft cap of an ngram or draft source for the loaded model,
+        then the recurrent snapshots the first context keeps for the source."""
+        if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
+            from ._draftmodel import DRAFT_MODEL_DRAFT_TOKENS_DEFAULT
+            from ._ngram import NGRAM_DRAFT_TOKENS_DEFAULT
+            self._spec_draft_max = ngram_draft_cap(
+                spec_draft_tokens, self._model_has_recurrent_layers() is not False,
+                default=(NGRAM_DRAFT_TOKENS_DEFAULT if self._spec_source_name == SPEC_NGRAM
+                         else DRAFT_MODEL_DRAFT_TOKENS_DEFAULT))
         if self._spec_rollback_wanted() and hasattr(cp, "n_rs_seq"):
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
+
+    def _load_draft_model(self, path: Optional[str], n_threads: Optional[int],
+                          verbose: bool) -> None:
+        """Load the draft GGUF at *path* on the main GPU and attach a
+        DraftModelSource drafting with it on its own context.
+
+        Any failure leaves the model working without drafting, with the
+        source's status naming why: "draft-model-missing", "draft-load-failed",
+        "draft-vocab-mismatch", "draft-rewind-unsupported" (a draft with
+        recurrent layers) or "draft-context-refused". A load the cancel event
+        stopped frees everything this instance loaded and raises
+        ModelLoadCancelled."""
+        from localm.debuglog import logger
+
+        from ._draftmodel import DraftModelSource, draft_vocab_mismatch, native_vocab_view
+        source = DraftModelSource(self, None, self._spec_draft_max or 1, n_threads)
+        self._source = source
+        if not path or not os.path.isfile(path):
+            source.disable("draft-model-missing")
+            return
+        mp = api.llama_model_default_params()
+        mp.n_gpu_layers = 99
+        if hasattr(mp, "split_mode"):
+            mp.split_mode = 0
+        mp.main_gpu = self._main_gpu_index
+        set_use_mmap(mp, False)
+        if self._load_progress_cb is not None:
+            mp.progress_callback = ctypes.cast(self._load_progress_cb, ctypes.c_void_p)
+        _load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
+        detail = ""
+        with _load_ctx() as captured:
+            model = api.llama_load_model_from_file(path, mp)
+            if captured is not None and not model:
+                detail = captured.tail()
+        if not model:
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                self._free_native()
+                from localm.inference.backends.base import ModelLoadCancelled
+                raise ModelLoadCancelled(f"Model load aborted (superseded): {path}")
+            logger.warning("draft model failed to load: %s %s", os.path.basename(path), detail)
+            source.disable("draft-load-failed")
+            return
+        source._model = model
+        mismatch = draft_vocab_mismatch(native_vocab_view(api, self._model_ptr),
+                                        native_vocab_view(api, model))
+        if mismatch:
+            logger.warning("draft model %s does not share this model's vocabulary (%s)",
+                           os.path.basename(path), mismatch)
+            source.disable("draft-vocab-mismatch")
+            source.close()
+            return
+        try:
+            draft_recurrent = api.has_hybrid_api() and (
+                api.llama_model_is_recurrent(model) or api.llama_model_is_hybrid(model))
+        except Exception:
+            draft_recurrent = True
+        if draft_recurrent:
+            source.disable("draft-rewind-unsupported")
+            source.close()
+            return
+        failure = source.create_context(self._ctx_capacity, self._offload_kqv)
+        if failure:
+            source.disable(failure)
+            source.close()
 
     def _model_has_recurrent_layers(self) -> Optional[bool]:
         """Whether the loaded model has recurrent layers (fully recurrent or

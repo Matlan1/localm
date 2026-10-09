@@ -572,7 +572,8 @@ class VramSizingMixin:
                 "fit_kw": dict(output_bytes=int(output_bytes),
                                layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
                                logits_bytes=logits,
-                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES)),
+                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES
+                                                 + self._draft_model_vram_bytes())),
             }
         except Exception as e:
             from localm.debuglog import logger as _dbg
@@ -734,7 +735,7 @@ class VramSizingMixin:
                 Path(self.model_path), _parsed=self._gguf_parsed_tensor_entries())
             if per_copy:
                 n_rs_seq = 0
-                if getattr(self, "spec_source", None) == "ngram":
+                if getattr(self, "spec_source", None) in ("ngram", "draft"):
                     from localm.inference.backends.llamacpp._ngram import (
                         ngram_draft_cap, ngram_rs_seq)
                     n_rs_seq = ngram_rs_seq(0, ngram_draft_cap(
@@ -753,6 +754,58 @@ class VramSizingMixin:
             charge = 0
         self._recurrent_state_vram_bytes_cached = charge
         return charge
+
+    def _draft_model_vram_bytes(self) -> int:
+        """VRAM the draft source's second model needs for THIS load, 0 unless
+        ``spec_source`` is "draft" and ``spec_draft_model`` is a readable GGUF.
+
+        The draft model's file size (its weights), its KV cache for
+        ``self.n_ctx`` tokens, the logits buffer of a context whose batch is
+        ``DRAFT_CONTEXT_BATCH``, and ``DRAFT_COMPUTE_MARGIN_BYTES``; the draft
+        context is created at the main context's size. Never raises: a probe
+        failure charges 0. Memoised per instance."""
+        if getattr(self, "spec_source", None) != "draft":
+            return 0
+        cached = getattr(self, "_draft_model_vram_bytes_cached", None)
+        if cached is not None:
+            return cached
+        charge = 0
+        try:
+            from localm.inference.backends.llamacpp._draftmodel import (
+                DRAFT_COMPUTE_MARGIN_BYTES, DRAFT_CONTEXT_BATCH)
+            from localm.inference.backends.llamacpp._split_fit import logits_buffer_bytes
+            from localm.model_manager.gguf import (
+                _gguf_split_layout_meta, gguf_kv_bytes_per_token)
+            raw = getattr(self, "spec_draft_model", None)
+            path = Path(raw) if raw else None
+            if path is not None and path.is_file():
+                kv_per_token = int(gguf_kv_bytes_per_token(path))
+                meta = _gguf_split_layout_meta(path)
+                n_vocab = meta[1] if meta else 0
+                self._draft_kv_per_token_cached = kv_per_token
+                charge = (path.stat().st_size + self.n_ctx * kv_per_token
+                          + logits_buffer_bytes(n_vocab, self.n_ctx,
+                                                max_batch=DRAFT_CONTEXT_BATCH)
+                          + DRAFT_COMPUTE_MARGIN_BYTES)
+        except Exception as exc:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("draft-model VRAM probe failed (%s); charging nothing "
+                       "extra for it", type(exc).__name__)
+            charge = 0
+        self._draft_model_vram_bytes_cached = charge
+        return charge
+
+    def _spec_extra_vram_bytes(self) -> int:
+        """VRAM the configured draft source needs beyond the main model and
+        context: the MTP draft context or the draft model."""
+        return self._mtp_draft_context_vram_bytes() + self._draft_model_vram_bytes()
+
+    def _spec_kv_per_token(self) -> int:
+        """KV bytes per token of context a draft source adds: the MTP draft
+        context's or the draft model's, both of which grow with the main one."""
+        self._draft_model_vram_bytes()
+        return (self._mtp_draft_kv_per_token()
+                + int(getattr(self, "_draft_kv_per_token_cached", 0) or 0))
 
     def _mtp_draft_kv_per_token(self) -> int:
         """Draft-context KV bytes per token of context, 0 when this load has no
@@ -1068,7 +1121,7 @@ class VramSizingMixin:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             weights = int(model_bytes * min(1.0, gpu_layers / layers))
         overhead = (self._split_overhead_bytes(split_devices)
-                    + self._mtp_draft_context_vram_bytes()
+                    + self._spec_extra_vram_bytes()
                     + self._recurrent_state_vram_bytes())
         need = weights + kv_cache + overhead
         ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
@@ -1137,8 +1190,8 @@ class VramSizingMixin:
           above this load's;
         - fewer GPU layers."""
         options = []
-        per_token = self._kv_bytes_per_token() + self._mtp_draft_kv_per_token()
-        fixed = need - kv_cache - self.n_ctx * self._mtp_draft_kv_per_token()
+        per_token = self._kv_bytes_per_token() + self._spec_kv_per_token()
+        fixed = need - kv_cache - self.n_ctx * self._spec_kv_per_token()
         if per_token > 0 and budget > fixed:
             ctx = ((budget - fixed) // per_token // 1024) * 1024
             ctx = min(ctx, ((self.n_ctx - 1) // 1024) * 1024)
@@ -1212,7 +1265,7 @@ class VramSizingMixin:
         if gpu_layers < self._DEFAULT_GPU_LAYERS:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             per_token = int(per_token * min(1.0, gpu_layers / layers))
-        per_token += self._mtp_draft_kv_per_token()
+        per_token += self._spec_kv_per_token()
         if per_token <= 0:
             return None
         # How much NEW KV must land in VRAM to grow to n_ctx depends on WHERE the
@@ -1302,7 +1355,7 @@ class VramSizingMixin:
         model = self._effective_model_bytes_for_vram()
         budget = (free - model - self._split_overhead_bytes(split_devices)
                   - embedder_ctx_reservation_bytes()
-                  - self._mtp_draft_context_vram_bytes()
+                  - self._spec_extra_vram_bytes()
                   - self._recurrent_state_vram_bytes())
         if budget <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN)
@@ -1351,12 +1404,12 @@ class VramSizingMixin:
         charges: the VRAM-resident weights with the CONFIGURED n_cpu_moe
         (``_vram_model_bytes``; never an automatic choice of an earlier
         load), the KV cache for ``self.n_ctx`` tokens, and the compute overhead
-        for *split_devices* devices plus the MTP draft context and the
-        recurrent state."""
+        for *split_devices* devices plus the draft source (MTP draft context or
+        draft model) and the recurrent state."""
         model = self._vram_model_bytes(int(getattr(self, "n_cpu_moe", 0) or 0))
         kv = self.n_ctx * self._kv_bytes_per_token()
         overhead = (self._split_overhead_bytes(split_devices)
-                    + self._mtp_draft_context_vram_bytes()
+                    + self._spec_extra_vram_bytes()
                     + self._recurrent_state_vram_bytes())
         return model, kv, overhead
 

@@ -247,14 +247,21 @@ CORE_FIELDS: list = [
     SettingField("spec_source", Widget.SELECT, "Speculative drafting",
                  "Where draft tokens come from. mtp = the model's own MTP head; "
                  "ngram = repeats of earlier text in the chat, no second model; "
-                 "off = none. Inherit follows the MTP toggle. Run `localm "
-                 "bench-spec <model>` to check yours.",
+                 "draft = a smaller model (Draft model); off = none. Inherit "
+                 "follows the MTP toggle. Run `localm bench-spec <model>` to "
+                 "check yours.",
                  group="Engine", applies=Applies.NEXT_LOAD,
-                 options=["", "off", "mtp", "ngram"]),
-    SettingField("spec_draft_tokens", Widget.NUMBER, "N-gram draft tokens",
-                 "Most tokens one n-gram step proposes. Blank uses 8; models "
-                 "with recurrent layers use at most 4.",
+                 options=["", "off", "mtp", "ngram", "draft"]),
+    SettingField("spec_draft_tokens", Widget.NUMBER, "Draft tokens per step",
+                 "Most tokens one n-gram or draft-model step proposes. Blank "
+                 "uses 8 for n-gram and 4 for a draft model; models with "
+                 "recurrent layers use at most 4.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=16),
+    SettingField("spec_draft_model", Widget.TEXT, "Draft model",
+                 "For Speculative drafting = draft: a smaller model with the same "
+                 "vocabulary, by name or GGUF path. `localm spec-drafts <model>` "
+                 "lists the ones you have.",
+                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.

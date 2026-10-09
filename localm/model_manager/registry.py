@@ -1469,7 +1469,8 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[s
     registry entry to a new key (unlike alias_model, which copies - *old_name*
     stops working here), and best-effort migrates every OTHER place inside
     <data dir> that stores the plain name string (config.json's pinned_models
-    / embedding_model / coder_reviewer_model, scheduled jobs' `model` field,
+    / embedding_model / coder_reviewer_model / spec_draft_model, scheduled
+    jobs' `model` field,
     RAG collection metadata). A per-project ``.localcoder/config.toml``
     ``model`` setting lives OUTSIDE <data dir> (in the user's own project
     repo, discoverable only relative to a `cwd` a coder session supplies) and
@@ -1557,6 +1558,8 @@ def _migrate_model_references(old_name: str, new_name: str) -> List[str]:
                 cfg["embedding_model"] = new_name
             if cfg.get("coder_reviewer_model") == old_name:
                 cfg["coder_reviewer_model"] = new_name
+            if cfg.get("spec_draft_model") == old_name:
+                cfg["spec_draft_model"] = new_name
         update_config(_apply_cfg)
     except Exception as e:
         logger.debug("rename_model: config migration failed for %s -> %s: %s",

@@ -30,7 +30,8 @@ from typing import List, Optional
 SPEC_OFF = "off"
 SPEC_MTP = "mtp"
 SPEC_NGRAM = "ngram"
-SPEC_SOURCES = (SPEC_OFF, SPEC_MTP, SPEC_NGRAM)
+SPEC_DRAFT = "draft"
+SPEC_SOURCES = (SPEC_OFF, SPEC_MTP, SPEC_NGRAM, SPEC_DRAFT)
 
 
 def resolve_spec_source(spec_source: Optional[str], mtp_enabled: bool) -> str:
@@ -103,6 +104,10 @@ class DraftSource:
     def skip_call(self, reason: str) -> None:
         """Record that the reply about to run cannot draft, and why."""
 
+    def close(self) -> None:
+        """Free what the source holds natively. Called while the model's own
+        context and weights are still allocated, before they are freed."""
+
     def report(self) -> dict:
         """The model's speculation state and the last reply's figures:
         ``status`` (model level), ``active`` (the reply speculated),
@@ -113,6 +118,81 @@ class DraftSource:
         return {"status": "disabled", "active": False, "call_status": "",
                 "skipped": "", "drafted": 0, "accepted": 0, "steps": 0,
                 "paused_steps": 0, "draft_max": 0}
+
+
+class CountedSource(DraftSource):
+    """A source that keeps its own status and per-reply counters.
+
+    ``usable`` and ``status`` are model level: ``disable`` clears the first and
+    names why in the second, for the rest of the model's life. The counters are
+    reset by ``begin_call`` (through ``reset_call``) and by ``skip_call``.
+    ``label`` names the source in log lines.
+    """
+
+    label = "drafting"
+
+    def __init__(self, draft_max: int) -> None:
+        self.draft_max = draft_max
+        self.usable = True
+        self.status = "ok"
+        self._drafting = False
+        self.active_this_call = False
+        self.call_status = ""
+        self.skipped = ""
+        self.drafted = 0
+        self.accepted = 0
+        self.steps = 0
+        self.paused_steps = 0
+
+    def reset_call(self, skipped: str = "") -> None:
+        self.active_this_call = False
+        self.call_status = ""
+        self.skipped = skipped
+        self.drafted = 0
+        self.accepted = 0
+        self.steps = 0
+        self.paused_steps = 0
+
+    def skip_call(self, reason: str) -> None:
+        self.reset_call(reason if self.usable else "")
+        self._drafting = False
+
+    def report(self) -> dict:
+        return {"status": self.status, "active": self.active_this_call,
+                "call_status": self.call_status, "skipped": self.skipped,
+                "drafted": self.drafted, "accepted": self.accepted,
+                "steps": self.steps, "paused_steps": self.paused_steps,
+                "draft_max": self.draft_max}
+
+    def drafting(self) -> bool:
+        return self._drafting
+
+    def stop_this_call(self, status: str) -> None:
+        self._drafting = False
+        self.active_this_call = False
+        self.call_status = status
+        from localm.debuglog import logger
+        logger.info("%s stopped for this reply - %s", self.label, status)
+
+    def disable(self, status: str) -> None:
+        """Stop drafting for the rest of the model's life and record why."""
+        self.usable = False
+        self._drafting = False
+        self.status = status
+        from localm.debuglog import logger
+        logger.warning("%s disabled for this model - %s", self.label, status)
+
+    def on_verify(self, drafted: int, accepted: int) -> None:
+        self.steps += 1
+        self.drafted += drafted
+        self.accepted += accepted
+        self.active_this_call = True
+
+    def on_paused_step(self) -> None:
+        self.paused_steps += 1
+
+    def rewind_unsupported(self) -> None:
+        self.disable("rewind-unsupported")
 
 
 class MtpSource(DraftSource):

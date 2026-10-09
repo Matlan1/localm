@@ -50,6 +50,7 @@ class GgufWorker(VramSizingMixin):
         mtp_draft_tokens: Optional[int] = None,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
+        spec_draft_model: Optional[str] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -58,7 +59,8 @@ class GgufWorker(VramSizingMixin):
         self.mtp_enabled = mtp_enabled
         self.mtp_draft_tokens = mtp_draft_tokens   # None = LlamaCpp's default
         self.spec_source = spec_source             # None = follow mtp_enabled
-        self.spec_draft_tokens = spec_draft_tokens # None = the n-gram default
+        self.spec_draft_tokens = spec_draft_tokens # None = the source's default
+        self.spec_draft_model = spec_draft_model   # draft GGUF path for the draft source
         # Already resolved by the parent - VramSizingMixin's _check_context_fit
         # reads this in preference to n_gpu_layers, matching GgufBackend's shape.
         self.effective_gpu_layers = n_gpu_layers
@@ -235,6 +237,8 @@ class GgufWorker(VramSizingMixin):
                if self.spec_source is not None else {}),
             **({"spec_draft_tokens": self.spec_draft_tokens}
                if self.spec_draft_tokens is not None else {}),
+            **({"spec_draft_model": self.spec_draft_model}
+               if self.spec_draft_model is not None else {}),
         )
         self._loaded = True
         return {

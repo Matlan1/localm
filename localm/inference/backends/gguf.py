@@ -117,6 +117,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         mtp_draft_tokens: Optional[int] = None,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
+        spec_draft_model: Optional[str] = None,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -131,7 +132,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.spec_source = resolve_spec_source(spec_source, mtp_enabled)
         self.mtp_enabled = self.spec_source == SPEC_MTP
         self.mtp_draft_tokens = mtp_draft_tokens   # None = the native default
-        self.spec_draft_tokens = spec_draft_tokens  # None = the n-gram default
+        self.spec_draft_tokens = spec_draft_tokens  # None = the source's default
+        self.spec_draft_model = spec_draft_model    # draft GGUF path for the draft source
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
@@ -386,7 +388,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         """
         source = getattr(self, "spec_source",
                          "mtp" if getattr(self, "mtp_enabled", False) else "off")
-        if not self.loaded or source not in ("mtp", "ngram"):
+        if not self.loaded or source not in ("mtp", "ngram", "draft"):
             return None
         if source == "mtp":
             usage = self.last_mtp_usage
@@ -409,7 +411,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             state, reason = "off", str(rep.get("skipped"))
         else:
             state, reason = "idle", None
-        return {"source": "ngram", "state": state,
+        return {"source": source, "state": state,
                 "drafted": _count(rep.get("drafted")),
                 "accepted": _count(rep.get("accepted")),
                 "paused_steps": paused, "reason": reason}
@@ -629,6 +631,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         source = getattr(self, "spec_source", None)
         if source is not None and source != ("mtp" if self.mtp_enabled else "off"):
             params["spec_source"] = source
+        if source == "draft":
+            params["spec_draft_model"] = getattr(self, "spec_draft_model", None)
         if getattr(self, "spec_draft_tokens", None) is not None:
             params["spec_draft_tokens"] = int(self.spec_draft_tokens)
         if main_gpu is not None:

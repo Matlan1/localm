@@ -10,7 +10,7 @@ from __future__ import annotations
 import weakref
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from ._drafting import SPEC_NGRAM, DraftSource
+from ._drafting import SPEC_NGRAM, CountedSource
 
 NGRAM_N_MIN = 3
 NGRAM_N_MAX = 5
@@ -21,11 +21,12 @@ NGRAM_DRAFT_TOKENS_MAX = 16
 NGRAM_RECURRENT_DRAFT_TOKENS_MAX = 4
 
 
-def ngram_draft_cap(draft_tokens: Optional[int], recurrent: bool) -> int:
-    """Draft tokens one n-gram step may propose: *draft_tokens* (None for the
-    default) clamped to 1..NGRAM_DRAFT_TOKENS_MAX, and to
-    NGRAM_RECURRENT_DRAFT_TOKENS_MAX on a model with recurrent layers."""
-    n = NGRAM_DRAFT_TOKENS_DEFAULT if draft_tokens is None else int(draft_tokens)
+def ngram_draft_cap(draft_tokens: Optional[int], recurrent: bool,
+                    default: int = NGRAM_DRAFT_TOKENS_DEFAULT) -> int:
+    """Draft tokens one step of an ngram or draft source may propose:
+    *draft_tokens* (None for *default*) clamped to 1..NGRAM_DRAFT_TOKENS_MAX,
+    and to NGRAM_RECURRENT_DRAFT_TOKENS_MAX on a model with recurrent layers."""
+    n = default if draft_tokens is None else int(draft_tokens)
     n = max(1, min(n, NGRAM_DRAFT_TOKENS_MAX))
     if recurrent:
         n = min(n, NGRAM_RECURRENT_DRAFT_TOKENS_MAX)
@@ -123,7 +124,7 @@ class NgramIndex:
         return []
 
 
-class NgramSource(DraftSource):
+class NgramSource(CountedSource):
     """Drafts by prompt lookup over the tokens in the main cache.
 
     The index follows ``llm._cached_tokens``: begin_call keeps the prefix it
@@ -133,57 +134,25 @@ class NgramSource(DraftSource):
     """
 
     name = SPEC_NGRAM
+    label = "n-gram drafting"
     free_miss = True
 
     def __init__(self, llm, draft_max: int = NGRAM_DRAFT_TOKENS_DEFAULT,
                  is_eog: Optional[Callable[[int], bool]] = None) -> None:
+        super().__init__(max(1, min(int(draft_max), NGRAM_DRAFT_TOKENS_MAX)))
         self._llm_ref = weakref.ref(llm)
-        self.draft_max = max(1, min(int(draft_max), NGRAM_DRAFT_TOKENS_MAX))
         self.index = NgramIndex()
         self._is_eog = is_eog
-        self.usable = True
-        self.status = "ok"
-        self._drafting = False
-        self.active_this_call = False
-        self.call_status = ""
-        self.skipped = ""
-        self.drafted = 0
-        self.accepted = 0
-        self.steps = 0
-        self.paused_steps = 0
 
     @property
     def _llm(self):
         return self._llm_ref()
-
-    def reset_call(self, skipped: str = "") -> None:
-        self.active_this_call = False
-        self.call_status = ""
-        self.skipped = skipped
-        self.drafted = 0
-        self.accepted = 0
-        self.steps = 0
-        self.paused_steps = 0
-
-    def skip_call(self, reason: str) -> None:
-        self.reset_call(reason if self.usable else "")
-        self._drafting = False
-
-    def report(self) -> dict:
-        return {"status": self.status, "active": self.active_this_call,
-                "call_status": self.call_status, "skipped": self.skipped,
-                "drafted": self.drafted, "accepted": self.accepted,
-                "steps": self.steps, "paused_steps": self.paused_steps,
-                "draft_max": self.draft_max}
 
     def begin_call(self) -> bool:
         self.reset_call()
         self._drafting = self.usable
         if self._drafting:
             self.index.sync(self._llm._cached_tokens)
-        return self._drafting
-
-    def drafting(self) -> bool:
         return self._drafting
 
     def ready(self, pos: int) -> bool:
@@ -211,27 +180,3 @@ class NgramSource(DraftSource):
             if is_eog(d):
                 return drafts[:i]
         return drafts
-
-    def stop_this_call(self, status: str) -> None:
-        self._drafting = False
-        self.active_this_call = False
-        self.call_status = status
-        from localm.debuglog import logger
-        logger.info("n-gram drafting stopped for this reply - %s", status)
-
-    def on_verify(self, drafted: int, accepted: int) -> None:
-        self.steps += 1
-        self.drafted += drafted
-        self.accepted += accepted
-        self.active_this_call = True
-
-    def on_paused_step(self) -> None:
-        self.paused_steps += 1
-
-    def rewind_unsupported(self) -> None:
-        self.usable = False
-        self._drafting = False
-        self.status = "rewind-unsupported"
-        from localm.debuglog import logger
-        logger.warning("n-gram drafting: this model's KV cache cannot drop a "
-                       "rejected draft token; speculation disabled for this model")

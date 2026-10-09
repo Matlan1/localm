@@ -109,7 +109,7 @@ def _llama(draft_max=8):
     llm._can_reuse_kv = lambda needed: True
     llm._spec_source_name = "ngram"
     llm._mtp_enabled = False
-    llm._ngram_draft_max = draft_max
+    llm._spec_draft_max = draft_max
     llm._source = NgramSource(llm, draft_max=draft_max)
     return llm
 
@@ -368,7 +368,7 @@ def test_the_first_context_keeps_a_snapshot_per_draft_token(probe, expected_cap)
         if probe == "raises":
             api.llama_model_is_recurrent.side_effect = OSError("probe")
         llm._apply_initial_spec_params(cp, None)
-    assert llm._ngram_draft_max == expected_cap
+    assert llm._spec_draft_max == expected_cap
     assert cp.n_rs_seq == expected_cap
 
 
