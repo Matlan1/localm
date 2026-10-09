@@ -15,8 +15,6 @@ name: docs
 # GitHub Actions), the build job warns and the deploy job is skipped.
 
 on:
-  push:
-    branches: [claude/heuristic-franklin-5daa64]
   pull_request:
     paths:
       - "docs/**"
