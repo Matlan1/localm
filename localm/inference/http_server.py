@@ -520,7 +520,8 @@ def _gpu_placement_fields(engine) -> dict:
     current load, or {} when the backend cannot report placement (no load
     yet, or a backend without a layer-count knob - see Engine.gpu_placement),
     plus the ``Engine.mmap_state`` fields (``use_mmap``, ``mmap``,
-    ``mmap_from_disk``, ``mmap_note``) when the load reported them.
+    ``mmap_from_disk``, ``mmap_note``) when the load reported them, plus
+    ``adapters`` (``Engine.applied_adapters``) when LoRA adapters are applied.
     Merged into every switch_engine()/load-route success payload so a caller
     can tell a full GPU load from a silent CPU fallback instead of a bare
     "loaded"/"already_active" that hides it."""
@@ -529,6 +530,9 @@ def _gpu_placement_fields(engine) -> dict:
     mmap_state = getattr(engine, "mmap_state", None)
     if isinstance(mmap_state, dict):
         fields.update(mmap_state)
+    adapters = getattr(engine, "applied_adapters", None)
+    if isinstance(adapters, list) and adapters:
+        fields["adapters"] = adapters
     return fields
 
 

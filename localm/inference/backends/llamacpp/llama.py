@@ -195,6 +195,18 @@ class _CapturedStderr:
         return None
 
 
+_ADAPTER_LOG_LINE = re.compile(r"lora|adapter|fail|error|incorrect|mismatch", re.I)
+
+
+def _adapter_failure_detail(log: str) -> str:
+    """The lines of the native *log* that explain an adapter load failure: those
+    naming the adapter, a failure or an error, else the last lines of the log.
+    At most six lines."""
+    lines = [line.strip() for line in log.splitlines() if line.strip()]
+    relevant = [line for line in lines if _ADAPTER_LOG_LINE.search(line)]
+    return "\n".join((relevant or lines)[-6:])
+
+
 @contextlib.contextmanager
 def _capture_stderr():
     """
@@ -1107,6 +1119,9 @@ class LlamaCpp:
     mtp_steps = 0                # verification batches THIS generation decoded
     mtp_paused_steps = 0         # steps THIS generation ran plain because drafting was slower
     mtp_skipped = ""             # why THIS generation could not draft at all: "image" or ""
+    _adapter_specs: tuple = ()   # (path, scale) of each LoRA adapter this model loads
+    _adapter_handles: tuple = () # native handles of the loaded adapters, in the same order
+    applied_adapters: tuple = () # {"path", "scale"} of each adapter applied to the context
     _draft_pacer = None          # _DraftPacer for this model, created on first use
     _source = None               # the DraftSource for this model, created on first use
     _spec_source_name = SPEC_MTP # the configured draft source: off, mtp or ngram
@@ -1159,6 +1174,7 @@ class LlamaCpp:
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
         use_mmap: Optional[bool] = None,
+        adapters: Optional[List[Tuple[str, float]]] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -1166,6 +1182,9 @@ class LlamaCpp:
         # mtp_enabled. MTP is enabled exactly when the source is mtp.
         self._spec_source_name = resolve_spec_source(spec_source, mtp_enabled)
         self._mtp_enabled = self._spec_source_name == SPEC_MTP
+        self._adapter_specs = [(str(p), float(s)) for p, s in (adapters or [])]
+        self._adapter_handles: list = []
+        self.applied_adapters: List[dict] = []
         self._mtp_draft_max = max(1, min(int(mtp_draft_tokens), MTP_DRAFT_TOKENS_MAX))
         self._n_threads = n_threads
         # Optional preflight consulted by _prefill_fresh_context() before
@@ -1408,6 +1427,9 @@ class LlamaCpp:
             self._model_ptr = None
             raise pretokenizer_guard.PretokenizerUnusableModelError(refusal)
 
+        if self._adapter_specs:
+            self._load_adapters(verbose)
+
         # Model's true transformer layer count, read once here from the loaded
         # model. This is the only place it is currently EXPOSED, which is NOT the
         # same as the only place it is knowable: model_manager/gguf.py parses the
@@ -1471,8 +1493,19 @@ class LlamaCpp:
         with _ctx():
             self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
         if not self._ctx_ptr:
+            self._free_adapters()
             api.llama_free_model(self._model_ptr)
             raise RuntimeError("Failed to create llama context")
+        if self._adapter_handles:
+            try:
+                self._apply_adapters(self._ctx_ptr)
+            except Exception:
+                api.llama_free(self._ctx_ptr)
+                self._ctx_ptr = None
+                self._free_adapters()
+                api.llama_free_model(self._model_ptr)
+                self._model_ptr = None
+                raise
 
         # Multi-Token Prediction (MTP) draft context initialization
         if not self._mtp_enabled:
@@ -1571,6 +1604,70 @@ class LlamaCpp:
                 "mmproj load failed (%s); model stays text-only%s", exc, suffix)
             self._mtmd = None
 
+    def _load_adapters(self, verbose: bool) -> None:
+        """Load every LoRA adapter in ``self._adapter_specs`` for the loaded model.
+
+        On any failure frees what was loaded and the model, then raises
+        :class:`AdapterLoadError` naming the adapter and the reason (the native
+        loader's own log text when it refused the file)."""
+        from localm.debuglog import suppress_console_mirror
+        from localm.inference.backends.base import AdapterLoadError
+        _capture = _capture_stderr if not verbose else contextlib.nullcontext
+        _mirror = suppress_console_mirror if not verbose else contextlib.nullcontext
+        failure = ""
+        try:
+            if not api.has_lora_api():
+                failure = ("this llama runtime does not export the LoRA adapter "
+                           "functions; run 'localm setup-llama' to update it")
+            else:
+                for path, _scale in self._adapter_specs:
+                    detail = ""
+                    with _mirror(), _capture() as captured:
+                        handle = api.llama_adapter_lora_init(self._model_ptr, path)
+                        if handle is None and captured is not None:
+                            detail = _adapter_failure_detail(captured.tail())
+                    if handle is None:
+                        failure = (f"the llama runtime refused LoRA adapter "
+                                   f"{os.path.basename(path)}"
+                                   + (f":\n{detail}" if detail else
+                                      " (run with LOCALM_DEBUG=1 for the native log)"))
+                        break
+                    self._adapter_handles.append(handle)
+        except Exception as exc:
+            failure = f"loading LoRA adapters failed: {exc}"
+        if failure:
+            self._free_adapters()
+            api.llama_free_model(self._model_ptr)
+            self._model_ptr = None
+            raise AdapterLoadError(failure)
+
+    def _apply_adapters(self, ctx) -> None:
+        """Make the loaded adapters active on *ctx* with their scales.
+
+        Called after every creation of the main context. Raises
+        :class:`AdapterLoadError` when the native call reports failure."""
+        from localm.inference.backends.base import AdapterLoadError
+        if not self._adapter_handles:
+            return
+        rc = api.llama_set_adapters_lora(
+            ctx, list(self._adapter_handles), [s for _p, s in self._adapter_specs])
+        if rc != 0:
+            raise AdapterLoadError(
+                f"the llama runtime could not apply the LoRA adapters (code {rc})")
+        self.applied_adapters = [{"path": p, "scale": s} for p, s in self._adapter_specs]
+
+    def _free_adapters(self) -> None:
+        """Free every loaded adapter. Call after the contexts using them are
+        freed and before the model is."""
+        handles, self._adapter_handles = list(self._adapter_handles), []
+        self.applied_adapters = []
+        for handle in handles:
+            try:
+                api.llama_adapter_lora_free(handle)
+            except Exception as exc:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("freeing a LoRA adapter raised %s", type(exc).__name__)
+
     def _read_kv_bytes_per_token(self) -> int:
         """Architecture-accurate KV-cache size PER TOKEN in bytes, from the loaded
         model's attention shape, or 0 when it cannot be determined (a stripped DLL
@@ -1655,6 +1752,7 @@ class LlamaCpp:
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
+        self._free_adapters()
         if self._model_ptr:
             api.llama_free_model(self._model_ptr)
             self._model_ptr = None
@@ -3204,6 +3302,13 @@ class LlamaCpp:
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+        if self._ctx_ptr:
+            try:
+                self._apply_adapters(self._ctx_ptr)
+            except Exception:
+                api.llama_free(self._ctx_ptr)
+                self._ctx_ptr = None
+                raise
         if not self._ctx_ptr:
             if had_draft_context:
                 self._disable_mtp("context-refused",

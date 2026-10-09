@@ -21,14 +21,16 @@ without paying a process-spawn cost.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Callable, Iterator, List, Optional
 
 from localm.console import console
 
-from .base import (BaseBackend, ModelLoadCancelled, PretokenizerUnsafeInputError,
-                   PretokenizerUnusableModelError, UnsupportedModelRoleError)
+from .base import (AdapterLoadError, BaseBackend, ModelLoadCancelled,
+                   PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
+                   UnsupportedModelRoleError)
 from .llamacpp._runner import RunnerBusy
 from .llamacpp._sizing import VramSizingMixin
 
@@ -131,9 +133,14 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
         use_mmap: str = "auto",
+        adapters: Optional[list] = None,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
+        # GGUF LoRA adapters to apply to the model: (path, scale) pairs, in order.
+        self.adapters = [(os.path.abspath(p), float(s)) for p, s in (adapters or [])]
+        # The {"path", "scale"} of each adapter the last load applied.
+        self.applied_adapters: list = []
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
         # Opt-in MoE expert placement: keep the expert weights of the first N
@@ -481,6 +488,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         role_refusal = gguf_chat_refusal(gguf_architecture(Path(self.model_path)))
         if role_refusal is not None:
             raise UnsupportedModelRoleError(role_refusal)
+        from localm.model_manager import gguf_adapter_chat_refusal
+        adapter_refusal = gguf_adapter_chat_refusal(Path(self.model_path))
+        if adapter_refusal is not None:
+            raise UnsupportedModelRoleError(adapter_refusal)
+        self._check_adapters()
         # A model whose declared pre-tokenizer cannot hold a conversation is
         # refused here, before any VRAM probe or worker spawn. The worker's own
         # metadata read refuses it again when the header read reports None.
@@ -498,7 +510,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         try:
             self._load_native()
         except (ModelLoadCancelled, PretokenizerUnusableModelError,
-                UnsupportedModelRoleError, GpuSplitConfigError):
+                UnsupportedModelRoleError, AdapterLoadError, GpuSplitConfigError):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:
@@ -517,6 +529,23 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             if split_note:
                 vram_hint += f" {split_note}"
             raise RuntimeError(_load_failure_message(exc, vram_hint)) from exc
+
+    def _check_adapters(self) -> None:
+        """Refuse a load whose attached LoRA adapters cannot be applied: a
+        missing file, or a header that is not a GGUF LoRA adapter for this
+        model's architecture. Raises :class:`AdapterLoadError` naming the
+        adapter and the reason, before any VRAM probe or worker spawn."""
+        from localm.model_manager import gguf_adapter_incompatibility
+        for path, _scale in self.adapters:
+            name = Path(path).name
+            if not Path(path).is_file():
+                raise AdapterLoadError(
+                    f"LoRA adapter {name} is attached to this model but its file "
+                    f"is missing ({path}). Detach it with 'localm adapter detach' "
+                    "or restore the file.")
+            reason = gguf_adapter_incompatibility(Path(path), Path(self.model_path))
+            if reason is not None:
+                raise AdapterLoadError(f"LoRA adapter {name} cannot be applied: {reason}")
 
     def _load_native(self) -> None:
         """Load by spawning an isolated worker process and handing it the
@@ -659,6 +688,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             mtp_enabled=self.mtp_enabled,
             use_mmap=mmap_decision.use_mmap,
         )
+        if self.adapters:
+            params["adapters"] = [[p, s] for p, s in self.adapters]
         if self.mtp_draft_tokens is not None:
             params["mtp_draft_tokens"] = int(self.mtp_draft_tokens)
         source = getattr(self, "spec_source", None)
@@ -692,6 +723,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._loaded = True
         self._supports_images = bool(meta.get("supports_images"))
         self._supports_mtp = bool(meta.get("supports_mtp"))
+        reported = meta.get("adapters")
+        self.applied_adapters = list(reported) if isinstance(reported, list) else []
 
         # Whether the model is memory-mapped: the worker's report from the
         # native load log, else the forced mode, else None (not known).
@@ -870,6 +903,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._runner = None
         self._llm = None
         self._loaded = False
+        self.applied_adapters = []
 
     @property
     def loaded(self) -> bool:

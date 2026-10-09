@@ -51,9 +51,11 @@ class GgufWorker(VramSizingMixin):
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
         use_mmap: Optional[bool] = None,
+        adapters: Optional[list] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
+        self.adapters = [(str(p), float(s)) for p, s in (adapters or [])]
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
         self.mtp_enabled = mtp_enabled
@@ -168,7 +170,9 @@ class GgufWorker(VramSizingMixin):
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
-        "weight_placement", "moe_skip_reason", "mmap"}``.
+        "weight_placement", "moe_skip_reason", "mmap", "adapters"}``;
+        ``adapters`` lists the ``{"path", "scale"}`` of each LoRA adapter
+        applied to the context.
         ``weight_placement`` is llama.cpp's own per-backend load report (VRAM vs
         system RAM), the only ground truth for whether ``n_cpu_moe`` actually
         moved anything - this worker is the only process that can see it, since
@@ -235,6 +239,7 @@ class GgufWorker(VramSizingMixin):
             mtp_enabled=self.mtp_enabled,
             use_mmap=self.use_mmap,
             verbose=False,
+            **({"adapters": self.adapters} if self.adapters else {}),
             **({"mtp_draft_tokens": self.mtp_draft_tokens}
                if self.mtp_draft_tokens is not None else {}),
             **({"spec_source": self.spec_source}
@@ -251,6 +256,7 @@ class GgufWorker(VramSizingMixin):
             "weight_placement": getattr(self._llm, "weight_placement", []),
             "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),
             "mmap": getattr(self._llm, "mmap_mapped", None),
+            "adapters": [dict(a) for a in getattr(self._llm, "applied_adapters", ())],
         }
 
     def close(self) -> None:

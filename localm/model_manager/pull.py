@@ -1433,7 +1433,11 @@ def _pull_gguf_file(
             # about which type label this call chooses.
             gguf_meta = _mm.gguf_registry_metadata(dest)
             if type_is_auto and reg_type == "llm":
-                if _mm.gguf_is_mmproj(dest):
+                if _mm.gguf_adapter_kind(dest) is not None:
+                    console.print("[dim]Detected as a LoRA adapter (GGUF metadata). "
+                                  "Attach it with 'localm adapter attach'.[/dim]")
+                    reg_type = "lora"
+                elif _mm.gguf_is_mmproj(dest):
                     console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
                     reg_type = "mmproj"
                 elif _mm.gguf_embedding_signal(dest):
@@ -1591,7 +1595,11 @@ def _pull_gguf_file(
         # for the freshly-downloaded case.
         gguf_meta = _mm.gguf_registry_metadata(base_dir / filename)
         if type_is_auto and reg_type == "llm":
-            if _mm.gguf_is_mmproj(base_dir / filename):
+            if _mm.gguf_adapter_kind(base_dir / filename) is not None:
+                console.print("[dim]Detected as a LoRA adapter (GGUF metadata). "
+                              "Attach it with 'localm adapter attach'.[/dim]")
+                reg_type = "lora"
+            elif _mm.gguf_is_mmproj(base_dir / filename):
                 console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
                 reg_type = "mmproj"
             elif _mm.gguf_embedding_signal(base_dir / filename):

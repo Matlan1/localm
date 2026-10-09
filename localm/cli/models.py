@@ -956,6 +956,87 @@ def alias(existing, new_name):
         sys.exit(1)
 
 
+@main.group("adapter")
+def adapter_group():
+    """Attach GGUF LoRA adapters to a base model.
+
+    An adapter is a GGUF file with general.type 'adapter' (made by llama.cpp's
+    convert_lora_to_gguf.py, or downloaded); 'localm add' and 'localm pull'
+    register it as type 'lora'. Attached adapters are applied every time the
+    base model loads.
+
+    \b
+    Example:
+      localm add my-lora.gguf -n my-lora
+      localm adapter attach my-lora qwen3-0.6b --scale 0.8
+      localm run qwen3-0.6b
+    """
+
+
+@adapter_group.command("attach")
+@click.argument("adapter", shell_complete=_complete_model_name)
+@click.argument("base", shell_complete=_complete_model_name)
+@click.option("--scale", default=1.0, show_default=True, type=float,
+              help="Multiplier applied to the adapter's effect (negative subtracts it).")
+def adapter_attach_cmd(adapter, base, scale):
+    """Apply ADAPTER to BASE whenever BASE loads.
+
+    Refuses an adapter whose architecture differs from BASE's, naming both.
+    An adapter belongs to one base; attaching it again moves it.
+    """
+    from rich.markup import escape
+
+    from ..model_manager import AdapterError, attach_adapter
+
+    try:
+        attach_adapter(adapter, base, scale)
+    except AdapterError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        sys.exit(1)
+    console.print(
+        f"[green]✓[/green] [bold]{escape(adapter)}[/bold] is attached to "
+        f"[bold]{escape(base)}[/bold] (scale {scale:g}).")
+    console.print(
+        f"[dim]It is applied the next time {escape(base)} loads; if it is loaded "
+        f"in a running server, run 'localm unload {escape(base)}' first.[/dim]")
+
+
+@adapter_group.command("detach")
+@click.argument("adapter", shell_complete=_complete_model_name)
+def adapter_detach_cmd(adapter):
+    """Stop applying ADAPTER to its base model (the adapter stays registered)."""
+    from rich.markup import escape
+
+    from ..model_manager import detach_adapter
+
+    if not detach_adapter(adapter):
+        console.print(f"[red]'{escape(adapter)}' is not an attached adapter.[/red]")
+        sys.exit(1)
+    console.print(f"[green]✓[/green] [bold]{escape(adapter)}[/bold] is detached.")
+
+
+@adapter_group.command("list")
+def adapter_list_cmd():
+    """List the registered GGUF LoRA adapters and what each is attached to."""
+    from rich.markup import escape
+
+    from localm.model_manager import list_adapters, load_registry
+
+    adapters = list_adapters()
+    if not adapters:
+        console.print("[dim]No adapters registered. Add one with 'localm add <file.gguf>'.[/dim]")
+        return
+    registered = load_registry()
+    for a in adapters:
+        if a["base"] is None:
+            where = "[dim]not attached[/dim]"
+        else:
+            note = "" if a["base"] in registered else " [yellow](base is not registered)[/yellow]"
+            where = (f"attached to [bold]{escape(a['base'])}[/bold] "
+                     f"(scale {a['scale'] if a['scale'] is not None else '?'}){note}")
+        console.print(f"  [bold]{escape(a['name'])}[/bold]  {where}")
+
+
 def _rename_on_running_server(old_name: str, new_name: str):
     """Ask the localm server serving this directory to perform the rename, so
     the registry move and the live engine's re-key happen in ONE process.
