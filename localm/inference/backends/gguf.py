@@ -607,6 +607,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         ctx_max = self._effective_ctx_max(split_budget=ctx_budget)
         self.effective_ctx_max = ctx_max
 
+        # Whether the worker memory-maps the model file (VramSizingMixin.
+        # _resolve_use_mmap): forced on, forced off, or the build's default.
+        mmap_decision = self._resolve_use_mmap(gpu_layers, vram_before)
+
         # Record what this load applies, for the GUI's loaded-model status: the
         # auto override when computed, else the config ratios, else equal, through
         # the same resolve_gpu_split validation, normalized to shares. Display data
@@ -648,6 +652,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             gpu_split_ratios=worker_split,
             n_cpu_moe=self._load_n_cpu_moe(),
             mtp_enabled=self.mtp_enabled,
+            use_mmap=mmap_decision.use_mmap,
         )
         if self.mtp_draft_tokens is not None:
             params["mtp_draft_tokens"] = int(self.mtp_draft_tokens)
@@ -685,6 +690,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._loaded = True
         self._supports_images = bool(meta.get("supports_images"))
         self._supports_mtp = bool(meta.get("supports_mtp"))
+
+        # Whether the model is memory-mapped: the worker's report from the
+        # native load log, else the forced mode, else None (not known).
+        # mmap_forced_by_ram marks an auto load mapped because its host-resident
+        # weights do not fit available system RAM.
+        reported = meta.get("mmap")
+        self.effective_use_mmap = (reported if isinstance(reported, bool)
+                                   else mmap_decision.use_mmap)
+        self.mmap_forced_by_ram = (self.effective_use_mmap is True
+                                   and mmap_decision.reason == "exceeds_ram")
 
         # Record the model's true transformer layer count, reported once by the
         # child, so the next load and the GUI VRAM estimate can size a partial GPU

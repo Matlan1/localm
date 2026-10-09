@@ -123,6 +123,15 @@ def _stderr_ctx_for_generate(verbose: bool):
 _MODEL_BUFFER_RE = re.compile(
     r"load_tensors:\s*([A-Za-z0-9_]+) model buffer size\s*=\s*([\d.]+)\s*MiB")
 
+# llama.cpp's load-time report of how it reads the weights: "(load_mode = mmap)"
+# on builds with the load_mode enum (builds that resolve AUTO print mmap or none
+# instead), "(mmap = true)" on older ones. The value classes share no character
+# with the closing ")", so a failed match ends without backtracking.
+_LOAD_MODE_RE = re.compile(r"\(load_mode = ([a-z+]+)\)|\(mmap = (true|false)\)")
+_MAPPED_LOAD_MODES = {"mmap": True, "mmap+mlock": True, "none": False,
+                      "mlock": False, "dio": False}
+_MMAP_UNSUPPORTED_TEXT = "mmap is not supported on this platform"
+
 
 class _CapturedStderr:
     """Holder yielded by _capture_stderr; .tail() reads the captured native text."""
@@ -164,6 +173,27 @@ class _CapturedStderr:
                           or name.endswith("_Host"),
             })
         return out
+
+    def mapped(self) -> Optional[bool]:
+        """Whether the captured native load memory-mapped the model file: False
+        when the log says mmap is not supported on this platform; else the
+        last ``(load_mode = X)`` / ``(mmap = X)`` report when it names a mode
+        (``auto`` names none); else True when a ``CPU_Mapped`` model buffer
+        was reported; else None (not reported)."""
+        text = self._read()
+        if _MMAP_UNSUPPORTED_TEXT in text:
+            return False
+        reported = None
+        for m in _LOAD_MODE_RE.finditer(text):
+            if m.group(1) is not None:
+                reported = _MAPPED_LOAD_MODES.get(m.group(1), reported)
+            else:
+                reported = m.group(2) == "true"
+        if reported is not None:
+            return reported
+        if any(b["backend"] == "CPU_Mapped" for b in self.model_buffers()):
+            return True
+        return None
 
 
 @contextlib.contextmanager
@@ -1131,6 +1161,7 @@ class LlamaCpp:
         spec_draft_tokens: Optional[int] = None,
         spec_draft_model: Optional[str] = None,
         spec_draft_gpu: bool = True,
+        use_mmap: Optional[bool] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -1212,12 +1243,14 @@ class LlamaCpp:
         mp.n_gpu_layers = n_gpu_layers
         if hasattr(mp, "load_mtp") and self._mtp_enabled:
             mp.load_mtp = True
-        if n_gpu_layers >= 99:
+        # use_mmap True or False forces that load mode; None keeps the build's
+        # default (mmap on every device that supports it).
+        if use_mmap is not None:
             # Newer builds replaced use_mmap/use_mlock/use_direct_io with a
             # single load_mode enum at a DIFFERENT offset; set_use_mmap writes
             # whichever this build has. Assigning mp.use_mmap directly would
             # land in check_tensors on those builds - same size, no error.
-            set_use_mmap(mp, False)
+            set_use_mmap(mp, bool(use_mmap))
         # Multi-GPU: honour the configured main_gpu_index (validated against
         # the devices actually visible right now), or the parent's main_gpu in
         # llama.cpp's device numbering when given; leaves the native default
@@ -1343,6 +1376,9 @@ class LlamaCpp:
         _load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
         _mirror_ctx = suppress_console_mirror if not verbose else contextlib.nullcontext
         self.weight_placement: list = []
+        # Whether the load memory-mapped the weights, from the native load log
+        # (_CapturedStderr.mapped); None when not reported or not captured.
+        self.mmap_mapped: Optional[bool] = None
         _load_failure_detail = ""
         with _mirror_ctx(), _load_ctx() as captured:
             api.llama_backend_init()
@@ -1353,6 +1389,7 @@ class LlamaCpp:
             if captured is not None:
                 if self._model_ptr:
                     self.weight_placement = captured.model_buffers()
+                    self.mmap_mapped = captured.mapped()
                 else:
                     _load_failure_detail = captured.tail()
         if not self._model_ptr:

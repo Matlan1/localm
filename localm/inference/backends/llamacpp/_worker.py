@@ -52,6 +52,7 @@ class GgufWorker(VramSizingMixin):
         spec_draft_tokens: Optional[int] = None,
         spec_draft_model: Optional[str] = None,
         spec_draft_gpu: bool = True,
+        use_mmap: Optional[bool] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -85,6 +86,9 @@ class GgufWorker(VramSizingMixin):
         # The parent's main_gpu_index in llama.cpp's device numbering, or None
         # (LlamaCpp then reads main_gpu_index from the config).
         self.main_gpu = main_gpu
+        # The parent's mmap decision: True or False forces it, None keeps the
+        # build's default.
+        self.use_mmap = use_mmap
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False
@@ -178,7 +182,7 @@ class GgufWorker(VramSizingMixin):
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
-        "weight_placement", "moe_skip_reason"}``.
+        "weight_placement", "moe_skip_reason", "mmap"}``.
         ``weight_placement`` is llama.cpp's own per-backend load report (VRAM vs
         system RAM), the only ground truth for whether ``n_cpu_moe`` actually
         moved anything - this worker is the only process that can see it, since
@@ -188,7 +192,8 @@ class GgufWorker(VramSizingMixin):
         naming why ``n_cpu_moe`` did not apply - carried out here rather than
         printed by ``_apply_cpu_moe`` itself, because THIS process is the
         isolated child and only the parent (GgufBackend) may render a
-        user-facing message.
+        user-facing message. ``mmap`` is whether the load memory-mapped the
+        model file, read from the native load log (None when not reported).
 
         Raises :class:`~localm.inference.backends.base.ModelLoadCancelled` if
         ``cancel_event`` was set during the load (native progress-callback
@@ -242,6 +247,7 @@ class GgufWorker(VramSizingMixin):
             main_gpu=self.main_gpu,
             n_cpu_moe=self.n_cpu_moe,
             mtp_enabled=self.mtp_enabled,
+            use_mmap=self.use_mmap,
             verbose=False,
             **({"mtp_draft_tokens": self.mtp_draft_tokens}
                if self.mtp_draft_tokens is not None else {}),
@@ -261,6 +267,7 @@ class GgufWorker(VramSizingMixin):
             "supports_mtp": bool(getattr(self._llm, "supports_mtp", False)),
             "weight_placement": getattr(self._llm, "weight_placement", []),
             "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),
+            "mmap": getattr(self._llm, "mmap_mapped", None),
         }
 
     def close(self) -> None:

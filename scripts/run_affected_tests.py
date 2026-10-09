@@ -10,9 +10,13 @@ The selector's exit status and output decide what runs:
              not run and this script exits 0.
   wide       exit 3 (the selection exceeds the selector's --max-share): with
              --depth above 0 the selector runs again at depth 0 and its
-             selection, if there is one, runs instead; a selection that is
-             still wide, empty or failed at depth 0 exits 1 without running
-             pytest, as does a wide selection at --depth 0.
+             selection, if there is one, runs instead. A selection that is
+             still wide at depth 0 (a hub module most tests import) runs in
+             full: the selector runs once more at depth 0 with the limit
+             lifted to WHOLE_SUITE_SHARE, and pytest runs every file it
+             selects. Only a selection of every test file (a conftest.py or
+             dependency-lock change) exits 1 without running pytest; so does
+             a depth-0 retry that selects nothing or fails.
   failed     any other exit status, no output, or a line that is not an
              existing tests/**/test_*.py file: exit 1 without running pytest.
 
@@ -49,6 +53,10 @@ import ci_runner_files  # noqa: E402
 SELECTOR = REPO / "scripts" / "affected_tests.py"
 NOTHING_AFFECTED = "tests/NO_TEST_FILE_IS_AFFECTED"
 WIDE_EXIT = 3
+# Passed to the selector as --max-share to lift its limit: only a selection of
+# every test file is still wide (n of n files is 1.0, n-1 of n is below this
+# for any suite under a million files).
+WHOLE_SUITE_SHARE = 0.999999
 PYTEST_NO_TESTS_COLLECTED = 5
 _TEST_PATH = re.compile(r"^tests(?:/[A-Za-z0-9_\-][A-Za-z0-9_.\-]*)*/test_[A-Za-z0-9_.\-]+\.py$")
 _PYTEST_ARGS = ["-m", "not integration", "-n", "auto"]
@@ -65,7 +73,8 @@ class Selection:
     exit_status: int = 0
     depth: int = 0                              # the --depth the selector ran at
     wider: Selection | None = None              # the wide result this one replaced
-    retry: str = ""                             # the depth-0 retry's mode, on a kept wide result
+    over_limit: bool = False                    # selected, though wider than the selector's limit
+    retry: str = ""                             # how the narrower runs ended, on a kept wide result
 
 
 def parse_selection(exit_status: int, stdout: str, stderr: str, repo: Path | None = None,
@@ -99,8 +108,11 @@ def parse_selection(exit_status: int, stdout: str, stderr: str, repo: Path | Non
     return Selection("selected", paths=paths, reasons=reasons, detail=stderr.strip(), depth=depth)
 
 
-def _run_selector(depth: int, base: str, files: list[str] | None) -> subprocess.CompletedProcess:
+def _run_selector(depth: int, base: str, files: list[str] | None,
+                  max_share: float | None = None) -> subprocess.CompletedProcess:
     cmd = [sys.executable, str(SELECTOR), "--why", "--depth", str(depth), "--base", base]
+    if max_share is not None:
+        cmd += ["--max-share", str(max_share)]
     if files is not None:
         cmd += ["--files", *files]
     return subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True,
@@ -120,26 +132,41 @@ def _base_resolves(base: str) -> bool:
 def select(depth: int, base: str, files: list[str] | None) -> Selection:
     """The selection to run: the selector's result at *depth*, or, when that
     is wide and *depth* is above 0, its result at depth 0 if that one selects
-    test files. A depth-0 retry that is wide, nothing or failed is returned
-    as the original wide result, carrying the retry as its detail. Without
-    *files*, a *base* that does not resolve is a failed selection: the
-    selector would diff HEAD against itself and select nothing."""
+    test files. A depth-0 retry that is nothing or failed is returned as the
+    original wide result, carrying the retry as its detail. A selection still
+    wide at depth 0 is selected again at depth 0 with the limit lifted to
+    WHOLE_SUITE_SHARE and returned with ``over_limit`` set; only a selection
+    of every test file stays wide. Without *files*, a *base* that does not
+    resolve is a failed selection: the selector would diff HEAD against itself
+    and select nothing."""
     if files is None and not _base_resolves(base):
         return Selection("failed", detail=f"base ref {base!r} does not resolve in this checkout, "
                                           "so the change cannot be computed (a shallow checkout "
                                           "has no origin/master)", exit_status=1, depth=depth)
     proc = _run_selector(depth, base, files)
     selection = parse_selection(proc.returncode, proc.stdout, proc.stderr, depth=depth)
-    if selection.mode != "wide" or depth == 0:
+    if selection.mode != "wide":
         return selection
-    proc0 = _run_selector(0, base, files)
-    narrower = parse_selection(proc0.returncode, proc0.stdout, proc0.stderr, depth=0)
-    if narrower.mode == "selected":
-        narrower.wider = selection
-        return narrower
-    selection.retry = narrower.mode
-    selection.detail = (f"{selection.detail}\n\nat --depth 0: {narrower.mode}\n"
-                        f"{narrower.detail}").strip()
+    if depth > 0:
+        proc0 = _run_selector(0, base, files)
+        narrower = parse_selection(proc0.returncode, proc0.stdout, proc0.stderr, depth=0)
+        if narrower.mode == "selected":
+            narrower.wider = selection
+            return narrower
+        selection.retry = narrower.mode
+        selection.detail = (f"{selection.detail}\n\nat --depth 0: {narrower.mode}\n"
+                            f"{narrower.detail}").strip()
+        if narrower.mode != "wide":
+            return selection
+    procw = _run_selector(0, base, files, WHOLE_SUITE_SHARE)
+    whole = parse_selection(procw.returncode, procw.stdout, procw.stderr, depth=0)
+    if whole.mode == "selected":
+        whole.wider = selection
+        whole.over_limit = True
+        return whole
+    selection.retry = "whole"
+    selection.detail = (f"{selection.detail}\n\nat --depth 0 up to every test file but the whole "
+                        f"suite: {whole.mode}\n{whole.detail}").strip()
     return selection
 
 
@@ -159,13 +186,22 @@ def render_summary(selection: Selection, args: list[str] | None,
     if selection.mode == "selected":
         lines.append(f"**{len(selection.paths)} test file(s)** selected at "
                      f"`--depth {selection.depth}`; pytest runs exactly those.")
-        if selection.wider is not None:
+        if selection.over_limit:
+            lines.append("**This change is wide**: the selection is wider than the selector's "
+                         "limit (a quarter of the test files) even at `--depth 0`, because it "
+                         "touches a module most tests import. pytest runs all of it. Test files "
+                         "that reach the change only through other modules are not in it; the "
+                         "`full-ci` label adds the whole suite.")
+        elif selection.wider is not None:
             lines.append(f"The selection at `--depth {selection.wider.depth}` was wider than the "
                          f"selector's limit (exit 3); the depth-0 selection runs instead.")
     elif selection.mode == "nothing":
         lines.append("**No test file is affected** by this change; pytest was not run.")
     elif selection.mode == "wide":
-        retry = {"wide": " and at `--depth 0`", "nothing": ", and nothing at `--depth 0`",
+        retry = {"wide": " and at `--depth 0`",
+                 "whole": " and at `--depth 0`, even with the limit lifted to every test file "
+                          "but the whole suite",
+                 "nothing": ", and nothing at `--depth 0`",
                  "failed": ", and the selector failed at `--depth 0`"}.get(selection.retry, "")
         lines.append(f"**Selection wider than the selector's limit** (exit 3) at "
                      f"`--depth {selection.depth}`{retry}: pytest was not run and the job "

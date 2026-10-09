@@ -4,13 +4,14 @@ that runs it.
 
 The wrapper's contract is that pytest's exit status becomes the job's, that
 it never runs the whole suite, and that every way the selection can be wrong
-or too wide is refused rather than read as green: a selector exit 3 is retried
-at depth 0 and fails when that is wide, empty or failed too, a selector crash
-fails, an empty selection fails, a path that is not an existing
-tests/**/test_*.py fails, and only the nothing-affected sentinel on its own
-skips pytest. The last section binds the wrapper to the real tree and pins the
-shape of the ci.yml job so the gate cannot be quietly narrowed, label-gated or
-made non-blocking.
+is refused rather than read as green: a selector exit 3 is retried at depth 0;
+one still wide there runs in full with the selector's limit lifted, and fails
+only when the selection is every test file; a depth-0 retry that is empty or
+failed fails, a selector crash fails, an empty selection fails, a path that is
+not an existing tests/**/test_*.py fails, and only the nothing-affected
+sentinel on its own skips pytest. The last section binds the wrapper to the
+real tree and pins the shape of the ci.yml job so the gate cannot be quietly
+narrowed, label-gated or made non-blocking.
 """
 
 import importlib.util
@@ -162,11 +163,14 @@ def test_a_selection_without_paths_runs_no_pytest(rat):
 # --- select: the depth-0 retry of a wide selection ----------------------------
 
 def _selector_by_depth(monkeypatch, rat, by_depth):
+    """Replace the selector with canned answers keyed by depth, or by
+    (depth, max_share) for a call that lifts the limit. Returns the list of
+    (depth, max_share) calls made."""
     calls = []
 
-    def fake(depth, base, files):
-        calls.append(depth)
-        return by_depth[depth]
+    def fake(depth, base, files, max_share=None):
+        calls.append((depth, max_share))
+        return by_depth.get((depth, max_share), by_depth.get(depth))
 
     monkeypatch.setattr(rat, "_run_selector", fake)
     monkeypatch.setattr(rat, "_base_resolves", lambda base: True)
@@ -182,8 +186,9 @@ def test_a_wide_depth_one_selection_is_retried_at_depth_zero_and_that_one_runs(
                             "1 of 800 test files affected by 1 changed file(s)")})
     monkeypatch.setattr(rat, "REPO", repo)
     s = rat.select(1, "origin/master", None)
-    assert calls == [1, 0]
+    assert calls == [(1, None), (0, None)]
     assert s.mode == "selected" and s.depth == 0 and s.paths == ["tests/test_a.py"]
+    assert s.over_limit is False
     assert s.wider is not None and s.wider.mode == "wide" and s.wider.depth == 1
     text = rat.render_summary(s, rat.pytest_args(s, []))
     assert "selected at `--depth 0`" in text
@@ -191,43 +196,119 @@ def test_a_wide_depth_one_selection_is_retried_at_depth_zero_and_that_one_runs(
     assert "1 of 800 test files" in text
 
 
+_WIDE = CompletedProcess([], 3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
+                         "WIDE: 88%")
+
+
 @pytest.mark.parametrize("retry", [
-    CompletedProcess([], 3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n", "WIDE: 40%"),
     CompletedProcess([], 0, "tests/NO_TEST_FILE_IS_AFFECTED\n", "0 of 800 ..."),
     CompletedProcess([], 1, "tests/AFFECTED_TESTS_FAILED_SEE_STDERR\n", "Traceback"),
     CompletedProcess([], 0, "", ""),
-], ids=["still-wide", "nothing", "crash", "empty"])
+], ids=["nothing", "crash", "empty"])
 def test_a_depth_zero_retry_that_selects_nothing_keeps_the_wide_result(
         rat, repo, monkeypatch, retry):
     """A hub-module change whose depth-0 selection is not a list of test files
-    is wide, never nothing: the job must fail rather than run no test."""
-    calls = _selector_by_depth(monkeypatch, rat, {
-        1: CompletedProcess([], 3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
-                            "WIDE: 88%"),
-        0: retry})
+    is wide, never nothing: the job must fail rather than run no test, and the
+    selector is not asked again with its limit lifted."""
+    calls = _selector_by_depth(monkeypatch, rat, {1: _WIDE, 0: retry})
     monkeypatch.setattr(rat, "REPO", repo)
     s = rat.select(1, "origin/master", None)
-    assert calls == [1, 0]
+    assert calls == [(1, None), (0, None)]
     assert s.mode == "wide" and s.depth == 1
     assert "WIDE: 88%" in s.detail and "at --depth 0:" in s.detail
     assert rat.pytest_args(s, []) is None
     headline = rat.render_summary(s, None).splitlines()[2]
     assert headline.startswith("**Selection wider than the selector's limit** (exit 3) at `--depth 1`")
-    expected = {3: " and at `--depth 0`", 0: ", and nothing at `--depth 0`" if retry.stdout.strip()
-                else ", and the selector failed at `--depth 0`",
-                1: ", and the selector failed at `--depth 0`"}[retry.returncode]
+    expected = (", and nothing at `--depth 0`" if retry.stdout.strip() and retry.returncode == 0
+                else ", and the selector failed at `--depth 0`")
     assert expected in headline, headline
     assert "job fails" in headline and "needs the full suite" in headline
 
 
-def test_a_wide_selection_at_depth_zero_is_not_retried(rat, repo, monkeypatch):
+_LIFTED_PATHS = ("tests/test_a.py  # imports localm.config\n"
+                 "tests/sub/test_b.py  # names localm.config\n")
+
+
+def test_a_selection_still_wide_at_depth_zero_runs_in_full_with_the_limit_lifted(
+        rat, repo, monkeypatch):
     calls = _selector_by_depth(monkeypatch, rat, {
-        0: CompletedProcess([], 3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
-                            "WIDE: 30%")})
+        1: _WIDE, 0: _WIDE,
+        (0, rat.WHOLE_SUITE_SHARE): CompletedProcess(
+            [], 0, _LIFTED_PATHS, "478 of 924 test files affected by 16 changed file(s)")})
+    monkeypatch.setattr(rat, "REPO", repo)
+    s = rat.select(1, "origin/master", None)
+    assert calls == [(1, None), (0, None), (0, rat.WHOLE_SUITE_SHARE)]
+    assert s.mode == "selected" and s.depth == 0 and s.over_limit is True
+    assert s.paths == ["tests/test_a.py", "tests/sub/test_b.py"]
+    assert s.wider is not None and s.wider.mode == "wide"
+    args = rat.pytest_args(s, [])
+    assert args[:2] == s.paths and "-m" in args
+    text = rat.render_summary(s, args)
+    assert "**2 test file(s)** selected at `--depth 0`" in text
+    assert "This change is wide" in text and "pytest runs all of it" in text
+    assert "478 of 924 test files" in text
+    assert "at --depth 1: wide" in text and "WIDE: 88%" in text
+
+
+def test_a_wide_selection_at_depth_zero_is_selected_again_with_the_limit_lifted(
+        rat, repo, monkeypatch):
+    calls = _selector_by_depth(monkeypatch, rat, {
+        0: _WIDE,
+        (0, rat.WHOLE_SUITE_SHARE): CompletedProcess([], 0, _LIFTED_PATHS, "2 of 3 ...")})
     monkeypatch.setattr(rat, "REPO", repo)
     s = rat.select(0, "origin/master", None)
-    assert calls == [0]
-    assert s.mode == "wide" and s.depth == 0
+    assert calls == [(0, None), (0, rat.WHOLE_SUITE_SHARE)]
+    assert s.mode == "selected" and s.over_limit is True and s.depth == 0
+
+
+@pytest.mark.parametrize("lifted", [
+    CompletedProcess([], 3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
+                     "WIDE: 100%"),
+    CompletedProcess([], 1, "tests/AFFECTED_TESTS_FAILED_SEE_STDERR\n", "Traceback"),
+    CompletedProcess([], 0, "", ""),
+], ids=["every-test-file", "crash", "empty"])
+def test_a_selection_that_is_every_test_file_or_fails_when_lifted_stays_wide(
+        rat, repo, monkeypatch, lifted):
+    _selector_by_depth(monkeypatch, rat, {1: _WIDE, 0: _WIDE,
+                                          (0, rat.WHOLE_SUITE_SHARE): lifted})
+    monkeypatch.setattr(rat, "REPO", repo)
+    s = rat.select(1, "origin/master", None)
+    assert s.mode == "wide" and s.retry == "whole" and s.over_limit is False
+    assert rat.pytest_args(s, []) is None
+    headline = rat.render_summary(s, None).splitlines()[2]
+    assert "even with the limit lifted to every test file but the whole suite" in headline
+    assert "job fails" in headline and "needs the full suite" in headline
+    assert "up to every test file but the whole suite:" in s.detail
+
+
+def test_the_lifted_limit_is_passed_to_the_selector_as_max_share(rat, monkeypatch):
+    seen = []
+    monkeypatch.setattr(rat.subprocess, "run", lambda cmd, **kw: seen.append(cmd)
+                        or CompletedProcess(cmd, 0, "", ""))
+    rat._run_selector(0, "origin/master", None)
+    rat._run_selector(0, "origin/master", ["a.py"], rat.WHOLE_SUITE_SHARE)
+    assert "--max-share" not in seen[0]
+    assert seen[1][seen[1].index("--max-share") + 1] == str(rat.WHOLE_SUITE_SHARE)
+    assert seen[1][-2:] == ["--files", "a.py"]
+
+
+def test_only_a_selection_of_every_test_file_exceeds_the_lifted_limit(rat):
+    """n of n files is share 1.0; n-1 of n stays under the lifted limit for any
+    suite under a hundred thousand files."""
+    assert 1.0 > rat.WHOLE_SUITE_SHARE
+    assert all((n - 1) / n <= rat.WHOLE_SUITE_SHARE for n in (2, 3, 924, 20_000, 100_000))
+
+
+def test_the_real_selector_honours_the_lifted_limit(rat):
+    """A hub change exceeds a tiny limit but not the lifted one; a change to
+    tests/conftest.py is every test file and exceeds both."""
+    hub = ["localm/config.py"]
+    assert rat._run_selector(0, "HEAD", hub, 0.001).returncode == rat.WIDE_EXIT
+    lifted = rat._run_selector(0, "HEAD", hub, rat.WHOLE_SUITE_SHARE)
+    assert lifted.returncode == 0, lifted.stderr
+    assert rat.parse_selection(0, lifted.stdout, lifted.stderr, depth=0).mode == "selected"
+    every = rat._run_selector(0, "HEAD", ["tests/conftest.py"], rat.WHOLE_SUITE_SHARE)
+    assert every.returncode == rat.WIDE_EXIT, every.stderr
 
 
 # --- the base ref: an unresolvable one must never read as nothing affected ----
@@ -244,7 +325,8 @@ def test_an_unresolvable_base_is_a_failed_selection_and_the_selector_never_runs(
     ref it diffs HEAD against HEAD, selects nothing and exits 0. The wrapper
     refuses before that can happen."""
     calls = []
-    monkeypatch.setattr(rat, "_run_selector", lambda depth, base, files: calls.append(depth))
+    monkeypatch.setattr(rat, "_run_selector",
+                        lambda depth, base, files, max_share=None: calls.append(depth))
     monkeypatch.setattr(rat, "_base_resolves", lambda base: False)
     monkeypatch.setattr(rat, "REPO", repo)
     s = rat.select(1, "origin/master", None)
@@ -259,7 +341,7 @@ def test_an_explicit_file_list_needs_no_base(rat, repo, monkeypatch):
     monkeypatch.setattr(rat, "_base_resolves", lambda base: False)
     monkeypatch.setattr(rat, "REPO", repo)
     s = rat.select(1, "refs/nonexistent/branch", ["a.py"])
-    assert calls == [1] and s.mode == "selected"
+    assert calls == [(1, None)] and s.mode == "selected"
 
 
 def test_main_fails_on_an_unresolvable_base_without_running_pytest(rat, repo, monkeypatch):
@@ -282,7 +364,7 @@ def _drive(rat, monkeypatch, tmp_path, selector, pytest_status=0, argv=(), base_
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setattr(rat, "REPO", tmp_path)
-    monkeypatch.setattr(rat, "_run_selector", lambda depth, base, files: selector)
+    monkeypatch.setattr(rat, "_run_selector", lambda depth, base, files, max_share=None: selector)
     monkeypatch.setattr(rat, "_base_resolves", lambda base: base_resolves)
     run_pytest = MagicMock(return_value=pytest_status)
     monkeypatch.setattr(rat, "_run_pytest", run_pytest)
@@ -327,9 +409,10 @@ def test_nothing_affected_runs_no_pytest_and_passes(rat, repo, monkeypatch):
     assert "No test file is affected" in text and "pytest was not run" in text
 
 
-def test_wide_at_both_depths_fails_without_running_pytest(rat, repo, monkeypatch):
-    """The same wide result at depth 1 and at the depth-0 retry: the job fails,
-    nothing runs, and the summary says the change needs the full suite."""
+def test_a_selection_of_every_test_file_fails_without_running_pytest(rat, repo, monkeypatch):
+    """The same wide result at depth 1, at the depth-0 retry and with the limit
+    lifted (every test file): the job fails, nothing runs, and the summary says
+    the change needs the full suite."""
     status, run_pytest, text = _drive(
         rat, monkeypatch, repo,
         _cp(3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
@@ -337,9 +420,36 @@ def test_wide_at_both_depths_fails_without_running_pytest(rat, repo, monkeypatch
     assert status == 1
     run_pytest.assert_not_called()
     assert "wider than the selector's limit" in text and "at `--depth 0`" in text
+    assert "even with the limit lifted" in text
     assert "job fails" in text and "needs the full suite" in text
     assert "never runs the whole suite" in text
     assert "WIDE: 100%" in text
+
+
+def test_a_wide_change_runs_in_full_and_its_pytest_status_is_the_job_status(
+        rat, repo, monkeypatch):
+    """The hub-module case end to end through main(): wide at depths 1 and 0,
+    selected once the limit is lifted, and pytest decides the job."""
+    def selector(depth, base, files, max_share=None):
+        if max_share is None:
+            return _cp(3, "tests/SELECTION_TOO_WIDE_FOR_A_TARGETED_RUN_SEE_STDERR\n",
+                       f"WIDE: 52% at depth {depth}")
+        return _cp(0, _LIFTED_PATHS, "2 of 3 test files affected by 1 changed file(s)")
+
+    for pytest_status in (0, 1):
+        summary = repo / "summary.md"
+        summary.unlink(missing_ok=True)
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+        monkeypatch.setattr(rat, "REPO", repo)
+        monkeypatch.setattr(rat, "_run_selector", selector)
+        monkeypatch.setattr(rat, "_base_resolves", lambda base: True)
+        run_pytest = MagicMock(return_value=pytest_status)
+        monkeypatch.setattr(rat, "_run_pytest", run_pytest)
+        assert rat.main([]) == pytest_status
+        run_pytest.assert_called_once_with(
+            ["tests/test_a.py", "tests/sub/test_b.py", "-m", "not integration", "-n", "auto"])
+        text = summary.read_text(encoding="utf-8")
+        assert "This change is wide" in text and "**2 test file(s)**" in text
 
 
 def test_wide_is_never_treated_as_nothing_affected(rat, repo, monkeypatch):
@@ -415,7 +525,7 @@ def test_arguments_after_the_separator_reach_pytest(rat, repo, monkeypatch):
 def test_selector_flags_are_passed_through(rat, repo, monkeypatch):
     seen = {}
 
-    def fake_selector(depth, base, files):
+    def fake_selector(depth, base, files, max_share=None):
         seen.update(depth=depth, base=base, files=files)
         return _cp(0, "tests/NO_TEST_FILE_IS_AFFECTED\n")
 
@@ -476,6 +586,8 @@ def test_the_ci_job_runs_on_every_pull_request_and_cannot_be_skipped_green():
         !contains(github.event.pull_request.labels.*.name, 'full-ci')"""), (
         "every unlabelled PR, and never a labelled one, whose whole suite the matrix runs")
     assert isinstance(job.get("timeout-minutes"), int)
+    assert job["timeout-minutes"] >= ci["jobs"]["test"]["timeout-minutes"], (
+        "a change to a hub module runs most of what the matrix job runs, on one host")
     assert "strategy" not in job, "one host: a subset cannot be measured per platform"
 
     checkout = job["steps"][0]
