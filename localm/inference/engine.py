@@ -366,7 +366,9 @@ class Engine:
         is this engine's ``model_path``. Raises
         :class:`~localm.inference.backends.base.AdapterLoadError` when an
         attached adapter's registry entry is unusable."""
-        if not hasattr(self._backend, "adapters"):
+        from localm.inference.backends.gguf import GgufBackend
+        backend = self._backend
+        if not isinstance(backend, GgufBackend):
             return
         from localm.model_manager import AdapterError, get_model_adapters, get_model_info
         from .backends.base import AdapterLoadError
@@ -377,7 +379,7 @@ class Engine:
             attached = get_model_adapters(self.display_name)
         except AdapterError as exc:
             raise AdapterLoadError(str(exc)) from exc
-        self._backend.adapters = [(os.path.abspath(p), float(s)) for p, s in attached]
+        backend.adapters = [(os.path.abspath(p), float(s)) for p, s in attached]
 
     @property
     def applied_adapters(self) -> list:
@@ -385,7 +387,7 @@ class Engine:
         (the adapter file's name, never its full path); empty when none is
         applied or the backend does not report any."""
         applied = getattr(self._backend, "applied_adapters", None)
-        if not isinstance(applied, list):
+        if not isinstance(applied, (list, tuple)):
             return []
         return [{"name": Path(str(a.get("path", ""))).name, "scale": a.get("scale")}
                 for a in applied if isinstance(a, dict)]

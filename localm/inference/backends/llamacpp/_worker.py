@@ -239,7 +239,7 @@ class GgufWorker(VramSizingMixin):
             mtp_enabled=self.mtp_enabled,
             use_mmap=self.use_mmap,
             verbose=False,
-            **({"adapters": self.adapters} if self.adapters else {}),
+            adapters=self.adapters or None,
             **({"mtp_draft_tokens": self.mtp_draft_tokens}
                if self.mtp_draft_tokens is not None else {}),
             **({"spec_source": self.spec_source}

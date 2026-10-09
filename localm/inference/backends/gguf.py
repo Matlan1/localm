@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional, Sequence, Tuple
 
 from localm.console import console
 
@@ -116,6 +116,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     load() raises; there is no degraded fallback path.
     """
 
+    # GGUF LoRA adapters to apply to the model: (path, scale) pairs, in order.
+    adapters: Sequence[Tuple[str, float]] = ()
+    # The {"path", "scale"} of each adapter the last load applied.
+    applied_adapters: Sequence[dict] = ()
+
     def __init__(
         self,
         model_path: str,
@@ -137,10 +142,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
-        # GGUF LoRA adapters to apply to the model: (path, scale) pairs, in order.
         self.adapters = [(os.path.abspath(p), float(s)) for p, s in (adapters or [])]
-        # The {"path", "scale"} of each adapter the last load applied.
-        self.applied_adapters: list = []
+        self.applied_adapters = []
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
         # Opt-in MoE expert placement: keep the expert weights of the first N

@@ -659,6 +659,11 @@ class TestBackendLoadPath:
         backend.unload()
         assert backend.applied_adapters == []
 
+    def test_a_backend_built_without_init_has_no_adapters(self):
+        bare = GgufBackend.__new__(GgufBackend)
+        assert bare.adapters == () and bare.applied_adapters == ()
+        bare._check_adapters()
+
     def test_a_model_without_adapters_sends_none(self, tmp_path):
         backend, _ = self._backend(tmp_path, None)
         backend.effective_gpu_layers = 0
@@ -695,7 +700,7 @@ class TestWorkerAndRunner:
         assert seen["adapters"] == [("/a/adp.gguf", 0.5)]
         assert meta["adapters"] == [{"path": "/a/adp.gguf", "scale": 0.5}]
 
-    def test_the_worker_passes_no_adapter_argument_when_there_are_none(self):
+    def test_the_worker_passes_no_adapters_when_there_are_none(self):
         from localm.inference.backends.llamacpp._worker import GgufWorker
         seen = {}
 
@@ -708,7 +713,7 @@ class TestWorkerAndRunner:
         with patch("localm.inference.backends.llamacpp._loader.load_lib"), \
                 patch("localm.inference.backends.llamacpp.LlamaCpp", _FakeLlama):
             meta = GgufWorker("m.gguf", None, 512, 99, None, 512).load()
-        assert "adapters" not in seen
+        assert seen["adapters"] is None
         assert meta["adapters"] == []
 
     def _runner_with_reply(self, reply):

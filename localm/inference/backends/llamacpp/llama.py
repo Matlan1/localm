@@ -24,7 +24,8 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional, Tuple
+from typing import (Any, Callable, Dict, Generator, Iterable, Iterator, List, Optional,
+                    Sequence, Tuple)
 
 from localm.inference import pretokenizer_guard
 from localm.textguard import (
@@ -1119,9 +1120,9 @@ class LlamaCpp:
     mtp_steps = 0                # verification batches THIS generation decoded
     mtp_paused_steps = 0         # steps THIS generation ran plain because drafting was slower
     mtp_skipped = ""             # why THIS generation could not draft at all: "image" or ""
-    _adapter_specs: tuple = ()   # (path, scale) of each LoRA adapter this model loads
-    _adapter_handles: tuple = () # native handles of the loaded adapters, in the same order
-    applied_adapters: tuple = () # {"path", "scale"} of each adapter applied to the context
+    _adapter_specs: Sequence[Tuple[str, float]] = ()   # (path, scale) of each LoRA adapter this model loads
+    _adapter_handles: Sequence[Any] = ()   # native handles of the loaded adapters, in the same order
+    applied_adapters: Sequence[dict] = ()  # {"path", "scale"} of each adapter applied to the context
     _draft_pacer = None          # _DraftPacer for this model, created on first use
     _source = None               # the DraftSource for this model, created on first use
     _spec_source_name = SPEC_MTP # the configured draft source: off, mtp or ngram
@@ -1183,8 +1184,8 @@ class LlamaCpp:
         self._spec_source_name = resolve_spec_source(spec_source, mtp_enabled)
         self._mtp_enabled = self._spec_source_name == SPEC_MTP
         self._adapter_specs = [(str(p), float(s)) for p, s in (adapters or [])]
-        self._adapter_handles: list = []
-        self.applied_adapters: List[dict] = []
+        self._adapter_handles = []
+        self.applied_adapters = []
         self._mtp_draft_max = max(1, min(int(mtp_draft_tokens), MTP_DRAFT_TOKENS_MAX))
         self._n_threads = n_threads
         # Optional preflight consulted by _prefill_fresh_context() before
@@ -1614,6 +1615,9 @@ class LlamaCpp:
         from localm.inference.backends.base import AdapterLoadError
         _capture = _capture_stderr if not verbose else contextlib.nullcontext
         _mirror = suppress_console_mirror if not verbose else contextlib.nullcontext
+        model = self._model_ptr
+        if model is None:
+            return
         failure = ""
         try:
             if not api.has_lora_api():
@@ -1623,7 +1627,7 @@ class LlamaCpp:
                 for path, _scale in self._adapter_specs:
                     detail = ""
                     with _mirror(), _capture() as captured:
-                        handle = api.llama_adapter_lora_init(self._model_ptr, path)
+                        handle = api.llama_adapter_lora_init(model, path)
                         if handle is None and captured is not None:
                             detail = _adapter_failure_detail(captured.tail())
                     if handle is None:
@@ -1632,12 +1636,12 @@ class LlamaCpp:
                                    + (f":\n{detail}" if detail else
                                       " (run with LOCALM_DEBUG=1 for the native log)"))
                         break
-                    self._adapter_handles.append(handle)
+                    self._adapter_handles = [*self._adapter_handles, handle]
         except Exception as exc:
             failure = f"loading LoRA adapters failed: {exc}"
         if failure:
             self._free_adapters()
-            api.llama_free_model(self._model_ptr)
+            api.llama_free_model(model)
             self._model_ptr = None
             raise AdapterLoadError(failure)
 
