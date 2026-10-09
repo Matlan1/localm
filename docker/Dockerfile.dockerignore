@@ -1,0 +1,12 @@
+*
+!pyproject.toml
+!VERSION
+!docs/pypi-readme.md
+!localm
+!runtime
+!docker/entrypoint.sh
+!docker/healthcheck.sh
+**/__pycache__
+**/*.pyc
+runtime/localm_llama_runtime/lib/*
+!runtime/localm_llama_runtime/lib/.gitkeep
