@@ -52,6 +52,7 @@ nav:
   - Home: index.md
   - Getting started:
       - Linux and macOS: linux-setup.md
+      - Docker: docker.md
       - GPU setup: gpu-setup.md
       - The web GUI: gui.md
       - Using localm from your phone: phone.md
