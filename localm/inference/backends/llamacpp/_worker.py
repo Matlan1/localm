@@ -267,7 +267,7 @@ class GgufWorker(VramSizingMixin):
                if self.diffusion_max_tokens is not None else {}),
         )
         self._loaded = True
-        return {
+        meta = {
             "n_layers": getattr(self._llm, "n_layers", None),
             "kv_bytes_per_token": getattr(self._llm, "kv_bytes_per_token", 0),
             "supports_images": bool(self._llm.supports_images),
@@ -276,11 +276,13 @@ class GgufWorker(VramSizingMixin):
             "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),
             "mmap": getattr(self._llm, "mmap_mapped", None),
             "diffusion": bool(getattr(self._llm, "is_diffusion", False)),
-            "diffusion_capacity": int(getattr(self._llm, "_diffusion_capacity", 0) or 0),
-            "diffusion_reply_tokens": int(
-                getattr(self._llm, "_diffusion_max_tokens", None)
-                or _diffusion_default_reply_tokens()),
         }
+        if meta["diffusion"]:
+            meta["diffusion_capacity"] = int(getattr(self._llm, "_diffusion_capacity", 0) or 0)
+            meta["diffusion_reply_tokens"] = int(
+                getattr(self._llm, "_diffusion_max_tokens", None)
+                or _diffusion_default_reply_tokens())
+        return meta
 
     def close(self) -> None:
         if self._llm is not None and hasattr(self._llm, "close"):
