@@ -19,7 +19,7 @@ whole ``BaseBackend`` public contract is preserved.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, Optional
 
 from localm.console import console
 from localm.debuglog import logger

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List
 
 from localm.pathsafe import confined_under
 

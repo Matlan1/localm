@@ -31,7 +31,7 @@ import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Iterator, Mapping, Optional, Sequence
 
 from localm.debuglog import logger
 

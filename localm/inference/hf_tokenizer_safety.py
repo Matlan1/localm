@@ -64,7 +64,7 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
-from typing import Iterator, List
+from typing import Iterator
 
 # Real pre_tokenizer/normalizer/decoder patterns are tiny (the GPT-2 pattern
 # above is 74 characters). Checked BEFORE anything else, including the recursive

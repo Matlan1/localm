@@ -21,7 +21,7 @@ it), so load/unload are no-ops.
 from __future__ import annotations
 
 import json
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, Optional
 
 from localm.inference.backends.base import UnsupportedInputError
 

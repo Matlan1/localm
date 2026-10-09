@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import AsyncIterator, Callable, List, NamedTuple, Optional
+from typing import AsyncIterator, Callable, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse

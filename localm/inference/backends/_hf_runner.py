@@ -120,7 +120,7 @@ import os
 import queue as _queue
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 
 class RunnerBusy(Exception):

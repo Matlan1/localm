@@ -44,7 +44,7 @@ import math
 import re
 import threading
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 from localm import pathscrub
 from localm.debuglog import dedup_native_stderr, logger

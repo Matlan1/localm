@@ -6,7 +6,7 @@ from __future__ import annotations
 import base64
 import io
 import re
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     # numpy is referenced ONLY by decode_audio's return annotation, and this

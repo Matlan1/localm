@@ -34,7 +34,6 @@ import multiprocessing as mp
 import os
 import queue as _queue
 import time
-from typing import List
 
 from localm.inference.backends.base import PretokenizerUnsafeInputError
 

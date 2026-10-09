@@ -37,7 +37,7 @@ import hashlib
 import os
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Iterable, Optional
 
 from ..base import VisionInputError
 from . import _api as api

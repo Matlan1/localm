@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, Optional
 
 
 class UnsupportedInputError(ValueError):

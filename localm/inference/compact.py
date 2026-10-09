@@ -19,7 +19,7 @@ client-side against /v1/chat/completions.
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional
 
 from localm.textguard import (
     compose, compose_join, slice_guarded, untrusted_spans_of,

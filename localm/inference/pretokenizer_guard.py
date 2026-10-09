@@ -51,7 +51,7 @@ backtracks linearly and cannot itself blow up on hostile input.
 
 from __future__ import annotations
 
-from typing import Dict, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 import regex
 

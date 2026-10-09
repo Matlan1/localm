@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field, replace
-from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Callable, Mapping, Optional, Sequence, Union
 
 from localm.model_manager import capabilities as caps
 from localm.model_manager.registry import is_llm

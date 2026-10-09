@@ -39,7 +39,7 @@ import ctypes
 import os
 import struct
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from localm.bugreport import LocalmError
 
