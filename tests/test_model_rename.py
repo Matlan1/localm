@@ -228,6 +228,7 @@ class TestRenameModelMigratesReferences:
         cfg["pinned_models"] = ["orig", "other"]
         cfg["embedding_model"] = "orig"
         cfg["coder_reviewer_model"] = "orig"
+        cfg["spec_draft_model"] = "orig"
         save_config(cfg)
 
         from localm.plugins.builtin.jobs.store import Job, JobStore
@@ -248,6 +249,7 @@ class TestRenameModelMigratesReferences:
         assert new_cfg["pinned_models"] == ["renamed", "other"]
         assert new_cfg["embedding_model"] == "renamed"
         assert new_cfg["coder_reviewer_model"] == "renamed"
+        assert new_cfg["spec_draft_model"] == "renamed"
 
         assert store.get(job.id).model == "renamed"
         assert store.get(other_job.id).model == "other"

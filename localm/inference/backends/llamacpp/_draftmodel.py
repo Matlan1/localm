@@ -15,7 +15,7 @@ from typing import Callable, List, Optional
 
 from ._drafting import SPEC_DRAFT, CountedSource
 
-DRAFT_MODEL_DRAFT_TOKENS_DEFAULT = 4
+DRAFT_MODEL_DRAFT_TOKENS_DEFAULT = 2
 DRAFT_MODEL_DRAFT_TOKENS_MAX = 16
 # Draft and target vocabulary sizes may differ by at most this many entries.
 DRAFT_VOCAB_SIZE_MAX_DIFFERENCE = 128
