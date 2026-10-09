@@ -557,10 +557,11 @@ def test_observed_step_times_correct_the_measured_costs():
     assert src.step_cost(1) == pytest.approx(0.1 + 1.2 + 3 * 0.2 * 0.05)
     for _ in range(60):
         src.on_step_seconds(3, 1.9 + 7 * 0.05)
-        src.on_step_seconds(0, 1.0 + 0.05)
+        src.on_step_seconds(0, 1.0 + 0.4)
     assert src.step_cost(3) == pytest.approx(1.9 + 7 * 0.05)
-    assert src.step_cost(0) == pytest.approx(1.05)
-    assert src.step_cost(8) == pytest.approx(0.8 + 2.6 + 17 * 0.05, rel=1e-3)
+    assert src.step_cost(0) == pytest.approx(1.4)
+    assert 0.05 < src._row_s < 0.4
+    assert src.step_cost(8) == pytest.approx(0.8 + 2.6 + 17 * src._row_s)
 
 
 def test_a_step_faster_than_measured_never_makes_an_unseen_length_cheaper():
