@@ -506,7 +506,7 @@
   "coder.setup.modeLabel": "Sitzungspersistenz",
   "coder.setup.modelLabel": "Modell (wechselt die aktive Engine)",
   "coder.setup.nativeToolsLabel": "Native Tools-API (falls der Server sie unterstützt)",
-  "coder.setup.nativeToolsTitle": "Beim Modellserver die OpenAI-kompatible native Tools-API anfragen. localms eigener Server implementiert sie nicht und sagt dies auch; er verwendet stattdessen grammatikgestützte Tool-Aufrufe.",
+  "coder.setup.nativeToolsTitle": "Beim Modellserver die OpenAI-kompatible native Tools-API anfragen. Mit localms eigenem Server wird sie nicht angewendet, und die Sitzung sagt dies auch; sie verwendet stattdessen grammatikgestützte Tool-Aufrufe.",
   "coder.setup.noVerifyLabel": "Verifizierung überspringen",
   "coder.setup.noVerifyTitle": "Führt überhaupt keine Exit-Code-Prüfung aus, selbst wenn dieses Projekt eine offensichtliche hat.",
   "coder.setup.patchLabel": "Patch-Modus (Diff sammeln, nichts schreiben)",

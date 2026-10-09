@@ -139,7 +139,7 @@ test("native tools: the checkbox is sent, and the server's 'not applied' note is
       sessionInfo: {
         native_tools: false,
         native_tools_requested: true,
-        notes: ["native_tools was not applied: this server does not implement the OpenAI tools API."],
+        notes: ["native_tools was not applied: this session talks to localm's own server."],
       },
     }),
   });

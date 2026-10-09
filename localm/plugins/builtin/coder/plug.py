@@ -769,20 +769,17 @@ async def create_session(req: CreateSessionRequest, request: Request):
                                  restricted=restricted,
                                  session_mode=session_mode,
                                  model_pinned=bool(req.model)))
-    # The request is wired to the backend for real; whether the SERVER honours
-    # it is a separate question and the caller is told the answer rather than
-    # left to assume. A localm self-connection does NOT implement the OpenAI
-    # tools API (its ChatRequest declares no tools/tool_choice, so the fields
-    # are dropped), and the session runs on localm's own grammar-constrained
-    # tool-call convention instead - which is the equivalent guarantee, not a
-    # downgrade. Nothing errors either way; saying nothing is what would make an
-    # ignored option indistinguishable from an applied one.
+    # The request is wired to the backend for real; whether the backend sends it
+    # is a separate question and the caller is told the answer rather than left
+    # to assume. A localm self-connection runs on localm's own grammar-constrained
+    # tool-call convention and does not send the OpenAI tools fields. Nothing
+    # errors either way; saying nothing is what would make an ignored option
+    # indistinguishable from an applied one.
     if req.native_tools and not backend.supports_native_tools:
         notes.append(
-            "native_tools was not applied: this server does not implement the "
-            "OpenAI tools API. The session uses localm's own tool-call "
-            "convention (grammar-constrained where the loaded model supports "
-            "it).")
+            "native_tools was not applied: this session talks to localm's own "
+            "server, where it uses localm's tool-call convention "
+            "(grammar-constrained where the loaded model supports it).")
 
     # A SUGGESTION, never a switch. The coder pins the active model, and a
     # per-session model switch changes the one shared engine for every other

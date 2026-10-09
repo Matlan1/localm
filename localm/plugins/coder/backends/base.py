@@ -23,14 +23,13 @@ class BaseLLMBackend(ABC):
     # Subclasses pointing at a local GBNF-capable server set this to True
     supports_grammar: bool = False
 
-    # Whether the SERVER this backend talks to implements the OpenAI-compatible
-    # ``tools`` / ``tool_choice`` request fields. Defaults to True: the only
-    # consumer is the warning that fires when a caller ASKED for native tools and
-    # will not get them, so a backend that has never declared an answer does not
-    # manufacture that warning. A backend that KNOWS its server cannot honour the
-    # fields overrides this to False - see ``HTTPBackend.supports_native_tools``,
-    # which does that for localm's own server (``ChatRequest`` declares no such
-    # fields and pydantic drops them).
+    # Whether this backend sends the OpenAI-compatible ``tools`` / ``tool_choice``
+    # request fields to its server. Defaults to True: the only consumer is the
+    # warning that fires when a caller ASKED for native tools and will not get
+    # them, so a backend that has never declared an answer does not manufacture
+    # that warning. A backend that does not send them overrides this to False -
+    # see ``HTTPBackend.supports_native_tools``, which does that for localm's own
+    # server.
     supports_native_tools: bool = True
 
     @abstractmethod

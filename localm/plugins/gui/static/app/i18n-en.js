@@ -659,7 +659,7 @@ export const I18N_EN = {
   "coder.setup.modelLabel": "Model (switches the active engine)",
   "coder.setup.nativeToolsLabel": "Native tools API (if the server supports it)",
   "coder.setup.nativeToolsTitle":
-    "Ask the model server for the OpenAI-compatible native tools API. localm's own server does not implement it and will say so; it uses grammar-constrained tool calls instead.",
+    "Ask the model server for the OpenAI-compatible native tools API. With localm's own server this is not applied and the session says so; it uses grammar-constrained tool calls instead.",
   "coder.setup.noVerifyLabel": "Skip verification",
   "coder.setup.noVerifyTitle": "Run no exit-code check at all, even when this project has an obvious one.",
   "coder.setup.patchLabel": "Patch mode (collect a diff, write nothing)",

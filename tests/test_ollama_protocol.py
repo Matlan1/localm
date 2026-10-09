@@ -127,12 +127,21 @@ def test_think_flows_into_chat_template_kwargs():
     assert plan.want_thinking is True
 
 
-def test_tools_and_tool_calls_are_refused_not_dropped():
-    with pytest.raises(P.OllamaError) as tools:
-        P.plan_chat(P.OllamaChatRequest(
-            model="m", tools=[{"type": "function"}],
-            messages=[{"role": "user", "content": "hi"}]), "m")
-    assert tools.value.status == 400
+def test_tools_are_forwarded_and_tool_calls_are_translated():
+    tool = {"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}
+    plan = P.plan_chat(P.OllamaChatRequest(
+        model="m", tools=[tool], messages=[
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "f", "arguments": {"a": 1}}}]},
+            {"role": "tool", "tool_name": "f", "content": "result"}]), "m")
+    assert plan.body["tools"] == [tool]
+    call = plan.body["messages"][1]["tool_calls"][0]
+    assert call["function"] == {"name": "f", "arguments": '{"a": 1}'}
+    assert plan.body["messages"][2] == {"role": "tool", "content": "result"}
+
+
+def test_a_tool_call_without_a_function_name_is_refused():
     with pytest.raises(P.OllamaError) as calls:
         P.plan_chat(P.OllamaChatRequest(model="m", messages=[
             {"role": "assistant", "content": "", "tool_calls": [{"function": {}}]}]), "m")

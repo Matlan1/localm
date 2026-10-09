@@ -280,15 +280,14 @@ class HTTPBackend(BaseLLMBackend):
 
     @property
     def supports_native_tools(self) -> bool:
-        """Can the CONNECTED server actually honour ``native_tools``?
+        """Does this backend send ``native_tools`` to the CONNECTED server?
 
-        False for localm's OWN server: ``localm.inference.protocol.ChatRequest``
-        declares no ``tools`` or ``tool_choice`` field, and pydantic's default
-        ``extra`` policy is ``ignore``, so a native-tools body reaches localm and
-        is silently dropped. Nothing errors; the model simply answers with the
-        XML tool-call convention the system prompt already teaches it
-        (``native_tools`` does not change that prompt), so the request is inert
-        rather than broken.
+        False for localm's OWN server: the session there runs on the XML
+        tool-call convention its system prompt teaches, grammar-constrained
+        (``supports_grammar``), and a body that also carried ``tools`` would
+        make the server describe the tools to the model a second time and
+        refuse the grammar. ``_body`` leaves ``tools`` and ``tool_choice`` out
+        for it.
 
         True for everything else - the OpenAI and Anthropic backends are built
         with ``native_tools=True`` because those APIs implement it, and a
@@ -298,8 +297,7 @@ class HTTPBackend(BaseLLMBackend):
         A capability QUESTION rather than a value folded into ``native_tools``
         itself, so the requested value and the effective one stay
         distinguishable and a caller that asked for something it did not get can
-        be told. localm's own grammar-constrained tool calls
-        (``supports_grammar``) are the equivalent guarantee on this path."""
+        be told."""
         return not self._is_local_server
 
     def context_capacity(self) -> Optional[int]:
@@ -560,7 +558,7 @@ class HTTPBackend(BaseLLMBackend):
             **self._extra,
             **kwargs,
         }
-        if self.native_tools and self._tool_defs:
+        if self.native_tools and self._tool_defs and not self._is_local_server:
             body["tools"] = self._tool_defs
             body["tool_choice"] = "auto"
         if self._is_local_server:
