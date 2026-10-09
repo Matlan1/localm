@@ -35,6 +35,10 @@ ACCEPTANCE_PRIOR_REJECTED = 0.8
 ACCEPTANCE_DECAY = 0.9
 # A draft length is chosen only when it beats a plain step by this fraction.
 DRAFT_GAIN_MARGIN = 0.05
+# Steps decided not to draft before one drafts anyway to measure acceptance.
+ACCEPTANCE_PROBE_EVERY = 32
+# Acceptance a probing step is sized for.
+ACCEPTANCE_PROBE_P = 0.9
 # Most drafts a step proposes while the step costs are unmeasured.
 DRAFT_MODEL_UNMEASURED_TOKENS = 2
 # Tokens a reply of unknown length is assumed to have left.
@@ -203,6 +207,7 @@ class DraftModelSource(CountedSource):
         self.costs: Optional[StepCosts] = None
         self._acc_accepted = 0.0
         self._acc_rejected = 0.0
+        self._since_probe = ACCEPTANCE_PROBE_EVERY
 
     @property
     def _llm(self):
@@ -297,7 +302,9 @@ class DraftModelSource(CountedSource):
         them, the length with the best expected rate at the current
         ``acceptance`` (0 when drafting is not expected to pay, or when
         catching the draft cache up costs more than the reply is expected to
-        gain)."""
+        gain). A step after ``ACCEPTANCE_PROBE_EVERY`` steps that did not
+        draft, and the first step of the model, drafts the length sized for
+        ``ACCEPTANCE_PROBE_P`` instead, so the acceptance is measured."""
         n = self.draft_max
         if tokens_left is not None:
             n = min(n, tokens_left)
@@ -310,8 +317,12 @@ class DraftModelSource(CountedSource):
         self._acc_rejected *= ACCEPTANCE_DECAY
         p = self.acceptance()
         k = self.costs.best_length(p, n)
+        if k == 0 and self._since_probe >= ACCEPTANCE_PROBE_EVERY:
+            p = ACCEPTANCE_PROBE_P
+            k = self.costs.best_length(p, n)
         if k and not self._catch_up_pays(p, k, tokens_left):
-            return 0
+            k = 0
+        self._since_probe = 0 if k else self._since_probe + 1
         return k
 
     def _catch_up_pays(self, p: float, k: int, tokens_left: Optional[int]) -> bool:

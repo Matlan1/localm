@@ -2830,10 +2830,10 @@ class LlamaCpp:
             prefix = spread(32, 1)
             top = source.draft_max + 1
             sizes = sorted({n for n in VERIFY_MEASURE_SIZES if n < top} | {top}) if top >= 2 else []
-            target = self._time_decode(self._ctx_ptr, prefix, spread(1, 5), False, 2, 5)
-            verify = {n: self._time_decode(self._ctx_ptr, prefix, spread(n, 5), True, 2, 3)
+            target = self._time_decode(self._ctx_ptr, prefix, spread(1, 5), False, 3, 5)
+            verify = {n: self._time_decode(self._ctx_ptr, prefix, spread(n, 5), True, 3, 5)
                       for n in sizes}
-            draft = self._time_decode(source._ctx, prefix, spread(1, 5), False, 2, 5)
+            draft = self._time_decode(source._ctx, prefix, spread(1, 5), False, 3, 5)
             batch = 64
             draft_prefill = self._time_decode(source._ctx, prefix, spread(batch, 9),
                                               False, 1, 3) / batch

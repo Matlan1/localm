@@ -462,6 +462,37 @@ def test_the_draft_length_rises_falls_and_recovers_with_acceptance():
     assert lengths[-1] > 0
 
 
+def test_a_draft_that_the_prior_rejects_still_probes_its_acceptance():
+    from localm.inference.backends.llamacpp._draftmodel import (
+        ACCEPTANCE_PROBE_EVERY, ACCEPTANCE_PROBE_P)
+    marginal = _costs(target=5.78, verify={2: 6.29, 3: 7.0, 5: 8.5}, draft=3.48)
+    assert marginal.best_length(0.6, 4) == 0
+    assert marginal.best_length(ACCEPTANCE_PROBE_P, 4) > 0
+    llm = _measured_llama(draft_max=4, costs=marginal)
+    src = llm._source
+    llm._cached_tokens = list(range(20))
+    src._tokens = list(range(20))
+    lengths = [src.budget(20, None) for _ in range(2 * ACCEPTANCE_PROBE_EVERY + 2)]
+    assert lengths[0] > 0
+    probes = [i for i, k in enumerate(lengths) if k]
+    assert probes == [0, ACCEPTANCE_PROBE_EVERY + 1]
+
+
+def test_a_probe_that_finds_high_acceptance_keeps_drafting():
+    marginal = _costs(target=5.78, verify={2: 6.29, 3: 7.0, 5: 8.5}, draft=3.48)
+    llm = _measured_llama(draft_max=4, costs=marginal)
+    src = llm._source
+    llm._cached_tokens = list(range(20))
+    src._tokens = list(range(20))
+    lengths = []
+    for _ in range(40):
+        k = src.budget(20, None)
+        lengths.append(k)
+        if k:
+            src.on_verify(k, k)
+    assert all(k > 0 for k in lengths[1:])
+
+
 def test_without_measured_costs_a_step_drafts_at_most_two():
     llm = _llama(8)
     llm._source.costs = None
