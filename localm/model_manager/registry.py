@@ -10,6 +10,9 @@ import re
 import shutil
 import stat as _stat
 import sys
+import time
+import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -24,6 +27,7 @@ from ..config import REGISTRY_FILE
 from ..config import load_config
 from ..config import update_config
 from ..debuglog import logger
+from ._shared import _emit_progress
 from ._shared import _verify_digest
 from ._shared import console
 from .gguf import _SPLIT_GGUF_RE
@@ -40,6 +44,11 @@ from .gguf import gguf_embedding_signal
 from .gguf import gguf_is_mmproj
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
 from .gguf import _gguf_metadata_probe
+from .gguf import HubCacheScan
+from .gguf import is_hub_blob
+from .gguf import hub_snapshot_repo_id
+from .gguf import logical_model_path
+from .gguf import scan_hub_cache
 
 MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'unknown'})
 
@@ -1679,11 +1688,11 @@ def _register(
     reason: a stored ``tool_use=False`` is a real answer (the model's own chat
     template was read and renders no tool calls) and must stay distinct from a
     key never written, which means nobody has looked."""
-    entry = {"path": str(path.resolve()), "source": source, "model_type": model_type}
+    entry = {"path": str(logical_model_path(path)), "source": source, "model_type": model_type}
     if sha256:
         entry["sha256"] = sha256.lower()
     if mmproj:
-        entry["mmproj"] = str(Path(mmproj).resolve())
+        entry["mmproj"] = str(logical_model_path(Path(mmproj)))
     if architecture is not None:
         entry["architecture"] = architecture
     if expert_count is not None:
@@ -2407,11 +2416,14 @@ def _store_with_projector(path: Path, action: str, *,
     from rich.markup import escape
 
     _mm.ensure_dirs()
-    path = path.resolve()
+    path = logical_model_path(path)
 
     if path.is_dir():
         verb = "Copying" if action == "copy" else "Moving"
-        dest = _mm.MODELS_DIR / path.name
+        hub_repo = hub_snapshot_repo_id(path)
+        if hub_repo and action == "move":
+            raise RuntimeError(_HUB_MOVE_REFUSAL.format(path))
+        dest = _mm.MODELS_DIR / (_sanitize_name(hub_repo) if hub_repo else path.name)
         if dest.resolve() == path:
             return StoredModel(path, None)                 # already in place
         if dest.exists():
@@ -2469,6 +2481,10 @@ def _store_with_projector(path: Path, action: str, *,
             notes.append(f"Copied {escape(t.src.name)} instead of moving it: {who} "
                          "in the same folder may also use it.")
         items.append((t.src, dest, t.mode, " ".join(notes) or None))
+
+    for src, _dest, mode, _note in items:
+        if mode == "move" and _is_hub_cache_link(src):
+            raise RuntimeError(_HUB_MOVE_REFUSAL.format(src))
 
     to_transfer = []
     for item in items:
@@ -2693,7 +2709,7 @@ def _register_with_dedup(
                 if need_sha_backfill and not e.get("sha256"):
                     e["sha256"] = digest.lower()
                 if need_mmproj_backfill and not e.get("mmproj"):
-                    e["mmproj"] = str(Path(mmproj).resolve())
+                    e["mmproj"] = str(logical_model_path(Path(mmproj)))
                 if need_arch_backfill and "architecture" not in e:
                     e["architecture"] = architecture
                 if need_expert_backfill and "expert_count" not in e:
@@ -2763,7 +2779,7 @@ def _register_with_dedup(
                 if digest:
                     entry["sha256"] = digest.lower()
                 if mmproj:
-                    entry["mmproj"] = str(Path(mmproj).resolve())
+                    entry["mmproj"] = str(logical_model_path(Path(mmproj)))
                 if architecture is not None:
                     entry["architecture"] = architecture
                 if expert_count is not None:
@@ -3213,6 +3229,19 @@ def _resolve_ollama_manifest(p: Path):
 
 
 
+_HUB_MOVE_REFUSAL = (
+    "Cannot move {} out of the Hugging Face cache: the cache would be left with "
+    "broken links. Use copy, or register it in place.")
+
+
+def _is_hub_cache_link(path: Path) -> bool:
+    """True when *path* is a symlink into a Hugging Face hub cache blob."""
+    try:
+        return path.is_symlink() and is_hub_blob(path.resolve())
+    except OSError:
+        return False
+
+
 def _primary_name_collision(gguf: Path, claimed: dict) -> Optional[str]:
     """The conflicting path in MODELS_DIR, if *gguf*'s own name (or any split
     part) is already occupied there by a genuinely different file, or by a
@@ -3403,6 +3432,7 @@ def _add_local_gguf_dir(
     no_hash: bool,
     fast: bool = False,
     model_type: Optional[str] = None,
+    names: Optional[dict] = None,
 ) -> bool:
     """Register every loose .gguf model in a folder (the *first_parts* list).
 
@@ -3415,7 +3445,8 @@ def _add_local_gguf_dir(
     True - the caller has already checked *first_parts* is non-empty.
 
     A duplicate answered with "copy" / "move" carries only the projector
-    ``find_sibling_mmproj`` attaches (``attached_projector_only``). An entry
+    ``find_sibling_mmproj`` attaches (``attached_projector_only``). *names* maps
+    a GGUF path to the name it registers under instead of its filename stem. An entry
     whose file an earlier model's move already carried into MODELS_DIR is
     registered at ``MODELS_DIR / <its name>``; one that is gone from both
     places is skipped with a message.
@@ -3435,7 +3466,8 @@ def _add_local_gguf_dir(
             gguf = carried
         base = _gguf_model_stem(gguf)
         reg = _mm.load_registry()
-        wanted = _sanitize_name(name) if use_given_name else base
+        wanted = _sanitize_name(name) if use_given_name else (
+            (names or {}).get(gguf) or base)
         model_name = _unique_registry_name(reg, wanted)
 
         size = None
@@ -3468,6 +3500,472 @@ def _add_local_gguf_dir(
     return True
 
 
+
+
+_LLAMAFILE_SUFFIXES = frozenset({".llamafile", ".exe", ""})
+_EXTRACT_CHUNK_BYTES = 1 << 20
+_EXTRACT_EMIT_INTERVAL_S = 0.7
+
+
+def _llamafile_ggufs(path: Path) -> List[str]:
+    """Names of the ``.gguf`` members of *path* when it is a llamafile (a file
+    named ``*.llamafile`` / ``*.exe`` / without extension that is also a ZIP
+    archive); an empty list for any other file, including an unreadable one."""
+    if path.suffix.lower() not in _LLAMAFILE_SUFFIXES:
+        return []
+    try:
+        if not zipfile.is_zipfile(path):
+            return []
+        with zipfile.ZipFile(path) as archive:
+            return [i.filename for i in archive.infolist()
+                    if not i.is_dir() and i.filename.lower().endswith(".gguf")]
+    except (OSError, zipfile.BadZipFile, ValueError, NotImplementedError, RuntimeError):
+        return []
+
+
+class _ExtractProgress:
+    """Progress for one unpacking: a Rich bar on the console, or sentinel frames
+    when the GUI runs the command (LOCALM_PROGRESS_JSON=1)."""
+
+    def __init__(self, label: str, total: int) -> None:
+        self.label = label
+        self.total = total
+        self.done = 0
+        self._last = 0.0
+        self._gui = os.environ.get("LOCALM_PROGRESS_JSON") == "1"
+        self._progress = None
+        self._task = None
+
+    def __enter__(self) -> "_ExtractProgress":
+        if self._gui:
+            _emit_progress(0, self.total, phase="extract", zero_is_unknown=True)
+            return self
+        from rich.markup import escape
+        from rich.progress import (BarColumn, DownloadColumn, Progress, SpinnerColumn,
+                                   TextColumn, TimeRemainingColumn)
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[dim]Extracting {task.description}[/dim]"),
+            BarColumn(), DownloadColumn(), TimeRemainingColumn(),
+            transient=True, console=console,
+        )
+        self._progress.__enter__()
+        self._task = self._progress.add_task(escape(self.label), total=self.total or None)
+        return self
+
+    def advance(self, n: int) -> None:
+        self.done += n
+        if self._gui:
+            now = time.monotonic()
+            if now - self._last >= _EXTRACT_EMIT_INTERVAL_S:
+                self._last = now
+                _emit_progress(self.done, self.total, phase="extract")
+        elif self._progress is not None:
+            self._progress.update(self._task, advance=n)
+
+    def __exit__(self, *exc) -> None:
+        if self._gui:
+            _emit_progress(self.done, self.total, phase="extract")
+        elif self._progress is not None:
+            self._progress.__exit__(*exc)
+
+
+def _crc32_file(path: Path) -> int:
+    crc = 0
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(_EXTRACT_CHUNK_BYTES), b""):
+            crc = zlib.crc32(chunk, crc)
+    return crc & 0xFFFFFFFF
+
+
+def _free_models_name(filename: str) -> Path:
+    """``MODELS_DIR/filename``, or the first free ``<stem>-<n><suffix>`` beside it."""
+    dest = _mm.MODELS_DIR / filename
+    stem, suffix = Path(filename).stem, Path(filename).suffix
+    n = 2
+    while dest.exists():
+        dest = _mm.MODELS_DIR / f"{stem}-{n}{suffix}"
+        n += 1
+    return dest
+
+
+def _extract_gguf_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo,
+                         source_name: str) -> "tuple[Path, Optional[str]]":
+    """Unpack the GGUF member *info* of *archive* into the models folder under its
+    base name; returns ``(path, sha256)``.
+
+    The bytes go to a hidden ``.part`` file first and move into place only once
+    the member read to its end (the ZIP checks its CRC) and starts with the GGUF
+    magic. A file already at that name with the same bytes is reused (the sha256
+    is None when the size and CRC alone matched); one with different bytes leaves
+    the new copy under ``<stem>-<n>.gguf``. Raises RuntimeError, leaving no
+    partial file, when the member name is unsafe, the disk is too full, or the
+    member is unreadable, short or not a GGUF."""
+    import hashlib
+
+    filename = _mm._safe_models_filename(PurePosixPath(info.filename).name)
+    if filename is None:
+        raise RuntimeError(f"{info.filename!r} in {source_name} is not a safe file name")
+    _mm.ensure_dirs()
+    existing = _mm.MODELS_DIR / filename
+    if (existing.is_file() and existing.stat().st_size == info.file_size
+            and _crc32_file(existing) == info.CRC):
+        return existing, None
+    if not _mm._check_disk_space(_mm.MODELS_DIR, info.file_size):
+        raise RuntimeError(
+            f"Not enough disk space to extract {filename} into {_mm.MODELS_DIR}")
+    part = _mm.MODELS_DIR / f".{filename}.part"
+    digest = hashlib.sha256()
+    written = 0
+    try:
+        with _ExtractProgress(filename, info.file_size) as progress, \
+                archive.open(info) as src, open(part, "wb") as out:
+            while True:
+                chunk = src.read(_EXTRACT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                out.write(chunk)
+                digest.update(chunk)
+                written += len(chunk)
+                progress.advance(len(chunk))
+        if written != info.file_size:
+            raise RuntimeError(f"{filename} came out {written} bytes, expected "
+                               f"{info.file_size}")
+        if not _has_gguf_magic(part):
+            raise RuntimeError(f"{filename} in {source_name} is not a GGUF file")
+        sha = digest.hexdigest()
+        dest = existing
+        if existing.exists():
+            if _mm._sha256_file(existing) == sha:
+                part.unlink()
+                return existing, sha
+            dest = _free_models_name(filename)
+        os.replace(part, dest)
+        return dest, sha
+    except (zipfile.BadZipFile, zlib.error, EOFError, OSError, NotImplementedError) as e:
+        raise RuntimeError(f"Could not extract {filename} from {source_name}: {e}") from e
+    finally:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+
+
+def _add_local_llamafile(path: Path, name: Optional[str], on_duplicate: str,
+                         model_type: Optional[str]) -> bool:
+    """Unpack the GGUF model of a llamafile into the models folder and register it.
+
+    Members whose name contains ``mmproj`` are projectors: a verified one is
+    attached to the model when the llamafile holds a single model. *name* applies
+    only to a single model. Returns False, registering nothing, when a member
+    cannot be extracted."""
+    from rich.markup import escape
+
+    with zipfile.ZipFile(path) as archive:
+        members = [i for i in archive.infolist()
+                   if not i.is_dir() and i.filename.lower().endswith(".gguf")]
+        models = [i for i in members if "mmproj" not in i.filename.lower()]
+        projectors = [i for i in members if "mmproj" in i.filename.lower()]
+        if not models:
+            console.print(f"[red]Not a model:[/red] {escape(path.name)} holds a projector "
+                          "but no model.")
+            return False
+        console.print(f"[dim]{escape(path.name)} is a llamafile; extracting its model "
+                      f"into {escape(str(_mm.MODELS_DIR))}...[/dim]")
+        try:
+            model_files = [_extract_gguf_member(archive, i, path.name) for i in models]
+            projector_files = [_extract_gguf_member(archive, i, path.name)
+                               for i in projectors] if len(models) == 1 else []
+            if projectors and len(models) > 1:
+                console.print(f"[yellow]{escape(path.name)} holds several models; its "
+                              "projector is not attached to any of them.[/yellow]")
+        except RuntimeError as e:
+            console.print(f"[red]{escape(str(e))}[/red]")
+            return False
+    mmproj = next((f for f, _ in projector_files if gguf_is_mmproj(f)), None)
+    if projector_files and mmproj is None:
+        console.print(f"[yellow]The projector in {escape(path.name)} is not a GGUF "
+                      "vision projector; not attached.[/yellow]")
+    registered_any = False
+    for file, digest in model_files:
+        model_name = _sanitize_name(name) if (name and len(model_files) == 1) \
+            else _gguf_model_stem(file)
+        detected, meta = _detect_local_model_type(file, is_gguf=True, is_hf=False)
+        effective = model_type if model_type is not None else detected
+        registered_any = _mm._register_with_dedup(
+            model_name, file, "local", on_duplicate=on_duplicate,
+            digest=digest or _mm._hash_with_progress(file), model_type=effective,
+            mmproj=mmproj if effective == "llm" else None,
+            architecture=meta.get("architecture"),
+            expert_count=meta.get("expert_count"),
+        ) or registered_any
+    return registered_any
+
+
+def _register_ollama_blob(
+    blob_path: Path,
+    model_name: str,
+    *,
+    on_duplicate: str,
+    model_type: str,
+    store: Optional[str],
+    projector: Optional[Path] = None,
+    architecture: Optional[str] = None,
+    expert_count: Optional[int] = None,
+) -> bool:
+    """Register one Ollama model blob (and its *projector* blob, when given) under
+    *model_name*, first copying or moving them into the models folder when *store*
+    is set. Returns False when nothing was registered; see ``add_local``."""
+    from rich.markup import escape
+
+    if store and _mm.is_external_path(blob_path):
+        # Refuse before touching the filesystem when registration is already
+        # known to be refused (a name collision with no terminal to confirm an
+        # overwrite): moving first would displace the file while reporting success.
+        if not sys.stdin.isatty():
+            reg = _mm.load_registry()
+            conflict = _name_collision(model_name, blob_path, reg)
+            if conflict is not None:
+                console.print(
+                    f"[red]'{escape(model_name)}' already points to a different "
+                    f"file:[/red] {escape(str(conflict))}\nRefusing to move "
+                    f"{escape(str(blob_path))} into place non-interactively - "
+                    "pick another name with -n."
+                )
+                return False
+        try:
+            blob_path = _mm._store_into_models_dir(blob_path, store)
+            if projector is not None and _mm.is_external_path(projector):
+                projector = _mm._store_into_models_dir(projector, store)
+        except RuntimeError as e:
+            console.print(f"[red]{escape(str(e))}[/red]")
+            return False
+    digest = blob_path.name.removeprefix("sha256-") \
+        if blob_path.name.startswith("sha256-") else None
+    registered = _mm._register_with_dedup(
+        model_name, blob_path, "ollama",
+        on_duplicate=on_duplicate, digest=digest, model_type=model_type,
+        mmproj=projector, architecture=architecture, expert_count=expert_count,
+    )
+    if not registered and store:
+        verb = "moved" if store == "move" else "copied"
+        console.print(
+            f"[yellow]{escape(str(blob_path))} was {verb} into the models "
+            f"folder but not registered as '{escape(model_name)}'.[/yellow] "
+            "It will be picked up under an automatic name the next time "
+            "models are scanned (`localm list`, or the next server start)."
+        )
+    return registered
+
+
+_OLLAMA_MODEL_LAYER = "application/vnd.ollama.image.model"
+_OLLAMA_PROJECTOR_LAYER = "application/vnd.ollama.image.projector"
+
+
+class _OllamaModel(NamedTuple):
+    name: str
+    blob: Path
+    projector: Optional[Path]
+
+
+def _ollama_root(p: Path) -> Optional[Path]:
+    """The Ollama model store *p* denotes: *p* when it holds ``manifests`` and
+    ``blobs`` folders, ``p/models`` when that does (the ``~/.ollama`` folder);
+    else None."""
+    for cand in (p, p / "models"):
+        try:
+            if (cand / "manifests").is_dir() and (cand / "blobs").is_dir():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _ollama_layer_blob(blobs: Path, layers: list, media_type: str):
+    """``(blob_path, problem)`` for the first *layers* entry of *media_type*:
+    the blob in *blobs* when its digest is well formed and the file exists,
+    else None and the reason. ``(None, None)`` when there is no such layer."""
+    for layer in layers:
+        if not isinstance(layer, dict) or layer.get("mediaType") != media_type:
+            continue
+        digest = layer.get("digest")
+        blob_name = digest.replace(":", "-") if isinstance(digest, str) else ""
+        if not _OLLAMA_BLOB_RE.fullmatch(blob_name):
+            return None, "a layer has a malformed digest"
+        blob = blobs / blob_name
+        if not blob.is_file():
+            return None, f"the blob {blob_name[:19]}... is missing"
+        return blob, None
+    return None, None
+
+
+def _scan_ollama_root(root: Path):
+    """``(models, problems)`` for an Ollama model store.
+
+    One model per manifest (``manifests/<registry>/<owner>/<model>/<tag>``) whose
+    model layer is a GGUF file in ``blobs``, named ``<model>-<tag>`` (``<owner>-``
+    in front for any owner other than ``library``), lowercased. The projector
+    layer is attached only when its blob is a GGUF vision projector. *problems*
+    lists one sentence per manifest that could not be registered."""
+    import json as _json
+
+    manifests = root / "manifests"
+    blobs = root / "blobs"
+    models: List[_OllamaModel] = []
+    problems: List[str] = []
+    try:
+        tag_files = sorted(f for f in manifests.rglob("*") if f.is_file())
+    except OSError:
+        return models, problems
+    for tag_file in tag_files:
+        parts = tag_file.relative_to(manifests).parts
+        if len(parts) < 3:
+            continue
+        try:
+            manifest = _json.loads(tag_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        layers = manifest.get("layers") if isinstance(manifest, dict) else None
+        if not isinstance(layers, list):
+            continue
+        owner = [] if parts[1] == "library" or len(parts) == 3 else list(parts[1:-2])
+        label = "-".join(owner + [parts[-2], parts[-1]]).lower().replace(" ", "-")
+        blob, problem = _ollama_layer_blob(blobs, layers, _OLLAMA_MODEL_LAYER)
+        if blob is None:
+            if problem:
+                problems.append(f"{label}: {problem}")
+            continue
+        if not _has_gguf_magic(blob):
+            problems.append(f"{label}: the model is not a GGUF file")
+            continue
+        projector, proj_problem = _ollama_layer_blob(blobs, layers, _OLLAMA_PROJECTOR_LAYER)
+        if proj_problem:
+            problems.append(f"{label}: no vision projector attached, {proj_problem}")
+        elif projector is not None and not (
+                _has_gguf_magic(projector) and gguf_is_mmproj(projector)):
+            problems.append(f"{label}: no vision projector attached, "
+                            "its projector layer is not a GGUF projector")
+            projector = None
+        models.append(_OllamaModel(label, blob, projector))
+    return models, problems
+
+
+def _add_local_ollama_root(
+    root: Path,
+    name: Optional[str],
+    on_duplicate: str,
+    model_type: Optional[str],
+    store: Optional[str],
+) -> Optional[bool]:
+    """Register every GGUF model in an Ollama model store (see
+    ``_scan_ollama_root``). A manifest sharing a blob with one registered earlier
+    in the same scan becomes an alias of it. *name* applies only when the store
+    holds one model. Returns True when anything was registered, False when
+    nothing could be, and None when the folder holds no Ollama manifest at all
+    (so the caller treats it as an ordinary folder)."""
+    from rich.markup import escape
+
+    models, problems = _scan_ollama_root(root)
+    if not models and not problems:
+        return None
+    for problem in problems:
+        console.print(f"[yellow]Skipped part of the Ollama store:[/yellow] {escape(problem)}")
+    if not models:
+        console.print(f"[red]Not a model:[/red] no GGUF model found in the Ollama "
+                      f"store {escape(str(root))}")
+        return False
+    registered_any = False
+    first_name_for_blob: dict = {}
+    for model in models:
+        wanted = _sanitize_name(name) if (name and len(models) == 1) else model.name
+        model_name = _unique_registry_name(_mm.load_registry(), wanted)
+        earlier = first_name_for_blob.get(model.blob)
+        if earlier is not None:
+            registered_any = alias_model(earlier, model_name) or registered_any
+            continue
+        detected, meta = _detect_local_model_type(
+            model.blob, is_gguf=False, is_hf=False, is_blob=True)
+        effective = model_type if model_type is not None else detected
+        ok = _register_ollama_blob(
+            model.blob, model_name, on_duplicate=on_duplicate,
+            model_type=effective, store=store,
+            projector=model.projector if effective == "llm" else None,
+            architecture=meta.get("architecture"),
+            expert_count=meta.get("expert_count"),
+        )
+        if ok:
+            first_name_for_blob[model.blob] = model_name
+        registered_any = ok or registered_any
+    return registered_any
+
+
+def _add_local_hub_cache(
+    root: Path,
+    hub: HubCacheScan,
+    name: Optional[str],
+    on_duplicate: str,
+    no_hash: bool,
+    fast: bool,
+    model_type: Optional[str],
+    store: Optional[str],
+) -> bool:
+    """Register the models of a Hugging Face hub cache (see ``scan_hub_cache``).
+
+    Each repository registers from the snapshot folder, never from ``blobs``:
+    as one HF model when the snapshot is a HuggingFace model directory, else its
+    GGUF files, a repo with a single non-projector GGUF taking the repo id as its
+    name (a repo with several keeps each file's stem). *name* applies only when
+    the cache holds one repository. A move into the models folder is refused
+    because it would break the cache's links. Returns True when anything was
+    registered or was already registered."""
+    from rich.markup import escape
+
+    if store == "move":
+        console.print(
+            f"[red]Cannot move models out of the Hugging Face cache[/red] "
+            f"({escape(str(root))}): the cache would be left with broken links. "
+            "Use copy, or register them in place.")
+        return False
+    only_repo = len(hub.units) == 1
+    registered_any = False
+    unusable = hub.empty_repos
+    found = 0
+    for unit in hub.units:
+        repo_name = _sanitize_name(name) if (name and only_repo) else _sanitize_name(unit.repo_id)
+        if _is_hf_model_dir(unit.snapshot):
+            found += 1
+            registered_any = add_local(
+                str(unit.snapshot), _unique_registry_name(_mm.load_registry(), repo_name),
+                on_duplicate=on_duplicate, no_hash=no_hash, fast=fast,
+                model_type=model_type, store=store,
+            ) or registered_any
+            continue
+        first_parts, _hf = _find_model_units(unit.snapshot, max_depth=_import_max_depth())
+        if not first_parts:
+            unusable += 1
+            continue
+        found += 1
+        models = [g for g in first_parts if "mmproj" not in g.name.lower()]
+        names = {models[0]: repo_name} if len(models) == 1 else None
+        if store:
+            stored = _mm._store_loose_gguf_dir(first_parts, store)
+            if stored is None:
+                return False
+            names = {new: names[old] for old, new in zip(first_parts, stored)
+                     if names and old in names}
+            first_parts = stored
+        registered_any = _add_local_gguf_dir(
+            first_parts, None, on_duplicate, no_hash, fast,
+            model_type=model_type, names=names,
+        ) or registered_any
+    if unusable:
+        console.print(f"[dim]Skipped {unusable} Hugging Face cache repo(s) with no "
+                      "downloaded model files.[/dim]")
+    if not found:
+        console.print(f"[red]Not a model:[/red] no usable model in the Hugging Face "
+                      f"cache {escape(str(root))}")
+        return False
+    return registered_any
 
 
 def add_local(
@@ -3509,10 +4007,17 @@ def add_local(
     """
     from rich.markup import escape
 
-    p = Path(path_str).resolve()
+    p = logical_model_path(Path(path_str))
     if not p.exists():
         console.print(f"[red]Not found:[/red] {escape(path_str)}")
         return False
+
+    # Ollama model store (holds manifests/ and blobs/) -> every GGUF model in it
+    ollama_root = _ollama_root(p)
+    if ollama_root is not None:
+        outcome = _add_local_ollama_root(ollama_root, name, on_duplicate, model_type, store)
+        if outcome is not None:
+            return outcome
 
     # Ollama manifest directory -> resolve to actual GGUF blob
     ollama = _resolve_ollama_manifest(p)
@@ -3520,52 +4025,18 @@ def add_local(
         blob_path, suggested = ollama
         # Sanitize the user-supplied -n name through the same filter
         # sync_models_dir uses, so a '../evil' or 'a/b' name can never become a
-        # raw registry key. Computed before any move so the collision check below
-        # and the eventual registration agree on the exact same name.
+        # raw registry key.
         model_name = _sanitize_name(name) if name else suggested
-        if store and _mm.is_external_path(blob_path):
-            # Refuse before touching the filesystem when registration is
-            # already known to be refused - a name collision with no terminal to
-            # confirm an overwrite. Moving first and discovering it afterwards
-            # would silently displace the file while reporting success.
-            if not sys.stdin.isatty():
-                reg = _mm.load_registry()
-                conflict = _name_collision(model_name, blob_path, reg)
-                if conflict is not None:
-                    console.print(
-                        f"[red]'{escape(model_name)}' already points to a different "
-                        f"file:[/red] {escape(str(conflict))}\nRefusing to move "
-                        f"{escape(str(blob_path))} into place non-interactively - "
-                        "pick another name with -n."
-                    )
-                    return False
-            try:
-                blob_path = _mm._store_into_models_dir(blob_path, store)
-            except RuntimeError as e:
-                console.print(f"[red]{escape(str(e))}[/red]")
-                return False
-        # Ollama blob filenames already ARE the sha256 digest - store it free
-        digest = blob_path.name.removeprefix("sha256-") \
-            if blob_path.name.startswith("sha256-") else None
-        # An Ollama blob is a GGUF text model, so an unspecified type is 'llm'.
-        # The interactive path can still decline (or a rarer post-move content
-        # dedup can) - report that honestly rather than claiming success for a
-        # file that is now sitting in MODELS_DIR unregistered under any name
-        # (sync_models_dir/`localm list` will pick it up under an auto name).
-        registered = _mm._register_with_dedup(
-            model_name, blob_path, "ollama",
-            on_duplicate=on_duplicate, digest=digest,
+        return _register_ollama_blob(
+            blob_path, model_name, on_duplicate=on_duplicate,
             model_type=(model_type if model_type is not None else "llm"),
+            store=store,
         )
-        if not registered and store:
-            verb = "moved" if store == "move" else "copied"
-            console.print(
-                f"[yellow]{escape(str(blob_path))} was {verb} into the models "
-                f"folder but not registered as '{escape(model_name)}'.[/yellow] "
-                "It will be picked up under an automatic name the next time "
-                "models are scanned (`localm list`, or the next server start)."
-            )
-        return registered
+
+    # A llamafile (an executable with a ZIP of its weights appended) is unpacked
+    # into the models folder; the model inside cannot be registered in place.
+    if p.is_file() and _llamafile_ggufs(p):
+        return _add_local_llamafile(p, name, on_duplicate, model_type)
 
     # Refuse the localm data directory (and its models root): its config.json is
     # the app's settings file, not a model config, so registering it would poison
@@ -3608,6 +4079,12 @@ def add_local(
     # type detection are the same as for `localm add <hf dir>`. An HF dir (is_hf)
     # falls through to the dir-as-one-model path below; a folder holding no
     # model falls through to the "Not a model" message.
+    if p.is_dir() and not is_hf:
+        hub = scan_hub_cache(p)
+        if hub is not None:
+            return _add_local_hub_cache(
+                p, hub, name, on_duplicate, no_hash, fast, model_type, store)
+
     max_depth = _import_max_depth()
     if p.is_dir() and not is_hf:
         first_parts, hf_dirs = _find_model_units(p, max_depth=max_depth)
@@ -3663,7 +4140,9 @@ def add_local(
     # any store/move (the move preserves the filename, so the value is identical
     # either way) so the collision check below and the eventual registration
     # agree on the exact same name.
-    model_name = _sanitize_name(name) if name else (split_base or p.stem)
+    hub_repo = hub_snapshot_repo_id(p) if p.is_dir() else None
+    model_name = _sanitize_name(name) if name else (
+        split_base or (_sanitize_name(hub_repo) if hub_repo else p.stem))
     kind = "hf" if is_hf else "local"
 
     # Bring an external file/dir into managed storage BEFORE registering, so the

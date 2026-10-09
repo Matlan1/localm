@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Models other tools already downloaded can be added in place.** `localm add` (and
+  the Models page's add-path box) now takes the Hugging Face cache folder
+  (`~/.cache/huggingface`, or `HF_HOME`), registering one model per repository from
+  its current revision and named after the repo; an Ollama model folder
+  (`~/.ollama`, or `OLLAMA_MODELS`), registering every GGUF model in it as
+  `model-tag`, with a vision model's projector attached; and a `.llamafile`, whose
+  model (and projector) is unpacked into the models folder with a progress bar.
+  Moving models out of the Hugging Face cache is refused, since it would break the
+  cache; copy them instead.
 - **Release files carry build provenance and a software bill of materials.** The release
   zip, the sdist, the wheel and a CycloneDX SBOM of the pinned dependencies are attested by
   the release workflow, so `gh attestation verify` proves which workflow built a file and
