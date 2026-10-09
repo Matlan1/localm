@@ -249,6 +249,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **A Mixture-of-Experts model whose experts do not fit in system RAM now loads.**
+  With every layer on the GPU, localm read the weights it keeps in system RAM (the
+  routed experts it moves off the GPU, and the token embeddings) fully into memory, so
+  a model whose experts were larger than free RAM failed to load or pushed the system
+  into swap. localm now checks free RAM first: when those weights fit, nothing changes;
+  when they do not, the model file is memory-mapped, so only the parts in use stay in
+  RAM and the rest is read from disk as needed.
 - **Setup can pick up after being interrupted, on every platform.** `setup.sh`,
   `setup.bat` and the graphical installer keep a short journal of the steps they have
   started and finished. Run again after Ctrl+C, a closed window or a crash, setup says

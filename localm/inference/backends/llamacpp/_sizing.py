@@ -53,6 +53,58 @@ def embedder_ctx_reservation_bytes() -> int:
         return 0
 
 
+# Free system RAM an auto full-offload load must have beyond its host-resident
+# weights for them to be read into memory instead of memory-mapped.
+HOST_RAM_HEADROOM_BYTES = 2 * 1024 ** 3
+
+
+class MmapDecision(NamedTuple):
+    """How a load memory-maps the model file (:func:`decide_use_mmap`).
+
+    ``use_mmap`` is True to force mmap, False to force it off, None to keep the
+    runtime's own default (mmap on every device that supports it). ``reason``
+    is one of ``"user_on"``, ``"user_off"``, ``"partial_offload"``,
+    ``"fits_ram"``, ``"exceeds_ram"``, ``"ram_unknown"`` or
+    ``"host_unknown"``. ``host_bytes`` is the weight bytes the load keeps in
+    system RAM and ``ram_total``/``ram_available`` the RAM reading, each None
+    when not known or not needed."""
+    use_mmap: Optional[bool]
+    reason: str
+    host_bytes: Optional[int] = None
+    ram_total: Optional[int] = None
+    ram_available: Optional[int] = None
+
+
+def decide_use_mmap(setting, full_offload: bool, host_bytes: Optional[int],
+                    ram_total: Optional[int], ram_available: Optional[int]) -> MmapDecision:
+    """The mmap mode for one load.
+
+    *setting* is the configured ``use_mmap``: ``"on"`` or ``"off"`` (any case)
+    forces that mode; anything else is ``auto``. Under auto:
+
+    - a load that does not put every layer on the GPU (*full_offload* False)
+      keeps the runtime default;
+    - a full-offload load reads its host-resident weights into memory (mmap
+      off) when *host_bytes* plus :data:`HOST_RAM_HEADROOM_BYTES` fits
+      *ram_available*, and keeps the runtime default when it does not, when
+      *ram_available* is None, or when *host_bytes* is None.
+    """
+    mode = setting.strip().lower() if isinstance(setting, str) else ""
+    if mode == "on":
+        return MmapDecision(True, "user_on")
+    if mode == "off":
+        return MmapDecision(False, "user_off")
+    if not full_offload:
+        return MmapDecision(None, "partial_offload")
+    if host_bytes is None:
+        return MmapDecision(None, "host_unknown", None, ram_total, ram_available)
+    if ram_available is None:
+        return MmapDecision(None, "ram_unknown", host_bytes, ram_total, None)
+    if host_bytes + HOST_RAM_HEADROOM_BYTES <= ram_available:
+        return MmapDecision(False, "fits_ram", host_bytes, ram_total, ram_available)
+    return MmapDecision(None, "exceeds_ram", host_bytes, ram_total, ram_available)
+
+
 class _AutoLayerBudget(NamedTuple):
     """The sizing inputs behind one ``_auto_gpu_layers()`` decision - the same
     numbers ``_effective_gpu_layers()`` needs to explain WHY a partial offload
@@ -1565,6 +1617,53 @@ class VramSizingMixin:
         if n_expert <= 0 or n_used <= 0:
             return 0
         return pinned * min(n_used, n_expert) // n_expert
+
+    def _host_resident_bytes(self) -> Optional[int]:
+        """Weight bytes a load with every layer on the GPU keeps in system RAM:
+        the model file's bytes minus :meth:`_vram_model_bytes` for this load's
+        n_cpu_moe, so the input layer and any pinned routed experts. None when
+        the file size cannot be read, or when n_cpu_moe is
+        above 0 and the per-block byte probe failed. An input-layer probe
+        failure counts the input layer as 0 bytes here."""
+        try:
+            model_bytes = self._model_bytes()
+        except OSError:
+            return None
+        if model_bytes <= 0:
+            return None
+        n_cpu_moe = self._load_n_cpu_moe()
+        if n_cpu_moe > 0 and not self._block_bytes():
+            return None
+        return max(0, model_bytes - self._vram_model_bytes(n_cpu_moe))
+
+    def _resolve_use_mmap(self, gpu_layers: int) -> MmapDecision:
+        """This load's :class:`MmapDecision` for *gpu_layers* and the configured
+        ``use_mmap`` (read via getattr, ``auto`` when absent), stored as
+        ``last_mmap_decision`` and logged at debug. System RAM is read only for
+        an auto load with every layer on the GPU. Never raises: a failure
+        computing the host-resident bytes yields ``host_unknown``."""
+        setting = getattr(self, "use_mmap", "auto")
+        full = gpu_layers >= self._DEFAULT_GPU_LAYERS
+        mode = setting.strip().lower() if isinstance(setting, str) else ""
+        host = total = available = None
+        if full and mode not in ("on", "off"):
+            try:
+                host = self._host_resident_bytes()
+            except Exception as exc:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("mmap: host-resident byte count failed (%s)",
+                           type(exc).__name__)
+                host = None
+            if host is not None:
+                from localm.sysstats import system_ram
+                total, available = system_ram()
+        decision = decide_use_mmap(setting, full, host, total, available)
+        self.last_mmap_decision = decision
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("mmap: use_mmap=%s -> %s (%s; host %s bytes, RAM available %s "
+                   "of %s bytes)", setting, decision.use_mmap, decision.reason,
+                   decision.host_bytes, decision.ram_available, decision.ram_total)
+        return decision
 
     def _effective_gpu_layers(self) -> int:
         """The n_gpu_layers this load will actually use, and the n_cpu_moe it

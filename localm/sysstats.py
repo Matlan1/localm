@@ -15,8 +15,11 @@ slow driver/subprocess call never blocks the poll itself (see _vram/_gpu_util):
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
+from pathlib import Path
 
 
 def _clamped_field_deltas(t1, t2):
@@ -124,6 +127,142 @@ def _cpu_ram() -> dict:
     except Exception:
         pass
     return out
+
+
+# System RAM reading ------------------------------------------------------- #
+
+_PROC_MEMINFO = Path("/proc/meminfo")
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+def system_ram() -> "tuple[int | None, int | None]":
+    """``(total, available)`` system RAM in bytes, each None when it cannot be
+    read. Never raises; a failed read is logged at debug.
+
+    Read through psutil when it is installed, else the platform's own
+    interface: ``GlobalMemoryStatusEx`` on Windows, ``/proc/meminfo`` on Linux,
+    and on any other platform ``sysconf`` for the total with available None.
+    On Linux a cgroup memory limit (:func:`_cgroup_memory`) caps both: the
+    total at the limit, the available at the limit minus the cgroup's usage."""
+    total, available = _psutil_ram()
+    if total is None and available is None:
+        total, available = _platform_ram()
+    if sys.platform.startswith("linux"):
+        total, available = _cap_to_cgroup(total, available, _cgroup_memory(_CGROUP_ROOT))
+    return total, available
+
+
+def _psutil_ram() -> "tuple[int | None, int | None]":
+    """``(total, available)`` from ``psutil.virtual_memory()``, or
+    ``(None, None)`` when psutil is absent or the read fails."""
+    try:
+        import psutil
+    except Exception:
+        return None, None
+    try:
+        vm = psutil.virtual_memory()
+        return int(vm.total), int(vm.available)
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("system_ram: psutil read failed: %s", e)
+        return None, None
+
+
+def _platform_ram() -> "tuple[int | None, int | None]":
+    """``(total, available)`` from this platform's own interface, either None
+    when it cannot be read."""
+    try:
+        if sys.platform == "win32":
+            return _windows_ram()
+        if sys.platform.startswith("linux"):
+            return _meminfo_ram(_PROC_MEMINFO)
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        return (int(total) if total > 0 else None), None
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("system_ram: platform read failed: %s", e)
+        return None, None
+
+
+def _windows_ram() -> "tuple[int | None, int | None]":
+    """``(ullTotalPhys, ullAvailPhys)`` from ``GlobalMemoryStatusEx``, or
+    ``(None, None)`` when the call fails."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", wintypes.DWORD),
+            ("dwMemoryLoad", wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = _MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        from localm.debuglog import logger
+        logger.debug("system_ram: GlobalMemoryStatusEx failed (error %s)",
+                     ctypes.GetLastError())
+        return None, None
+    return int(status.ullTotalPhys), int(status.ullAvailPhys)
+
+
+def _meminfo_ram(path: Path) -> "tuple[int | None, int | None]":
+    """``(MemTotal, MemAvailable)`` in bytes from a ``/proc/meminfo``-format
+    file at *path*, each None when its line is missing or unparseable."""
+    fields: dict = {}
+    for line in path.read_text(encoding="ascii", errors="replace").splitlines():
+        name, _, rest = line.partition(":")
+        if name in ("MemTotal", "MemAvailable"):
+            parts = rest.split()
+            if parts and parts[0].isdigit():
+                scale = 1024 if len(parts) > 1 and parts[1] == "kB" else 1
+                fields[name] = int(parts[0]) * scale
+    return fields.get("MemTotal"), fields.get("MemAvailable")
+
+
+def _read_int(path: Path) -> "int | None":
+    """The integer in the file at *path*, or None when it is missing, reads
+    ``max`` or is not an integer."""
+    try:
+        text = path.read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def _cgroup_memory(root: Path) -> "tuple[int | None, int | None]":
+    """``(limit, usage)`` in bytes of the cgroup memory controller under
+    *root*: cgroup v2 (``memory.max``/``memory.current``) first, else v1
+    (``memory/memory.limit_in_bytes``/``memory/memory.usage_in_bytes``). The
+    limit is None when no limit is set; usage is None when it cannot be read."""
+    limit = _read_int(root / "memory.max")
+    if limit is not None:
+        return limit, _read_int(root / "memory.current")
+    limit = _read_int(root / "memory" / "memory.limit_in_bytes")
+    if limit is not None:
+        return limit, _read_int(root / "memory" / "memory.usage_in_bytes")
+    return None, None
+
+
+def _cap_to_cgroup(total: "int | None", available: "int | None",
+                   cgroup: "tuple[int | None, int | None]") -> "tuple[int | None, int | None]":
+    """*total* and *available* capped by a cgroup ``(limit, usage)``: a limit
+    at or above *total* (v1 reports "unlimited" as a huge number) changes
+    nothing; otherwise the total becomes the limit and the available becomes
+    the smaller of *available* and the limit minus *usage* (the limit itself
+    when usage is unknown)."""
+    limit, usage = cgroup
+    if limit is None or (total is not None and limit >= total):
+        return total, available
+    room = max(0, limit - usage) if usage is not None else limit
+    return limit, (room if available is None else min(available, room))
 
 
 def _vram_reading_trusted(info: dict, status) -> bool:

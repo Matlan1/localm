@@ -69,7 +69,8 @@ class TestLoad:
         assert kwargs.get("n_gpu_layers") == 99
         assert meta == {"n_layers": 42, "kv_bytes_per_token": 12_345,
                          "supports_images": True, "supports_mtp": False,
-                         "weight_placement": [], "moe_skip_reason": None}
+                         "weight_placement": [], "moe_skip_reason": None,
+                         "mmap": None}
         assert w._loaded is True
 
     def test_load_passes_through_weight_placement_from_llamacpp(self, tmp_path):
@@ -108,6 +109,28 @@ class TestLoad:
                         {"localm.inference.backends.llamacpp": fake_llamacpp_module}):
             meta = w.load()
         assert meta["moe_skip_reason"] == "no_experts"
+
+    @pytest.mark.parametrize("use_mmap", [True, False, None])
+    def test_load_passes_the_parents_mmap_decision_verbatim(self, tmp_path, use_mmap):
+        w = _worker(str(tmp_path / "m.gguf"), use_mmap=use_mmap)
+        fake_llamacpp_module = MagicMock()
+        fake_llamacpp_module.LlamaCpp.return_value = _StubLlm()
+        with patch("localm.inference.backends.llamacpp._loader.load_lib"),              patch.dict(sys.modules,
+                        {"localm.inference.backends.llamacpp": fake_llamacpp_module}):
+            w.load()
+        _, kwargs = fake_llamacpp_module.LlamaCpp.call_args
+        assert "use_mmap" in kwargs and kwargs["use_mmap"] is use_mmap
+
+    def test_load_reports_whether_the_model_was_memory_mapped(self, tmp_path):
+        w = _worker(str(tmp_path / "m.gguf"))
+        stub = _StubLlm()
+        stub.mmap_mapped = True
+        fake_llamacpp_module = MagicMock()
+        fake_llamacpp_module.LlamaCpp.return_value = stub
+        with patch("localm.inference.backends.llamacpp._loader.load_lib"),              patch.dict(sys.modules,
+                        {"localm.inference.backends.llamacpp": fake_llamacpp_module}):
+            meta = w.load()
+        assert meta["mmap"] is True
 
     def test_load_passes_resolved_gpu_layers_and_ctx_max_verbatim(self, tmp_path):
         """The worker never re-derives auto-sizing - it trusts whatever the
