@@ -388,7 +388,7 @@ _TOOL_SESSION = [
 
 def _roles_alternate(messages):
     roles = [m["role"] for m in messages]
-    return roles[0] == "user" and all(a != b for a, b in zip(roles, roles[1:], strict=True))
+    return roles[0] == "user" and all(a != b for a, b in zip(roles, roles[1:], strict=False))
 
 
 class TestTailAndPendingRequest:
