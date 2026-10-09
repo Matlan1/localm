@@ -15,7 +15,7 @@ NAME="localm-smoke-$$"
 VOLUME="${NAME}-data"
 
 cleanup() {
-  docker rm -f "$NAME" "${NAME}-env" "${NAME}-refuse" >/dev/null 2>&1 || true
+  docker rm -fv "$NAME" "${NAME}-env" "${NAME}-refuse" >/dev/null 2>&1 || true
   docker volume rm "$VOLUME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT

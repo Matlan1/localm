@@ -9,11 +9,11 @@ name: docker
 #                      a deliberate dispatch. A failed run is re-run from the
 #                      Actions tab; the release itself is never affected.
 #   workflow_dispatch  dry run by default (build + smoke test + tag computation,
-#                      no login, no push). Untick dry_run on master to publish the
-#                      version in VERSION.
+#                      no login, no push). Untick dry_run and run it on the tag
+#                      v<VERSION> to publish that release's images again.
 #
 # Tags: <version> and <version>-<backend> for every release; latest, cpu and
-# vulkan only for a release that is not a pre-release.
+# vulkan only when that release is the repository's latest (never a pre-release).
 
 on:
   pull_request:
@@ -61,38 +61,8 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           PRERELEASE: ${{ github.event.release.prerelease }}
           DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          set -eu
-          version="$(tr -d '[:space:]' < VERSION)"
-          case "$version" in
-            ""|*[!0-9A-Za-z._-]*)
-              echo "::error::VERSION is not usable as an image tag: '$version'"
-              exit 1
-              ;;
-          esac
-          push=false
-          floating=false
-          if [ "$EVENT_NAME" = "release" ]; then
-            if [ "${RELEASE_TAG#v}" != "$version" ]; then
-              echo "::error::release tag '$RELEASE_TAG' does not match VERSION '$version'"
-              exit 1
-            fi
-            push=true
-            if [ "$PRERELEASE" != "true" ]; then
-              floating=true
-            fi
-          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; then
-            if [ "$REF" != "refs/heads/master" ]; then
-              echo "::error::publishing from a dispatch requires master, got '$REF'"
-              exit 1
-            fi
-            push=true
-          fi
-          {
-            echo "version=$version"
-            echo "push=$push"
-            echo "floating=$floating"
-          } >> "$GITHUB_OUTPUT"
+          GH_TOKEN: ${{ github.token }}
+        run: sh docker/resolve-release.sh
 
   build:
     name: Build and smoke-test (${{ matrix.backend }})

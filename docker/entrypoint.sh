@@ -41,7 +41,7 @@ if [ "$insecure" = 0 ]; then
     open)
       cat >&2 <<'EOF'
 localm: refusing to start. This container listens on every interface, so it needs
-an API key of at least 8 characters, and none is set.
+an API key of at least 8 characters. None is set, or the one that is set is shorter.
 
 Create one in the data volume (printed once), then start the container again:
 

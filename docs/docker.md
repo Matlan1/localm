@@ -15,7 +15,7 @@ a checkout (see [Build it yourself](#build-it-yourself)).
 | `<version>-vulkan`, `vulkan` | llama.cpp Vulkan runtime (Mesa drivers included) |
 
 `latest`, `cpu` and `vulkan` move with each release that is not a pre-release.
-Images are `linux/amd64` only. There is no CUDA image yet.
+Images are `linux/amd64` only (on an arm64 host, build with `--platform linux/amd64`). There is no CUDA image yet.
 
 ## First run
 
@@ -129,7 +129,7 @@ Mesa drivers; to use an AMD or Intel GPU, pass the render device through:
 docker run -d --device /dev/dri -v localm-data:/data -p 8642:8642 ghcr.io/matlan1/localm:vulkan
 ```
 
-The automated tests run the images on CPU-only runners, so GPU use is not covered
+If the render device on your host is restricted to a group, add that group with `--group-add`. The automated tests run the images on CPU-only runners, so GPU use is not covered
 by them. `localm doctor` inside the container (`docker exec <container> localm
 doctor`) reports which devices the runtime found. NVIDIA GPUs through CUDA are not
 supported by these images yet.
@@ -139,8 +139,8 @@ supported by these images yet.
 From the repository root:
 
 ```bash
-docker build -f docker/Dockerfile --build-arg BACKEND=cpu -t localm:cpu .
-docker build -f docker/Dockerfile --build-arg BACKEND=vulkan -t localm:vulkan .
+docker build --platform linux/amd64 -f docker/Dockerfile --build-arg BACKEND=cpu -t localm:cpu .
+docker build --platform linux/amd64 -f docker/Dockerfile --build-arg BACKEND=vulkan -t localm:vulkan .
 ```
 
 `bash docker/smoke-test.sh localm:cpu` runs the same checks the project's CI runs

@@ -16,6 +16,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = REPO_ROOT / "docker" / "entrypoint.sh"
 HEALTHCHECK = REPO_ROOT / "docker" / "healthcheck.sh"
+RESOLVE = REPO_ROOT / "docker" / "resolve-release.sh"
 DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docker.yml"
 
@@ -168,6 +169,100 @@ class TestHealthcheck:
 
     def test_nothing_listening_is_not_healthy(self, tmp_path):
         assert self._run(tmp_path, https="000", http="000") == 1
+
+
+@posix_only
+class TestResolveRelease:
+    @pytest.fixture
+    def resolve(self, tmp_path):
+        """Run docker/resolve-release.sh in a directory whose VERSION is 1.2.3 with a
+        stand-in `gh` whose latest release is $FAKE_LATEST. Returns
+        (exit code, stdout, {output name: value})."""
+        (tmp_path / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text('#!/bin/sh\n[ -z "$FAKE_GH_FAIL" ] || exit 1\necho "$FAKE_LATEST"\n',
+                      encoding="utf-8")
+        gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+        out = tmp_path / "github-output"
+
+        def run(event, *, ref="refs/heads/master", tag="", prerelease="", dry_run="",
+                latest="v1.2.3", gh_fails=False, version=None):
+            if version is not None:
+                (tmp_path / "VERSION").write_text(version, encoding="utf-8")
+            out.write_text("", encoding="utf-8")
+            env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+                   "EVENT_NAME": event, "REF": ref, "RELEASE_TAG": tag,
+                   "PRERELEASE": prerelease, "DRY_RUN": dry_run,
+                   "GITHUB_REPOSITORY": "owner/repo", "GITHUB_OUTPUT": str(out),
+                   "FAKE_LATEST": latest, "FAKE_GH_FAIL": "1" if gh_fails else ""}
+            proc = subprocess.run(["sh", str(RESOLVE)], cwd=tmp_path, env=env,
+                                  capture_output=True, text=True, timeout=30)
+            values = dict(line.split("=", 1) for line in
+                          out.read_text(encoding="utf-8").splitlines())
+            return proc.returncode, proc.stdout, values
+
+        return run
+
+    def test_pull_request_builds_and_never_pushes(self, resolve):
+        code, _, out = resolve("pull_request")
+        assert code == 0
+        assert out == {"version": "1.2.3", "push": "false", "floating": "false"}
+
+    def test_latest_release_pushes_and_moves_the_floating_tags(self, resolve):
+        code, _, out = resolve("release", tag="v1.2.3", prerelease="false")
+        assert code == 0
+        assert out == {"version": "1.2.3", "push": "true", "floating": "true"}
+
+    def test_prerelease_pushes_version_tags_only(self, resolve):
+        code, _, out = resolve("release", tag="v1.2.3", prerelease="true")
+        assert code == 0
+        assert out == {"version": "1.2.3", "push": "true", "floating": "false"}
+
+    def test_rerun_of_an_older_release_does_not_move_latest(self, resolve):
+        code, _, out = resolve("release", tag="v1.2.3", prerelease="false", latest="v2.0.0")
+        assert code == 0
+        assert out == {"version": "1.2.3", "push": "true", "floating": "false"}
+
+    def test_release_tag_must_match_version(self, resolve):
+        code, stdout, out = resolve("release", tag="v1.2.4", prerelease="false")
+        assert code == 1
+        assert "does not match VERSION" in stdout
+        assert out == {}
+
+    def test_unreadable_latest_release_fails_instead_of_dropping_latest(self, resolve):
+        code, stdout, out = resolve("release", tag="v1.2.3", prerelease="false", gh_fails=True)
+        assert code == 1
+        assert "could not read the latest release" in stdout
+        assert out == {}
+
+    def test_dispatch_defaults_to_a_dry_run(self, resolve):
+        code, _, out = resolve("workflow_dispatch", dry_run="true")
+        assert code == 0
+        assert out["push"] == "false"
+        assert out["floating"] == "false"
+
+    def test_dispatch_cannot_publish_from_a_branch(self, resolve):
+        code, stdout, out = resolve("workflow_dispatch", dry_run="false")
+        assert code == 1
+        assert "requires the release tag ref refs/tags/v1.2.3" in stdout
+        assert out == {}
+
+    def test_dispatch_cannot_publish_another_versions_tag(self, resolve):
+        code, _, out = resolve("workflow_dispatch", dry_run="false", ref="refs/tags/v1.2.2")
+        assert code == 1
+        assert out == {}
+
+    def test_dispatch_on_the_release_tag_republishes_it(self, resolve):
+        code, _, out = resolve("workflow_dispatch", dry_run="false", ref="refs/tags/v1.2.3")
+        assert code == 0
+        assert out == {"version": "1.2.3", "push": "true", "floating": "true"}
+
+    def test_a_version_that_is_not_a_tag_is_refused(self, resolve):
+        code, stdout, _ = resolve("pull_request", version="1.2.3+local\n")
+        assert code == 1
+        assert "not usable as an image tag" in stdout
 
 
 class TestDockerfile:
