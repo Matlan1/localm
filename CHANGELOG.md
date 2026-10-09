@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Files and folders localm cannot run now say why.** `localm add`, `localm pull <path>`
+  and the GUI add and pull routes name the format and the nearest runnable alternative for
+  GGUF version 1 and big-endian GGUF files, legacy GGML `.bin` files, importance-matrix
+  GGUFs, Mistral-native folders, `.onnx`, TensorRT, LiteRT and NeMo files, and MLC,
+  OpenVINO and EXL2/EXL3 folders. An MLX-quantized, EXL2/EXL3 or OpenVINO folder still
+  registers, with a note that it cannot be loaded, and is refused at load with the same
+  sentence before any worker starts. Direct-URL and Ollama-blob pulls apply the same
+  checks, and the automatic models-folder scan quietly skips the GGUFs it cannot load. A
+  Mistral-style folder holding both Hugging Face shards and `consolidated*` files is sized
+  by the shards only.
 - **Models other tools already downloaded can be added in place.** `localm add` (and
   the Models page's add-path box) now takes the Hugging Face cache folder
   (`~/.cache/huggingface`, or `HF_HOME`), registering one model per repository from
