@@ -737,7 +737,7 @@ class TestStoreLooseGgufDir:
     def test_model_with_mmproj_in_batch_dir_no_double_processing(
             self, tmp_path, isolated_home):
         """A model + its mmproj both appear as their own entries in
-        _gguf_first_parts (mmproj isn't filtered out) - naively calling the
+        _find_model_units (mmproj isn't filtered out) - naively calling the
         single-file helper on EVERY entry would try to move/copy the mmproj
         TWICE (once as the model's sibling, once as its own top-level entry),
         which either crashes (move: source already gone) or false-positives a

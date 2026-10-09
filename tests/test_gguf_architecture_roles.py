@@ -1,0 +1,162 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""What a GGUF IS comes from its own header: chat model, embedding, vision
+projector, or one of the llama.cpp architectures that load but cannot chat
+(speculative-decoding draft heads, diffusion language models, T5, audio codec).
+
+The architecture names are the ones in llama.cpp's own architecture table.
+"""
+
+from __future__ import annotations
+
+import os
+import struct
+import time
+from pathlib import Path
+
+import pytest
+
+from localm.inference.backends.base import UnsupportedModelRoleError
+from localm.inference.backends.gguf import GgufBackend, _load_failure_message
+from localm.model_manager import (
+    gguf_architecture, gguf_chat_refusal, gguf_embedding_signal,
+)
+from localm.model_manager.registry import _detect_local_model_type
+
+_T_BOOL, _T_UINT32, _T_STRING = 7, 4, 8
+
+
+def _kv_string(value: str) -> bytes:
+    raw = value.encode("utf-8")
+    return struct.pack("<I", _T_STRING) + struct.pack("<Q", len(raw)) + raw
+
+
+def _kv_bool(value: bool) -> bytes:
+    return struct.pack("<I", _T_BOOL) + struct.pack("<?", value)
+
+
+def _kv_uint32(value: int) -> bytes:
+    return struct.pack("<I", _T_UINT32) + struct.pack("<I", value)
+
+
+def _gguf(path: Path, arch: str, extra=()) -> Path:
+    kv = [("general.architecture", _kv_string(arch))] + list(extra)
+    body = b""
+    for key, encoded in kv:
+        kb = key.encode("utf-8")
+        body += struct.pack("<Q", len(kb)) + kb + encoded
+    head = b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0) + struct.pack("<Q", len(kv))
+    path.write_bytes(head + body + b"\0" * 2048)
+    old = time.time() - 3600
+    os.utime(path, (old, old))
+    return path
+
+
+def _type_of(path: Path) -> str:
+    return _detect_local_model_type(path, is_gguf=True, is_hf=False)[0]
+
+
+CHAT_ARCHITECTURES = [
+    "llama", "qwen3", "qwen3next", "qwen35", "gpt-oss", "gemma3", "gemma3n", "gemma4",
+    "glm4moe", "lfm2", "smollm3", "mistral3", "minimax-m2", "deepseek2", "mamba2",
+    "rwkv7", "granitehybrid", "qwen3vl", "pangu-embedded", "hunyuan-moe", "seed_oss",
+]
+EMBEDDING_ARCHITECTURES = [
+    "bert", "modern-bert", "nomic-bert", "nomic-bert-moe", "neo-bert", "jina-bert-v2",
+    "jina-bert-v3", "eurobert", "gemma-embedding", "gemma-embedding2", "t5encoder",
+    "llama-embed",
+]
+NON_CHAT_ARCHITECTURES = [
+    "eagle3", "dflash", "gemma4-assistant", "dream", "llada", "llada-moe", "rnd1",
+    "t5", "wavtokenizer-dec", "qwen3tts", "pockettts",
+]
+
+
+class TestArchitectureRoles:
+    @pytest.mark.parametrize("arch", CHAT_ARCHITECTURES)
+    def test_chat_architectures_stay_llm(self, tmp_path, arch):
+        assert _type_of(_gguf(tmp_path / "m.gguf", arch)) == "llm"
+
+    @pytest.mark.parametrize("arch", EMBEDDING_ARCHITECTURES)
+    def test_encoder_architectures_are_embeddings(self, tmp_path, arch):
+        assert _type_of(_gguf(tmp_path / "m.gguf", arch)) == "embedding"
+
+    @pytest.mark.parametrize("arch", NON_CHAT_ARCHITECTURES)
+    def test_non_chat_architectures_are_not_llm(self, tmp_path, arch):
+        f = _gguf(tmp_path / "m.gguf", arch)
+        mtype, meta = _detect_local_model_type(f, is_gguf=True, is_hf=False)
+        assert mtype == "unknown"
+        assert meta["architecture"] == arch
+
+    def test_pooling_type_key_marks_a_decoder_architecture_as_embedding(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", "qwen3", [("qwen3.pooling_type", _kv_uint32(3))])
+        assert _type_of(f) == "embedding"
+
+    def test_non_causal_key_marks_an_unlisted_encoder_as_embedding(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", "future-encoder",
+                  [("future-encoder.attention.causal", _kv_bool(False))])
+        assert gguf_embedding_signal(f) is True
+        assert _type_of(f) == "embedding"
+
+    def test_causal_true_stays_llm(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", "llama", [("llama.attention.causal", _kv_bool(True))])
+        assert _type_of(f) == "llm"
+
+    def test_diffusion_lm_declaring_non_causal_is_not_an_embedding(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", "llada", [("llada.attention.causal", _kv_bool(False))])
+        assert gguf_embedding_signal(f) is False
+        assert _type_of(f) == "unknown"
+
+    def test_mmproj_is_still_mmproj(self, tmp_path):
+        assert _type_of(_gguf(tmp_path / "m.gguf", "clip")) == "mmproj"
+
+
+class TestChatRefusal:
+    @pytest.mark.parametrize("arch,what", [
+        ("eagle3", "draft head"), ("dflash", "draft head"), ("gemma4-assistant", "draft head"),
+        ("dream", "diffusion language model"), ("llada", "diffusion language model"),
+        ("t5", "encoder-decoder"), ("wavtokenizer-dec", "audio codec"),
+        ("qwen3tts", "text-to-speech"),
+    ])
+    def test_message_names_the_architecture_and_what_it_is(self, arch, what):
+        msg = gguf_chat_refusal(arch)
+        assert f"'{arch}'" in msg and what in msg
+
+    @pytest.mark.parametrize("arch", CHAT_ARCHITECTURES + EMBEDDING_ARCHITECTURES + ["clip", "", None])
+    def test_no_refusal_for_anything_else(self, arch):
+        assert gguf_chat_refusal(arch) is None
+
+    def test_architecture_reader(self, tmp_path):
+        assert gguf_architecture(_gguf(tmp_path / "m.gguf", "qwen3next")) == "qwen3next"
+        assert gguf_architecture(tmp_path / "missing.gguf") is None
+
+
+class TestBackendRefusesBeforeLoading:
+    @pytest.mark.parametrize("arch", ["eagle3", "llada", "t5", "wavtokenizer-dec"])
+    def test_load_raises_before_any_vram_probe_or_worker(self, tmp_path, monkeypatch, arch):
+        f = _gguf(tmp_path / "m.gguf", arch)
+        backend = GgufBackend(str(f))
+        for hook in ("_check_vram", "_load_native", "_effective_gpu_layers"):
+            monkeypatch.setattr(backend, hook, lambda *a, **k: pytest.fail(
+                f"{hook} ran for a model that cannot chat"))
+        with pytest.raises(UnsupportedModelRoleError) as caught:
+            backend.load()
+        assert f"'{arch}'" in str(caught.value)
+        assert "setup-llama" not in str(caught.value)
+
+
+class TestUnknownArchitectureLoadMessage:
+    NATIVE_TAIL = (
+        "Failed to load model: m.gguf\n"
+        "llama_model_load: error loading model: error loading model architecture: "
+        "unknown model architecture: 'qwen9next'\n")
+
+    def test_names_the_architecture_and_blames_the_runtime_age_not_the_install(self):
+        msg = _load_failure_message(RuntimeError(self.NATIVE_TAIL))
+        assert "'qwen9next'" in msg
+        assert "newer than the runtime" in msg
+        assert "Provision or repair" not in msg
+        assert "setup-llama --tag latest" in msg
+
+    def test_other_runtime_errors_keep_the_repair_advice(self):
+        msg = _load_failure_message(RuntimeError("Failed to load model: m.gguf"))
+        assert "Provision or repair it" in msg

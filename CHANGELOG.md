@@ -249,6 +249,27 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **Models you already have on disk are found where LM Studio and llama.cpp keep them.**
+  `localm add <folder>` and the models-folder scan now look inside subfolders (as far
+  as the Folder import depth setting allows, three levels by default, so LM Studio's
+  `publisher/repo/file.gguf` is covered) and register HuggingFace safetensors model
+  folders as well as GGUF files; before, a safetensors model was only found when you
+  pointed at its own folder, and the automatic scan only saw files sitting directly in
+  the models folder. A folder import also reads each GGUF's own header: a vision
+  projector is no longer listed as a chat model, an embedding model is listed as one,
+  and the model's architecture is recorded. A `.GGUF` file with an upper-case
+  extension is recognised.
+- **GGUF files that are not chat models are no longer listed as chat models.** Draft
+  heads for speculative decoding (EAGLE3, DFlash, Gemma 4 assistant), diffusion
+  language models (Dream, LLaDA, RND1), T5 encoder-decoder models, text-to-speech
+  models (Qwen3-TTS) and the WavTokenizer codec now show as type `unknown` and say what they are if you try to load one,
+  instead of failing in the runtime. `llama-embed` models and any encoder that declares
+  non-causal attention are recognised as embedding models, and openPangu-Embedded,
+  which is a chat model, is no longer mistaken for an embedding model.
+- **A model newer than the bundled llama.cpp now says so.** When the runtime does not
+  know a model's architecture, the error names the architecture and says the model is
+  newer than the runtime (with `localm setup-llama --tag latest` to try a newer build),
+  instead of telling you to repair the runtime.
 - **Setup can pick up after being interrupted, on every platform.** `setup.sh`,
   `setup.bat` and the graphical installer keep a short journal of the steps they have
   started and finished. Run again after Ctrl+C, a closed window or a crash, setup says

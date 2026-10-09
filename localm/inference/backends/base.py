@@ -180,6 +180,13 @@ class PretokenizerUnusableModelError(RuntimeError):
     """
 
 
+class UnsupportedModelRoleError(RuntimeError):
+    """Raised by a load when the file is a model localm cannot chat with (a
+    speculative-decoding draft head, a diffusion language model, an
+    encoder-decoder model, an audio codec). The message says which and is
+    reported as-is, with no runtime-repair advice appended."""
+
+
 class ModelLoadCancelled(Exception):
     """Raised by ``load()`` when an in-flight model load was aborted because a
     newer model selection superseded it (preemptive model switching).
