@@ -516,10 +516,11 @@ def test_a_pyproject_change_outside_the_requirement_lists_affects_every_test(dep
     assert _everything(mod, _select(mod, ["pyproject.toml"]), "pyproject.toml")
 
 
-def test_a_ruff_config_change_selects_no_test(dep_repo):
+def test_a_ruff_config_change_selects_only_the_tests_naming_pyproject(dep_repo):
     mod, root = dep_repo
     _edit(root, "pyproject.toml", 'select = ["F"]', 'select = ["F", "B"]')
-    assert _select(mod, ["pyproject.toml"]) == {}
+    assert _select(mod, ["pyproject.toml"]) == {
+        "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
 
 
 def test_a_lock_change_outside_the_packages_affects_every_test(dep_repo):
