@@ -128,6 +128,28 @@ test("a loaded base whose attached set differs from what it runs asks for a relo
   assert.match(b[0].textContent, /reload/);
 });
 
+test("a base running under another of its names counts as live and shows its adapters", async () => {
+  const base = {
+    ...BASE, loaded: false, adapter_resident: true,
+    adapters: [{ name: "tone-lora", file: "tone-lora.gguf", scale: 0.8 }],
+    applied_adapters: [{ name: "tone-lora.gguf", scale: 0.8 }],
+  };
+  const { window } = await boot([base]);
+  const b = badges(window, "qwen3-0.6b");
+  assert.equal(b.length, 1);
+  assert.ok(b[0].classList.contains("adapter-active"));
+});
+
+test("a base running under another of its names with different adapters asks for a reload", async () => {
+  const base = {
+    ...BASE, loaded: false, adapter_resident: true,
+    adapters: [{ name: "tone-lora", file: "tone-lora.gguf", scale: 0.8 }],
+    applied_adapters: [],
+  };
+  const { window } = await boot([base]);
+  assert.match(badges(window, "qwen3-0.6b")[0].textContent, /reload/);
+});
+
 test("a loaded base still running an adapter that was since detached asks for a reload", async () => {
   const base = { ...BASE, loaded: true, applied_adapters: [{ name: "tone-lora.gguf", scale: 1 }] };
   const { window } = await boot([base]);

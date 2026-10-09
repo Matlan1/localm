@@ -1523,7 +1523,7 @@ def names_same_model(a: str, b: str, reg: Optional[dict] = None) -> bool:
         return False
     try:
         return str(Path(pa).resolve()) == str(Path(pb).resolve())
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 

@@ -21,7 +21,8 @@ from localm.inference.http_server import (principal_id, require_fs_host,
 import localm.inference.http_server as _hs
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import (ModelRouteContext,
-                                                       _require_registered)
+                                                       _require_registered,
+                                                       resident_engine)
 from localm.plugins.gui.web import (LoadModelRequest, ScanRequest,
                                     UnloadModelRequest)
 
@@ -29,11 +30,13 @@ from localm.plugins.gui.web import (LoadModelRequest, ScanRequest,
 def _adapter_maps(registry: dict, row_names: list) -> tuple:
     """Adapter facts for the model list, computed off the event loop.
 
-    Returns ``(adapter_info, attached_to)``: *adapter_info* maps each GGUF LoRA
-    adapter's name to its ``adapter`` / ``base`` / ``scale`` row fields, and
-    *attached_to* maps each non-adapter row name to the adapters applied
+    Returns ``(adapter_info, attached_to, resident)``: *adapter_info* maps each
+    GGUF LoRA adapter's name to its ``adapter`` / ``base`` / ``scale`` row
+    fields, *attached_to* maps each non-adapter row name to the adapters applied
     whenever it loads, as ``{"name", "file", "scale"}`` (an adapter attached to
-    any registered name of the same model file counts)."""
+    any registered name of the same model file counts, and one adapter file
+    counts once), and *resident* maps each of those row names to the loaded
+    engine that runs its file under any name."""
     from pathlib import Path as _P
 
     from localm.model_manager import (list_adapters, names_same_model)
@@ -48,17 +51,20 @@ def _adapter_maps(registry: dict, row_names: list) -> tuple:
                 info["scale"] = a["scale"]
         adapter_info[a["name"]] = info
     attached_to: dict = {}
+    seen: dict = {}
     for a in adapters:
         if not a["base"]:
             continue
         for name in row_names:
-            if name in adapter_info:
+            if name in adapter_info or a["path"] in seen.get(name, ()):
                 continue
             if name == a["base"] or names_same_model(name, a["base"], registry):
+                seen.setdefault(name, set()).add(a["path"])
                 attached_to.setdefault(name, []).append(
                     {"name": a["name"], "file": _P(str(a["path"])).name,
                      "scale": a["scale"]})
-    return adapter_info, attached_to
+    resident = {name: resident_engine(name, registry) for name in attached_to}
+    return adapter_info, attached_to, resident
 
 
 def register(app: FastAPI, context: ModelRouteContext) -> None:
@@ -164,7 +170,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
          context_lens, tool_caps) = await loop.run_in_executor(
             get_plugin_executor(), _probe_rows)
 
-        adapter_info, attached_to = await loop.run_in_executor(
+        adapter_info, attached_to, resident = await loop.run_in_executor(
             get_plugin_executor(), _adapter_maps, registry,
             [name for name, _e, _m, _p in rows])
 
@@ -225,7 +231,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 row_out.update(adapter_info[name])
             elif attached_to.get(name):
                 row_out["adapters"] = attached_to[name]
-                applied = getattr(engine, "applied_adapters", None) if loaded else None
+                live = engine if loaded else resident.get(name)
+                if live is not None and not loaded:
+                    row_out["adapter_resident"] = True
+                applied = getattr(live, "applied_adapters", None) if live is not None else None
                 if isinstance(applied, list):
                     row_out["applied_adapters"] = applied
             elif loaded and engine is not None:

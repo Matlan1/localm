@@ -36,6 +36,33 @@ class ModelRouteContext:
                    jobs=ctx.jobs)
 
 
+def resident_engine(model: str, registry: dict):
+    """The loaded engine in this process that runs the model file registered as
+    *model*, under any of its names (a registered alias, or a name another
+    process has since renamed), or None. A path that cannot be resolved counts
+    as resident, because it cannot be ruled out. Does filesystem I/O; callers
+    on the event loop use the executor."""
+    from pathlib import Path
+
+    import localm.inference.http_server as _hs
+    from localm.model_manager import _entry_path, names_same_model
+    model_path = _entry_path(registry.get(model))
+    for key, engine in list(_hs._engines.items()):
+        if not getattr(engine, "loaded", False):
+            continue
+        try:
+            if names_same_model(key, model, registry):
+                return engine
+            engine_path = getattr(engine, "model_path", None)
+            if engine_path is None or model_path is None:
+                continue
+            if Path(str(engine_path)).resolve() == Path(model_path).resolve():
+                return engine
+        except (OSError, ValueError):
+            return engine
+    return None
+
+
 def _require_registered(model: str, registry: dict | None = None) -> dict:
     """Raise 404 unless *model* is in the registry. Returns the registry, so a
     caller that needs it afterward (model_alias) doesn't load it twice."""
