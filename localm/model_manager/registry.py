@@ -1804,9 +1804,9 @@ def sync_models_dir(prune: Optional[bool] = None, *,
     directories (``config.json`` plus weights or a tokenizer) - and registers
     them. The scan descends ``import_max_depth`` folder levels (at least two),
     skips folders whose name starts with a dot, and treats a HuggingFace model
-    directory as one model without looking inside it. A GGUF whose mtime is too fresh (may still be mid-copy) is skipped
-    for this call and picked up on a later one, once it has been quiet for a
-    bit - see ``_gguf_recently_written``.
+    directory as one model without looking inside it. A GGUF whose mtime is too
+    fresh (may still be mid-copy) is skipped for this call and picked up on a
+    later one, once it has been quiet for a bit - see ``_gguf_recently_written``.
 
     Registry entries whose file has gone missing are, by default, **flagged**
     (``"missing": true``) rather than deleted, so a temporarily-unavailable model
