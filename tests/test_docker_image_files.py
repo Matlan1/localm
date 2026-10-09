@@ -313,7 +313,9 @@ class TestWorkflow:
         assert wf["permissions"] == {}
         writers = {name: job["permissions"] for name, job in wf["jobs"].items()
                    if any(v == "write" for v in job["permissions"].values())}
-        assert writers == {"publish": {"contents": "read", "packages": "write"}}
+        assert set(writers) == {"publish", "attest"}
+        assert writers["publish"] == {"contents": "read", "packages": "write"}
+        assert wf["jobs"]["attest"]["needs"] == "publish"
 
     def test_pull_requests_only_run_for_docker_paths_and_never_publish(self):
         wf = _workflow()
