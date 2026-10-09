@@ -56,14 +56,14 @@ def _annotate(level: str, message: str) -> None:
         print(f"::{level}::{message}")
 
 
-def _summarise(lines: "list[str]") -> None:
+def _summarise(lines: list[str]) -> None:
     try:
         ci_runner_files.append(ci_runner_files.STEP_SUMMARY, "\n".join(lines) + "\n")
     except OSError as e:
         print(f"(could not write the step summary: {e})")
 
 
-def run_canary(query: str = DEFAULT_QUERY) -> "list[dict]":
+def run_canary(query: str = DEFAULT_QUERY) -> list[dict]:
     """One real search per service localm's search uses: each service of the
     built-in chain separately, or the configured SearXNG instance
     (``localm.web_retrieval.providers.provider_from_config``). Returns one
@@ -94,7 +94,7 @@ def run_canary(query: str = DEFAULT_QUERY) -> "list[dict]":
     return out
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--query", default=DEFAULT_QUERY,

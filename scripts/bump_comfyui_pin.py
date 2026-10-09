@@ -82,7 +82,7 @@ class Refused(Exception):
 #  Evidence                                                                    #
 # --------------------------------------------------------------------------- #
 
-def load_receipt(path: Path, tag: str, commit: str, require: "tuple[str, ...]") -> dict:
+def load_receipt(path: Path, tag: str, commit: str, require: tuple[str, ...]) -> dict:
     """The receipt dict, validated: it must be for exactly *tag* AND *commit*,
     and every ``require``d check must report PASS.
 
@@ -142,7 +142,7 @@ def _forward_only(current_tag: str, target_tag: str) -> None:
 #  Rewrites (pure text -> text)                                                #
 # --------------------------------------------------------------------------- #
 
-def _replace_once(pattern: "re.Pattern", text: str, repl, what: str) -> str:
+def _replace_once(pattern: re.Pattern, text: str, repl, what: str) -> str:
     matches = list(pattern.finditer(text))
     if len(matches) != 1:
         raise Refused(f"{what}: expected exactly one match, found {len(matches)}; "
@@ -169,7 +169,7 @@ def rewrite(text: str, tag: str, commit: str) -> str:
 #  Entry point                                                                 #
 # --------------------------------------------------------------------------- #
 
-def _read(path: Path) -> "tuple[str, str]":
+def _read(path: Path) -> tuple[str, str]:
     """(text with LF newlines, the newline sequence the file uses)."""
     data = path.read_bytes().decode("utf-8")
     newline = "\r\n" if "\r\n" in data else "\n"

@@ -28,7 +28,7 @@ def _js_text() -> str:
     return _SETTINGS_JS.read_text(encoding="utf-8")
 
 
-def _key_scope_values() -> "list[str]":
+def _key_scope_values() -> list[str]:
     """The scope VALUES (not labels) offered as checkboxes, in document order."""
     text = _js_text()
     m = re.search(r"export const KEY_SCOPES = \[(.*?)\n\];", text, re.S)
@@ -36,7 +36,7 @@ def _key_scope_values() -> "list[str]":
     return re.findall(r'\["([^"]+)",', m.group(1))
 
 
-def _privileged_key_scopes() -> "set[str]":
+def _privileged_key_scopes() -> set[str]:
     text = _js_text()
     m = re.search(
         r"export const PRIVILEGED_KEY_SCOPES = new Set\(\[(.*?)\]\);", text, re.S)
