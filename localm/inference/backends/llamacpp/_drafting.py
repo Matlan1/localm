@@ -22,6 +22,7 @@ cache that cannot drop a rejected draft through rewind_unsupported.
 """
 from __future__ import annotations
 
+import weakref
 from typing import List, Optional
 
 
@@ -81,13 +82,19 @@ class MtpSource(DraftSource):
     Every call delegates to the MTP state and methods on the LlamaCpp instance,
     so the ``mtp_*`` attributes there stay the record of what the reply did.
     The draft sampler is a greedy chain made by begin_call and freed by end_call.
+    The instance is held through a weak reference, so a model that keeps its
+    source is still finalized when its last reference goes.
     """
 
     name = "mtp"
 
     def __init__(self, llm) -> None:
-        self._llm = llm
+        self._llm_ref = weakref.ref(llm)
         self._sampler = None
+
+    @property
+    def _llm(self):
+        return self._llm_ref()
 
     def begin_call(self) -> bool:
         from .llama import _greedy_chain

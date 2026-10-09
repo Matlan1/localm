@@ -129,7 +129,8 @@ def test_a_source_that_raises_stops_drafting_and_the_reply_completes():
     assert tokens == _reference(PROMPT, 20)
     src = llm._source
     assert src.status == "draft-decode-error:ValueError"
-    assert [c for c in src.calls if isinstance(c, tuple) and c[0] == "propose"][-1][1] >= 10
+    late = [c for c in src.calls if isinstance(c, tuple) and c[0] == "propose" and c[1] >= 10]
+    assert len(late) == 1, "the source was asked again after it failed"
     assert src.calls[-1] == "end_call"
 
 
@@ -169,6 +170,25 @@ def test_the_base_source_never_drafts():
     assert src.drafting() is False
     assert src.propose(1, 0, 4) == []
     assert src.extra_vram_bytes() == 0
+
+
+def test_a_model_holding_its_mtp_source_is_finalized_when_dropped():
+    import gc
+    import weakref
+    from localm.inference.backends.llamacpp.llama import LlamaCpp
+
+    llm = LlamaCpp.__new__(LlamaCpp)
+    llm.close = lambda: None
+    llm._draft_source()
+    gone = weakref.ref(llm)
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        del llm
+        assert gone() is None, "the model and its draft source form a reference cycle"
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 def test_an_mtp_model_gets_the_mtp_source_once():
