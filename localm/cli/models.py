@@ -621,7 +621,7 @@ def spec_drafts(model):
             continue
         fits.append((gguf_file_bytes(path), name))
     if not fits:
-        console.print(f"No downloaded model shares {escape(model)}'s vocabulary. "
+        console.print(f"No downloaded causal chat model shares {escape(model)}'s vocabulary. "
                       "A smaller model of the same family usually does.")
         return
     from rich.table import Table

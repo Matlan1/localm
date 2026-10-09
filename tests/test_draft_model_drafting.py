@@ -523,6 +523,35 @@ def test_a_probe_without_a_rejection_resets_the_back_off():
     assert [i for i, k in enumerate(lengths) if k] == [0, 65, 98, 163]
 
 
+def test_a_probe_after_which_drafting_pays_resets_the_back_off_and_a_reply_restarts_it():
+    from localm.inference.backends.llamacpp._stepcosts import ACCEPTANCE_PROBE_EVERY
+    costs = _costs(verify={2: 1.581, 3: 2.0, 5: 2.6, 9: 4.6}, draft=0.0)
+    assert costs.best_length(0.6, 8) == 0 and costs.best_length(0.7, 8) > 0
+    llm = _measured_llama(draft_max=8, costs=costs)
+    src = llm._source
+    llm._cached_tokens = list(range(20))
+    src._tokens = list(range(20))
+    k = src.budget(20, None)
+    assert k == 4 and src._probing
+    src.on_verify(k, k - 1)
+    assert src._probe_every == ACCEPTANCE_PROBE_EVERY
+    src._probe_every = 4 * ACCEPTANCE_PROBE_EVERY
+    src.begin_call()
+    assert src._probe_every == ACCEPTANCE_PROBE_EVERY
+
+
+def test_a_full_accept_does_not_carry_into_the_next_reply_or_past_a_pause():
+    llm = _measured_llama()
+    src = llm._source
+    src.on_verify(4, 4)
+    assert src._hot is True
+    src.begin_call()
+    assert src._hot is False
+    src.on_verify(4, 4)
+    src.on_paused_step()
+    assert src._hot is False
+
+
 def test_the_steps_held_back_are_counted_per_reply():
     llm = _marginal_llama()
     src = llm._source
@@ -626,27 +655,31 @@ def test_observed_step_times_correct_the_measured_costs():
     assert src.step_cost(3) == pytest.approx(0.3 + 1.6)
     src.on_step_seconds(3, 1.9 + 0.35)
     assert src.step_cost(3) == pytest.approx(1.9 + 0.2 * 0.35)
-    assert src._draft_over_s == pytest.approx(0.2 * 0.35 / 3)
-    assert src.step_cost(1) == pytest.approx(0.1 + 1.2 + 0.2 * 0.35 / 3)
+    assert src.drafting_overhead() == pytest.approx((0.2 * 0.35, 0.0))
+    assert src.step_cost(1) == pytest.approx(0.1 + 1.2 + 0.2 * 0.35)
     for _ in range(60):
         src.on_step_seconds(3, 1.9 + 0.35)
         src.on_step_seconds(0, 1.0 + 0.4)
     assert src.step_cost(3) == pytest.approx(1.9 + 0.35)
     assert src.step_cost(0) == pytest.approx(1.4)
     assert src._step_over_s == pytest.approx(0.4, rel=1e-4)
-    assert src._draft_over_s < 0
+    assert src.drafting_overhead() == (0.0, 0.0)
     assert src.step_cost(8) == pytest.approx(0.8 + 2.6 + 0.4, rel=1e-4)
 
 
-def test_a_step_overhead_is_charged_once_and_the_rest_per_draft():
+def test_the_drafting_overhead_is_fitted_as_fixed_plus_per_draft():
     llm = _measured_llama(costs=_costs(draft=0.1))
     src = llm._source
     for _ in range(80):
         src.on_step_seconds(0, 1.0 + 0.1)
-        src.on_step_seconds(2, 0.2 + 1.4 + 0.1 + 2 * 0.3)
+        src.on_step_seconds(2, 0.2 + 1.4 + 0.1 + 0.6)
     assert src._step_over_s == pytest.approx(0.1)
-    assert src._draft_over_s == pytest.approx(0.3)
-    assert src.step_cost(4) == pytest.approx(0.4 + 1.8 + 0.1 + 4 * 0.3)
+    assert src.drafting_overhead() == pytest.approx((0.6, 0.0))
+    assert src.step_cost(4) == pytest.approx(0.4 + 1.8 + 0.1 + 0.6)
+    for _ in range(80):
+        src.on_step_seconds(4, 0.4 + 1.8 + 0.1 + 1.2)
+    assert src.drafting_overhead() == pytest.approx((0.0, 0.3), abs=1e-6)
+    assert src.step_cost(6) == pytest.approx(0.6 + 2.2 + 0.1 + 6 * 0.3)
 
 
 def test_a_plain_steps_overhead_does_not_price_a_moe_target_out_of_drafting():
@@ -667,7 +700,7 @@ def test_a_step_faster_than_measured_never_makes_an_unseen_length_cheaper():
     for _ in range(30):
         src.on_step_seconds(2, 0.5)
         src.on_step_seconds(0, 0.5)
-    assert src._step_over_s < 0 and src._draft_over_s < 0
+    assert src._step_over_s < 0 and src.drafting_overhead() == (0.0, 0.0)
     assert src.step_cost(2) < 1.4
     assert src.step_cost(5) == pytest.approx(0.5 + 2.0)
 
@@ -679,23 +712,21 @@ def test_step_times_are_ignored_without_measured_costs_or_a_time():
     src.on_step_seconds(2, 5.0)
     src.costs = _costs()
     src.on_step_seconds(2, 0.0)
-    assert src._observed == {}
-    assert (src._step_over_s, src._draft_over_s) == (0.0, 0.0)
+    assert src._observed == {} and src._step_over_s == 0.0
 
 
-def test_per_draft_overhead_seen_while_drafting_shortens_the_drafts():
-    llm = _measured_llama(costs=_costs(draft=0.05))
+def test_a_fixed_drafting_overhead_seen_at_short_lengths_does_not_price_out_long_drafts():
+    from localm.inference.backends.llamacpp._stepcosts import best_length
+    moe = _costs(target=0.0074, verify={2: 0.0097, 3: 0.0121, 5: 0.0207, 9: 0.0294}, draft=0.0)
+    llm = _measured_llama(costs=moe)
     src = llm._source
-    llm._cached_tokens = list(range(20))
-    src._tokens = list(range(20))
-    for _ in range(30):
-        src.on_verify(6, 5)
-    p = src.acceptance()
-    assert src.costs.best_length(p, 8) == 4
     for _ in range(40):
-        src.on_step_seconds(8, 0.4 + 2.6 + 8 * 0.25)
-    assert src.step_cost(0) == pytest.approx(1.0)
-    assert 0 < src.budget(20, None) < 4
+        src.on_step_seconds(0, 0.0077)
+        src.on_step_seconds(1, 0.0115)
+        src.on_step_seconds(2, 0.0138)
+    fixed, per_draft = src.drafting_overhead()
+    assert per_draft == 0.0 and fixed == pytest.approx(0.00145, abs=1e-4)
+    assert best_length(0.95, 8, src.step_cost) == 8
 
 
 def test_a_step_with_a_long_catch_up_is_not_timed():
@@ -776,7 +807,7 @@ def test_the_loop_reports_each_steps_time_and_drafts_to_the_source():
         replay.on_step_seconds(k, s)
     assert src._observed == pytest.approx(replay._observed)
     assert src._step_over_s == pytest.approx(replay._step_over_s)
-    assert src._draft_over_s == pytest.approx(replay._draft_over_s)
+    assert src.drafting_overhead() == pytest.approx(replay.drafting_overhead())
 
 
 @pytest.mark.parametrize("wrong", [(), (8, 9, 14), tuple(range(7, 40, 3))])
@@ -1385,7 +1416,9 @@ def test_no_charge_for_a_draft_model_beside_an_encoder_decoder_model(tmp_path):
     for arch in ("qwen2", "t5"):
         target = _vocab_gguf(tmp_path / ("m-%s.gguf" % arch), tokens, arch=arch)
         b = GgufBackend(str(target), spec_source="draft", spec_draft_model=str(draft), n_ctx=2048)
-        with patch("localm.model_manager.gguf.gguf_kv_bytes_per_token", return_value=1000),              patch("localm.model_manager.gguf._gguf_split_layout_meta", return_value=(2, 40)),              patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=0):
+        with patch("localm.model_manager.gguf.gguf_kv_bytes_per_token", return_value=1000), \
+             patch("localm.model_manager.gguf._gguf_split_layout_meta", return_value=(2, 40)), \
+             patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=0):
             charges[arch] = b._draft_model_charge_bytes()
     assert charges["qwen2"] > 0 and charges["t5"] == 0
 
@@ -1586,7 +1619,7 @@ def test_spec_drafts_says_so_when_nothing_fits(cli_runner, tmp_path):
          patch("localm.model_manager.load_registry", return_value=registry):
         res = cli_runner.invoke(models_mod.main, ["spec-drafts", "big"])
     assert res.exit_code == 0, res.output
-    assert "No downloaded model shares" in res.output
+    assert "No downloaded causal chat model shares" in res.output
 
 
 # --------------------------------------------------------------------------- #

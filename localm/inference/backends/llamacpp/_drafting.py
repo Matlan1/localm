@@ -26,7 +26,7 @@ begin_call. ``report`` describes the model's state and the last reply.
 from __future__ import annotations
 
 import weakref
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ._stepcosts import (
     ACCEPTANCE_DECAY, ACCEPTANCE_PRIOR_ACCEPTED, ACCEPTANCE_PRIOR_REJECTED,
@@ -106,10 +106,11 @@ class DraftSource:
         """Record that a step of this reply took *seconds*, from before its
         proposal until the next token was in hand and without the time spent
         in the consumer, and verified *drafted* drafts: 0 for a step that
-        decoded one token without proposing any, None for a step whose time
-        does not stand for its length (a proposal or verification that
-        failed, a proposal that drafted nothing, a step that grew the
-        context)."""
+        decoded one token without proposing any (for a ``free_miss`` source
+        also one whose proposal failed or drafted nothing), None for a step
+        whose time does not stand for its length (a verification that failed,
+        a step that grew the context, and for any other source a proposal
+        that failed or drafted nothing)."""
 
     def rewind_unsupported(self) -> None:
         pass
@@ -152,8 +153,9 @@ class CountedSource(DraftSource):
     ``on_step_seconds`` and ``choose_length`` picks the draft length. The
     acceptance is estimated separately for a step right after one that
     verified every draft it proposed ("after a full accept") and for any other
-    step. The estimates, the probing schedule and the observed figures live
-    for the model's life. A subclass needs ``_llm`` for ``cap_drafts``.
+    step. The estimates and the observed figures live for the model's life;
+    the probe interval restarts at ``ACCEPTANCE_PROBE_EVERY`` each reply. A
+    subclass needs ``_llm`` for ``cap_drafts``.
     """
 
     label = "drafting"
@@ -175,7 +177,7 @@ class CountedSource(DraftSource):
         self.costs: Optional[StepCosts] = None
         self._observed: Dict[int, float] = {}
         self._step_over_s = 0.0
-        self._draft_over_s = 0.0
+        self._drafting_fit: Optional[Tuple[float, float]] = None
         # Decayed [accepted drafts, rejections], keyed by "after a full accept".
         self._evidence: Dict[bool, List[float]] = {False: [0.0, 0.0], True: [0.0, 0.0]}
         self._hot = False
@@ -193,6 +195,9 @@ class CountedSource(DraftSource):
         self.steps = 0
         self.paused_steps = 0
         self.held_steps = 0
+        self._hot = False
+        self._probing = False
+        self._probe_every = ACCEPTANCE_PROBE_EVERY
 
     def skip_call(self, reason: str) -> None:
         self.reset_call(reason if self.usable else "")
@@ -237,8 +242,10 @@ class CountedSource(DraftSource):
     def on_verify(self, drafted: int, accepted: int) -> None:
         """Count a verification of *drafted* drafts of which *accepted* were
         kept, and fold it into the acceptance evidence of the state its length
-        was chosen in. A probe that had a rejection doubles the probe interval
-        up to ``ACCEPTANCE_PROBE_MAX_EVERY``; one without resets it."""
+        was chosen in. After a probe, the probe interval goes back to
+        ``ACCEPTANCE_PROBE_EVERY`` when the probe had no rejection or drafting
+        now pays at the updated ``acceptance``, else it doubles, up to
+        ``ACCEPTANCE_PROBE_MAX_EVERY``."""
         self.steps += 1
         self.drafted += drafted
         self.accepted += accepted
@@ -248,14 +255,17 @@ class CountedSource(DraftSource):
         evidence[0] = evidence[0] * ACCEPTANCE_DECAY + accepted
         evidence[1] = evidence[1] * ACCEPTANCE_DECAY + (1.0 if rejected else 0.0)
         if self._probing:
-            self._probe_every = (min(2 * self._probe_every, ACCEPTANCE_PROBE_MAX_EVERY)
-                                 if rejected else ACCEPTANCE_PROBE_EVERY)
+            pays = (self.costs is not None
+                    and best_length(self.acceptance(), self.draft_max, self.step_cost) > 0)
+            self._probe_every = (ACCEPTANCE_PROBE_EVERY if pays or not rejected
+                                 else min(2 * self._probe_every, ACCEPTANCE_PROBE_MAX_EVERY))
             self._probing = False
         self._hot = drafted > 0 and not rejected
         self._since_probe = 0
 
     def on_paused_step(self) -> None:
         self.paused_steps += 1
+        self._hot = False
 
     def rewind_unsupported(self) -> None:
         self.disable("rewind-unsupported")
@@ -275,16 +285,46 @@ class CountedSource(DraftSource):
         accepted, rejected = self._evidence[True]
         return (accepted + weight * p) / (accepted + rejected + weight)
 
+    def drafting_overhead(self) -> Tuple[float, float]:
+        """``(fixed, per_draft)``: the seconds a drafting step takes beyond
+        its measured decodes and the overhead of every step, as ``fixed +
+        per_draft * k``, fitted by least squares to the running figures of the
+        draft lengths seen so far. With one length seen, ``per_draft`` is 0;
+        with none, both are 0; each is never below 0. Requires ``costs``."""
+        if self._drafting_fit is None:
+            costs = self.costs
+            if costs is None:
+                raise RuntimeError("step costs are not measured")
+            base = max(0.0, self._step_over_s)
+            points = [(k, s - costs.step_cost(k) - base)
+                      for k, s in self._observed.items() if k > 0]
+            fixed = per_draft = 0.0
+            if len(points) == 1:
+                fixed = points[0][1]
+            elif points:
+                n = len(points)
+                mean_k = sum(k for k, _ in points) / n
+                mean_e = sum(e for _, e in points) / n
+                spread = sum((k - mean_k) ** 2 for k, _ in points)
+                per_draft = max(0.0, sum((k - mean_k) * (e - mean_e)
+                                         for k, e in points) / spread)
+                fixed = mean_e - per_draft * mean_k
+            self._drafting_fit = (max(0.0, fixed), per_draft)
+        return self._drafting_fit
+
     def modelled_step_cost(self, drafted: int) -> float:
         """Seconds of a step drafting *drafted*: the measured ``costs`` plus
-        the estimated seconds every step takes beyond them and, per draft, the
-        estimated seconds a draft adds beyond that (each never below 0).
+        the estimated seconds every step takes beyond them (never below 0)
+        and, for a drafting step, ``drafting_overhead`` at that length.
         Raises RuntimeError without ``costs``."""
         costs = self.costs
         if costs is None:
             raise RuntimeError("step costs are not measured")
-        return (costs.step_cost(drafted) + max(0.0, self._step_over_s)
-                + max(0.0, self._draft_over_s) * max(0, drafted))
+        cost = costs.step_cost(drafted) + max(0.0, self._step_over_s)
+        if drafted > 0:
+            fixed, per_draft = self.drafting_overhead()
+            cost += fixed + per_draft * drafted
+        return cost
 
     def step_cost(self, drafted: int) -> float:
         """Seconds of a step drafting *drafted*: the running figure of the
@@ -297,23 +337,19 @@ class CountedSource(DraftSource):
         """Fold a step's *seconds*, clipped to within ``OBSERVED_COST_CLIP``
         times the running figure for its length, into that figure, which
         starts at ``step_cost`` and moves ``OBSERVED_COST_WEIGHT`` of the way
-        to each new time, and into the overhead estimates of
-        ``modelled_step_cost``: a plain step's time beyond the measured
-        one-token decode is the overhead of every step, and a drafting step's
-        time beyond its measured decodes and that overhead, divided by its
-        drafts, the overhead of a draft. Ignored without ``costs``, for
-        *drafted* None or for a time of 0 or less."""
+        to each new time; a plain step's time beyond the measured one-token
+        decode also moves the overhead of every step the same way, and the
+        ``drafting_overhead`` fit is redone from the figures. Ignored without
+        ``costs``, for *drafted* None or for a time of 0 or less."""
         if drafted is None or self.costs is None or seconds <= 0.0:
             return
         before = self.step_cost(drafted)
         seconds = min(max(seconds, before / OBSERVED_COST_CLIP), before * OBSERVED_COST_CLIP)
-        extra = seconds - self.costs.step_cost(drafted)
         if drafted <= 0:
+            extra = seconds - self.costs.step_cost(0)
             self._step_over_s += OBSERVED_COST_WEIGHT * (extra - self._step_over_s)
-        else:
-            per = (extra - max(0.0, self._step_over_s)) / drafted
-            self._draft_over_s += OBSERVED_COST_WEIGHT * (per - self._draft_over_s)
         self._observed[drafted] = before + OBSERVED_COST_WEIGHT * (seconds - before)
+        self._drafting_fit = None
 
     @property
     def _llm(self) -> Any:
@@ -338,8 +374,9 @@ class CountedSource(DraftSource):
         ``best_length`` under ``step_cost`` at the ``acceptance`` of the
         step's state (after a full accept when the step before verified every
         draft it proposed). When that is 0 and this method has given 0 for
-        at least the probe interval (``ACCEPTANCE_PROBE_EVERY`` at first)
-        since the last verification, the length sized for
+        at least the probe interval (``ACCEPTANCE_PROBE_EVERY`` at the start
+        of a reply) since the last verification, or has not yet verified any
+        draft for the model, the length sized for
         ``ACCEPTANCE_PROBE_P`` instead (0 when none pays even there), so the
         acceptance is measured. 0 when
         ``length_pays`` refuses the length; each 0 counts in ``held_steps``,

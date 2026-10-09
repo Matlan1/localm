@@ -620,17 +620,21 @@ each verification weighing 0.9 of the evidence before it, kept separately for a
 step right after one whose drafts were all accepted, so a run of copied or easy
 text drafts long; that estimate starts from the other one and ages while it
 holds steps back. When the estimate says not to draft, a step after 32 held
-steps since the last verification drafts the length sized for p 0.9, if that
-length pays, so a draft that turns good is noticed; each such probe with a
-rejected draft doubles that interval, up to 256. `cost(k)` follows what steps
-actually take: the decode loop reports each step's seconds, and each length
-keeps a running figure that starts at its modelled cost and moves a fifth of the
-way to each new time, clipped to within 3 times the figure. A step whose
-proposal or verification failed, whose proposal drafted nothing, that grew the
-context, or, for a draft model, whose proposal first caught the draft cache up
-on more than 3 tokens, is not counted. A length not seen yet costs its measured
-`k * draft + verify(k + 1)` plus the overhead seen per plain step and per
-draft. The verification cost curve is what makes this model aware: a
+steps since the last verification (and the first held step of a model)
+drafts the length sized for p 0.9, if that length pays, so a draft that turns
+good is noticed; each such probe that had a rejection and after which
+drafting still does not pay doubles that interval for the rest of the reply,
+up to 256. `cost(k)` follows
+what steps actually take: the decode loop reports each step's seconds, and
+each length keeps a running figure that starts at its modelled cost and moves
+a fifth of the way to each new time, clipped to within 3 times the figure. A
+step whose verification failed or that grew the context is not counted; nor,
+for a draft model, is a step whose proposal failed, drafted nothing, or first
+caught the draft cache up on more than 3 tokens (for an n-gram source such a
+step counts as a plain step). A length not seen yet costs its measured
+`k * draft + verify(k + 1)`, plus the overhead seen per plain step and a
+drafting-step overhead fitted as fixed plus per draft to the lengths seen so
+far. The verification cost curve is what makes this model aware: a
 Mixture-of-Experts target, whose verification batch reads more experts per
 extra token, gets shorter drafts than a dense one, and a target whose experts
 sit in system RAM shorter still. A step skips drafting when catching the draft
