@@ -64,7 +64,7 @@ class MmapDecision(NamedTuple):
     ``use_mmap`` is True to force mmap, False to force it off, None to keep the
     runtime's own default (mmap on every device that supports it). ``reason``
     is one of ``"user_on"``, ``"user_off"``, ``"partial_offload"``,
-    ``"fits_ram"``, ``"exceeds_ram"``, ``"ram_unknown"`` or
+    ``"no_gpu"``, ``"fits_ram"``, ``"exceeds_ram"``, ``"ram_unknown"`` or
     ``"host_unknown"``. ``host_bytes`` is the weight bytes the load keeps in
     system RAM and ``ram_total``/``ram_available`` the RAM reading, each None
     when not known or not needed."""
@@ -1636,30 +1636,59 @@ class VramSizingMixin:
             return None
         return max(0, model_bytes - self._vram_model_bytes(n_cpu_moe))
 
-    def _resolve_use_mmap(self, gpu_layers: int) -> MmapDecision:
+    @staticmethod
+    def _layers_reach_a_gpu(gpu_readings) -> bool:
+        """Whether a load's GPU layers can land on a GPU: False when the native
+        runtime ships no GPU backend library
+        (``discover.native_backend_has_gpu``); else, on a build whose GPU index
+        space list_gpus cannot see (Vulkan, SYCL), whether the native device
+        registry lists a device; else whether *gpu_readings* (this load's
+        list_gpus reading) is non-empty."""
+        from localm import discover
+        if discover.native_backend_has_gpu() is False:
+            return False
+        if discover._native_gpu_index_space_is_opaque():
+            return bool(discover.native_gpu_devices())
+        return bool(gpu_readings)
+
+    def _resolve_use_mmap(self, gpu_layers: int, gpu_readings) -> MmapDecision:
         """This load's :class:`MmapDecision` for *gpu_layers* and the configured
         ``use_mmap`` (read via getattr, ``auto`` when absent), stored as
-        ``last_mmap_decision`` and logged at debug. System RAM is read only for
-        an auto load with every layer on the GPU. Never raises: a failure
-        computing the host-resident bytes yields ``host_unknown``."""
+        ``last_mmap_decision`` and logged at debug.
+
+        An auto load with *gpu_layers* at 99 whose layers cannot reach a GPU
+        (:meth:`_layers_reach_a_gpu` on *gpu_readings*, this load's list_gpus
+        reading) keeps the runtime default with reason ``no_gpu``. System RAM
+        is read only for an auto load with every layer on a GPU. Never raises:
+        a failing GPU check yields ``no_gpu`` and a failing host-resident byte
+        count ``host_unknown``."""
         setting = getattr(self, "use_mmap", "auto")
         full = gpu_layers >= self._DEFAULT_GPU_LAYERS
         mode = setting.strip().lower() if isinstance(setting, str) else ""
-        host = total = available = None
-        if full and mode not in ("on", "off"):
-            try:
-                host = self._host_resident_bytes()
-            except Exception as exc:
-                from localm.debuglog import logger as _dbg
-                _dbg.debug("mmap: host-resident byte count failed (%s)",
-                           type(exc).__name__)
-                host = None
-            if host is not None:
-                from localm.sysstats import system_ram
-                total, available = system_ram()
-        decision = decide_use_mmap(setting, full, host, total, available)
-        self.last_mmap_decision = decision
         from localm.debuglog import logger as _dbg
+        if mode in ("on", "off") or not full:
+            decision = decide_use_mmap(setting, full, None, None, None)
+        else:
+            try:
+                on_gpu = self._layers_reach_a_gpu(gpu_readings)
+            except Exception as exc:
+                _dbg.debug("mmap: GPU presence check failed (%s)", type(exc).__name__)
+                on_gpu = False
+            if not on_gpu:
+                decision = MmapDecision(None, "no_gpu")
+            else:
+                try:
+                    host = self._host_resident_bytes()
+                except Exception as exc:
+                    _dbg.debug("mmap: host-resident byte count failed (%s)",
+                               type(exc).__name__)
+                    host = None
+                total = available = None
+                if host is not None:
+                    from localm.sysstats import system_ram
+                    total, available = system_ram()
+                decision = decide_use_mmap(setting, True, host, total, available)
+        self.last_mmap_decision = decision
         _dbg.debug("mmap: use_mmap=%s -> %s (%s; host %s bytes, RAM available %s "
                    "of %s bytes)", setting, decision.use_mmap, decision.reason,
                    decision.host_bytes, decision.ram_available, decision.ram_total)

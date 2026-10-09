@@ -584,7 +584,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         # Whether the worker memory-maps the model file (VramSizingMixin.
         # _resolve_use_mmap): forced on, forced off, or the build's default.
-        mmap_decision = self._resolve_use_mmap(gpu_layers)
+        mmap_decision = self._resolve_use_mmap(gpu_layers, vram_before)
 
         # Record what this load applies, for the GUI's loaded-model status: the
         # auto override when computed, else the config ratios, else equal, through

@@ -83,6 +83,18 @@ class TestDecideUseMmap:
 #  The sizing layer: host-resident bytes from the real file, RAM read once    #
 # --------------------------------------------------------------------------- #
 
+GPU = [{"index": 0, "name": "GPU 0", "total": 24 * GIB, "free": 20 * GIB}]
+
+
+@pytest.fixture(autouse=True)
+def _gpu_runtime():
+    """A native runtime that ships a GPU backend, on a build whose GPU index
+    space list_gpus can see."""
+    with patch("localm.discover.native_backend_has_gpu", return_value=True), \
+         patch("localm.discover._native_gpu_index_space_is_opaque", return_value=False):
+        yield
+
+
 def _backend(path, **kw):
     return GgufBackend(str(path), n_ctx=64, **kw)
 
@@ -122,7 +134,7 @@ class TestResolveUseMmap:
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
         host = b._host_resident_bytes()
         with _ram(64 * GIB, host + HOST_RAM_HEADROOM_BYTES) as probe:
-            d = b._resolve_use_mmap(99)
+            d = b._resolve_use_mmap(99, GPU)
         assert d == MmapDecision(False, "fits_ram", host, 64 * GIB,
                                  host + HOST_RAM_HEADROOM_BYTES)
         assert b.last_mmap_decision == d
@@ -132,25 +144,25 @@ class TestResolveUseMmap:
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
         host = b._host_resident_bytes()
         with _ram(64 * GIB, host + HOST_RAM_HEADROOM_BYTES - 1):
-            d = b._resolve_use_mmap(99)
+            d = b._resolve_use_mmap(99, GPU)
         assert (d.use_mmap, d.reason, d.host_bytes) == (None, "exceeds_ram", host)
 
     def test_an_unreadable_ram_reading_keeps_mmap(self, tmp_path):
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
         with _ram(None, None):
-            d = b._resolve_use_mmap(99)
+            d = b._resolve_use_mmap(99, GPU)
         assert (d.use_mmap, d.reason) == (None, "ram_unknown")
 
     def test_a_dense_full_offload_with_room_stays_unmapped(self, tmp_path):
         b = _backend(_dense_model(tmp_path))
         with _ram(16 * GIB, 8 * GIB):
-            d = b._resolve_use_mmap(99)
+            d = b._resolve_use_mmap(99, GPU)
         assert (d.use_mmap, d.reason) == (False, "fits_ram")
 
     def test_a_dense_full_offload_on_a_full_box_keeps_mmap(self, tmp_path):
         b = _backend(_dense_model(tmp_path))
         with _ram(16 * GIB, 1 * GIB):
-            d = b._resolve_use_mmap(99)
+            d = b._resolve_use_mmap(99, GPU)
         assert (d.use_mmap, d.reason) == (None, "exceeds_ram")
 
     @pytest.mark.parametrize("setting, want", [("on", True), ("off", False)])
@@ -159,7 +171,7 @@ class TestResolveUseMmap:
         b.use_mmap = setting
         free = 1 if setting == "off" else 1024 * GIB
         with _ram(64 * GIB, free) as probe:
-            d = b._resolve_use_mmap(99)
+            d = b._resolve_use_mmap(99, GPU)
         assert d.use_mmap is want
         assert probe.call_count == 0
 
@@ -167,7 +179,7 @@ class TestResolveUseMmap:
     def test_a_partial_offload_keeps_the_default_and_reads_no_ram(self, tmp_path, layers):
         b = _backend(_moe_model(tmp_path))
         with _ram(64 * GIB, 1) as probe:
-            d = b._resolve_use_mmap(layers)
+            d = b._resolve_use_mmap(layers, GPU)
         assert (d.use_mmap, d.reason) == (None, "partial_offload")
         assert probe.call_count == 0
 
@@ -175,16 +187,67 @@ class TestResolveUseMmap:
         b = _backend(_moe_model(tmp_path))
         with patch.object(GgufBackend, "_host_resident_bytes",
                           side_effect=ValueError("corrupt")), _ram(64 * GIB, 64 * GIB) as probe:
-            d = b._resolve_use_mmap(99)
+            d = b._resolve_use_mmap(99, GPU)
         assert (d.use_mmap, d.reason) == (None, "host_unknown")
         assert probe.call_count == 0
+
+
+class TestNoGpu:
+    """99 GPU layers with no GPU to hold them puts the whole model in system
+    RAM, so the load keeps the runtime default however little the input layer
+    and experts weigh."""
+
+    def test_no_gpu_reading_keeps_the_default_and_reads_no_ram(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
+        with _ram(64 * GIB, 64 * GIB) as probe:
+            d = b._resolve_use_mmap(99, [])
+        assert (d.use_mmap, d.reason) == (None, "no_gpu")
+        assert probe.call_count == 0
+
+    def test_a_cpu_only_runtime_keeps_the_default_despite_a_gpu_reading(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
+        with patch("localm.discover.native_backend_has_gpu", return_value=False), \
+             _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(99, GPU)
+        assert (d.use_mmap, d.reason) == (None, "no_gpu")
+
+    def test_an_unreadable_runtime_dir_falls_back_to_the_gpu_reading(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
+        with patch("localm.discover.native_backend_has_gpu", return_value=None), \
+             _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(99, GPU)
+        assert (d.use_mmap, d.reason) == (False, "fits_ram")
+
+    @pytest.mark.parametrize("registry, want", [
+        (None, "no_gpu"), ([], "no_gpu"), ([{"index": 0, "name": "Vulkan0"}], "fits_ram")])
+    def test_a_vulkan_or_sycl_build_asks_the_native_registry(self, tmp_path, registry, want):
+        b = _backend(_dense_model(tmp_path))
+        with patch("localm.discover._native_gpu_index_space_is_opaque", return_value=True), \
+             patch("localm.discover.native_gpu_devices", return_value=registry), \
+             _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(99, [])
+        assert d.reason == want
+
+    def test_a_failing_gpu_check_never_raises(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
+        with patch("localm.discover.native_backend_has_gpu",
+                   side_effect=OSError("unreadable")), _ram(64 * GIB, 64 * GIB) as probe:
+            d = b._resolve_use_mmap(99, GPU)
+        assert (d.use_mmap, d.reason) == (None, "no_gpu")
+        assert probe.call_count == 0
+
+    def test_an_explicit_off_still_wins_without_a_gpu(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
+        b.use_mmap = "off"
+        d = b._resolve_use_mmap(99, [])
+        assert (d.use_mmap, d.reason) == (False, "user_off")
 
 
 # --------------------------------------------------------------------------- #
 #  GgufBackend._load_native: the decision reaches the worker, the report back #
 # --------------------------------------------------------------------------- #
 
-def _load(backend, meta_mmap):
+def _load(backend, meta_mmap, gpus=GPU):
     seen = {}
 
     def _spawn(params, **_kw):
@@ -192,7 +255,7 @@ def _load(backend, meta_mmap):
         return {"n_layers": 4, "kv_bytes_per_token": 0, "supports_images": False,
                 "weight_placement": [], "moe_skip_reason": None, "mmap": meta_mmap}
 
-    with patch("localm.discover.list_gpus", return_value=([], "ok")), \
+    with patch("localm.discover.list_gpus", return_value=(list(gpus), "ok")), \
          patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                "spawn_and_load", side_effect=_spawn):
         backend._load_native()
@@ -230,6 +293,15 @@ class TestLoadNativeWiring:
         with _ram(64 * GIB, 1 * GIB):
             _load(b, None)
         assert b.effective_use_mmap is None
+        assert b.mmap_forced_by_ram is False
+
+    def test_the_loads_own_gpu_reading_decides_whether_layers_reach_a_gpu(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
+        with _ram(64 * GIB, 32 * GIB):
+            params = _load(b, True, gpus=[])
+        assert "use_mmap" in params and params["use_mmap"] is None
+        assert b.last_mmap_decision.reason == "no_gpu"
+        assert b.effective_use_mmap is True
         assert b.mmap_forced_by_ram is False
 
     def test_a_mapped_load_with_an_unknown_ram_reading_is_not_flagged(self, tmp_path):

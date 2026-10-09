@@ -132,7 +132,11 @@ def _cpu_ram() -> dict:
 # System RAM reading ------------------------------------------------------- #
 
 _PROC_MEMINFO = Path("/proc/meminfo")
+_PROC_SELF_CGROUP = Path("/proc/self/cgroup")
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
+# A cgroup v1 memory limit at or above this reads as unlimited (v1 reports
+# "no limit" as PAGE_COUNTER_MAX pages, about 9.2e18 bytes).
+_CGROUP_UNLIMITED = 1 << 60
 
 
 def system_ram() -> "tuple[int | None, int | None]":
@@ -142,13 +146,14 @@ def system_ram() -> "tuple[int | None, int | None]":
     Read through psutil when it is installed, else the platform's own
     interface: ``GlobalMemoryStatusEx`` on Windows, ``/proc/meminfo`` on Linux,
     and on any other platform ``sysconf`` for the total with available None.
-    On Linux a cgroup memory limit (:func:`_cgroup_memory`) caps both: the
-    total at the limit, the available at the limit minus the cgroup's usage."""
+    On Linux a memory limit on this process's cgroup or one of its ancestors
+    (:func:`_cgroup_memory`) caps a known reading (:func:`_cap_to_cgroup`)."""
     total, available = _psutil_ram()
     if total is None and available is None:
         total, available = _platform_ram()
     if sys.platform.startswith("linux"):
-        total, available = _cap_to_cgroup(total, available, _cgroup_memory(_CGROUP_ROOT))
+        total, available = _cap_to_cgroup(
+            total, available, _cgroup_memory(_CGROUP_ROOT, _PROC_SELF_CGROUP))
     return total, available
 
 
@@ -237,31 +242,87 @@ def _read_int(path: Path) -> "int | None":
     return int(text) if text.isdigit() else None
 
 
-def _cgroup_memory(root: Path) -> "tuple[int | None, int | None]":
-    """``(limit, usage)`` in bytes of the cgroup memory controller under
-    *root*: cgroup v2 (``memory.max``/``memory.current``) first, else v1
-    (``memory/memory.limit_in_bytes``/``memory/memory.usage_in_bytes``). The
-    limit is None when no limit is set; usage is None when it cannot be read."""
-    limit = _read_int(root / "memory.max")
-    if limit is not None:
-        return limit, _read_int(root / "memory.current")
-    limit = _read_int(root / "memory" / "memory.limit_in_bytes")
-    if limit is not None:
-        return limit, _read_int(root / "memory" / "memory.usage_in_bytes")
-    return None, None
+def _cgroup_levels(root: Path, proc_cgroup: Path) -> "list[tuple[Path, bool]]":
+    """``(directory, is_v2)`` for each cgroup level whose memory limit applies
+    to this process, innermost first: its own cgroup and every ancestor up to
+    the mount at *root*, from the cgroup v2 entry (``0::<path>``) and any v1
+    entry naming the ``memory`` controller (under ``root/memory``) in the
+    ``/proc/<pid>/cgroup``-format file *proc_cgroup*. Just the two mount roots
+    when that file cannot be read or a path climbs above its namespace root."""
+    fallback = [(root, True), (root / "memory", False)]
+    try:
+        lines = proc_cgroup.read_text(encoding="ascii", errors="replace").splitlines()
+    except OSError:
+        return fallback
+    levels = []
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        hier, controllers, rel = parts
+        if hier == "0" and controllers == "":
+            base, v2 = root, True
+        elif "memory" in controllers.split(","):
+            base, v2 = root / "memory", False
+        else:
+            continue
+        segments = [seg for seg in rel.strip().split("/") if seg]
+        if ".." in segments:
+            return fallback
+        d = base.joinpath(*segments)
+        while True:
+            levels.append((d, v2))
+            if d == base:
+                break
+            d = d.parent
+    return levels or fallback
+
+
+def _inactive_file(stat_path: Path, v2: bool) -> int:
+    """Reclaimable page-cache bytes (``inactive_file``, or v1's hierarchical
+    ``total_inactive_file``) from a cgroup ``memory.stat`` at *stat_path*; 0
+    when it cannot be read."""
+    key = "inactive_file" if v2 else "total_inactive_file"
+    try:
+        text = stat_path.read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return 0
+    for line in text.splitlines():
+        name, _, value = line.partition(" ")
+        if name == key and value.strip().isdigit():
+            return int(value)
+    return 0
+
+
+def _cgroup_memory(root: Path, proc_cgroup: Path) -> "tuple[int | None, int | None]":
+    """``(limit, room)`` in bytes for this process's cgroup memory
+    controller (:func:`_cgroup_levels`): the smallest memory limit set on any
+    level, and the smallest limit minus usage across those levels, where usage
+    excludes reclaimable page cache (:func:`_inactive_file`) and an unreadable
+    usage counts as 0. ``(None, None)`` when no level sets a limit; a v1 limit
+    of :data:`_CGROUP_UNLIMITED` or more is no limit."""
+    limit = room = None
+    for d, v2 in _cgroup_levels(root, proc_cgroup):
+        lim = _read_int(d / ("memory.max" if v2 else "memory.limit_in_bytes"))
+        if lim is None or lim >= _CGROUP_UNLIMITED:
+            continue
+        usage = _read_int(d / ("memory.current" if v2 else "memory.usage_in_bytes")) or 0
+        level_room = max(0, lim - max(0, usage - _inactive_file(d / "memory.stat", v2)))
+        limit = lim if limit is None else min(limit, lim)
+        room = level_room if room is None else min(room, level_room)
+    return limit, room
 
 
 def _cap_to_cgroup(total: "int | None", available: "int | None",
                    cgroup: "tuple[int | None, int | None]") -> "tuple[int | None, int | None]":
-    """*total* and *available* capped by a cgroup ``(limit, usage)``: a limit
-    at or above *total* (v1 reports "unlimited" as a huge number) changes
-    nothing; otherwise the total becomes the limit and the available becomes
-    the smaller of *available* and the limit minus *usage* (the limit itself
-    when usage is unknown)."""
-    limit, usage = cgroup
-    if limit is None or (total is not None and limit >= total):
+    """*total* and *available* capped by a cgroup ``(limit, room)``
+    (:func:`_cgroup_memory`). Unchanged when *total* is None (an unknown
+    reading stays unknown), when there is no limit, or when the limit is at or
+    above *total*; otherwise the total becomes the limit and the available the
+    smaller of *available* and *room* (*room* alone when *available* is None)."""
+    limit, room = cgroup
+    if total is None or limit is None or limit >= total:
         return total, available
-    room = max(0, limit - usage) if usage is not None else limit
     return limit, (room if available is None else min(available, room))
 
 
