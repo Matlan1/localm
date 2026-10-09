@@ -67,6 +67,10 @@ jobs:
             echo "::error::doctor reports CPU mode only on Apple Silicon"
             exit 1
           fi
+          if ! grep -q "GPU: .*(metal)" doctor.log; then
+            echo "::error::doctor does not report the Metal GPU"
+            exit 1
+          fi
 
       - name: Server starts with no model and answers /v1/models
         run: |

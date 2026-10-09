@@ -23,11 +23,11 @@ on:
   #   workflow_dispatch   runs the matrix unconditionally, plus the mutation
   #                  shards (and so the mutation-test gate); never on push.
   #   schedule       two crons. The nightly one ("23 3 * * *") runs test,
-  #                  gui-tests and optional-stacks on master. The weekly one
-  #                  ("37 6 * * 1") runs those plus every job that is weekly
-  #                  only: the mutation shards and gate, abi-check,
-  #                  web-search-canary, voice-stack, lint and the two pin
-  #                  checks. A weekly-only job tests
+  #                  gui-tests, optional-stacks and lint on master. The weekly
+  #                  one ("37 6 * * 1") runs those plus every job that is
+  #                  weekly only: the mutation shards and gate, abi-check,
+  #                  web-search-canary, voice-stack and the two pin checks. A
+  #                  weekly-only job tests
   #                  github.event.schedule == '37 6 * * 1'.
   #
   # THE LABEL GATE IS THE WHOLE MECHANISM. Do not remove the `full-ci`
@@ -100,7 +100,7 @@ on:
     # of the ABI-drift check and of the mutation gate. The minute stays off
     # the top of the hour, where GitHub drops scheduled runs under load. (#860)
     - cron: "37 6 * * 1"
-    # Nightly, 03:23 UTC, on master: test, gui-tests and optional-stacks only.
+    # Nightly, 03:23 UTC, on master: test, gui-tests, optional-stacks and lint.
     - cron: "23 3 * * *"
 
 concurrency:
@@ -329,10 +329,7 @@ jobs:
     runs-on: ubuntu-latest
     # Cheap and independent of the Python suite: runs on every PR, not only
     # under the `full-ci` label that gates the two-platform test matrix.
-    # Not on the nightly schedule.
-    if: >-
-      github.event_name != 'push' &&
-      (github.event_name != 'schedule' || github.event.schedule == '37 6 * * 1')
+    if: github.event_name != 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -938,7 +935,10 @@ jobs:
   # label named; every other PR merges without the matrix. A skipped
   # required job never passes.
   merge-policy:
-    name: merge-policy
+    # Skipped runs keep the unevaluated expression as their check name, so only a
+    # pull_request run reports a check called merge-policy. See
+    # test_the_merge_policy_check_name_exists_only_on_pull_request_runs.
+    name: ${{ github.event_name == 'pull_request' && 'merge-policy' || 'merge-policy (pull_request runs only)' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [python-pr-gate, lint, gui-tests, test, mutation-scope, mutation-test]

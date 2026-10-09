@@ -122,10 +122,12 @@ boundary (`auth`, `scopes`, `tls`, `bindhost`, `netlisten`, `portmux`,
 workflows and gates. None of those blocks a merge; the list lives in
 `scripts/merge_policy.py`.
 
+`master` is protected by a repository ruleset (`.github/rulesets/master.json`, applied with `gh api repos/<owner>/<repo>/rulesets`): no force-push, no deletion, and every change arrives through a pull request whose `merge-policy` and CodeQL `analyze (<language>)` checks have passed. No approving review is required. Only a `pull_request` run reports a check named `merge-policy`, so the skipped run the narrow `push` trigger creates on the same commit cannot stand in for it.
+
 Scheduled runs on master. The nightly cron (03:23 UTC) runs `test`,
-`gui-tests` and `optional-stacks`. The weekly cron (Monday 06:37 UTC) runs
-those and, only on that cron, the mutation shards and gate, `abi-check`,
-`web-search-canary`, `voice-stack`, `lint` and the two pin-currency checks. A
+`gui-tests`, `optional-stacks` and `lint`. The weekly cron (Monday 06:37 UTC)
+runs those and, only on that cron, the mutation shards and gate, `abi-check`,
+`web-search-canary`, `voice-stack` and the two pin-currency checks. A
 weekly-only job's `if:` tests `github.event.schedule == '37 6 * * 1'`;
 `tests/test_ci_schedule_split.py` evaluates every job's `if:` under each
 trigger.

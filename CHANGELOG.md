@@ -12,6 +12,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Release files carry build provenance and a software bill of materials.** The release
+  zip, the sdist, the wheel and a CycloneDX SBOM of the pinned dependencies are attested by
+  the release workflow, so `gh attestation verify` proves which workflow built a file and
+  from which commit. SECURITY.md has the commands.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing

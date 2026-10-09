@@ -17,14 +17,13 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-_OTHER_CRON_FILES = ("codeql.yml", "pin-currency.yml")
 
 NIGHTLY = "23 3 * * *"
 WEEKLY = "37 6 * * 1"
 
-NIGHTLY_JOBS = {"test", "gui-tests", "optional-stacks"}
+NIGHTLY_JOBS = {"test", "gui-tests", "optional-stacks", "lint"}
 WEEKLY_JOBS = NIGHTLY_JOBS | {
-    "lint", "abi-check", "comfyui-pin-check", "llama-rocm-pin-check",
+    "abi-check", "comfyui-pin-check", "llama-rocm-pin-check",
     "mutation-run", "mutation-test", "web-search-canary", "voice-stack",
 }
 
@@ -169,14 +168,21 @@ def test_the_workflow_has_exactly_a_nightly_and_a_weekly_cron():
 
 def test_no_other_workflow_shares_a_cron_slot():
     ours = {NIGHTLY, WEEKLY}
-    for fname in _OTHER_CRON_FILES:
-        wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / fname).read_text(encoding="utf-8"))
+    checked = 0
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        if path == _CI:
+            continue
+        wf = yaml.safe_load(path.read_text(encoding="utf-8"))
         wf["on"] = wf.pop(True, wf.get("on"))
-        for entry in wf["on"]["schedule"]:
-            assert entry["cron"] not in ours, fname
+        if not isinstance(wf["on"], dict):
+            continue
+        for entry in wf["on"].get("schedule", []):
+            checked += 1
+            assert entry["cron"] not in ours, path.name
+    assert checked >= 1
 
 
-def test_the_nightly_run_runs_exactly_test_gui_tests_and_optional_stacks():
+def test_the_nightly_run_runs_exactly_the_matrix_jobs_and_lint():
     assert _jobs_that_run(_scenario("schedule", NIGHTLY)) == NIGHTLY_JOBS
 
 
@@ -197,8 +203,9 @@ def test_a_dispatch_still_runs_the_weekly_only_jobs_except_the_opt_in_abi_check(
     assert "abi-check" in _jobs_that_run(_scenario("workflow_dispatch", run_abi=True))
 
 
-def test_the_push_trigger_still_runs_only_abi_check():
-    assert _jobs_that_run(_scenario("push")) == {"abi-check"}
+def test_the_push_trigger_runs_the_same_jobs_as_before_the_split():
+    assert _jobs_that_run(_scenario("push")) == {
+        "abi-check", "comfyui-pin-check", "llama-rocm-pin-check"}
 
 
 @pytest.mark.parametrize("labels,expected_present,expected_absent", [
