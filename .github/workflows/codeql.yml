@@ -56,23 +56,13 @@ jobs:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        # Held on the floating major tag rather than a commit SHA. Upstream
-        # recommends the major tag for this action specifically: a pinned patch
-        # silently loses functionality as server-side feature flags are retired.
-        # .github/dependabot.yml encodes the same exception.
-        # zizmor: ignore[unpinned-uses]
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
         with:
           languages: ${{ matrix.language }}
           build-mode: none
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Analyze
-        # Held on the floating major tag rather than a commit SHA. Upstream
-        # recommends the major tag for this action specifically: a pinned patch
-        # silently loses functionality as server-side feature flags are retired.
-        # .github/dependabot.yml encodes the same exception.
-        # zizmor: ignore[unpinned-uses]
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
         with:
           category: "/language:${{ matrix.language }}"
