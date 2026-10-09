@@ -31,6 +31,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model (and projector) is unpacked into the models folder with a progress bar.
   Moving models out of the Hugging Face cache is refused, since it would break the
   cache; copy them instead.
+- **OpenAI-compatible speech-to-text and image endpoints.** `POST /v1/audio/transcriptions`
+  takes a multipart upload and returns `json`, `text`, `srt`, `vtt` or `verbose_json` (with
+  segment and word timestamps), transcribed locally with Whisper; the audio is never written
+  to disk. `POST /v1/images/generations` generates through the image plugin (ComfyUI) and
+  returns `b64_json`, or a gallery `url` when an API key is configured, honouring `n` and
+  `size`; in privacy mode no image is kept on disk. The official `openai` SDK works against
+  both, and local apps can call them like `/v1/chat/completions`. Speech synthesis
+  (`/v1/audio/speech`) is not served yet. See docs/server-api.md.
 - **An Ollama-compatible API on the same server and port.** `/api/chat`, `/api/generate`,
   `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
   answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies

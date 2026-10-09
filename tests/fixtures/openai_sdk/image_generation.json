@@ -1,0 +1,7 @@
+{
+ "sdk": "3.26.1",
+ "method": "POST",
+ "path": "/images/generations",
+ "content_type": "application/json",
+ "body_b64": "eyJtb2RlbCI6ImRhbGwtZS0zIiwicHJvbXB0IjoiYSBsaWdodGhvdXNlIiwibiI6MiwicXVhbGl0eSI6ImhkIiwicmVzcG9uc2VfZm9ybWF0IjoiYjY0X2pzb24iLCJzaXplIjoiMTAyNHgxMDI0Iiwic3R5bGUiOiJ2aXZpZCIsInVzZXIiOiJ1MSJ9"
+}

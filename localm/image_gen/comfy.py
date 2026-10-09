@@ -193,6 +193,24 @@ def apply_fast_dequant(workflow: dict) -> int:
 # ---------------------------------------------------------------------------
 
 
+LATENT_SIZE_CLASSES = ("EmptyLatentImage", "EmptySD3LatentImage")
+
+
+def apply_output_size(workflow: dict, width: int, height: int) -> bool:
+    """Set the generated image's size on every empty-latent node of *workflow*
+    (``LATENT_SIZE_CLASSES``) and, when at least one was set, on every
+    ``ModelSamplingFlux`` node, whose positional embeddings must match. Returns
+    False, leaving the workflow untouched, when it has no empty-latent node."""
+    latents = find_nodes_by_class(workflow, *LATENT_SIZE_CLASSES)
+    if not latents:
+        return False
+    for _nid, node in latents + find_nodes_by_class(workflow, "ModelSamplingFlux"):
+        inputs = node.setdefault("inputs", {})
+        inputs["width"] = int(width)
+        inputs["height"] = int(height)
+    return True
+
+
 def _build_image_workflow(
     workflow: dict,
     *,
@@ -211,14 +229,30 @@ def _build_image_workflow(
     denoise: Optional[float],
     fast_dequant: bool,
     say,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
 ) -> tuple[bool, str, Optional[str]]:
     """Shape the FLUX workflow in place from the call's parameters.
 
     Returns ``(ok, message, uploaded_name)``: ``ok=False`` with an error message
-    when the workflow cannot be driven (bad input image, no text-prompt node);
-    ``uploaded_name`` is the ComfyUI-side filename of an uploaded img2img source
-    (for later containment) or None. Pure workflow shaping; the only network I/O
-    is the img2img upload."""
+    when the workflow cannot be driven (bad input image, no text-prompt node, an
+    output size the workflow has no latent-size node to carry, or a size given
+    together with an input image); ``uploaded_name`` is the ComfyUI-side
+    filename of an uploaded img2img source (for later containment) or None. Pure
+    workflow shaping; the only network I/O is the img2img upload."""
+    if (width is None) != (height is None):
+        return False, "width and height must be given together.", None
+    if width is not None and height is not None:
+        if input_image is not None:
+            return False, ("An output size cannot be combined with an input image: "
+                           "the output takes the input image's dimensions."), None
+        if not apply_output_size(workflow, width, height):
+            return False, (
+                "The image workflow has no latent-size node "
+                f"({', '.join(LATENT_SIZE_CLASSES)}), so the requested size "
+                f"{width}x{height} cannot be applied. Request the workflow's own "
+                "size, or add one of those nodes to the workflow."), None
+
     # 2a. Rewrite a float32 GGUF dequant to the loader's fast default unless the
     # caller opted out.
     if fast_dequant:
@@ -506,6 +540,8 @@ def generate_image(
     cancel_check: Optional[callable] = None,
     placement: Optional[dict] = None,
     on_progress: Optional[callable] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
 ) -> tuple[bool, str]:
     """
     Generate an image from *prompt* and save it to *output_path*.
@@ -584,6 +620,11 @@ def generate_image(
         unload call so it authenticates on a keyless (open-mode) server too -
         see ``selfclient.self_request``'s docstring. Only used as a fallback
         when no owner API key is configured.
+    width, height
+        Output size in pixels, given together. None keeps the workflow's own
+        size. Applied to the workflow's empty-latent nodes; a workflow without
+        one fails with a message rather than ignoring the size. Cannot be
+        combined with *input_image*, whose dimensions the output takes.
     max_poll_seconds
         Timeout waiting for ComfyUI to finish (default 10 minutes).
     write_sidecar
@@ -652,6 +693,8 @@ def generate_image(
         denoise=denoise,
         fast_dequant=fast_dequant,
         say=_say,
+        width=width,
+        height=height,
     )
     if not ok:
         return False, msg
