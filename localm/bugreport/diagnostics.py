@@ -11,7 +11,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from localm.bugreport.scrub import _scrub_home, _scrub_query_and_header_secrets, _scrub_url_creds
+from localm.bugreport.scrub import (
+    _scrub_emails, _scrub_home, _scrub_query_and_header_secrets, _scrub_url_creds,
+)
 
 
 def _localm_version() -> str:
@@ -277,7 +279,8 @@ def _safe_config_subset() -> dict:
             # comfy_api_url / net_search_url / coder_reviewer routinely carry a
             # credential as a query parameter (?api_key=...), not only as
             # user:pass@ - see _scrub_query_and_header_secrets.
-            val = _scrub_query_and_header_secrets(_scrub_url_creds(_scrub_home(val)))
+            val = _scrub_emails(
+                _scrub_query_and_header_secrets(_scrub_url_creds(_scrub_home(val))))
         out[key] = val
     return out
 

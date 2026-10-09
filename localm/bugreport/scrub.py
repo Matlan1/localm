@@ -168,23 +168,46 @@ _BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 
-# An email address, matched from the first character of its local part.
+# Characters that end an address token: ASCII whitespace and controls, C1
+# controls, no-break space, quotes, and the brackets and delimiters an address
+# sits between in prose, markup, URLs, paths and JSON. Every other character,
+# non-ASCII included, belongs to the token.
+_EMAIL_TOKEN_END = r"\x00-\x20\x7f-\xa0\x22\x27<>()\[\]{},;:/\\|\x60=?&#!*^~$"
+
+# A whole token that contains ``local@domain.tld`` (or ``local%40domain.tld``),
+# matched from the token's first character to its last. The TLD is at least two
+# letters, ASCII or non-ASCII. Same pattern as scripts/report_issue.py and
+# scripts/report_issue.ps1. See test_email_pattern_does_not_grow_superlinearly.
 _EMAIL_RE = re.compile(
-    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
+    "(?<![^" + _EMAIL_TOKEN_END + "])"
+    "[^" + _EMAIL_TOKEN_END + "]*?"
+    "[^@" + _EMAIL_TOKEN_END + "](?:@|%40)"
+    "[^@._%+" + _EMAIL_TOKEN_END + "]+"
+    r"(?:\.[^@._%+" + _EMAIL_TOKEN_END + "]+)*"
+    r"\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}"
+    "[^" + _EMAIL_TOKEN_END + "]*"
 )
 
 
+def _email_replacement(m: re.Match) -> str:
+    token = m.group(0)
+    core = token.rstrip(".")
+    address = core.replace("%40", "@")
+    if address.isascii() and address.lower() == MAINTAINER_EMAIL.lower():
+        return token
+    return "<redacted-email>" + token[len(core):]
+
+
 def _scrub_emails(text: str) -> str:
-    """Replace every email address with ``<redacted-email>``, except
-    ``MAINTAINER_EMAIL`` (compared case-insensitively), which is kept as
-    written. Idempotent: the replacement contains no ``@``. A ``user@`` URL
-    credential already rewritten to ``<redacted>@`` by ``_scrub_url_creds`` is
-    left as it is."""
+    """Replace every token that contains an email address with
+    ``<redacted-email>``, keeping any trailing periods. A token that is exactly
+    ``MAINTAINER_EMAIL`` (ASCII, compared case-insensitively, ``%40`` read as
+    ``@``, trailing periods ignored) is kept as written. Idempotent: the
+    replacement contains no ``@``. A ``user@`` URL credential already rewritten
+    to ``<redacted>@`` by ``_scrub_url_creds`` is left as it is."""
     if not text:
         return text
-    keep = MAINTAINER_EMAIL.lower()
-    return _EMAIL_RE.sub(
-        lambda m: m.group(0) if m.group(0).lower() == keep else "<redacted-email>", text)
+    return _EMAIL_RE.sub(_email_replacement, text)
 
 
 def _scrub_secrets(text: str) -> str:

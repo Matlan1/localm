@@ -171,8 +171,10 @@ no way to show the confirmation prompt at all.
   and bearer / API-key-shaped tokens - an `Authorization:` value is caught
   whole whatever its scheme (Bearer, Basic or a raw token) - wherever they
   appear in diagnostic text, recent log tails, or the activity ring.
-- Email addresses, replaced with `<redacted-email>`, except the maintainer's
-  contact address the report is addressed to.
+- Email addresses in the usual `name@domain` form (also URL-encoded as
+  `name%40domain`), anywhere in the report including the configuration
+  section, replaced with `<redacted-email>`, except the maintainer's contact
+  address the report is addressed to.
 - Config values are sent only from a small allowlist of operational keys
   (port, context size, GPU layer count, mode, ...); the API key itself is
   never stored in config and never included.

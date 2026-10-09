@@ -147,11 +147,30 @@ _HEADER_SECRET_RE = re.compile(
     r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
     r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
 )
-# An email address, matched from the first character of its local part.
-# Byte-identical to _EMAIL_RE in localm/bugreport/scrub.py.
+# A whole token that contains an email address. Byte-identical to _EMAIL_RE in
+# localm/bugreport/scrub.py, where the token rules are described.
+_EMAIL_TOKEN_END = r"\x00-\x20\x7f-\xa0\x22\x27<>()\[\]{},;:/\\|\x60=?&#!*^~$"
 _EMAIL_RE = re.compile(
-    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
+    "(?<![^" + _EMAIL_TOKEN_END + "])"
+    "[^" + _EMAIL_TOKEN_END + "]*?"
+    "[^@" + _EMAIL_TOKEN_END + "](?:@|%40)"
+    "[^@._%+" + _EMAIL_TOKEN_END + "]+"
+    r"(?:\.[^@._%+" + _EMAIL_TOKEN_END + "]+)*"
+    r"\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}"
+    "[^" + _EMAIL_TOKEN_END + "]*"
 )
+
+
+def _email_replacement(m: re.Match) -> str:
+    """``<redacted-email>`` plus the token's trailing periods, or the token
+    unchanged when it is MAINTAINER_EMAIL (ASCII, case-insensitive, ``%40`` read
+    as ``@``). Mirrors localm/bugreport/scrub.py."""
+    token = m.group(0)
+    core = token.rstrip(".")
+    address = core.replace("%40", "@")
+    if address.isascii() and address.lower() == MAINTAINER_EMAIL.lower():
+        return token
+    return "<redacted-email>" + token[len(core):]
 
 
 def scrub(text: str) -> str:
@@ -187,10 +206,8 @@ def scrub(text: str) -> str:
     # Bearer tokens and API keys anywhere in the text.
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)
-    # Email addresses, except the maintainer's (compared case-insensitively).
-    keep = MAINTAINER_EMAIL.lower()
-    text = _EMAIL_RE.sub(
-        lambda m: m.group(0) if m.group(0).lower() == keep else "<redacted-email>", text)
+    # Email addresses, except the maintainer's.
+    text = _EMAIL_RE.sub(_email_replacement, text)
     return text
 
 

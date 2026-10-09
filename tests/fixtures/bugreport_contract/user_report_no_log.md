@@ -45,7 +45,7 @@ it broke
 - comfy_workdir: ~/ComfyUI
 - comfy_api_url: http://<redacted>@alice-desktop.local:8188/?api_key=<redacted>
 - net_search_url: https://search.example.org/search?q=x&token=<redacted>
-- coder_reviewer: http://reviewer.example.net/v1?key=<redacted>&model=m
+- coder_reviewer: http://reviewer.example.net/v1?key=<redacted>&model=m&cc=<redacted-email>
 
 ## Dependencies
 - localm: 0.0.0+contract

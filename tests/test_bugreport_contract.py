@@ -101,7 +101,7 @@ def _config(with_upload: bool = True) -> dict:
         "comfy_workdir": f"{_home()}/ComfyUI",
         "comfy_api_url": f"http://admin:{PW}@{HOST}:8188/?api_key={QV}",
         "net_search_url": f"https://search.example.org/search?q=x&token={QV}",
-        "coder_reviewer": f"http://reviewer.example.net/v1?key={QV}&model=m",
+        "coder_reviewer": f"http://reviewer.example.net/v1?key={QV}&model=m&cc={OTHER_EMAIL}",
         "hf_token": CFG_HF,
         "civitai_api_key": CFG_CIVITAI,
     }
