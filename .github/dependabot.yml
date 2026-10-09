@@ -22,6 +22,8 @@ updates:
           - "fastapi"
           - "httpx"
           - "huggingface-hub"
+          - "mkdocs"
+          - "mkdocs-material"
           - "playwright"
           - "psutil"
           - "pydantic"
