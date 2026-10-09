@@ -133,7 +133,7 @@ def test_loopback_labeled_hosts_never_resolve_off_box(host):
     except OSError as e:
         pytest.skip(f"{host!r} did not resolve on this box ({e}) - nothing to cross-check")
     assert infos, f"{host!r} resolved to zero addresses - nothing to cross-check"
-    for family, socktype, proto, canonname, sockaddr in infos:
+    for _family, _socktype, _proto, _canonname, sockaddr in infos:
         resolved_ip = sockaddr[0]
         assert ipaddress.ip_address(resolved_ip).is_loopback, (
             f"is_loopback_host({host!r}) is True, but the OS resolves it to "

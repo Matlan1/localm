@@ -855,7 +855,7 @@ class MemoryStore:
         rel = _maxnorm(self._bm25.scores(query))
         if vec_rel is not None:
             rel = [REL_LEX_SHARE * a + (1.0 - REL_LEX_SHARE) * b
-                   for a, b in zip(rel, vec_rel)]
+                   for a, b in zip(rel, vec_rel, strict=False)]
         return rel
 
     def _vector_relevance(self, query: str, embed_fn: Optional[EmbedFn],
@@ -918,7 +918,7 @@ class MemoryStore:
         rec_tokens = [_content_tokens(r.text) for r in self._records]
         is_episode = [r.kind == "episodic" and r.source not in TRUSTED_SOURCES
                       for r in self._records]
-        generic = generic_tokens([t for t, e in zip(rec_tokens, is_episode) if e])
+        generic = generic_tokens([t for t, e in zip(rec_tokens, is_episode, strict=True) if e])
         lex_hits = [lexical_match(q_tokens, rec_tokens[i], generic) if is_episode[i]
                     else bool(q_tokens & rec_tokens[i])
                     for i in range(len(self._records))]

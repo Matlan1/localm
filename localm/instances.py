@@ -836,7 +836,7 @@ def snapshot(home: Path, probe: Optional[Callable[[dict], bool]] = None,
 
     alive_flags = _threaded_map(_probe, entries)
     rows: list[dict] = []
-    for e, alive in zip(entries, alive_flags):
+    for e, alive in zip(entries, alive_flags, strict=True):
         row = dict(e) if include_token else {k: v for k, v in e.items() if k != "token"}
         row["alive"] = alive
         rows.append(row)

@@ -131,7 +131,7 @@ _UNTERMINATED_THINK = "<think>\nThinking Process: the user wants a summary, let 
 def _assert_alternates(out):
     roles = [m["role"] for m in out if m["role"] != "system"]
     assert roles[0] == "user", roles
-    for a, b in zip(roles, roles[1:]):
+    for a, b in zip(roles, roles[1:], strict=True):
         assert a != b, f"adjacent {a} turns: {roles}"
 
 

@@ -2538,7 +2538,7 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
         if raw_ratios is not None and len(raw_ratios) == len(raw_indices):
             # Re-pair by ORIGINAL position so a ratio still lines up with its
             # index even when another index was dropped/de-duped above.
-            by_index = dict(zip(raw_indices, raw_ratios))
+            by_index = dict(zip(raw_indices, raw_ratios, strict=True))
             ratios = [by_index[i] for i in valid]
         else:
             logger.warning(
@@ -2549,7 +2549,7 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
     if ratios is None:
         ratios = [1.0] * len(valid)
 
-    return list(zip(valid, ratios))
+    return list(zip(valid, ratios, strict=True))
 
 
 def single_gpu_index(configured_indices, *, gpus: Optional[list] = None,
@@ -3125,7 +3125,7 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
         "auto GPU split: distributing by free VRAM - %s",
         ", ".join(
             f"device {i}: {r * 100:.0f}% ({f / 1024 ** 3:.1f} GB free)"
-            for i, r, f in zip(idx_list, ratios, frees)))
+            for i, r, f in zip(idx_list, ratios, frees, strict=True)))
     return ratios
 
 
@@ -3638,7 +3638,7 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
         "(combined %.1f GB free / %.1f GB total)",
         out["devices"],
         ", ".join(f"device {d.get('index')}: {f / 1024 ** 3:.1f} GB free"
-                  for d, f in zip(devices, frees)),
+                  for d, f in zip(devices, frees, strict=True)),
         out["free"] / 1024 ** 3, out["total"] / 1024 ** 3)
     return out
 
@@ -3698,7 +3698,7 @@ def _llama_visible_torch_devices(devices: list) -> list:
     flags = [d.get("integrated") if isinstance(d, dict) else None for d in devices]
     if not flags or not all(isinstance(f, bool) for f in flags):
         return list(devices)
-    discrete = [d for d, f in zip(devices, flags) if not f]
+    discrete = [d for d, f in zip(devices, flags, strict=True) if not f]
     return discrete if discrete else list(devices)
 
 
@@ -3810,7 +3810,7 @@ def _totals_mismatch(devices: list, native: list) -> str:
     if len(native) != len(devices):
         return (f"the llama.cpp runtime lists {len(native)} discrete GPU(s) where "
                 f"torch reports {len(devices)}")
-    for pos, (d, n) in enumerate(zip(devices, native)):
+    for pos, (d, n) in enumerate(zip(devices, native, strict=True)):
         n_total = n.get("total")
         tolerance = max(_SPLIT_TOTAL_MATCH_MIN_BYTES,
                         int(d["total"] * _SPLIT_TOTAL_MATCH_FRACTION))
@@ -3937,7 +3937,7 @@ def implicit_split_devices(config: Optional[dict] = None, *,
                 logger.info("implicit GPU split fit: not applied - %s; keeping "
                             "llama.cpp's default split", reason)
             elif with_source_index:
-                for entry, d in zip(out, devices):
+                for entry, d in zip(out, devices, strict=True):
                     entry["source_index"] = d.get("index")
             return out
     except Exception as e:

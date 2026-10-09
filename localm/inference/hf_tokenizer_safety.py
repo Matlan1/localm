@@ -257,7 +257,7 @@ def validate_tokenizer_json(model_path: str) -> None:
             "crashed while checking it) - likely catastrophic native regex "
             "backtracking against ordinary chat text; refusing to load.")
 
-    for pattern, verdict in zip(patterns, verdicts):
+    for pattern, verdict in zip(patterns, verdicts, strict=False):
         if verdict == "OK":
             continue
         reason = verdict[4:] if verdict.startswith("BAD ") else verdict

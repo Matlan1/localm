@@ -679,7 +679,7 @@ def _verify_probe_output(path: Path) -> "tuple[bool, str]":
         px = pixels[cy]
         r, g, b = px[cx * channels], px[cx * channels + 1], px[cx * channels + 2]
         want = _PROBE_RGB
-        if all(abs(a - w) <= 1 for a, w in zip((r, g, b), want)):
+        if all(abs(a - w) <= 1 for a, w in zip((r, g, b), want, strict=True)):
             return True, (f"the blurred output's center pixel is {(r, g, b)}, matching the "
                           f"solid input color {want} within rounding - a real GPU kernel ran")
         return False, f"center pixel is {(r, g, b)}, expected {want} (+-1)"

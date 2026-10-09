@@ -877,7 +877,7 @@ class GGUFEmbedder:
                 group_toks = [pending_toks[j] for j in group]
                 vecs = ([self._decode_single(group_toks[0])] if len(group_toks) == 1
                         else self._decode_batch(group_toks))
-                for gi, v in zip(group_idx, vecs):
+                for gi, v in zip(group_idx, vecs, strict=False):
                     out[gi] = v
             return out
 

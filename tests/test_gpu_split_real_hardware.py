@@ -140,7 +140,7 @@ def test_split_load_honors_configured_ratio(two_real_gpus, tiny_model_path, monk
     llm = LlamaCpp(tiny_model_path, n_ctx=512, n_gpu_layers=99)
     try:
         after = [_device_memory_used_bytes(tool, i) for i in indices]
-        deltas = [max(0, a - b) for a, b in zip(after, before)]
+        deltas = [max(0, a - b) for a, b in zip(after, before, strict=True)]
         total = sum(deltas)
         assert total > 0, (
             f"no measurable VRAM delta on any configured device after load "
@@ -333,7 +333,7 @@ def test_amd_rocm_hip_split_path_executes(two_real_gpus, tiny_model_path, monkey
     llm = LlamaCpp(tiny_model_path, n_ctx=512, n_gpu_layers=99)
     try:
         after = [_device_memory_used_bytes(tool, i) for i in indices]
-        deltas = [max(0, a - b) for a, b in zip(after, before)]
+        deltas = [max(0, a - b) for a, b in zip(after, before, strict=True)]
         assert all(d > 0 for d in deltas), (
             f"expected a positive VRAM delta on every configured AMD device "
             f"after a split load, got deltas={deltas} (before={before}, "
@@ -378,7 +378,7 @@ def test_adversarial_uneven_ratio_and_short_device_refusal(two_real_gpus, tiny_m
     llm = LlamaCpp(tiny_model_path, n_ctx=512, n_gpu_layers=99)
     try:
         after = [_device_memory_used_bytes(tool, i) for i in indices]
-        deltas = [max(0, a - b) for a, b in zip(after, before)]
+        deltas = [max(0, a - b) for a, b in zip(after, before, strict=True)]
         total = sum(deltas)
         assert total > 0, "no measurable VRAM delta for the 99:1 ratio load"
         dev0_share = deltas[0] / total

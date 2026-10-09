@@ -661,7 +661,7 @@ def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple
         else:
             missing.append((slot["class_type"], slot["input_name"], value, options))
     if on_progress:
-        for cls, field, old, new in subs:
+        for cls, _field, old, new in subs:
             try:
                 on_progress(
                     f"Model '{old}' is not installed; substituting '{new}' "

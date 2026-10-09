@@ -96,7 +96,7 @@ def test_manager_remove_releases_the_log(tmp_path, sessions_dir, open_sessions):
 def test_manager_close_all_releases_every_log(tmp_path, sessions_dir, open_sessions):
     manager = SessionManager()
     logs = []
-    for i in range(2):
+    for _ in range(2):
         s = manager.create(_session(tmp_path))
         logs.append(s.audit_log_path())
     assert logs[0] != logs[1]

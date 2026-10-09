@@ -330,7 +330,7 @@ def map_untrusted_ranges(content_spans, per_content_spans) -> Tuple[Tuple[int, i
     the template's own text.
     """
     ranges: List[Tuple[int, int]] = []
-    for span, local in zip(content_spans, per_content_spans):
+    for span, local in zip(content_spans, per_content_spans, strict=False):
         start, end = span[0], span[1]
         lead = span[2] if len(span) > 2 else 0
         for a, b in local:

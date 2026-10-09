@@ -2097,7 +2097,7 @@ def _response_key_violations(tracked: list[Path]) -> list[str]:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
 
-            def report(lineno: int, key: str, shapes, fn=node.name) -> None:
+            def report(lineno: int, key: str, shapes, fn=node.name, lines=lines, rel=rel) -> None:
                 if lineno - 1 < len(lines) and "hygiene-ok" in lines[lineno - 1]:
                     return
                 method, path, _, _ = shapes[0]
