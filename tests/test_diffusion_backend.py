@@ -455,3 +455,84 @@ class TestRunnerStatusCancel:
             b._loaded = True
             list(b.chat_stream([{"role": "user", "content": "x"}]))
             assert seen["cancel_on_status"] is expected
+
+
+class TestLoadSetup:
+    """LlamaCpp.__init__ over a mocked native API, the pattern of
+    tests/test_main_gpu_wiring.py: what a diffusion model's load sets up."""
+
+    def _api(self, *, mask=126336, meta=None):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        values = {"general.architecture": "llada-moe", "diffusion.shift_logits": "false"}
+        values.update(meta or {})
+        api = MagicMock()
+        api.llama_model_default_params.return_value = SimpleNamespace(
+            main_gpu=0, n_gpu_layers=0, use_mmap=True)
+        api.llama_model_is_diffusion.return_value = True
+        api.has_diffusion_api.return_value = True
+        api.has_model_meta_api.return_value = True
+        api.llama_model_meta_val_str.side_effect = lambda model, key: values.get(key)
+        api.llama_vocab_mask.return_value = mask
+        api.llama_n_ubatch.return_value = 512
+        api.llama_model_n_ctx_train.return_value = 4096
+        return api
+
+    def _build(self, api, monkeypatch, **kw):
+        monkeypatch.setattr(LlamaCpp, "_cache_can_drop_a_speculative_token",
+                            lambda self: pytest.fail("a speculation probe ran at load"))
+        monkeypatch.setattr(LlamaCpp, "_load_mmproj",
+                            lambda self, *a: pytest.fail("a vision projector was loaded"))
+        with patch("localm.inference.backends.llamacpp.llama.api", api):
+            llm = LlamaCpp("m.gguf", n_ctx=512, n_gpu_layers=99, verbose=True, **kw)
+            report = llm.speculation_report()
+            llm.close()
+        return llm, report
+
+    @pytest.mark.parametrize("spec", [dict(spec_source="ngram"), dict(mtp_enabled=True),
+                                      dict(spec_source="mtp")])
+    def test_no_speculation_is_set_up_and_the_refusal_is_reported(self, monkeypatch, spec):
+        api = self._api()
+        llm, report = self._build(api, monkeypatch, mmproj_path="proj.gguf", **spec)
+        assert llm.is_diffusion is True and llm.architecture == "llada-moe"
+        assert llm._spec_source_name == "off" and llm.supports_mtp is False
+        assert llm.mtp_status == "diffusion-model"
+        assert report["status"] == "diffusion-model"
+        api.llama_model_mtp_support.assert_not_called()
+        assert llm.kv_bytes_per_token == 0
+        assert llm._diffusion_capacity == 512
+        assert llm._diffusion_shift_logits is False
+        assert llm._diffusion_mask == 126336
+
+    def test_shift_logits_defaults_to_true_when_undeclared(self, monkeypatch):
+        llm, _ = self._build(self._api(meta={"diffusion.shift_logits": None}), monkeypatch)
+        assert llm._diffusion_shift_logits is True
+
+    def test_capacity_is_bounded_by_the_trained_context(self, monkeypatch):
+        api = self._api()
+        api.llama_model_n_ctx_train.return_value = 256
+        llm, _ = self._build(api, monkeypatch)
+        assert llm._diffusion_capacity == 256
+
+    def test_no_mask_token_is_refused_and_frees_the_model(self, monkeypatch):
+        api = self._api(mask=-1)
+        with pytest.raises(RuntimeError, match="no mask token"):
+            self._build(api, monkeypatch)
+        api.llama_free_model.assert_called_once()
+
+    def test_runtime_without_the_diffusion_calls_is_refused(self, monkeypatch):
+        api = self._api()
+        api.has_diffusion_api.return_value = False
+        with pytest.raises(RuntimeError, match="setup-llama"):
+            self._build(api, monkeypatch)
+        api.llama_free_model.assert_called_once()
+
+    def test_a_mocked_non_bool_answer_is_not_diffusion(self, monkeypatch):
+        from unittest.mock import MagicMock
+        api = self._api(meta={"general.architecture": "qwen3"})
+        api.llama_model_is_diffusion.return_value = MagicMock()
+        monkeypatch.setattr(LlamaCpp, "_read_kv_bytes_per_token", lambda self: 4096)
+        with patch("localm.inference.backends.llamacpp.llama.api", api):
+            llm = LlamaCpp("m.gguf", n_ctx=512, n_gpu_layers=99, verbose=True)
+            llm.close()
+        assert llm.is_diffusion is False and llm.kv_bytes_per_token == 4096

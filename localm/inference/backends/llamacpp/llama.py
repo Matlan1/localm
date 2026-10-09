@@ -34,7 +34,7 @@ from localm.textguard import (
 
 from . import _api as api
 from . import _diffusion
-from ._drafting import SPEC_MTP, SPEC_NGRAM, DraftSource, MtpSource, resolve_spec_source
+from ._drafting import SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource, resolve_spec_source
 from ._ngram import NgramSource, ngram_draft_cap, ngram_rs_seq
 from ._structs import (
     llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
@@ -1435,6 +1435,9 @@ class LlamaCpp:
             api.llama_free_model(self._model_ptr)
             self._model_ptr = None
             raise
+        if self.is_diffusion:
+            self._spec_source_name = SPEC_OFF
+            self._mtp_enabled = False
 
         # Model's true transformer layer count, read once here from the loaded
         # model. This is the only place it is currently EXPOSED, which is NOT the
@@ -1485,8 +1488,7 @@ class LlamaCpp:
         # snapshots, and a step that proposes k drafts can reject all k.
         # Costs nothing on a model with no recurrent layers.
         # See test_recurrent_rollback_is_requested_when_mtp_is_enabled.
-        if not self.is_diffusion:
-            self._apply_initial_spec_params(cp, spec_draft_tokens)
+        self._apply_initial_spec_params(cp, spec_draft_tokens)
         cp.flash_attn_type   = -1  # keep default (unspecified)
         if n_threads is not None:
             cp.n_threads       = n_threads
@@ -1540,10 +1542,7 @@ class LlamaCpp:
         _mtp_log.info("MTP: active=%s status=%s", self.supports_mtp, self.mtp_status)
         if self._spec_source_name == SPEC_NGRAM:
             source = self._draft_source()
-            if self.is_diffusion:
-                source.usable = False
-                source.status = _DIFFUSION_SPEC_STATUS
-            elif not self._cache_can_drop_a_speculative_token():
+            if not self._cache_can_drop_a_speculative_token():
                 source.usable = False
                 source.status = "rewind-unsupported"
             _mtp_log.info("n-gram drafting: status=%s draft_max=%d",
