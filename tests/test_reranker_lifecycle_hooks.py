@@ -3,8 +3,6 @@
 shared embedder: unload-all (honouring an in-flight request), the VRAM eviction
 that makes room for a chat model, and the shutdown and restart exits (lock-free,
 so a worker never outlives the server holding its model in VRAM).
-
-Mirrors tests/test_embedder_unload_honors_pin.py for the reranker.
 """
 
 import asyncio
