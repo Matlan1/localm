@@ -115,7 +115,7 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
     # stacks. They sit OUTSIDE the /api,/v1 metadata-GET gate, so they are refused
     # here instead - cross-origin, in EVERY mode (they are unauthenticated in
     # protected mode too, so an open-mode-only refusal would miss them).
-    _CROSS_ORIGIN_GET_REFUSED = ("/whoami", "/debug/stacks")
+    _CROSS_ORIGIN_GET_REFUSED = ("/whoami", "/debug/stacks", "/metrics")
 
     # Same refusal, matched by PREFIX rather than exact path. /api/fs/* is the
     # host filesystem browser: it enumerates the user's disk, which is host
@@ -141,7 +141,7 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
     # cross-origin refusal above and is a separate, narrower surface.
     # NOTE: enforced only on a LOOPBACK bind - see the comment at token_gated_get
     # below for why answering 403 off loopback would open a new oracle.
-    _SHELL_TOKEN_GETS = ("/debug/stacks",)
+    _SHELL_TOKEN_GETS = ("/debug/stacks", "/metrics")
 
     def _cross_origin_refused(request) -> bool:
         """True when this request carries an Origin header that is neither

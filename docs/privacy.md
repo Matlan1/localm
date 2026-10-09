@@ -106,6 +106,12 @@ and so would otherwise leave this unauthenticated. Directory prefixes in the
 returned frames (your data directory, the install location, the Python
 environment) are redacted; the file, line and function are kept.
 
+`GET /metrics` (off by default; see [the server API](server-api.md#get-metrics))
+exposes request counts and latencies, token counts, tokens per second, time to
+first token, queue depth, loaded-model count and GPU memory. Every label is a
+route template or a status code, and no metric carries a prompt, a reply, a
+model name or a model path, in any session mode. It writes nothing to disk.
+
 ### The debug log (`--debug` / `LOCALM_DEBUG`)
 
 `localm gui --debug` (or `LOCALM_DEBUG=1`) writes a debug log under

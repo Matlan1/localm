@@ -16,6 +16,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   of up to 16: the reply is cut before the first match, the generation ends there instead of
   running to its token budget, and `finish_reason` is `stop`. A stop sequence inside a
   reasoning model's `<think>` block is not applied. The Ollama API's `options.stop` uses it.
+- **Prometheus metrics at `/metrics`.** Turn on "Prometheus metrics" in Settings > Server
+  (or set `metrics_enabled`) and restart to serve request counts and latency by route,
+  prompt and generated tokens, tokens per second, time to first token, queue depth, loaded
+  models and GPU memory in Prometheus text format. It needs an admin API key, answers only
+  on a loopback bind when no key exists, and carries no prompt, reply, model name or model
+  path in any label. Off by default.
 - **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5 and other `t5`
   GGUFs register as chat models and answer through `localm run`, the GUI chat and
   `/v1/chat/completions`, where they were refused before.
