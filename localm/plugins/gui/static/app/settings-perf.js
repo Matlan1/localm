@@ -2953,6 +2953,8 @@ export function clipAtBoundary(text, max) {
   return s.slice(0, end).trimEnd() + "…";
 }
 
+let lastRerankNote = null;
+
 /** Query the selected knowledge collection for hits that clear its relevance
  *  floor and inject them as cited excerpts; when none clear it, inject a note
  *  saying the collection had nothing relevant. */
@@ -2969,6 +2971,10 @@ export async function retrieveKnowledge(conv, query, opts = {}) {
       `/api/rag/collections/${encodeURIComponent(kb)}/query`, fetchOpts);
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
+    if (data.rerank_note && data.rerank_note !== lastRerankNote) {
+      toast(t("knowledge.rerank.skipped", { note: data.rerank_note }), true);
+    }
+    lastRerankNote = data.rerank_note || null;
     const echo = clipAtBoundary(query, KB_QUERY_ECHO_CHARS);
     if (!data.hits.length) {
       conv.messages.push({

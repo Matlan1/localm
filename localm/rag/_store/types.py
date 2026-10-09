@@ -15,6 +15,9 @@ DescribeImageFn = Callable[[bytes, str], Optional[str]]
 EmbedFn = Callable[[list[str]], list[list[float]]]
 
 
+RerankFn = Callable[[str, list[str]], list[float]]
+
+
 # Called with a human-readable message as the sole positional argument. A call
 # site with an exact numerator/denominator additionally passes phase/done/total/
 # unit as keywords; any sink such a site can reach must accept and ignore them

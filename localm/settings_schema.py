@@ -986,6 +986,19 @@ CORE_FIELDS: list = [
                  "does not recognise, when a chat model is loaded. Off, those files "
                  "are tagged plain text.",
                  group="Knowledge", owner="rag"),
+    SettingField("rag_rerank", Widget.TOGGLE, "Rerank Knowledge results",
+                 "Re-score the best matches with a reranker model before they are "
+                 "added to a chat. Needs a reranker model installed; without one "
+                 "retrieval is unchanged.",
+                 group="Knowledge", owner="rag"),
+    SettingField("rag_rerank_model", Widget.TEXT, "Reranker model",
+                 "Name of the installed reranker used for Knowledge results. "
+                 "Blank uses the only installed reranker.",
+                 group="Knowledge", owner="rag"),
+    SettingField("rag_rerank_candidates", Widget.NUMBER, "Reranker candidates",
+                 "How many of the best matches the reranker re-scores. More finds "
+                 "answers ranked lower, and takes proportionally longer per question.",
+                 group="Knowledge", owner="rag", min=5, max=100, step=5),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     # These three are the CORE twins of the admin_only MediaFields (see
     # MEDIA_PLUGIN_FIELDS below). The write gate reads CORE_FIELDS only -

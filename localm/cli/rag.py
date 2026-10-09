@@ -455,7 +455,11 @@ def _cli_rag_embed_fn(url):
 @click.option("--relevant-only", is_flag=True,
               help="Drop hits below the relevance floor the GUI chat applies "
                    "before injecting excerpts.")
-def rag_query(collection, text, k, embed, url, relevant_only):
+@click.option("--rerank/--no-rerank", default=None,
+              help="Re-score the best hits with an installed reranker model. "
+                   "Default: the rag_rerank setting (on, and used only while a "
+                   "reranker is installed).")
+def rag_query(collection, text, k, embed, url, relevant_only, rerank):
     """Show the top-K chunks COLLECTION returns for TEXT.
 
     By default the CLI scores lexically (BM25). Pass --embed to also embed the
@@ -473,14 +477,28 @@ def rag_query(collection, text, k, embed, url, relevant_only):
         console.print(f"[red]No such collection:[/red] {escape(collection)}")
         sys.exit(1)
     embed_fn = _cli_rag_embed_fn(url) if embed else None
-    hits = coll.query(text, k=k, embed_fn=embed_fn, relevant_only=relevant_only)
+    from ..rag.rerank import rerank_plan
+    plan = rerank_plan(enabled=rerank)
+    if plan.note:
+        console.print(f"[yellow]Not reranking:[/yellow] {escape(plan.note)}")
+    elif rerank and plan.fn is None:
+        console.print("[yellow]Not reranking:[/yellow] no reranker model is "
+                      "installed (see 'localm pull').")
+    hits = coll.query(text, k=k, embed_fn=embed_fn, relevant_only=relevant_only,
+                      rerank_fn=plan.fn, rerank_candidates=plan.candidates)
+    if coll.rerank_degrade_reason:
+        console.print(f"[yellow]Not reranked:[/yellow] "
+                      f"{escape(coll.rerank_degrade_reason)}")
     if not hits:
         console.print("[dim](no relevant matches)[/dim]" if relevant_only
                       else "[dim](no matches)[/dim]")
         return
     for i, h in enumerate(hits, 1):
+        scored = f"score {h['score']}"
+        if "rerank_score" in h:
+            scored += f", rerank {h['rerank_score']}"
         console.print(f"[cyan][{i}][/cyan] [bold]{escape(h['source'])}[/bold]:{h['pos']} "
-                      f"[dim](score {h['score']})[/dim]")
+                      f"[dim]({scored})[/dim]")
         excerpt = h["text"][:300].replace("\n", " ")
         console.print(f"    {escape(excerpt)}\n")
 

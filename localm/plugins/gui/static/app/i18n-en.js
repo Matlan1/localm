@@ -905,6 +905,22 @@ export const I18N_EN = {
   "knowledge.embed.setupFailed": "Embedding setup did not complete - see the log below",
   "knowledge.embed.setupFailedMsg": "Setup failed: {message}",
   "knowledge.embed.status.checking": "Checking…",
+  "knowledge.rerankCard.title": "Reranking",
+  "knowledge.rerankCard.intro":
+    "After the first search, a reranker model re-scores the best matches so the " +
+    "most relevant excerpts come first. It needs a reranker model installed and " +
+    "runs on this machine; without one, results are returned as searched.",
+  "knowledge.rerankCard.toggle": "Rerank Knowledge results",
+  "knowledge.rerank.status.checking": "Checking…",
+  "knowledge.rerank.statusLoadFailed": "Could not read the reranking state: {message}",
+  "knowledge.rerank.status.off": "Reranking is off. Results are returned as searched.",
+  "knowledge.rerank.status.on": "Reranking the best {n} matches with {model}.",
+  "knowledge.rerank.status.unusable": "Reranking cannot run: {note}",
+  "knowledge.rerank.status.noneInstalled":
+    "No reranker model is installed, so results are returned as searched. " +
+    "Install one with: {command}",
+  "knowledge.rerank.saveFailed": "Could not save the reranking setting: {message}",
+  "knowledge.rerank.skipped": "Knowledge results were not reranked: {note}",
   "knowledge.embed.status.lastError": "  Last error: {error}",
   "knowledge.embed.status.notSetUp":
     "Not set up: '{model}' is not installed - indexing is BM25 (lexical) only. Pick a model below and click \"Set up / apply\".",

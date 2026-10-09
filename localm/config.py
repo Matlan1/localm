@@ -910,6 +910,14 @@ DEFAULT_CONFIG: dict = {
     # chat model is loaded, prompt-guess from a snippet (cached per extension for
     # the process). Off -> labeled "text"; never fired during embedding-only index.
     "rag_classify_unknown_files": True,
+    # Re-score the best Knowledge hits with a reranker model before they are
+    # injected into a chat. Takes effect only while a reranker is registered
+    # (rag_rerank_model names one; empty = the only registered reranker); without
+    # one retrieval is unchanged. rag_rerank_candidates is how many of the best
+    # blended hits the reranker sees.
+    "rag_rerank": True,
+    "rag_rerank_model": "",
+    "rag_rerank_candidates": 20,
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,

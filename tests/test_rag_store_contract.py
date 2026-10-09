@@ -1353,7 +1353,7 @@ COLLECTION_METHODS = {
     'load_and_maybe_backfill': ('classmethod', "(name: 'str', base: 'Optional[Path]' = None) -> 'Collection'"),
     'peek_detail': ('classmethod', "(name: 'str', base: 'Optional[Path]' = None) -> 'Optional[dict]'"),
     'peek_stats': ('classmethod', "(name: 'str', base: 'Optional[Path]' = None) -> 'Optional[dict]'"),
-    'query': ('function', "(self, text: 'str', k: 'int' = 4, embed_fn: 'Optional[EmbedFn]' = None, *, relevant_only: 'bool' = False) -> 'list[dict]'"),
+    'query': ('function', "(self, text: 'str', k: 'int' = 4, embed_fn: 'Optional[EmbedFn]' = None, *, relevant_only: 'bool' = False, rerank_fn: 'Optional[RerankFn]' = None, rerank_candidates: 'int' = 20) -> 'list[dict]'"),
     'reembed': ('function', "(self, *, embed_fn: 'EmbedFn', model_name: 'Optional[str]' = None, on_progress: 'Optional[ProgressFn]' = None, batch: 'int' = 32) -> 'dict'"),
     'remove_doc': ('function', "(self, source: 'str') -> 'bool'"),
     'resync': ('function', "(self, *, embed_fn: 'Optional[EmbedFn]' = None, classify_fn: 'Optional[ClassifyFn]' = None, describe_image_fn: 'Optional[DescribeImageFn]' = None, on_progress: 'Optional[ProgressFn]' = None, policy: 'Optional[dict]' = None, force: 'bool' = False, prune_missing: 'bool' = False, model_name: 'Optional[str]' = None) -> 'dict'"),
