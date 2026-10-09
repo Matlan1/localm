@@ -206,7 +206,9 @@ class TestGgufVersionAndEndianness:
 
     def test_big_endian_needs_plausible_big_endian_counts(self, tmp_path):
         head = b"GGUF" + struct.pack(">I", 3) + struct.pack(">Q", 2**40) + struct.pack(">Q", 0)
-        assert gguf_header_refusal(head).startswith("This GGUF declares version 50331648")
+        assert gguf_header_refusal(head) is None
+        sane = b"GGUF" + struct.pack(">I", 3) + struct.pack(">Q", 2) + struct.pack(">Q", 1)
+        assert gguf_header_refusal(sane) == BIG_ENDIAN_SENTENCE
 
     @pytest.mark.parametrize("label,kw,sentence", BAD_GGUFS, ids=[b[0] for b in BAD_GGUFS])
     def test_magic_check_rejects_every_case(self, tmp_path, label, kw, sentence):
