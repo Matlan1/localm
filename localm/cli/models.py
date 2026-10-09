@@ -244,15 +244,16 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
             console.print("[yellow]The draft model runs on the CPU (the model "
                           "runs on the CPU, or the draft model does not fit in "
                           "VRAM beside it).[/yellow]")
-        if source == "draft":
+        if source in ("draft", "ngram"):
             costs = engine.draft_step_costs()
             if costs:
                 verify = ", ".join("%s: %.1f" % (n, ms)
                                    for n, ms in sorted(costs.get("verify_ms", {}).items(),
                                                        key=lambda kv: int(kv[0])))
+                draft_ms = (f", draft {costs.get('draft_ms', 0):.1f}"
+                            if source == "draft" else "")
                 console.print(f"[dim]Measured step ms: model {costs.get('target_ms', 0):.1f}, "
-                              f"checking n tokens {{{verify}}}, draft "
-                              f"{costs.get('draft_ms', 0):.1f}[/dim]")
+                              f"checking n tokens {{{verify}}}{draft_ms}[/dim]")
         if not usable:
             return ([], False, status, engine.gpu_placement, (0, 0), [], "", [])
         per_prompt = []
@@ -285,6 +286,12 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
             [{"role": "user", "content": _SPEC_REPEAT_PROMPT}],
             max_tokens=gen_tokens, seed=_MTP_PROBE_SEED, temperature=0.0,
             top_p=1.0, top_k=1, repeat_penalty=1.0))
+        if source in ("draft", "ngram"):
+            observed = (engine.draft_step_costs() or {}).get("observed_ms") or {}
+            if observed:
+                shown = ", ".join("%s: %.1f" % (k, ms) for k, ms in
+                                  sorted(observed.items(), key=lambda kv: int(kv[0])))
+                console.print(f"[dim]Step ms seen by drafts per step: {{{shown}}}[/dim]")
         return (rates, True, status, engine.gpu_placement, (drafted, accepted),
                 texts, greedy, per_prompt)
     finally:

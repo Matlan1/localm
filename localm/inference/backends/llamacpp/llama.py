@@ -1854,8 +1854,9 @@ class LlamaCpp:
                 pacer = self._draft_pacer
                 clock = self._clock
                 # The step whose cost is still being measured: (start, drafted,
-                # tokens it makes available); its time ends when the next token
-                # is in hand and excludes time spent in the consumer.
+                # tokens it makes available, drafts verified or None, timed for
+                # the pacer); its time ends when the next token is in hand and
+                # excludes time spent in the consumer.
                 step = None
                 consumer_s = 0.0
                 pos = n_prompt
@@ -1908,7 +1909,11 @@ class LlamaCpp:
                             eog = self._tokenizer.is_eog(token)
 
                         if step is not None:
-                            pacer.record(step[1], clock() - step[0] - consumer_s, step[2])
+                            step_s = clock() - step[0] - consumer_s
+                            if step[4]:
+                                pacer.record(step[1], step_s, step[2])
+                            if step[3] is not None:
+                                source.on_step_seconds(step[3], step_s)
                             step = None
 
                         # Stop when the model signals end-of-generation via the vocabulary
@@ -1966,8 +1971,9 @@ class LlamaCpp:
                         # --- Speculative drafting (while the source drafts) ---
                         drafts: List[int] = []
                         accepted: List[int] = []
-                        timed = speculate = False
+                        timed = speculate = verified = observed = False
                         if source.drafting():
+                            observed = source.observes_steps
                             if pacer.paused:
                                 timed = True
                                 pacer.speculate()
@@ -2015,6 +2021,7 @@ class LlamaCpp:
                                                 break
                                             accepted.append(draft)
                                         n_acc = len(accepted)
+                                        verified = True
                                         source.on_verify(len(drafts), n_acc)
                                         removed = True
                                         if n_acc < len(drafts):
@@ -2058,7 +2065,8 @@ class LlamaCpp:
                                     if batch is not None:
                                         api.llama_batch_free(batch)
                             if timed:
-                                step = (step_t0, True, 1 + len(accepted))
+                                step = (step_t0, True, 1 + len(accepted),
+                                        len(drafts) if verified else None, True)
                             for draft in accepted:
                                 yield_t0 = clock()
                                 yield draft
@@ -2106,8 +2114,10 @@ class LlamaCpp:
                                     source.after_single_token(token, pos)
                                     self._cached_tokens.append(token)
                                     pos += 1
-                                    if timed:
-                                        step = (step_t0, speculate and not source.free_miss, 1)
+                                    if timed or observed:
+                                        step = (step_t0, speculate and not source.free_miss, 1,
+                                                0 if source.free_miss or not speculate else None,
+                                                timed)
                                 finally:
                                     # Always release the native batch - including when
                                     # _prefill_fresh_context above raises mid-growth.
@@ -2780,32 +2790,40 @@ class LlamaCpp:
         cache is probed first; when it cannot drop a rejected draft the source
         is created unusable with status "rewind-unsupported" and no draft
         model is loaded. Otherwise the draft source loads its draft model
-        (``_load_draft_model``) and its step costs are measured
-        (``_measure_draft_step_costs``); a draft model that cannot beat plain
-        decoding even with every draft accepted is freed with status
-        "draft-cannot-pay"."""
+        (``_load_draft_model``), and the step costs of either source are
+        measured (``_measure_step_costs``). A draft model that cannot beat
+        plain decoding at an acceptance of ``DRAFT_GATE_ACCEPTANCE`` is freed
+        with status "draft-cannot-pay"; an n-gram source that cannot beat it
+        even with every draft accepted is turned off with status
+        "ngram-cannot-pay"."""
         from localm.debuglog import logger
+
+        from ._draftmodel import DRAFT_MODEL_UNMEASURED_TOKENS
+        from ._stepcosts import DRAFT_GATE_ACCEPTANCE
         can_drop = self._cache_can_drop_a_speculative_token()
-        if self._spec_source_name == SPEC_DRAFT and can_drop:
+        draft = self._spec_source_name == SPEC_DRAFT
+        if draft and can_drop:
             self._load_draft_model(spec_draft_model, n_threads, verbose,
                                    on_gpu=spec_draft_gpu)
-            source = self._draft_source()
-            if source.usable and source.loaded:
-                quiet = _quiet_stderr if not verbose else contextlib.nullcontext
-                with quiet():
-                    costs = self._measure_draft_step_costs(source)
-                    if costs is not None and not costs.can_pay(source.draft_max):
-                        source.close()
-                if costs is None:
-                    logger.info("draft-model step costs could not be measured; "
-                                "drafting at most %d tokens per step",
-                                min(source.draft_max, 2))
-                else:
-                    source.costs = costs
-                    logger.info("draft-model step costs: %s", costs.report())
-                    if not costs.can_pay(source.draft_max):
-                        source.disable("draft-cannot-pay")
         source = self._draft_source()
+        if can_drop and source.usable and (not draft or source.loaded):
+            gate_p = DRAFT_GATE_ACCEPTANCE if draft else 1.0
+            quiet = _quiet_stderr if not verbose else contextlib.nullcontext
+            with quiet():
+                costs = self._measure_step_costs(source)
+                pays = costs is None or costs.can_pay(source.draft_max, gate_p)
+                if draft and not pays:
+                    source.close()
+            if costs is None:
+                logger.info("%s: step costs could not be measured; drafting at most "
+                            "%d tokens per step", source.label,
+                            min(source.draft_max, DRAFT_MODEL_UNMEASURED_TOKENS)
+                            if draft else source.draft_max)
+            else:
+                source.costs = costs
+                logger.info("%s: step costs %s", source.label, costs.report())
+                if not pays:
+                    source.disable("%s-cannot-pay" % source.name)
         if source.usable and not can_drop:
             source.usable = False
             source.status = "rewind-unsupported"
@@ -2846,15 +2864,19 @@ class LlamaCpp:
             api.llama_memory_clear(mem, True)
         return statistics.median(times)
 
-    def _measure_draft_step_costs(self, source):
-        """The ``_draftmodel.StepCosts`` of this load: the target's one-token
-        decode and its verification batches up to ``source.draft_max + 1``
-        tokens, and the draft model's one-token and batched decodes, each
-        after a short shared prefix of tokens spread over the vocabulary. The
-        main and draft caches are left empty. None when a decode fails."""
+    def _measure_step_costs(self, source):
+        """The ``_stepcosts.StepCosts`` of this load for *source*: the target's
+        one-token decode and its verification batches up to
+        ``source.draft_max + 1`` tokens, with the sizes and repetitions
+        ``measure_plan`` sets from a first one-token decode, and for a
+        draft-model source the draft model's one-token and batched decodes;
+        each after a short shared prefix of tokens spread over the vocabulary.
+        The main cache and any draft cache are left empty. None when a decode
+        fails or the vocabulary has fewer than 256 tokens."""
         from localm.debuglog import logger
 
-        from ._draftmodel import VERIFY_MEASURE_SIZES, StepCosts
+        from ._stepcosts import StepCosts, measure_plan
+        draft_ctx = source._ctx if source.name == SPEC_DRAFT else None
         try:
             vocab = api.llama_model_get_vocab(self._model_ptr)
             n_vocab = int(api.llama_vocab_n_tokens(vocab))
@@ -2865,22 +2887,25 @@ class LlamaCpp:
                 return [16 + (offset + 7919 * i) % (n_vocab - 32) for i in range(n)]
 
             prefix = spread(32, 1)
-            top = source.draft_max + 1
-            sizes = sorted({n for n in VERIFY_MEASURE_SIZES if n < top} | {top}) if top >= 2 else []
-            target = self._time_decode(self._ctx_ptr, prefix, spread(1, 5), False, 3, 5)
-            verify = {n: self._time_decode(self._ctx_ptr, prefix, spread(n, 5), True, 3, 5)
+            probe = self._time_decode(self._ctx_ptr, prefix, spread(1, 5), False, 1, 1)
+            warm, reps, sizes = measure_plan(probe, source.draft_max + 1)
+            target = self._time_decode(self._ctx_ptr, prefix, spread(1, 5), False, warm, reps)
+            verify = {n: self._time_decode(self._ctx_ptr, prefix, spread(n, 5), True, warm, reps)
                       for n in sizes}
-            draft = self._time_decode(source._ctx, prefix, spread(1, 5), False, 3, 5)
-            batch = 64
-            draft_prefill = self._time_decode(source._ctx, prefix, spread(batch, 9),
-                                              False, 1, 3) / batch
-            source._reset_cache()
+            draft = draft_prefill = 0.0
+            if draft_ctx is not None:
+                draft = self._time_decode(draft_ctx, prefix, spread(1, 5), False, 3, 5)
+                batch = 64
+                draft_prefill = self._time_decode(draft_ctx, prefix, spread(batch, 9),
+                                                  False, 1, 3) / batch
+                source._reset_cache()
             return StepCosts(target=target, verify=verify, draft=draft,
                              draft_prefill=draft_prefill)
         except Exception as exc:
-            logger.debug("draft-model step-cost measurement failed (%s)",
+            logger.debug("%s: step-cost measurement failed (%s)", source.label,
                          type(exc).__name__)
-            source._reset_cache()
+            if draft_ctx is not None:
+                source._reset_cache()
             return None
 
     def _load_draft_model(self, path: Optional[str], n_threads: Optional[int],

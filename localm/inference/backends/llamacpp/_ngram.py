@@ -159,10 +159,12 @@ class NgramSource(CountedSource):
         return True
 
     def budget(self, pos: int, tokens_left: Optional[int]) -> int:
-        n = self.draft_max
-        if tokens_left is not None:
-            n = min(n, tokens_left)
-        return max(0, min(n, self._llm._ctx_capacity - pos - 1))
+        """Drafts the step at *pos* may propose: ``cap_drafts``, and with
+        measured ``costs`` the ``choose_length`` of that."""
+        n = self.cap_drafts(pos, tokens_left)
+        if self.costs is None:
+            return n
+        return self.choose_length(n, tokens_left)
 
     def propose(self, token: int, pos: int, n_max: int) -> List[int]:
         cached = self._llm._cached_tokens

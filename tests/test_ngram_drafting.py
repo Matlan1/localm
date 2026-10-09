@@ -442,6 +442,53 @@ def test_cheap_ngram_drafting_keeps_going():
     assert llm._source.steps > 5
 
 
+def _row_costs(row):
+    """Measured costs of FakeNative(main_cost=1.0, row_cost=row)."""
+    from localm.inference.backends.llamacpp._stepcosts import StepCosts
+    return StepCosts(target=1.0, verify={n: 1.0 + row * (n - 1) for n in (2, 3, 5, 9)})
+
+
+def _timed_run(prompt, n, row, costs):
+    from localm.inference.backends.llamacpp._drafting import DraftSource
+    llm = _llama(8)
+    if costs == "off":
+        llm._source = DraftSource()
+    else:
+        llm._source.costs = costs
+    fake = FakeNative(llm, main_cost=1.0, row_cost=row)
+    tokens, _ = _generate(llm, fake, max_new_tokens=n, prompt=prompt)
+    assert tokens == _reference(prompt, n)
+    return llm, fake.now
+
+
+@pytest.mark.parametrize("prompt", [REPEATING, DIVERGING, FRESH],
+                         ids=["repeating", "diverging", "fresh"])
+@pytest.mark.parametrize("row", [0.05, 0.6, 1.5])
+def test_measured_ngram_output_matches_the_target_alone(prompt, row):
+    llm, _ = _timed_run(prompt, 40, row, _row_costs(row))
+    assert llm._source.costs is not None
+
+
+@pytest.mark.parametrize("prompt", [REPEATING * 3, DIVERGING * 3, FRESH],
+                         ids=["repeating", "diverging", "fresh"])
+def test_measured_ngram_never_drafts_where_verifying_costs_more_than_it_yields(prompt):
+    plain_llm, plain = _timed_run(prompt, 120, 1.5, "off")
+    blind, blind_s = _timed_run(prompt, 120, 1.5, None)
+    measured, measured_s = _timed_run(prompt, 120, 1.5, _row_costs(1.5))
+    assert blind._source.drafted > 0 and blind_s > plain
+    assert measured._source.drafted == 0
+    assert measured_s == pytest.approx(plain)
+
+
+def test_measured_ngram_keeps_drafting_where_verifying_is_cheap():
+    _, plain = _timed_run(REPEATING * 3, 120, 0.05, "off")
+    llm, measured = _timed_run(REPEATING * 3, 120, 0.05, _row_costs(0.05))
+    src = llm._source
+    assert src.accepted > 90
+    assert measured < 0.4 * plain
+    assert 0 in src._observed and max(src._observed) == 8
+
+
 def test_a_diverging_follow_up_reindexes_only_what_changed():
     class _Counting(NgramIndex):
         indexed = 0

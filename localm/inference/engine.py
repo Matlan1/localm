@@ -495,11 +495,16 @@ class Engine:
         return placed if isinstance(placed, bool) else None
 
     def draft_step_costs(self) -> Optional[dict]:
-        """The draft-model step costs the loaded backend measured
-        (``StepCosts.report()``), or None when it has none yet."""
+        """The step costs the loaded backend measured for its n-gram or
+        draft-model source (``StepCosts.report()``) plus ``observed_ms``, the
+        corrected step milliseconds of each draft length seen so far ({} when
+        none), or None when it measured none."""
         rep = getattr(self._backend, "last_speculation", None)
         costs = rep.get("costs") if isinstance(rep, dict) else None
-        return costs if isinstance(costs, dict) else None
+        if not isinstance(costs, dict):
+            return None
+        observed = rep.get("observed_ms")
+        return {**costs, "observed_ms": observed if isinstance(observed, dict) else {}}
 
     def speculation_usage(self) -> Optional[dict]:
         """Speculative-drafting figures for the reply that just finished, for

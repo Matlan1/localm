@@ -141,7 +141,7 @@ class DraftFake(FakeNative):
 
 def _flat_costs():
     """Step costs under which every draft length up to the cap is chosen."""
-    from localm.inference.backends.llamacpp._draftmodel import StepCosts
+    from localm.inference.backends.llamacpp._stepcosts import StepCosts
     return StepCosts(target=1.0, verify={n: 1.0 for n in (2, 3, 5, 9, 17)}, draft=0.0,
                      draft_prefill=0.0)
 
@@ -391,7 +391,7 @@ def test_the_draft_source_takes_its_own_default_and_the_recurrent_cap(configured
 # --------------------------------------------------------------------------- #
 
 def _costs(target=1.0, verify=None, draft=0.1, draft_prefill=0.001):
-    from localm.inference.backends.llamacpp._draftmodel import StepCosts
+    from localm.inference.backends.llamacpp._stepcosts import StepCosts
     return StepCosts(target=target, verify=verify or {2: 1.2, 3: 1.4, 5: 1.8, 9: 2.6},
                      draft=draft, draft_prefill=draft_prefill)
 
@@ -411,7 +411,7 @@ def test_the_best_length_follows_the_acceptance_and_the_costs(p, best):
 
 
 def test_expected_tokens_is_the_geometric_sum():
-    from localm.inference.backends.llamacpp._draftmodel import expected_tokens
+    from localm.inference.backends.llamacpp._stepcosts import expected_tokens
     assert expected_tokens(0.5, 2) == pytest.approx(1.75)
     assert expected_tokens(1.0, 4) == 5.0
     assert expected_tokens(0.0, 4) == 1.0
@@ -424,6 +424,22 @@ def test_a_draft_slower_than_the_target_cannot_pay():
                        draft=0.0032)
     assert cpu_draft.can_pay(4) is False and cpu_draft.best_length(1.0, 4) == 0
     assert gpu_draft.can_pay(4) is True
+
+
+def test_paying_is_judged_at_the_given_acceptance():
+    marginal = _costs(draft=0.65)
+    assert marginal.can_pay(8) is True
+    assert marginal.can_pay(8, 0.85) is False
+    assert _costs(draft=0.3).can_pay(8, 0.85) is True
+
+
+@pytest.mark.parametrize("probe,top,plan", [
+    (0.01, 9, (3, 5, [2, 3, 5, 9])), (0.05, 5, (3, 5, [2, 3, 5])),
+    (0.01, 17, (3, 5, [2, 3, 5, 9, 17])), (0.01, 12, (3, 5, [2, 3, 5, 9, 12])),
+    (0.06, 9, (1, 1, [2, 9])), (2.0, 2, (1, 1, [2])), (0.01, 1, (1, 1, []))])
+def test_a_slow_target_is_measured_with_fewer_decodes(probe, top, plan):
+    from localm.inference.backends.llamacpp._stepcosts import measure_plan
+    assert measure_plan(probe, top) == plan
 
 
 def _measured_llama(draft_max=8, costs=None):
@@ -456,14 +472,14 @@ def test_the_draft_length_rises_falls_and_recovers_with_acceptance():
     for i in range(120):
         k = src.budget(20, None)
         lengths.append(k)
-        if k and i < 40:
-            src.on_verify(k, 0)
+        if k:
+            src.on_verify(k, 0 if i < 40 else k)
     assert 0 in lengths[:40]
-    assert lengths[-1] > 0
+    assert all(k > 0 for k in lengths[-20:])
 
 
 def test_a_draft_that_the_prior_rejects_still_probes_its_acceptance():
-    from localm.inference.backends.llamacpp._draftmodel import (
+    from localm.inference.backends.llamacpp._stepcosts import (
         ACCEPTANCE_PROBE_EVERY, ACCEPTANCE_PROBE_P)
     marginal = _costs(target=5.78, verify={2: 6.29, 3: 7.0, 5: 8.5}, draft=3.48)
     assert marginal.best_length(0.6, 4) == 0
@@ -472,10 +488,27 @@ def test_a_draft_that_the_prior_rejects_still_probes_its_acceptance():
     src = llm._source
     llm._cached_tokens = list(range(20))
     src._tokens = list(range(20))
-    lengths = [src.budget(20, None) for _ in range(2 * ACCEPTANCE_PROBE_EVERY + 2)]
-    assert lengths[0] > 0
+    lengths = []
+    for _ in range(2 * ACCEPTANCE_PROBE_EVERY + 3):
+        k = src.budget(20, None)
+        lengths.append(k)
+        if k:
+            src.on_verify(k, 0)
     probes = [i for i, k in enumerate(lengths) if k]
-    assert probes == [0, ACCEPTANCE_PROBE_EVERY + 1]
+    assert probes == [0, ACCEPTANCE_PROBE_EVERY + 1, 2 * ACCEPTANCE_PROBE_EVERY + 2]
+
+
+def test_a_probe_that_drafts_nothing_is_tried_again_on_the_next_step():
+    from localm.inference.backends.llamacpp._stepcosts import ACCEPTANCE_PROBE_EVERY
+    marginal = _costs(target=5.78, verify={2: 6.29, 3: 7.0, 5: 8.5}, draft=3.48)
+    llm = _measured_llama(draft_max=4, costs=marginal)
+    src = llm._source
+    llm._cached_tokens = list(range(20))
+    src._tokens = list(range(20))
+    assert [src.budget(20, None) > 0 for _ in range(3)] == [True, True, True]
+    src.on_verify(2, 0)
+    assert [src.budget(20, None) > 0 for _ in range(ACCEPTANCE_PROBE_EVERY)] == (
+        [False] * ACCEPTANCE_PROBE_EVERY)
 
 
 def test_a_probe_that_finds_high_acceptance_keeps_drafting():
@@ -485,12 +518,13 @@ def test_a_probe_that_finds_high_acceptance_keeps_drafting():
     llm._cached_tokens = list(range(20))
     src._tokens = list(range(20))
     lengths = []
-    for _ in range(40):
+    for _ in range(120):
         k = src.budget(20, None)
         lengths.append(k)
         if k:
             src.on_verify(k, k)
-    assert all(k > 0 for k in lengths[1:])
+    assert lengths[0] > 0 and 0 in lengths
+    assert all(k > 0 for k in lengths[-60:])
 
 
 def test_without_measured_costs_a_step_drafts_at_most_two():
@@ -513,6 +547,93 @@ def test_a_long_catch_up_on_a_slow_draft_skips_drafting_for_the_reply():
     assert src._valid == 396
 
 
+def test_observed_step_times_correct_the_measured_costs():
+    llm = _measured_llama(costs=_costs(draft=0.1))
+    src = llm._source
+    assert src.step_cost(3) == pytest.approx(0.3 + 1.6)
+    src.on_step_seconds(3, 1.9 + 7 * 0.05)
+    assert src.step_cost(3) == pytest.approx(1.9 + 0.2 * 7 * 0.05)
+    assert src._row_s == pytest.approx(0.2 * 0.05)
+    assert src.step_cost(1) == pytest.approx(0.1 + 1.2 + 3 * 0.2 * 0.05)
+    for _ in range(60):
+        src.on_step_seconds(3, 1.9 + 7 * 0.05)
+        src.on_step_seconds(0, 1.0 + 0.05)
+    assert src.step_cost(3) == pytest.approx(1.9 + 7 * 0.05)
+    assert src.step_cost(0) == pytest.approx(1.05)
+    assert src.step_cost(8) == pytest.approx(0.8 + 2.6 + 17 * 0.05, rel=1e-3)
+
+
+def test_a_step_faster_than_measured_never_makes_an_unseen_length_cheaper():
+    llm = _measured_llama(costs=_costs())
+    src = llm._source
+    for _ in range(30):
+        src.on_step_seconds(2, 0.5)
+    assert src._row_s < 0
+    assert src.step_cost(2) < 1.4
+    assert src.step_cost(5) == pytest.approx(0.5 + 2.0)
+
+
+def test_step_times_are_ignored_without_measured_costs_or_a_time():
+    llm = _llama(4)
+    src = llm._source
+    src.costs = None
+    src.on_step_seconds(2, 5.0)
+    src.costs = _costs()
+    src.on_step_seconds(2, 0.0)
+    assert src._observed == {} and src._row_s == 0.0
+
+
+def test_per_row_overhead_seen_while_drafting_shortens_the_drafts():
+    llm = _measured_llama(costs=_costs(draft=0.05))
+    src = llm._source
+    llm._cached_tokens = list(range(20))
+    src._tokens = list(range(20))
+    for _ in range(30):
+        src.on_verify(6, 5)
+    p = src.acceptance()
+    assert src.costs.best_length(p, 8) == 4
+    for _ in range(40):
+        src.on_step_seconds(8, 0.4 + 2.6 + 17 * 0.25)
+    assert src.step_cost(0) == pytest.approx(1.25, rel=1e-3)
+    assert 0 < src.budget(20, None) < 4
+
+
+def test_a_step_with_a_long_catch_up_is_not_timed():
+    llm = _measured_llama(costs=_costs())
+    src = llm._source
+    src._catch_up = 40
+    src.on_step_seconds(2, 9.0)
+    assert src._observed == {}
+    src._catch_up = 2
+    src.on_step_seconds(2, 1.5)
+    assert 2 in src._observed and src._catch_up == 0
+
+
+def test_the_loop_reports_each_steps_time_and_drafts_to_the_source():
+    llm = _measured_llama(draft_max=3, costs=_flat_costs())
+    fake = DraftFake(llm, main_cost=1.0, row_cost=0.1, draft_cost=0.2)
+    seen = []
+    src = llm._source
+    record = src.on_step_seconds
+    src.on_step_seconds = lambda k, s: (seen.append((k, s)), record(k, s))
+    tokens, _ = _run(llm, fake, max_new_tokens=40)
+    assert tokens == _reference(PROMPT, 40)
+    first, rest = seen[0], seen[1:]
+    assert first == (3, pytest.approx(5 * 0.2 + 1.0 + 0.1 * 3))
+    plain = [s for k, s in rest if k == 0]
+    drafting = [(k, s) for k, s in rest if k > 0]
+    assert plain and drafting
+    assert all(s == pytest.approx(1.0) for s in plain)
+    for k, s in drafting:
+        assert s == pytest.approx(k * 0.2 + 1.0 + 0.1 * k)
+    assert sum(k for k, _ in seen) <= src.drafted
+    replay = _measured_llama(draft_max=3, costs=_flat_costs())._source
+    for k, s in rest:
+        replay.on_step_seconds(k, s)
+    assert src._observed == pytest.approx(replay._observed)
+    assert src._row_s == pytest.approx(replay._row_s)
+
+
 @pytest.mark.parametrize("wrong", [(), (8, 9, 14), tuple(range(7, 40, 3))])
 def test_adaptive_draft_lengths_keep_the_output_of_the_target_alone(wrong):
     llm = _measured_llama()
@@ -529,14 +650,45 @@ def test_the_step_costs_are_measured_on_both_contexts():
     with patch.object(llama_mod, "api") as api:
         fake.install(api)
         api.llama_vocab_n_tokens.return_value = 1000
-        costs = llm._measure_draft_step_costs(llm._source)
+        costs = llm._measure_step_costs(llm._source)
     assert costs.target == pytest.approx(1.0)
-    assert sorted(costs.verify) == [2, 3, 5]
+    assert sorted(costs.verify) == [2, 5]
     assert costs.verify[5] == pytest.approx(1.4)
     assert costs.draft == pytest.approx(0.2)
     assert costs.draft_prefill == pytest.approx(0.2 / 64)
     assert fake.main_cache == {} and fake.draft_cache == {}
     assert llm._source._tokens == []
+
+
+def test_a_fast_target_is_measured_at_every_verify_size():
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    llm = _llama(4)
+    fake = DraftFake(llm, main_cost=0.01, row_cost=0.001, draft_cost=0.002)
+    with patch.object(llama_mod, "api") as api:
+        fake.install(api)
+        api.llama_vocab_n_tokens.return_value = 1000
+        costs = llm._measure_step_costs(llm._source)
+    assert sorted(costs.verify) == [2, 3, 5]
+    assert costs.verify[3] == pytest.approx(0.012)
+    timed_main = [d for d in fake.main_decodes if d[0][0] == 32]
+    assert len(timed_main) == 2 + 8 * 4
+
+
+def test_an_ngram_source_is_measured_on_the_target_alone():
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    from localm.inference.backends.llamacpp._ngram import NgramSource
+    llm = _llama(4)
+    llm._spec_source_name = "ngram"
+    llm._source = NgramSource(llm, draft_max=4)
+    fake = FakeNative(llm, main_cost=0.01, row_cost=0.001)
+    with patch.object(llama_mod, "api") as api:
+        fake.install(api)
+        api.llama_vocab_n_tokens.return_value = 1000
+        costs = llm._measure_step_costs(llm._source)
+    assert costs.target == pytest.approx(0.01)
+    assert costs.verify[5] == pytest.approx(0.014)
+    assert (costs.draft, costs.draft_prefill) == (0.0, 0.0)
+    assert fake.main_cache == {}
 
 
 def test_a_failed_measurement_leaves_no_costs():
@@ -546,25 +698,46 @@ def test_a_failed_measurement_leaves_no_costs():
     with patch.object(llama_mod, "api") as api:
         fake.install(api)
         api.llama_vocab_n_tokens.return_value = 1000
-        assert llm._measure_draft_step_costs(llm._source) is None
+        assert llm._measure_step_costs(llm._source) is None
 
 
-@pytest.mark.parametrize("costs,status,kept", [
-    ("pays", "ok", True), ("cannot", "draft-cannot-pay", False), (None, "ok", None)])
-def test_a_draft_model_that_cannot_pay_is_freed_at_load(costs, status, kept):
-    llm = _llama(4)
+@pytest.mark.parametrize("costs,status", [
+    ("pays", "ok"), ("cannot", "draft-cannot-pay"), ("marginal", "draft-cannot-pay"),
+    (None, "ok")])
+def test_a_draft_model_that_cannot_pay_is_freed_at_load(costs, status):
+    llm = _llama(8)
     src = llm._source
     src.costs = None
-    measured = {"pays": _costs(), "cannot": _costs(draft=5.0), None: None}[costs]
+    measured = {"pays": _costs(), "cannot": _costs(draft=5.0),
+                "marginal": _costs(draft=0.65), None: None}[costs]
     llm._cache_can_drop_a_speculative_token = lambda: True
     llm._load_draft_model = lambda *a, **kw: None
-    llm._measure_draft_step_costs = lambda source: measured
+    llm._measure_step_costs = lambda source: measured
     freed = []
     src.close = lambda: freed.append(True)
     llm._set_up_spec_source("d.gguf", None, True, True)
-    assert (src.status, src.usable) == (status, costs != "cannot")
+    refused = status == "draft-cannot-pay"
+    assert (src.status, src.usable) == (status, not refused)
     assert src.costs is measured
-    assert bool(freed) is (costs == "cannot")
+    assert bool(freed) is refused
+
+
+@pytest.mark.parametrize("costs,status", [
+    ("pays", "ok"), ("marginal", "ok"), ("cannot", "ngram-cannot-pay"), (None, "ok")])
+def test_ngram_is_measured_at_load_and_turned_off_only_when_it_can_never_pay(costs, status):
+    from localm.inference.backends.llamacpp._ngram import NgramSource
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
+    llm._spec_source_name = "ngram"
+    llm._spec_draft_max = 8
+    measured = {"pays": _costs(draft=0.0), "marginal": _costs(verify={2: 1.85, 9: 8.5}, draft=0.0),
+                "cannot": _costs(verify={2: 2.0, 9: 9.0}, draft=0.0), None: None}[costs]
+    llm._cache_can_drop_a_speculative_token = lambda: True
+    llm._measure_step_costs = lambda source: measured
+    llm._set_up_spec_source(None, None, True, True)
+    src = llm._source
+    assert isinstance(src, NgramSource)
+    assert (src.status, src.usable) == (status, status == "ok")
+    assert src.costs is measured
 
 
 # --------------------------------------------------------------------------- #
@@ -635,10 +808,14 @@ def test_the_main_cache_is_probed_before_a_draft_model_is_loaded(source, can_dro
     order = []
     llm._cache_can_drop_a_speculative_token = lambda: order.append("probe") or can_drop
     llm._load_draft_model = lambda *a, **kw: order.append(("load", kw.get("on_gpu")))
+    llm._measure_step_costs = lambda source: order.append("measure")
 
     llm._set_up_spec_source("d.gguf", None, False, False)
 
-    assert order == (["probe", ("load", False)] if loads else ["probe"])
+    expected = ["probe"] + ([("load", False)] if loads else [])
+    if source == "ngram" and can_drop:
+        expected.append("measure")
+    assert order == expected
     src = llm._source
     assert src.name == source and src.status == status and src.usable is (status == "ok")
     if source == "draft" and not can_drop:
@@ -1155,9 +1332,25 @@ def test_the_engine_hands_out_the_measured_step_costs():
     from localm.inference import engine as engine_mod
     eng = object.__new__(engine_mod.Engine)
     eng._backend = SimpleNamespace(last_speculation={"costs": {"target_ms": 8.0}})
-    assert eng.draft_step_costs() == {"target_ms": 8.0}
+    assert eng.draft_step_costs() == {"target_ms": 8.0, "observed_ms": {}}
+    eng._backend = SimpleNamespace(last_speculation={"costs": {"target_ms": 8.0},
+                                                     "observed_ms": {0: 9.0}})
+    assert eng.draft_step_costs() == {"target_ms": 8.0, "observed_ms": {0: 9.0}}
     eng._backend = SimpleNamespace(last_speculation=None)
     assert eng.draft_step_costs() is None
+
+
+def test_the_report_carries_the_measured_and_observed_costs():
+    llm = _measured_llama(costs=_costs())
+    src = llm._source
+    assert "observed_ms" in src.report() and src.report()["observed_ms"] == {}
+    src.on_step_seconds(0, 1.0)
+    rep = src.report()
+    assert rep["costs"]["target_ms"] == 1000.0
+    assert rep["observed_ms"] == {0: 1000.0}
+    assert rep["acceptance"] == pytest.approx(0.6)
+    src.costs = None
+    assert "costs" not in src.report()
 
 
 def test_bench_spec_without_a_draft_model_says_how_to_find_one(cli_runner):
