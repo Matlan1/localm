@@ -85,7 +85,7 @@ def _install_spies(monkeypatch):
     def spy_replace(src, dst, *a, **kw):
         try:
             captured = (_perm_fingerprint(src),
-                        open(src, "r", encoding="utf-8-sig").read())
+                        open(src, encoding="utf-8-sig").read())
         except OSError:                      # not one of ours; stay transparent
             captured = (None, None)
         events.append(("replace", str(src), str(dst), *captured))

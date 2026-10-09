@@ -325,7 +325,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         try:
             return await run_in_threadpool_bounded(_lookup, timeout=_LOOKUP_TIMEOUT)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Looking up the model source timed out: {e}")
+            raise HTTPException(504, f"Looking up the model source timed out: {e}") from e
 
     @app.post("/api/models/pull-comfy-source",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
@@ -358,7 +358,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     lookup_comfy_download, filename, req.class_type, req.input_name,
                     timeout=_LOOKUP_TIMEOUT)
             except ThreadCallTimeout as e:
-                raise HTTPException(504, f"Looking up the model source timed out: {e}")
+                raise HTTPException(504, f"Looking up the model source timed out: {e}") from e
             source = lookup.download
         if source is None:
             raise HTTPException(400, f"No download source for: {req.filename}")
@@ -376,7 +376,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 _download_dest, source, plugin, timeout=20.0)
         except ThreadCallTimeout as e:
             raise HTTPException(
-                504, f"Resolving the ComfyUI download destination timed out: {e}")
+                504, f"Resolving the ComfyUI download destination timed out: {e}") from e
         if dest_dir is None:
             raise HTTPException(
                 400,

@@ -99,7 +99,7 @@ def parse_cron(expr: str) -> list:
             f"cron expression must have 5 fields (minute hour dom month dow), "
             f"got {len(fields)}: {expr!r}")
     sets = []
-    for idx, (raw, (lo, hi)) in enumerate(zip(fields, _FIELD_BOUNDS)):
+    for idx, (raw, (lo, hi)) in enumerate(zip(fields, _FIELD_BOUNDS, strict=True)):
         if idx == 4:
             # day-of-week: accept 7 as an alias for Sunday (Vixie cron), then
             # normalise to 0 so cron_match (which computes dow 0..6) still works.

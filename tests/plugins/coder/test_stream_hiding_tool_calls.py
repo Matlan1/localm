@@ -67,7 +67,7 @@ def _release_latency(text, tool_names=None):
             consumed[0] += 1
             yield c
 
-    for chunk, hidden in _ContextMixin._stream_hiding_tool_calls(
+    for _chunk, hidden in _ContextMixin._stream_hiding_tool_calls(
             counting_pieces(), tool_names=tool_names):
         if not hidden:
             return consumed[0]

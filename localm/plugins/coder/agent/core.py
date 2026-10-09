@@ -97,7 +97,7 @@ class Agent(
         always_confirm: Optional[set] = None,
         dry_run: bool = False,
         patch_mode: bool = False,
-        parent: Optional["Agent"] = None,
+        parent: Optional[Agent] = None,
         mode: SessionMode = SessionMode.PRIVACY,
         scope: Optional[str] = None,
         scope_inherited: bool = False,

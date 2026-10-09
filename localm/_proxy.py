@@ -35,10 +35,10 @@ def _default_opener(method: str, url: str, data, headers: dict, timeout: float):
             pass
         raise LocalmError(
             "the localm proxy returned an error",
-            reason=f"HTTP {e.code}: {detail.decode('utf-8', 'replace')[:300]}".strip())
+            reason=f"HTTP {e.code}: {detail.decode('utf-8', 'replace')[:300]}".strip()) from None
     except (urllib.error.URLError, OSError) as e:
         raise LocalmError("could not reach the localm proxy",
-                          reason=str(getattr(e, "reason", e)))
+                          reason=str(getattr(e, "reason", e))) from None
 
 
 def request(base: str, path: str, *, method: str = "GET", token: Optional[str] = None,
@@ -71,4 +71,4 @@ def request(base: str, path: str, *, method: str = "GET", token: Optional[str] =
         return _json.loads(text)
     except ValueError:
         raise LocalmError("the localm proxy returned a non-JSON response",
-                          reason=text[:200])
+                          reason=text[:200]) from None

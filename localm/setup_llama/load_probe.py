@@ -108,7 +108,7 @@ sys.exit(0 if _loader.compute_backends_available() else {_PROBE_NO_BACKENDS})
 """
 
 
-def _is_abi_rejection(detail: "Optional[str]") -> bool:
+def _is_abi_rejection(detail: Optional[str]) -> bool:
     """Whether *detail* is _native_loads_ok reporting OUR OWN ABI gate refusing
     the runtime, as opposed to any other load failure.
 

@@ -28,7 +28,7 @@ def _find_run_log(home=None, pid=None):
         d = _P(home) / "logs"
     if not d.is_dir():
         return None
-    logs = sorted(d.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    logs = sorted(d.glob("localm_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
     if pid is not None:
         for p in logs:
             if p.stem.endswith(f"_{pid}"):

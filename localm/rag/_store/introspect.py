@@ -107,7 +107,7 @@ class _CollectionIntrospection:
         peek_stats() BEFORE any Collection exists."""
         if not isinstance(recorded, dict):
             return False
-        def _stat(name: str) -> "list[int] | None":
+        def _stat(name: str) -> list[int] | None:
             try:
                 st = (coll_dir / name).stat()
             except OSError:
@@ -118,7 +118,7 @@ class _CollectionIntrospection:
 
     @classmethod
     def _peek_meta(cls, name: str, base: Optional[Path] = None
-                    ) -> "tuple[str, Path, dict] | None":
+                    ) -> tuple[str, Path, dict] | None:
         """(checked name, collection dir, parsed meta.json), or None when
         there is nothing here the lazy path can trust enough to skip the full
         load: an invalid name, no meta.json, or one that fails to parse. On None
@@ -278,7 +278,7 @@ class _CollectionIntrospection:
 
     @classmethod
     def load_and_maybe_backfill(cls, name: str, base: Optional[Path] = None
-                                ) -> "Collection":
+                                ) -> Collection:
         """The COLD-fallback path for ``peek_stats()``/``peek_detail()``: a
         full, authoritative load of *name* straight from disk (``Collection(
         name, base, cache=False)``, so it never fills the collection cache),

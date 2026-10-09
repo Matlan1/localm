@@ -441,7 +441,7 @@ def extract_text(path: Path,
     try:
         data = path.read_bytes()
     except OSError as e:
-        raise ExtractError(f"Cannot read {path.name}: {e}")
+        raise ExtractError(f"Cannot read {path.name}: {e}") from e
     return extract_bytes(data, path.name, describe_image_fn=describe_image_fn)
 
 
@@ -493,7 +493,7 @@ def extract_bytes(data: bytes, filename: str,
         try:
             desc = describe_image_fn(data, mime_type)
         except Exception as e:
-            raise ExtractError(f"Image description failed: {e}")
+            raise ExtractError(f"Image description failed: {e}") from e
         if not desc or not desc.strip():
             raise ExtractError(f"Active model returned empty description for {filename}")
         text = desc
@@ -617,7 +617,7 @@ def _extract_zip(data: bytes, filename: str,
                     _archive_log().debug("rag: could not read archive member %s in %s: %s",
                                          member, filename, e)
     except Exception as e:
-        raise ExtractError(f"Cannot parse {filename} as zip: {e}")
+        raise ExtractError(f"Cannot parse {filename} as zip: {e}") from e
     return _join_archive(texts, truncated)
 
 
@@ -668,7 +668,7 @@ def _extract_tar_members(tf, filename: str, describe_image_fn, *, _depth: int = 
                 break
             members.append(member)
     except Exception as e:
-        raise ExtractError(f"Cannot parse {filename} as tar archive: {e}")
+        raise ExtractError(f"Cannot parse {filename} as tar archive: {e}") from e
     members.sort(key=lambda m: m.name)
     try:
         for member in members:
@@ -718,7 +718,7 @@ def _extract_tar_members(tf, filename: str, describe_image_fn, *, _depth: int = 
                 _archive_log().debug("rag: could not read archive member %s in %s: %s",
                                      member.name, filename, e)
     except Exception as e:
-        raise ExtractError(f"Cannot parse {filename} as tar archive: {e}")
+        raise ExtractError(f"Cannot parse {filename} as tar archive: {e}") from e
     return _join_archive(texts, truncated)
 
 
@@ -741,7 +741,7 @@ def _decompress_single_stream(data: bytes, filename: str) -> bytes:
         with fh:
             raw = fh.read(limit + 1)
     except Exception as e:
-        raise ExtractError(f"{filename}: could not decompress: {e}")
+        raise ExtractError(f"{filename}: could not decompress: {e}") from e
     if len(raw) > limit:
         raise ExtractError(f"{filename}: decompressed content exceeds "
                            f"{limit // 1_000_000} MB limit (possible bomb); refusing to extract.")
@@ -786,7 +786,7 @@ def _extract_docx(data: bytes, filename: str) -> str:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             xml = _read_zip_member(zf, "word/document.xml", filename)
     except (zipfile.BadZipFile, KeyError, OSError) as e:
-        raise ExtractError(f"Cannot parse {filename} as .docx: {e}")
+        raise ExtractError(f"Cannot parse {filename} as .docx: {e}") from e
     # Tabs and explicit breaks inside runs. The attribute span excludes both < and
     # >, so a match stops at the next tag instead of scanning past it.
     xml = re.sub(r"<w:(?:tab|br|cr)\b[^<>]*/?>", "\t", xml)
@@ -813,7 +813,7 @@ def _extract_ipynb(data: bytes, filename: str) -> str:
     except (json.JSONDecodeError, ValueError, RecursionError) as e:
         # RecursionError from deeply-nested JSON is folded into ExtractError too:
         # it is a RuntimeError, not a JSONDecodeError.
-        raise ExtractError(f"Cannot parse {filename} as a notebook: {type(e).__name__}")
+        raise ExtractError(f"Cannot parse {filename} as a notebook: {type(e).__name__}") from e
     # A notebook is a JSON object with a "cells" list. Validate the shape and
     # coerce, so a malformed file raises ExtractError rather than TypeError.
     if not isinstance(nb, dict):
@@ -855,10 +855,10 @@ def _extract_pdf(data: bytes, filename: str) -> str:
     import io
     try:
         from pypdf import PdfReader
-    except ImportError:
+    except ImportError as exc:
         raise ExtractError(
             "PDF support needs the pypdf package. Install it with: "
-            "pip install \"localm[rag]\"  (or: pip install pypdf)")
+            "pip install \"localm[rag]\"  (or: pip install pypdf)") from exc
     try:
         reader = PdfReader(io.BytesIO(data))
         pages = []
@@ -891,4 +891,4 @@ def _extract_pdf(data: bytes, filename: str) -> str:
             _archive_identity_debug("%s PDF extraction stopped early (%s)", filename, note)
         return _join_pdf(pages, note)
     except Exception as e:
-        raise ExtractError(f"Cannot extract text from {filename}: {e}")
+        raise ExtractError(f"Cannot extract text from {filename}: {e}") from e

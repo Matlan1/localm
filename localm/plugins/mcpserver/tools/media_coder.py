@@ -12,7 +12,6 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from typing import Dict
 
 from localm import pathsafe
 from localm.pathsafe import is_unc_or_device_path
@@ -176,7 +175,7 @@ def coder_engine(engines: EngineCache, decision):
     return engine, decision.current, decision
 
 
-def build(engines: EngineCache) -> Dict[str, dict]:
+def build(engines: EngineCache) -> dict[str, dict]:
     """``generate_image`` and ``run_coder_task``. The coder agent runs on an
     engine from *engines*, pinned for the length of the run."""
     def generate_image(args: dict) -> dict:
@@ -219,9 +218,9 @@ def build(engines: EngineCache) -> Dict[str, dict]:
             expanded = str(Path(raw).expanduser())
             try:
                 return pathsafe.confined_absolute_or_under(home, expanded)
-            except ValueError:
+            except ValueError as e:
                 raise ValueError(
-                    f"{label} must stay within the localm data dir ({home})")
+                    f"{label} must stay within the localm data dir ({home})") from e
 
         try:
             out_arg = args.get("output_path")
@@ -338,7 +337,7 @@ def build(engines: EngineCache) -> Dict[str, dict]:
             # the model is loaded here if that instance stops answering.
             from localm.plugins.coder.backends.http import HTTPBackend
             backend = peer_backend = PeerCoderBackend(engines, model_name, engine, HTTPBackend(
-                getattr(engine, "_base"), model=getattr(engine, "_model", None) or model_name,
+                engine._base, model=getattr(engine, "_model", None) or model_name,
                 api_key=getattr(engine, "_token", None) or "localm",
                 localm_server=True))
         else:

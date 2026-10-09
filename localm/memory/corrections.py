@@ -86,6 +86,6 @@ class PendingCorrection:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "PendingCorrection":
+    def from_dict(cls, data: dict) -> PendingCorrection:
         known = set(cls.__dataclass_fields__)     # type: ignore[attr-defined]
         return cls(**{k: v for k, v in data.items() if k in known})

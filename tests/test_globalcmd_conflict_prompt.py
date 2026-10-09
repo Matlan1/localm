@@ -157,7 +157,7 @@ def test_priority_prepends_and_keep_appends(monkeypatch):
     for choice, expected in (("priority", "prepend"), ("keep", "append")):
         seen = []
         _capture_install(monkeypatch, seen)
-        monkeypatch.setattr(gc, "ask_conflict", lambda *a, **k: choice)
+        monkeypatch.setattr(gc, "ask_conflict", lambda *a, _choice=choice, **k: _choice)
         gc.main(["install", "--root", "."])
         assert seen == [expected], f"{choice} should install with {expected}"
 

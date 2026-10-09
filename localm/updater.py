@@ -110,7 +110,7 @@ def verify_signature(data: bytes, signature_b64) -> None:
     try:
         sig = base64.b64decode(str(signature_b64), validate=True)
     except Exception:
-        raise LocalmError("the update signature is malformed", reason="not valid base64")
+        raise LocalmError("the update signature is malformed", reason="not valid base64") from None
     for key in keys:
         try:
             key.verify(sig, data)
@@ -367,7 +367,7 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     try:
         aid = int(asset_id)
     except (TypeError, ValueError):
-        raise LocalmError("bad asset id", reason=str(asset_id))
+        raise LocalmError("bad asset id", reason=str(asset_id)) from None
     url = base.rstrip("/") + f"/update/download?id={aid}"
     headers = {"User-Agent": "localm"}
     if token:
@@ -404,13 +404,13 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
                         break
                     f.write(chunk)
     except urllib.error.HTTPError as e:
-        raise LocalmError("the update download failed", reason=f"HTTP {e.code}")
+        raise LocalmError("the update download failed", reason=f"HTTP {e.code}") from None
     except RedirectDowngradeRefused as e:
         # Must stay ahead of the URLError clause below, which it subclasses.
         raise LocalmError("the update download tried to downgrade to http",
-                          reason=str(getattr(e, "reason", e)))
+                          reason=str(getattr(e, "reason", e))) from None
     except (urllib.error.URLError, OSError) as e:
-        raise LocalmError("could not download the update", reason=str(getattr(e, "reason", e)))
+        raise LocalmError("could not download the update", reason=str(getattr(e, "reason", e))) from None
     return dest
 
 
@@ -495,7 +495,7 @@ def _apply_lock(what: str = "update"):
             from localm.bugreport import LocalmError
             raise LocalmError(
                 f"another {what} is already being applied",
-                reason="wait for it to finish, then try again")
+                reason="wait for it to finish, then try again") from None
     # Record who holds it, for a future caller's staleness check. Best-effort: a
     # failed write means the next check falls back to age.
     try:
@@ -645,13 +645,13 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
                 except Exception as rb:
                     raise LocalmError(
                         "the post-update step failed AND rollback failed - manual recovery needed",
-                        reason=f"{why}; rollback: {rb}; restore from {backup_dir}")
+                        reason=f"{why}; rollback: {rb}; restore from {backup_dir}") from None
 
             try:
                 rc = int(run(cmd))
             except Exception as e:
                 _rollback_or_raise(f"post-update step crashed: {e}")
-                raise LocalmError("the post-update step crashed; rolled back", reason=str(e))
+                raise LocalmError("the post-update step crashed; rolled back", reason=str(e)) from None
             if rc != 0:
                 _rollback_or_raise(f"{cmd[0]} exited {rc}")
                 raise LocalmError("the post-update step failed; rolled back",

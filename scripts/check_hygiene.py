@@ -582,7 +582,7 @@ _RAW_ACCESSOR_GUARDS = {
 _MAX_TEST_FILE_BYTES = 100_000_000
 
 
-def _const_bytes(node: ast.AST) -> "int | None":
+def _const_bytes(node: ast.AST) -> int | None:
     r"""Byte size of a literal size expression, or None when not resolvable.
 
     A tiny constant-folder, not ast.literal_eval: it understands only the shapes a
@@ -1039,7 +1039,7 @@ def _eager_module_statements(body: list[ast.stmt]) -> list[ast.stmt]:
 
 
 def _resolve_relative_import(node: ast.ImportFrom, own_module: str,
-                              is_package: bool) -> "str | None":
+                              is_package: bool) -> str | None:
     """The absolute ``localm...`` module a relative ``ImportFrom`` resolves to,
     mirroring ``importlib._bootstrap._resolve_name``: a level-N import is
     anchored at the importing module's ``__package__``, then walked up (N-1)
@@ -1361,7 +1361,7 @@ def _layering_tiers(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
     return ([], problems) if problems else (tiers, [])
 
 
-def _tracked_localm_files(pkg_root: Path) -> "list[Path] | None":
+def _tracked_localm_files(pkg_root: Path) -> list[Path] | None:
     """Every git-tracked file under *pkg_root*, with no directory filtered out.
     None when git cannot answer (no checkout, no git) or tracks nothing there."""
     try:
@@ -1373,7 +1373,7 @@ def _tracked_localm_files(pkg_root: Path) -> "list[Path] | None":
     return files or None
 
 
-def _layering_units(pkg_root: Path, tracked: "list[Path] | None") -> set[str]:
+def _layering_units(pkg_root: Path, tracked: list[Path] | None) -> set[str]:
     """The units the map must place: from the tracked file list when given
     (a generated, untracked module is not one), else from disk. A directory
     counts when any tracked ``.py`` sits beneath it, ``__init__.py`` or not."""
@@ -1395,7 +1395,7 @@ def _layering_units(pkg_root: Path, tracked: "list[Path] | None") -> set[str]:
     return units
 
 
-def _import_direction_violations(tracked: "list[Path] | None" = None) -> list[str]:
+def _import_direction_violations(tracked: list[Path] | None = None) -> list[str]:
     """Module-level imports that go up the declared layering or between peers,
     and a layering map that is malformed, incomplete, stale or duplicated.
 
@@ -1557,7 +1557,7 @@ def _same_module_helper_keys(call: ast.AST, index: dict, seen: frozenset,
 
 
 def _route_json_keys(fn, index: dict, seen: frozenset = frozenset(),
-                     helpers: "set | None" = None) -> "set[str] | None":
+                     helpers: set | None = None) -> set[str] | None:
     """The union of top-level keys over every return of *fn*, or None when the
     shape is open.
 
@@ -1580,7 +1580,7 @@ def _route_json_keys(fn, index: dict, seen: frozenset = frozenset(),
                 nested, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
             closure_names.update(n.id for n in ast.walk(nested) if isinstance(n, ast.Name))
 
-    def open_uses(st: ast.AST, allowed: "set[int]") -> None:
+    def open_uses(st: ast.AST, allowed: set[int]) -> None:
         for node in ast.walk(st):
             if (isinstance(node, ast.Name) and tracked.get(node.id) is not None
                     and id(node) not in allowed):
@@ -1685,14 +1685,14 @@ def _route_json_keys(fn, index: dict, seen: frozenset = frozenset(),
     return keys
 
 
-def _json_response_content_or_none(call: ast.Call) -> "ast.AST | None":
+def _json_response_content_or_none(call: ast.Call) -> ast.AST | None:
     try:
         return _json_response_content(call)
     except _OpenShape:
         return None
 
 
-def _route_template_regex(template: str) -> "re.Pattern[str]":
+def _route_template_regex(template: str) -> re.Pattern[str]:
     """A regex matching a concrete path for a FastAPI path template: `{name}`
     matches one segment, `{name:path}` the rest of the path."""
     out = "^"
@@ -1704,7 +1704,7 @@ def _route_template_regex(template: str) -> "re.Pattern[str]":
     return re.compile(out + "$")
 
 
-def _decorated_route(dec: ast.AST) -> "tuple[str, str, bool] | None":
+def _decorated_route(dec: ast.AST) -> tuple[str, str, bool] | None:
     """(METHOD, path template, opened) for an `@x.get("/path", ...)`-shaped
     decorator with a literal path, else None. *opened* is True when the
     decorator carries response_model or response_class."""
@@ -1757,7 +1757,7 @@ def _own_route_paths(tree: ast.AST) -> set[str]:
     decorator, an `add_api_route("/p", ...)` call, or `app.get("/p")(fn)`."""
     paths: set[str] = set()
 
-    def literal(call: ast.Call) -> "str | None":
+    def literal(call: ast.Call) -> str | None:
         if (isinstance(call.func, ast.Attribute) and call.args
                 and isinstance(call.args[0], ast.Constant)
                 and isinstance(call.args[0].value, str)
@@ -1780,7 +1780,7 @@ def _own_route_paths(tree: ast.AST) -> set[str]:
     return paths
 
 
-def _path_text(node: ast.AST, strings: dict) -> "str | None":
+def _path_text(node: ast.AST, strings: dict) -> str | None:
     """A path expression as text: a literal, an f-string, or a concatenation,
     with a name bound in *strings* substituted and every other non-literal part
     replaced by one placeholder segment; None when the node is not
@@ -1806,7 +1806,7 @@ def _path_text(node: ast.AST, strings: dict) -> "str | None":
     return _JSON_ROUTE_SEGMENT
 
 
-def _request_path(text: str) -> "str | None":
+def _request_path(text: str) -> str | None:
     """The request path of *text*: the query string dropped and a scheme and
     host stripped; None unless the remainder starts with '/'. A text starting
     with a placeholder (a base URL that is not a literal) is None."""
@@ -1817,7 +1817,7 @@ def _request_path(text: str) -> "str | None":
     return text if text.startswith("/") else None
 
 
-def _request_call(call: ast.Call, strings: dict) -> "tuple[str, str] | None":
+def _request_call(call: ast.Call, strings: dict) -> tuple[str, str] | None:
     """(METHOD, path) for `<x>.get|post|...(<path>, ...)`, else None."""
     if not (isinstance(call.func, ast.Attribute) and call.func.attr in _JSON_ROUTE_METHODS
             and call.args):
@@ -1890,7 +1890,7 @@ class _JsonKeyReads:
         self.bodies: dict = {}        # name -> set of (METHOD, path)
         self.strings: dict = {}       # name -> path text
 
-    def _routes_of_body(self, node: ast.AST) -> "set | None":
+    def _routes_of_body(self, node: ast.AST) -> set | None:
         node = _unwrap_await(node)
         if isinstance(node, ast.Name):
             return self.bodies.get(node.id)
@@ -1921,7 +1921,7 @@ class _JsonKeyReads:
     def _reads(self, node: ast.AST) -> None:
         shadowed = _shadowed_names(node)
 
-        def bound(expr: ast.AST) -> "set | None":
+        def bound(expr: ast.AST) -> set | None:
             base = _unwrap_await(expr)
             if isinstance(base, ast.Name) and base.id in shadowed:
                 return None
@@ -2067,7 +2067,7 @@ def _response_key_violations(tracked: list[Path]) -> list[str]:
     compiled = [(method, template, _route_template_regex(template), handlers)
                 for (method, template), handlers in routes.items()]
 
-    def resolve(method: str, path: str) -> "tuple[str, set[str], set[str]] | None":
+    def resolve(method: str, path: str) -> tuple[str, set[str], set[str]] | None:
         matches = [(t, hs) for m, t, rx, hs in compiled if m == method and rx.match(path)]
         if len(matches) != 1:
             return None
@@ -2097,7 +2097,7 @@ def _response_key_violations(tracked: list[Path]) -> list[str]:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
 
-            def report(lineno: int, key: str, shapes, fn=node.name) -> None:
+            def report(lineno: int, key: str, shapes, fn=node.name, lines=lines, rel=rel) -> None:
                 if lineno - 1 < len(lines) and "hygiene-ok" in lines[lineno - 1]:
                     return
                 method, path, _, _ = shapes[0]

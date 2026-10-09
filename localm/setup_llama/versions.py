@@ -45,7 +45,7 @@ TAG_HELP = ("Use a tag as upstream publishes it, for example 'b10355' (letters, 
             f"{_TRACK_LATEST!r} for upstream's newest.")
 
 
-def is_safe_tag(tag: "Optional[str]") -> bool:
+def is_safe_tag(tag: Optional[str]) -> bool:
     """Whether *tag* is safe to interpolate into a release URL path segment.
 
     PUBLIC: the GUI's runtime route accepts a caller-supplied tag and must
@@ -74,7 +74,7 @@ def tracks_latest() -> bool:
     return str(raw).strip().lower() == _TRACK_LATEST
 
 
-def pinned_tag() -> "Optional[str]":
+def pinned_tag() -> Optional[str]:
     """The exact llama.cpp release tag the user has pinned, or None when they
     have not pinned one (the default, which installs _PINNED_TAG, and the
     ``--tag latest`` tracking mode, which is tracks_latest()'s business).
@@ -107,7 +107,7 @@ def pinned_tag() -> "Optional[str]":
     return raw
 
 
-def set_pinned_tag(tag: "Optional[str]") -> None:
+def set_pinned_tag(tag: Optional[str]) -> None:
     """Store the user's build choice: an exact tag, the _TRACK_LATEST sentinel,
     or falsy to clear it back to the shipped _PINNED_TAG. Raises on a config
     write failure: unlike recording history, a choice the user explicitly asked
@@ -117,7 +117,7 @@ def set_pinned_tag(tag: "Optional[str]") -> None:
     config.update_config(lambda cfg: cfg.__setitem__("llama_runtime_pin", value))
 
 
-def _record_runtime_history(backend: str, tag: "Optional[str]") -> None:
+def _record_runtime_history(backend: str, tag: Optional[str]) -> None:
     """Append a successful provision to the rollback history. Best-effort by
     design - the provision itself already succeeded, so failing to journal it
     must not turn a working install into an error - but a failure is LOGGED
@@ -180,7 +180,7 @@ def runtime_history() -> list:
             if isinstance(e, dict) and is_safe_tag(str(e.get("tag") or ""))]
 
 
-def previous_tag(backend: str) -> "Optional[str]":
+def previous_tag(backend: str) -> Optional[str]:
     """The most recent recorded tag for *backend* that is NOT the one currently
     installed - i.e. what --rollback goes back to. None when there is no such
     build to return to.

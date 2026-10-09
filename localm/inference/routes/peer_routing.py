@@ -82,7 +82,7 @@ def register(app: FastAPI, ctx) -> None:
             peer, requires_key = await run_in_threadpool_bounded(
                 _lookup, timeout=_PEER_LOOKUP_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Looking for a peer with '{name}' loaded timed out: {e}")
+            raise HTTPException(504, f"Looking for a peer with '{name}' loaded timed out: {e}") from e
         if peer is None:
             return {"available": False, "peer": None}
         return {"available": True, "peer": {
@@ -141,7 +141,7 @@ def register(app: FastAPI, ctx) -> None:
             route, refused = await run_in_threadpool_bounded(
                 _verify, timeout=_PEER_LOOKUP_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Verifying peer '{instance_id}' timed out: {e}")
+            raise HTTPException(504, f"Verifying peer '{instance_id}' timed out: {e}") from e
         if refused is not None:
             raise HTTPException(
                 403, f"Peer instance '{instance_id}' refused the route: {refused}.")

@@ -97,7 +97,7 @@ class Detection:
         return "none" if self.probe_ok else "unknown"
 
 
-def _run_ok(cmd: list) -> "tuple[str, bool]":
+def _run_ok(cmd: list) -> tuple[str, bool]:
     """Run *cmd*; return (combined stdout+stderr, ran_to_completion).
 
     The flag reports exactly one thing: the process STARTED, did not time out,
@@ -119,7 +119,7 @@ def _run(cmd: list) -> str:
     return _run_ok(cmd)[0]
 
 
-def _win_gpu_names() -> "tuple[str, bool]":
+def _win_gpu_names() -> tuple[str, bool]:
     """Names of the Windows display adapters (lowercased), best-effort, plus
     whether either enumeration tool actually answered.
 
@@ -137,7 +137,7 @@ def _win_gpu_names() -> "tuple[str, bool]":
     return out.lower(), ok
 
 
-def _linux_gpu_names() -> "tuple[str, bool]":
+def _linux_gpu_names() -> tuple[str, bool]:
     """Names of Linux PCI display controllers (lowercased), best-effort, plus
     whether ``lspci`` actually answered (it is absent on plenty of minimal
     installs and containers, where "no display controllers" would be a fabricated
@@ -258,7 +258,7 @@ def amd_gfx_family(names: str) -> str:
     return ""
 
 
-def recommended_install_backend(det: "Detection | None" = None) -> str:
+def recommended_install_backend(det: Detection | None = None) -> str:
     """The backend the INSTALLER should provision by default - the ONE policy both
     setup.bat and setup.sh call:
       * Apple Silicon                         -> metal
@@ -303,7 +303,7 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
     return "vulkan"
 
 
-def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> str:
+def recommended_torch_variant(backend: str, det: Detection | None = None) -> str:
     """The PyTorch variant the INSTALLER should provision for the HuggingFace /
     transformers backend, given the user's chosen llama.cpp *backend* and the
     detected hardware. Returns "cuda" | "rocm" | "xpu" | "none". Both setup.bat and
@@ -412,7 +412,7 @@ def _cuda_is_blackwell() -> bool:
     return any(cap >= _CUDA_BLACKWELL_MIN_CAP for cap in caps)
 
 
-def pytorch_index_url(variant: str) -> "str | None":
+def pytorch_index_url(variant: str) -> str | None:
     """The PyTorch wheel index URL for a torch *variant* key ("cuda" | "xpu" |
     "rocm-linux" | "cpu"), or None if unknown. Public accessor, so other
     callers (the managed-ComfyUI fresh install picks the ComfyUI torch here)
@@ -428,7 +428,7 @@ def pytorch_index_url(variant: str) -> "str | None":
     return _TORCH_INDEX.get(variant)
 
 
-def amd_rocm_win_torch_packages() -> "tuple[str, str, str]":
+def amd_rocm_win_torch_packages() -> tuple[str, str, str]:
     """(torch, torchvision, torchaudio) pinned requirement strings for AMD's
     official Windows ROCm preview (gfx110X/gfx120X, RX 7000/9000) - the exact
     build published at amd_rocm_win_find_links(), so this project and a fresh
@@ -444,7 +444,7 @@ def amd_rocm_win_find_links() -> str:
     return _AMD_ROCM_WIN_FIND_LINKS
 
 
-def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
+def torch_pip_args(backend: str, det: Detection | None = None) -> str:
     """The exact ``uv pip install -p .venv <ARGS>`` arguments to provision the HF
     PyTorch stack for *backend* on THIS machine - or "" when no verified prebuilt
     exists and the installer should skip and guide the user. SINGLE source of truth

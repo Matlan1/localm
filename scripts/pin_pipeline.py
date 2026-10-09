@@ -131,7 +131,7 @@ def _load_module(path: Path, name: str):
     return mod
 
 
-def newest_candidate(repo: Path = REPO) -> "tuple[str, str] | None":
+def newest_candidate(repo: Path = REPO) -> tuple[str, str] | None:
     """(pinned tag, newest upstream tag) when upstream has something newer
     than the pin, else None (already current or upstream unreadable - both
     read the same here: nothing eligible to test this run)."""
@@ -151,7 +151,7 @@ def newest_candidate(repo: Path = REPO) -> "tuple[str, str] | None":
     return pin, newest
 
 
-def newest_comfyui_candidate(repo: Path = REPO) -> "tuple[str, str, str] | None":
+def newest_comfyui_candidate(repo: Path = REPO) -> tuple[str, str, str] | None:
     """(pinned tag, candidate tag, candidate commit) when upstream has a
     newer release AND its commit could be resolved, else None (already
     current, upstream unreadable, or the tag->commit resolution failed - all
@@ -211,14 +211,14 @@ def save_state(state: dict, *, pin: str = "llama") -> None:
     _state_path(pin).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
-def _parse_iso(value: str) -> "_dt.datetime | None":
+def _parse_iso(value: str) -> _dt.datetime | None:
     try:
         return _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
     except (TypeError, ValueError):
         return None
 
 
-def should_skip(state: dict, candidate: str, *, now: "_dt.datetime | None" = None) -> "str | None":
+def should_skip(state: dict, candidate: str, *, now: _dt.datetime | None = None) -> str | None:
     """A reason to skip *candidate* this run, or None to proceed.
 
     A FAIL is never retried while it remains the newest candidate: only a
@@ -245,7 +245,7 @@ def should_skip(state: dict, candidate: str, *, now: "_dt.datetime | None" = Non
 #  dir, never writes a tracked file, so it never needs the dedicated worktree)#
 # --------------------------------------------------------------------------- #
 
-def run_under_gpu_lease(cmd: "list[str]", *, purpose: str, cwd: Path) -> int:
+def run_under_gpu_lease(cmd: list[str], *, purpose: str, cwd: Path) -> int:
     """Run *cmd* holding the shared GPU lease for its whole duration. Returns
     the WRAPPED command's own exit code on success; LEASE_BUSY_EXIT if the
     lease itself could not be acquired (the command never ran)."""
@@ -294,7 +294,7 @@ def run_comfyui_confirm(tag: str, commit: str, receipt_path: Path) -> int:
     workdir = _comfyui_scratch_workdir()
     script = REPO / "scripts" / "confirm_comfyui_runtime.py"
 
-    def _run_phase(phase: str, *, require_gpu: bool = False) -> "tuple[int, str]":
+    def _run_phase(phase: str, *, require_gpu: bool = False) -> tuple[int, str]:
         cmd = [sys.executable, str(script), "--tag", tag, "--commit", commit,
               "--workdir", str(workdir), "--receipt", str(receipt_path), "--phase", phase]
         if require_gpu:
@@ -340,7 +340,7 @@ def _worktree_env(worktree: Path) -> dict:
     return env
 
 
-def run_bump(worktree: Path, candidate: str, receipt_path: Path, *, write: bool) -> "tuple[int, str]":
+def run_bump(worktree: Path, candidate: str, receipt_path: Path, *, write: bool) -> tuple[int, str]:
     """The WORKTREE's own copy of scripts/bump_llama_pin.py --tag candidate
     --receipt receipt_path [--write] - never the main checkout's copy, so the
     edit lands in the worktree's tree, ready to commit there."""
@@ -353,7 +353,7 @@ def run_bump(worktree: Path, candidate: str, receipt_path: Path, *, write: bool)
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def run_targeted_tests(worktree: Path) -> "tuple[bool, str]":
+def run_targeted_tests(worktree: Path) -> tuple[bool, str]:
     """The pin's own checklist test files (bump_llama_pin.py's checklist item
     5), run targeted - never the full suite - against the WORKTREE's tree."""
     test_files = [
@@ -373,7 +373,7 @@ def run_targeted_tests(worktree: Path) -> "tuple[bool, str]":
 
 
 def run_comfyui_bump(worktree: Path, tag: str, commit: str, receipt_path: Path,
-                     *, write: bool) -> "tuple[int, str]":
+                     *, write: bool) -> tuple[int, str]:
     """The WORKTREE's own copy of scripts/bump_comfyui_pin.py --tag tag
     --commit commit --receipt receipt_path [--write] - never the main
     checkout's copy, matching run_bump()'s own reasoning."""
@@ -386,7 +386,7 @@ def run_comfyui_bump(worktree: Path, tag: str, commit: str, receipt_path: Path,
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def run_comfyui_targeted_tests(worktree: Path) -> "tuple[bool, str]":
+def run_comfyui_targeted_tests(worktree: Path) -> tuple[bool, str]:
     """The ComfyUI pin's own checklist test files (bump_comfyui_pin.py's
     checklist item 1), run targeted - never the full suite - against the
     WORKTREE's tree."""
@@ -464,9 +464,9 @@ def insert_changelog_bullet(text: str, bullet: str) -> str:
 _ISSUES_INTRO_RE = re.compile(r"an entry lives\nin exactly one\..*?\n\n", re.S)
 
 
-def append_fail_issue(candidate: str, reason: str, receipt_path: "Path | None",
+def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
                       issues_path: Path = ISSUES_PATH, *, pin: str = "llama",
-                      summary: "str | None" = None, kind: str = "CONFIRM-FAILED") -> bool:
+                      summary: str | None = None, kind: str = "CONFIRM-FAILED") -> bool:
     """Append a new OPEN entry to issues/issues.txt for a genuine FAIL (never
     for an ordinary INCONCLUSIVE - that is not evidence of anything; a
     repeated-INCONCLUSIVE streak past INCONCLUSIVE_ISSUE_THRESHOLD and an
@@ -521,9 +521,9 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: "Path | None",
     return True
 
 
-def _record_inconclusive(candidate: str, receipt_path: "Path | None", *, pin: str = "llama",
-                         reason: "str | None" = None, force_issue: bool = False,
-                         issue_summary: "str | None" = None, **extra) -> int:
+def _record_inconclusive(candidate: str, receipt_path: Path | None, *, pin: str = "llama",
+                         reason: str | None = None, force_issue: bool = False,
+                         issue_summary: str | None = None, **extra) -> int:
     """Save an INCONCLUSIVE verdict for *candidate* and track how many
     CONSECUTIVE runs have been INCONCLUSIVE for this exact candidate (any
     other verdict, or a different candidate becoming newest, resets the
@@ -578,7 +578,7 @@ def _record_inconclusive(candidate: str, receipt_path: "Path | None", *, pin: st
 #  Git / PR / merge - always from this script's OWN dedicated worktree       #
 # --------------------------------------------------------------------------- #
 
-def _run_git(args: "list[str]", cwd: Path, **kwargs) -> subprocess.CompletedProcess:
+def _run_git(args: list[str], cwd: Path, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, **kwargs)
 
 
@@ -681,7 +681,7 @@ def prepare_bump_branch(worktree: Path, candidate: str, *, pin: str = "llama") -
 
 
 def commit_and_push(worktree: Path, branch: str, candidate: str, old_tag: str,
-                    *, message: "str | None" = None) -> None:
+                    *, message: str | None = None) -> None:
     """Stages every TRACKED modification (`git add -u`), not a hardcoded file
     list. run_bump() always touches setup_llama/pins.py/_api.py/CHANGELOG.md, but
     a bump can also require a manual follow-on fix to a safety-relevant
@@ -712,7 +712,7 @@ def commit_and_push(worktree: Path, branch: str, candidate: str, old_tag: str,
 
 
 def open_pr(worktree: Path, branch: str, candidate: str, old_tag: str,
-           *, title: "str | None" = None, body: "str | None" = None) -> int:
+           *, title: str | None = None, body: str | None = None) -> int:
     """*title*/*body* override the default llama-specific text; the defaults
     reproduce the exact original text so the llama call site needs no
     change."""
@@ -763,7 +763,7 @@ def wait_for_ci(worktree: Path) -> str:
 
 
 def merge_pr(pr_number: int, worktree: Path, branch: str, candidate: str, old_tag: str,
-            *, title: "str | None" = None, body: "str | None" = None) -> None:
+            *, title: str | None = None, body: str | None = None) -> None:
     """Squash-merge, then detach and delete the LOCAL branch by hand rather
     than via `gh pr merge --delete-branch` (that flag's local cleanup
     switches to the default branch first, which this worktree is never on).

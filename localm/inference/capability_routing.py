@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field, replace
-from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Callable, Mapping, Optional, Sequence, Union
 
 from localm.model_manager import capabilities as caps
 from localm.model_manager.registry import is_llm
@@ -109,7 +109,7 @@ class CapabilityNeeds:
     count the model's trained window must cover, or None when the request states
     no context requirement."""
 
-    capabilities: Tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
     min_context: Optional[int] = None
 
     def is_empty(self) -> bool:
@@ -176,29 +176,29 @@ class RoutingDecision:
     resolved: Optional[str]
     pinned: bool
     needs: CapabilityNeeds
-    gaps: Dict[str, Optional[bool]] = field(default_factory=dict)
-    unmet: Tuple[str, ...] = ()
-    candidates: Tuple[str, ...] = ()
-    load_errors: Tuple[str, ...] = ()
-    candidate_unmet: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
-    skipped: Tuple[SkippedCandidate, ...] = ()
+    gaps: dict[str, Optional[bool]] = field(default_factory=dict)
+    unmet: tuple[str, ...] = ()
+    candidates: tuple[str, ...] = ()
+    load_errors: tuple[str, ...] = ()
+    candidate_unmet: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    skipped: tuple[SkippedCandidate, ...] = ()
     policy: str = AUTOSWITCH_AUTO
     suggested: Optional[str] = None
 
-    def answered_by(self, name: str) -> "RoutingDecision":
+    def answered_by(self, name: str) -> RoutingDecision:
         """This decision with candidate *name* answering: ``resolved`` names it and
         ``unmet`` is what *name* lacks (``candidate_unmet``), else unchanged."""
         return replace(self, resolved=name,
                        unmet=self.candidate_unmet.get(name, self.unmet))
 
-    def without_route(self, load_errors: Sequence[str] = ()) -> "RoutingDecision":
+    def without_route(self, load_errors: Sequence[str] = ()) -> RoutingDecision:
         """This decision with the route withdrawn: *current* answers, every gap
         is unmet, and *load_errors* records why each candidate could not be
         used."""
         return replace(self, resolved=self.current, unmet=tuple(sorted(self.gaps)),
                        load_errors=tuple(load_errors))
 
-    def with_skipped(self, more: Sequence[SkippedCandidate]) -> "RoutingDecision":
+    def with_skipped(self, more: Sequence[SkippedCandidate]) -> RoutingDecision:
         """This decision with *more* added to ``skipped``: models found to be
         skipped after the decision was made."""
         return replace(self, skipped=self.skipped + tuple(more))
@@ -349,8 +349,8 @@ def _model_satisfies(name: str, needs: CapabilityNeeds, reg: dict,
 
 def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
                   dir_cache: dict,
-                  known: Optional[Dict[str, bool]] = None,
-                  ignore_unknown: bool = False) -> Dict[str, Optional[bool]]:
+                  known: Optional[dict[str, bool]] = None,
+                  ignore_unknown: bool = False) -> dict[str, Optional[bool]]:
     """The needs *name* does not confirm, each with the tri-state as measured.
 
     A capability is a gap when it is not confirmed True, so an UNKNOWN counts,
@@ -361,7 +361,7 @@ def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
     With *ignore_unknown*, an unknown capability is not a gap unless the
     request cannot be answered without it (``_REQUIRED_TO_ANSWER``); only a
     confirmed ``False`` is. Passing *name* as None still gaps every need."""
-    gaps: Dict[str, Optional[bool]] = {}
+    gaps: dict[str, Optional[bool]] = {}
     known = known or {}
     if name is None:
         return {c: None for c in needs.capabilities}
@@ -392,7 +392,7 @@ def _current_gaps(name: Optional[str], needs: CapabilityNeeds, reg: dict,
 def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
                pinned: bool, resident: Sequence[str] = (),
                reg: Optional[dict] = None,
-               current_known: Optional[Dict[str, bool]] = None,
+               current_known: Optional[dict[str, bool]] = None,
                skip: Union[Mapping[str, SkippedCandidate],
                            Callable[[], Mapping[str, SkippedCandidate]], None] = None,
                mode: str = AUTOSWITCH_AUTO) -> RoutingDecision:

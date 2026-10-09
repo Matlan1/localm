@@ -126,7 +126,7 @@ def _templates_overlap(a: str, b: str) -> bool:
     matches exactly one path segment."""
     sa, sb = a.split("/"), b.split("/")
     return len(sa) == len(sb) and all(
-        x == y or _is_param(x) or _is_param(y) for x, y in zip(sa, sb))
+        x == y or _is_param(x) or _is_param(y) for x, y in zip(sa, sb, strict=True))
 
 
 def _describe(keys) -> str:

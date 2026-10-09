@@ -1,0 +1,50 @@
+name: Bug report
+description: Something is broken, crashes, or behaves differently from the docs.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        You can also run `localm bug-report -m "..."` to generate a report with a safe
+        hardware and backend snapshot, and send it from there.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. localm gui
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: localm version
+      description: Output of `localm --version`.
+    validations:
+      required: true
+  - type: input
+    id: os-gpu
+    attributes:
+      label: OS and GPU
+      description: e.g. "Windows 11, AMD RX 6800" or "Ubuntu 24.04, CPU only"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`localm doctor` output"
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error or log output
+      description: Relevant lines only. Remove anything private first.
+      render: text

@@ -82,7 +82,7 @@ class TestModelRoutesAreScoped:
         from localm import auth
         reader = auth.create_key("reader", [S.MODELS_READ])["key"]
         with TestClient(scoped_app) as c:
-            for method, path, body, _ in READ_ROUTES:
+            for method, path, _body, _ in READ_ROUTES:
                 r = getattr(c, method)(path, headers=_hdr(reader))
                 assert r.status_code != 403, f"models:read should reach {path}, got {r.status_code}"
             for method, path, body, _ in WRITE_ROUTES:

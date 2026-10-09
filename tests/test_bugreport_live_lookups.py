@@ -70,7 +70,7 @@ def _names_tests_replace() -> dict:
             elif isinstance(n, ast.Import):
                 aliases |= {a.asname for a in n.names if a.name == MOD and a.asname}
 
-        def is_module(node) -> bool:
+        def is_module(node, aliases=aliases) -> bool:
             ch = _chain(node)
             return (len(ch) == 1 and ch[0] in aliases) or ch == ["localm", "bugreport"]
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from typing import List
 
 _ELF_MAGIC = b"\x7fELF"
 _ELFCLASS64 = 2
@@ -19,7 +18,7 @@ _DT_NULL = 0
 _DT_NEEDED = 1
 
 
-def needed_libraries(path: Path) -> List[str]:
+def needed_libraries(path: Path) -> list[str]:
     """The ``DT_NEEDED`` sonames a 64-bit little-endian ELF shared object at
     *path* declares, in file order.
 

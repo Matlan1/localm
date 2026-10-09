@@ -124,7 +124,7 @@ def test_a_failed_reembed_leaves_the_previous_index_intact(tmp_path):
     vf = tmp_path / "kb" / "vectors.json"
     before = vf.read_text(encoding="utf-8")
 
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match="embedder died"):
         c.reembed(embed_fn=_embedder(64, fail_after=2))
 
     assert vf.read_text(encoding="utf-8") == before, "index changed after a failed re-embed"

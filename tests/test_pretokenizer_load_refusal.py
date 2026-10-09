@@ -254,6 +254,7 @@ class TestLlamaCppBackstop:
     def test_an_unusable_model_is_refused_and_freed_before_any_context(self, monkeypatch):
         monkeypatch.setattr("localm.config.load_config", lambda: {"main_gpu_index": None})
         mock_api = self._api("exaone-moe")
+        gc.collect()
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             from localm.inference.backends.llamacpp.llama import LlamaCpp
             with pytest.raises(PretokenizerUnusableModelError) as ei:
@@ -434,6 +435,7 @@ class TestEmbedderChildBackstop:
 
     def test_an_unusable_model_is_refused_and_freed_before_any_context(self, monkeypatch):
         from localm.inference import embedder as emb
+        gc.collect()
         calls = self._patch_native(monkeypatch, "exaone-moe")
         with pytest.raises(PretokenizerUnusableModelError) as ei:
             emb.GGUFEmbedder("<stub-path>", n_gpu_layers=0)

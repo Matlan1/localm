@@ -164,7 +164,7 @@ class RingBuffer:
 #  pid identity helpers                                                       #
 # --------------------------------------------------------------------------- #
 
-def _process_create_time(pid: int) -> "dict | None":
+def _process_create_time(pid: int) -> dict | None:
     """The process start identity, or None when it cannot be read.
 
     See :func:`localm.instances.process_start_identity`: a boot id plus start
@@ -959,7 +959,7 @@ class JobRegistry:
             return out
 
     def drain_finished(self, kind: Optional[str] = None, owner=_ANY_OWNER,
-                       select: Optional[Callable[["BackgroundJob"], bool]] = None) -> list:
+                       select: Optional[Callable[[BackgroundJob], bool]] = None) -> list:
         """Status of every job that finished since the last drain, then mark them.
 
         For a caller that absorbs completions at a turn boundary instead of

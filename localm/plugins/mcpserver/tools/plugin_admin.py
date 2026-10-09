@@ -4,7 +4,6 @@ uninstall."""
 
 from __future__ import annotations
 
-from typing import Dict
 
 from ..server import _quiet_stdout, _text_result
 
@@ -23,7 +22,7 @@ def _run_mgr_action(mgr, fn, *, plugin: str):
     return None
 
 
-def build() -> Dict[str, dict]:
+def build() -> dict[str, dict]:
     """``list_plugins``, ``install_plugin``, ``enable_plugin``,
     ``disable_plugin`` and ``uninstall_plugin``."""
     def list_plugins(args: dict) -> dict:

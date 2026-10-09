@@ -322,7 +322,7 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
-def process_start_identity(pid: int) -> "dict | None":
+def process_start_identity(pid: int) -> dict | None:
     """When process *pid* started, in a form no later change of the system
     clock alters, or None when it cannot be read.
 
@@ -402,7 +402,7 @@ def _win_thread_api():
     return _WIN_THREAD_API
 
 
-def _win_thread_created(pid: int, tid: int) -> "int | None":
+def _win_thread_created(pid: int, tid: int) -> int | None:
     """The creation time of running thread *tid* of process *pid*, in 100 ns
     units since 1601, or None."""
     ctypes, wintypes, k = _win_thread_api()
@@ -422,7 +422,7 @@ def _win_thread_created(pid: int, tid: int) -> "int | None":
         k.CloseHandle(h)
 
 
-def thread_start_identity(pid: int, tid: int) -> "dict | None":
+def thread_start_identity(pid: int, tid: int) -> dict | None:
     """When thread *tid* of process *pid* started, or None when that is not a
     running thread of that process or cannot be read.
 
@@ -473,7 +473,7 @@ def start_identity_matches(recorded, current) -> bool:
     return False
 
 
-_PID_SPACE: "str | None" = None
+_PID_SPACE: str | None = None
 _LINUX_MACHINE_ID_FILES = (Path("/etc/machine-id"),
                            Path("/var/lib/dbus/machine-id"))
 
@@ -836,7 +836,7 @@ def snapshot(home: Path, probe: Optional[Callable[[dict], bool]] = None,
 
     alive_flags = _threaded_map(_probe, entries)
     rows: list[dict] = []
-    for e, alive in zip(entries, alive_flags):
+    for e, alive in zip(entries, alive_flags, strict=True):
         row = dict(e) if include_token else {k: v for k, v in e.items() if k != "token"}
         row["alive"] = alive
         rows.append(row)
