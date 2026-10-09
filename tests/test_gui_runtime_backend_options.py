@@ -27,7 +27,7 @@ from localm.plugins.gui.web import STATIC_DIR
 _KEEP_INSTALLED = ""
 
 
-def _runtime_backend_options() -> "list[str]":
+def _runtime_backend_options() -> list[str]:
     """The <option> values of #runtime-backend, in document order."""
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     m = re.search(r'<select id="runtime-backend".*?</select>', html, re.S)

@@ -690,14 +690,9 @@ class TestCorruptFiles:
         assert c.docs() == [{"path": "/x/b.txt", "chunks": 1},
                             {"path": "upload:a.txt", "chunks": 2, "uploaded": True}]
         assert c._meta["name"] == "kb" and "created" not in c._meta
-        if raw.startswith(b"\xff"):
-            with pytest.raises(UnicodeDecodeError):
-                Collection.peek_stats("kb", base)
-            with pytest.raises(UnicodeDecodeError):
-                Collection.confined_to("kb", [str(tmp_path)], base)
-        else:
-            assert Collection.peek_stats("kb", base) is None
-            assert Collection.confined_to("kb", [str(tmp_path)], base) is None
+        assert Collection.peek_stats("kb", base) is None
+        assert Collection.peek_detail("kb", base) is None
+        assert Collection.confined_to("kb", [str(tmp_path)], base) is None
         assert c.is_confined_to([str(tmp_path)]) is False
         assert c.is_confined_to([]) is True
         c.add_uploads([])
@@ -1008,6 +1003,17 @@ class TestRelabelAndProvenance:
         assert [Collection(n, base=base).embedding_model() for n in "abc"] == [
             "new", "new", "keep"]
         assert relabel_embedding_model("old", "new", base) == ([], [])
+
+    def test_relabel_skips_an_undecodable_meta(self, base):
+        for name in ("a", "b"):
+            Collection(name, base=base).create().add_uploads(
+                _uploads({"x.txt": "apple"}), embed_fn=_embed, model_name="old")
+        Collection("u", base=base).create()
+        (base / "u" / "meta.json").write_bytes(b"\xff\xfe\x00bad")
+        assert relabel_embedding_model("old", "new", base) == (["a", "b"], [])
+        assert [Collection(n, base=base).embedding_model() for n in "ab"] == [
+            "new", "new"]
+        assert (base / "u" / "meta.json").read_bytes() == b"\xff\xfe\x00bad"
 
     def test_provenance_report(self):
         base = store.rag_dir()

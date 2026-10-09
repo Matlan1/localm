@@ -167,7 +167,7 @@ class HttpEngine:
                                  stream=True, timeout=300)
         except requests.RequestException as e:
             raise RuntimeError(
-                f"Could not reach the localm server at {self._base}: {e}")
+                f"Could not reach the localm server at {self._base}: {e}") from e
 
         if resp.status_code >= 400:
             detail = _error_detail(resp)

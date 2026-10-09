@@ -764,7 +764,7 @@ def plugin_config(name, key, value):
     try:
         _, stored = apply_local_plugin_config(name, key, value)
     except ValueError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
     _report_set(name, key, stored)
 
 

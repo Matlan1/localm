@@ -93,7 +93,7 @@ def _wide_console(monkeypatch):
 _GGUF_BYTES = b"GGUF" + b"\x00" * 1024   # real magic + past _GGUF_MIN_BYTES (1024)
 
 
-def _mkfile(models_dir, name: str, content: bytes = _GGUF_BYTES) -> "object":
+def _mkfile(models_dir, name: str, content: bytes = _GGUF_BYTES) -> object:
     p = models_dir / name
     p.write_bytes(content)
     return p

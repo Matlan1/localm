@@ -17,7 +17,7 @@ Two halves of one contract:
 
 import importlib.util
 import json
-from typing import Iterator, List, Optional
+from typing import Iterator, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -61,7 +61,7 @@ class _MinimalBackend(BaseBackend):
     """
 
     def __init__(self) -> None:
-        self.chat_stream_calls: List[dict] = []
+        self.chat_stream_calls: list[dict] = []
 
     def load(self) -> None:
         pass
@@ -69,7 +69,7 @@ class _MinimalBackend(BaseBackend):
     def unload(self) -> None:
         pass
 
-    def chat_stream(self, messages: List[dict], **kwargs) -> Iterator[str]:
+    def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
         # Records that generation ran; an empty list means nothing was generated.
         self.chat_stream_calls.append(dict(kwargs))
         yield "unconstrained text"

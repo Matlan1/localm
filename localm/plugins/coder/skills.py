@@ -153,7 +153,7 @@ def _confine_skill_file(skill: Skill, rel: str) -> Path:
     try:
         return pathsafe.confined_under(skill.path, rel)
     except ValueError as e:
-        raise PermissionError(str(e))
+        raise PermissionError(str(e)) from e
 
 
 # ------------------------------------------------------------------ #

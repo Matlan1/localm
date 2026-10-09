@@ -325,10 +325,10 @@ def post_report(url: str, token: str | None, title: str, body: str,
                     detail = e.read().decode("utf-8", "replace")[:300]
                 except Exception:
                     pass
-                raise RuntimeError(f"HTTP {e.code}: {detail}".strip())
+                raise RuntimeError(f"HTTP {e.code}: {detail}".strip()) from e
             except (urllib.error.URLError, OSError) as e:
                 raise RuntimeError(f"could not reach the server: "
-                                   f"{getattr(e, 'reason', e)}")
+                                   f"{getattr(e, 'reason', e)}") from e
 
     status, raw = opener(url, payload, headers, timeout)
     if not (200 <= int(status) < 300):

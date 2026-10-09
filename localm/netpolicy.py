@@ -228,7 +228,7 @@ def check_url(url: str, *, allow_when_off: bool = False) -> None:
             "net_allow from different reads", exc)
         raise NetworkPolicyError(
             "Network policy configuration could not be read; refusing this "
-            "request as a precaution. Retry once the config is readable.")
+            "request as a precaution. Retry once the config is readable.") from exc
 
     mode = env if env in NET_MODES else str(cfg.get("net_mode", "ask")).strip().lower()
     if mode not in NET_MODES:
@@ -617,11 +617,11 @@ def _body_chunks(resp, per_read: bool, limit: int):
         try:
             data = read1(_BODY_CHUNK, decode_content=False)
         except ReadTimeoutError as exc:
-            raise requests.exceptions.ConnectionError(exc)
+            raise requests.exceptions.ConnectionError(exc) from exc
         except ProtocolError as exc:
-            raise requests.exceptions.ChunkedEncodingError(exc)
+            raise requests.exceptions.ChunkedEncodingError(exc) from exc
         except SSLError as exc:
-            raise requests.exceptions.SSLError(exc)
+            raise requests.exceptions.SSLError(exc) from exc
         if not data:
             tail = decoder.flush()
             if tail:

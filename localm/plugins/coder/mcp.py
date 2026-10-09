@@ -93,8 +93,8 @@ class MCPServer:
                 encoding="utf-8",
                 env=full_env,
             )
-        except FileNotFoundError:
-            raise MCPError(f"MCP server '{self.name}': command not found: {self.command}")
+        except FileNotFoundError as e:
+            raise MCPError(f"MCP server '{self.name}': command not found: {self.command}") from e
         self._stderr = StderrTail(self._proc)
 
         reader = threading.Thread(target=self._read_loop, daemon=True)

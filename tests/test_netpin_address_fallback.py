@@ -263,7 +263,7 @@ def test_connect_timeout_still_classified_as_timeout(monkeypatch):
     from localm.web_retrieval.errors import describe_failure, failure_kind
 
     def times_out(address, *a, **k):
-        raise socket.timeout("timed out")
+        raise TimeoutError("timed out")
     monkeypatch.setattr(urllib3.connection.connection, "create_connection",
                         times_out)
     with netpin.pinned_session(["192.0.2.10"]) as session:
@@ -289,7 +289,7 @@ def test_connect_attempts_share_a_budget_of_two_timeouts(monkeypatch):
     def blackholed(address, timeout=None, *a, **k):
         seen.append((address[0], timeout))
         clock.now += timeout
-        raise socket.timeout("timed out")
+        raise TimeoutError("timed out")
     monkeypatch.setattr(urllib3.connection.connection, "create_connection",
                         blackholed)
     ips = ["192.0.2.10", "192.0.2.11", "192.0.2.12", "192.0.2.13"]
