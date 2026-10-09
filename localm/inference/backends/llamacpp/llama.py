@@ -1564,9 +1564,9 @@ class LlamaCpp:
         """Set ``is_diffusion``, ``architecture`` and the diffusion settings the
         loaded model declares (mask token, ``diffusion.shift_logits``).
 
-        Raises RuntimeError for a diffusion model this runtime cannot run: a
-        build without the calls the sampler needs, or a vocabulary with no mask
-        token."""
+        Raises RuntimeError when the runtime lacks the calls the sampler needs,
+        and UnsupportedModelRoleError for a diffusion model whose vocabulary
+        declares no mask token."""
         from localm.model_manager.gguf import gguf_is_diffusion_architecture
         arch = None
         if api.has_model_meta_api():
@@ -1586,7 +1586,8 @@ class LlamaCpp:
         vocab = api.llama_model_get_vocab(self._model_ptr)
         self._diffusion_mask = api.llama_vocab_mask(vocab)
         if self._diffusion_mask == _diffusion.LLAMA_TOKEN_NULL:
-            raise RuntimeError(
+            from localm.inference.backends.base import UnsupportedModelRoleError
+            raise UnsupportedModelRoleError(
                 f"This diffusion language model ('{arch}') declares no mask token, "
                 "so it cannot be run.")
         shift = None
@@ -2247,10 +2248,10 @@ class LlamaCpp:
         with self._inference_lock:
             if not self._model_ptr:
                 raise RuntimeError("Model not loaded")
+            self.last_finish_reason = "stop"
             n_input = len(prompt_tokens)
             if n_input == 0:
                 return
-            self.last_finish_reason = "stop"
             try:
                 params = _diffusion.resolve_params(
                     architecture=self.architecture, n_input=n_input,

@@ -362,6 +362,13 @@ class Engine:
         return getattr(self._backend, "effective_ctx_max", None)
 
     @property
+    def reply_reserve(self) -> Optional[int]:
+        """Tokens of the context capacity the loaded model's reply always takes
+        (a diffusion model's reply canvas), or None when the reply grows into
+        whatever room is left."""
+        return getattr(self._backend, "reply_reserve", None)
+
+    @property
     def gpu_placement(self) -> Optional[dict]:
         """Where the last load's transformer layers actually ended up: GPU vs
         CPU. ``{"gpu_layers_offloaded": N, "gpu_layers_total": M, "degraded":

@@ -20,6 +20,12 @@ from typing import Callable, List, Optional
 from ._sizing import VramSizingMixin
 
 
+def _diffusion_default_reply_tokens() -> int:
+    """The reply length a diffusion model uses when none is configured."""
+    from ._diffusion import DEFAULT_MAX_TOKENS
+    return DEFAULT_MAX_TOKENS
+
+
 class GgufWorker(VramSizingMixin):
     """The real, native-call-owning half of the GGUF backend.
 
@@ -189,7 +195,10 @@ class GgufWorker(VramSizingMixin):
         isolated child and only the parent (GgufBackend) may render a
         user-facing message. ``mmap`` is whether the load memory-mapped the
         model file, read from the native load log (None when not reported).
-        ``diffusion`` is True for a diffusion language model.
+        ``diffusion`` is True for a diffusion language model, and then
+        ``diffusion_capacity`` is the most tokens (prompt plus reply) one
+        generation can hold and ``diffusion_reply_tokens`` the reply length it
+        is configured for.
 
         Raises :class:`~localm.inference.backends.base.ModelLoadCancelled` if
         ``cancel_event`` was set during the load (native progress-callback
@@ -266,6 +275,10 @@ class GgufWorker(VramSizingMixin):
             "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),
             "mmap": getattr(self._llm, "mmap_mapped", None),
             "diffusion": bool(getattr(self._llm, "is_diffusion", False)),
+            "diffusion_capacity": int(getattr(self._llm, "_diffusion_capacity", 0) or 0),
+            "diffusion_reply_tokens": int(
+                getattr(self._llm, "_diffusion_max_tokens", None)
+                or _diffusion_default_reply_tokens()),
         }
 
     def close(self) -> None:

@@ -1080,9 +1080,12 @@ class VramSizingMixin:
 
     def _keeps_no_kv_cache(self) -> bool:
         """True for a model llama.cpp creates no KV cache for: a diffusion
-        language model, which re-reads its whole canvas every step. Read from
-        the loaded model when there is one, else from the file's
+        language model, which re-reads its whole canvas every step. True once a
+        load reported one (``_diffusion_loaded``); otherwise read from the
+        loaded model when there is one, else from the file's
         ``general.architecture`` (memoised per instance)."""
+        if getattr(self, "_diffusion_loaded", False) is True:
+            return True
         loaded = getattr(getattr(self, "_llm", None), "is_diffusion", None)
         if isinstance(loaded, bool):
             return loaded
@@ -1396,7 +1399,10 @@ class VramSizingMixin:
         that lifts the conservative _AUTO_CTX_MAX safety clamp so the window can
         use the full VRAM-derived budget. When ctx_auto is off, n_ctx_max is used
         verbatim (0/None already mean unlimited downstream). ``split_budget`` is
-        passed to :meth:`_auto_ctx_max`."""
+        passed to :meth:`_auto_ctx_max`. A model that keeps no KV cache (a
+        diffusion model, whose window is fixed at load) gets ``n_ctx``."""
+        if self._keeps_no_kv_cache():
+            return self.n_ctx
         if self.ctx_auto:
             unlimited = (self.n_ctx_max == 0)
             auto = self._auto_ctx_max(capped=not unlimited, split_budget=split_budget)

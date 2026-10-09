@@ -64,17 +64,21 @@ def test_same_seed_repeats_and_requests_are_independent(diffusion_backend):
 
 
 def test_cancel_mid_run_leaves_the_worker_serving(diffusion_backend):
-    from localm.inference.backends.base import StreamCancelled
+    import threading
+
+    from localm.inference.backends.base import stream_stop_check
     expected = _ask(diffusion_backend, [])
     pid = diffusion_backend._runner._proc.pid
+    stop = threading.Event()
     statuses = []
 
-    def cancel_at_30(s):
+    def stop_at_30(s):
         statuses.append(s)
         if s == "Denoising reply (30%)...":
-            raise StreamCancelled()
-    out = "".join(diffusion_backend.chat_stream(
-        _MESSAGES, max_tokens=64, temperature=0.0, seed=3, on_status=cancel_at_30))
+            stop.set()
+    with stream_stop_check(stop.is_set):
+        out = "".join(diffusion_backend.chat_stream(
+            _MESSAGES, max_tokens=64, temperature=0.0, seed=3, on_status=stop_at_30))
     assert out == ""
     assert statuses[-1] == "Denoising reply (30%)..."
     assert diffusion_backend.loaded

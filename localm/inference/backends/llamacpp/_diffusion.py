@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+import operator
 import struct
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Protocol, Sequence, Tuple
@@ -522,11 +523,22 @@ def _probs(data, size: int) -> List[float]:
 
 _ENTROPY_EPS = f32(1e-10)
 
+# Candidate count above which entropy_confidence sums in double precision.
+EXACT_ENTROPY_MAX = 4096
+
 
 def entropy_confidence(probs: Sequence[float]) -> float:
     """The upstream example's ENTROPY confidence: ``-sum(p * log(p + 1e-10))``
-    of *probs*, accumulated in float32 in order. It is the entropy itself, so
-    the positions the model is least certain about rank first."""
+    of *probs*. It is the entropy itself, so the positions the model is least
+    certain about rank first.
+
+    Up to :data:`EXACT_ENTROPY_MAX` candidates the sum is accumulated in
+    float32 in order, exactly like the upstream example. Above that (top_k off)
+    it is a double-precision sum, rounded to float32 at the end, which can
+    order two nearly equal positions differently from upstream."""
+    if len(probs) > EXACT_ENTROPY_MAX:
+        return f32(-math.fsum(map(operator.mul, probs,
+                                  map(math.log, map(_ENTROPY_EPS.__add__, probs)))))
     entropy = 0.0
     for p in probs:
         entropy = f32(entropy + f32(p * f32(math.log(f32(p + _ENTROPY_EPS)))))

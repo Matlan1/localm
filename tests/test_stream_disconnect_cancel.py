@@ -819,11 +819,12 @@ def test_registration_is_removed_once_the_generation_ends():
 
 
 class _StatusOnlyEngine(_LockingEngine):
-    """Like a diffusion language model: reports progress through on_status
-    and yields nothing until the reply is done, which here is never. Follows
-    the GGUF runner's contract: a StreamCancelled raised by on_status ends the
-    generation. Without the HTTP layer raising it after a disconnect, this
-    holds the lock forever."""
+    """Like a diffusion language model: yields nothing until the reply is done,
+    which here is never, while reporting progress through on_status when it is
+    given one. It stops only when the caller's published stop check asks it to
+    (stream_stop_requested), which is what the GGUF runner polls for such a
+    model. Without the HTTP layer publishing the check, this holds the lock
+    forever."""
 
     cancelled = False
 
@@ -831,16 +832,16 @@ class _StatusOnlyEngine(_LockingEngine):
         return self._denoise(on_status)
 
     def _denoise(self, on_status):
-        from localm.inference.backends.base import StreamCancelled
+        from localm.inference.backends.base import stream_stop_requested
         with self.inference_lock:
             self.entered.set()
             step = 0
             while True:
-                try:
-                    on_status(f"Denoising reply ({step % 10 * 10}%)...")
-                except StreamCancelled:
+                if stream_stop_requested():
                     self.cancelled = True
                     return
+                if on_status is not None:
+                    on_status(f"Denoising reply ({step % 10 * 10}%)...")
                 step += 1
                 time.sleep(0.01)
         yield  # pragma: no cover - makes this a generator, as the real one is
@@ -863,6 +864,41 @@ def test_disconnect_while_only_status_flows_stops_the_generation(producer, lead)
 
         assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
             "a generation reporting only status kept running after the disconnect"
+        assert eng.cancelled is True
+
+    asyncio.run(scenario())
+
+
+def test_cancel_all_stops_a_non_streaming_generation_that_yields_nothing():
+    from localm.inference.http_server import _generate_full
+
+    async def scenario():
+        eng = _StatusOnlyEngine()
+        task = asyncio.ensure_future(_generate_full(eng, _MSG, None, max_tokens=0))
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        assert residency.cancel_all("lock-model") == 1
+        text = await asyncio.wait_for(task, timeout=3.0)
+        assert text == ""
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "a non-streaming generation that yields nothing ignored cancel_all"
+        assert eng.cancelled is True
+
+    asyncio.run(scenario())
+
+
+def test_cancel_all_stops_a_compaction_summary_that_yields_nothing():
+    from localm.inference.http_server import _compact_for_capacity
+
+    async def scenario():
+        eng = _StatusOnlyEngine()
+        task = asyncio.ensure_future(_compact_for_capacity(eng, _MSG_MANY, None))
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        assert residency.cancel_all("lock-model") == 1
+        await asyncio.wait_for(task, timeout=3.0)
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "a compaction summary that yields nothing ignored cancel_all"
         assert eng.cancelled is True
 
     asyncio.run(scenario())

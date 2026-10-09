@@ -5007,7 +5007,8 @@ async def _stream_sse(
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
         compact = compact or (
-            _needs_compaction(engine.context_capacity(), prompt_tokens, messages)
+            _needs_compaction(engine.context_capacity(), prompt_tokens, messages,
+                              _engine_reply_reserve(engine))
             and compactable(messages))
 
     if not role_sent:
@@ -5040,7 +5041,8 @@ async def _stream_sse(
         capacity = engine.context_capacity()
         if (not refusal and isinstance(capacity, int) and capacity > 0
                 and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
-            refusal = context_overflow_detail(prompt_tokens, capacity)
+            refusal = context_overflow_detail(prompt_tokens, capacity,
+                                              _engine_reply_reserve(engine))
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
@@ -5090,23 +5092,19 @@ async def _stream_sse(
         # surfaces it and the finally still enqueues _DONE.
         _log_assembled_prompt(messages)
         gen = None
-        from localm.inference.backends.base import StreamCancelled
-
         def _on_status(s: str) -> None:
-            if cancel_event.is_set():
-                raise StreamCancelled()
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
 
+        from localm.inference.backends.base import stream_stop_check
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
-            gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
-            for token in gen:
-                if cancel_event.is_set():
-                    break
-                loop.call_soon_threadsafe(token_queue.put_nowait, token)
-        except StreamCancelled:
-            pass
+            with stream_stop_check(cancel_event.is_set):
+                gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
+                for token in gen:
+                    if cancel_event.is_set():
+                        break
+                    loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
             # Log (full traceback to the debug log) and surface to the client - a
             # silent thread death looks like an empty reply. NOT
@@ -5290,23 +5288,19 @@ async def _stream_sse_completion(
         # orphan the consumer (see the fuller note in _stream_sse).
         _log_assembled_prompt(messages)
         gen = None
-        from localm.inference.backends.base import StreamCancelled
-
         def _on_status(s: str) -> None:
-            if cancel_event.is_set():
-                raise StreamCancelled()
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
 
+        from localm.inference.backends.base import stream_stop_check
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
-            gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
-            for token in gen:
-                if cancel_event.is_set():
-                    break
-                loop.call_soon_threadsafe(token_queue.put_nowait, token)
-        except StreamCancelled:
-            pass
+            with stream_stop_check(cancel_event.is_set):
+                gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
+                for token in gen:
+                    if cancel_event.is_set():
+                        break
+                    loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
             # Surface an inference failure to the client instead of letting this
             # daemon thread die (an uncaught death fires a crash report and looks
@@ -5438,18 +5432,38 @@ COMPACTION_DISCONNECT_DETAIL = (
     "Client closed the request while the conversation was being compacted.")
 
 
-def _needs_compaction(capacity, prompt_tokens, messages) -> bool:
+def _needs_compaction(capacity, prompt_tokens, messages,
+                      reply_reserve: Optional[int] = None) -> bool:
     """True when *prompt_tokens* leaves less than the reply buffer (2048 tokens
     or 10% of *capacity*, whichever is larger) free in *capacity*, for a
-    conversation of more than three messages."""
+    conversation of more than three messages. *reply_reserve*, when given, is
+    the reply buffer instead (a diffusion model's whole reply canvas)."""
     if not (isinstance(capacity, int) and capacity > 0
             and isinstance(prompt_tokens, int) and len(messages) > 3):
         return False
+    if reply_reserve is not None:
+        return capacity - prompt_tokens < reply_reserve
     return capacity - prompt_tokens < max(2048, int(capacity * 0.10))
 
 
-def context_overflow_detail(prompt_tokens: int, capacity: int) -> str:
-    """The refusal text for a prompt larger than the context capacity."""
+def _engine_reply_reserve(engine) -> Optional[int]:
+    """The reply buffer *engine*'s model needs inside its context capacity when
+    that is fixed by the model (a diffusion model's reply canvas), else None."""
+    reserve = getattr(engine, "reply_reserve", None)
+    if isinstance(reserve, int) and not isinstance(reserve, bool) and reserve > 0:
+        return reserve
+    return None
+
+
+def context_overflow_detail(prompt_tokens: int, capacity: int,
+                            reply_reserve: Optional[int] = None) -> str:
+    """The refusal text for a prompt larger than the context capacity. With
+    *reply_reserve* (a diffusion model) the text names the fixed window that
+    holds prompt and reply together instead of the context window settings."""
+    if reply_reserve is not None:
+        return (f"Prompt ({prompt_tokens} tokens) does not fit the {capacity} "
+                f"tokens this diffusion model reads at once, prompt and reply "
+                f"together. Start a new chat or shorten the message.")
     return (f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
             f"context capacity ({capacity} tokens). Start a new chat, "
             f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
@@ -5498,14 +5512,16 @@ async def _compact_for_capacity(engine, messages: list, request=None
     disconnected = {"v": False}
 
     def _gen_for_compact(ms: list[dict], max_t: int) -> str:
+        from localm.inference.backends.base import stream_stop_check
         parts = []
         gen = engine.chat_stream(ms, max_tokens=max_t, temperature=0.3,
                                  thinking=False)
         try:
-            for tok in gen:
-                if cancel.is_set():
-                    break
-                parts.append(tok)
+            with stream_stop_check(cancel.is_set):
+                for tok in gen:
+                    if cancel.is_set():
+                        break
+                    parts.append(tok)
         finally:
             gen.close()
         if cancel.is_set():
@@ -5582,16 +5598,18 @@ async def _generate_full(engine, messages: list, request=None, *,
     poll = _resolve_disconnect_poll(request)
 
     def _run() -> str:
+        from localm.inference.backends.base import stream_stop_check
         _log_assembled_prompt(messages)
         gen = engine.chat_stream(messages, **gen_kwargs)
         parts: list[str] = []
         try:
-            for token in gen:
-                if cancel_event.is_set():
-                    break
-                if timing is not None and "first_token_at" not in timing:
-                    timing["first_token_at"] = time.perf_counter()
-                parts.append(token)
+            with stream_stop_check(cancel_event.is_set):
+                for token in gen:
+                    if cancel_event.is_set():
+                        break
+                    if timing is not None and "first_token_at" not in timing:
+                        timing["first_token_at"] = time.perf_counter()
+                    parts.append(token)
         finally:
             # Close from THIS (suspended) worker thread so GeneratorExit propagates
             # through the backend wrappers into llama.py _generate, whose
@@ -5847,7 +5865,8 @@ async def _complete(
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
-        if _needs_compaction(capacity, prompt_tokens, messages):
+        if _needs_compaction(capacity, prompt_tokens, messages,
+                             _engine_reply_reserve(engine)):
             new_messages, changed, gone = await _compact_for_capacity(
                 engine, messages, request)
             if gone:

@@ -697,6 +697,14 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._loaded = True
         self._supports_images = bool(meta.get("supports_images"))
         self._supports_mtp = bool(meta.get("supports_mtp"))
+        if meta.get("diffusion") is True:
+            self._diffusion_loaded = True
+            capacity = meta.get("diffusion_capacity")
+            if isinstance(capacity, int) and capacity > 0:
+                self.effective_ctx_max = capacity
+            reply = meta.get("diffusion_reply_tokens")
+            if isinstance(reply, int) and reply > 0:
+                self.diffusion_reply_tokens = min(reply, self.effective_ctx_max or reply)
 
         # Whether the model is memory-mapped: the worker's report from the
         # native load log, else the forced mode, else None (not known).
@@ -888,9 +896,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     @property
     def is_diffusion(self) -> bool:
-        """True when the model file is a diffusion language model, read from its
-        own GGUF header."""
+        """True when the model is a diffusion language model: read from the
+        file's own GGUF header, or reported by the worker that loaded it."""
         return self._keeps_no_kv_cache()
+
+    @property
+    def reply_reserve(self) -> Optional[int]:
+        """For a loaded diffusion model, the reply length every generation
+        takes out of ``effective_ctx_max``; None otherwise."""
+        reserve = getattr(self, "diffusion_reply_tokens", None)
+        if self.loaded and self.is_diffusion and isinstance(reserve, int) and reserve > 0:
+            return reserve
+        return None
 
     @property
     def supports_grammar(self) -> bool:
@@ -1103,7 +1120,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             yield from self._runner.chat_stream(
                 first_chunk_timeout=self._first_token_timeout_seconds(),
                 on_status=on_status,
-                cancel_on_status=self.is_diffusion,
+                stop_on_request=self.is_diffusion,
                 **kwargs)
         except RuntimeError:
             # The isolated worker crashed or stalled and the model is gone. Drop it

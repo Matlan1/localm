@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from abc import ABC, abstractmethod
 from typing import Callable, Iterator, List, Optional
 
@@ -180,12 +182,37 @@ class PretokenizerUnusableModelError(RuntimeError):
     """
 
 
-class StreamCancelled(Exception):
-    """Raised by a ``chat_stream`` caller's ``on_status`` callback to stop the
-    generation that status reports on. A backend that can stop between status
-    updates (a GGUF diffusion language model) cancels the generation and ends the
-    stream without an error; every other backend ignores it like any other
-    exception from ``on_status``."""
+_STREAM_STOP: "contextvars.ContextVar[Optional[Callable[[], bool]]]" = (
+    contextvars.ContextVar("localm_stream_stop", default=None))
+
+
+@contextlib.contextmanager
+def stream_stop_check(check: Callable[[], bool]):
+    """Publish *check* for the stream the caller iterates inside this block, in
+    this thread. A backend that waits a long time without reaching a ``yield``
+    (a GGUF diffusion language model) polls it through
+    :func:`stream_stop_requested` and stops the generation once it returns True;
+    every other backend ignores it."""
+    token = _STREAM_STOP.set(check)
+    try:
+        yield
+    finally:
+        _STREAM_STOP.reset(token)
+
+
+def stream_stop_requested() -> bool:
+    """True when the check published by :func:`stream_stop_check` asks the
+    current stream to stop. False when none is published; a check that raises
+    is logged at debug and read as False."""
+    check = _STREAM_STOP.get()
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:
+        from localm.debuglog import logger
+        logger.debug("stream stop check raised (read as not stopping)", exc_info=True)
+        return False
 
 
 class UnsupportedModelRoleError(RuntimeError):
