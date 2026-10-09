@@ -398,7 +398,7 @@ def _write_receipt(path: Path, summary: dict, backends: list[str], rc: int) -> N
     receipt = {
         "tag": summary["tag"],
         "exit_code": rc,
-        "written_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "written_at": _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "backends": {b: summary["results"].get(b, {"verdict": INCONCLUSIVE,
                                                    "why": "not run"})
                      for b in backends},
