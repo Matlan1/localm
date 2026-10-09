@@ -109,6 +109,12 @@ def _observe(c: Collection) -> dict:
     return json.loads(json.dumps(obs))
 
 
+def _as_written_here(raw: bytes) -> bytes:
+    """*raw* with its line breaks as a text-mode file write on this platform
+    emits them (the collection files are written in text mode)."""
+    return raw.replace(b"\r\n", b"\n").replace(b"\n", os.linesep.encode())
+
+
 def _strip_scores(obs: dict) -> tuple[dict, list]:
     scores = []
     for q in obs["queries"]:
@@ -204,9 +210,13 @@ class TestOnDiskFormat:
         coll = fixture_base / name
         assert sorted(p.name for p in coll.iterdir()) == sorted(
             p.name for p in src.iterdir())
-        for fname in ("chunks.jsonl", "vectors.json", "vectors.json.rejected"):
+        for fname in ("chunks.jsonl", "vectors.json"):
             if (src / fname).exists():
-                assert (coll / fname).read_bytes() == (src / fname).read_bytes(), fname
+                assert (coll / fname).read_bytes() == _as_written_here(
+                    (src / fname).read_bytes()), fname
+        if (src / "vectors.json.rejected").exists():
+            assert ((coll / "vectors.json.rejected").read_bytes()
+                    == (src / "vectors.json.rejected").read_bytes())
         got = json.loads((coll / "meta.json").read_text("utf-8"))
         want = json.loads((src / "meta.json").read_text("utf-8"))
         got[store._STATS_CACHE_KEY].pop("fingerprint")
