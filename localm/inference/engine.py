@@ -470,6 +470,13 @@ class Engine:
         placed = getattr(self._backend, "draft_model_on_gpu", None)
         return placed if isinstance(placed, bool) else None
 
+    def draft_step_costs(self) -> Optional[dict]:
+        """The draft-model step costs the loaded backend measured
+        (``StepCosts.report()``), or None when it has none yet."""
+        rep = getattr(self._backend, "last_speculation", None)
+        costs = rep.get("costs") if isinstance(rep, dict) else None
+        return costs if isinstance(costs, dict) else None
+
     def speculation_usage(self) -> Optional[dict]:
         """Speculative-drafting figures for the reply that just finished, for
         any draft source (see GgufBackend.last_speculation_usage), or None when

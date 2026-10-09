@@ -944,11 +944,13 @@ def test_a_cpu_placed_draft_model_is_reported_on_the_reply():
 
 
 @pytest.mark.parametrize("source,configured,copies", [
-    ("draft", None, 5), ("draft", 3, 4), ("ngram", None, 5), ("ngram", 2, 3)])
-def test_recurrent_state_sizing_uses_the_sources_own_draft_cap(tmp_path, source, configured,
-                                                               copies):
+    ("draft", None, 4), ("draft", 2, 3), ("ngram", None, 5), ("ngram", 2, 3)])
+def test_recurrent_state_sizing_uses_the_sources_own_draft_cap(tmp_path, monkeypatch, source,
+                                                               configured, copies):
     from localm.inference.backends.gguf import GgufBackend
+    from localm.inference.backends.llamacpp import _draftmodel
     from localm.inference.backends.llamacpp import llama as llama_mod
+    monkeypatch.setattr(_draftmodel, "DRAFT_MODEL_DRAFT_TOKENS_DEFAULT", 3)
     b = GgufBackend(str(tmp_path / "m.gguf"), spec_source=source, spec_draft_tokens=configured)
     with patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=1000), \
          patch.object(GgufBackend, "_gguf_parsed_tensor_entries", return_value=None):
@@ -1103,6 +1105,28 @@ def test_bench_spec_drafts_with_the_named_draft_model(cli_runner, tmp_path):
     assert "Draft model is 1.40x faster" in res.output
     assert seen == [("off", None, None), ("draft", 3, str(small))]
     assert engine.resolve_spec_draft_model({}) is None
+
+
+@pytest.mark.parametrize("counts,shown", [((128, 8), True), ((0, 0), False)])
+def test_bench_spec_names_the_mixture_of_experts_shape(cli_runner, counts, shown):
+    from localm.cli import models as models_mod
+    from tests.test_spec_source_settings import _spec_arm
+    with patch.object(models_mod, "get_operator_model_info",
+                      return_value=("model.gguf", None)), \
+         patch("localm.model_manager.gguf.gguf_expert_counts", return_value=counts), \
+         patch.object(models_mod, "_spec_probe_arm", _spec_arm([50.0], [70.0])):
+        res = cli_runner.invoke(models_mod.main, ["bench-spec", "model.gguf", "--rounds", "1"])
+    assert res.exit_code == 0, res.output
+    assert ("8 of 128 experts per token" in res.output) is shown
+
+
+def test_the_engine_hands_out_the_measured_step_costs():
+    from localm.inference import engine as engine_mod
+    eng = object.__new__(engine_mod.Engine)
+    eng._backend = SimpleNamespace(last_speculation={"costs": {"target_ms": 8.0}})
+    assert eng.draft_step_costs() == {"target_ms": 8.0}
+    eng._backend = SimpleNamespace(last_speculation=None)
+    assert eng.draft_step_costs() is None
 
 
 def test_bench_spec_without_a_draft_model_says_how_to_find_one(cli_runner):

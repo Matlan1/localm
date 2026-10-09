@@ -244,6 +244,15 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
             console.print("[yellow]The draft model runs on the CPU (the model "
                           "runs on the CPU, or the draft model does not fit in "
                           "VRAM beside it).[/yellow]")
+        if source == "draft":
+            costs = engine.draft_step_costs()
+            if costs:
+                verify = ", ".join("%s: %.1f" % (n, ms)
+                                   for n, ms in sorted(costs.get("verify_ms", {}).items(),
+                                                       key=lambda kv: int(kv[0])))
+                console.print(f"[dim]Measured step ms: model {costs.get('target_ms', 0):.1f}, "
+                              f"checking n tokens {{{verify}}}, draft "
+                              f"{costs.get('draft_ms', 0):.1f}[/dim]")
         if not usable:
             return ([], False, status, engine.gpu_placement, (0, 0), [], "", [])
         per_prompt = []
@@ -547,6 +556,11 @@ def bench_spec(model, source, draft_model, gen_tokens, rounds, ctx, gpu_layers,
     label = _SPEC_LABELS[source]
     console.print(f"Comparing {label} on/off for [cyan]{escape(model)}[/cyan] "
                   f"({rounds} round(s), {len(_SPEC_PROBE_PROMPTS)} prompts each)…")
+    from ..model_manager.gguf import gguf_expert_counts
+    n_expert, n_used = gguf_expert_counts(Path(model_path))
+    if n_expert:
+        console.print(f"[dim]Mixture of experts: {n_used} of {n_expert} experts "
+                      "per token[/dim]")
     _run_spec_bench(
         model, label,
         lambda enabled: _spec_probe_arm(
