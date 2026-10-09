@@ -1891,10 +1891,9 @@ def _gguf_metadata_probe(path: Path) -> dict:
                 off = _gguf_skip_value(buf, off, vtype)
             # Stop as soon as the answer is decided: a definitive embedding
             # architecture, or any pooling_type key at all, makes the rest of
-            # the KV block irrelevant to classification. The general.* keys
-            # come first in a written file, so reading on until general.type is
-            # seen or the first non-general key lets an adapter for an embedding
-            # architecture still report its general.type.
+            # the KV block irrelevant to classification. After such a signal,
+            # keep reading through the general.* keys until general.type is
+            # seen or a non-general key comes.
             if ((has_pooling_type or architecture in _GGUF_EMBEDDING_ARCHITECTURES)
                     and (general_type is not None or not key.startswith("general."))):
                 break
