@@ -281,7 +281,9 @@ def test_an_untracked_new_test_file_selects_itself(repo):
 _FACADE_FILES = {
     "localm/__init__.py": "",
     "localm/setup_llama/__init__.py": "from localm.setup_llama.versions import pinned_tag\n",
-    "localm/setup_llama/versions.py": "def pinned_tag():\n    return None\n",
+    "localm/setup_llama/versions.py": (
+        "from localm.pins import TAG\n\n\ndef pinned_tag():\n    return TAG\n"),
+    "localm/pins.py": "TAG = None\n",
     "localm/updater.py": "from localm import setup_llama\n",
     "tests/conftest.py": "",
     "tests/test_facade_import.py": "import localm.setup_llama\n",
@@ -318,7 +320,17 @@ def test_a_change_inside_a_reexport_facade_counts_as_a_change_to_the_package(fac
     assert at_one["tests/test_facade_caller.py"] == [
         "imports localm.updater (1 hop(s) from a change)"]
     assert "tests/test_none.py" not in at_one
-    assert mod._REEXPORT_FACADES == ("localm.setup_llama",)
+    assert mod._REEXPORT_FACADES == ("localm.setup_llama", "localm.bugreport")
+
+
+def test_a_reexport_facade_counts_as_importing_what_its_modules_import(facade_repo):
+    mod, _ = facade_repo
+    assert "tests/test_facade_import.py" not in _select(mod, ["localm/pins.py"])
+    at_one = _select(mod, ["localm/pins.py"], depth=1)
+    assert "imports localm.setup_llama (1 hop(s) from a change)" in \
+        at_one["tests/test_facade_import.py"]
+    assert "tests/test_facade_caller.py" not in at_one
+    assert "tests/test_none.py" not in at_one
 
 
 # --------------------------------------------------------------------------- #

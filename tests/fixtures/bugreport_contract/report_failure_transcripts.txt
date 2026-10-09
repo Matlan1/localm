@@ -1,0 +1,21 @@
+=== automatic
+
+Sorry - setup failed.
+Reason: see C:\Users\alice\Documents\localm\notes.txt
+A bug report was saved (edit it before sending): <REPORT>
+Run localm bug-report --send to send it now (no GitHub account needed) - or email/Discord it yourself.
+=== user
+
+Filing a bug report: user filed
+A bug report was saved (edit it before sending): <REPORT>
+Run localm bug-report --send to send it now (no GitHub account needed) - or email/Discord it yourself.
+=== interactive, not now
+
+Sorry - asked.
+A bug report was saved (edit it before sending): <REPORT>
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+No report sent. It is saved if you change your mind.

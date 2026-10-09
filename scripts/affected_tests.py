@@ -76,8 +76,9 @@ REPO = Path(__file__).resolve().parent.parent
 _ROUTE_METHODS = {"get", "post", "put", "delete", "patch", "websocket", "api_route"}
 _EVERYTHING = {"tests/conftest.py"}
 # Packages whose callers import and patch the package itself, which re-exports
-# its submodules' names.
-_REEXPORT_FACADES = ("localm.setup_llama",)
+# its submodules' names. Each counts as importing every module its own modules
+# import.
+_REEXPORT_FACADES = ("localm.setup_llama", "localm.bugreport")
 _DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
@@ -223,6 +224,13 @@ class Graph:
             names = imported_names(_read(rel), module_name(rel), False)
             self.test_top[rel] = _top_levels(names)
             self.test_imports[rel] = self.resolve(names)
+        for facade in _REEXPORT_FACADES:
+            if facade not in self.sources:
+                continue
+            for dep, users in self.reverse.items():
+                inside = dep == facade or dep.startswith(facade + ".")
+                if not inside and any(u.startswith(facade + ".") for u in users):
+                    users.add(facade)
 
     def resolve(self, names: set[str]) -> set[str]:
         """The known modules the dotted *names* refer to, by longest prefix."""
