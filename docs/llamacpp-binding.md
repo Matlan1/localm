@@ -588,19 +588,22 @@ its candidate up first and then drafts the part of it with the most expected
 tokens per second under the measured costs, none unless that beats a plain step
 by 5%. Every candidate is checked token by token against the tokens the reply
 goes on to hold, whether it was drafted or not, so how far candidates run before
-a wrong token is learned without paying for drafts. The counts are kept per
-draft position and per kind of candidate: where its match ends relative to the
-source position of the last candidate token found right in this reply (on it:
-a copy continuing; 1 to 32 positions past it (`NGRAM_RESUME_GAP`): a copy
-picking up again after an edit, such as a renamed identifier; otherwise a fresh
-match), and whether the match lies in the context before the reply or in the
-reply itself. A kind starts from a 10% chance per token of being wrong for a
-match in the context and 40% for one in the reply; its counts over the model's
-life are the prior of its counts in the current reply. So a copy that picks up
-again after an edit drafts up to the next edit in one step, matches that keep
-going wrong (prose, code written from scratch) are held back, and on a target
-whose verification batches are dear, such as a Mixture-of-Experts model, a long
-draft is chosen only where candidates are nearly always right. The speculation
+a wrong token is learned without paying for drafts; a candidate is looked up one
+token past the longest draft, so the token the target adds after a full-length
+draft is checked too. The counts are kept per draft position and per kind of
+candidate: where its match ends relative to the source position of the latest
+reply token a candidate token was found right against (on it: a copy
+continuing; 1 to 32 positions past it (`NGRAM_RESUME_GAP`): a copy picking up
+again after an edit, such as a renamed identifier; otherwise a fresh match),
+and whether the match lies in the context before the reply or in the reply
+itself. A kind starts from a 10% chance per token of being wrong for a match in
+the context and 40% for one in the reply; its counts over the model's life are
+the prior of its counts in the current reply. So a copy that picks up again
+after an edit drafts about as far as such copies have run before their next
+edit (at most `spec_draft_tokens`), matches that keep going wrong (prose, code
+written from scratch) are held back, and on a target whose verification
+batches are dear, such as a Mixture-of-Experts model, a long draft is chosen
+only where candidates are nearly always right. The speculation
 report carries `runs` (per kind, the tokens a full-length candidate is expected
 to yield) and `held_steps` (the reply's candidates held back) beside `costs`
 and `observed_ms`. When the costs cannot be measured it proposes up to the cap

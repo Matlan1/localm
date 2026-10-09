@@ -104,10 +104,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   them in one pass, so replies that rewrite a file, quote a passage or repeat
   tool-call JSON come out faster. Replies are the same model's replies. It
   measures your model when it loads and learns while it writes how far copied
-  text runs, so a rewrite drafts each copied stretch up to the next edit in one
-  step, and on models where checking drafts is expensive, such as
-  Mixture-of-Experts models, it holds back where drafting would not pay instead
-  of slowing replies down. It is
+  text tends to run, so rewrites draft longer stretches at once, and on models
+  where checking drafts is expensive, such as Mixture-of-Experts models, it
+  holds back where drafting would not pay instead of slowing replies down. It is
   off by default; `localm bench-spec <model>` measures whether it pays on your
   machine, and the reply's usage line shows how many drafted tokens were accepted.
 - **Speculative decoding with a draft model.** Speculative drafting can now use a

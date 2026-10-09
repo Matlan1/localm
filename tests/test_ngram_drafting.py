@@ -600,12 +600,47 @@ def test_a_new_reply_keeps_what_the_model_learned_and_clears_the_reply():
     kind = ("continue", "reply")
     src.runs.check(kind, 1, True)
     src._open = [[3, [1], 0, kind, 1]]
-    src._last_right = 7
+    src._last_right, src._last_right_at = 7, 3
     src.reset_call()
     life, reply = src.runs._counts(kind)
     assert (life.checked[1], life.wrong[1]) == (1.0, 1.0)
     assert (reply.checked[1], reply.wrong[1]) == (0.0, 0.0)
-    assert src._open == [] and src._last_right is None
+    assert src._open == [] and src._last_right is None and src._last_right_at == -1
+
+
+def test_the_latest_reply_token_sets_where_the_copy_stands():
+    src = _llama()._source
+    kind = ("start", "context")
+    src._open = [[10, [1, 2, 3, 4], 0, kind, 50], [11, [2, 9, 9, 9], 0, kind, 80]]
+    src._check_open(list(range(10)) + [50, 1, 2, 3, 4], 5)
+    assert (src._last_right, src._last_right_at) == (54, 14)
+    assert src._open == []
+
+
+def test_a_copy_that_runs_on_past_a_full_length_draft_continues():
+    llm = _llama(4)
+    src = llm._source
+    src.costs = _row_costs(0.05)
+    copied = list(range(100, 130))
+    llm._cached_tokens = copied + [7, 8]
+    src.begin_call()
+    pos = len(llm._cached_tokens)
+    for t in copied[:2]:
+        assert src.propose(t, pos, 4) == []
+        llm._cached_tokens.append(t)
+        pos += 1
+    drafts = src.propose(copied[2], pos, 4)
+    assert drafts == copied[3:7]
+    assert src._open[-1][3] == ("start", "context")
+    llm._cached_tokens += [copied[2]] + drafts
+    pos += 1 + len(drafts)
+
+    src.propose(copied[7], pos, 4)
+
+    assert src._last_right == 7
+    assert src._open[-1][3] == ("continue", "context")
+    life, _reply = src.runs._counts(("start", "context"))
+    assert life.checked[1:] == [1.0, 1.0, 1.0, 1.0]
 
 
 def test_the_report_carries_the_runs_and_a_draft_model_keeps_its_acceptance():
@@ -671,6 +706,7 @@ def test_a_copy_with_renames_drafts_up_to_each_rename(row):
     assert measured_s <= 1.02 * blind_s
     assert plain_s - measured_s > 0.25 * len(reply)
     assert src.accepted >= 0.8 * blind.accepted
+    assert src.drafted - src.accepted < blind.drafted - blind.accepted
     assert src.runs.report()["resume/context"] > 5.0
 
 
