@@ -34,7 +34,7 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
 ``req_q`` (parent -> child), one command processed at a time:
     ("load", {model_path, mmproj_path, n_ctx, n_gpu_layers, n_ctx_max, n_ctx_grow,
               vram_overhead_bytes, gpu_split_ratios, n_cpu_moe, use_mmap,
-              main_gpu?})
+              main_gpu?, adapters?})
     ("chat_stream", {messages, max_tokens, temperature, top_p, top_k,
                       repeat_penalty, grammar, grammar_lazy, grammar_triggers, seed})
     ("count_tokens", text)
@@ -52,7 +52,8 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
                                              "UnsupportedInputError",
                                              "GrammarUnsupportedError", and on
                                              a load reply
-                                             "PretokenizerUnusableModelError". An
+                                             "PretokenizerUnusableModelError"
+                                             and "AdapterLoadError". An
                                              UNTAGGED error becomes a
                                              RuntimeError, which GgufBackend
                                              reads as "the isolated worker
@@ -103,7 +104,7 @@ import time
 from typing import Callable, Optional
 
 from localm.inference.backends.base import (
-    ContextCapacityExceededError,
+    AdapterLoadError, ContextCapacityExceededError,
     GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled,
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
     UnsupportedInputError)
@@ -323,6 +324,8 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 resp_q.put(("cancelled", str(e)))
             except PretokenizerUnusableModelError as e:
                 resp_q.put(("error", str(e), "PretokenizerUnusableModelError"))
+            except AdapterLoadError as e:
+                resp_q.put(("error", str(e), "AdapterLoadError"))
             except Exception as e:
                 resp_q.put(("error", str(e)))
             # A hard native abort during worker.load() is NOT caught here -
@@ -852,6 +855,8 @@ class ModelRunner:
         if kind == "error":
             if len(result) > 2 and result[2] == "PretokenizerUnusableModelError":
                 raise PretokenizerUnusableModelError(result[1])
+            if len(result) > 2 and result[2] == "AdapterLoadError":
+                raise AdapterLoadError(result[1])
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the model-loading process: {result!r}")
 

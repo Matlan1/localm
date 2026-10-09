@@ -12,6 +12,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **`stop` sequences on `/v1/chat/completions` and `/v1/completions`.** A string or a list
+  of up to 16: the reply is cut before the first match, the generation ends there instead of
+  running to its token budget, and `finish_reason` is `stop`. A stop sequence inside a
+  reasoning model's `<think>` block is not applied. The Ollama API's `options.stop` uses it.
 - **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5 and other `t5`
   GGUFs register as chat models and answer through `localm run`, the GUI chat and
   `/v1/chat/completions`, where they were refused before.
@@ -220,6 +224,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and the API reference lists every route, parameter and schema the server
   declares. `scripts/export_openapi.py` writes the schema without loading a model.
   The site is published with each release.
+- **GGUF LoRA adapters can be attached to a base model.** A GGUF adapter file (made by
+  llama.cpp's `convert_lora_to_gguf.py`, or downloaded) now registers as type `lora`
+  instead of a chat model that cannot load. `localm adapter attach ADAPTER BASE
+  [--scale S]` ties it to a registered GGUF model, and `localm run BASE`, the server
+  and the GUI then load BASE with the adapter applied; `localm adapter detach` and
+  `localm adapter list` manage them. An adapter made for a different architecture is
+  refused with both architectures named, and a loaded model's load response lists the
+  adapters it runs with.
+- **LoRA adapters are managed from the Models page.** An adapter row shows what it is
+  attached to and its scale, with attach, change and detach controls; a refusal such as a
+  mismatched architecture appears inside the dialog. A base model shows the adapters it
+  will run with, the ones it is running, and asks for an unload and reload when they
+  differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU

@@ -327,7 +327,6 @@ def register(app: FastAPI, ctx) -> None:
 
     async def _run_chat(request: Request, plan: P.Plan, kind: str, name: str):
         started = time.perf_counter()
-        plan.body["stream"] = plan.stream or bool(plan.stop)
         try:
             chat_req = ChatRequest(**plan.body)
         except ValidationError as exc:
@@ -342,16 +341,15 @@ def register(app: FastAPI, ctx) -> None:
         body_iterator = getattr(inner, "body_iterator", None)
         if inner.status_code >= 400:
             raise P.OllamaError(inner.status_code, await _error_text(inner))
-        if body_iterator is not None and (plan.stream or plan.stop):
-            lines = P.ndjson_stream(
-                P.iter_sse_json(body_iterator), kind=kind, model=name,
-                want_thinking=plan.want_thinking, stop=plan.stop, started=started)
-            if not plan.stream:
-                return JSONResponse(await P.collect_reply(lines, kind))
+        if body_iterator is not None and plan.stream:
             headers = {k: v for k, v in inner.headers.items()
                        if k.lower().startswith("x-localm-")}
             headers.update({"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-            return StreamingResponse(lines, media_type=_NDJSON, headers=headers)
+            return StreamingResponse(
+                P.ndjson_stream(
+                    P.iter_sse_json(body_iterator), kind=kind, model=name,
+                    want_thinking=plan.want_thinking, started=started),
+                media_type=_NDJSON, headers=headers)
         raw = (await _collect_body(body_iterator)
                if body_iterator is not None else bytes(inner.body))
         try:
@@ -361,8 +359,7 @@ def register(app: FastAPI, ctx) -> None:
                 502, "the model route returned a reply that is not JSON") from None
         total_ns = int((time.perf_counter() - started) * 1_000_000_000)
         return JSONResponse(P.completion_to_reply(
-            kind, data, name, want_thinking=plan.want_thinking, stop=plan.stop,
-            total_ns=total_ns))
+            kind, data, name, want_thinking=plan.want_thinking, total_ns=total_ns))
 
     async def _collect_body(body_iterator) -> bytes:
         parts = []

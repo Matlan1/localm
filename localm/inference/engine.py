@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from pathlib import Path
 from typing import Callable, Iterator, List, Optional
+
+from rich.markup import escape
 
 from localm.config import load_config
 from localm.console import console
@@ -371,7 +374,44 @@ class Engine:
                 f"Loading [bold cyan]{self.display_name}[/bold cyan] "
                 f"[dim](backend: {backend_type})[/dim]"
             )
+            self._attach_registered_adapters()
+            for path, scale in getattr(self._backend, "adapters", None) or ():
+                console.print(f"[dim]  with LoRA adapter {escape(Path(path).name)} "
+                              f"(scale {scale:g})[/dim]")
             self._backend.load()
+
+    def _attach_registered_adapters(self) -> None:
+        """Give a GGUF backend the LoRA adapters currently attached to this
+        engine's registered model, so a load applies the attachments as they are
+        now. Applies only when ``display_name`` is a registered model whose file
+        is this engine's ``model_path``. Raises
+        :class:`~localm.inference.backends.base.AdapterLoadError` when an
+        attached adapter's registry entry is unusable."""
+        from localm.inference.backends.gguf import GgufBackend
+        backend = self._backend
+        if not isinstance(backend, GgufBackend):
+            return
+        from localm.model_manager import AdapterError, get_model_adapters, get_model_info
+        from .backends.base import AdapterLoadError
+        try:
+            info = get_model_info(self.display_name)
+            if info is None or Path(str(info[0])).resolve() != Path(self.model_path).resolve():
+                return
+            attached = get_model_adapters(self.display_name)
+        except AdapterError as exc:
+            raise AdapterLoadError(str(exc)) from exc
+        backend.adapters = [(os.path.abspath(p), float(s)) for p, s in attached]
+
+    @property
+    def applied_adapters(self) -> list:
+        """The LoRA adapters the loaded model runs with, as ``{"name", "scale"}``
+        (the adapter file's name, never its full path); empty when none is
+        applied or the backend does not report any."""
+        applied = getattr(self._backend, "applied_adapters", None)
+        if not isinstance(applied, (list, tuple)):
+            return []
+        return [{"name": Path(str(a.get("path", ""))).name, "scale": a.get("scale")}
+                for a in applied if isinstance(a, dict)]
 
     def unload(self) -> None:
         self._backend.unload()
@@ -667,6 +707,7 @@ class Engine:
                     console.print(
                         f"[dim]Reloading [bold]{self.display_name}[/bold]…[/dim]"
                     )
+                    self._attach_registered_adapters()
                     self._backend.load()
 
         cfg = load_config()

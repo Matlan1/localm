@@ -177,6 +177,62 @@ def llama_free(ctx: ctypes.c_void_p) -> None:
 
 
 # ---------------------------------------------------------------------------
+#  LoRA adapters
+# ---------------------------------------------------------------------------
+
+LlamaAdapterLora = ctypes.c_void_p   # struct llama_adapter_lora*
+
+
+def has_lora_api() -> bool:
+    """True when this llama.dll exports the LoRA adapter functions
+    (``llama_adapter_lora_init`` / ``_free`` and ``llama_set_adapters_lora``),
+    so a caller can load adapters instead of raising AttributeError on a
+    stripped build."""
+    lib = load_lib()
+    return all(hasattr(lib, fn) for fn in (
+        "llama_adapter_lora_init", "llama_adapter_lora_free",
+        "llama_set_adapters_lora"))
+
+
+def llama_adapter_lora_init(model: ctypes.c_void_p, path: str) -> Optional[ctypes.c_void_p]:
+    """Load the GGUF LoRA adapter at *path* for *model*, or None when the
+    native loader refused it (it logs the reason). The adapter stays valid
+    until ``llama_adapter_lora_free`` or the model is freed. Only call after
+    has_lora_api()."""
+    fn = _bind("llama_adapter_lora_init", LlamaAdapterLora, LlamaModel, ctypes.c_char_p)
+    result = fn(model, path.encode("utf-8"))
+    return result if result else None
+
+
+def llama_adapter_lora_free(adapter: ctypes.c_void_p) -> None:
+    """Free an adapter returned by llama_adapter_lora_init. Only call after
+    has_lora_api()."""
+    _bind("llama_adapter_lora_free", None, LlamaAdapterLora)(adapter)
+
+
+def llama_set_adapters_lora(ctx: ctypes.c_void_p, adapters: list, scales: list) -> int:
+    """Make exactly *adapters* (handles from llama_adapter_lora_init) active on
+    *ctx*, each multiplied by the matching entry of *scales*, replacing whatever
+    was active. Returns 0 on success. An adapter with scale 0 is not applied.
+    An empty list clears every adapter. Only call after has_lora_api().
+
+    The two lists must have equal length; the native call aborts the process on
+    a null array with a non-zero count, so a mismatch raises ValueError here."""
+    if len(adapters) != len(scales):
+        raise ValueError(
+            f"{len(adapters)} adapters but {len(scales)} scales")
+    fn = _bind("llama_set_adapters_lora", ctypes.c_int32, LlamaContext,
+               ctypes.POINTER(LlamaAdapterLora), ctypes.c_size_t,
+               ctypes.POINTER(ctypes.c_float))
+    n = len(adapters)
+    if n == 0:
+        return int(fn(ctx, None, 0, None))
+    handles = (LlamaAdapterLora * n)(*adapters)
+    factors = (ctypes.c_float * n)(*scales)
+    return int(fn(ctx, handles, n, factors))
+
+
+# ---------------------------------------------------------------------------
 #  Context / model accessors
 # ---------------------------------------------------------------------------
 

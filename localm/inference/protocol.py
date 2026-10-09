@@ -9,6 +9,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 from localm.inference.backends.base import LOADING_MODEL_STATUS, VISION_CPU_FALLBACK_STATUS
+from localm.inference.stop_sequences import normalize_stop
 
 
 # ------------------------------------------------------------------ #
@@ -146,6 +147,15 @@ class CompletionRequest(BaseModel):
     grammar_lazy: bool = False
     grammar_triggers: Optional[List[str]] = None
     seed: Optional[int] = None
+    # Text that ends the reply when generated: one string or a list. The reply
+    # is cut before the first match and finish_reason is "stop".
+    stop: Optional[List[str]] = None
+
+    @field_validator("stop", mode="before")
+    @classmethod
+    def _stop_sequences(cls, v):
+        """Accept one string or a list of strings; reject anything else."""
+        return normalize_stop(v)
 
 
 class ChatRequest(BaseModel):
@@ -169,6 +179,9 @@ class ChatRequest(BaseModel):
     grammar_lazy: bool = False
     grammar_triggers: Optional[List[str]] = None
     seed: Optional[int] = None     # RNG seed for reproducible generation
+    # Text that ends the reply when generated: one string or a list. The reply
+    # is cut before the first match and finish_reason is "stop".
+    stop: Optional[List[str]] = None
     # Capabilities the answering model must have, e.g. ["tool_use"]. Consulted
     # ONLY when no model is pinned: with an explicit `model`, a gap is reported
     # and the pinned model still answers.
@@ -192,6 +205,12 @@ class ChatRequest(BaseModel):
     # reasoning model to answer without its reasoning channel. Other keys are
     # accepted and ignored.
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+
+    @field_validator("stop", mode="before")
+    @classmethod
+    def _stop_sequences(cls, v):
+        """Accept one string or a list of strings; reject anything else."""
+        return normalize_stop(v)
 
     @field_validator("chat_template_kwargs")
     @classmethod

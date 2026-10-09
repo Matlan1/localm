@@ -252,6 +252,26 @@ is a real HuggingFace model (config plus weights and tokenizer), the folder is
 registered; otherwise the file is rejected with an "incomplete model" message
 rather than added as a half-model.
 
+### LoRA adapters
+
+A GGUF LoRA adapter (a `.gguf` whose header says `general.type = adapter`, as made by
+llama.cpp's `convert_lora_to_gguf.py`) registers as type `lora` and cannot be run on its
+own. Attach it to a registered GGUF chat model and it is applied every time that model loads:
+
+```bash
+localm add my-lora.gguf -n my-lora
+localm adapter attach my-lora qwen3-0.6b --scale 0.8   # refused if the architectures differ
+localm run qwen3-0.6b                                  # runs with the adapter applied
+localm adapter list                                    # adapters and what they are attached to
+localm adapter detach my-lora
+```
+
+An adapter belongs to one base; attaching it again moves it. Several adapters can be attached
+to one base and are applied together, each at its own scale (a negative scale subtracts it).
+A change applies the next time the base loads, so unload a model that is already running
+(`localm unload BASE`). Adapters need a llama runtime that exports the LoRA functions and a GGUF
+base model; they are not supported for HuggingFace-format models.
+
 ### List and remove
 
 ```bash

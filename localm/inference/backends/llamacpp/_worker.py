@@ -53,9 +53,11 @@ class GgufWorker(VramSizingMixin):
         spec_draft_model: Optional[str] = None,
         spec_draft_gpu: bool = True,
         use_mmap: Optional[bool] = None,
+        adapters: Optional[list] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
+        self.adapters = [(str(p), float(s)) for p, s in (adapters or [])]
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
         self.mtp_enabled = mtp_enabled
@@ -182,8 +184,10 @@ class GgufWorker(VramSizingMixin):
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
-        "weight_placement", "moe_skip_reason", "mmap", "encoder_decoder",
-        "encoder_input_limit"}``. ``encoder_decoder`` is True for a model that
+        "weight_placement", "moe_skip_reason", "mmap", "adapters",
+        "encoder_decoder", "encoder_input_limit"}``. ``adapters`` lists the
+        ``{"path", "scale"}`` of each LoRA adapter applied to the context.
+        ``encoder_decoder`` is True for a model that
         encodes its prompt before decoding (T5), and ``encoder_input_limit`` is
         then the most prompt tokens one request may carry (0 otherwise).
         ``weight_placement`` is llama.cpp's own per-backend load report (VRAM vs
@@ -259,6 +263,7 @@ class GgufWorker(VramSizingMixin):
             mtp_enabled=self.mtp_enabled,
             use_mmap=self.use_mmap,
             verbose=False,
+            adapters=self.adapters or None,
             spec_draft_gpu=self._draft_gpu,
             **optional,
         )
@@ -271,6 +276,7 @@ class GgufWorker(VramSizingMixin):
             "weight_placement": getattr(self._llm, "weight_placement", []),
             "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),
             "mmap": getattr(self._llm, "mmap_mapped", None),
+            "adapters": [dict(a) for a in getattr(self._llm, "applied_adapters", ())],
             "encoder_decoder": bool(getattr(self._llm, "is_encoder_decoder", False)),
             "encoder_input_limit": int(getattr(self._llm, "encoder_input_limit", 0) or 0),
         }
