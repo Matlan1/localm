@@ -917,7 +917,7 @@ def _common_prefix_len(a: List[int], b: List[int]) -> int:
 
 
 def _build_sampler(
-    vocab: int,
+    vocab: ctypes.c_void_p,
     temperature: float = 0.8,
     top_k: int = 40,
     top_p: float = 0.95,
@@ -927,7 +927,7 @@ def _build_sampler(
     grammar: Optional[str] = None,
     grammar_lazy: bool = False,
     grammar_triggers: Optional[List[str]] = None,
-) -> int:
+) -> ctypes.c_void_p:
     """
     Construct a sampler chain:
         [grammar] → [penalties] → top_k → top_p → min_p → temperature → dist
@@ -1709,18 +1709,21 @@ class LlamaCpp:
         return 0
 
     def _architecture(self) -> Optional[str]:
-        """The loaded model's general.architecture, or None when this build
-        cannot read metadata or the key is absent."""
-        if not api.has_model_meta_api():
+        """The loaded model's general.architecture, or None when no model is
+        loaded, this build cannot read metadata, or the key is absent."""
+        model = self._model_ptr
+        if model is None or not api.has_model_meta_api():
             return None
-        return api.llama_model_meta_val_str(self._model_ptr, "general.architecture")
+        return api.llama_model_meta_val_str(model, "general.architecture")
 
     def _meta_int(self, key: str) -> int:
         """The loaded model's metadata value under *key* as a positive int, or 0
-        when it is absent, unreadable or not a positive integer."""
-        if not api.has_model_meta_api():
+        when it is absent, unreadable or not a positive integer, or when no
+        model is loaded."""
+        model = self._model_ptr
+        if model is None or not api.has_model_meta_api():
             return 0
-        raw = api.llama_model_meta_val_str(self._model_ptr, key)
+        raw = api.llama_model_meta_val_str(model, key)
         try:
             value = int(raw) if raw is not None else 0
         except (TypeError, ValueError):
@@ -1749,9 +1752,12 @@ class LlamaCpp:
         Raises RuntimeError when this build does not export the encoder API and
         the model's architecture is an encoder-decoder one, since such a model
         cannot generate without ``llama_encode``."""
+        model = self._model_ptr
+        if model is None:
+            return False
         if api.has_encoder_api():
-            return (api.llama_model_has_encoder(self._model_ptr)
-                    and api.llama_model_has_decoder(self._model_ptr))
+            return (api.llama_model_has_encoder(model)
+                    and api.llama_model_has_decoder(model))
         arch = self._architecture()
         from localm.model_manager.gguf import _GGUF_ENCODER_DECODER_ARCHITECTURES
         if arch in _GGUF_ENCODER_DECODER_ARCHITECTURES:
@@ -1767,7 +1773,8 @@ class LlamaCpp:
         n_ubatch as llama.cpp reports it, or, on a build without that accessor,
         *cp*'s n_ubatch clamped as llama.cpp clamps it (to n_batch, itself
         clamped to n_ctx)."""
-        native = api.llama_n_ubatch(self._ctx_ptr)
+        ctx = self._ctx_ptr
+        native = api.llama_n_ubatch(ctx) if ctx is not None else None
         if native:
             return int(native)
         return int(min(cp.n_ubatch, cp.n_batch, cp.n_ctx))
@@ -2294,10 +2301,11 @@ class LlamaCpp:
         everywhere except inside untrusted spans, with the vocabulary's BOS
         prepended when it asks for one and its EOS appended unless it says not
         to (a T5 vocabulary: EOS appended, no BOS)."""
+        tokenizer = self._loaded_tokenizer()
         prompt = _flatten_for_encoder(messages)
         ranges = _encoder_untrusted_ranges(messages, prompt)
-        tokens = self._tokenizer.encode(prompt, add_bos=False, untrusted_ranges=ranges)
-        vocab = self._tokenizer._vocab
+        tokens = tokenizer.encode(prompt, add_bos=False, untrusted_ranges=ranges)
+        vocab = tokenizer._vocab
         if api.llama_vocab_get_add_bos(vocab):
             bos = api.llama_token_bos(vocab)
             if bos != api.LLAMA_TOKEN_NULL:
@@ -2313,18 +2321,30 @@ class LlamaCpp:
         when this build has the memory API, else a fresh context of the same
         size. Caller holds _gen_lock."""
         self._cached_tokens = []
-        if self._memory_api_available():
-            api.llama_memory_clear(api.llama_get_memory(self._ctx_ptr), True)
+        ctx = self._ctx_ptr
+        if ctx is not None and self._memory_api_available():
+            api.llama_memory_clear(api.llama_get_memory(ctx), True)
             return
         self._prefill_fresh_context([], self._ctx_capacity)
+
+    def _loaded_tokenizer(self) -> _Tokenizer:
+        """The loaded model's tokenizer. Raises RuntimeError when no model is
+        loaded."""
+        tokenizer = self._tokenizer
+        if tokenizer is None:
+            raise RuntimeError("Model not loaded")
+        return tokenizer
 
     def _decoder_start_token(self) -> int:
         """The token an encoder-decoder model's decoder starts from: the model's
         declared decoder-start token, else its BOS. Raises RuntimeError when the
         model declares neither."""
-        token = api.llama_model_decoder_start_token(self._model_ptr)
+        model = self._model_ptr
+        if model is None:
+            raise RuntimeError("Model not loaded")
+        token = api.llama_model_decoder_start_token(model)
         if token == api.LLAMA_TOKEN_NULL:
-            token = api.llama_token_bos(self._tokenizer._vocab)
+            token = api.llama_token_bos(self._loaded_tokenizer()._vocab)
         if token == api.LLAMA_TOKEN_NULL:
             raise RuntimeError(
                 "This encoder-decoder model declares neither a decoder start "
@@ -2370,6 +2390,7 @@ class LlamaCpp:
         with self._inference_lock:
             if not self._model_ptr:
                 raise RuntimeError("Model not loaded")
+            tokenizer = self._loaded_tokenizer()
             if on_status:
                 on_status("Processing prompt...")
             enc_tokens = self.encoder_tokens(messages)
@@ -2415,7 +2436,7 @@ class LlamaCpp:
                             time.monotonic() - _t0)
 
                 sampler = _build_sampler(
-                    vocab=self._tokenizer._vocab,
+                    vocab=tokenizer._vocab,
                     temperature=temperature,
                     top_k=top_k,
                     top_p=top_p,
@@ -2452,7 +2473,7 @@ class LlamaCpp:
                                 break
                             pos += 1
                             token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
-                            eog = self._tokenizer.is_eog(token)
+                            eog = tokenizer.is_eog(token)
                         if eog:
                             break
                         yield token

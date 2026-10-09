@@ -286,8 +286,9 @@ class GgufWorker(VramSizingMixin):
         its encoder input (``LlamaCpp.encoder_tokens``). Raises on failure: the
         parent's RPC wrapper is what falls back to the chars/4 heuristic, at
         the process boundary rather than around the native call directly."""
-        if getattr(self._llm, "is_encoder_decoder", False):
-            return len(self._llm.encoder_tokens(messages))
+        llm = self._llm
+        if llm is not None and getattr(llm, "is_encoder_decoder", False):
+            return len(llm.encoder_tokens(messages))
         from .llama import _apply_model_template
         text_messages = []
         for m in messages:
