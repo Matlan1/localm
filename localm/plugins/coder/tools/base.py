@@ -29,16 +29,16 @@ class ToolResult:
     # mode, previewing via dry_run) and a caller recording what a REAL write
     # just changed (the changed-files/undo tracker) read this one field, fed
     # by the same matching pass.
-    changes: "list[tuple[str, bytes, str]] | None" = None
+    changes: list[tuple[str, bytes, str]] | None = None
 
     @classmethod
     def success(cls, output: str, summary: str = "",
-                changes: "list[tuple[str, bytes, str]] | None" = None) -> "ToolResult":
+                changes: list[tuple[str, bytes, str]] | None = None) -> ToolResult:
         return cls(ok=True, output=output, summary=summary, changes=changes)
 
     @classmethod
     def error(cls, message: str,
-              changes: "list[tuple[str, bytes, str]] | None" = None) -> "ToolResult":
+              changes: list[tuple[str, bytes, str]] | None = None) -> ToolResult:
         # summary is a ONE-LINE console display (see field comment). Keep the
         # full message in output and only a capped first line here, so a long
         # diagnostic (a timeout's partial output, git stderr) cannot flood the

@@ -107,7 +107,7 @@ class Job:
 
     name: str
     schedule_kind: str = "interval"
-    schedule: "int | str" = 3600
+    schedule: int | str = 3600
     task_kind: str = "chat"
     prompt: str = ""
     model: Optional[str] = None
@@ -192,7 +192,7 @@ class Job:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Job":
+    def from_dict(cls, data: dict) -> Job:
         # Only keep known fields so a forward-compat file with extra keys loads.
         known = {f for f in cls.__dataclass_fields__}      # type: ignore[attr-defined]
         return cls(**{k: v for k, v in data.items() if k in known})

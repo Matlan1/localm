@@ -275,7 +275,7 @@ class PluginHost:
     """Concrete `contract.Host`. One per loaded plugin; tracks what it mounted
     so it can be cleanly removed on unload."""
 
-    def __init__(self, app, manager: "PluginManager", spec: PluginSpec) -> None:
+    def __init__(self, app, manager: PluginManager, spec: PluginSpec) -> None:
         self.api_version = API_VERSION
         self._app = app
         self._manager = manager
@@ -586,7 +586,7 @@ class PluginManager:
                  installed_root: Optional[Path] = None,
                  # back-compat aliases: builtin_root was the store,
                  # external_root the installed/discovery dir
-                 builtin_root: "Optional[Path] | object" = _UNSET,
+                 builtin_root: Optional[Path] | object = _UNSET,
                  external_root: Optional[Path] = None) -> None:
         self.app = app
         self._inference_engine_static = inference_engine

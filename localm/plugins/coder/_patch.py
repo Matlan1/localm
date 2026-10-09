@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ class PatchError(ValueError):
 class _Hunk:
     old_start: int         # 1-indexed hint from @@ header
     old_count: int         # expected number of old-side lines (context + removals)
-    lines: List[str]       # diff lines, each with leading ' ', '+', or '-'
+    lines: list[str]       # diff lines, each with leading ' ', '+', or '-'
 
 
 # ---------------------------------------------------------------------------
@@ -57,9 +57,9 @@ _HUNK_RE = re.compile(
 )
 
 
-def _parse_hunks(diff_text: str) -> List[_Hunk]:
+def _parse_hunks(diff_text: str) -> list[_Hunk]:
     """Parse a unified diff string into a list of _Hunk objects."""
-    hunks: List[_Hunk] = []
+    hunks: list[_Hunk] = []
     current: Optional[_Hunk] = None
     in_hunk = False
 
@@ -102,13 +102,13 @@ def _parse_hunks(diff_text: str) -> List[_Hunk]:
 #  Fuzzy-match hunk position
 # ---------------------------------------------------------------------------
 
-def _old_side(hunk: _Hunk) -> List[str]:
+def _old_side(hunk: _Hunk) -> list[str]:
     """Lines that must be present in the original (context + removed)."""
     return [l[1:] for l in hunk.lines if l.startswith((" ", "-"))]
 
 
 def _find_hunk_position(
-    orig: List[str],
+    orig: list[str],
     hunk: _Hunk,
     *,
     fuzz: int = 20,
@@ -168,7 +168,7 @@ def apply_diff(original_text: str, diff_text: str) -> str:
         raise PatchError("No hunks found in the diff string.")
 
     orig = original_text.splitlines()
-    result: List[str] = list(orig)
+    result: list[str] = list(orig)
     offset = 0  # cumulative line-count delta from hunks already applied
 
     for idx, hunk in enumerate(hunks):

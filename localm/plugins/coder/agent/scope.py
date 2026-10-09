@@ -7,9 +7,9 @@ from __future__ import annotations
 import re
 
 # Compiled scope patterns, keyed by the scope string.
-_SCOPE_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
+_SCOPE_RE_CACHE: dict[str, re.Pattern[str]] = {}
 
-def _glob_to_regex(pattern: str) -> "re.Pattern[str]":
+def _glob_to_regex(pattern: str) -> re.Pattern[str]:
     """
     Compile a path-aware glob into a regex anchored to a full relative path.
 
@@ -53,7 +53,7 @@ def _glob_to_regex(pattern: str) -> "re.Pattern[str]":
     out.append(r")\Z")
     return re.compile("".join(out))
 
-def _scope_pattern(scope: str) -> "re.Pattern[str]":
+def _scope_pattern(scope: str) -> re.Pattern[str]:
     rx = _SCOPE_RE_CACHE.get(scope)
     if rx is None:
         rx = _glob_to_regex(scope)
