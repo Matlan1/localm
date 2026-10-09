@@ -174,8 +174,8 @@ def unsupported_quant_method_refusal(config: dict) -> Optional[str]:
     if named is None:
         return None
     label, runtime = named
-    return (f"This model is quantized with {label}, a format only {runtime} can run "
-            f"(NVIDIA CUDA only), so localm cannot load it. {_ALTERNATIVE}")
+    return (f"This model is quantized with {label}, a format only {runtime} can run, "
+            f"so localm cannot load it. {_ALTERNATIVE}")
 
 
 def mistral_native_refusal(folder: Path) -> Optional[str]:
@@ -198,9 +198,26 @@ def mistral_native_refusal(folder: Path) -> Optional[str]:
             "this layout. Use the model's GGUF or its Hugging Face-format files.")
 
 
+def openvino_refusal(folder: Path) -> Optional[str]:
+    """The reason an OpenVINO export cannot be loaded (``openvino_model.xml`` at the
+    top of *folder* and no PyTorch or safetensors weights beside it), or None."""
+    try:
+        if not (folder / "openvino_model.xml").is_file():
+            return None
+        for pattern in ("*.safetensors", "pytorch_model*", "*.pt", "*.pth"):
+            if next(folder.glob(pattern), None) is not None:
+                return None
+    except OSError:
+        return None
+    return _OPENVINO_SENTENCE
+
+
 def hf_folder_refusal(folder: Path) -> Optional[str]:
     """The reason the HuggingFace-style *folder* cannot be loaded (MLX-quantized,
-    or quantized for a runtime localm lacks), or None."""
+    quantized for a runtime localm lacks, or an OpenVINO export), or None."""
+    openvino = openvino_refusal(folder)
+    if openvino is not None:
+        return openvino
     config = _read_config(folder)
     if config is None:
         return None
@@ -223,14 +240,16 @@ _FILE_SUFFIX_EXPLANATIONS = {
               "NeMo. " + _ALTERNATIVE),
 }
 
+_OPENVINO_SENTENCE = (
+    "This folder is an OpenVINO IR model, which runs only in the OpenVINO runtime. "
+    + _ALTERNATIVE)
+
 # Marker file inside a folder -> sentence for a folder pointed at directly.
 _FOLDER_MARKER_EXPLANATIONS = (
     ("mlc-chat-config.json",
      "This folder is an MLC LLM compiled model, which runs only in the MLC LLM "
      "runtime. " + _ALTERNATIVE),
-    ("openvino_model.xml",
-     "This folder is an OpenVINO IR model, which runs only in the OpenVINO runtime. "
-     + _ALTERNATIVE),
+    ("openvino_model.xml", _OPENVINO_SENTENCE),
 )
 
 

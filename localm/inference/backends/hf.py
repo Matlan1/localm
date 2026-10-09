@@ -274,11 +274,12 @@ class HFBackend(BaseBackend):
     # ------------------------------------------------------------------ #
 
     def load(self) -> None:
-        # Three pre-flight refusals, before a child is ever spawned:
+        # Four pre-flight refusals, before a child is ever spawned:
         #   1. Custom code (auto_map) the user has not explicitly trusted.
-        #   2. A tokenizer.json regex pattern that fails the Oniguruma safety
+        #   2. A folder format this backend cannot load (MLX, EXL2/EXL3, OpenVINO).
+        #   3. A tokenizer.json regex pattern that fails the Oniguruma safety
         #      probe.
-        #   3. A shard index whose weight_map points outside the model
+        #   4. A shard index whose weight_map points outside the model
         #      directory. See test_hf_shard_index_safety.py.
         _check_custom_code_allowed(self.model_path)
         _check_format_supported(self.model_path)

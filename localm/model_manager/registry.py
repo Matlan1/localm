@@ -32,7 +32,7 @@ from .gguf import _is_hf_model_dir
 from .gguf import _gguf_declared_min_size
 from .gguf import _has_gguf_magic
 from .gguf import gguf_unusable_reason
-from .unsupported import explain_unsupported_model
+from .unsupported import explain_unsupported_model, hf_folder_refusal
 from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
@@ -1198,8 +1198,8 @@ def relocate_target(new_path: str) -> "tuple[Path | None, str | None]":
             return None, f"Not a HuggingFace model directory: {p}"
     elif p.suffix.lower() != ".gguf":
         return None, f"Not a GGUF model file: {p}"
-    elif gguf_unusable_reason(p) is not None:
-        return None, f"{p}: {gguf_unusable_reason(p)}"
+    elif (unusable := gguf_unusable_reason(p)) is not None:
+        return None, f"{p}: {unusable}"
     elif not _has_gguf_magic(p):
         declared_min = _gguf_declared_min_size(p)
         try:
@@ -3547,6 +3547,11 @@ def add_local(
         # raw registry key. Computed before any move so the collision check below
         # and the eventual registration agree on the exact same name.
         model_name = _sanitize_name(name) if name else suggested
+        blob_unusable = gguf_unusable_reason(blob_path)
+        if blob_unusable is not None:
+            console.print(f"[red]Not a usable model:[/red] {escape(str(blob_path))}\n"
+                          f"{escape(blob_unusable)}")
+            return False
         if store and _mm.is_external_path(blob_path):
             # Refuse before touching the filesystem when registration is
             # already known to be refused - a name collision with no terminal to
@@ -3785,6 +3790,11 @@ def add_local(
             "under an automatic name the next time models are scanned "
             "(`localm list`, or the next server start)."
         )
+    if registered and is_hf:
+        cannot_load = hf_folder_refusal(p)
+        if cannot_load is not None:
+            console.print("[yellow]Registered, but localm cannot load it:[/yellow] "
+                          f"{escape(cannot_load)}")
     return registered
 
 

@@ -16,9 +16,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and the GUI add and pull routes name the format and the nearest runnable alternative for
   GGUF version 1 and big-endian GGUF files, legacy GGML `.bin` files, importance-matrix
   GGUFs, Mistral-native folders, `.onnx`, TensorRT, LiteRT and NeMo files, and MLC,
-  OpenVINO and EXL2/EXL3 folders. An MLX-quantized or EXL2/EXL3 folder that is already
-  registered is refused at load with the same sentence, before any worker starts, and the
-  automatic models-folder scan quietly skips the GGUFs it cannot load.
+  OpenVINO and EXL2/EXL3 folders. An MLX-quantized, EXL2/EXL3 or OpenVINO folder still
+  registers, with a note that it cannot be loaded, and is refused at load with the same
+  sentence before any worker starts. Direct-URL and Ollama-blob pulls apply the same
+  checks, and the automatic models-folder scan quietly skips the GGUFs it cannot load. A
+  Mistral-style folder holding both Hugging Face shards and `consolidated*` files is sized
+  by the shards only.
 - **Release files carry build provenance and a software bill of materials.** The release
   zip, the sdist, the wheel and a CycloneDX SBOM of the pinned dependencies are attested by
   the release workflow, so `gh attestation verify` proves which workflow built a file and

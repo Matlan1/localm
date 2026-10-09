@@ -287,7 +287,9 @@ def _model_file_size(name: str) -> Optional[int]:
         if p.is_file():
             return p.stat().st_size
         if p.is_dir():
-            total = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            skipped = residency.alternate_layout_files(p)
+            total = sum(f.stat().st_size for f in p.rglob("*")
+                        if f.is_file() and f not in skipped)
             return total if total > 0 else None
     except (OSError, TypeError, ValueError):
         return None

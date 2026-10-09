@@ -62,12 +62,12 @@ GGML_SENTENCE = ("This is an old-format GGML file (the pre-GGUF format used by e
 MLX_SENTENCE = ("This is an MLX-quantized model (mlx-community format), which runs "
                 "only in Apple's MLX and cannot be loaded here. Use the GGUF of the "
                 "same model, or the original non-MLX weights.")
-EXL2_SENTENCE = ("This model is quantized with EXL2, a format only ExLlamaV2 can run "
-                 "(NVIDIA CUDA only), so localm cannot load it. Use a GGUF of the "
-                 "same model, or the original Hugging Face weights.")
-EXL3_SENTENCE = ("This model is quantized with EXL3, a format only ExLlamaV3 can run "
-                 "(NVIDIA CUDA only), so localm cannot load it. Use a GGUF of the "
-                 "same model, or the original Hugging Face weights.")
+EXL2_SENTENCE = ("This model is quantized with EXL2, a format only ExLlamaV2 can run, "
+                 "so localm cannot load it. Use a GGUF of the same model, or the "
+                 "original Hugging Face weights.")
+EXL3_SENTENCE = ("This model is quantized with EXL3, a format only ExLlamaV3 can run, "
+                 "so localm cannot load it. Use a GGUF of the same model, or the "
+                 "original Hugging Face weights.")
 MISTRAL_SENTENCE = ("This is a Mistral-native model folder (params.json plus "
                     "consolidated*.safetensors, no config.json). localm loads GGUF "
                     "files and Hugging Face-format folders (config.json plus "
@@ -624,3 +624,156 @@ class TestPulledFile:
         assert mm.pull_model("owner/repo:pulled.gguf") is False
         assert mm.load_registry() == {}
         assert V1_SENTENCE in "\n".join(printed)
+
+
+# --------------------------------------------------------------------------- #
+#  Other registration paths                                                    #
+# --------------------------------------------------------------------------- #
+
+def _ollama_manifest(root: Path, blob_writer) -> Path:
+    digest = "a" * 64
+    blob = root / "blobs" / f"sha256-{digest}"
+    blob.parent.mkdir(parents=True)
+    blob_writer(blob)
+    manifest_dir = root / "manifests" / "registry.ollama.ai" / "library" / "m" / "latest"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "latest").write_text(json.dumps({"layers": [
+        {"mediaType": "application/vnd.ollama.image.model", "digest": f"sha256:{digest}"}]}))
+    return manifest_dir
+
+
+class TestOllamaBlob:
+    @pytest.mark.parametrize("label,kw,sentence", [
+        ("v1", dict(version=1), V1_SENTENCE),
+        ("imatrix", dict(arch=None, general_type="imatrix"), IMATRIX_SENTENCE),
+    ])
+    def test_an_unusable_blob_is_not_registered(self, home, tmp_path, printed,
+                                                label, kw, sentence):
+        manifest = _ollama_manifest(tmp_path / "ollama", lambda p: _gguf(p, **kw))
+        assert mm.add_local(str(manifest)) is False
+        assert mm.load_registry() == {}
+        assert sentence in "\n".join(printed)
+
+    def test_a_normal_blob_still_registers(self, home, tmp_path):
+        manifest = _ollama_manifest(tmp_path / "ollama", lambda p: _gguf(p))
+        assert mm.add_local(str(manifest)) is True
+        assert list(mm.load_registry()) == ["m"]
+
+
+class TestUrlPull:
+    URL = "http://host.example/pulled.gguf"
+
+    @pytest.fixture
+    def url_env(self, home, monkeypatch):
+        monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: True)
+        monkeypatch.setattr(mm, "find_by_sha256", lambda *a, **k: [])
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+
+    def _serve(self, monkeypatch, body: bytes):
+        from unittest.mock import MagicMock
+
+        def fake_pinned_request(method, url, **kwargs):
+            if method == "HEAD":
+                h = MagicMock()
+                h.status_code = 200
+                h.headers = {"content-length": str(len(body))}
+                return h
+            r = MagicMock()
+            r.status_code = 200
+            r.raise_for_status = MagicMock()
+            r.headers = {"content-length": str(len(body))}
+            r.iter_content = lambda chunk_size: iter([body])
+            return r
+
+        monkeypatch.setattr("localm.netpolicy.pinned_request", fake_pinned_request)
+
+    @pytest.mark.parametrize("label,kw,sentence", [
+        ("v1", dict(version=1), V1_SENTENCE),
+        ("big_endian", dict(big_endian=True), BIG_ENDIAN_SENTENCE),
+        ("imatrix", dict(arch=None, general_type="imatrix"), IMATRIX_SENTENCE),
+    ])
+    def test_a_downloaded_unusable_gguf_is_not_registered(
+            self, url_env, home, tmp_path, monkeypatch, printed, label, kw, sentence):
+        body = _gguf(tmp_path / "src.gguf", **kw).read_bytes()
+        self._serve(monkeypatch, body)
+        assert mm.pull_model(self.URL) is False
+        assert mm.load_registry() == {}
+        assert sentence in "\n".join(printed)
+
+    def test_a_normal_download_registers(self, url_env, home, tmp_path, monkeypatch):
+        self._serve(monkeypatch, _gguf(tmp_path / "src.gguf").read_bytes())
+        assert mm.pull_model(self.URL) is True
+        assert "pulled" in mm.load_registry()
+
+    def test_a_file_already_in_the_models_folder_is_not_registered(
+            self, url_env, home, monkeypatch, printed):
+        _gguf(home / "models" / "pulled.gguf", version=1)
+        self._serve(monkeypatch, b"unused")
+        assert mm.pull_model(self.URL) is False
+        assert mm.load_registry() == {}
+        assert V1_SENTENCE in "\n".join(printed)
+
+
+OPENVINO_SENTENCE = FOLDER_SENTENCES["openvino_model.xml"]
+
+
+class TestFoldersThatRegisterAsHuggingFace:
+    def test_an_openvino_export_registers_with_a_note_and_is_refused_at_load(
+            self, home, tmp_path, monkeypatch, printed):
+        hf_mod = _no_runner(monkeypatch)
+        d = _hf_dir(tmp_path / "ov", weights=("openvino_model.bin",))
+        (d / "openvino_model.xml").write_text("<net/>")
+        assert mm.add_local(str(d)) is True
+        assert "Registered, but localm cannot load it" in "\n".join(printed)
+        assert OPENVINO_SENTENCE in "\n".join(printed)
+        with pytest.raises(UnsupportedModelRoleError) as caught:
+            hf_mod.HFBackend(str(d)).load()
+        assert str(caught.value) == OPENVINO_SENTENCE
+
+    def test_a_folder_with_openvino_and_real_weights_is_not_refused(self, tmp_path):
+        d = _hf_dir(tmp_path / "both")
+        (d / "openvino_model.xml").write_text("<net/>")
+        assert hf_folder_refusal(d) is None
+
+    def test_an_exllama_folder_registers_with_the_note(self, home, tmp_path, printed):
+        d = _hf_dir(tmp_path / "exl", {"architectures": ["LlamaForCausalLM"],
+                                       "quantization_config": EXL2_QUANT})
+        assert mm.add_local(str(d)) is True
+        out = "\n".join(printed)
+        assert "Registered, but localm cannot load it" in out and EXL2_SENTENCE in out
+
+    def test_a_plain_hf_folder_gets_no_note(self, home, tmp_path, printed):
+        d = _hf_dir(tmp_path / "plain")
+        assert mm.add_local(str(d)) is True
+        assert "cannot load it" not in "\n".join(printed)
+
+
+class TestConsolidatedFilesAreNotCounted:
+    def test_two_layout_folder_is_sized_by_the_hf_shards_only(self, tmp_path):
+        from localm.inference.residency import alternate_layout_files, model_footprint_bytes
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "config.json").write_text("{}")
+        (d / "model-00001-of-00001.safetensors").write_bytes(b"\0" * 1000)
+        (d / "consolidated.safetensors").write_bytes(b"\0" * 1000)
+        assert alternate_layout_files(d) == frozenset({d / "consolidated.safetensors"})
+        assert model_footprint_bytes(d) == 1000 + len("{}")
+
+    def test_a_folder_with_only_consolidated_weights_counts_them(self, tmp_path):
+        from localm.inference.residency import alternate_layout_files, model_footprint_bytes
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "config.json").write_text("{}")
+        (d / "consolidated.safetensors").write_bytes(b"\0" * 1000)
+        assert alternate_layout_files(d) == frozenset()
+        assert model_footprint_bytes(d) == 1000 + len("{}")
+
+    def test_a_folder_without_config_json_counts_everything(self, tmp_path):
+        from localm.inference.residency import alternate_layout_files
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "model.safetensors").write_bytes(b"\0" * 10)
+        (d / "consolidated.safetensors").write_bytes(b"\0" * 10)
+        assert alternate_layout_files(d) == frozenset()
