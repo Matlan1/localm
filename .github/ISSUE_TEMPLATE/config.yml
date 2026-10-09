@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and setup help
+    url: https://github.com/Matlan1/localm/discussions
+    about: Setup questions, GPU help (AMD, NVIDIA, Intel), and "does this work with my card".
+  - name: Report a security vulnerability
+    url: https://github.com/Matlan1/localm/blob/master/SECURITY.md
+    about: Report vulnerabilities privately as described in SECURITY.md. Do not open a public issue.
