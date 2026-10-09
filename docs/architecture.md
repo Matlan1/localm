@@ -122,6 +122,8 @@ boundary (`auth`, `scopes`, `tls`, `bindhost`, `netlisten`, `portmux`,
 workflows and gates. None of those blocks a merge; the list lives in
 `scripts/merge_policy.py`.
 
+`master` is protected by a repository ruleset (`.github/rulesets/master.json`, applied with `gh api repos/<owner>/<repo>/rulesets`): no force-push, no deletion, and every change arrives through a pull request whose `merge-policy` and CodeQL `analyze (<language>)` checks have passed. No approving review is required. Only a `pull_request` run reports a check named `merge-policy`, so the skipped run the narrow `push` trigger creates on the same commit cannot stand in for it.
+
 `mutation-test` is the mutation-testing gate for the trust boundary: the
 eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`). On the
 weekly schedule, on a dispatch, or on a pull request carrying the
