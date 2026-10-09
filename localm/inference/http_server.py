@@ -518,12 +518,18 @@ def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
 def _gpu_placement_fields(engine) -> dict:
     """{"gpu_layers_offloaded", "gpu_layers_total", "degraded"} for *engine*'s
     current load, or {} when the backend cannot report placement (no load
-    yet, or a backend without a layer-count knob - see Engine.gpu_placement).
+    yet, or a backend without a layer-count knob - see Engine.gpu_placement),
+    plus the ``Engine.mmap_state`` fields (``use_mmap``, ``mmap``,
+    ``mmap_from_disk``, ``mmap_note``) when the load reported them.
     Merged into every switch_engine()/load-route success payload so a caller
     can tell a full GPU load from a silent CPU fallback instead of a bare
     "loaded"/"already_active" that hides it."""
     placement = getattr(engine, "gpu_placement", None)
-    return dict(placement) if placement else {}
+    fields = dict(placement) if placement else {}
+    mmap_state = getattr(engine, "mmap_state", None)
+    if isinstance(mmap_state, dict):
+        fields.update(mmap_state)
+    return fields
 
 
 # How many more probe attempts an inconclusive VRAM reading with nothing left
@@ -1450,7 +1456,8 @@ async def _switch_free_for_reload(loop, name: str, engine,
 def _describe_load_placement(name: str, engine, evictions=()) -> str:
     """One line naming where *engine*'s load of *name* placed its layers
     (``Engine.gpu_placement``), how the layer count was chosen
-    (``Engine.gpu_sizing``) and the outcome of each eviction that made room
+    (``Engine.gpu_sizing``), the mmap note when the load has one
+    (``Engine.mmap_state``) and the outcome of each eviction that made room
     for it (``VictimRelease.describe``)."""
     placement = getattr(engine, "gpu_placement", None)
     sizing = getattr(engine, "gpu_sizing", None)
@@ -1484,6 +1491,9 @@ def _describe_load_placement(name: str, engine, evictions=()) -> str:
         else:
             detail += f", n_gpu_layers {sizing.get('layers')}"
         parts.append(detail)
+    mmap_state = getattr(engine, "mmap_state", None)
+    if isinstance(mmap_state, dict) and mmap_state.get("mmap_note"):
+        parts.append(mmap_state["mmap_note"])
     parts.extend(e.describe() for e in evictions)
     return "; ".join(parts)
 
