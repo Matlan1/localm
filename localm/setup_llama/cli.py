@@ -78,7 +78,7 @@ BACKENDS: tuple[str, ...] = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
                    "one-click installer and for scripted setups.")
 def main(from_dir: Optional[str], backend: str, url: Optional[str],
          sha256: Optional[str], force: bool, tag: Optional[str],
-         rollback: bool, cuda_line: Optional[str], assume_yes: bool) -> None:
+         rollback: bool, assume_yes: bool, cuda_line: Optional[str] = None) -> None:
     """Download or copy the native llama.cpp binaries into localm's own venv.
 
     The chosen backend is load-tested after provisioning. If it cannot load on
