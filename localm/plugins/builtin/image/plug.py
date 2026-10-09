@@ -253,7 +253,7 @@ async def imagine_move(name: str, req: MoveFileRequest, request: Request):
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        raise HTTPException(400, f"Cannot create destination: {e}")
+        raise HTTPException(400, f"Cannot create destination: {e}") from e
     if not dest_dir.is_dir():
         raise HTTPException(400, f"Not a directory: {req.dest}")
     target = dest_dir / path.name
@@ -361,7 +361,7 @@ async def imagine_comfy_models(request: Request):
             _backend._comfy_model_roles, s, roles, timeout=20.0)
         loras = await run_in_threadpool_bounded(_backend._comfy_lora_options, s, timeout=20.0)
     except ThreadCallTimeout as e:
-        raise HTTPException(504, f"Reading ComfyUI's model list timed out: {e}")
+        raise HTTPException(504, f"Reading ComfyUI's model list timed out: {e}") from e
     out = {"api_url": s["api_url"], "loras": loras or [], **resolved}
     if not resolved["reachable"]:
         out["message"] = "ComfyUI is not running - launch it to see available models."
@@ -393,7 +393,7 @@ async def imagine_comfy_launch():
         ok, message = await run_in_threadpool_bounded(
             _backend.ensure_available, s, timeout=budget)
     except ThreadCallTimeout as e:
-        raise HTTPException(504, f"Launching ComfyUI timed out: {e}")
+        raise HTTPException(504, f"Launching ComfyUI timed out: {e}") from e
     return {"ok": ok, "message": message, "api_url": s["api_url"]}
 
 

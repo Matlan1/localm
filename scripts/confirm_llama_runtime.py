@@ -238,7 +238,7 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _fetch_model() -> "tuple[str, str]":
+def _fetch_model() -> tuple[str, str]:
     """(path, error). Never raises: no model is INCONCLUSIVE, not a failure of
     the build under test."""
     try:
@@ -252,7 +252,7 @@ def _fetch_model() -> "tuple[str, str]":
 
 
 def _place_build(backend: str, tag: str, dest: Path, attempts: int = 3
-                 ) -> "tuple[str, str]":
+                 ) -> tuple[str, str]:
     """Download and extract *backend* at *tag* into *dest*. Returns (lib_path,
     error).
 
@@ -308,7 +308,7 @@ def _run_probe(lib: Path, model: str) -> dict:
             "why": f"the probe emitted no verdict (exit {r.returncode}): {tail}"}
 
 
-def confirm(tag: str, backends: "list[str]", workdir: Path) -> dict:
+def confirm(tag: str, backends: list[str], workdir: Path) -> dict:
     model, model_err = _fetch_model()
     results: dict = {}
     libs: dict = {}
@@ -335,7 +335,7 @@ def confirm(tag: str, backends: "list[str]", workdir: Path) -> dict:
     return {"tag": tag, "results": results, "lib_sha256": libs}
 
 
-def _report(summary: dict, backends: "list[str]") -> int:
+def _report(summary: dict, backends: list[str]) -> int:
     tag, results, libs = summary["tag"], summary["results"], summary["lib_sha256"]
     print("\n" + "=" * 72)
     print(f"CONFIRMATION SUMMARY for llama.cpp {tag}")
@@ -389,7 +389,7 @@ def _report(summary: dict, backends: "list[str]") -> int:
     return 0
 
 
-def _write_receipt(path: Path, summary: dict, backends: "list[str]", rc: int) -> None:
+def _write_receipt(path: Path, summary: dict, backends: list[str], rc: int) -> None:
     """Write the run's verdicts as JSON: tag, exit code, per-backend verdict
     dicts for every requested backend, the llama library digest per backend, and
     the UTC time of writing. Written for every outcome, including FAIL and

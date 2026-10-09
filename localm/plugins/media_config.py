@@ -91,7 +91,7 @@ def would_cycle(name: str, source: str, cfg: dict) -> bool:
 
 
 def resolve_config(name: str, cfg: dict,
-                   *, active: "Optional[set]" = None) -> tuple[dict, Optional[str]]:
+                   *, active: Optional[set] = None) -> tuple[dict, Optional[str]]:
     """Effective stored block for media plugin *name*.
 
     Applies ``use_config_from`` (one hop, using the source's OWN block) when the

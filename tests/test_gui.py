@@ -1623,13 +1623,13 @@ class TestCompanionEndpoint:
             main = asyncio.ensure_future(endpoint())
             try:
                 await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
                 main.cancel()
                 raise AssertionError(
                     "a concurrent trivial coroutine never got to run while "
                     "companion_addresses() was in flight - /api/companion is "
                     "on the event loop, so one slow DNS lookup freezes the "
-                    "whole server")
+                    "whole server") from e
             elapsed = trivial_done[0] - t0
             resp = await asyncio.wait_for(main, timeout=BLOCK_S + 10)
             return elapsed, resp
@@ -5242,13 +5242,13 @@ class TestPairingQR:
             main = asyncio.ensure_future(endpoint())
             try:
                 await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
                 main.cancel()
                 raise AssertionError(
                     "a concurrent trivial coroutine never got to run while "
                     "the QR render was in flight - /api/pairing/qr is on the "
                     "event loop, so the first pairing-QR request after a "
-                    "restart freezes the whole server")
+                    "restart freezes the whole server") from e
             elapsed = trivial_done[0] - t0
             resp = await asyncio.wait_for(main, timeout=BLOCK_S + 10)
             return elapsed, resp

@@ -76,7 +76,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             return await asyncio.wait_for(asyncio.shield(fut),
                                           sysstats.STATS_REPLY_BUDGET_S)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return sysstats.cached_stats()
 
     @app.get("/api/companion", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])

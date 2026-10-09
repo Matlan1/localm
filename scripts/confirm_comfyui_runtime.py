@@ -130,7 +130,7 @@ def _new_receipt(tag: str, commit: str) -> dict:
            "server": {}, "launch_log_tail": "", "not_covered": list(NOT_COVERED)}
 
 
-def _load_receipt(path: Path, tag: str, commit: str) -> "dict | None":
+def _load_receipt(path: Path, tag: str, commit: str) -> dict | None:
     """The existing receipt at *path* if it is for the SAME tag+commit, else
     None (a stale receipt from a different candidate must never be silently
     reused as if it already covered this one)."""
@@ -164,7 +164,7 @@ def _check_passed(receipt: dict, name: str) -> bool:
 #  and every resolved path re-checked to be under the scratch dir.            #
 # --------------------------------------------------------------------------- #
 
-def _prepare_scratch_env(workdir: Path) -> "tuple[Path, Path]":
+def _prepare_scratch_env(workdir: Path) -> tuple[Path, Path]:
     """(scratch_home, scratch_tmp), created, and every relevant env var
     pointed at them. MUST run before the first `import localm` anywhere in
     this process - several of localm's path constants are frozen at import
@@ -180,7 +180,7 @@ def _prepare_scratch_env(workdir: Path) -> "tuple[Path, Path]":
     return home, tmp
 
 
-def _verify_isolation(workdir: Path) -> "tuple[bool, str]":
+def _verify_isolation(workdir: Path) -> tuple[bool, str]:
     """(ok, why). Re-checks, AFTER import, that every localm path this script
     is about to touch actually resolved under *workdir* - the only thing that
     stands between a misconfigured environment and installing into the
@@ -203,7 +203,7 @@ def _verify_isolation(workdir: Path) -> "tuple[bool, str]":
 #  provision phase                                                            #
 # --------------------------------------------------------------------------- #
 
-def _requirements_changed(root: Path, old_commit: str, new_commit: str) -> "bool | None":
+def _requirements_changed(root: Path, old_commit: str, new_commit: str) -> bool | None:
     """Whether requirements.txt differs between *old_commit* and *new_commit*
     inside the already-cloned *root* (a full clone, so both commits are
     reachable). None when it could not be determined (never treated as a
@@ -387,7 +387,7 @@ def _bare_torch_probe(venv_python: Path) -> dict:
         return {"error": str(e)}
 
 
-def _torch_variant_ok(reported_version: "str | None", spec) -> bool:
+def _torch_variant_ok(reported_version: str | None, spec) -> bool:
     if not reported_version:
         return False
     if "==" in (spec.packages[0] if spec.packages else ""):
@@ -513,7 +513,7 @@ def run_smoke_phase(tag: str, commit: str, workdir: Path, receipt_path: Path) ->
     return 0
 
 
-def _fetch_system_stats(api_url: str) -> "dict | None":
+def _fetch_system_stats(api_url: str) -> dict | None:
     import urllib.request
     try:
         req = urllib.request.Request(f"{api_url}/system_stats")
@@ -523,7 +523,7 @@ def _fetch_system_stats(api_url: str) -> "dict | None":
         return None
 
 
-def _verify_identity(stats: "dict | None", root: Path) -> "tuple[bool, str]":
+def _verify_identity(stats: dict | None, root: Path) -> tuple[bool, str]:
     if not stats:
         return False, "/system_stats did not answer or returned unreadable JSON"
     system = stats.get("system") or {}
@@ -633,7 +633,7 @@ def _check_gpu_roundtrip(receipt, api_url, workdir: Path, comfy_client_mod) -> N
     _set_check(receipt, "gpu_roundtrip", PASS if ok else FAIL, why)
 
 
-def _verify_probe_output(path: Path) -> "tuple[bool, str]":
+def _verify_probe_output(path: Path) -> tuple[bool, str]:
     """The output is a solid-color PNG blurred by a real GPU kernel: the
     center pixel must still be the input color, within +-1 for float->byte
     truncation. Reads raw PNG bytes - no Pillow dependency in THIS process
@@ -688,7 +688,7 @@ def _verify_probe_output(path: Path) -> "tuple[bool, str]":
 
 
 def _unfilter_png_rows(raw: bytes, width: int, height: int, channels: int,
-                       *, up_to_row: int) -> "list[bytearray]":
+                       *, up_to_row: int) -> list[bytearray]:
     """Reconstruct scanlines 0..up_to_row (inclusive) of a bit-depth-8 PNG's
     decompressed IDAT stream, applying the PNG spec's per-row filter
     (0 None, 1 Sub, 2 Up, 3 Average, 4 Paeth). Every row up to the target must

@@ -45,7 +45,7 @@ def _release(tag, *, prerelease=False, draft=False, published_at=None):
 
 
 def _day(n: int) -> dt.datetime:
-    return dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(days=n)
+    return dt.datetime(2026, 1, 1, tzinfo=dt.UTC) + dt.timedelta(days=n)
 
 
 @pytest.fixture(autouse=True)

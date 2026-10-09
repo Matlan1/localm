@@ -1,0 +1,173 @@
+name: docker
+
+# Builds the localm server images (docker/Dockerfile) and smoke-tests each one.
+#
+#   pull_request       only when docker/** or this file changes: build + smoke
+#                      test, nothing is pushed.
+#   release: published build + smoke test, then push the tested images to
+#                      ghcr.io/matlan1/localm. The only trigger that pushes without
+#                      a deliberate dispatch. A failed run is re-run from the
+#                      Actions tab; the release itself is never affected.
+#   workflow_dispatch  dry run by default (build + smoke test + tag computation,
+#                      no login, no push). Untick dry_run and run it on the tag
+#                      v<VERSION> to publish that release's images again.
+#
+# Tags: <version> and <version>-<backend> for every release; latest, cpu and
+# vulkan only when that release is the repository's latest (never a pre-release).
+
+on:
+  pull_request:
+    paths:
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and smoke-test only; push nothing"
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: docker-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/matlan1/localm
+
+jobs:
+  prepare:
+    name: Resolve version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      push: ${{ steps.resolve.outputs.push }}
+      floating: ${{ steps.resolve.outputs.floating }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - name: Resolve version and whether to push
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GH_TOKEN: ${{ github.token }}
+        run: sh docker/resolve-release.sh
+
+  build:
+    name: Build and smoke-test (${{ matrix.backend }})
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cpu, vulkan]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - name: Build the image
+        env:
+          BACKEND: ${{ matrix.backend }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          docker build -f docker/Dockerfile \
+            --build-arg BACKEND="$BACKEND" \
+            --build-arg IMAGE_VERSION="$VERSION" \
+            --build-arg IMAGE_REVISION="$GITHUB_SHA" \
+            -t "localm:$BACKEND" .
+      - name: Smoke-test the image
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: bash docker/smoke-test.sh "localm:$BACKEND"
+      - name: Save the tested image
+        if: github.event_name != 'pull_request'
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: docker save "localm:$BACKEND" | gzip > "image-$BACKEND.tar.gz"
+      - name: Upload the tested image
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: image-${{ matrix.backend }}
+          path: image-${{ matrix.backend }}.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish to GHCR
+    needs: [prepare, build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write  # push the images to ghcr.io/matlan1/localm
+    outputs:
+      digests: ${{ steps.push.outputs.digests }}
+    steps:
+      - name: Download the tested images
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: image-*
+          merge-multiple: true
+      - name: Load the tested images
+        run: |
+          set -eu
+          for archive in image-*.tar.gz; do
+            gunzip -c "$archive" | docker load
+          done
+      - name: Log in to GHCR
+        if: needs.prepare.outputs.push == 'true'
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+      - name: Tag and push
+        id: push
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PUSH: ${{ needs.prepare.outputs.push }}
+          FLOATING: ${{ needs.prepare.outputs.floating }}
+        run: |
+          set -eu
+          digests="{}"
+          for backend in cpu vulkan; do
+            tags="$VERSION-$backend"
+            if [ "$backend" = "cpu" ]; then
+              tags="$tags $VERSION"
+            fi
+            if [ "$FLOATING" = "true" ]; then
+              tags="$tags $backend"
+              if [ "$backend" = "cpu" ]; then
+                tags="$tags latest"
+              fi
+            fi
+            for tag in $tags; do
+              docker tag "localm:$backend" "$IMAGE:$tag"
+              if [ "$PUSH" = "true" ]; then
+                docker push "$IMAGE:$tag"
+              else
+                echo "dry run: would push $IMAGE:$tag"
+              fi
+            done
+            if [ "$PUSH" = "true" ]; then
+              digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$VERSION-$backend")"
+              digests="$(printf '%s' "$digests" | python3 -c 'import json,sys; d=json.load(sys.stdin); d[sys.argv[1]]=sys.argv[2]; print(json.dumps(d))' "$backend" "$digest")"
+              echo "$backend: $digest" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          echo "digests=$digests" >> "$GITHUB_OUTPUT"

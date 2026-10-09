@@ -384,7 +384,7 @@ def _packed_address(ip: str) -> Optional[bytes]:
 
 
 def start_advertiser(port: int, *, tls: bool,
-                     addresses: Optional[list[str]] = None) -> Optional["_Advertiser"]:
+                     addresses: Optional[list[str]] = None) -> Optional[_Advertiser]:
     """Advertise this server over mDNS so it is reachable as ``<mdns_name>.local``
     on the LAN, and return a handle whose ``close()`` withdraws it.
 

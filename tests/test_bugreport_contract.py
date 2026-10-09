@@ -371,7 +371,7 @@ def _write_hang(logs: Path, pid: int, label: str = "0x0002") -> Path:
     path.write_bytes((
         f"Thread {label} (most recent call first):\n"
         f'  File "{WIN_PATH}", line 40 in _run_once\n'
-        f"  Authorization: Bearer {BEARER}\n").encode("utf-8"))
+        f"  Authorization: Bearer {BEARER}\n").encode())
     old = time.time() - 60
     os.utime(path, (old, old))
     return path
@@ -395,7 +395,7 @@ def _transcript(capsys, path=None) -> str:
 
 def test_automatic_report_is_byte_identical(world, tmp_path):
     (world.logs / "pre_restart.log").write_bytes(
-        f"11:59:59 INFO localm: before restart token={QV}\n".encode("utf-8"))
+        f"11:59:59 INFO localm: before restart token={QV}\n".encode())
     text = bugreport.build_report(
         f"model load failed for {_own_path()} on {HOST} token={QV}",
         reason=f"backend said api_key={QV} reading {WIN_PATH}; ask {OTHER_EMAIL}",
@@ -407,7 +407,7 @@ def test_automatic_report_is_byte_identical(world, tmp_path):
 
 def test_user_report_saved_file_is_byte_identical(world, tmp_path):
     (world.logs / "pre_restart.log").write_bytes(
-        f"11:59:59 INFO localm: before restart Bearer {BEARER}\n".encode("utf-8"))
+        f"11:59:59 INFO localm: before restart Bearer {BEARER}\n".encode())
     _write_hang(world.logs, os.getpid())
     _write_run_log(world.logs, os.getpid())
     decoy = world.logs / "localm_2026-10-09_120500_1.log"

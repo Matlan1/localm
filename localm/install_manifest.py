@@ -51,7 +51,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, Optional
 
 MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"
@@ -74,7 +74,7 @@ EXIT_UNAVAILABLE = 3     # current-data / prepare-data --keep-current: the data 
 
 # In-clone runtime folders, by manifest key. Only these names are ever written
 # to the pending file, and the shells accept only these names from it.
-RUNTIME_DIRS: Dict[str, str] = {"python_dir": ".python", "cache_dir": ".cache",
+RUNTIME_DIRS: dict[str, str] = {"python_dir": ".python", "cache_dir": ".cache",
                                 "uv_dir": ".uv"}
 DEFERRABLE = (".venv",) + tuple(RUNTIME_DIRS.values())
 
@@ -200,7 +200,7 @@ def journal_state(root) -> dict:
     state["exists"] = True
     lines = text.split("\n")
     lines.pop()  # whatever follows the last newline is not a whole line
-    open_steps: List[str] = []
+    open_steps: list[str] = []
     for line in lines:
         parts = line.rstrip("\r").split("\t")
         ev = parts[0]
@@ -353,7 +353,7 @@ def _recorded_root(m: dict) -> str:
     return ""
 
 
-def _rebase(m: dict, root: Path) -> Tuple[dict, str]:
+def _rebase(m: dict, root: Path) -> tuple[dict, str]:
     """(*m* with every path recorded inside the folder it was written in moved
     under *root*, that folder) for an install folder that was moved, renamed
     or copied after setup. The folder is "" when it is *root* or unknown, and
@@ -390,7 +390,7 @@ def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
            runtime_contained=False, python_dir="", cache_dir="", uv_dir="",
            path_dir="", command_shim="", path_modified=False,
            files: Iterable[str] = (), uv_shared_installed=False,
-           data_preexisting: Optional[List[str]] = None,
+           data_preexisting: Optional[list[str]] = None,
            data_parents_created: Iterable[str] = ()) -> Path:
     """Merge what a setup step created into the manifest under *root*.
 
@@ -546,11 +546,11 @@ def _uses_folder(install: str, folder) -> bool:
     return bool(configured) and _same(configured, folder)
 
 
-def _others_using(folder, root: Path, marker: Optional[dict]) -> List[str]:
+def _others_using(folder, root: Path, marker: Optional[dict]) -> list[str]:
     """The other installs *marker* lists that still use *folder*: on this
     computer, those that exist and are set up to use it; on another computer,
     every one listed, since it cannot be checked from here."""
-    out: List[str] = []
+    out: list[str] = []
     for inst in (marker or {}).get("installs", []):
         if _other_host(inst["host"]):
             out.append(f"{inst['path']} on the computer {inst['host']}")
@@ -560,7 +560,7 @@ def _others_using(folder, root: Path, marker: Optional[dict]) -> List[str]:
     return out
 
 
-def configured_data_dir(root) -> Tuple[str, bool]:
+def configured_data_dir(root) -> tuple[str, bool]:
     """(folder, exists) for the data folder the clone at *root* is set up to
     use: the full path named in ``localm-home.cfg``, else ``<root>/home``
     when it exists. ("", False) when there is none or the setting cannot be
@@ -789,7 +789,7 @@ def _remove_entry(p: Path) -> None:
             p.unlink()
 
 
-def _tree_size(path: Path, max_entries: int = 500_000) -> Tuple[int, int, bool]:
+def _tree_size(path: Path, max_entries: int = 500_000) -> tuple[int, int, bool]:
     """(bytes, files, complete) for *path*, without following links."""
     total = files = seen = 0
     stack = [str(path)]
@@ -1156,8 +1156,8 @@ def _cfg_data_dir(root: Path) -> str:
 
 
 def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
-          defer_runtime: bool, old_root: str = "") -> Tuple[List[_Item], list]:
-    items: List[_Item] = []
+          defer_runtime: bool, old_root: str = "") -> tuple[list[_Item], list]:
+    items: list[_Item] = []
     data_info = []
     in_use = [p for p in {sys.executable, getattr(sys, "_base_executable", ""),
                           sys.prefix, sys.base_prefix} if p]
@@ -1440,11 +1440,11 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
     return items, data_info
 
 
-def _pointers_into(root: Path) -> List[_Item]:
+def _pointers_into(root: Path) -> list[_Item]:
     """Entries outside this folder that exist only to point into it: user
     PATH entries (Windows), the lines Astral's uv installer adds to shell
     startup files for a uv in ``<root>/.uv``, and its install receipt."""
-    out: List[_Item] = []
+    out: list[_Item] = []
     if sys.platform == "win32":
         try:
             from localm import globalcmd
@@ -1532,7 +1532,7 @@ _UV_RC_NAMES = (".profile", ".bashrc", ".bash_profile", ".bash_login", ".zshrc",
                 ".zshenv", os.path.join(".config", "fish", "conf.d", "uv.env.fish"))
 
 
-def _rc_files() -> List[Path]:
+def _rc_files() -> list[Path]:
     home = Path.home()
     return [home / n for n in _UV_RC_NAMES if (home / n).is_file()]
 
@@ -1593,7 +1593,7 @@ def _strip_uv_lines(rc: Path, root: Path) -> int:
     return removed
 
 
-def _uv_receipts() -> List[Path]:
+def _uv_receipts() -> list[Path]:
     dirs = []
     for base in (os.environ.get("XDG_CONFIG_HOME", ""), os.environ.get("LOCALAPPDATA", ""),
                  str(Path.home() / ".config")):
@@ -1607,7 +1607,7 @@ def _uv_receipts() -> List[Path]:
     return out
 
 
-def _webview_profiles(root: Path) -> List[str]:
+def _webview_profiles(root: Path) -> list[str]:
     """pywebview's default profile folders (shared by every pywebview app),
     where the app window keeps its cookies and page storage, when this install
     has the app-window package and the folder exists."""
@@ -1625,7 +1625,7 @@ def _webview_profiles(root: Path) -> List[str]:
     return [c for c in cands if c and os.path.isdir(c)]
 
 
-def _coder_project_dirs(data_dir: Path) -> List[str]:
+def _coder_project_dirs(data_dir: Path) -> list[str]:
     """``<project>/.localcoder`` for each project in the data folder's coder
     project list that has one."""
     try:
@@ -1878,7 +1878,7 @@ def _classify(report: dict, it: _Item, *, force: bool, dry_run: bool,
         report["failed"].append((it.path, f"could not remove: {e}"))
 
 
-def _finish(report: dict, root: Path, m: Optional[dict], items: List[_Item],
+def _finish(report: dict, root: Path, m: Optional[dict], items: list[_Item],
             *, dry_run: bool) -> dict:
     asked_refused = report.get("partial") or any(
         it.status == "refuse" and it.kind in ("data", "data-entry", "venv", "runtime", "lib", "file")
@@ -1931,11 +1931,11 @@ def _finish(report: dict, root: Path, m: Optional[dict], items: List[_Item],
     return report
 
 
-def _pycache_dirs(root: Path, keep: Iterable[str] = ()) -> List[Path]:
+def _pycache_dirs(root: Path, keep: Iterable[str] = ()) -> list[Path]:
     """The ``__pycache__`` folders under *root*, outside ``.git``, the runtime
     folders uninstall removes whole, the folders in *keep*, and links."""
     kept = [Path(k) for k in keep]
-    out: List[Path] = []
+    out: list[Path] = []
     for dirpath, dirnames, _files in os.walk(root):
         here = Path(dirpath)
         if here == root:
@@ -1970,7 +1970,7 @@ def _sweep_pycache(report: dict, root: Path, *, dry_run: bool) -> None:
         report["removed"].append(label)
 
 
-def finish_pending(root) -> Tuple[list, list]:
+def finish_pending(root) -> tuple[list, list]:
     """Remove the folders named in the pending file (allowlisted names only),
     then the pending file and the manifest when all are gone. For callers that
     run after the uninstaller's process has exited. Returns (removed, left)."""
@@ -2004,10 +2004,10 @@ def finish_pending(root) -> Tuple[list, list]:
 #  Report                                                                      #
 # --------------------------------------------------------------------------- #
 
-def format_report(rep: dict) -> List[str]:
+def format_report(rep: dict) -> list[str]:
     """The report as the lines setup prints."""
     dry = rep.get("dry_run")
-    out: List[str] = []
+    out: list[str] = []
 
     def section(title, rows):
         if rows:

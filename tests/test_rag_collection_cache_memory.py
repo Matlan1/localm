@@ -25,7 +25,7 @@ def _empty_cache():
 
 
 def _build(base: Path, name: str, *, n_chunks: int = 500, dim: int = 32,
-           seed: int = 0, model: "str | None" = None) -> None:
+           seed: int = 0, model: str | None = None) -> None:
     rnd = random.Random(seed)
     words = [f"w{seed}x{i}" for i in range(400)]
     c = Collection(name, base=base).create()

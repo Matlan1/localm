@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable
 
 # A home-rooted path whose account segment must go even when it is NOT exactly
 # Path.home() - a different account, or any path under the well-known user
@@ -89,7 +89,7 @@ def scrub_user_paths(text: str) -> str:
     return re.sub(_USER_ROOT_PATTERN, r"\1<redacted>", text, flags=flags)
 
 
-def _machine_prefixes() -> List[Tuple[str, str]]:
+def _machine_prefixes() -> list[tuple[str, str]]:
     """(prefix, replacement) for every directory that names THIS machine's
     layout, longest first.
 
@@ -98,7 +98,7 @@ def _machine_prefixes() -> List[Tuple[str, str]]:
     first would rewrite the head of the child's path and leave the remainder
     dangling.
     """
-    found: List[Tuple[str, str]] = []
+    found: list[tuple[str, str]] = []
 
     def add(value, label: str) -> None:
         """Register BOTH the raw value and its resolved form.

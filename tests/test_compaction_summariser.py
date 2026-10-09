@@ -475,8 +475,8 @@ def test_stream_recount_refusal_after_compaction_is_reported_in_the_stream():
     def _count(ms):
         try:
             return next(counts)
-        except StopIteration:
-            raise PretokenizerUnsafeInputError("unbroken run of 9000 characters")
+        except StopIteration as e:
+            raise PretokenizerUnsafeInputError("unbroken run of 9000 characters") from e
 
     engine.count_messages_tokens.side_effect = _count
     r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": True})
@@ -523,8 +523,8 @@ def test_stream_recount_fault_after_compaction_ends_the_stream_with_an_error():
     def _count(ms):
         try:
             return next(counts)
-        except StopIteration:
-            raise RuntimeError("worker died during the token count")
+        except StopIteration as e:
+            raise RuntimeError("worker died during the token count") from e
 
     engine.count_messages_tokens.side_effect = _count
     r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": True})
