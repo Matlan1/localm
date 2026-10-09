@@ -52,6 +52,11 @@ def test_it_is_in_the_load_fingerprint_keys():
     assert "use_mmap" in LOAD_CONFIG_KEYS
 
 
+def test_it_is_in_the_bug_report_config_keys():
+    from localm.bugreport import _SAFE_CONFIG_KEYS
+    assert "use_mmap" in _SAFE_CONFIG_KEYS
+
+
 # --------------------------------------------------------------------------- #
 #  `localm config`                                                            #
 # --------------------------------------------------------------------------- #
