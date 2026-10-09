@@ -77,11 +77,11 @@ _BY_NAME = {e.name: e for e in CATALOG}
 _BY_COMMAND = {cmd: e for e in CATALOG for cmd in e.commands}
 
 
-def get(name: str) -> "CatalogEntry | None":
+def get(name: str) -> CatalogEntry | None:
     return _BY_NAME.get(name)
 
 
-def for_command(command: str) -> "CatalogEntry | None":
+def for_command(command: str) -> CatalogEntry | None:
     """The first-party plugin that provides *command*, if any (for the
     'that needs the X plugin - install it?' hint)."""
     return _BY_COMMAND.get(command)
@@ -94,7 +94,7 @@ def commands() -> dict:
     return {cmd: e.name for cmd, e in _BY_COMMAND.items()}
 
 
-def suggestion(command: str) -> "str | None":
+def suggestion(command: str) -> str | None:
     """A friendly 'that command needs the X plugin' hint for *command* when it
     belongs to a known first-party plugin that is not handling it (because the
     plugin is not installed or not enabled), else None for a truly unknown

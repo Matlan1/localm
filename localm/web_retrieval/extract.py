@@ -75,7 +75,7 @@ _BLANK_RUN_RE = re.compile(r"\n{3,}")
 class _Node:
     __slots__ = ("tag", "attrs", "children", "parent")
 
-    def __init__(self, tag: str, attrs: dict, parent: "Optional[_Node]"):
+    def __init__(self, tag: str, attrs: dict, parent: Optional[_Node]):
         self.tag = tag
         self.attrs = attrs
         self.children: list = []

@@ -19,7 +19,6 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
-from typing import List
 from typing import Optional
 from rich.progress import BarColumn
 from rich.progress import DownloadColumn
@@ -404,7 +403,7 @@ def _etag_from_head(resp: Any) -> "str | None":
 
 
 
-def _progress_file_info(target_parts: List[Path]) -> "tuple[str | None, int, int]":
+def _progress_file_info(target_parts: list[Path]) -> "tuple[str | None, int, int]":
     """(current-file name, 1-based index, count) for a multi-part download, derived
     from which parts have already landed at their final path - the first one not yet
     present is the file currently downloading. Cheap existence checks only. Returns
@@ -437,7 +436,7 @@ class _ProgressOutcome:
         self.succeeded = True
 
 
-def _incomplete_prefixes(base_dir: Path, rel_parts: List[str],
+def _incomplete_prefixes(base_dir: Path, rel_parts: list[str],
                          etags: "dict[str, str | None] | None" = None,
                          ) -> "dict[str, str | None] | None":
     """Filename prefixes of the ``.incomplete`` temp files for *rel_parts*,
@@ -457,7 +456,7 @@ def _incomplete_prefixes(base_dir: Path, rel_parts: List[str],
     try:
         from huggingface_hub._local_folder import _short_hash
         from huggingface_hub._local_folder import get_local_download_paths
-        out: "dict[str, str | None]" = {}
+        out: dict[str, str | None] = {}
         for rel in rel_parts:
             paths = get_local_download_paths(Path(base_dir), rel)
             out[_short_hash(paths.metadata_path.name)] = (etags or {}).get(rel)
@@ -471,9 +470,9 @@ def _incomplete_prefixes(base_dir: Path, rel_parts: List[str],
 
 
 @contextlib.contextmanager
-def _download_progress(target_parts: List[Path], total_size: int, *,
+def _download_progress(target_parts: list[Path], total_size: int, *,
                        base_dir: "Path | None" = None,
-                       rel_parts: "List[str] | None" = None,
+                       rel_parts: "list[str] | None" = None,
                        etags: "dict[str, str | None] | None" = None):
     """Stream JSON download progress while files land under *base_dir*.
 
@@ -507,7 +506,7 @@ def _download_progress(target_parts: List[Path], total_size: int, *,
                 done += p.stat().st_size
             except OSError:
                 pass  # not finished yet
-        largest: "dict[str, int]" = {}
+        largest: dict[str, int] = {}
         if cache_root.is_dir():
             try:
                 for f in cache_root.rglob("*.incomplete"):
@@ -919,7 +918,7 @@ def _hf_file_sha256(repo_id: str, filename: str,
 
 
 
-def _pick_best_of_same_repo_mmprojs(cands: List[str]) -> str:
+def _pick_best_of_same_repo_mmprojs(cands: list[str]) -> str:
     """Deterministic pick among several mmproj filenames found in the SAME
     repo, once stem-matching (``_pick_mmproj_candidate``) could not narrow them
     to one.
@@ -936,7 +935,7 @@ def _pick_best_of_same_repo_mmprojs(cands: List[str]) -> str:
     return f16[0] if f16 else sorted(cands)[0]
 
 
-def _hf_repo_files(repo_id: str) -> Optional[List[str]]:
+def _hf_repo_files(repo_id: str) -> Optional[list[str]]:
     """*repo_id*'s file listing, or None when it could not be fetched at all
     (offline, API error, rate limit).
 
@@ -952,7 +951,7 @@ def _hf_repo_files(repo_id: str) -> Optional[List[str]]:
 
 
 def _pick_mmproj_from_listing(
-    files: List[str], model_filename: str, base_dir: Path,
+    files: list[str], model_filename: str, base_dir: Path,
 ) -> Optional[str]:
     """The mmproj (vision projector) filename among *files* (a repo's file
     listing) that pairs with *model_filename*, or None when none qualify.
@@ -1480,8 +1479,8 @@ def _pull_gguf_file(
 
     # Disk space pre-flight - HEAD each missing part's CDN URL for its
     # Content-Length and the etag huggingface_hub will name its temp file by.
-    part_sizes: "dict[str, int]" = {}
-    etags: "dict[str, str | None]" = {}
+    part_sizes: dict[str, int] = {}
+    etags: dict[str, str | None] = {}
     try:
         import requests as _req
         total_size = 0

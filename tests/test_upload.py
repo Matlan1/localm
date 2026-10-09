@@ -140,8 +140,9 @@ def test_confined_upload_path_strips_traversal(scoped_app):
         assert p.parent.resolve() == up, f"{bad!r} escaped to {p}"
         assert p.name == expect
     # Empty / dot names are rejected outright.
+    from fastapi import HTTPException
     for bad in ("", ".", ".."):
-        with pytest.raises(Exception):
+        with pytest.raises(HTTPException):
             web._confined_upload_path(bad)
 
 

@@ -737,12 +737,14 @@ class _StatusWindow(AppFace):
                 elif kind == "close":
                     try:
                         root.destroy()
+                    except Exception:
+                        pass
                     finally:
                         # Drop every Tk reference so nothing is finalized by GC in
                         # the wrong thread at process exit.
                         self._root = self._log = self._status_lbl = None
                         self._addr_lbl = self._as_btn = None
-                        return
+                    return
             if self.get_log_lines is not None and self._log is not None:
                 lines = self.get_log_lines() or []
                 self._log.configure(state="normal")

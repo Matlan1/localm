@@ -396,7 +396,7 @@ def _self_test_child() -> int:
     return 0
 
 
-def decode_self_test(timeout: float = 60.0) -> "tuple[str, str]":
+def decode_self_test(timeout: float = 60.0) -> tuple[str, str]:
     """Decode a short generated recording with the installed PyAV, in a child
     process so a native fault cannot take the caller down.
 

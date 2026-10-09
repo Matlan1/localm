@@ -30,7 +30,7 @@ import localm.setup_llama as _sl
 # and the route rejects (or the reverse) is not representable. "auto" is a real
 # member, not a sentinel - it is what a bare `setup-llama` resolves through
 # _auto_backend, and it is the right default for a first provision.
-BACKENDS: "tuple[str, ...]" = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
+BACKENDS: tuple[str, ...] = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
                                "metal", "amd-rocm")
 
 

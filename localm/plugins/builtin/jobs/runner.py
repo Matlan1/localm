@@ -321,7 +321,7 @@ def _headless_routed_model(job: Job) -> Optional[str]:
     return decision.resolved
 
 
-def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
+def _load_engine(model: Optional[str]) -> tuple[Optional[object], bool]:
     """Resolve an inference Engine for *model* (or the active/first registered
     model). Returns ``(engine, reused)``:
 

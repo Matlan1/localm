@@ -517,6 +517,147 @@ def _find_model_units(d: Path, max_depth: int = 3, *,
     return ggufs, hf_dirs
 
 
+_HUB_REPO_PREFIX = "models--"
+
+
+class HubCacheUnit(NamedTuple):
+    """One repository of a Hugging Face hub cache: its id (``org/name``) and the
+    snapshot folder (one revision's files) to register."""
+
+    repo_id: str
+    snapshot: Path
+
+
+class HubCacheScan(NamedTuple):
+    """Result of :func:`scan_hub_cache`: the repositories with downloaded files
+    and the count of repository folders that hold none."""
+
+    units: List[HubCacheUnit]
+    empty_repos: int
+
+
+def hub_repo_id(folder_name: str) -> Optional[str]:
+    """The repository id a hub-cache repo folder name encodes (``models--org--name``
+    -> ``org/name``, ``models--name`` -> ``name``); None for any other name."""
+    if not folder_name.startswith(_HUB_REPO_PREFIX):
+        return None
+    parts = folder_name[len(_HUB_REPO_PREFIX):].split("--")
+    if not all(parts):
+        return None
+    return "/".join(parts)
+
+
+def is_hub_blob(path: Path) -> bool:
+    """True when *path* is a file inside a hub-cache repo's ``blobs`` folder."""
+    return (path.parent.name == "blobs"
+            and hub_repo_id(path.parent.parent.name) is not None)
+
+
+def hub_snapshot_repo_id(path: Path) -> Optional[str]:
+    """The repository id when *path* is ``<models--repo>/snapshots/<revision>``
+    (a snapshot folder of a hub cache, its path left unresolved); else None."""
+    if path.parent.name != "snapshots":
+        return None
+    return hub_repo_id(path.parent.parent.name)
+
+
+def logical_model_path(path: Path) -> Path:
+    """*path* made absolute with every symlink resolved except a final component
+    that links into a hub cache's ``blobs`` folder.
+
+    A file in a hub-cache snapshot is a symlink named after the real file
+    (``model.Q4_K_M.gguf``) pointing at a content-hash blob that has no
+    extension; resolving it fully would register the blob. That final link is
+    kept, with its parent folder resolved. Any other path resolves normally."""
+    path = Path(path)
+    try:
+        if path.is_symlink() and is_hub_blob(path.resolve()):
+            return path.parent.resolve() / path.name
+    except OSError:
+        pass
+    return path.resolve()
+
+
+def _hub_revision(repo_dir: Path) -> Optional[Path]:
+    """The snapshot folder to register for a hub-cache repo folder: the revision
+    ``refs/main`` names when that snapshot exists, otherwise the most recently
+    modified snapshot; None when the repo has no snapshot folder."""
+    snapshots = repo_dir / "snapshots"
+    try:
+        revisions = [c for c in snapshots.iterdir() if c.is_dir()]
+    except OSError:
+        return None
+    if not revisions:
+        return None
+    try:
+        wanted = (repo_dir / "refs" / "main").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        wanted = ""
+    for rev in revisions:
+        if wanted and rev.name == wanted:
+            return rev
+    return max(revisions, key=lambda r: (_mtime(r), r.name))
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _is_hub_repo_dir(folder: Path) -> bool:
+    """True for a hub-cache repo folder: a ``models--*`` name holding at least
+    one of the ``snapshots``, ``refs`` or ``blobs`` folders."""
+    if hub_repo_id(folder.name) is None:
+        return False
+    try:
+        return any((folder / sub).is_dir() for sub in ("snapshots", "refs", "blobs"))
+    except OSError:
+        return False
+
+
+def _hub_cache_root(d: Path) -> Optional[Path]:
+    """The hub-cache root *d* denotes: *d* itself when it holds repo folders,
+    ``d/hub`` when that does (an ``HF_HOME`` folder); else None."""
+    for cand in (d, d / "hub"):
+        try:
+            if any(c.is_dir() and _is_hub_repo_dir(c) for c in cand.iterdir()):
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def scan_hub_cache(d: Path) -> Optional[HubCacheScan]:
+    """Scan *d* as a Hugging Face hub cache; None when *d* is not one.
+
+    *d* is a cache when it is a ``models--*`` repo folder, holds ``models--*``
+    folders, or is a folder whose ``hub`` child does. One unit per repository:
+    the snapshot ``refs/main`` points at (newest snapshot when absent), sorted by
+    repo id. ``blobs``, ``refs`` and ``.no_exist`` are never entered, so partial
+    ``*.incomplete`` downloads are never seen. A repo folder with no snapshot is
+    counted in ``empty_repos`` and left out."""
+    if _is_hub_repo_dir(d):
+        repos = [d]
+    else:
+        root = _hub_cache_root(d)
+        if root is None:
+            return None
+        try:
+            repos = [c for c in root.iterdir()
+                     if c.is_dir() and _is_hub_repo_dir(c)]
+        except OSError:
+            return None
+    units: List[HubCacheUnit] = []
+    empty = 0
+    for repo in sorted(repos, key=lambda r: r.name):
+        snapshot = _hub_revision(repo)
+        if snapshot is None:
+            empty += 1
+            continue
+        units.append(HubCacheUnit(hub_repo_id(repo.name) or repo.name, snapshot))
+    return HubCacheScan(units, empty)
 
 
 # ------------------------------------------------------------------ #

@@ -48,7 +48,7 @@ def _collection_cache_fingerprint(coll_dir: Path) -> dict:
     """(file id, mtime_ns, size) for meta.json, chunks.jsonl and vectors.json,
     None for a file that does not exist. Every atomic replace gives the file a
     new id."""
-    def _stat(name: str) -> "tuple[int, int, int] | None":
+    def _stat(name: str) -> tuple[int, int, int] | None:
         try:
             st = os.stat(coll_dir / name)
         except OSError:
@@ -158,7 +158,7 @@ class _Snapshot:
                  "__weakref__")
 
 
-def _freeze_snapshot(coll: "Collection", key: str, fingerprint: dict) -> _Snapshot:
+def _freeze_snapshot(coll: Collection, key: str, fingerprint: dict) -> _Snapshot:
     """A snapshot of *coll*'s just-loaded state. Wraps *coll*'s chunk dicts and
     marks its norm matrix read-only, so *coll* must be re-served from the
     snapshot (``_serve_snapshot``) once it is cached."""
@@ -205,7 +205,7 @@ class _SnapshotCache:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._entries: "OrderedDict[str, _Snapshot]" = OrderedDict()
+        self._entries: OrderedDict[str, _Snapshot] = OrderedDict()
         self._bytes = 0
         self._epoch = 0
         self._writing = 0

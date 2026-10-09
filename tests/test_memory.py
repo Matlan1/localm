@@ -252,9 +252,6 @@ def test_vector_blend_activates_with_embed_fn(tmp_path):
     _seed_many(s, TINY_CORPUS)
     s.add(_rec("python async programming", importance=0.5, last_used=NOW),
           embed_fn=_stub_embed)
-    for i in range(TINY_CORPUS):
-        # give the fillers vectors too so coverage >= 80%
-        pass
     # re-embed everything so coverage is high
     for r in s.all():
         s.update(r.id, text=r.text, embed_fn=_stub_embed)

@@ -1248,7 +1248,7 @@ def test_real_gguf_embeddings_are_semantic():
             assert abs(math.sqrt(sum(x * x for x in v)) - 1.0) < 1e-3
 
         def cos(a, b):
-            return sum(x * y for x, y in zip(a, b))
+            return sum(x * y for x, y in zip(a, b, strict=True))
         # semantic ordering: kitten closest to cat, then car, then unrelated
         assert cos(V[0], V[1]) > cos(V[0], V[2]) > cos(V[0], V[3])
         # deterministic WITHIN one decode path: two separate single-item calls
@@ -1283,7 +1283,7 @@ def test_real_gguf_embeddings_via_isolated_embedder(monkeypatch):
     assert len(V) == 3 and all(len(v) == e.dim for v in V)
 
     def cos(a, b):
-        return sum(x * y for x, y in zip(a, b))
+        return sum(x * y for x, y in zip(a, b, strict=True))
     assert cos(V[0], V[1]) > cos(V[0], V[2])       # kitten closer to cat than QCD
 
 
@@ -1682,7 +1682,7 @@ def test_real_gguf_overlong_texts_not_identical():
         long_b = ("quantum chromodynamics binds quarks through gluon "
                   "exchange in the strong interaction ") * 120
         va, vb = e.embed([long_a, long_b])
-        cos = sum(x * y for x, y in zip(va, vb))
+        cos = sum(x * y for x, y in zip(va, vb, strict=True))
         assert cos < 0.999, f"over-long texts still collide (cos={cos})"
     finally:
         e.close()

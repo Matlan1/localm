@@ -565,7 +565,7 @@ def tool_dispatch_parallel(
         base_sha = base_sha.splitlines()[0].strip()
 
         # 1. Create one worktree per child.
-        for spec, outcome in zip(specs, outcomes):
+        for spec, outcome in zip(specs, outcomes, strict=True):
             label = _safe_label(spec["name"]) or "child"
             wt_name = f"{WORKTREE_PREFIX}{label}-{run_id}"
             worktree = repo / WORKTREE_SUBDIR / wt_name
@@ -588,7 +588,7 @@ def tool_dispatch_parallel(
             outcome.child_cwd = worktree / rel_cwd if rel_cwd else worktree
             created.append((worktree, branch, outcome))
 
-        runnable = [(s, o) for s, o in zip(specs, outcomes) if o.status == "pending"]
+        runnable = [(s, o) for s, o in zip(specs, outcomes, strict=True) if o.status == "pending"]
         if not runnable:
             return ToolResult.error(
                 "dispatch_parallel could not create any isolated worktree:\n" +
@@ -663,7 +663,7 @@ def tool_dispatch_parallel(
         # 3. Commit each child's work and capture its diff BEFORE teardown. A child
         #    that never started has nothing to commit and no diff to read; running
         #    the commit anyway would only manufacture a "could not commit" warning.
-        for worktree, branch, outcome in created:
+        for worktree, _branch, outcome in created:
             if outcome.status in ("timeout", "not_started"):
                 continue
             msg = f"coder child '{outcome.name}' ({run_id})"

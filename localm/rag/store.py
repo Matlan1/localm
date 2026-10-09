@@ -148,7 +148,7 @@ def delete_collection(name: str, base: Optional[Path] = None,
 
 
 def relabel_embedding_model(old_name: str, new_name: str,
-                            base: Optional[Path] = None) -> "tuple[list, list]":
+                            base: Optional[Path] = None) -> tuple[list, list]:
     """Rewrite the recorded embedding-model label *old_name* to *new_name* in
     every collection that carries it.
 
@@ -274,7 +274,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
             lock_path_for(self.dir), collection=self.name, op=op,
             on_wait=on_progress)
 
-    def create(self) -> "Collection":
+    def create(self) -> Collection:
         """Create the collection if it does not exist yet.
 
         Takes the write lock and re-checks existence inside it. The fast path

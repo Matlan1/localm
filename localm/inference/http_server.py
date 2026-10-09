@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import AsyncIterator, Callable, List, NamedTuple, Optional
+from typing import AsyncIterator, Callable, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -138,7 +138,7 @@ _inference_sem: asyncio.Semaphore | None = None
 # get_engine's fast path and ignores the in-flight pin). None until a real server
 # lifespan runs (a bare create_app() test app / headless import never sets it), so an
 # off-loop caller detects "no loop" and degrades safely instead of racing the registry.
-_server_loop: "asyncio.AbstractEventLoop | None" = None
+_server_loop: asyncio.AbstractEventLoop | None = None
 
 # Preemptive model switching (see switch_engine). _switch_desired = most-recent
 # switch request; _switch_loading = model whose load is in flight; _switch_cancel
@@ -147,7 +147,7 @@ _server_loop: "asyncio.AbstractEventLoop | None" = None
 # load-progress callback reads (threading.Event is thread-safe).
 _switch_desired: Optional[str] = None
 _switch_loading: Optional[str] = None
-_switch_cancel: Optional["threading.Event"] = None
+_switch_cancel: Optional[threading.Event] = None
 
 # Cross-install GPU/VRAM coordination (multi-instance, see localm.gpu_registry).
 # None until lifespan startup populates it, and ONLY for a real, non-isolated,
@@ -4847,7 +4847,7 @@ class PrepProgress:
             self.text = text
             self._changed.set()
 
-    async def wait_changed(self, task: "asyncio.Future", timeout: float) -> None:
+    async def wait_changed(self, task: asyncio.Future, timeout: float) -> None:
         """Return when the text changes, *task* finishes, or *timeout* passes."""
         self._changed.clear()
         waiter = asyncio.ensure_future(self._changed.wait())
@@ -4858,12 +4858,12 @@ class PrepProgress:
             waiter.cancel()
 
 
-def release_prepared_on_done(task: "asyncio.Future", engine_of) -> None:
+def release_prepared_on_done(task: asyncio.Future, engine_of) -> None:
     """Unpin the engine a preparation *task* pinned, once it finishes, for a
     caller that will never stream it. ``engine_of(result)`` returns that
     engine, or None when the result holds no pin. A failed or cancelled task
     holds no pin."""
-    def _release(t: "asyncio.Future") -> None:
+    def _release(t: asyncio.Future) -> None:
         if t.cancelled():
             return
         exc = t.exception()
@@ -4883,7 +4883,7 @@ def release_prepared_on_done(task: "asyncio.Future", engine_of) -> None:
 
 
 async def stream_after_prep(
-    task: "asyncio.Future",
+    task: asyncio.Future,
     progress: PrepProgress,
     model_id: str,
     start_stream: Callable[[object, str], AsyncIterator[str]],
@@ -5947,7 +5947,7 @@ async def _complete(
     return JSONResponse(response.model_dump())
 
 
-def _protocol_messages_to_dicts(messages: List[Message]) -> list:
+def _protocol_messages_to_dicts(messages: list[Message]) -> list:
     """Convert Pydantic Message objects to plain dicts for backends. A message's
     ``origin`` marker, when set, is kept as an ``"origin"`` key; an unmarked
     message has no such key."""

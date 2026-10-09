@@ -70,7 +70,7 @@ _MAX_DERIVED_PROBE_CHARS = 8  # bounds probe COUNT - a first-line, cheap bound.
                                # below bounds the SUM directly.
 
 
-def _pattern_derived_probes(pattern: str) -> "tuple[str, ...]":
+def _pattern_derived_probes(pattern: str) -> tuple[str, ...]:
     """One probe PER distinct character in *pattern* (the
     _MAX_DERIVED_PROBE_CHARS most frequent ones, if there are more distinct
     characters than that), each that character ALONE repeated 60,000 times.
@@ -98,7 +98,7 @@ def _pattern_derived_probes(pattern: str) -> "tuple[str, ...]":
     _check_one's own internal wall-clock budget is what bounds total COST
     regardless of count, so a caller-controlled property cannot scale
     validation cost past a fixed ceiling."""
-    counts: "dict[str, int]" = {}
+    counts: dict[str, int] = {}
     for ch in pattern:
         counts[ch] = counts.get(ch, 0) + 1
     most_frequent = sorted(counts, key=lambda ch: counts[ch], reverse=True)

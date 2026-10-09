@@ -22,10 +22,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   checks, and the automatic models-folder scan quietly skips the GGUFs it cannot load. A
   Mistral-style folder holding both Hugging Face shards and `consolidated*` files is sized
   by the shards only.
+- **Models other tools already downloaded can be added in place.** `localm add` (and
+  the Models page's add-path box) now takes the Hugging Face cache folder
+  (`~/.cache/huggingface`, or `HF_HOME`), registering one model per repository from
+  its current revision and named after the repo; an Ollama model folder
+  (`~/.ollama`, or `OLLAMA_MODELS`), registering every GGUF model in it as
+  `model-tag`, with a vision model's projector attached; and a `.llamafile`, whose
+  model (and projector) is unpacked into the models folder with a progress bar.
+  Moving models out of the Hugging Face cache is refused, since it would break the
+  cache; copy them instead.
 - **Release files carry build provenance and a software bill of materials.** The release
   zip, the sdist, the wheel and a CycloneDX SBOM of the pinned dependencies are attested by
   the release workflow, so `gh attestation verify` proves which workflow built a file and
   from which commit. SECURITY.md has the commands.
+- **Docker images for the API server.** Releases publish CPU and Vulkan images to `ghcr.io/matlan1/localm`, and `docker/Dockerfile` builds the same image from a clone. The container keeps its data in a `/data` volume, serves HTTPS, and refuses to start until an API key exists (`docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate`). See docs/docker.md.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing

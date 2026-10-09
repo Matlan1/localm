@@ -521,7 +521,7 @@ class TestImplicitSplitSizing:
         per_device_free = [f for f, _t in UNEVEN_BOX]
         # What actually gets placed: the budget net of the per-device overhead.
         placed = free - b._split_overhead_bytes(devices)
-        for share, card_free in zip(_shares(per_device_free), per_device_free):
+        for share, card_free in zip(_shares(per_device_free), per_device_free, strict=True):
             assert placed * share <= card_free
 
         smallest = min(per_device_free)

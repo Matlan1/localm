@@ -94,7 +94,7 @@ def honor_env_debug() -> None:
         enable_debug()
 
 
-_deferred_records: "list[tuple[int, str, tuple]]" = []
+_deferred_records: list[tuple[int, str, tuple]] = []
 
 
 def defer_log(level: int, msg: str, *args) -> None:
@@ -177,7 +177,7 @@ class _RingBufferHandler(logging.Handler):
 
     def __init__(self, capacity: int = _RING_CAPACITY) -> None:
         super().__init__(level=logging.INFO)
-        self._buf: "collections.deque[str]" = collections.deque(maxlen=capacity)
+        self._buf: collections.deque[str] = collections.deque(maxlen=capacity)
         self.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
 
@@ -675,7 +675,7 @@ class _LineGrouper:
         self._emit = emit
         # key -> [count, {variant: count}, overflowed]. The inner dict is
         # insertion-ordered, so variants can be replayed in arrival order.
-        self._pending: "collections.OrderedDict[str, list]" = collections.OrderedDict()
+        self._pending: collections.OrderedDict[str, list] = collections.OrderedDict()
 
     @classmethod
     def _key(cls, line: str) -> str:

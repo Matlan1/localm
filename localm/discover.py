@@ -1087,11 +1087,11 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
 # _torch_doomed_announced: the last _torch_gpu_probe_known_doomed() answer written
 # to the log, or None before anything has been.
 _source_selection_lock = threading.Lock()
-_native_hip_resident: "bool | None" = None
-_rocm_sdk_present: "bool | None" = None
-_native_sycl_resident: "bool | None" = None
-_intel_sycl_rt_present: "bool | None" = None
-_torch_doomed_announced: "bool | None" = None
+_native_hip_resident: bool | None = None
+_rocm_sdk_present: bool | None = None
+_native_sycl_resident: bool | None = None
+_intel_sycl_rt_present: bool | None = None
+_torch_doomed_announced: bool | None = None
 
 
 def native_hip_runtime_resident() -> bool:
@@ -1365,7 +1365,7 @@ def _torch_gpu_probe_known_doomed() -> bool:
         # never defuses the real guard.
         _announce_torch_doomed(False)
         return False
-    doomed_reason: "str | None" = None
+    doomed_reason: str | None = None
     try:
         if native_hip_runtime_resident() and _rocm_sdk_installed():
             doomed_reason = "hip"
@@ -1498,7 +1498,7 @@ _child_stderr_seen: set[str] = set()
 _child_stderr_cap_reported = False
 
 
-def _child_stderr_once(err: str) -> "str | None":
+def _child_stderr_once(err: str) -> str | None:
     """The child's stderr, capped, the FIRST time this exact text is seen this
     process. ``None`` once it is a repeat, so the caller can leave it out.
 
@@ -1586,7 +1586,7 @@ def _torch_gpus_resident() -> list:
     return out
 
 
-def _torch_gpus_isolated() -> "Optional[list]":
+def _torch_gpus_isolated() -> Optional[list]:
     """torch's device list read from a CHILD process, for the case where torch
     is not yet resident and importing it HERE would take the Windows OS loader
     lock and block thread creation process-wide, stalling the event loop (full
@@ -1950,7 +1950,7 @@ _CORRECTION_COLD_BUDGET_S = 1.5
 _probe_deadline_at = None
 
 
-def _windows_largest_adapter_registry_entry() -> "dict | None":
+def _windows_largest_adapter_registry_entry() -> dict | None:
     """``{"index": 0, "name": <DriverDesc>, "total": <bytes>}`` for the
     LARGEST adapter (skips an iGPU) in the Windows display-adapter class
     registry key, or ``None`` off Windows / when nothing readable.
@@ -2538,7 +2538,7 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
         if raw_ratios is not None and len(raw_ratios) == len(raw_indices):
             # Re-pair by ORIGINAL position so a ratio still lines up with its
             # index even when another index was dropped/de-duped above.
-            by_index = dict(zip(raw_indices, raw_ratios))
+            by_index = dict(zip(raw_indices, raw_ratios, strict=True))
             ratios = [by_index[i] for i in valid]
         else:
             logger.warning(
@@ -2549,7 +2549,7 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
     if ratios is None:
         ratios = [1.0] * len(valid)
 
-    return list(zip(valid, ratios))
+    return list(zip(valid, ratios, strict=True))
 
 
 def single_gpu_index(configured_indices, *, gpus: Optional[list] = None,
@@ -2659,7 +2659,7 @@ def _integrated_gpu_refusal(index: int, reading: Optional[dict]) -> GpuSplitConf
         f"without it.")
 
 
-def _torch_llama_numbering(readings: list) -> "tuple[Optional[dict], str]":
+def _torch_llama_numbering(readings: list) -> tuple[Optional[dict], str]:
     """``({torch index: llama.cpp device}, "")`` for every GPU of torch
     reading *readings* that llama.cpp's device list holds, or
     ``(None, reason)`` when neither numbering below is proven.
@@ -3125,7 +3125,7 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
         "auto GPU split: distributing by free VRAM - %s",
         ", ".join(
             f"device {i}: {r * 100:.0f}% ({f / 1024 ** 3:.1f} GB free)"
-            for i, r, f in zip(idx_list, ratios, frees)))
+            for i, r, f in zip(idx_list, ratios, frees, strict=True)))
     return ratios
 
 
@@ -3638,7 +3638,7 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
         "(combined %.1f GB free / %.1f GB total)",
         out["devices"],
         ", ".join(f"device {d.get('index')}: {f / 1024 ** 3:.1f} GB free"
-                  for d, f in zip(devices, frees)),
+                  for d, f in zip(devices, frees, strict=True)),
         out["free"] / 1024 ** 3, out["total"] / 1024 ** 3)
     return out
 
@@ -3698,7 +3698,7 @@ def _llama_visible_torch_devices(devices: list) -> list:
     flags = [d.get("integrated") if isinstance(d, dict) else None for d in devices]
     if not flags or not all(isinstance(f, bool) for f in flags):
         return list(devices)
-    discrete = [d for d, f in zip(devices, flags) if not f]
+    discrete = [d for d, f in zip(devices, flags, strict=True) if not f]
     return discrete if discrete else list(devices)
 
 
@@ -3810,7 +3810,7 @@ def _totals_mismatch(devices: list, native: list) -> str:
     if len(native) != len(devices):
         return (f"the llama.cpp runtime lists {len(native)} discrete GPU(s) where "
                 f"torch reports {len(devices)}")
-    for pos, (d, n) in enumerate(zip(devices, native)):
+    for pos, (d, n) in enumerate(zip(devices, native, strict=True)):
         n_total = n.get("total")
         tolerance = max(_SPLIT_TOTAL_MATCH_MIN_BYTES,
                         int(d["total"] * _SPLIT_TOTAL_MATCH_FRACTION))
@@ -3821,7 +3821,7 @@ def _totals_mismatch(devices: list, native: list) -> str:
 
 
 def _torch_split_slots(kept: list, every: list, *, check_runtime: bool = True,
-                       check_free_scope: bool = True) -> "tuple[Optional[list], str]":
+                       check_free_scope: bool = True) -> tuple[Optional[list], str]:
     """``(devices, "")`` with each torch device in *kept* renumbered to its
     position in llama.cpp's own device list, or ``(None, reason)`` when the
     torch reading cannot be proven to match that list. *every* is the whole
@@ -3937,7 +3937,7 @@ def implicit_split_devices(config: Optional[dict] = None, *,
                 logger.info("implicit GPU split fit: not applied - %s; keeping "
                             "llama.cpp's default split", reason)
             elif with_source_index:
-                for entry, d in zip(out, devices):
+                for entry, d in zip(out, devices, strict=True):
                     entry["source_index"] = d.get("index")
             return out
     except Exception as e:

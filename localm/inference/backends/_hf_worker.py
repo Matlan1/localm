@@ -31,7 +31,7 @@ import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Iterator, Mapping, Optional, Sequence
 
 from localm.debuglog import logger
 
@@ -381,7 +381,7 @@ def _untrusted_prompt_ranges(tokenizer, template_messages, text,
         return ()
 
     def render(sentinels):
-        probe = [dict(m, content=s) for m, s in zip(template_messages, sentinels)]
+        probe = [dict(m, content=s) for m, s in zip(template_messages, sentinels, strict=False)]
         return tokenizer.apply_chat_template(
             probe, tokenize=False, add_generation_prompt=True,
             **(template_kwargs or {}))
@@ -621,7 +621,7 @@ _AUDIO_UNSUPPORTED_MESSAGE = (
 )
 
 
-def _messages_contain_audio(messages: List[dict]) -> bool:
+def _messages_contain_audio(messages: list[dict]) -> bool:
     """True if any message carries an ``input_audio`` content part."""
     for msg in messages:
         content = msg.get("content")
@@ -645,7 +645,7 @@ def _audio_processor_sampling_rate(processor) -> Optional[int]:
     return None
 
 
-def _build_audio_process_kwargs(processor, audios: List[tuple]) -> Tuple[dict, bool]:
+def _build_audio_process_kwargs(processor, audios: list[tuple]) -> tuple[dict, bool]:
     """``(kwargs, rate_verified)`` for passing *audios* (a list of
     ``(waveform, sample_rate)`` pairs) to *processor*'s ``__call__``.
 
@@ -725,7 +725,7 @@ def _image_content_key(image) -> Optional[str]:
     return digest.hexdigest()
 
 
-def _join_image_features(entries: List[dict]) -> dict:
+def _join_image_features(entries: list[dict]) -> dict:
     """Join per-image feature entries (field name to value) in request order.
 
     ``pooler_output``: tensors are concatenated along dim 0; tuples/lists are
@@ -743,7 +743,7 @@ def _join_image_features(entries: List[dict]) -> dict:
     if all("deepstack_features" in e for e in entries):
         joined["deepstack_features"] = [
             torch.cat(list(layer), dim=0)
-            for layer in zip(*(e["deepstack_features"] for e in entries))]
+            for layer in zip(*(e["deepstack_features"] for e in entries), strict=False)]
     return joined
 
 
@@ -766,7 +766,7 @@ class _VisionFeatureCache:
         self._original = inner.get_image_features
         self._signature = inspect.signature(self._original)
         self._max_images = max_images
-        self._features: "OrderedDict[str, object]" = OrderedDict()
+        self._features: OrderedDict[str, object] = OrderedDict()
         self._armed: Optional[tuple] = None
         self.last_encoded = 0
         inner.get_image_features = self._get_image_features
@@ -777,9 +777,9 @@ class _VisionFeatureCache:
     def __contains__(self, key: str) -> bool:
         return key in self._features
 
-    def missing(self, keys: Sequence[str]) -> List[str]:
+    def missing(self, keys: Sequence[str]) -> list[str]:
         """The distinct keys in *keys* with no cached features, in order."""
-        out: List[str] = []
+        out: list[str] = []
         for key in keys:
             if key not in self._features and key not in out:
                 out.append(key)
@@ -792,7 +792,7 @@ class _VisionFeatureCache:
             del self._features[key]
 
     def arm(self, keys: Sequence[str], image_inputs: Mapping[str, Mapping],
-            pixel_shape: Tuple[int, ...]) -> None:
+            pixel_shape: tuple[int, ...]) -> None:
         """Serve the next ``get_image_features`` call from the cache.
 
         *keys* are the request's image keys in prompt order, *image_inputs*
@@ -1189,7 +1189,7 @@ class HFWorker:
                 )
         return max(1, len(text) // 4)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """Return exact token count of the structured messages formatted with the
         HF tokenizer/processor's chat template."""
         if self._tokenizer is not None:
@@ -1243,15 +1243,15 @@ class HFWorker:
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
-    def _single_image_inputs(self, images: list, keys: List[str],
-                             wanted: List[str], device) -> Dict[str, Mapping]:
+    def _single_image_inputs(self, images: list, keys: list[str],
+                             wanted: list[str], device) -> dict[str, Mapping]:
         """Each image in *wanted* (keys into *keys*/*images*) processed on its
         own, as the processor output of a one-image user turn, moved to
         *device*. Text-only outputs are left out."""
         text = self._processor.apply_chat_template(
             [{"role": "user", "content": [{"type": "image"}]}],
             tokenize=False, add_generation_prompt=False)
-        out: Dict[str, Mapping] = {}
+        out: dict[str, Mapping] = {}
         for key in wanted:
             image = images[keys.index(key)]
             batch = self._processor(text=text, images=[image], return_tensors="pt",
@@ -1335,7 +1335,7 @@ class HFWorker:
                 "an embedding model", type(model).__name__, type(e).__name__, e)
             return False
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """
         Return embedding vectors via mean-pooling of the last hidden states.
 
@@ -1380,7 +1380,7 @@ class HFWorker:
 
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,
@@ -1389,7 +1389,7 @@ class HFWorker:
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,   # GBNF/EBNF; masks output via xgrammar ([grammar] extra)
         grammar_lazy: bool = False,
-        grammar_triggers: Optional[List[str]] = None,
+        grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         cancel_event: Optional[threading.Event] = None,
         on_status: Optional[Callable[[str], None]] = None,
@@ -1463,7 +1463,7 @@ class HFWorker:
                 template_messages.append(msg)
 
         vision_cache = getattr(self, "_vision_cache", None)
-        image_keys: Optional[List[str]] = None
+        image_keys: Optional[list[str]] = None
         vision_plan: Optional[tuple] = None
         if vision_cache is not None:
             vision_cache.disarm()
@@ -1501,7 +1501,7 @@ class HFWorker:
                     on_status("Encoding image...")
                 except Exception:
                     logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
-            image_inputs: Dict[str, Mapping] = {}
+            image_inputs: dict[str, Mapping] = {}
             if image_keys is not None and to_encode:
                 try:
                     image_inputs = self._single_image_inputs(
@@ -1617,7 +1617,7 @@ class HFWorker:
         if cancel_event is not None:
             gen_kwargs["stopping_criteria"].append(_CancelCriteria(cancel_event))
 
-        generation_errors: List[Exception] = []
+        generation_errors: list[Exception] = []
 
         def _run_generate() -> None:
             try:

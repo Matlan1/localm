@@ -120,7 +120,7 @@ def test_flac_vorbis_comment_becomes_zeroed_padding_and_frames_are_untouched(tmp
     # Same block layout (offsets, lengths, is_last), only the types changed.
     assert [(o, ln, last) for o, _, ln, last in blocks_after] == \
            [(o, ln, last) for o, _, ln, last in blocks_before]
-    for (off, t_before, length, _), (_, t_after, _, _) in zip(blocks_before, blocks_after):
+    for (off, t_before, length, _), (_, t_after, _, _) in zip(blocks_before, blocks_after, strict=True):
         if t_before == 4:
             assert t_after == 1                                  # PADDING
             assert after[off + 4:off + 4 + length] == b"\x00" * length

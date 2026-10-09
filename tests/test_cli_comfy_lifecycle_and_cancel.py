@@ -241,7 +241,10 @@ _DONE_OP = {"id": "aaaabbbbcccc", "kind": "pull", "label": "Old pull",
             "cancellable": False}
 
 
-def _cancel_server(ops, cancel=_Resp(200, {"status": "cancelling"})):
+_CANCELLING = _Resp(200, {"status": "cancelling"})
+
+
+def _cancel_server(ops, cancel=_CANCELLING):
     return _Server({("GET", "/api/activity"): _Resp(200, {"now": 9.0,
                                                           "operations": ops}),
                     ("POST", f"/api/jobs/{_RUNNING_OP['id']}/cancel"): cancel})

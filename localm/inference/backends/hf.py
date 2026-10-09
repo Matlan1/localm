@@ -19,7 +19,7 @@ whole ``BaseBackend`` public contract is preserved.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, Optional
 
 from localm.console import console
 from localm.debuglog import logger
@@ -418,7 +418,7 @@ class HFBackend(BaseBackend):
                              "stream; using the chars/4 estimate")
         return max(1, len(text) // 4)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """Return exact token count of the structured messages formatted
         with the HF tokenizer/processor's chat template (an RPC), or the
         base heuristic when the worker is busy or not loaded. Mirrors
@@ -435,7 +435,7 @@ class HFBackend(BaseBackend):
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """
         Return embedding vectors for *texts* via the isolated worker.
         Callers must gate on ``can_embed`` above: this is NOT a valid
@@ -467,7 +467,7 @@ class HFBackend(BaseBackend):
 
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,
@@ -476,7 +476,7 @@ class HFBackend(BaseBackend):
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,
         grammar_lazy: bool = False,
-        grammar_triggers: Optional[List[str]] = None,
+        grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,

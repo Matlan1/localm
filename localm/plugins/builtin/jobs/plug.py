@@ -43,7 +43,7 @@ def _run_job(job, *, engine=None):
 _router = APIRouter()
 
 # Module-level so unregister() can stop the scheduler the live server started.
-_scheduler: "JobScheduler | None" = None
+_scheduler: JobScheduler | None = None
 _host = None
 
 
@@ -59,27 +59,27 @@ class JobCreate(BaseModel):
     # that need it, so the rule stays in ONE place.
     prompt: str = ""
     schedule_kind: str = "interval"     # "interval" | "cron"
-    schedule: "int | str" = 3600        # seconds, or a 5-field cron string
-    model: "str | None" = None
-    cwd: "str | None" = None
-    scope: "str | None" = None
-    collection: "str | None" = None     # rag jobs: the collection to re-sync
+    schedule: int | str = 3600        # seconds, or a 5-field cron string
+    model: str | None = None
+    cwd: str | None = None
+    scope: str | None = None
+    collection: str | None = None     # rag jobs: the collection to re-sync
     allow_shell: bool = False           # coder jobs: opt in to full shell exec
     enabled: bool = True
 
 
 class JobUpdate(BaseModel):
-    name: "str | None" = None
-    task_kind: "str | None" = None
-    prompt: "str | None" = None
-    schedule_kind: "str | None" = None
-    schedule: "int | str | None" = None
-    model: "str | None" = None
-    cwd: "str | None" = None
-    scope: "str | None" = None
-    collection: "str | None" = None
-    allow_shell: "bool | None" = None
-    enabled: "bool | None" = None
+    name: str | None = None
+    task_kind: str | None = None
+    prompt: str | None = None
+    schedule_kind: str | None = None
+    schedule: int | str | None = None
+    model: str | None = None
+    cwd: str | None = None
+    scope: str | None = None
+    collection: str | None = None
+    allow_shell: bool | None = None
+    enabled: bool | None = None
 
 
 def _check_model_name(model) -> None:

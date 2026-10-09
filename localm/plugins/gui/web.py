@@ -205,7 +205,7 @@ def _compute_sw_cache_value() -> str:
     return f"localm-shell-{h.hexdigest()[:16]}"
 
 
-def _sw_js_response(if_none_match: "str | None" = None) -> Response:
+def _sw_js_response(if_none_match: str | None = None) -> Response:
     """sw.js's own bytes with the CACHE constant substituted for a fresh content
     digest (see ``_compute_sw_cache_value``). An unparseable source (the
     placeholder line edited into some other shape) fails LOUD with a 500 rather
@@ -542,14 +542,14 @@ def _share_inbox(create: bool = True) -> Path:
 _SHARE_NO_OWNER = "-"
 
 
-def _share_entry_name(owner: "str | None", fid: str, filename: str) -> str:
+def _share_entry_name(owner: str | None, fid: str, filename: str) -> str:
     """Build an inbox filename carrying its creator's principal id, so a later
     request can be checked against job_owner_ok before it is read or cleared."""
     token = owner if owner else _SHARE_NO_OWNER
     return f"{fid}__{token}__{filename}"
 
 
-def _parse_share_entry(path: Path) -> "tuple[str, str | None, str]":
+def _parse_share_entry(path: Path) -> tuple[str, str | None, str]:
     """(fid, owner_or_None, filename) from an inbox entry's name.
 
     maxsplit=2 so a filename that itself contains "__" is not corrupted (fid and
@@ -565,7 +565,7 @@ def _parse_share_entry(path: Path) -> "tuple[str, str | None, str]":
     return fid, None, name
 
 
-def _multipart_boundary(content_type: str) -> "bytes | None":
+def _multipart_boundary(content_type: str) -> bytes | None:
     """The boundary token from a multipart/form-data Content-Type, or None."""
     if "multipart/form-data" not in (content_type or "").lower():
         return None
@@ -577,7 +577,7 @@ def _multipart_boundary(content_type: str) -> "bytes | None":
     return None
 
 
-def _disp_param(disposition: bytes, key: bytes) -> "bytes | None":
+def _disp_param(disposition: bytes, key: bytes) -> bytes | None:
     """Value of a Content-Disposition parameter, e.g. name= or filename=."""
     token = key + b'="'
     i = disposition.find(token)

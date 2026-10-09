@@ -47,7 +47,7 @@ _BACKEND_MARKER = ".localm-backend"
 
 
 def _record_provisioned_backend(target: Path, backend: str,
-                                build: "Optional[str]" = None) -> None:
+                                build: Optional[str] = None) -> None:
     """Record *backend* as the one now provisioned in *target*, optionally with
     the *build* tag it came from. Best-effort: the marker only optimises the
     guard, so a write failure is non-fatal (the guard then conservatively
@@ -68,7 +68,7 @@ def _record_provisioned_backend(target: Path, backend: str,
         pass
 
 
-def _read_marker(target: Path) -> "Optional[list]":
+def _read_marker(target: Path) -> Optional[list]:
     """The marker's whitespace-separated tokens, or None when there is no
     readable marker. One reader for both accessors below, so the two can never
     disagree about how the file is split."""
@@ -79,7 +79,7 @@ def _read_marker(target: Path) -> "Optional[list]":
     return raw.split() or None
 
 
-def _provisioned_backend(target: Path) -> "Optional[str]":
+def _provisioned_backend(target: Path) -> Optional[str]:
     """The backend last provisioned into *target*, or None if unknown (no marker
     - e.g. an install predating the marker, or a hand-placed build). 'Unknown'
     is treated conservatively by the guard: an explicit pick is re-provisioned.
@@ -97,7 +97,7 @@ def _provisioned_backend(target: Path) -> "Optional[str]":
     return parts[0] if parts else None
 
 
-def _provisioned_build(target: Path) -> "Optional[str]":
+def _provisioned_build(target: Path) -> Optional[str]:
     """The build tag recorded alongside the backend, or None when the marker
     predates the two-token format or the tag was not knowable at provision time.
 
@@ -109,7 +109,7 @@ def _provisioned_build(target: Path) -> "Optional[str]":
     return parts[1] if parts and len(parts) > 1 else None
 
 
-def installed_backend() -> "Optional[str]":
+def installed_backend() -> Optional[str]:
     """The backend actually provisioned on this box right now, or None when
     nothing is provisioned yet (a fresh install, or one that predates the
     marker).
@@ -125,7 +125,7 @@ def installed_backend() -> "Optional[str]":
     return _sl._provisioned_backend(_sl._repo_runtime_lib())
 
 
-def installed_build() -> "Optional[str]":
+def installed_build() -> Optional[str]:
     """The llama.cpp release tag actually provisioned on this box right now, or
     None when nothing is provisioned or the marker predates tag recording.
 
@@ -240,7 +240,7 @@ class RuntimeInUseError(Exception):
     fallback, this earns "close it and retry" with the existing install left
     completely intact."""
 
-    def __init__(self, locked: "list[Path]", partial: bool = False):
+    def __init__(self, locked: list[Path], partial: bool = False):
         self.locked = list(locked)
         # True only when files were already deleted before the lock was hit (the
         # probe-to-unlink race). The install is then half cleared, and saying
@@ -252,9 +252,9 @@ class RuntimeInUseError(Exception):
         super().__init__(f"{len(self.locked)} runtime file(s) in use: {shown}{more}")
 
 
-def _clearable_files(target: Path) -> "list[Path]":
+def _clearable_files(target: Path) -> list[Path]:
     """The files _clear_target WOULD delete, in deletion order."""
-    out: "list[Path]" = []
+    out: list[Path] = []
     try:
         for f in target.iterdir():
             if f.is_file():
@@ -268,7 +268,7 @@ def _clearable_files(target: Path) -> "list[Path]":
     return out
 
 
-def _files_in_use(target: Path) -> "list[Path]":
+def _files_in_use(target: Path) -> list[Path]:
     """Of the files a provision would delete, those that cannot be replaced now.
 
     Probed with ``open(..., "r+b")``: it writes no bytes and creates nothing, and
@@ -286,7 +286,7 @@ def _files_in_use(target: Path) -> "list[Path]":
     An unprobeable file counts as NOT in use. This gate exists to prevent a
     destructive half-state, so an inconclusive answer must not become a new way
     to block a legitimate install."""
-    locked: "list[Path]" = []
+    locked: list[Path] = []
     for f in _clearable_files(target):
         try:
             with open(f, "r+b"):
@@ -300,7 +300,7 @@ def _files_in_use(target: Path) -> "list[Path]":
     return locked
 
 
-def _clear_target(target: Path) -> "list[Path]":
+def _clear_target(target: Path) -> list[Path]:
     """Remove library files left by an earlier provision so a re-provision (or
     a fallback to a different backend) never mixes DLLs from two builds. Only
     touches files in the dir, plus the _BLAS_LIBRARY_DIRS subdirectories
@@ -312,7 +312,7 @@ def _clear_target(target: Path) -> "list[Path]":
     the OSError instead would report success on a half-cleared directory, and
     the caller would then copy a new build over the survivors and produce the
     mixed-build state this function exists to prevent."""
-    left: "list[Path]" = []
+    left: list[Path] = []
     try:
         for f in target.iterdir():
             if f.is_file():
@@ -411,7 +411,7 @@ def _provision_lock_path(target: Path) -> Path:
     return target.parent / (target.name + ".setup.lock")
 
 
-def _provision_lock_holder_pid(lock: Path) -> "Optional[int]":
+def _provision_lock_holder_pid(lock: Path) -> Optional[int]:
     try:
         data = json.loads((lock / _PROVISION_LOCK_OWNER).read_text(encoding="utf-8"))
         pid = data.get("pid") if isinstance(data, dict) else None

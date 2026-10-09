@@ -45,11 +45,9 @@ class TestGgufEmbedUnsupported:
         from localm.inference.backends.gguf import GgufBackend
         backend = GgufBackend.__new__(GgufBackend)
         backend._loaded = True
-        try:
+        with pytest.raises(NotImplementedError) as caught:
             backend.embed(["text"])
-            assert False, "expected NotImplementedError"
-        except NotImplementedError as e:
-            assert "GGUF" in str(e)
+        assert "GGUF" in str(caught.value)
 
 
 class TestResultCompression:

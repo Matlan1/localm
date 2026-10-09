@@ -120,7 +120,7 @@ import os
 import queue as _queue
 import threading
 import time
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 
 class RunnerBusy(Exception):
@@ -966,7 +966,7 @@ class HFRunner:
     def count_messages_tokens(self, messages: list) -> int:
         return self._simple_request("count_messages_tokens", messages, try_lock=True)
 
-    def embed(self, texts: List[str], timeout: float = EMBED_TIMEOUT_DEFAULT) -> List[List[float]]:
+    def embed(self, texts: list[str], timeout: float = EMBED_TIMEOUT_DEFAULT) -> list[list[float]]:
         # NOT try_lock: unlike a token count, embedding has no honest
         # fallback value - a caller that needs it must wait, mirroring
         # IsolatedEmbedder.embed()'s plain blocking _rpc_lock.

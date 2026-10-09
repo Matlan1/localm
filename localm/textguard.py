@@ -28,7 +28,7 @@ memory), never to trusted file reads that legitimately contain these strings.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
+from typing import Optional
 
 # Frame markers localm owns. The body of untrusted content must not be able to
 # contain a literal one (or it could end / forge the frame). Match an opening or
@@ -95,7 +95,7 @@ _SPECIAL_RE = re.compile(
 )
 
 
-def _defang_special(m: "re.Match") -> str:
+def _defang_special(m: re.Match) -> str:
     """Escape the leading delimiter of a matched control token so it is inert."""
     s = m.group(0)
     if s.startswith("["):
@@ -124,7 +124,7 @@ def neutralise(text: str) -> str:
     return text
 
 
-def _normalise_spans(spans, length: int) -> Tuple[Tuple[int, int], ...]:
+def _normalise_spans(spans, length: int) -> tuple[tuple[int, int], ...]:
     """Clamp *spans* to ``[0, length]``, drop empties, sort and merge overlaps."""
     cleaned = []
     for item in spans or ():
@@ -134,7 +134,7 @@ def _normalise_spans(spans, length: int) -> Tuple[Tuple[int, int], ...]:
         if end > start:
             cleaned.append((start, end))
     cleaned.sort()
-    merged: List[Tuple[int, int]] = []
+    merged: list[tuple[int, int]] = []
     for start, end in cleaned:
         if merged and start <= merged[-1][1]:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
@@ -161,7 +161,7 @@ class GuardedText(str):
 
     __slots__ = ("untrusted_spans",)
 
-    def __new__(cls, text: str = "", untrusted_spans=()) -> "GuardedText":
+    def __new__(cls, text: str = "", untrusted_spans=()) -> GuardedText:
         obj = super().__new__(cls, text)
         obj.untrusted_spans = _normalise_spans(untrusted_spans, len(obj))
         return obj
@@ -193,8 +193,8 @@ def compose(*parts) -> GuardedText:
     an untrusted range. A :class:`GuardedText` part contributes its own ranges,
     shifted into the result, so composed blocks nest.
     """
-    chunks: List[str] = []
-    spans: List[Tuple[int, int]] = []
+    chunks: list[str] = []
+    spans: list[tuple[int, int]] = []
     pos = 0
     for part in parts:
         if isinstance(part, _Untrusted):
@@ -215,7 +215,7 @@ def compose(*parts) -> GuardedText:
 
 def compose_join(separator: str, parts) -> GuardedText:
     """``separator.join(parts)`` as a :func:`compose`, preserving untrusted ranges."""
-    interleaved: List = []
+    interleaved: list = []
     for i, part in enumerate(parts):
         if i:
             interleaved.append(separator)
@@ -223,7 +223,7 @@ def compose_join(separator: str, parts) -> GuardedText:
     return compose(*interleaved)
 
 
-def untrusted_spans_of(value) -> Tuple[Tuple[int, int], ...]:
+def untrusted_spans_of(value) -> tuple[tuple[int, int], ...]:
     """The untrusted ranges recorded on *value*, or ``()`` when it carries none."""
     spans = getattr(value, "untrusted_spans", ())
     if not isinstance(spans, tuple):
@@ -242,7 +242,7 @@ _SENTINEL_CLOSE = "\ue001"
 _TRIM_CHARS = " \t\n\r\v\f"
 
 
-def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tuple[int, int, int]]]":
+def content_spans_via_sentinels(contents, render, rendered) -> Optional[list[tuple[int, int, int]]]:
     """Locate each of *contents* inside *rendered*, or return ``None``.
 
     *render* takes a list of replacement contents and returns the template's
@@ -280,7 +280,7 @@ def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tu
     if not isinstance(skeleton, str):
         return None
 
-    positions: List[int] = []
+    positions: list[int] = []
     pos = 0
     for sentinel in sentinels:
         found = skeleton.find(sentinel, pos)
@@ -294,8 +294,8 @@ def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tu
     if sentinels:
         wrappers.append(skeleton[positions[-1] + len(sentinels[-1]):])
 
-    rebuilt: List[str] = []
-    spans: List[Tuple[int, int, int]] = []
+    rebuilt: list[str] = []
+    spans: list[tuple[int, int, int]] = []
     out_len = 0
     for i, content in enumerate(contents):
         wrapper = wrappers[i]
@@ -320,7 +320,7 @@ def content_spans_via_sentinels(contents, render, rendered) -> "Optional[List[Tu
     return spans
 
 
-def map_untrusted_ranges(content_spans, per_content_spans) -> Tuple[Tuple[int, int], ...]:
+def map_untrusted_ranges(content_spans, per_content_spans) -> tuple[tuple[int, int], ...]:
     """Shift each content's own untrusted ranges into rendered-text coordinates.
 
     A content span is ``(start, end)`` or ``(start, end, lead)`` as returned by
@@ -329,8 +329,8 @@ def map_untrusted_ranges(content_spans, per_content_spans) -> Tuple[Tuple[int, i
     span, so a range over stripped whitespace maps to nothing rather than to
     the template's own text.
     """
-    ranges: List[Tuple[int, int]] = []
-    for span, local in zip(content_spans, per_content_spans):
+    ranges: list[tuple[int, int]] = []
+    for span, local in zip(content_spans, per_content_spans, strict=False):
         start, end = span[0], span[1]
         lead = span[2] if len(span) > 2 else 0
         for a, b in local:
@@ -360,9 +360,9 @@ def slice_guarded(value, start: int, end: int) -> GuardedText:
     return GuardedText(text[start:end], kept)
 
 
-def split_by_trust(text: str, spans) -> List[Tuple[str, bool]]:
+def split_by_trust(text: str, spans) -> list[tuple[str, bool]]:
     """Split *text* into ``(segment, is_untrusted)`` pairs that concatenate back to it."""
-    out: List[Tuple[str, bool]] = []
+    out: list[tuple[str, bool]] = []
     pos = 0
     for start, end in _normalise_spans(spans, len(text)):
         if start > pos:

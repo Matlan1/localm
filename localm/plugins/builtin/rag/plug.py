@@ -307,7 +307,7 @@ def _require_rag_confinement(name: str, request: Request) -> list:
     return key_roots
 
 
-def _dim_mismatch(stats: dict, active_dim) -> "bool | None":
+def _dim_mismatch(stats: dict, active_dim) -> bool | None:
     """Best-effort: does *stats* (a ``stats()``-shaped dict) disagree with
     *active_dim* (the currently RESIDENT embedder's dimension, from
     ``embedder.loaded_dim()`` - or None when nothing is loaded)?

@@ -97,7 +97,7 @@ def plugin_requirements(extras: Iterable[str]) -> list:
 
 def _req_name(req: str) -> str:
     """The distribution name from a requirement string (drops version/marker)."""
-    return re.split(r"[<>=!~ \[;@]", req.strip(), 1)[0].strip()
+    return re.split(r"[<>=!~ \[;@]", req.strip(), maxsplit=1)[0].strip()
 
 
 def is_satisfied(req: str) -> bool:

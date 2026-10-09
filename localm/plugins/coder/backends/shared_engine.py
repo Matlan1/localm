@@ -46,7 +46,7 @@ def _exit_marker(gen: dict):
 # generation under it takes engine._LOAD_LOCK (auto-reload) and, below that,
 # embedder._LOCK; residency._PIN_LOCK is a leaf. Never acquire engine_lock while
 # holding any of those three.
-_LOCKS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _LOCKS_GUARD = threading.Lock()
 # The one lock every engine that cannot be a WeakKeyDictionary key shares, so
 # serialisation is never silently switched off for such an engine.
