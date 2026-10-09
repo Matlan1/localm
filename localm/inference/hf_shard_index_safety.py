@@ -54,7 +54,7 @@ def validate_shard_index(model_path: str) -> None:
     for index_file in _index_files(base):
         try:
             index = json.loads(index_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         if not isinstance(index, dict):
             continue

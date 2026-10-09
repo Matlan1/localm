@@ -294,6 +294,8 @@ def prepare_worker_process() -> None:
     if dll_dirs:
         logger.debug("hf worker: added the venv's DLL directories: %s",
                      ", ".join(dll_dirs))
+    from localm.inference.backends._hf_hub_gate import close_hub_gate
+    close_hub_gate()
 
 
 def _runner_main(req_q, resp_q, ctrl_q) -> None:
@@ -377,6 +379,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     "can_embed": worker.can_embed,
                     "device": worker.resolved_device,
                     "context_capacity": getattr(worker, "context_capacity", None),
+                    "load_notes": list(getattr(worker, "load_notes", None) or []),
                 }))
             except Exception as e:
                 resp_q.put(("error", str(e)))

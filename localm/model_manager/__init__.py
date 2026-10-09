@@ -65,10 +65,13 @@ from .gguf import (
     gguf_tool_use_signal,
     gguf_context_length,
     gguf_pretokenizer,
+    gguf_general_type,
+    gguf_unusable_reason,
     chat_template_tool_signal,
     missing_split_parts,
     split_gguf_parts,
 )
+from .unsupported import explain_unsupported_model, hf_folder_refusal
 from .registry import (
     _add_local_gguf_dir,
     _backup_registry,
@@ -169,7 +172,9 @@ __all__ = [
     "gguf_architecture", "gguf_chat_refusal", "gguf_non_chat_model_type", "gguf_embedding_signal", "gguf_is_mmproj",
     "gguf_registry_metadata", "_GGUF_SETTLE_SECONDS", "_gguf_recently_written",
     "gguf_capability_metadata", "gguf_tool_use_signal", "gguf_context_length",
-    "gguf_pretokenizer", "chat_template_tool_signal",
+    "gguf_pretokenizer", "gguf_general_type", "gguf_unusable_reason", "chat_template_tool_signal",
+    # unsupported
+    "explain_unsupported_model", "hf_folder_refusal",
     # registry
     "MODEL_SHORTCUTS", "_SHORTCUT_SIZES", "resolve_spec", "get_model_path",
     "get_model_info", "find_sibling_mmproj", "get_model_mmproj", "_hf_is_vision",

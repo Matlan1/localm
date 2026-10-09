@@ -457,6 +457,56 @@ def _simulate_fault(mode: str) -> None:
     os.abort()
 
 
+def _unknown_language(language) -> str:
+    """The refusal sentence for a language code Whisper does not know, or "" when
+    the code is acceptable (or empty, or the code list cannot be read)."""
+    if not language:
+        return ""
+    try:
+        from faster_whisper.tokenizer import _LANGUAGE_CODES
+    except ImportError:
+        return ""
+    if language in _LANGUAGE_CODES:
+        return ""
+    return (f"'{language}' is not a language Whisper supports "
+            "(use an ISO 639-1 code such as 'en', or omit it to detect it).")
+
+
+def _transcribe_detailed(model, audio, language, opts) -> tuple[str, dict]:
+    """Transcribe ``audio`` and return ``(text, detail)`` where ``detail`` is a
+    plain dict of language, duration and per-segment rows (with word rows when
+    ``opts["word_timestamps"]``). ``opts`` keys: prompt, temperature,
+    word_timestamps; absent keys keep faster-whisper's defaults, and a
+    temperature of 0 keeps its default 0-to-1 fallback schedule (a positive value
+    fixes the temperature)."""
+    kwargs = {"language": language,
+              "word_timestamps": bool(opts.get("word_timestamps"))}
+    if opts.get("prompt"):
+        kwargs["initial_prompt"] = opts["prompt"]
+    if opts.get("temperature"):
+        kwargs["temperature"] = float(opts["temperature"])
+    segments, info = model.transcribe(audio, **kwargs)
+    rows = []
+    for seg in segments:
+        rows.append({
+            "id": len(rows), "seek": seg.seek,
+            "start": round(float(seg.start), 3), "end": round(float(seg.end), 3),
+            "text": seg.text.strip(), "tokens": list(seg.tokens),
+            "temperature": (0.0 if seg.temperature is None
+                            else float(seg.temperature)),
+            "avg_logprob": float(seg.avg_logprob),
+            "compression_ratio": float(seg.compression_ratio),
+            "no_speech_prob": float(seg.no_speech_prob),
+            "words": [{"word": w.word, "start": round(float(w.start), 3),
+                       "end": round(float(w.end), 3),
+                       "probability": float(w.probability)}
+                      for w in (seg.words or [])],
+        })
+    text = " ".join(r["text"] for r in rows).strip()
+    return text, {"language": info.language,
+                  "duration": len(audio) / 16000.0, "segments": rows}
+
+
 def _worker_main(req_q, resp_q) -> None:
     """Long-lived child: decode + load + transcribe, one request at a time.
 
@@ -490,7 +540,8 @@ def _worker_main(req_q, resp_q) -> None:
         msg = req_q.get()
         if msg is None:                          # shutdown sentinel
             return
-        data, name, language, download_root, local_files_only = msg
+        data, name, language, download_root, local_files_only, *rest = msg
+        opts = rest[0] if rest else None
 
         fault = os.environ.get(_FAULT_ENV)
         if fault:
@@ -501,6 +552,12 @@ def _worker_main(req_q, resp_q) -> None:
         except Exception as e:                   # native lib missing / failed to load
             resp_q.put(("error", "needs-faster-whisper", str(e)))
             continue
+
+        if opts is not None:
+            bad = _unknown_language(language)
+            if bad:
+                resp_q.put(("error", "bad-request", bad))
+                continue
 
         audio, err = _decode_or_error(data, decode_audio)
         if err is not None:
@@ -526,13 +583,17 @@ def _worker_main(req_q, resp_q) -> None:
             continue
 
         try:
-            segments, _info = model.transcribe(audio, language=language)
-            text = " ".join(s.text.strip() for s in segments).strip()
+            if opts is None:
+                segments, _info = model.transcribe(audio, language=language)
+                text = " ".join(s.text.strip() for s in segments).strip()
+                detail = None
+            else:
+                text, detail = _transcribe_detailed(model, audio, language, opts)
         except Exception as e:
             resp_q.put(("error", "transcribe", str(e)))
             continue
 
-        resp_q.put(("ok", text))
+        resp_q.put(("ok", text) if detail is None else ("ok", text, detail))
 
 
 # --------------------------------------------------------------------------- #
@@ -595,7 +656,29 @@ def _ensure_worker() -> None:
 def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
                    local_files_only: bool = True,
                    blocked_reason: Optional[str] = None) -> str:
+    """Transcribe ``data`` in the isolated worker and return the text.
+
+    Same contract as ``_run_in_worker_detailed``, and additionally raises
+    ``VoiceError`` (code "no-speech") when the recording transcribes to nothing."""
+    text, _detail = _run_in_worker_detailed(
+        data, name, language, timeout,
+        local_files_only=local_files_only, blocked_reason=blocked_reason)
+    if not text:
+        raise VoiceError("No speech detected in the recording", code="no-speech")
+    return text
+
+
+def _run_in_worker_detailed(data: bytes, name: str, language, timeout: float, *,
+                            opts: Optional[dict] = None,
+                            local_files_only: bool = True,
+                            blocked_reason: Optional[str] = None,
+                            ) -> tuple[str, Optional[dict]]:
     """Send one transcription to the isolated worker and wait for its result.
+
+    Returns ``(text, detail)``; ``detail`` is None unless ``opts`` was given, in
+    which case it is the segment/word dict ``_transcribe_detailed`` builds, and
+    ``opts`` may carry prompt, temperature and word_timestamps. ``text`` is empty
+    for a recording with no speech.
 
     ``local_files_only`` is the caller's network-policy decision (default True:
     never download unless something explicitly said so - the fail-safe
@@ -616,8 +699,9 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
                              code="spawn") from e
         proc, req_q, resp_q = _proc, _req_q, _resp_q
         try:
-            req_q.put((data, name, language, str(stt_cache_dir()),
-                       bool(local_files_only)))
+            request = (data, name, language, str(stt_cache_dir()),
+                       bool(local_files_only))
+            req_q.put(request if opts is None else request + (opts,))
         except Exception as e:
             _kill_worker()
             raise VoiceError(f"Could not dispatch transcription to the STT worker: {e}",
@@ -649,13 +733,12 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
 
     kind = result[0]
     if kind == "ok":
-        text = result[1]
-        if not text:
-            raise VoiceError("No speech detected in the recording", code="no-speech")
-        return text
+        return result[1], (result[2] if len(result) > 2 else None)
 
     tag = result[1]
     detail = result[2] if len(result) > 2 else ""
+    if tag == "bad-request":
+        raise VoiceError(detail, code=tag)
     if tag == "needs-faster-whisper":
         raise VoiceError(
             "Speech-to-text needs the faster-whisper package. Install it with: "
@@ -689,20 +772,12 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
     raise VoiceError("Transcription failed.", code="transcribe")
 
 
-def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
-    """Transcribe an audio blob (webm/ogg/wav/mp3 - anything PyAV decodes).
-
-    The native pipeline (decode -> load -> transcribe) runs in an isolated
-    worker process; see the module docstring. The only work done in the server
-    process is the pure-Python guards below, so no native code path can fault
-    the server."""
-    # Reject an empty recording up front (pure Python, no native, no worker
-    # spawn): a 0-byte blob (a mic that captured nothing) is a clean client error.
-    if not data:
-        raise VoiceError("Empty recording (no audio was captured).", code="empty")
-
-    # Availability check without importing the native lib, so a missing
-    # dependency is reported before a worker spawn.
+def _stt_plan(language: Optional[str]) -> dict:
+    """Resolve how one transcription runs: the configured model name, language,
+    worker timeout, and the network-policy decision for the one-time model
+    download (``local_files_only`` / ``blocked_reason``). Raises ``VoiceError``
+    (code "needs-faster-whisper") when the speech package is missing, before any
+    worker is spawned."""
     if importlib.util.find_spec("faster_whisper") is None:
         raise VoiceError(
             "Speech-to-text needs the faster-whisper package. Install it "
@@ -731,10 +806,50 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
             local_files_only = False
         else:
             blocked_reason = _stt_download_blocked_reason(name, mode)
+    return {"name": name, "language": lang, "timeout": timeout,
+            "local_files_only": local_files_only,
+            "blocked_reason": blocked_reason}
 
-    return _run_in_worker(data, name, lang, timeout,
-                          local_files_only=local_files_only,
-                          blocked_reason=blocked_reason)
+
+def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
+    """Transcribe an audio blob (webm/ogg/wav/mp3 - anything PyAV decodes).
+
+    The native pipeline (decode -> load -> transcribe) runs in an isolated
+    worker process; see the module docstring. The only work done in the server
+    process is the pure-Python guards below, so no native code path can fault
+    the server."""
+    # Reject an empty recording up front (pure Python, no native, no worker
+    # spawn): a 0-byte blob (a mic that captured nothing) is a clean client error.
+    if not data:
+        raise VoiceError("Empty recording (no audio was captured).", code="empty")
+
+    plan = _stt_plan(language)
+    return _run_in_worker(data, plan["name"], plan["language"], plan["timeout"],
+                          local_files_only=plan["local_files_only"],
+                          blocked_reason=plan["blocked_reason"])
+
+
+def transcribe_detailed(data: bytes, language: Optional[str] = None, *,
+                        prompt: Optional[str] = None,
+                        temperature: Optional[float] = None,
+                        word_timestamps: bool = False) -> dict:
+    """Transcribe an audio blob and return ``{"text", "language", "duration",
+    "segments"}`` (segments carry timing, token and confidence fields, plus word
+    rows when ``word_timestamps``). A recording with no speech returns empty
+    text rather than raising. Same isolation and network-policy rules as
+    ``transcribe_bytes``; raises ``VoiceError``, with code "bad-request" for an
+    unsupported language code."""
+    if not data:
+        raise VoiceError("Empty recording (no audio was captured).", code="empty")
+
+    plan = _stt_plan(language)
+    opts = {"prompt": prompt, "temperature": temperature,
+            "word_timestamps": bool(word_timestamps)}
+    text, detail = _run_in_worker_detailed(
+        data, plan["name"], plan["language"], plan["timeout"], opts=opts,
+        local_files_only=plan["local_files_only"],
+        blocked_reason=plan["blocked_reason"])
+    return {"text": text, **(detail or {})}
 
 
 def shutdown_stt() -> None:

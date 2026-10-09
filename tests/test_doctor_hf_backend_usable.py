@@ -338,6 +338,9 @@ def test_the_worker_starts_the_way_the_hf_worker_does(fake_hf, monkeypatch):
     monkeypatch.setattr(_mp_spawn, "suppress_native_error_dialogs", lambda: None)
     monkeypatch.setattr(_mp_spawn, "add_venv_dll_directories",
                         lambda: events.append("dll directories") or [])
+    from localm.inference.backends import _hf_hub_gate
+    monkeypatch.setattr(_hf_hub_gate, "close_hub_gate",
+                        lambda: events.append("hub kernel gate"))
 
     class _Conn:
         def send(self, msg):
@@ -351,6 +354,7 @@ def test_the_worker_starts_the_way_the_hf_worker_does(fake_hf, monkeypatch):
     assert events == [
         ("step", "worker startup"),
         "dll directories",
+        "hub kernel gate",
         ("step", "import torch"),
         ("step", "import transformers"),
         ("step", "transformers.AutoTokenizer"),

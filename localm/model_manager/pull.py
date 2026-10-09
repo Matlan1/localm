@@ -1426,6 +1426,10 @@ def _pull_gguf_file(
                 )
                 return False
         if register:
+            unusable = _mm.gguf_unusable_reason(dest)
+            if unusable is not None:
+                console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
+                return False
             reg_type = model_type
             # One shared header probe backs the mmproj/embedding refinement
             # below AND the persisted architecture/expert_count. Captured
@@ -1590,6 +1594,10 @@ def _pull_gguf_file(
                         f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
 
     if register:
+        unusable = _mm.gguf_unusable_reason(base_dir / filename)
+        if unusable is not None:
+            console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
+            return False
         reg_type = model_type
         # One shared header probe, as in the "already downloaded" branch above,
         # for the freshly-downloaded case.
@@ -2538,6 +2546,10 @@ def _pull_url_locked(
             )
         else:
             console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
+        unusable = _mm.gguf_unusable_reason(dest)
+        if unusable is not None:
+            console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
+            return False
         _mm._register_with_dedup(name, dest, url, model_type=model_type)
         return True
 
@@ -2758,6 +2770,10 @@ def _pull_url_locked(
                     alias_model(dups[0], name)
                     return True
 
+    unusable = _mm.gguf_unusable_reason(dest)
+    if unusable is not None:
+        console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
+        return False
     _mm._register(name, dest, url, sha256=actual, model_type=model_type)
     # name is always _sanitize_name()-derived by pull_model() before reaching
     # here, and is escaped anyway; it sits in a TAG-INJECTION position.

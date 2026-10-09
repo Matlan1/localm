@@ -30,6 +30,7 @@ import io
 import json
 import os
 import platform
+import re
 import socket
 import ssl
 import stat
@@ -100,7 +101,7 @@ def _config(with_upload: bool = True) -> dict:
         "comfy_workdir": f"{_home()}/ComfyUI",
         "comfy_api_url": f"http://admin:{PW}@{HOST}:8188/?api_key={QV}",
         "net_search_url": f"https://search.example.org/search?q=x&token={QV}",
-        "coder_reviewer": f"http://reviewer.example.net/v1?key={QV}&model=m",
+        "coder_reviewer": f"http://reviewer.example.net/v1?key={QV}&model=m&cc={OTHER_EMAIL}",
         "hf_token": CFG_HF,
         "civitai_api_key": CFG_CIVITAI,
     }
@@ -292,12 +293,22 @@ def _assert_file_bytes(path: Path, golden: str, tmp_path: Path) -> str:
     return text.replace(os.linesep, "\n")
 
 
-def _assert_scrubbed(text: str) -> None:
+_ANY_EMAIL_RE = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _assert_scrubbed(text: str, *, footer: bool = True) -> None:
     for secret in SECRETS:
         assert secret not in text, secret
     for head in FOREIGN_PATH_HEADS:
         assert head not in text, head
     assert _home() not in text
+    assert OTHER_EMAIL not in text
+    assert "<redacted-email>" in text
+    leftover = [e for e in _ANY_EMAIL_RE.findall(text) if e != bugreport.MAINTAINER_EMAIL]
+    assert leftover == [], leftover
+    if footer:
+        assert bugreport._report_footer() in text
+        assert f"({bugreport.MAINTAINER_EMAIL})" in text
 
 
 def _automatic_context() -> dict:
@@ -460,7 +471,7 @@ def test_log_digest_is_scrubbed_at_its_source(world):
     digest, reason = bugreport._recent_log_tail_result(pid=os.getpid())
     assert reason == ""
     assert "localm.engine: load failed" in digest
-    _assert_scrubbed(digest)
+    _assert_scrubbed(digest, footer=False)
     assert bugreport._recent_log_tail(pid=os.getpid()) == digest
 
 

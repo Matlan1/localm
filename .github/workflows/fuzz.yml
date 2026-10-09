@@ -1,0 +1,73 @@
+name: Fuzz
+
+# Property-based fuzzing of the untrusted-input parsers (tests/fuzz/).
+#
+#   schedule / workflow_dispatch   the "nightly" profile: a large random budget
+#                                  with a persistent Hypothesis example
+#                                  database, so a failing input is replayed
+#                                  first on the next run.
+#   pull_request                   only when this file changes: a small smoke
+#                                  run that proves the workflow itself works.
+#
+# Ordinary pull requests run the same tests inside the normal suite with the
+# small, derandomized "pr" profile (see tests/fuzz/conftest.py).
+on:
+  schedule:
+    - cron: "13 2 * * *"
+  workflow_dispatch:
+    inputs:
+      examples:
+        description: "Hypothesis max_examples per property"
+        default: "2000"
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/fuzz.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      LOCALM_FUZZ_PROFILE: ${{ github.event_name == 'pull_request' && 'pr' || 'nightly' }}
+      LOCALM_FUZZ_EXAMPLES: ${{ github.event_name == 'pull_request' && '20' || inputs.examples || '2000' }}
+      LOCALM_FUZZ_DB: .hypothesis/examples
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Restore the example database
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .hypothesis/examples
+          key: fuzz-db-${{ github.run_id }}
+          restore-keys: fuzz-db-
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,rag]"
+
+      - name: Fuzz
+        run: python -m pytest tests/fuzz -m "not integration" -q -p no:cacheprovider
+
+      - name: Keep the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: fuzz-examples
+          path: .hypothesis/examples
+          if-no-files-found: ignore

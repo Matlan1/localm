@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
 from localm.image_gen import comfy as _comfy
 from localm.media.managed_comfy import legacy_comfy_value, managed_comfy_active
@@ -147,7 +147,9 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     delete_outputs: Optional[bool] = None,
                     cancel_check=None,
                     placement: Optional[dict] = None,
-                    on_progress=None) -> tuple[bool, str]:
+                    on_progress=None,
+                    width: Optional[int] = None,
+                    height: Optional[int] = None) -> tuple[bool, str]:
     if delete_outputs is None:
         delete_outputs = bool(s.get("delete_outputs", False))
     # Forward the strength kwargs only when the caller set them; an unset
@@ -159,6 +161,9 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
             lora_kwargs["lora_strength_model"] = lora_strength_model
         if lora_strength_clip is not None:
             lora_kwargs["lora_strength_clip"] = lora_strength_clip
+    size_kwargs: dict[str, Any] = {}
+    if width is not None and height is not None:
+        size_kwargs = {"width": width, "height": height}
     return _comfy.generate_image(
         prompt, out_path,
         api_url=s["api_url"],
@@ -182,6 +187,7 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
         placement=placement,
         on_progress=on_progress,
         **lora_kwargs,
+        **size_kwargs,
     )
 
 

@@ -97,7 +97,10 @@ def register(app: FastAPI, ctx) -> None:
                     if p.is_file():
                         return p.stat().st_size
                     if p.is_dir():
-                        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+                        from localm.inference.residency import alternate_layout_files
+                        skipped = alternate_layout_files(p)
+                        return sum(f.stat().st_size for f in p.rglob("*")
+                                   if f.is_file() and f not in skipped)
                 except OSError:
                     pass
                 return None
