@@ -1106,9 +1106,7 @@ class _CountingCallScanner:
         out = []
         for node in self._ast.walk(self.tree):
             hit = None
-            if isinstance(node, self._ast.Attribute) and node.attr in self.ATTRS:
-                hit = node
-            elif (isinstance(node, self._ast.Call)
+            if isinstance(node, self._ast.Attribute) and node.attr in self.ATTRS or (isinstance(node, self._ast.Call)
                   and isinstance(node.func, self._ast.Name)
                   and node.func.id == "getattr"
                   and len(node.args) >= 2

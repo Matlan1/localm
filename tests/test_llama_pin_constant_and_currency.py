@@ -56,7 +56,7 @@ def _no_network(monkeypatch):
 
 
 def _day(n: int) -> dt.datetime:
-    return dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(days=n)
+    return dt.datetime(2026, 1, 1, tzinfo=dt.UTC) + dt.timedelta(days=n)
 
 
 def _releases(*pairs):

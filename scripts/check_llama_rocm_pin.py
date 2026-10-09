@@ -119,7 +119,7 @@ def _parse_date(value) -> _dt.datetime | None:
         return None
     try:
         return _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=_dt.timezone.utc)
+            tzinfo=_dt.UTC)
     except ValueError:
         return None
 

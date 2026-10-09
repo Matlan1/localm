@@ -1623,7 +1623,7 @@ class TestCompanionEndpoint:
             main = asyncio.ensure_future(endpoint())
             try:
                 await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
-            except asyncio.TimeoutError as e:
+            except TimeoutError as e:
                 main.cancel()
                 raise AssertionError(
                     "a concurrent trivial coroutine never got to run while "
@@ -2945,7 +2945,7 @@ class TestJobs:
         while time.monotonic() < deadline:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=0.5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
@@ -2970,7 +2970,7 @@ class TestJobs:
         while time.monotonic() < deadline:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=0.5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
@@ -2998,7 +2998,7 @@ class TestJobs:
             while time.monotonic() < deadline:
                 try:
                     ev = await asyncio.wait_for(q.get(), timeout=0.5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 if ev["type"] == "end":
                     end = ev
@@ -4259,7 +4259,7 @@ class TestRagEndpoints:
         import base64
         app, _ = rag_app
         with TestClient(app) as client:
-            b64 = base64.b64encode("hello attachment".encode()).decode()
+            b64 = base64.b64encode(b"hello attachment").decode()
             r = client.post("/api/rag/extract",
                             json={"filename": "note.txt", "content_b64": b64})
             assert r.status_code == 200
@@ -5242,7 +5242,7 @@ class TestPairingQR:
             main = asyncio.ensure_future(endpoint())
             try:
                 await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
-            except asyncio.TimeoutError as e:
+            except TimeoutError as e:
                 main.cancel()
                 raise AssertionError(
                     "a concurrent trivial coroutine never got to run while "
