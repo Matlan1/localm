@@ -11,6 +11,7 @@ import pytest
 
 from localm.inference import ollama_protocol as P
 from localm.inference.gbnf import check_grammar_structure
+from tests._gbnf_matcher import Grammar
 
 
 def _run(coro):
@@ -86,10 +87,21 @@ def test_format_none_and_empty_mean_no_grammar():
     assert P.format_to_grammar("") is None
 
 
-def test_format_schema_and_unknown_strings_are_refused():
-    with pytest.raises(P.OllamaError) as schema:
-        P.format_to_grammar({"type": "object"})
-    assert schema.value.status == 400 and "schema" in schema.value.message
+def test_format_schema_becomes_a_grammar_for_that_schema():
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    grammar = Grammar(P.format_to_grammar(schema))
+    assert grammar.accepts('{"name": "Ann"}')
+    assert not grammar.accepts('{"name": 5}')
+    assert not grammar.accepts("{}")
+
+
+def test_format_schema_the_grammar_cannot_enforce_is_a_400_naming_the_keyword():
+    with pytest.raises(P.OllamaError) as exc:
+        P.format_to_grammar({"type": "string", "pattern": "^a"})
+    assert exc.value.status == 400 and "pattern" in exc.value.message
+
+
+def test_unknown_format_strings_are_refused():
     with pytest.raises(P.OllamaError) as other:
         P.format_to_grammar("xml")
     assert other.value.status == 400

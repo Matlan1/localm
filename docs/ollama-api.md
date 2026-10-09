@@ -4,8 +4,8 @@ localm answers the Ollama HTTP API on the same server and port as its
 OpenAI-compatible API, so a tool that speaks Ollama can use a localm model
 without an adapter. The routes are checked against the official `ollama`
 Python client; other clients (Open WebUI, Home Assistant, Continue, Zed) use
-the same wire format, but one that depends on tool calling or on a JSON-schema
-`format` will not work yet (see the end of this page).
+the same wire format, but one that depends on tool calling will not work yet
+(see the end of this page).
 
 ```bash
 localm serve <model> --port 11434     # Ollama's default port, for clients that assume it
@@ -68,7 +68,7 @@ defaults to true, as in Ollama); send `"stream": false` for one JSON document.
 | `options.temperature`, `top_p`, `top_k`, `repeat_penalty`, `seed` | Passed to the sampler. |
 | `options.num_predict` | A cap of 1 or more sets the maximum number of new tokens; -1 and -2 mean no cap. |
 | `options.stop` | A string or a list. Sent as the request's `stop` (see [server-api.md](server-api.md)): the reply is cut before the first match, the generation ends there and `done_reason` is `stop`. |
-| `format` | `"json"` constrains the reply to a JSON object. A JSON schema is refused with a 400. |
+| `format` | `"json"` constrains the reply to a JSON object. A JSON schema constrains it to that schema: `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `prefixItems`, `minItems`, `maxItems`, `minLength`, `maxLength`, integer `minimum` and `maximum`, `format` (`date`, `time`, `date-time`, `uuid`), `anyOf`, `oneOf`, `allOf` and local `$ref` (recursive schemas included). Properties come out in the order the schema lists them, and an object with listed properties has no others unless `additionalProperties` allows it. A keyword the grammar cannot enforce (`pattern`, `multipleOf`, `not`, number bounds, ...) is a 400 naming it. |
 | `think` | `true` (or a level string) returns the model's reasoning in `message.thinking` (`thinking` on generate); `false` turns reasoning off. |
 | `keep_alive` | On a request with no messages or prompt: `0` unloads the model, anything else loads it (a model served by another instance is left to that instance). Unloading needs `models:write`; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`. Ignored on a normal request; localm manages residency itself (`idle_unload_seconds`). |
 | other `options` keys, unknown request keys | Accepted and ignored (named in the debug log). |
@@ -117,4 +117,4 @@ answer 501 with the localm equivalent in the message: `localm pull`,
 
 ## Not supported yet
 
-Tool calling (`tools`, `tool_calls`) and `format` as a JSON schema.
+Tool calling (`tools`, `tool_calls`).
