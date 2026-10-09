@@ -38,18 +38,16 @@ def gguf_header_refusal(head: bytes) -> Optional[str]:
     localm cannot load, or None when the magic is absent, the header is too short
     to judge, or the version is one that loads.
 
-    Mirrors llama.cpp's own checks: version 0 is invalid, a version whose low 16
-    bits are zero is a byte-swapped (big-endian) file, version 1 is no longer
-    supported, and a version above 3 is newer than the loader understands."""
+    Mirrors llama.cpp's own checks: a version whose low 16 bits are zero is a
+    byte-swapped (big-endian) file, version 1 is no longer supported, and a
+    version above 3 is newer than the loader understands. Version 0 gets no
+    verdict: a magic followed by zero bytes is also what a placeholder or a
+    zero-filled partial copy looks like, and the loader reports it itself."""
     if len(head) < 8 or head[:4] != b"GGUF":
         return None
     (version,) = struct.unpack_from("<I", head, 4)
-    if gguf_version_supported(version):
+    if version == 0 or gguf_version_supported(version):
         return None
-    if version == 0:
-        return ("This file starts like a GGUF but declares version 0, which is not "
-                "a valid GGUF. It is probably corrupt or incompletely downloaded; "
-                "download it again.")
     if version & 0xFFFF == 0:
         (swapped,) = struct.unpack_from(">I", head, 4)
         if swapped in (1, 2, 3) and _big_endian_counts_plausible(head):

@@ -41,9 +41,6 @@ _T_STRING = 8
 
 V1_SENTENCE = ("This is a GGUF version 1 file, an early format llama.cpp no longer "
                "loads. Use a current GGUF (version 3) of the same model.")
-V0_SENTENCE = ("This file starts like a GGUF but declares version 0, which is not "
-               "a valid GGUF. It is probably corrupt or incompletely downloaded; "
-               "download it again.")
 BIG_ENDIAN_SENTENCE = ("This GGUF was written for a big-endian machine (for example "
                        "IBM s390x), so its bytes are swapped for this CPU and it "
                        "cannot be loaded here. Use the standard little-endian GGUF "
@@ -169,7 +166,6 @@ def _hf_dir(d: Path, config: dict | None = None, *, weights=("model.safetensors"
 
 BAD_GGUFS = [
     ("v1", dict(version=1), V1_SENTENCE),
-    ("v0", dict(version=0), V0_SENTENCE),
     ("big_endian_v3", dict(version=3, big_endian=True), BIG_ENDIAN_SENTENCE),
     ("big_endian_v2", dict(version=2, big_endian=True), BIG_ENDIAN_SENTENCE),
     ("v4", dict(version=4), V4_SENTENCE),
@@ -188,6 +184,11 @@ class TestGgufVersionAndEndianness:
         f = _gguf(tmp_path / "m.gguf", version=version)
         assert gguf_unusable_reason(f) is None
         assert _has_gguf_magic(f) is True
+
+    def test_version_zero_gets_no_verdict(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", version=0)
+        assert gguf_header_refusal(f.read_bytes()[:24]) is None
+        assert gguf_unusable_reason(f) is None
 
     def test_non_gguf_and_short_files_get_no_verdict(self, tmp_path):
         assert gguf_header_refusal(b"") is None
