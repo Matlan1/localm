@@ -28,7 +28,7 @@ import json
 import os
 import re
 import socket
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Iterable, Optional
 
