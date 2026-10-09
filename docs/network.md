@@ -200,7 +200,7 @@ drives (the Download browser button under Settings > Server & network, or
 runs a Chrome, Chromium, Edge or Brave already installed on the machine
 instead of the download; either engine starts with a fresh, empty profile,
 so none of your logged-in sessions are used. An API key needs the separate
-`browser` scope (see [SECURITY.md](../SECURITY.md)), independent of the
+`browser` scope (see [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md)), independent of the
 coding agent's shell access, so you can grant one without the other.
 
 ## What the policy does NOT govern
