@@ -1,5 +1,8 @@
 """The documentation workflow builds on docs changes and deploys only on a release."""
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -66,3 +69,72 @@ def test_the_decision_step_deploys_only_on_release_or_a_wet_dispatch(wf):
     assert '[ "$EVENT" = "release" ]' in script
     assert '[ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]' in script
     assert "pull_request" not in script
+
+
+def _bash():
+    found = shutil.which("bash")
+    if found is None or "system32" in found.lower().replace("\\", "/"):
+        pytest.skip("no POSIX bash on PATH")
+    return found
+
+
+def _run_decision(wf, tmp_path, *, event, dry_run, gh_mode):
+    script = next(s for s in wf["jobs"]["build"]["steps"] if s.get("id") == "decide")["run"]
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    calls = tmp_path / "gh_calls"
+    shim = shim_dir / "gh"
+    shim.write_text(
+        '#!/bin/sh\n'
+        f'echo "$@" >> "{calls.as_posix()}"\n'
+        'case "$GH_MODE" in\n'
+        '  enabled) echo "{}"; exit 0;;\n'
+        '  missing) echo "gh: Not Found (HTTP 404)" >&2; exit 1;;\n'
+        '  *) echo "gh: Server Error (HTTP 500)" >&2; exit 1;;\n'
+        'esac\n', encoding="utf-8", newline="\n")
+    shim.chmod(0o755)
+    out, summary = tmp_path / "out", tmp_path / "summary"
+    env = dict(os.environ, EVENT=event, DRY_RUN=dry_run, GH_TOKEN="x", REPO="o/r",
+               GH_MODE=gh_mode, GITHUB_OUTPUT=out.as_posix(),
+               GITHUB_STEP_SUMMARY=summary.as_posix(),
+               PATH=shim_dir.as_posix() + os.pathsep + os.environ["PATH"])
+    proc = subprocess.run([_bash(), "-c", script], capture_output=True, text=True, env=env,
+                          timeout=60)
+    deploy = out.read_text(encoding="utf-8").strip() if out.exists() else None
+    return proc, deploy, calls.exists()
+
+
+@pytest.mark.parametrize("event,dry_run", [
+    ("pull_request", ""), ("workflow_dispatch", "true"), ("push", "")])
+def test_a_build_only_event_never_asks_about_pages_and_never_deploys(wf, tmp_path, event, dry_run):
+    proc, deploy, asked = _run_decision(wf, tmp_path, event=event, dry_run=dry_run,
+                                        gh_mode="enabled")
+    assert proc.returncode == 0, proc.stderr
+    assert deploy == "deploy=false"
+    assert not asked
+
+
+@pytest.mark.parametrize("event,dry_run", [
+    ("release", ""), ("workflow_dispatch", "false")])
+def test_a_deploying_event_deploys_when_pages_is_enabled(wf, tmp_path, event, dry_run):
+    proc, deploy, asked = _run_decision(wf, tmp_path, event=event, dry_run=dry_run,
+                                        gh_mode="enabled")
+    assert proc.returncode == 0, proc.stderr
+    assert deploy == "deploy=true"
+    assert asked
+
+
+def test_a_release_without_pages_warns_and_does_not_deploy(wf, tmp_path):
+    proc, deploy, _ = _run_decision(wf, tmp_path, event="release", dry_run="",
+                                    gh_mode="missing")
+    assert proc.returncode == 0, proc.stderr
+    assert deploy == "deploy=false"
+    assert "::warning title=GitHub Pages is not enabled::" in proc.stdout
+
+
+def test_an_unexpected_pages_api_error_fails_the_step(wf, tmp_path):
+    proc, deploy, _ = _run_decision(wf, tmp_path, event="release", dry_run="",
+                                    gh_mode="error")
+    assert proc.returncode != 0
+    assert deploy is None
+    assert "HTTP 500" in proc.stderr
