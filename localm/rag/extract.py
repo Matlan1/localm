@@ -139,7 +139,7 @@ def is_secret_index_name(name: str) -> bool:
         return True
     return False
 
-# Directories to skip when processing ZIP files (mirrors store.py _SKIP_DIRS)
+# Directories to skip when processing ZIP files (mirrors rag/_store/indexing.py _SKIP_DIRS)
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
               ".pytest_cache", ".mypy_cache", "dist", "build", ".idea",
               ".vscode"}

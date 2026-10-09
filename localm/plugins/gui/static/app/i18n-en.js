@@ -1397,7 +1397,7 @@ export const I18N_EN = {
   "settings.field.mtpDraftTokens.label": "MTP draft tokens",
   "settings.field.mtpDraftTokens.help": "Tokens MTP proposes per step when it is on. More pays off when most drafts are accepted; `localm bench-mtp <model> --draft-tokens N` measures it.",
   "settings.field.specSource.label": "Speculative drafting",
-  "settings.field.specSource.help": "Where draft tokens come from. mtp = the model's own MTP head; ngram = repeats of earlier text in the chat, no second model; off = none. Inherit follows the MTP toggle. Run `localm bench-spec <model>` to check yours.",
+  "settings.field.specSource.help": "Where drafts come from: mtp (the model's MTP head), ngram (repeats of earlier text, no second model) or off. Inherit follows the MTP toggle. Check: `localm bench-spec <model>`.",
   "settings.field.specDraftTokens.label": "N-gram draft tokens",
   "settings.field.specDraftTokens.help": "Most tokens one n-gram step proposes. Blank uses 8; models with recurrent layers use at most 4.",
   "settings.field.vramOverheadMb.label": "Reserved VRAM overhead (MB)",
@@ -1425,7 +1425,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Models
   "settings.field.importMaxDepth.label": "Folder import depth",
-  "settings.field.importMaxDepth.help": "Subfolder levels `localm add <dir>` scans for models.",
+  "settings.field.importMaxDepth.help": "Folder levels `localm add <dir>` and the models-folder scan search for GGUF files and HuggingFace model folders.",
   "settings.field.confirmRemove.label": "Confirm before deleting models",
   "settings.field.confirmRemove.help": "Ask for confirmation before `localm rm` deletes a model's files on disk.",
   "settings.field.autopruneMissingModels.label": "Auto-remove entries for missing files",

@@ -2156,6 +2156,23 @@ def _native_backend_has_vulkan() -> bool:
     return any("vulkan" in n for n in _native_backend_ggml_names())
 
 
+# Substrings of a ggml backend library name that runs on a GPU (ggml-cpu*,
+# ggml-blas and ggml-rpc do not).
+_GPU_BACKEND_MARKERS = ("cuda", "hip", "vulkan", "sycl", "metal", "opencl",
+                        "musa", "cann", "webgpu")
+
+
+def native_backend_has_gpu() -> Optional[bool]:
+    """Whether the currently-resolved native runtime directory ships a GPU
+    ggml backend library (CUDA, HIP, Vulkan, SYCL, Metal, OpenCL, MUSA, CANN
+    or WebGPU), or None when the directory is unresolved or lists no ggml
+    library. Same shipped-file-set authority as :func:`_native_backend_has_vulkan`."""
+    names = _native_backend_ggml_names()
+    if not names:
+        return None
+    return any(m in n for n in names for m in _GPU_BACKEND_MARKERS)
+
+
 def _native_backend_has_sycl() -> bool:
     """True when the currently-resolved native runtime directory ships the
     SYCL ggml backend (a ``ggml-sycl.*`` file) - i.e. the active install is

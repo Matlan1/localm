@@ -3,7 +3,7 @@
 normalises to the first part.
 
 llama.cpp loads a split GGUF set from its ``*-00001-of-N`` part. The folder
-branch (_gguf_first_parts) and sync_models_dir normalise, and get_model_info
+branch (_find_model_units) and sync_models_dir normalise, and get_model_info
 normalises at read time; these tests pin the single-file path.
 """
 

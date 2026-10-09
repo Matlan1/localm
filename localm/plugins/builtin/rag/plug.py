@@ -460,7 +460,7 @@ def _self_services(request: Request):
             _make_self_describe_image(self_url, active_model))
 
 
-# The two embedding-degrade lines store.py emits (add_paths/add_uploads).
+# The two embedding-degrade lines rag/_store/indexing.py emits (add_paths/add_uploads).
 _DEGRADE_UNAVAILABLE = "embeddings unavailable"
 _DEGRADE_NON_FINITE = "embeddings had non-finite"
 
@@ -504,9 +504,9 @@ def _job_progress(job):
     the embedding-degrade warnings a bug report needs (see ``_log_progress``).
 
     The structured branch reuses the SAME ``done``/``total``/``unit`` the text was
-    already formatted from - store.py builds both from one set of numbers in a
-    single call - rather than a second, independent computation here that could
-    drift from the line a viewer reads."""
+    already formatted from - rag/_store/indexing.py builds both from one set of
+    numbers in a single call - rather than a second, independent computation here
+    that could drift from the line a viewer reads."""
     def _cb(text: str, *, phase=None, done=None, total=None, unit=None) -> None:
         job.push({"type": "line", "text": text})
         _log_progress(text)

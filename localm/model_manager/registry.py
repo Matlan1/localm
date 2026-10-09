@@ -27,13 +27,15 @@ from ..debuglog import logger
 from ._shared import _verify_digest
 from ._shared import console
 from .gguf import _SPLIT_GGUF_RE
-from .gguf import _gguf_first_parts
+from .gguf import _find_model_units
+from .gguf import _is_hf_model_dir
 from .gguf import _gguf_declared_min_size
 from .gguf import _has_gguf_magic
 from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
+from .gguf import gguf_non_chat_model_type
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_is_mmproj
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
@@ -210,6 +212,9 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                 return "mmproj", gguf_metadata
             if gguf_embedding_signal(path, meta=meta):
                 return "embedding", gguf_metadata
+            non_chat = gguf_non_chat_model_type(gguf_metadata.get("architecture"))
+            if non_chat:
+                return non_chat, gguf_metadata
             return "llm", gguf_metadata
         if is_hf:
             if (path / "adapter_config.json").exists():
@@ -1770,18 +1775,39 @@ def _backup_registry() -> Optional[Path]:
         return None
 
 
+def _gguf_model_stem(path: Path) -> str:
+    """The model name a GGUF registers under by default: its filename stem, with
+    the ``-NNNNN-of-NNNNN`` suffix of a split set removed."""
+    split = _SPLIT_GGUF_RE.match(path.name)
+    if split and split_gguf_parts(path.name):
+        return split.group("stem")
+    return path.stem
+
+
+def _import_max_depth() -> int:
+    """The ``import_max_depth`` setting as an int >= 1; the default (3) when the
+    stored value is not a number."""
+    raw = load_config().get("import_max_depth", 3)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        logger.warning("import_max_depth is %r, not a number; using 3", raw)
+        return 3
+
 
 
 def sync_models_dir(prune: Optional[bool] = None, *,
                      backfill_mmproj: bool = True) -> ModelSyncResult:
     """Reconcile the registry with the models directory.
 
-    Scans ``MODELS_DIR`` for models that aren't registered yet - loose GGUF
-    files (split GGUFs are registered by their first part) and HuggingFace
-    directories (any subfolder containing ``config.json``) - and registers them.
-    A loose GGUF whose mtime is too fresh (may still be mid-copy) is skipped
-    for this call and picked up on a later one, once it has been quiet for a
-    bit - see ``_gguf_recently_written``.
+    Scans ``MODELS_DIR`` for models that aren't registered yet - GGUF files
+    (split GGUFs are registered by their first part) and HuggingFace model
+    directories (``config.json`` plus weights or a tokenizer) - and registers
+    them. The scan descends ``import_max_depth`` folder levels (at least two),
+    skips folders whose name starts with a dot, and treats a HuggingFace model
+    directory as one model without looking inside it. A GGUF whose mtime is too
+    fresh (may still be mid-copy) is skipped for this call and picked up on a
+    later one, once it has been quiet for a bit - see ``_gguf_recently_written``.
 
     Registry entries whose file has gone missing are, by default, **flagged**
     (``"missing": true``) rather than deleted, so a temporarily-unavailable model
@@ -1816,30 +1842,28 @@ def sync_models_dir(prune: Optional[bool] = None, *,
 
     added = 0
     if _mm.MODELS_DIR.is_dir():
-        for child in sorted(_mm.MODELS_DIR.iterdir()):
+        # At least two levels, so HF dirs directly under the models folder are
+        # always found.
+        gguf_first_parts, hf_dirs = _find_model_units(
+            _mm.MODELS_DIR, max_depth=max(2, _import_max_depth()), skip_hidden=True,
+            skip_dirs=known)
+
+        for child in hf_dirs:
             try:
-                # HuggingFace model directory.
-                if child.is_dir() and (child / "config.json").is_file():
-                    resolved = str(child.resolve())
-                    if resolved in known:
-                        continue
-                    mtype, _gmeta = _detect_local_model_type(child, is_gguf=False, is_hf=True)
-                    _mm._register(_unique_registry_name(reg, child.name), child,
-                                  model_type=mtype)
-                    reg = _mm.load_registry()
-                    known.add(resolved)
-                    added += 1
+                resolved = str(child.resolve())
+                if resolved in known:
+                    continue
+                mtype, _gmeta = _detect_local_model_type(child, is_gguf=False, is_hf=True)
+                _mm._register(_unique_registry_name(reg, child.name), child,
+                              model_type=mtype)
+                reg = _mm.load_registry()
+                known.add(resolved)
+                added += 1
             except OSError:
                 continue
 
-        for child in sorted(_mm.MODELS_DIR.glob("*.gguf")):
+        for child in gguf_first_parts:
             try:
-                if not child.is_file():
-                    continue
-                # For split GGUFs, only register the first part.
-                parts = split_gguf_parts(child.name)
-                if parts and child.name != parts[0]:
-                    continue
                 resolved = str(child.resolve())
                 if resolved in known:
                     continue
@@ -1863,7 +1887,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                         child.name)
                     continue
                 mtype, gmeta = _detect_local_model_type(child, is_gguf=True, is_hf=False)
-                _mm._register(_unique_registry_name(reg, child.stem), child,
+                _mm._register(_unique_registry_name(reg, _gguf_model_stem(child)), child,
                               model_type=mtype, architecture=gmeta.get("architecture"),
                               expert_count=gmeta.get("expert_count"))
                 reg = _mm.load_registry()
@@ -3277,7 +3301,7 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
 
     ``first_parts`` is one entry per independent model in the folder - but that
     list also includes any mmproj vision-projector file sitting in the same
-    folder (``_gguf_first_parts`` does not filter those out, since they are
+    folder (``_find_model_units`` does not filter those out, since they are
     registered as their own model too). A projector is auto-attached to its
     model by _store_with_projector (find_sibling_mmproj), so calling the helper
     again on the projector's OWN entry would either re-move a file that is
@@ -3378,15 +3402,17 @@ def _add_local_gguf_dir(
     on_duplicate: str,
     no_hash: bool,
     fast: bool = False,
-    model_type: str = "llm",
+    model_type: Optional[str] = None,
 ) -> bool:
     """Register every loose .gguf model in a folder (the *first_parts* list).
 
     Names each model after its filename stem (split GGUFs strip the
     ``-NNNNN-of-NNNNN`` suffix), de-duplicating collisions via
     ``_unique_registry_name``. A user-supplied ``-n`` name is only honoured for
-    a single-model folder, since it cannot apply to many. Returns True - the
-    caller has already checked *first_parts* is non-empty.
+    a single-model folder, since it cannot apply to many. Each file's type
+    (llm / mmproj / embedding), architecture and expert count come from its own
+    GGUF header; an explicit *model_type* overrides the type only. Returns
+    True - the caller has already checked *first_parts* is non-empty.
 
     A duplicate answered with "copy" / "move" carries only the projector
     ``find_sibling_mmproj`` attaches (``attached_projector_only``). An entry
@@ -3407,8 +3433,7 @@ def _add_local_gguf_dir(
                               f"longer in {escape(str(gguf.parent))}.[/yellow]")
                 continue
             gguf = carried
-        split = _SPLIT_GGUF_RE.match(gguf.name)
-        base = split.group("stem") if (split and split_gguf_parts(gguf.name)) else gguf.stem
+        base = _gguf_model_stem(gguf)
         reg = _mm.load_registry()
         wanted = _sanitize_name(name) if use_given_name else base
         model_name = _unique_registry_name(reg, wanted)
@@ -3431,9 +3456,13 @@ def _add_local_gguf_dir(
             digest = _mm._hash_with_progress(gguf) \
                 if (not already_known or needs_backfill) else None
 
+        detected_type, gmeta = _detect_local_model_type(gguf, is_gguf=True, is_hf=False)
         _mm._register_with_dedup(
             model_name, gguf, "local", on_duplicate=on_duplicate,
-            digest=digest, size=size, model_type=model_type,
+            digest=digest, size=size,
+            model_type=(model_type if model_type is not None else detected_type),
+            architecture=gmeta.get("architecture"),
+            expert_count=gmeta.get("expert_count"),
             attached_projector_only=True,
         )
     return True
@@ -3549,8 +3578,8 @@ def add_local(
         return False
 
     from localm.inference.engine import _is_hf_dir
-    is_gguf = p.is_file() and p.suffix == ".gguf"
-    is_hf   = _is_hf_dir(str(p))  # config.json AND real weights/tokenizer
+    is_gguf = p.is_file() and p.suffix.lower() == ".gguf"
+    is_hf   = _is_hf_model_dir(p)  # config.json AND real weights/tokenizer, not a GGUF repo
     is_blob = p.is_file() and p.name.startswith("sha256-")  # raw Ollama blob by path
 
     # A lone .safetensors file is not loadable on its own: llama.cpp loads .gguf,
@@ -3572,33 +3601,45 @@ def add_local(
             )
             return False
 
-    # A directory of loose .gguf files (not a single model, not an HF model dir,
-    # not an Ollama manifest) - register each one, the way sync_models_dir does
-    # for the models folder. An HF dir (is_hf) falls through to the
-    # dir-as-one-model path below; an empty / non-gguf dir falls through to the
-    # "Not a model" message.
+    # A folder of models (not itself an HF model dir or an Ollama manifest):
+    # register every GGUF and every HF model dir found up to import_max_depth
+    # levels down, the way sync_models_dir does for the models folder. An HF dir
+    # goes through this function again as a single model, so store, dedup and
+    # type detection are the same as for `localm add <hf dir>`. An HF dir (is_hf)
+    # falls through to the dir-as-one-model path below; a folder holding no
+    # model falls through to the "Not a model" message.
+    max_depth = _import_max_depth()
     if p.is_dir() and not is_hf:
-        max_depth = max(1, int(load_config().get("import_max_depth", 3)))
-        first_parts = _gguf_first_parts(p, max_depth=max_depth)
-        if first_parts:
-            if store:
-                stored = _mm._store_loose_gguf_dir(first_parts, store)
-                if stored is None:
-                    return False
-                first_parts = stored
-            # Loose .gguf files are llama.cpp text models, so an unspecified type
-            # is 'llm' (detection per-file would only ever return 'llm' anyway).
-            return _add_local_gguf_dir(
-                first_parts, name, on_duplicate, no_hash, fast,
-                model_type=(model_type if model_type is not None else "llm"),
-            )
+        first_parts, hf_dirs = _find_model_units(p, max_depth=max_depth)
+        if first_parts or hf_dirs:
+            only_one = len(first_parts) + len(hf_dirs) == 1
+            registered_any = False
+            if first_parts:
+                if store:
+                    stored = _mm._store_loose_gguf_dir(first_parts, store)
+                    if stored is None:
+                        return False
+                    first_parts = stored
+                registered_any = _add_local_gguf_dir(
+                    first_parts, name if only_one else None, on_duplicate, no_hash,
+                    fast, model_type=model_type,
+                )
+            for hf_dir in hf_dirs:
+                wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name
+                registered_any = add_local(
+                    str(hf_dir), _unique_registry_name(_mm.load_registry(), wanted),
+                    on_duplicate=on_duplicate, no_hash=no_hash, fast=fast,
+                    model_type=model_type, store=store,
+                ) or registered_any
+            return registered_any
 
     if not (is_gguf or is_hf or is_blob):
-        console.print(
-            f"[red]Not a model:[/red] {escape(str(p))}\n"
-            "Expected a .gguf file or a HuggingFace model directory "
-            "(config.json plus weights or a tokenizer)."
-        )
+        detail = ("Expected a .gguf file or a HuggingFace model directory "
+                  "(config.json plus weights or a tokenizer).")
+        if p.is_dir():
+            detail += (f" Looked {max_depth} folder level(s) deep; point at a "
+                       "folder closer to the model, or raise 'import_max_depth'.")
+        console.print(f"[red]Not a model:[/red] {escape(str(p))}\n{detail}")
         return False
 
     # A directly-supplied split-GGUF part (e.g. `localm add big-00002-of-00002.gguf`)

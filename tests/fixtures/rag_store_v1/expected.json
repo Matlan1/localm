@@ -1,0 +1,1349 @@
+{
+ "degraded": {
+  "docs": [
+   {
+    "chunks": 1,
+    "hash": "d66ccc5b992f5c343b6d4c6a7c26bd4be495330f330dad23fc44de11635338b7",
+    "path": "upload:pay.txt",
+    "size": 39,
+    "uploaded": true
+   },
+   {
+    "chunks": 6,
+    "hash": "ce27905df39aefcef39b4f08e7f23c3dad1c506c20ec8fbea997a663836b0b70",
+    "path": "upload:turbines.txt",
+    "size": 4546,
+    "uploaded": true
+   }
+  ],
+  "documents": [
+   "upload:pay.txt",
+   "upload:turbines.txt"
+  ],
+  "embedding_model": "bge-small-en-v1.5",
+  "embedding_model_mixed": false,
+  "exists": true,
+  "is_confined_to_nothing": true,
+  "queries": [
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.932,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.8769,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 0.8381,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     }
+    ],
+    "q": [
+     "turbine",
+     4,
+     false,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.9541,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.9235,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9133,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.8499,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "turbine gearbox",
+     5,
+     true,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9175,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.8925,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.7216,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.6415,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.293,
+      "source": "upload:pay.txt",
+      "text": "Salary review notes for the river team."
+     }
+    ],
+    "q": [
+     "apple river notes",
+     6,
+     true,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9175,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.8925,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.7216,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.6415,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "apple river notes",
+     6,
+     false,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "banana cherry",
+     4,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 1.0,
+      "source": "upload:pay.txt",
+      "text": "Salary review notes for the river team."
+     }
+    ],
+    "q": [
+     "salary river",
+     3,
+     false,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 1.0,
+      "source": "upload:pay.txt",
+      "text": "Salary review notes for the river team."
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.9192,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9083,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.7806,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.7689,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 0.5736,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.5611,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "notes",
+     8,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "why did that fail",
+     3,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "",
+     3,
+     false,
+     false
+    ]
+   }
+  ],
+  "roots": [],
+  "stats": {
+   "chunks_bad_lines": 0,
+   "corrupt": false,
+   "created": 1791541875.1450794,
+   "has_vectors": false,
+   "n_chunks": 7,
+   "n_docs": 2,
+   "n_missing": 0,
+   "n_roots": 0,
+   "name": "degraded",
+   "vector_degrade_reason": "an earlier vector index was unusable and was set aside as vectors.json.rejected (nothing was deleted), and the current one does not cover every chunk; using BM25 lexical retrieval only - rebuild it with 'localm rag repair <name> --embed'",
+   "vector_dim": null
+  },
+  "vector_dim": null
+ },
+ "kb": {
+  "docs": [
+   {
+    "chunks": 1,
+    "hash": "ed675283df7d5f54a5a6bf877976b36727e05214122bce4b7100d0495e31cd29",
+    "path": "upload:cr\u00e8me.txt",
+    "size": 83,
+    "uploaded": true
+   },
+   {
+    "chunks": 1,
+    "hash": "adedbb755d7ea7f709cd9c4e93c3a3a74962e8a69bbc83e03ca1d90b70b1c90b",
+    "path": "upload:fruit.md",
+    "size": 68,
+    "uploaded": true
+   },
+   {
+    "chunks": 1,
+    "hash": "d66ccc5b992f5c343b6d4c6a7c26bd4be495330f330dad23fc44de11635338b7",
+    "path": "upload:pay.txt",
+    "size": 39,
+    "uploaded": true
+   },
+   {
+    "chunks": 1,
+    "hash": "fbbb9bd819ae24c982d7a8a557fb4a3078f86d86794ceba73949c9b7a4133e24",
+    "path": "upload:plain.txt",
+    "size": 65,
+    "uploaded": true
+   },
+   {
+    "chunks": 6,
+    "hash": "ce27905df39aefcef39b4f08e7f23c3dad1c506c20ec8fbea997a663836b0b70",
+    "path": "upload:turbines.txt",
+    "size": 4546,
+    "uploaded": true
+   }
+  ],
+  "documents": [
+   "upload:cr\u00e8me.txt",
+   "upload:fruit.md",
+   "upload:pay.txt",
+   "upload:plain.txt",
+   "upload:turbines.txt"
+  ],
+  "embedding_model": "bge-small-en-v1.5",
+  "embedding_model_mixed": false,
+  "exists": true,
+  "is_confined_to_nothing": true,
+  "queries": [
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9165,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.8523,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 0.8111,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     }
+    ],
+    "q": [
+     "turbine",
+     4,
+     false,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.8723,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.8323,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.8311,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.8137,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     }
+    ],
+    "q": [
+     "turbine gearbox",
+     5,
+     true,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.8819,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.8815,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.7639,
+      "source": "upload:cr\u00e8me.txt",
+      "text": "Cr\u00e8me br\u00fbl\u00e9e notes from the river caf\u00e9.\u2028A second line after a line separator."
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.7627,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.7569,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 0.7174,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     }
+    ],
+    "q": [
+     "apple river notes",
+     6,
+     true,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9709,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.9078,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 0.9003,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.811,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.6302,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "apple river notes",
+     6,
+     false,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 1.0,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     }
+    ],
+    "q": [
+     "banana cherry",
+     4,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 1.0,
+      "source": "upload:pay.txt",
+      "text": "Salary review notes for the river team."
+     }
+    ],
+    "q": [
+     "salary river",
+     3,
+     false,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.9691,
+      "source": "upload:cr\u00e8me.txt",
+      "text": "Cr\u00e8me br\u00fbl\u00e9e notes from the river caf\u00e9.\u2028A second line after a line separator."
+     }
+    ],
+    "q": [
+     "notes",
+     8,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "why did that fail",
+     3,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "",
+     3,
+     false,
+     false
+    ]
+   }
+  ],
+  "roots": [],
+  "stats": {
+   "chunks_bad_lines": 0,
+   "corrupt": false,
+   "created": 1791541875.1185007,
+   "has_vectors": true,
+   "n_chunks": 10,
+   "n_docs": 5,
+   "n_missing": 0,
+   "n_roots": 0,
+   "name": "kb",
+   "vector_degrade_reason": null,
+   "vector_dim": 8
+  },
+  "vector_dim": 8
+ },
+ "lexical": {
+  "docs": [
+   {
+    "chunks": 1,
+    "hash": "ed675283df7d5f54a5a6bf877976b36727e05214122bce4b7100d0495e31cd29",
+    "path": "upload:cr\u00e8me.txt",
+    "size": 83,
+    "uploaded": true
+   },
+   {
+    "chunks": 1,
+    "hash": "adedbb755d7ea7f709cd9c4e93c3a3a74962e8a69bbc83e03ca1d90b70b1c90b",
+    "path": "upload:fruit.md",
+    "size": 68,
+    "uploaded": true
+   },
+   {
+    "chunks": 1,
+    "hash": "d66ccc5b992f5c343b6d4c6a7c26bd4be495330f330dad23fc44de11635338b7",
+    "path": "upload:pay.txt",
+    "size": 39,
+    "uploaded": true
+   },
+   {
+    "chunks": 1,
+    "hash": "fbbb9bd819ae24c982d7a8a557fb4a3078f86d86794ceba73949c9b7a4133e24",
+    "path": "upload:plain.txt",
+    "size": 65,
+    "uploaded": true
+   },
+   {
+    "chunks": 6,
+    "hash": "ce27905df39aefcef39b4f08e7f23c3dad1c506c20ec8fbea997a663836b0b70",
+    "path": "upload:turbines.txt",
+    "size": 4546,
+    "uploaded": true
+   }
+  ],
+  "documents": [
+   "upload:cr\u00e8me.txt",
+   "upload:fruit.md",
+   "upload:pay.txt",
+   "upload:plain.txt",
+   "upload:turbines.txt"
+  ],
+  "embedding_model": null,
+  "embedding_model_mixed": false,
+  "exists": true,
+  "is_confined_to_nothing": true,
+  "queries": [
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9165,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.8523,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 0.8111,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     }
+    ],
+    "q": [
+     "turbine",
+     4,
+     false,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.9427,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.9122,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.8998,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.8431,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "turbine gearbox",
+     5,
+     true,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9709,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.9078,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 0.9003,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.811,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.6302,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "apple river notes",
+     6,
+     true,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9709,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.9078,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 0.9003,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.811,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.6302,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "apple river notes",
+     6,
+     false,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 1.0,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     }
+    ],
+    "q": [
+     "banana cherry",
+     4,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 1.0,
+      "source": "upload:pay.txt",
+      "text": "Salary review notes for the river team."
+     }
+    ],
+    "q": [
+     "salary river",
+     3,
+     false,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 1.0,
+      "source": "upload:pay.txt",
+      "text": "Salary review notes for the river team."
+     },
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 0.962,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.9382,
+      "source": "upload:cr\u00e8me.txt",
+      "text": "Cr\u00e8me br\u00fbl\u00e9e notes from the river caf\u00e9.\u2028A second line after a line separator."
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.8463,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.8339,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.7012,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.6885,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 0.4996,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     }
+    ],
+    "q": [
+     "notes",
+     8,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "why did that fail",
+     3,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "",
+     3,
+     false,
+     false
+    ]
+   }
+  ],
+  "roots": [],
+  "stats": {
+   "chunks_bad_lines": 0,
+   "corrupt": false,
+   "created": 1791541875.126798,
+   "has_vectors": false,
+   "n_chunks": 10,
+   "n_docs": 5,
+   "n_missing": 0,
+   "n_roots": 0,
+   "name": "lexical",
+   "vector_degrade_reason": null,
+   "vector_dim": null
+  },
+  "vector_dim": null
+ },
+ "mixed": {
+  "docs": [
+   {
+    "chunks": 1,
+    "hash": "adedbb755d7ea7f709cd9c4e93c3a3a74962e8a69bbc83e03ca1d90b70b1c90b",
+    "path": "upload:fruit.md",
+    "size": 68,
+    "uploaded": true
+   },
+   {
+    "chunks": 6,
+    "hash": "ce27905df39aefcef39b4f08e7f23c3dad1c506c20ec8fbea997a663836b0b70",
+    "path": "upload:turbines.txt",
+    "size": 4546,
+    "uploaded": true
+   }
+  ],
+  "documents": [
+   "upload:fruit.md",
+   "upload:turbines.txt"
+  ],
+  "embedding_model": "bge-small-en-v1.5",
+  "embedding_model_mixed": true,
+  "exists": true,
+  "is_confined_to_nothing": true,
+  "queries": [
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9322,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.8772,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 0.8385,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     }
+    ],
+    "q": [
+     "turbine",
+     4,
+     false,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.878,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.8369,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.8358,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.8205,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     }
+    ],
+    "q": [
+     "turbine gearbox",
+     5,
+     true,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.9725,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.8948,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.8436,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 0.6624,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.5433,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "apple river notes",
+     6,
+     true,
+     false
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 1.0,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.9807,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.9221,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.8878,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.6631,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "apple river notes",
+     6,
+     false,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 1.0,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     }
+    ],
+    "q": [
+     "banana cherry",
+     4,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "salary river",
+     3,
+     false,
+     true
+    ]
+   },
+   {
+    "hits": [
+     {
+      "format": "text",
+      "pos": 3,
+      "score": 0.9736,
+      "source": "upload:turbines.txt",
+      "text": "Section 2. Inspection log for unit 2. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 9,
+      "score": 0.9531,
+      "source": "upload:turbines.txt",
+      "text": "Section 5. Inspection log for unit 5. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "markdown",
+      "pos": 1,
+      "score": 0.9364,
+      "source": "upload:fruit.md",
+      "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes."
+     },
+     {
+      "format": "text",
+      "pos": 7,
+      "score": 0.7527,
+      "source": "upload:turbines.txt",
+      "text": "Section 4. Inspection log for unit 4. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 1,
+      "score": 0.7323,
+      "source": "upload:turbines.txt",
+      "text": "Section 1. Inspection log for unit 1. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. River notes describe the cooling loop. An apple orchard grows nearby. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 5,
+      "score": 0.5181,
+      "source": "upload:turbines.txt",
+      "text": "Section 3. Inspection log for unit 3. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. The gearbox hums. The gearbox hums. The gearbox hums. River notes describe the cooling loop. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. "
+     },
+     {
+      "format": "text",
+      "pos": 11,
+      "score": 0.4719,
+      "source": "upload:turbines.txt",
+      "text": "Section 6. Inspection log for unit 6. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The turbine spins. The gearbox hums. River notes describe the cooling loop. An apple orchard grows nearby. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover. Filler text about maintenance windows and shift handover."
+     }
+    ],
+    "q": [
+     "notes",
+     8,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "why did that fail",
+     3,
+     true,
+     true
+    ]
+   },
+   {
+    "hits": [],
+    "q": [
+     "",
+     3,
+     false,
+     false
+    ]
+   }
+  ],
+  "roots": [],
+  "stats": {
+   "chunks_bad_lines": 0,
+   "corrupt": false,
+   "created": 1791541875.133245,
+   "has_vectors": true,
+   "n_chunks": 7,
+   "n_docs": 2,
+   "n_missing": 0,
+   "n_roots": 0,
+   "name": "mixed",
+   "vector_degrade_reason": null,
+   "vector_dim": 8
+  },
+  "vector_dim": 8
+ }
+}

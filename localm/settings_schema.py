@@ -250,10 +250,9 @@ CORE_FIELDS: list = [
                  "--draft-tokens N` measures it.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=3),
     SettingField("spec_source", Widget.SELECT, "Speculative drafting",
-                 "Where draft tokens come from. mtp = the model's own MTP head; "
-                 "ngram = repeats of earlier text in the chat, no second model; "
-                 "off = none. Inherit follows the MTP toggle. Run `localm "
-                 "bench-spec <model>` to check yours.",
+                 "Where drafts come from: mtp (the model's MTP head), ngram "
+                 "(repeats of earlier text, no second model) or off. Inherit "
+                 "follows the MTP toggle. Check: `localm bench-spec <model>`.",
                  group="Engine", applies=Applies.NEXT_LOAD,
                  options=["", "off", "mtp", "ngram"]),
     SettingField("spec_draft_tokens", Widget.NUMBER, "N-gram draft tokens",
@@ -386,7 +385,8 @@ CORE_FIELDS: list = [
                  "HuggingFace-format model.",
                  group="Timeouts", min=1, step=1000),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
-                 "Subfolder levels `localm add <dir>` scans for models.",
+                 "Folder levels `localm add <dir>` and the models-folder scan search "
+                 "for GGUF files and HuggingFace model folders.",
                  group="Models", min=1, max=10, step=1),
     # ---- Chat (the DEFAULTS every chat starts from) ----
     # The GUI's per-chat "parameters" drawer OVERRIDES any of these for a single

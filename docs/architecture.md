@@ -87,11 +87,15 @@ The `python-pr-gate` job in `.github/workflows/ci.yml`
 (`scripts/run_affected_tests.py`) runs the `--depth 1` selection on ubuntu
 after the lockfile check, the hygiene gate and ruff. It never runs the
 whole suite: when the depth-1 selection is wider than a quarter of the
-suite it runs the depth-0 selection instead, and it fails when that is wide
-too, when the selector fails, prints nothing, names a path that is not an
-existing test file, or cannot resolve the base ref it diffs from. A change
-that fails the gate that way needs the two-platform matrix with coverage,
-which runs on a PR carrying the `full-ci` label in place of the gate.
+suite it runs the depth-0 selection instead, and a depth-0 selection that is
+still wider (a change to a module most tests import) runs in full, with the
+job summary saying so. It fails when the selection is every test file (a
+`tests/conftest.py` or dependency-lock change), when a depth-0 retry selects
+nothing or fails, when the selector fails, prints nothing, names a path that
+is not an existing test file, or cannot resolve the base ref it diffs from. A
+change that fails the gate that way needs the two-platform matrix with
+coverage, which runs on a PR carrying the `full-ci` label in place of the
+gate.
 
 `merge-policy` (`scripts/merge_policy.py`) is the one check that sums the
 others up. It runs on every pull request once `python-pr-gate`, `lint`,

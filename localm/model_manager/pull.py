@@ -1440,6 +1440,9 @@ def _pull_gguf_file(
                 elif _mm.gguf_embedding_signal(dest):
                     console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
                     reg_type = "embedding"
+                elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
+                    console.print(f"[yellow]{_mm.gguf_chat_refusal(gguf_meta.get('architecture'))}[/yellow]")
+                    reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
             mmproj_path = _mmproj_for_registration(
                 reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
@@ -1595,6 +1598,9 @@ def _pull_gguf_file(
             elif _mm.gguf_embedding_signal(base_dir / filename):
                 console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
                 reg_type = "embedding"
+            elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
+                console.print(f"[yellow]{_mm.gguf_chat_refusal(gguf_meta.get('architecture'))}[/yellow]")
+                reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
         mmproj_path = _mmproj_for_registration(
             reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
         _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",
