@@ -2743,18 +2743,108 @@ class LlamaCpp:
         cache is probed first; when it cannot drop a rejected draft the source
         is created unusable with status "rewind-unsupported" and no draft
         model is loaded. Otherwise the draft source loads its draft model
-        (``_load_draft_model``)."""
+        (``_load_draft_model``) and its step costs are measured
+        (``_measure_draft_step_costs``); a draft model that cannot beat plain
+        decoding even with every draft accepted is freed with status
+        "draft-cannot-pay"."""
         from localm.debuglog import logger
         can_drop = self._cache_can_drop_a_speculative_token()
         if self._spec_source_name == SPEC_DRAFT and can_drop:
             self._load_draft_model(spec_draft_model, n_threads, verbose,
                                    on_gpu=spec_draft_gpu)
+            source = self._draft_source()
+            if source.usable and source.loaded:
+                quiet = _quiet_stderr if not verbose else contextlib.nullcontext
+                with quiet():
+                    costs = self._measure_draft_step_costs(source)
+                    if costs is not None and not costs.can_pay(source.draft_max):
+                        source.close()
+                if costs is None:
+                    logger.info("draft-model step costs could not be measured; "
+                                "drafting at most %d tokens per step",
+                                min(source.draft_max, 2))
+                else:
+                    source.costs = costs
+                    logger.info("draft-model step costs: %s", costs.report())
+                    if not costs.can_pay(source.draft_max):
+                        source.disable("draft-cannot-pay")
         source = self._draft_source()
         if source.usable and not can_drop:
             source.usable = False
             source.status = "rewind-unsupported"
         logger.info("%s: status=%s draft_max=%d", source.label,
                     source.status, self._spec_draft_max)
+
+    def _time_decode(self, ctx, prefix: List[int], tokens: List[int],
+                     all_logits: bool, warm: int, reps: int) -> float:
+        """Median seconds of decoding *tokens* after *prefix* on *ctx*, over
+        *reps* timed decodes after *warm* untimed ones. Each decode is waited
+        for by reading its last logits row and then removed from the cache.
+        Leaves the cache empty. Raises RuntimeError when a decode fails."""
+        mem = api.llama_get_memory(ctx)
+        times: List[float] = []
+
+        def decode(toks: List[int], start: int, every_row: bool) -> None:
+            batch = self._create_batch(toks, start, logits_at_last_only=not every_row)
+            try:
+                if api.llama_decode(ctx, batch) != 0:
+                    raise RuntimeError("decode failed")
+            finally:
+                api.llama_batch_free(batch)
+
+        api.llama_memory_clear(mem, True)
+        decode(prefix, 0, False)
+        start = len(prefix)
+        try:
+            for i in range(warm + reps):
+                t0 = self._clock()
+                decode(tokens, start, all_logits)
+                api.llama_get_logits_ith(ctx, -1)
+                if i >= warm:
+                    times.append(self._clock() - t0)
+                if not api.llama_memory_seq_rm(mem, 0, start, -1):
+                    api.llama_memory_clear(mem, True)
+                    decode(prefix, 0, False)
+        finally:
+            api.llama_memory_clear(mem, True)
+        return statistics.median(times)
+
+    def _measure_draft_step_costs(self, source):
+        """The ``_draftmodel.StepCosts`` of this load: the target's one-token
+        decode and its verification batches up to ``source.draft_max + 1``
+        tokens, and the draft model's one-token and batched decodes, each
+        after a short shared prefix of tokens spread over the vocabulary. The
+        main and draft caches are left empty. None when a decode fails."""
+        from localm.debuglog import logger
+
+        from ._draftmodel import VERIFY_MEASURE_SIZES, StepCosts
+        try:
+            vocab = api.llama_model_get_vocab(self._model_ptr)
+            n_vocab = int(api.llama_vocab_n_tokens(vocab))
+            if n_vocab < 256:
+                return None
+
+            def spread(n: int, offset: int) -> List[int]:
+                return [16 + (offset + 7919 * i) % (n_vocab - 32) for i in range(n)]
+
+            prefix = spread(32, 1)
+            top = source.draft_max + 1
+            sizes = sorted({n for n in VERIFY_MEASURE_SIZES if n < top} | {top}) if top >= 2 else []
+            target = self._time_decode(self._ctx_ptr, prefix, spread(1, 5), False, 2, 5)
+            verify = {n: self._time_decode(self._ctx_ptr, prefix, spread(n, 5), True, 2, 3)
+                      for n in sizes}
+            draft = self._time_decode(source._ctx, prefix, spread(1, 5), False, 2, 5)
+            batch = 64
+            draft_prefill = self._time_decode(source._ctx, prefix, spread(batch, 9),
+                                              False, 1, 3) / batch
+            source._reset_cache()
+            return StepCosts(target=target, verify=verify, draft=draft,
+                             draft_prefill=draft_prefill)
+        except Exception as exc:
+            logger.debug("draft-model step-cost measurement failed (%s)",
+                         type(exc).__name__)
+            source._reset_cache()
+            return None
 
     def _load_draft_model(self, path: Optional[str], n_threads: Optional[int],
                           verbose: bool, on_gpu: bool = True) -> None:
@@ -2771,8 +2861,11 @@ class LlamaCpp:
         "draft-vocab-mismatch", "draft-rewind-unsupported" (a draft with
         recurrent layers) or "draft-context-refused". A load the cancel event
         stopped frees everything this instance loaded and raises
-        ModelLoadCancelled."""
+        ModelLoadCancelled. Unless *verbose*, llama.cpp's output while the draft
+        context is created or anything is freed goes where ``_quiet_stderr``
+        sends it."""
         from localm.debuglog import logger
+        quiet = _quiet_stderr if not verbose else contextlib.nullcontext
 
         from ._draftmodel import DraftModelSource, draft_vocab_mismatch, native_vocab_view
         source = DraftModelSource(self, None, self._spec_draft_max or 1, n_threads)
@@ -2805,7 +2898,8 @@ class LlamaCpp:
                 detail = captured.tail()
         if not model:
             if self._cancel_event is not None and self._cancel_event.is_set():
-                self._free_native()
+                with quiet():
+                    self._free_native()
                 from localm.inference.backends.base import ModelLoadCancelled
                 raise ModelLoadCancelled(f"Model load aborted (superseded): {path}")
             logger.warning("draft model failed to load: %s %s", os.path.basename(path), detail)
@@ -2817,8 +2911,9 @@ class LlamaCpp:
         if mismatch:
             logger.warning("draft model %s does not share this model's vocabulary (%s)",
                            os.path.basename(path), mismatch)
+            with quiet():
+                source.close()
             source.disable("draft-vocab-mismatch")
-            source.close()
             return
         try:
             draft_recurrent = api.has_hybrid_api() and (
@@ -2826,13 +2921,16 @@ class LlamaCpp:
         except Exception:
             draft_recurrent = True
         if draft_recurrent:
+            with quiet():
+                source.close()
             source.disable("draft-rewind-unsupported")
-            source.close()
             return
-        failure = source.create_context(self._ctx_capacity, self._offload_kqv and on_gpu)
+        with quiet():
+            failure = source.create_context(self._ctx_capacity, self._offload_kqv and on_gpu)
+            if failure:
+                source.close()
         if failure:
             source.disable(failure)
-            source.close()
         elif not on_gpu:
             source.status = "ok-cpu"
 

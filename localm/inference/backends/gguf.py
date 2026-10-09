@@ -468,9 +468,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         if (getattr(self, "spec_source", None) == "draft"
                 and not self._decide_draft_placement()):
             from localm.debuglog import logger as _dbg
-            _dbg.warning("draft model %s does not fit in VRAM beside %s; it runs "
-                         "on the CPU", Path(str(self.spec_draft_model)).name,
-                         Path(self.model_path).name)
+            if self.n_gpu_layers <= 0:
+                _dbg.info("draft model %s runs on the CPU with %s",
+                          Path(str(self.spec_draft_model)).name, Path(self.model_path).name)
+            else:
+                _dbg.warning("draft model %s does not fit in VRAM beside %s; it runs "
+                             "on the CPU", Path(str(self.spec_draft_model)).name,
+                             Path(self.model_path).name)
         # Resolve the effective GPU-layer count once, so _check_vram and
         # _load_native both read the same value.
         self.effective_gpu_layers = self._effective_gpu_layers()

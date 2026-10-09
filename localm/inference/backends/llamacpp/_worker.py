@@ -62,7 +62,7 @@ class GgufWorker(VramSizingMixin):
         self.spec_source = spec_source             # None = follow mtp_enabled
         self.spec_draft_tokens = spec_draft_tokens # None = the source's default
         self.spec_draft_model = spec_draft_model   # draft GGUF path for the draft source
-        self.draft_model_on_gpu = spec_draft_gpu   # where the parent placed the draft model
+        self._draft_gpu = spec_draft_gpu           # where the parent placed the draft model
         # Already resolved by the parent - VramSizingMixin's _check_context_fit
         # reads this in preference to n_gpu_layers, matching GgufBackend's shape.
         self.effective_gpu_layers = n_gpu_layers
@@ -165,6 +165,16 @@ class GgufWorker(VramSizingMixin):
         report = getattr(self._llm, "speculation_report", None)
         return report() if callable(report) else None
 
+    @property
+    def draft_model_on_gpu(self) -> bool:
+        """Whether a draft model is on the GPU for the context-growth charge:
+        the parent's placement, and once the model is loaded, only while its
+        draft source still holds a loaded draft model."""
+        if not self._draft_gpu:
+            return False
+        source = getattr(self._llm, "_source", None) if self._llm is not None else None
+        return source is None or bool(getattr(source, "loaded", True))
+
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
@@ -241,7 +251,7 @@ class GgufWorker(VramSizingMixin):
                if self.spec_draft_tokens is not None else {}),
             **({"spec_draft_model": self.spec_draft_model}
                if self.spec_draft_model is not None else {}),
-            **({"spec_draft_gpu": False} if not self.draft_model_on_gpu else {}),
+            **({"spec_draft_gpu": False} if not self._draft_gpu else {}),
         )
         self._loaded = True
         return {

@@ -240,9 +240,10 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
         usage = engine.speculation_usage() or {}
         status = usage.get("reason")
         usable = source == "off" or usage.get("state") not in (None, "unavailable")
-        if status == "draft-on-cpu":
-            console.print("[yellow]The draft model does not fit in VRAM beside "
-                          "the model, so it runs on the CPU.[/yellow]")
+        if source == "draft" and engine.draft_model_on_gpu() is False:
+            console.print("[yellow]The draft model runs on the CPU (the model "
+                          "runs on the CPU, or the draft model does not fit in "
+                          "VRAM beside it).[/yellow]")
         if not usable:
             return ([], False, status, engine.gpu_placement, (0, 0), [], "", [])
         per_prompt = []

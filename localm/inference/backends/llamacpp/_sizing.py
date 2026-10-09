@@ -724,8 +724,8 @@ class VramSizingMixin:
         ``gguf_recurrent_state_bytes`` is one copy of it; the context allocates
         ``1 + n_rs_seq`` copies. ``n_rs_seq`` is 0 without speculation; with
         MTP enabled it is ``llama.mtp_rs_seq`` of the draft-token count, and
-        with the ngram draft source ``_ngram.ngram_rs_seq`` of the n-gram draft
-        cap for a recurrent model (the same calls LlamaCpp makes when it
+        with the ngram or draft source ``_ngram.ngram_rs_seq`` of that source's
+        draft cap for a recurrent model (the same calls LlamaCpp makes when it
         creates the context). Never raises: a probe failure charges 0.
         Memoised per instance."""
         cached = getattr(self, "_recurrent_state_vram_bytes_cached", None)
@@ -738,11 +738,16 @@ class VramSizingMixin:
                 Path(self.model_path), _parsed=self._gguf_parsed_tensor_entries())
             if per_copy:
                 n_rs_seq = 0
-                if getattr(self, "spec_source", None) in ("ngram", "draft"):
+                source = getattr(self, "spec_source", None)
+                if source in ("ngram", "draft"):
+                    from localm.inference.backends.llamacpp._draftmodel import (
+                        DRAFT_MODEL_DRAFT_TOKENS_DEFAULT)
                     from localm.inference.backends.llamacpp._ngram import (
-                        ngram_draft_cap, ngram_rs_seq)
+                        NGRAM_DRAFT_TOKENS_DEFAULT, ngram_draft_cap, ngram_rs_seq)
                     n_rs_seq = ngram_rs_seq(0, ngram_draft_cap(
-                        getattr(self, "spec_draft_tokens", None), True))
+                        getattr(self, "spec_draft_tokens", None), True,
+                        default=(NGRAM_DRAFT_TOKENS_DEFAULT if source == "ngram"
+                                 else DRAFT_MODEL_DRAFT_TOKENS_DEFAULT)))
                 elif getattr(self, "mtp_enabled", False):
                     from localm.inference.backends.llamacpp.llama import (
                         MTP_DRAFT_TOKENS_DEFAULT, mtp_rs_seq)
@@ -761,7 +766,8 @@ class VramSizingMixin:
     def _draft_model_charge_bytes(self) -> int:
         """VRAM the draft source's second model needs on the GPU for THIS load,
         0 unless ``spec_source`` is "draft" and ``spec_draft_model`` is a
-        readable GGUF.
+        readable GGUF that ``_draft_model_rejected_by_metadata`` does not
+        reject.
 
         The draft model's file size (its weights), its KV cache for
         ``self.n_ctx`` tokens, the logits buffer of a context whose batch is
@@ -782,7 +788,8 @@ class VramSizingMixin:
                 _gguf_split_layout_meta, gguf_kv_bytes_per_token)
             raw = getattr(self, "spec_draft_model", None)
             path = Path(raw) if raw else None
-            if path is not None and path.is_file():
+            if (path is not None and path.is_file()
+                    and not self._draft_model_rejected_by_metadata(path)):
                 kv_per_token = int(gguf_kv_bytes_per_token(path))
                 meta = _gguf_split_layout_meta(path)
                 n_vocab = meta[1] if meta else 0
@@ -798,6 +805,30 @@ class VramSizingMixin:
             charge = 0
         self._draft_model_charge_bytes_cached = charge
         return charge
+
+    def _draft_model_rejected_by_metadata(self, path: Path) -> bool:
+        """Whether *path*'s GGUF metadata already shows the load would reject it
+        as this model's draft model: a vocabulary ``draft_vocab_mismatch``
+        refuses against this model's, or recurrent-state layers. False when
+        either file's metadata cannot be read. Never raises."""
+        try:
+            from localm.inference.backends.llamacpp._draftmodel import (
+                draft_vocab_mismatch, gguf_vocab_view)
+            from localm.model_manager.gguf import (
+                gguf_recurrent_state_bytes, gguf_vocab_signature)
+            if gguf_recurrent_state_bytes(path) > 0:
+                return True
+            target = gguf_vocab_signature(Path(self.model_path))
+            draft = gguf_vocab_signature(path)
+            if target is None or draft is None:
+                return False
+            return draft_vocab_mismatch(gguf_vocab_view(target),
+                                        gguf_vocab_view(draft)) is not None
+        except Exception as exc:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("draft-model metadata check failed (%s); charging it",
+                       type(exc).__name__)
+            return False
 
     def _draft_model_vram_bytes(self) -> int:
         """VRAM the draft model takes for THIS load: ``_draft_model_charge_bytes``

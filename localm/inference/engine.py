@@ -464,6 +464,12 @@ class Engine:
         usage = getattr(self._backend, "last_mtp_usage", None)
         return usage if isinstance(usage, dict) else None
 
+    def draft_model_on_gpu(self) -> Optional[bool]:
+        """Where the loaded backend placed its draft model: True on the GPU,
+        False on the CPU, None when the backend has no draft placement."""
+        placed = getattr(self._backend, "draft_model_on_gpu", None)
+        return placed if isinstance(placed, bool) else None
+
     def speculation_usage(self) -> Optional[dict]:
         """Speculative-drafting figures for the reply that just finished, for
         any draft source (see GgufBackend.last_speculation_usage), or None when

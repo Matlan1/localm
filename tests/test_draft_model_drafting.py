@@ -139,6 +139,13 @@ class DraftFake(FakeNative):
         return super().seq_rm(ctx, p0)
 
 
+def _flat_costs():
+    """Step costs under which every draft length up to the cap is chosen."""
+    from localm.inference.backends.llamacpp._draftmodel import StepCosts
+    return StepCosts(target=1.0, verify={n: 1.0 for n in (2, 3, 5, 9, 17)}, draft=0.0,
+                     draft_prefill=0.0)
+
+
 def _llama(draft_max=4):
     llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
     llm._tokenizer.is_eog.side_effect = lambda t: t == EOG
@@ -151,6 +158,7 @@ def _llama(draft_max=4):
     src._ctx = ctypes.c_void_p(6)
     src._ctx_capacity = 4096
     src._ctx_batch = 3
+    src.costs = _flat_costs()
     llm._source = src
     return llm
 
@@ -360,7 +368,7 @@ def test_the_draft_model_is_freed_before_the_target_model():
 
 
 @pytest.mark.parametrize("configured,recurrent,cap", [
-    (None, False, 2), (6, False, 6), (None, True, 2), (8, True, 4)])
+    (None, False, 8), (6, False, 6), (None, True, 4), (2, True, 2)])
 def test_the_draft_source_takes_its_own_default_and_the_recurrent_cap(configured, recurrent, cap):
     from localm.inference.backends.llamacpp import llama as llama_mod
     from localm.inference.backends.llamacpp._draftmodel import DRAFT_MODEL_DRAFT_TOKENS_DEFAULT
@@ -373,9 +381,159 @@ def test_the_draft_source_takes_its_own_default_and_the_recurrent_cap(configured
         api.llama_model_is_recurrent.return_value = recurrent
         api.llama_model_is_hybrid.return_value = False
         llm._apply_initial_spec_params(cp, configured)
-    assert DRAFT_MODEL_DRAFT_TOKENS_DEFAULT == 2
+    assert DRAFT_MODEL_DRAFT_TOKENS_DEFAULT == 8
     assert llm._spec_draft_max == cap
     assert cp.n_rs_seq == cap
+
+
+# --------------------------------------------------------------------------- #
+#  Measured step costs and the draft length                                   #
+# --------------------------------------------------------------------------- #
+
+def _costs(target=1.0, verify=None, draft=0.1, draft_prefill=0.001):
+    from localm.inference.backends.llamacpp._draftmodel import StepCosts
+    return StepCosts(target=target, verify=verify or {2: 1.2, 3: 1.4, 5: 1.8, 9: 2.6},
+                     draft=draft, draft_prefill=draft_prefill)
+
+
+def test_verify_cost_interpolates_and_extends_the_measured_sizes():
+    c = _costs()
+    assert c.verify_cost(1) == 1.0 and c.verify_cost(3) == pytest.approx(1.4)
+    assert c.verify_cost(4) == pytest.approx(1.6)
+    assert c.verify_cost(7) == pytest.approx(2.2)
+    assert c.verify_cost(11) == pytest.approx(3.0)
+    assert c.step_cost(0) == 1.0 and c.step_cost(3) == pytest.approx(0.3 + 1.6)
+
+
+@pytest.mark.parametrize("p,best", [(0.0, 0), (0.3, 0), (0.5, 1), (0.8, 3), (1.0, 8)])
+def test_the_best_length_follows_the_acceptance_and_the_costs(p, best):
+    assert _costs().best_length(p, 8) == best
+
+
+def test_expected_tokens_is_the_geometric_sum():
+    from localm.inference.backends.llamacpp._draftmodel import expected_tokens
+    assert expected_tokens(0.5, 2) == pytest.approx(1.75)
+    assert expected_tokens(1.0, 4) == 5.0
+    assert expected_tokens(0.0, 4) == 1.0
+
+
+def test_a_draft_slower_than_the_target_cannot_pay():
+    cpu_draft = _costs(target=0.008, verify={2: 0.0103, 3: 0.0127, 5: 0.0163},
+                       draft=0.025)
+    gpu_draft = _costs(target=0.008, verify={2: 0.0103, 3: 0.0127, 5: 0.0163},
+                       draft=0.0032)
+    assert cpu_draft.can_pay(4) is False and cpu_draft.best_length(1.0, 4) == 0
+    assert gpu_draft.can_pay(4) is True
+
+
+def _measured_llama(draft_max=8, costs=None):
+    llm = _llama(draft_max)
+    llm._source.costs = costs if costs is not None else _costs()
+    return llm
+
+
+def test_acceptance_starts_at_the_prior_and_follows_the_verify_results():
+    llm = _measured_llama()
+    src = llm._source
+    assert src.acceptance() == pytest.approx(0.6)
+    for _ in range(10):
+        src.on_verify(4, 4)
+    high = src.acceptance()
+    for _ in range(10):
+        src.on_verify(4, 0)
+    assert high > 0.9 and src.acceptance() < high
+
+
+def test_the_draft_length_rises_falls_and_recovers_with_acceptance():
+    llm = _measured_llama()
+    src = llm._source
+    llm._cached_tokens = list(range(20))
+    src._tokens = list(range(20))
+    for _ in range(20):
+        src.on_verify(8, 8)
+    assert src.budget(20, None) == 8
+    lengths = []
+    for i in range(120):
+        k = src.budget(20, None)
+        lengths.append(k)
+        if k and i < 40:
+            src.on_verify(k, 0)
+    assert 0 in lengths[:40]
+    assert lengths[-1] > 0
+
+
+def test_without_measured_costs_a_step_drafts_at_most_two():
+    llm = _llama(8)
+    llm._source.costs = None
+    assert llm._source.budget(10, None) == 2
+    assert llm._source.budget(10, 1) == 1
+
+
+def test_a_long_catch_up_on_a_slow_draft_skips_drafting_for_the_reply():
+    slow_prefill = _costs(draft_prefill=0.5)
+    llm = _measured_llama(costs=slow_prefill)
+    src = llm._source
+    for _ in range(20):
+        src.on_verify(8, 8)
+    llm._cached_tokens = list(range(400))
+    assert src.budget(400, 100) == 0
+    src._tokens = list(range(396))
+    assert src.budget(400, 100) > 0
+    assert src._valid == 396
+
+
+@pytest.mark.parametrize("wrong", [(), (8, 9, 14), tuple(range(7, 40, 3))])
+def test_adaptive_draft_lengths_keep_the_output_of_the_target_alone(wrong):
+    llm = _measured_llama()
+    fake = DraftFake(llm, wrong_draft_positions=wrong)
+    tokens, _ = _run(llm, fake, max_new_tokens=24)
+    assert tokens == _reference(PROMPT, 24)
+    assert llm._source.steps > 0
+
+
+def test_the_step_costs_are_measured_on_both_contexts():
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    llm = _llama(4)
+    fake = DraftFake(llm, main_cost=1.0, row_cost=0.1, draft_cost=0.2)
+    with patch.object(llama_mod, "api") as api:
+        fake.install(api)
+        api.llama_vocab_n_tokens.return_value = 1000
+        costs = llm._measure_draft_step_costs(llm._source)
+    assert costs.target == pytest.approx(1.0)
+    assert sorted(costs.verify) == [2, 3, 5]
+    assert costs.verify[5] == pytest.approx(1.4)
+    assert costs.draft == pytest.approx(0.2)
+    assert costs.draft_prefill == pytest.approx(0.2 / 64)
+    assert fake.main_cache == {} and fake.draft_cache == {}
+    assert llm._source._tokens == []
+
+
+def test_a_failed_measurement_leaves_no_costs():
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    llm = _llama(4)
+    fake = DraftFake(llm, fail_draft_decode=lambda index, positions: True)
+    with patch.object(llama_mod, "api") as api:
+        fake.install(api)
+        api.llama_vocab_n_tokens.return_value = 1000
+        assert llm._measure_draft_step_costs(llm._source) is None
+
+
+@pytest.mark.parametrize("costs,status,kept", [
+    ("pays", "ok", True), ("cannot", "draft-cannot-pay", False), (None, "ok", None)])
+def test_a_draft_model_that_cannot_pay_is_freed_at_load(costs, status, kept):
+    llm = _llama(4)
+    src = llm._source
+    src.costs = None
+    measured = {"pays": _costs(), "cannot": _costs(draft=5.0), None: None}[costs]
+    llm._cache_can_drop_a_speculative_token = lambda: True
+    llm._load_draft_model = lambda *a, **kw: None
+    llm._measure_draft_step_costs = lambda source: measured
+    freed = []
+    src.close = lambda: freed.append(True)
+    llm._set_up_spec_source("d.gguf", None, True, True)
+    assert (src.status, src.usable) == (status, costs != "cannot")
+    assert src.costs is measured
+    assert bool(freed) is (costs == "cannot")
 
 
 # --------------------------------------------------------------------------- #
@@ -454,6 +612,57 @@ def test_the_main_cache_is_probed_before_a_draft_model_is_loaded(source, can_dro
     assert src.name == source and src.status == status and src.usable is (status == "ok")
     if source == "draft" and not can_drop:
         assert src._model is None and src._ctx is None
+
+
+@pytest.mark.parametrize("case", ["ok", "context", "vocab", "cancel"])
+def test_native_draft_context_and_free_calls_run_with_stderr_quieted(tmp_path, case):
+    import contextlib
+    import threading
+
+    from localm.inference.backends.base import ModelLoadCancelled
+    llm, path, llama_mod = _loading_llama(tmp_path)
+    quieted = []
+    depth = {"n": 0}
+
+    @contextlib.contextmanager
+    def quiet():
+        depth["n"] += 1
+        try:
+            yield
+        finally:
+            depth["n"] -= 1
+
+    def record(name, result=None):
+        def call(*a, **kw):
+            quieted.append((name, depth["n"] > 0))
+            return result
+        return call
+
+    if case == "cancel":
+        llm._cancel_event = threading.Event()
+        llm._cancel_event.set()
+    with patch.object(llama_mod, "api") as api, \
+         patch.object(llama_mod, "set_use_mmap"), \
+         patch.object(llama_mod, "_quiet_stderr", quiet), \
+         patch("localm.discover.apply_gpu_split", return_value=None):
+        _view_api(api, draft_type=3 if case == "vocab" else 2)
+        api.llama_load_model_from_file.return_value = (
+            None if case == "cancel" else ctypes.c_void_p(5))
+        api.has_hybrid_api.return_value = False
+        api.llama_context_default_params.side_effect = lambda: SimpleNamespace()
+        api.llama_init_from_model.side_effect = record(
+            "init", None if case == "context" else ctypes.c_void_p(6))
+        api.llama_free_model.side_effect = record("free_model")
+        api.llama_free.side_effect = record("free_ctx")
+        if case == "cancel":
+            with pytest.raises(ModelLoadCancelled):
+                llm._load_draft_model(path, None, False)
+        else:
+            llm._load_draft_model(path, None, False)
+    assert quieted, "no native call was recorded"
+    assert all(inside for _name, inside in quieted), quieted
+    if case == "ok":
+        assert [n for n, _ in quieted] == ["init"]
 
 
 def test_a_cancelled_draft_load_frees_the_target_and_raises(tmp_path):
@@ -732,6 +941,108 @@ def test_a_cpu_placed_draft_model_is_reported_on_the_reply():
         "draft_max": 2}})
     usage = b.last_speculation_usage
     assert (usage["source"], usage["state"], usage["reason"]) == ("draft", "on", "draft-on-cpu")
+
+
+@pytest.mark.parametrize("source,configured,copies", [
+    ("draft", None, 5), ("draft", 3, 4), ("ngram", None, 5), ("ngram", 2, 3)])
+def test_recurrent_state_sizing_uses_the_sources_own_draft_cap(tmp_path, source, configured,
+                                                               copies):
+    from localm.inference.backends.gguf import GgufBackend
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    b = GgufBackend(str(tmp_path / "m.gguf"), spec_source=source, spec_draft_tokens=configured)
+    with patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=1000), \
+         patch.object(GgufBackend, "_gguf_parsed_tensor_entries", return_value=None):
+        charge = b._recurrent_state_vram_bytes()
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1))
+    llm._spec_source_name = source
+    llm._mtp_enabled = False
+    cp = SimpleNamespace(n_rs_seq=0)
+    with patch.object(llama_mod, "api") as api:
+        api.has_hybrid_api.return_value = True
+        api.llama_model_is_recurrent.return_value = True
+        api.llama_model_is_hybrid.return_value = False
+        llm._apply_initial_spec_params(cp, configured)
+    assert charge == 1000 * copies
+    assert charge == 1000 * (1 + cp.n_rs_seq)
+
+
+@pytest.mark.parametrize("placed,llm,expected", [
+    (True, None, True), (False, None, False),
+    (True, SimpleNamespace(_source=SimpleNamespace(loaded=True)), True),
+    (True, SimpleNamespace(_source=SimpleNamespace(loaded=False)), False),
+    (True, SimpleNamespace(_source=None), True)])
+def test_the_worker_charges_draft_growth_only_while_the_draft_model_is_loaded(placed, llm,
+                                                                              expected):
+    from localm.inference.backends.llamacpp._worker import GgufWorker
+    w = GgufWorker("m.gguf", None, 2048, 99, None, 0, spec_source="draft",
+                   spec_draft_model="d.gguf", spec_draft_gpu=placed)
+    w._llm = llm
+    w._draft_kv_per_token_cached = 1000
+    assert w.draft_model_on_gpu is expected
+    with patch.object(GgufWorker, "_draft_model_charge_bytes", return_value=_CHARGE), \
+         patch.object(GgufWorker, "_mtp_draft_kv_per_token", return_value=0):
+        assert w._spec_kv_per_token() == (1000 if expected else 0)
+        assert w._spec_extra_vram_bytes() == (_CHARGE if expected else 0)
+
+
+def test_a_disabled_draft_source_frees_its_native_state():
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    llm = _llama()
+    src = llm._source
+    src._sampler = object()
+    with patch.object(llama_mod, "api") as api:
+        src.disable("draft-rewind-unsupported")
+        freed_models = [c.args[0].value for c in api.llama_free_model.call_args_list]
+        freed_ctx = [c.args[0].value for c in api.llama_free.call_args_list]
+    assert (src.usable, src.status, src.loaded) == (False, "draft-rewind-unsupported", False)
+    assert (freed_models, freed_ctx) == ([5], [6])
+    api.llama_sampler_free.assert_called_once()
+
+
+@pytest.mark.parametrize("draft_model,recurrent,charged", [
+    ("gpt2", 0, True), ("llama", 0, False), ("gpt2", 4096, False)])
+def test_no_charge_for_a_draft_model_the_metadata_already_rejects(tmp_path, draft_model,
+                                                                  recurrent, charged):
+    from localm.inference.backends.gguf import GgufBackend
+    tokens = ["x%d" % i for i in range(40)]
+    target = _vocab_gguf(tmp_path / "m.gguf", tokens)
+    draft = _vocab_gguf(tmp_path / "d.gguf", tokens, model=draft_model)
+    b = GgufBackend(str(target), spec_source="draft", spec_draft_model=str(draft), n_ctx=2048)
+    with patch("localm.model_manager.gguf.gguf_kv_bytes_per_token", return_value=1000), \
+         patch("localm.model_manager.gguf._gguf_split_layout_meta", return_value=(2, 40)), \
+         patch("localm.model_manager.gguf.gguf_recurrent_state_bytes",
+               side_effect=lambda p, **kw: recurrent if p == draft else 0):
+        charge = b._draft_model_charge_bytes()
+    assert (charge > 0) is charged
+
+
+@pytest.mark.parametrize("gpu_layers,level", [(0, "info"), (99, "warning")])
+def test_a_cpu_draft_is_logged_by_its_cause(tmp_path, gpu_layers, level):
+    from localm.inference.backends.gguf import GgufBackend
+    b = GgufBackend(str(tmp_path / "m.gguf"), spec_source="draft",
+                    spec_draft_model=str(tmp_path / "d.gguf"), n_gpu_layers=gpu_layers)
+    with patch("localm.model_manager.missing_split_parts", return_value=[]), \
+         patch("localm.model_manager.gguf_pretokenizer", return_value=None), \
+         patch("localm.inference.pretokenizer_guard.load_refusal", return_value=None), \
+         patch.object(GgufBackend, "_decide_draft_placement", return_value=False), \
+         patch.object(GgufBackend, "_effective_gpu_layers", return_value=gpu_layers), \
+         patch.object(GgufBackend, "_check_vram"), \
+         patch.object(GgufBackend, "_load_native"), \
+         patch("localm.debuglog.logger") as log:
+        b.load()
+    other = "warning" if level == "info" else "info"
+    getattr(log, level).assert_called_once()
+    assert ("does not fit" in getattr(log, level).call_args.args[0]) is (level == "warning")
+    getattr(log, other).assert_not_called()
+
+
+def test_the_engine_reports_the_draft_placement():
+    from localm.inference import engine as engine_mod
+    eng = object.__new__(engine_mod.Engine)
+    eng._backend = SimpleNamespace(draft_model_on_gpu=False)
+    assert eng.draft_model_on_gpu() is False
+    eng._backend = SimpleNamespace()
+    assert eng.draft_model_on_gpu() is None
 
 
 def test_the_draft_model_charge_covers_the_measured_buffers():
