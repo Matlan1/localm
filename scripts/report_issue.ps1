@@ -59,6 +59,9 @@ function Scrub([string]$t) {
   # Bearer tokens and OpenAI-style / localm API keys.
   $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')
   $t = [regex]::Replace($t, '(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}', '<redacted>')
+  # Tokens that contain an email address, except the maintainer's ($email: ASCII, case-insensitive,
+  # %40 read as @, edge single quotes and trailing periods set aside). Same pattern as _EMAIL_RE in localm/bugreport/scrub.py.
+  $t = [regex]::Replace($t, '(?<![^\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*])[^\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]*?[^@\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*](?:@|%40)[^@.%+\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]+(?:\.[^@.%+\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]+)*\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}[^\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]*', [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $v = $m.Value; $c = $v.TrimStart([char]39); $lead = $v.Substring(0, $v.Length - $c.Length); $c = $c.TrimEnd([char[]]@('.', [char]39)); $trail = $v.Substring($lead.Length + $c.Length); $a = $c.Replace('%40', '@'); if ($email -and $a -cmatch '^[\x00-\x7f]*$' -and [string]::Equals($a, $email, [System.StringComparison]::OrdinalIgnoreCase)) { $v } else { $lead + '<redacted-email>' + $trail } })
   return $t
 }
 

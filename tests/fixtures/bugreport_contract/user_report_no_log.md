@@ -45,7 +45,7 @@ it broke
 - comfy_workdir: ~/ComfyUI
 - comfy_api_url: http://<redacted>@alice-desktop.local:8188/?api_key=<redacted>
 - net_search_url: https://search.example.org/search?q=x&token=<redacted>
-- coder_reviewer: http://reviewer.example.net/v1?key=<redacted>&model=m
+- coder_reviewer: http://reviewer.example.net/v1?key=<redacted>&model=m&cc=<redacted-email>
 
 ## Dependencies
 - localm: 0.0.0+contract
@@ -59,7 +59,7 @@ it broke
 ```
 12:00:00 INFO localm: loaded ~/models/private-model.gguf
 12:00:01 WARNING localm: GET http://<redacted>@alice-desktop.local/?sig=<redacted> failed
-12:00:02 INFO localm: reviewer bob.builder@example.com at \\FILESERVER01\share\report.txt
+12:00:02 INFO localm: reviewer <redacted-email> at \\FILESERVER01\share\report.txt
 12:00:03 ERROR localm: header X-Api-Key: <redacted> key <redacted>
 ```
 
