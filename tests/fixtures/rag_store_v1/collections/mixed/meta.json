@@ -1,0 +1,38 @@
+{
+  "name": "mixed",
+  "created": 1791540471.3519094,
+  "docs": {
+    "upload:turbines.txt": {
+      "size": 4546,
+      "hash": "ce27905df39aefcef39b4f08e7f23c3dad1c506c20ec8fbea997a663836b0b70",
+      "chunks": 6,
+      "uploaded": true
+    },
+    "upload:fruit.md": {
+      "size": 68,
+      "hash": "adedbb755d7ea7f709cd9c4e93c3a3a74962e8a69bbc83e03ca1d90b70b1c90b",
+      "chunks": 1,
+      "uploaded": true
+    }
+  },
+  "_stats_cache": {
+    "n_chunks": 7,
+    "has_vectors": true,
+    "vector_degrade_reason": null,
+    "corrupt": false,
+    "chunks_bad_lines": 0,
+    "fingerprint": {
+      "chunks": [
+        1791540471391236600,
+        5131
+      ],
+      "vectors": [
+        1791540471392793300,
+        317
+      ]
+    },
+    "vector_dim": 8
+  },
+  "embedding_model": "bge-small-en-v1.5",
+  "embedding_model_mixed": true
+}

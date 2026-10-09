@@ -1,0 +1,49 @@
+{
+  "name": "kb",
+  "created": 1791540471.2998571,
+  "docs": {
+    "upload:turbines.txt": {
+      "size": 4546,
+      "hash": "ce27905df39aefcef39b4f08e7f23c3dad1c506c20ec8fbea997a663836b0b70",
+      "chunks": 6,
+      "uploaded": true
+    },
+    "upload:fruit.md": {
+      "size": 68,
+      "hash": "adedbb755d7ea7f709cd9c4e93c3a3a74962e8a69bbc83e03ca1d90b70b1c90b",
+      "chunks": 1,
+      "uploaded": true
+    },
+    "upload:pay.txt": {
+      "size": 39,
+      "hash": "d66ccc5b992f5c343b6d4c6a7c26bd4be495330f330dad23fc44de11635338b7",
+      "chunks": 1,
+      "uploaded": true
+    },
+    "upload:plain.txt": {
+      "size": 65,
+      "hash": "fbbb9bd819ae24c982d7a8a557fb4a3078f86d86794ceba73949c9b7a4133e24",
+      "chunks": 1,
+      "uploaded": true
+    }
+  },
+  "_stats_cache": {
+    "n_chunks": 9,
+    "has_vectors": true,
+    "vector_degrade_reason": null,
+    "corrupt": false,
+    "chunks_bad_lines": 0,
+    "fingerprint": {
+      "chunks": [
+        1791540471316567200,
+        5377
+      ],
+      "vectors": [
+        1791540471318092400,
+        401
+      ]
+    },
+    "vector_dim": 8
+  },
+  "embedding_model": "bge-small-en-v1.5"
+}
