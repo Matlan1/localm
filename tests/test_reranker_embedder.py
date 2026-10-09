@@ -95,7 +95,7 @@ def make_ranker(native=None, *, n_ctx=64, n_seq_max=32, template=None, pooling=e
     e.n_ctx = n_ctx
     e._effective_seq_ctx = n_ctx if effective_seq_ctx is None else effective_seq_ctx
     e._mem = object()
-    e._vocab = None
+    e._vocab = object()
     e._ctx = object()
     e.dim = 8
     e.model_path = "reranker.gguf"
