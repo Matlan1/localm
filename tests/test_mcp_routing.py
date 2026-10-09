@@ -19,7 +19,17 @@ from unittest.mock import patch
 import pytest
 
 from localm import gpu_registry
+from localm.inference import capability_routing as cr
 from localm.plugins.mcpserver.server import EngineCache, MCPStdioServer, build_tools
+
+_REAL_CONFIGURED_MODE = cr.configured_mode
+
+
+@pytest.fixture(autouse=True)
+def _autoswitch_auto(monkeypatch):
+    """These tests exercise routing on tool and context needs, which only the
+    ``auto`` family acts on."""
+    monkeypatch.setattr(cr, "configured_mode", lambda: "auto")
 
 
 class _Engine:
@@ -321,6 +331,40 @@ class TestCoderRouting:
                 pytest.raises(RuntimeError, match="plain could not be loaded"):
             coder_engine(engines, decision)
         assert engines.resident == []
+
+
+class TestUnderTheDefaultAutoswitch:
+    """With model_autoswitch unset the setting reads as its default, ``image``:
+    the MCP tools honour it like every other surface, so a tool or context need
+    does not move an unnamed request and an image the default cannot read still
+    does."""
+
+    @pytest.fixture(autouse=True)
+    def _real_default(self, monkeypatch, coder_project):
+        monkeypatch.setattr(cr, "configured_mode", _REAL_CONFIGURED_MODE)
+        assert cr.configured_mode() == "image"
+
+    def test_a_coder_task_needing_tool_calls_stays_on_the_default_model(self, reg):
+        engines = _cache()
+        d = engines.route(None, [], required=("tool_use",), pinned=False)
+        assert d.resolved == "plain" and not d.routed and d.policy == "image"
+
+    def test_a_long_coder_task_stays_on_the_default_model(self, reg, coder_project):
+        TestCoderTaskRuns._small_default(reg)
+        engines = _cache(lazy=True)
+        task = "Refactor the parser as this log shows. " + "trace line " * 2400
+        res = _run_coder_task(engines, coder_project, task=task)
+        text = res["content"][0]["text"]
+        assert list(engines.made) == ["plain"]
+        assert res["isError"] is False, text
+        assert "reply-from-plain" in text and "answered by" not in text
+
+    def test_an_image_the_default_cannot_read_still_moves_the_request(self, reg):
+        _, img, _ = reg
+        engines = _cache()
+        res = _call(engines, "chat", {"prompt": "what is this?", "images": [str(img)]})
+        assert res["content"][0]["text"] == "reply-from-seer"
+        assert "answered by seer" in res["content"][1]["text"]
 
 
 class TestAFailedLoadIsNotRetriedByRouting:
