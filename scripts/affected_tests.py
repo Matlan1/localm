@@ -14,8 +14,7 @@ A test file is selected when any of these holds:
     import written as a string), a changed script by file name, or a changed
     non-Python file by file name;
   - a change to a module inside a package listed in _REEXPORT_FACADES also
-    counts as a change to that package, for both rules above, and that package
-    counts as importing every module its own modules import;
+    counts as a change to that package, for both rules above;
   - it imports a changed dependency, names it in a string literal, imports a
     module that imports it (with --depth N, also that module's importers, up
     to N hops), or sits under the folder of a conftest.py that imports it. A
@@ -74,7 +73,8 @@ REPO = Path(__file__).resolve().parent.parent
 _ROUTE_METHODS = {"get", "post", "put", "delete", "patch", "websocket", "api_route"}
 _EVERYTHING = {"tests/conftest.py"}
 # Packages whose callers import and patch the package itself, which re-exports
-# its submodules' names.
+# its submodules' names. Each counts as importing every module its own modules
+# import.
 _REEXPORT_FACADES = ("localm.setup_llama", "localm.bugreport")
 _DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
 _DEV_EXTRA = "dev"
