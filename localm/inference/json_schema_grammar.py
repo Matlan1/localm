@@ -34,7 +34,12 @@ MAX_INTEGER_BOUND = 10 ** 15
 
 class SchemaGrammarError(ValueError):
     """The schema is malformed, too large, or uses something the grammar
-    cannot express."""
+    cannot express. ``keyword`` names the schema keyword at fault when the
+    error is about one."""
+
+    def __init__(self, message: str, keyword: str | None = None) -> None:
+        super().__init__(message)
+        self.keyword = keyword
 
 
 _ANNOTATIONS = frozenset({
@@ -187,7 +192,7 @@ class _Compiler:
         for key in schema:
             if key in _KEYWORDS or key in _ANNOTATIONS:
                 continue
-            raise SchemaGrammarError(f"JSON schema keyword '{key}' is not supported")
+            raise SchemaGrammarError(f"JSON schema keyword '{key}' is not supported", keyword=key)
         if "$ref" in schema:
             return self._ref(schema["$ref"], hint)
         if "const" in schema:
@@ -243,7 +248,8 @@ class _Compiler:
         extra = [k for k in schema if k not in (key,) and k not in _ANNOTATIONS]
         if extra:
             raise SchemaGrammarError(
-                f"'{extra[0]}' next to {key} is not supported; put it inside each alternative")
+                f"'{extra[0]}' next to {key} is not supported; put it inside each alternative",
+                keyword=extra[0])
         alts = [self.visit(sub, f"{hint}-{i}") for i, sub in enumerate(subs)]
         return self.add(hint, " | ".join(alts))
 
@@ -323,7 +329,7 @@ class _Compiler:
         for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
             if key in schema:
                 raise SchemaGrammarError(
-                    f"'{key}' is supported on integers only, not on number")
+                    f"'{key}' is supported on integers only, not on number", keyword=key)
         return self.prim("number")
 
     def _integer(self, schema: dict, hint: str) -> str:
