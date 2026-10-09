@@ -1058,3 +1058,21 @@ def test_non_streaming_disconnect_records_the_partial_generation(metrics_on):
         assert _metric(_TTFT_COUNT) == 1
 
     asyncio.run(scenario())
+
+
+def test_closing_the_stream_closes_the_generation_at_once():
+    """aclose() on the returned stream runs the generation's own cleanup before
+    it returns, not one garbage-collection tick later."""
+    async def scenario():
+        eng = _LockingEngine()
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()                # role
+        await agen.__anext__()                # status
+        await agen.__anext__()                # first token
+        await agen.aclose()
+        assert residency.cancel_all("lock-model") == 0, \
+            "the generation was still registered after aclose() returned"
+        assert not sem.locked()
+
+    asyncio.run(scenario())
