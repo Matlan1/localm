@@ -4643,6 +4643,7 @@ def _record_generation_metrics(prompt_tokens, completion_tokens, ttft_ms,
 
 
 _abandoned_metric_tasks: set = set()
+_ABANDONED_PRODUCER_JOIN_S = 30.0
 
 
 class _GenerationMeter:
@@ -4651,8 +4652,10 @@ class _GenerationMeter:
     The stream fills it in as it runs (:meth:`begin`, ``first_token_at``,
     ``gen_end``) and calls :meth:`record` on its normal path. :meth:`abandon`
     runs when the stream is closed or fails before that: if a generation had
-    started, it records what was generated so far, counting the tokens on a
-    background task so nothing is awaited while the stream is being torn down.
+    started, it records what was generated so far from a background task,
+    which waits for the producer thread to exit (the backend is then no longer
+    streaming, so the tokenizer can give an exact count) and counts off the
+    event loop. Nothing is awaited while the stream is being torn down.
     Nothing is recorded for a stream closed before its generation started, or
     while metrics are off."""
 
@@ -4663,13 +4666,16 @@ class _GenerationMeter:
         self.first_token_at: Optional[float] = None
         self.gen_end: Optional[float] = None
         self.parts: Optional[list] = None
+        self.producer: Optional[threading.Thread] = None
         self.recorded = False
 
-    def begin(self, engine, prompt_tokens, gen_start: float, parts: list) -> None:
+    def begin(self, engine, prompt_tokens, gen_start: float, parts: list,
+              producer: threading.Thread) -> None:
         self.engine = engine
         self.prompt_tokens = prompt_tokens
         self.gen_start = gen_start
         self.parts = parts
+        self.producer = producer
 
     def record(self, prompt_tokens, completion_tokens, ttft_ms,
                tokens_per_sec) -> None:
@@ -4686,7 +4692,7 @@ class _GenerationMeter:
         from localm.inference import metrics
         if not metrics.is_enabled():
             return
-        engine, prompt_tokens = self.engine, self.prompt_tokens
+        engine, prompt_tokens, producer = self.engine, self.prompt_tokens, self.producer
         text = "".join(self.parts or ())
         first_token_at = self.first_token_at
         ttft_ms = _ttft_ms(self.gen_start, first_token_at)
@@ -4694,6 +4700,9 @@ class _GenerationMeter:
 
         async def _count_and_record() -> None:
             completion_tokens: Optional[int] = 0
+            if producer is not None:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, producer.join, _ABANDONED_PRODUCER_JOIN_S)
             if text:
                 try:
                     completion_tokens = await _count_streamed_tokens(engine, text)
@@ -5313,7 +5322,7 @@ async def _stream_sse_body(
         t.start()
 
         completion_parts: list[str] = []
-        meter.begin(engine, prompt_tokens, gen_start, completion_parts)
+        meter.begin(engine, prompt_tokens, gen_start, completion_parts, t)
         gen_error: Exception | None = None
         drained = False
         try:
@@ -5522,7 +5531,7 @@ async def _stream_sse_completion_body(
         t.start()
 
         completion_parts: list[str] = []
-        meter.begin(engine, prompt_tokens, gen_start, completion_parts)
+        meter.begin(engine, prompt_tokens, gen_start, completion_parts, t)
         gen_error: Exception | None = None
         drained = False
         try:

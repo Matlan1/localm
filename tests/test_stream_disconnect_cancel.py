@@ -987,8 +987,11 @@ def test_closing_at_the_final_chunk_does_not_record_twice(metrics_on):
         sem = asyncio.Semaphore(1)
         agen = _stream_sse(eng, _MSG, "lock-model", sem)
         async for chunk in agen:
+            assert "[DONE]" not in chunk
             if '"finish_reason":"stop"' in chunk:
                 break
+        else:
+            pytest.fail("the stream ended without a final chunk to close at")
         await agen.aclose()                   # disconnect before [DONE]
         await asyncio.sleep(0.2)
         assert _metric(_GENERATED) == 3
@@ -1074,5 +1077,45 @@ def test_closing_the_stream_closes_the_generation_at_once():
         assert residency.cancel_all("lock-model") == 0, \
             "the generation was still registered after aclose() returned"
         assert not sem.locked()
+
+    asyncio.run(scenario())
+
+
+class _BusyCountEngine(_LockingEngine):
+    """Counts exactly only once its generation has fully stopped, like the GGUF
+    backend, whose count_tokens falls back to a chars/4 estimate (here: 999)
+    while the worker is still draining a cancelled stream."""
+
+    def count_tokens(self, text):
+        if self.inference_lock.locked():
+            return 999
+        return super().count_tokens(text)
+
+    def _stream(self):
+        with self.inference_lock:
+            self.entered.set()
+            i = 0
+            try:
+                while True:
+                    yield f"t{i} "
+                    i += 1
+                    time.sleep(self._delay)
+            except GeneratorExit:
+                time.sleep(0.3)
+                raise
+
+
+def test_an_abandoned_stream_is_counted_after_the_backend_stops(metrics_on):
+    async def scenario():
+        eng = _BusyCountEngine()
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()                # role
+        await agen.__anext__()                # status
+        assert "t0" in await agen.__anext__()
+        await agen.aclose()
+        assert await _wait(lambda: _metric(_GENERATED) is not None, True, 5.0)
+        assert 1 <= _metric(_GENERATED) < 999, \
+            "counted while the backend was still busy: an estimate, not the real count"
 
     asyncio.run(scenario())
