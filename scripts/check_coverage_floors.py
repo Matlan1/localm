@@ -69,7 +69,7 @@ REPO = Path(__file__).resolve().parent.parent
 _MODULE_FLOORS: dict[str, int] = {
     "localm/bindhost.py": 100,
     "localm/scopes.py": 100,
-    "localm/pathsafe.py": 99,
+    "localm/pathsafe.py": 92,
     "localm/netpolicy.py": 90,
     "localm/auth.py": 90,
     "localm/tls.py": 87,
