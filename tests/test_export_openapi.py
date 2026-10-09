@@ -8,7 +8,6 @@ hand-built schema and with the exported real one.
 import importlib.util
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -57,12 +56,18 @@ def test_export_contains_the_chat_completions_route(exported):
     assert "post" in schema["paths"]["/v1/chat/completions"]
 
 
-def test_export_stamps_the_installed_version(exported):
-    _, out, _ = exported
-    init = (REPO / "localm" / "__init__.py").read_text(encoding="utf-8")
-    version = re.search(r'^__version__ = "([^"]+)"', init, re.M).group(1)
-    schema = json.loads(out.read_text(encoding="utf-8"))
-    assert schema["info"]["version"] == version
+def test_export_stamps_the_installed_version(tmp_path):
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "import localm; localm.__version__ = '9.8.7'; "
+        "import export_openapi; "
+        "print(export_openapi.build_schema()['info']['version'])"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code, str(SCRIPTS)], capture_output=True, text=True,
+        cwd=REPO, env=dict(os.environ, PYTHONPATH=str(REPO)), timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().splitlines()[-1] == "9.8.7"
 
 
 def test_export_leaves_the_callers_home_untouched(exported):
@@ -110,10 +115,15 @@ def test_render_builds_tables_and_links_for_a_small_schema():
     assert "Schema version 9.9" in page
     assert "| `thing_id` | path | string | yes |" in page
     assert "- `application/json`: [Thing](#schema-thing)" in page
-    assert "| `name` | string | yes | A \\| name |" in page
     assert "| `tags` | array of string | no |" in page
     assert page.index("## Other") > page.index("## OpenAI-compatible")
     assert "### Thing { #schema-thing }" in page
+
+
+def test_render_escapes_a_pipe_inside_a_table_cell():
+    schema = {"components": {"schemas": {"Thing": {
+        "type": "object", "properties": {"name": {"type": "string", "description": "A | name"}}}}}}
+    assert "| `name` | string | no | A \\| name |" in openapi_markdown.render(schema)
 
 
 def test_render_marks_a_deprecated_operation():
