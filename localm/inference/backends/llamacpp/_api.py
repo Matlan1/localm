@@ -525,16 +525,6 @@ def has_rerank_api() -> bool:
         "llama_model_cls_label"))
 
 
-def llama_vocab_bos(vocab: ctypes.c_void_p) -> int:
-    """Beginning-of-sentence token id, or -1 when the vocabulary has none."""
-    return _bind("llama_vocab_bos", llama_token, LlamaVocab)(vocab)
-
-
-def llama_vocab_eos(vocab: ctypes.c_void_p) -> int:
-    """End-of-sentence token id, or -1 when the vocabulary has none."""
-    return _bind("llama_vocab_eos", llama_token, LlamaVocab)(vocab)
-
-
 def llama_vocab_sep(vocab: ctypes.c_void_p) -> int:
     """Sentence-separator token id, or -1 when the vocabulary has none."""
     return _bind("llama_vocab_sep", llama_token, LlamaVocab)(vocab)
