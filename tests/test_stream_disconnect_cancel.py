@@ -903,3 +903,338 @@ def test_cancel_all_stops_a_compaction_summary_that_yields_nothing():
         assert eng.cancelled is True
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+#  /metrics: a stream the client abandons still counts what it generated.     #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def metrics_on():
+    from localm.inference import metrics
+    metrics.configure(True)
+    yield metrics
+    metrics.configure(False)
+
+
+def _metric(name: str):
+    from localm.inference import metrics
+    for line in metrics.render().splitlines():
+        if line.startswith(name + " "):
+            return float(line.split()[1])
+    return None
+
+
+_GENERATED = "localm_generated_tokens_total"
+_TTFT_COUNT = "localm_time_to_first_token_seconds_count"
+
+
+def test_chat_stream_disconnect_records_the_partial_generation(metrics_on):
+    async def scenario():
+        eng = _LockingEngine()
+        sem = asyncio.Semaphore(1)
+        agen = _pin_engine(eng, _stream_sse(eng, _MSG, "lock-model", sem))
+        await agen.__anext__()                # role
+        await agen.__anext__()                # status
+        assert "t0" in await agen.__anext__()
+        assert "t1" in await agen.__anext__()
+        await agen.aclose()                   # disconnect
+
+        assert await _wait(lambda: _metric(_GENERATED) is not None, True, 3.0), \
+            "an abandoned chat stream recorded no generated tokens"
+        assert _metric(_GENERATED) >= 2
+        assert _metric(_TTFT_COUNT) == 1
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0)
+
+    asyncio.run(scenario())
+
+
+def test_completions_stream_disconnect_records_the_partial_generation(metrics_on):
+    async def scenario():
+        eng = _LockingEngine()
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse_completion(eng, _MSG, "lock-model", sem)
+        assert "t0" in await agen.__anext__()
+        assert "t1" in await agen.__anext__()
+        await agen.aclose()
+
+        assert await _wait(lambda: _metric(_GENERATED) is not None, True, 3.0), \
+            "an abandoned completions stream recorded no generated tokens"
+        assert _metric(_GENERATED) >= 2
+        assert _metric(_TTFT_COUNT) == 1
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0)
+
+    asyncio.run(scenario())
+
+
+def test_a_finished_stream_is_recorded_exactly_once(metrics_on):
+    async def scenario():
+        eng = _LockingEngine(ntokens=3, per_token_delay=0.0)
+        sem = asyncio.Semaphore(1)
+        async for _chunk in _stream_sse(eng, _MSG, "lock-model", sem):
+            pass
+        await asyncio.sleep(0.2)
+        assert _metric(_GENERATED) == 3
+        assert _metric(_TTFT_COUNT) == 1
+
+    asyncio.run(scenario())
+
+
+def test_closing_at_the_final_chunk_does_not_record_twice(metrics_on):
+    async def scenario():
+        eng = _LockingEngine(ntokens=3, per_token_delay=0.0)
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        async for chunk in agen:
+            assert "[DONE]" not in chunk
+            if '"finish_reason":"stop"' in chunk:
+                break
+        else:
+            pytest.fail("the stream ended without a final chunk to close at")
+        await agen.aclose()                   # disconnect before [DONE]
+        await asyncio.sleep(0.2)
+        assert _metric(_GENERATED) == 3
+        assert _metric(_TTFT_COUNT) == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_stream_abandoned_while_queued_records_nothing(metrics_on):
+    async def scenario():
+        eng = _LockingEngine()
+        sem = asyncio.Semaphore(1)
+        await sem.acquire()                   # another request holds the model
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()                # role, sent before queueing
+        assert "waiting" in (await agen.__anext__()).lower()
+        waiting = asyncio.ensure_future(agen.__anext__())
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        await agen.aclose()
+        await asyncio.sleep(0.2)
+        assert _metric(_GENERATED) is None
+        assert _metric(_TTFT_COUNT) is None
+        assert not eng.entered.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_an_abandoned_stream_does_no_counting_while_metrics_are_off():
+    from localm.inference import metrics
+    metrics.configure(False)
+
+    async def scenario():
+        eng = _LockingEngine()
+        calls = []
+        real = eng.count_tokens
+        eng.count_tokens = lambda text: calls.append(text) or real(text)
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()
+        await agen.__anext__()
+        await agen.__anext__()
+        await agen.aclose()
+        await asyncio.sleep(0.2)
+        assert calls == []
+        assert _metric(_GENERATED) is None
+
+    asyncio.run(scenario())
+
+
+def test_non_streaming_disconnect_records_the_partial_generation(metrics_on):
+    from localm.inference.http_server import _complete
+
+    async def scenario():
+        eng = _LockingEngine()
+        sem = asyncio.Semaphore(1)
+        req = _FakeRequest()
+        task = asyncio.ensure_future(
+            _complete(eng, _MSG, "lock-model", sem, request=req, max_tokens=0))
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+        await asyncio.sleep(0.05)
+        req.disconnected = True
+        await asyncio.wait_for(task, timeout=3.0)
+        assert _metric(_GENERATED) >= 1
+        assert _metric(_TTFT_COUNT) == 1
+
+    asyncio.run(scenario())
+
+
+def test_closing_the_stream_closes_the_generation_at_once():
+    """aclose() on the returned stream runs the generation's own cleanup before
+    it returns, not one garbage-collection tick later."""
+    async def scenario():
+        eng = _LockingEngine()
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()                # role
+        await agen.__anext__()                # status
+        await agen.__anext__()                # first token
+        await agen.aclose()
+        assert residency.cancel_all("lock-model") == 0, \
+            "the generation was still registered after aclose() returned"
+        assert not sem.locked()
+
+    asyncio.run(scenario())
+
+
+class _BusyCountEngine(_LockingEngine):
+    """Counts exactly only once its generation has fully stopped, like the GGUF
+    backend, whose count_tokens falls back to a chars/4 estimate (here: 999)
+    while the worker is still draining a cancelled stream."""
+
+    def count_tokens(self, text):
+        if self.inference_lock.locked():
+            return 999
+        return super().count_tokens(text)
+
+    def _stream(self):
+        with self.inference_lock:
+            self.entered.set()
+            i = 0
+            try:
+                while True:
+                    yield f"t{i} "
+                    i += 1
+                    time.sleep(self._delay)
+            except GeneratorExit:
+                time.sleep(0.3)
+                raise
+
+
+def test_an_abandoned_stream_is_counted_after_the_backend_stops(metrics_on):
+    async def scenario():
+        eng = _BusyCountEngine()
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()                # role
+        await agen.__anext__()                # status
+        assert "t0" in await agen.__anext__()
+        await agen.aclose()
+        assert await _wait(lambda: _metric(_GENERATED) is not None, True, 5.0)
+        assert 1 <= _metric(_GENERATED) < 999, \
+            "counted while the backend was still busy: an estimate, not the real count"
+
+    asyncio.run(scenario())
+
+
+class _SlowFirstTokenEngine(_LockingEngine):
+    """Spends a while on the prompt before its first token."""
+
+    def _stream(self):
+        with self.inference_lock:
+            self.entered.set()
+            time.sleep(0.3)
+            i = 0
+            while True:
+                yield f"t{i} "
+                i += 1
+                time.sleep(self._delay)
+
+
+_PROMPT = "localm_prompt_tokens_total"
+
+
+def test_abandoned_before_the_first_token_counts_the_prompt_only(metrics_on):
+    async def scenario():
+        eng = _SlowFirstTokenEngine()
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()                # role
+        await agen.__anext__()                # status
+        pending = asyncio.ensure_future(agen.__anext__())
+        assert await _wait(lambda: eng.entered.is_set(), True, 2.0)
+        pending.cancel()                      # client gone before any token
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await agen.aclose()
+        assert await _wait(lambda: _metric(_PROMPT) is not None, True, 3.0)
+        assert _metric(_PROMPT) == 3
+        assert _metric(_GENERATED) is None
+        assert _metric(_TTFT_COUNT) is None
+
+    asyncio.run(scenario())
+
+
+def test_two_streams_abandoned_together_are_both_counted(metrics_on):
+    async def scenario():
+        first, second = _LockingEngine(), _LockingEngine()
+        streams = [_stream_sse(e, _MSG, "lock-model", asyncio.Semaphore(1))
+                   for e in (first, second)]
+        for agen in streams:
+            await agen.__anext__()
+            await agen.__anext__()
+            assert "t0" in await agen.__anext__()
+        await asyncio.gather(*(agen.aclose() for agen in streams))
+        assert await _wait(lambda: _metric(_TTFT_COUNT) == 2, True, 3.0)
+        assert _metric(_PROMPT) == 6
+        assert _metric(_GENERATED) >= 2
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_count_still_records_the_prompt_and_first_token(metrics_on):
+    class _CountFails(_LockingEngine):
+        def count_tokens(self, text):
+            raise RuntimeError("tokenizer gone")
+
+    async def scenario():
+        eng = _CountFails()
+        sem = asyncio.Semaphore(1)
+        agen = _stream_sse(eng, _MSG, "lock-model", sem)
+        await agen.__anext__()
+        await agen.__anext__()
+        assert "t0" in await agen.__anext__()
+        await agen.aclose()
+        assert await _wait(lambda: _metric(_PROMPT) is not None, True, 3.0)
+        assert _metric(_TTFT_COUNT) == 1
+        assert _metric(_GENERATED) is None
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_while_counting_the_finished_reply_is_counted_once(metrics_on):
+    class _SlowCount(_LockingEngine):
+        counting = None
+
+        def count_tokens(self, text):
+            if self.counting is not None:
+                self.counting.set()
+            time.sleep(0.3)
+            return super().count_tokens(text)
+
+    async def scenario():
+        eng = _SlowCount(ntokens=3, per_token_delay=0.0)
+        eng.counting = threading.Event()
+        sem = asyncio.Semaphore(1)
+
+        async def consume():
+            async for _chunk in _stream_sse(eng, _MSG, "lock-model", sem):
+                pass
+
+        task = asyncio.ensure_future(consume())
+        assert await _wait(lambda: eng.counting.is_set(), True, 3.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await _wait(lambda: _metric(_GENERATED) is not None, True, 3.0)
+        await asyncio.sleep(0.5)
+        assert _metric(_GENERATED) == 3
+        assert _metric(_TTFT_COUNT) == 1
+
+    asyncio.run(scenario())
+
+
+def test_abandon_without_a_running_loop_records_nothing_and_does_not_raise(
+        metrics_on, caplog):
+    from localm.inference.http_server import _GenerationMeter
+
+    meter = _GenerationMeter()
+    meter.begin(_LockingEngine(), 3, time.perf_counter(), ["t0 "], None)
+    with caplog.at_level("WARNING", logger="localm"):
+        meter.abandon()
+    assert _metric(_PROMPT) is None
+    assert "not recorded" in caplog.text

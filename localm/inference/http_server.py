@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import Any, AsyncIterator, Callable, NamedTuple, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -4642,6 +4642,107 @@ def _record_generation_metrics(prompt_tokens, completion_tokens, ttft_ms,
                                tokens_per_sec)
 
 
+_abandoned_metric_tasks: set = set()
+_ABANDONED_PRODUCER_JOIN_S = 30.0
+
+
+class _GenerationMeter:
+    """One streamed generation's metrics, recorded exactly once.
+
+    The stream fills it in as it runs (:meth:`begin`, ``first_token_at``,
+    ``gen_end``) and calls :meth:`record` on its normal path. :meth:`abandon`
+    runs when the stream is closed or fails before that: if a generation had
+    started, it records what was generated so far from a background task,
+    which waits for the producer thread to exit (the backend is then no longer
+    streaming, so the tokenizer can give an exact count) and counts off the
+    event loop. Nothing is awaited while the stream is being torn down.
+    Nothing is recorded for a stream closed before its generation started, or
+    while metrics are off."""
+
+    def __init__(self) -> None:
+        self.engine = None
+        self.prompt_tokens: Optional[int] = None
+        self.gen_start: Optional[float] = None
+        self.first_token_at: Optional[float] = None
+        self.gen_end: Optional[float] = None
+        self.parts: Optional[list] = None
+        self.producer: Optional[threading.Thread] = None
+        self.recorded = False
+
+    def begin(self, engine, prompt_tokens, gen_start: float, parts: list,
+              producer: threading.Thread) -> None:
+        self.engine = engine
+        self.prompt_tokens = prompt_tokens
+        self.gen_start = gen_start
+        self.parts = parts
+        self.producer = producer
+
+    def record(self, prompt_tokens, completion_tokens, ttft_ms,
+               tokens_per_sec) -> None:
+        if self.recorded:
+            return
+        self.recorded = True
+        _record_generation_metrics(prompt_tokens, completion_tokens, ttft_ms,
+                                   tokens_per_sec)
+
+    def abandon(self) -> None:
+        if self.recorded or self.gen_start is None:
+            return
+        self.recorded = True
+        from localm.inference import metrics
+        if not metrics.is_enabled():
+            return
+        engine, prompt_tokens, producer = self.engine, self.prompt_tokens, self.producer
+        text = "".join(self.parts or ())
+        first_token_at = self.first_token_at
+        ttft_ms = _ttft_ms(self.gen_start, first_token_at)
+        gen_end = self.gen_end if self.gen_end is not None else time.perf_counter()
+
+        async def _count_and_record() -> None:
+            completion_tokens: Optional[int] = 0
+            if producer is not None:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, producer.join, _ABANDONED_PRODUCER_JOIN_S)
+            if text:
+                try:
+                    completion_tokens = await _count_streamed_tokens(engine, text)
+                except Exception as exc:
+                    from localm.debuglog import logger as _dbg
+                    _dbg.warning("metrics: could not count an abandoned "
+                                 "stream's tokens (%s)", type(exc).__name__)
+                    completion_tokens = None
+            tps = (_tokens_per_sec(completion_tokens,
+                                   _decode_elapsed(first_token_at, gen_end))
+                   if completion_tokens else None)
+            _record_generation_metrics(prompt_tokens, completion_tokens,
+                                       ttft_ms, tps)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_count_and_record())
+        except RuntimeError:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("metrics: no running loop; an abandoned stream's "
+                         "generation was not recorded")
+            return
+        _abandoned_metric_tasks.add(task)
+        task.add_done_callback(_abandoned_metric_tasks.discard)
+
+
+async def _metered_stream(stream: AsyncGenerator[str, None],
+                          meter: _GenerationMeter) -> AsyncIterator[str]:
+    """Yield *stream*'s chunks. When it ends, fails or is closed early, close
+    it, then let *meter* record a generation that started but was never
+    recorded."""
+    try:
+        async for chunk in stream:
+            yield chunk
+    finally:
+        try:
+            await stream.aclose()
+        finally:
+            meter.abandon()
+
+
 def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[float]:
     """Time to first token in milliseconds, or None if nothing was generated."""
     if first_token_at is None:
@@ -5026,7 +5127,14 @@ def _prep_error_lines(detail: str, status: int, model_id: str, chunk_id: str,
             "data: [DONE]\n\n"]
 
 
-async def _stream_sse(
+def _stream_sse(*args, **kwargs) -> AsyncIterator[str]:
+    """:func:`_stream_sse_body`, with its generation metrics recorded even when
+    the client leaves mid-stream."""
+    meter = _GenerationMeter()
+    return _metered_stream(_stream_sse_body(*args, meter=meter, **kwargs), meter)
+
+
+async def _stream_sse_body(
     engine: Engine,
     messages: list,
     model_id: str,
@@ -5039,8 +5147,9 @@ async def _stream_sse(
     compact: bool = False,
     chunk_id: Optional[str] = None,
     role_sent: bool = False,
+    meter: Optional[_GenerationMeter] = None,
     **gen_kwargs,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     """Stream the reply to *messages* as SSE ``data:`` lines.
 
     *chunk_id* reuses the id of a stream the caller already opened, and
@@ -5053,6 +5162,7 @@ async def _stream_sse(
     the refusal as an error reply and no generation."""
     from localm.inference.compact import compactable
 
+    meter = meter or _GenerationMeter()
     chunk_id = chunk_id or make_chunk_id()
     ts = int(time.time())
     # Reasoning goes to delta.reasoning_content, tool calls to delta.tool_calls,
@@ -5212,6 +5322,7 @@ async def _stream_sse(
         t.start()
 
         completion_parts: list[str] = []
+        meter.begin(engine, prompt_tokens, gen_start, completion_parts, t)
         gen_error: Exception | None = None
         drained = False
         try:
@@ -5228,7 +5339,7 @@ async def _stream_sse(
                         gen_error = token
                         continue
                     if first_token_at is None:
-                        first_token_at = time.perf_counter()
+                        first_token_at = meter.first_token_at = time.perf_counter()
                     # Stream hook transforms the piece before it is recorded and sent,
                     # so usage reflects exactly what the client receives.
                     if pipeline is not None and ctx is not None and pipeline.has("stream"):
@@ -5259,7 +5370,7 @@ async def _stream_sse(
             # within a token or two on its own and this registration merely
             # stops being reachable, same as an unpin with nothing pinned).
             residency.unregister_cancel(engine.display_name, cancel_event)
-        gen_end = time.perf_counter()
+        gen_end = meter.gen_end = time.perf_counter()
         # Release any tail held back while disambiguating a partial <think> tag,
         # a partial tool call or a partial stop sequence.
         for data in _events_sse(router.flush(), model_id, chunk_id, ts):
@@ -5313,15 +5424,23 @@ async def _stream_sse(
         mtp=_mtp_usage(engine),
         speculation=_speculation_usage(engine),
     )
-    _record_generation_metrics(usage.prompt_tokens, usage.completion_tokens,
-                               usage.ttft_ms, usage.tokens_per_sec)
+    meter.record(usage.prompt_tokens, usage.completion_tokens,
+                 usage.ttft_ms, usage.tokens_per_sec)
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
                           finish_reason=finish_reason)
     yield f"data: {done.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
 
 
-async def _stream_sse_completion(
+def _stream_sse_completion(*args, **kwargs) -> AsyncIterator[str]:
+    """:func:`_stream_sse_completion_body`, with its generation metrics recorded
+    even when the client leaves mid-stream."""
+    meter = _GenerationMeter()
+    return _metered_stream(
+        _stream_sse_completion_body(*args, meter=meter, **kwargs), meter)
+
+
+async def _stream_sse_completion_body(
     engine: Engine,
     messages: list,
     model_id: str,
@@ -5331,8 +5450,10 @@ async def _stream_sse_completion(
     pipeline=None,
     ctx=None,
     prompt_tokens: Optional[int] = None,
+    meter: Optional[_GenerationMeter] = None,
     **gen_kwargs,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
+    meter = meter or _GenerationMeter()
     chunk_id = make_chunk_id()
     ts = int(time.time())
     stop = gen_kwargs.pop("stop", None)
@@ -5410,6 +5531,7 @@ async def _stream_sse_completion(
         t.start()
 
         completion_parts: list[str] = []
+        meter.begin(engine, prompt_tokens, gen_start, completion_parts, t)
         gen_error: Exception | None = None
         drained = False
         try:
@@ -5434,7 +5556,7 @@ async def _stream_sse_completion(
                         gen_error = token
                         continue
                     if first_token_at is None:
-                        first_token_at = time.perf_counter()
+                        first_token_at = meter.first_token_at = time.perf_counter()
                     # Stream hook transforms each piece before it is recorded and sent,
                     # so usage and the audit trail reflect what the client receives.
                     if pipeline is not None and ctx is not None and pipeline.has("stream"):
@@ -5465,7 +5587,7 @@ async def _stream_sse_completion(
             t.join()
         finally:
             residency.unregister_cancel(engine.display_name, cancel_event)
-        gen_end = time.perf_counter()
+        gen_end = meter.gen_end = time.perf_counter()
 
     if stopper is not None and not stopped:
         tail = stopper.flush()
@@ -5519,9 +5641,8 @@ async def _stream_sse_completion(
                 completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         },
     }
-    _record_generation_metrics(prompt_tokens, completion_tokens,
-                               done["usage"]["ttft_ms"],
-                               done["usage"]["tokens_per_sec"])
+    meter.record(prompt_tokens, completion_tokens,
+                 done["usage"]["ttft_ms"], done["usage"]["tokens_per_sec"])
     yield f"data: {json.dumps(done)}\n\n"
     yield "data: [DONE]\n\n"
 
