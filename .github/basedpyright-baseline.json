@@ -5458,16 +5458,16 @@
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 43,
-                    "endColumn": 49,
+                    "startColumn": 62,
+                    "endColumn": 68,
                     "lineCount": 1
                 }
             },
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 43,
-                    "endColumn": 49,
+                    "startColumn": 62,
+                    "endColumn": 68,
                     "lineCount": 1
                 }
             },
@@ -5492,6 +5492,14 @@
                 "range": {
                     "startColumn": 32,
                     "endColumn": 36,
+                    "lineCount": 1
+                }
+            },
+            {
+                "code": "reportArgumentType",
+                "range": {
+                    "startColumn": 34,
+                    "endColumn": 44,
                     "lineCount": 1
                 }
             }
