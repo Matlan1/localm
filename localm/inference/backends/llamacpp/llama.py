@@ -3880,6 +3880,8 @@ class LlamaCpp:
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+        if self._ctx_ptr and self.is_diffusion:
+            api.llama_set_causal_attn(self._ctx_ptr, False)
         if self._ctx_ptr:
             try:
                 self._apply_adapters(self._ctx_ptr)

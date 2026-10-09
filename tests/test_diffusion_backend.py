@@ -558,6 +558,24 @@ class TestLoadSetup:
             llm = LlamaCpp("m.gguf", n_ctx=512, n_gpu_layers=99, verbose=True)
             llm.close()
         assert llm.is_diffusion is False and llm.kv_bytes_per_token == 4096
+
+    def test_a_rebuilt_context_stays_bidirectional(self):
+        import ctypes
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from tests._bare_llama import make_bare_llama
+        api = MagicMock()
+        api.llama_context_default_params.return_value = SimpleNamespace(
+            n_ctx=0, n_batch=0, n_ubatch=0, offload_kqv=True)
+        api.llama_init_from_model.return_value = ctypes.c_void_p(77)
+        llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2),
+                              _mtp_enabled=False, is_diffusion=True)
+        llm._target_ctx = lambda needed: 1024
+        with patch("localm.inference.backends.llamacpp.llama.api", api):
+            llm._prefill_fresh_context([], 10)
+        api.llama_set_causal_attn.assert_called_once_with(
+            api.llama_init_from_model.return_value, False)
         api.llama_set_causal_attn.assert_not_called()
 
 
