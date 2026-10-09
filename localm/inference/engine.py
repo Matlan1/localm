@@ -410,14 +410,10 @@ class Engine:
         """How the last load chose its GPU layer count (the backend's
         ``last_gpu_sizing``: ``mode``, ``layers``, ``n_ctx`` and, for an
         auto-sized load, the free/total/model/KV/overhead bytes it was sized
-        against) plus the ``mmap_state`` fields when the load reported them, or
-        None for a backend that does not size layers or before any load."""
+        against), or None for a backend that does not size layers or before
+        any load."""
         sizing = getattr(self._backend, "last_gpu_sizing", None)
-        if not isinstance(sizing, dict):
-            return None
-        sizing = dict(sizing)
-        sizing.update(self.mmap_state or {})
-        return sizing
+        return dict(sizing) if isinstance(sizing, dict) else None
 
     @property
     def mmap_state(self) -> Optional[dict]:

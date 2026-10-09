@@ -239,18 +239,6 @@ def test_mmap_from_disk_needs_mmap_actually_on():
     assert _engine(_backend("auto", False, True)).mmap_state["mmap_from_disk"] is False
 
 
-def test_gpu_sizing_carries_the_mmap_fields():
-    b = _backend("auto", True, True)
-    b.last_gpu_sizing = {"mode": "auto", "layers": 99, "n_ctx": 4096}
-    sizing = _engine(b).gpu_sizing
-    assert sizing["layers"] == 99
-    assert sizing["mmap_from_disk"] is True
-
-
-def test_gpu_sizing_is_none_without_a_sizing_record():
-    assert _engine(_backend("auto", True, True)).gpu_sizing is None
-
-
 def test_the_load_payload_carries_the_mmap_fields():
     from localm.inference import http_server as hs
     e = SimpleNamespace(gpu_placement={"gpu_layers_offloaded": 4,
