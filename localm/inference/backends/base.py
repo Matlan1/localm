@@ -286,15 +286,20 @@ GRAMMAR_LOAD_FAILED_MESSAGE = (
 )
 
 
+# Shown when any grammar, lazy or forced, is requested of a diffusion language
+# model. Contains "would be ignored", which the GUI's web-tool retry matches
+# on. See test_grammar_refusals_carry_the_retry_phrase.
+GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE = (
+    "This model is a diffusion language model: it fills in its whole reply at "
+    "once instead of token by token, so the requested grammar would be ignored "
+    "and the reply would not match it. Use a regular chat model for "
+    "grammar-constrained output."
+)
+
+
 # Shown when a LAZY grammar is requested of a backend that can constrain
 # generation but cannot do it lazily. A distinct string from
 # GRAMMAR_UNSUPPORTED_MESSAGE above, which names a different recovery.
-GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE = (
-    "This model is a diffusion language model: it fills in its whole reply at "
-    "once instead of token by token, so it cannot follow a grammar and the reply "
-    "would not match it. Use a regular chat model for grammar-constrained output."
-)
-
 GRAMMAR_LAZY_UNSUPPORTED_MESSAGE = (
     "This model cannot apply a LAZY grammar (one that leaves generation "
     "unconstrained until a trigger pattern matches, then enforces the grammar "
