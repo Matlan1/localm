@@ -21,7 +21,7 @@ it), so load/unload are no-ops.
 from __future__ import annotations
 
 import json
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, Optional
 
 from localm.inference.backends.base import UnsupportedInputError
 
@@ -67,7 +67,7 @@ class HttpEngine:
     def unload(self) -> None:
         pass
 
-    def __enter__(self) -> "HttpEngine":
+    def __enter__(self) -> HttpEngine:
         return self
 
     def __exit__(self, *_exc) -> None:
@@ -114,7 +114,7 @@ class HttpEngine:
             h["Authorization"] = f"Bearer {self._token}"
         return h
 
-    def chat_stream(self, messages: List[dict], *,
+    def chat_stream(self, messages: list[dict], *,
                     max_tokens: Optional[int] = None,
                     temperature: Optional[float] = None,
                     top_p: Optional[float] = None,
