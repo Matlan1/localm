@@ -319,8 +319,6 @@ def message_to_openai(msg: OllamaMessage) -> dict[str, Any]:
         if msg.role != "assistant":
             raise OllamaError(400, "tool_calls belong on an assistant message")
         out["tool_calls"] = [tool_call_to_openai(c, i) for i, c in enumerate(msg.tool_calls)]
-    if msg.role == "tool" and msg.tool_name:
-        out["name"] = msg.tool_name
     return out
 
 

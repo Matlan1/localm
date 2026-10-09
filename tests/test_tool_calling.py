@@ -375,3 +375,11 @@ def test_a_reply_that_starts_with_a_bracket_is_text_unless_it_opens_a_call_list(
     assert calls_of(events) == [("get_weather", {})]
     parser = ToolCallStream({"get_weather"})
     assert parser.feed("[1, 2]") == [("text", "[1, 2]")]
+
+
+def test_a_one_call_grammar_refuses_a_second_call():
+    grammar, _lazy, _t = tool_grammar(validate_tools([WEATHER]), ToolChoice("required"), parallel=False)
+    one = call_text("get_weather", {"city": "Paris"})
+    assert accepts(grammar, one) and not accepts(grammar, one + "\n" + one)
+    many, _lazy, _t = tool_grammar(validate_tools([WEATHER]), ToolChoice("required"))
+    assert accepts(many, one + "\n" + one)

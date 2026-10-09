@@ -204,7 +204,7 @@ def register(app: FastAPI, ctx) -> None:
                               else {t.name for t in tools})
                 try:
                     grammar, grammar_lazy, grammar_triggers = tool_grammar(
-                        list(tools), choice)
+                        list(tools), choice, parallel=req.parallel_tool_calls is not False)
                 except ToolsError as e:
                     raise HTTPException(400, str(e)) from e
             gen_kwargs = dict(
@@ -218,6 +218,7 @@ def register(app: FastAPI, ctx) -> None:
                 stop=req.stop,
                 thinking=(req.chat_template_kwargs or {}).get("enable_thinking"),
                 tool_names=tool_names,
+                max_tool_calls=1 if tool_names and req.parallel_tool_calls is False else None,
             )
             # Strip None so Engine uses its config defaults
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}

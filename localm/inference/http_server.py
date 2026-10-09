@@ -5012,6 +5012,7 @@ async def _stream_sse(
     tool_names = gen_kwargs.pop("tool_names", None)
     stop = gen_kwargs.pop("stop", None)
     router = _ReplyRouter(stop, tool_names, gen_kwargs)
+    gen_kwargs.pop("max_tool_calls", None)
 
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
@@ -5637,12 +5638,15 @@ class _ReplyRouter:
             gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
         self._tools = ToolCallStream(tool_names) if tool_names else None
         self._stop = StopFilter(stops) if stops else None
+        self._max_calls = gen_kwargs.get("max_tool_calls")
         self.calls: list = []
         self.content: list[str] = []
         self.reasoning: list[str] = []
 
     @property
     def stopped(self) -> bool:
+        if self._max_calls is not None and len(self.calls) >= self._max_calls:
+            return True
         return self._stop is not None and self._stop.hit
 
     def feed(self, token: str) -> list:
@@ -5731,6 +5735,7 @@ async def _generate_full(engine, messages: list, request=None, *,
     poll = _resolve_disconnect_poll(request)
     stop = gen_kwargs.pop("stop", None)
     tool_names = gen_kwargs.pop("tool_names", None)
+    gen_kwargs.pop("max_tool_calls", None)
     stop_detector = _StopDetector(stop, gen_kwargs, tool_names) if stop else None
 
     def _run() -> str:
@@ -6188,11 +6193,6 @@ def _protocol_messages_to_dicts(messages: list[Message]) -> list:
             result[-1]["origin"] = origin
         if msg.tool_calls:
             result[-1]["tool_calls"] = msg.tool_calls
-        if msg.role == "tool":
-            if msg.tool_call_id:
-                result[-1]["tool_call_id"] = msg.tool_call_id
-            if msg.name:
-                result[-1]["name"] = msg.name
     return result
 
 

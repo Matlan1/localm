@@ -235,13 +235,15 @@ def render_messages(messages: list[dict], tools: list[Tool], choice: ToolChoice)
 # ------------------------------------------------------------------ grammar
 
 
-def tool_grammar(tools: list[Tool], choice: ToolChoice) -> tuple[str, bool, Optional[list[str]]]:
+def tool_grammar(tools: list[Tool], choice: ToolChoice,
+                 parallel: bool = True) -> tuple[str, bool, Optional[list[str]]]:
     """``(grammar, lazy, triggers)`` that makes the model's calls well formed.
 
     ``auto``: a lazy grammar, unconstrained until the model writes ``<tool_call>``.
     ``required`` or a named function: the grammar applies from the first token.
-    A tool whose parameter schema uses a keyword the compiler cannot enforce
-    takes any JSON object as its arguments."""
+    With *parallel* false the grammar admits one call. A tool whose parameter
+    schema uses a keyword the compiler cannot enforce takes any JSON object as
+    its arguments."""
     chosen = [t for t in tools if choice.kind != "function" or t.name == choice.name]
     try:
         grammar = schema_to_grammar(_calls_schema(chosen, generic=False))
@@ -250,7 +252,7 @@ def tool_grammar(tools: list[Tool], choice: ToolChoice) -> tuple[str, bool, Opti
             grammar = schema_to_grammar(_calls_schema(chosen, generic=True))
         except SchemaGrammarError as exc:
             raise ToolsError(f"the tools cannot be turned into a grammar: {exc}") from None
-    grammar = _wrap_calls(grammar)
+    grammar = _wrap_calls(grammar, parallel)
     if choice.kind == "auto":
         return grammar, True, [TOOL_CALL_TRIGGER]
     return grammar, False, None
@@ -290,13 +292,13 @@ def _calls_schema(tools: list[Tool], generic: bool) -> dict[str, Any]:
     return alts[0] if len(alts) == 1 else {"anyOf": alts}
 
 
-def _wrap_calls(grammar: str) -> str:
+def _wrap_calls(grammar: str, parallel: bool = True) -> str:
     """*grammar* (entry rule ``root`` for one call object) as one or more
-    ``<tool_call>`` blocks."""
+    ``<tool_call>`` blocks, or exactly one when *parallel* is false."""
     first, _, rest = grammar.partition("\n")
     body = first.removeprefix("root ::= ")
     return (
-        "root ::= tc-block+\n"
+        f"root ::= tc-block{'+' if parallel else ''}\n"
         f"tc-block ::= {literal(OPEN_TAG)} tc-ws tc-call {literal(CLOSE_TAG)} tc-ws\n"
         f"tc-call ::= {body}\n"
         "tc-ws ::= [ \\t\\n\\r]? [ \\t\\n\\r]? [ \\t\\n\\r]?\n"

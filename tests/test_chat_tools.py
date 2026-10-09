@@ -367,3 +367,33 @@ def test_an_assistant_message_may_send_null_content(home):
             {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
         {"role": "tool", "tool_call_id": "c", "content": "r"}])
     assert r.status_code == 200
+
+
+def test_parallel_tool_calls_false_keeps_one_call_and_asks_for_a_one_call_grammar(home):
+    served = Served(pieces(call() + "\n" + call("get_time", zone="CET")))
+    r = served.chat(tools=[WEATHER, TIME], parallel_tool_calls=False)
+    calls = r.json()["choices"][0]["message"]["tool_calls"]
+    assert [c["function"]["name"] for c in calls] == ["get_weather"]
+    assert r.json()["choices"][0]["finish_reason"] == "tool_calls"
+    _messages, kwargs = served.last
+    assert kwargs["grammar"].startswith("root ::= tc-block\n")
+    streamed = served.chat(tools=[WEATHER, TIME], parallel_tool_calls=False, stream=True)
+    streamed_calls = [tc for d in deltas(streamed) for tc in (d.get("tool_calls") or [])]
+    assert [c["function"]["name"] for c in streamed_calls] == ["get_weather"]
+    assert finish_of(streamed) == "tool_calls"
+
+
+def test_parallel_tool_calls_defaults_to_many(home):
+    served = Served(["ok"])
+    served.chat(tools=[WEATHER])
+    assert served.last[1]["grammar"].startswith("root ::= tc-block+\n")
+    served.chat(tools=[WEATHER], parallel_tool_calls=True)
+    assert served.last[1]["grammar"].startswith("root ::= tc-block+\n")
+
+
+def test_a_named_function_choice_reads_only_that_function(home):
+    served = Served(pieces(call()))
+    r = served.chat(tools=[WEATHER, TIME],
+                    tool_choice={"type": "function", "function": {"name": "get_time"}})
+    message = r.json()["choices"][0]["message"]
+    assert not message["tool_calls"] and "get_weather" in message["content"]

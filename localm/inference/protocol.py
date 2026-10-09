@@ -60,9 +60,6 @@ class Message(BaseModel):
     # (``id``, ``type``, ``function.name``, ``function.arguments``). On a request
     # message they are earlier calls; on a response they are the model's calls.
     tool_calls: Optional[List[Dict[str, Any]]] = None
-    # On a ``tool`` message: the ``id`` of the call it answers.
-    tool_call_id: Optional[str] = None
-    name: Optional[str] = None
     # Character ranges of ``content`` that came from an untrusted source, as
     # ``[[start, end], ...]``. The backend tokenises those ranges with
     # special-token parsing off. Optional and additive: a client that omits it
@@ -201,6 +198,8 @@ class ChatRequest(BaseModel):
     # when streaming) with finish_reason "tool_calls".
     tools: Optional[List[Any]] = None
     tool_choice: Optional[Any] = None
+    # False: the reply holds at most one call and ends there.
+    parallel_tool_calls: Optional[bool] = None
     # Capabilities the answering model must have, e.g. ["tool_use"]. Consulted
     # ONLY when no model is pinned: with an explicit `model`, a gap is reported
     # and the pinned model still answers. Vision and context length need no
