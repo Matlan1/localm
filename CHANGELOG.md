@@ -12,6 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Speculative decoding for any GGUF model, with no draft model.** The new
+  Speculative drafting setting (`spec_source`) adds `ngram`: the model drafts the
+  tokens that followed the same few tokens earlier in the conversation and checks
+  them in one pass, so replies that rewrite a file, quote a passage or repeat
+  tool-call JSON come out faster. Replies are the same model's replies. It is off
+  by default; `localm bench-spec <model>` measures whether it pays on your machine,
+  and the reply's usage line shows how many drafted tokens were accepted.
 - **A "Model autoswitch" setting controls when a chat may be answered by a different
   model.** `off` never switches; `image` (the default) switches only for an image
   your model cannot read; `ask` keeps your model and offers the better one on the

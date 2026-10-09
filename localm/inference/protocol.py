@@ -311,6 +311,22 @@ class MtpUsage(BaseModel):
     reason: Optional[str] = None
 
 
+class SpeculationUsage(BaseModel):
+    """Speculative drafting for one reply, for any draft source.
+
+    source is the draft source ("mtp" or "ngram"). state and the counts mean
+    what they mean in MtpUsage; for ngram, "unavailable" carries the model
+    status as reason (e.g. "rewind-unsupported") and "idle" means nothing in
+    the reply matched earlier text.
+    """
+    source: str
+    state: str
+    drafted: int = 0
+    accepted: int = 0
+    paused_steps: int = 0
+    reason: Optional[str] = None
+
+
 class UsageInfo(BaseModel):
     prompt_tokens:     int = 0
     completion_tokens: int = 0
@@ -320,6 +336,7 @@ class UsageInfo(BaseModel):
     tokens_per_sec: Optional[float] = None   # completion tokens / generation time
     context_capacity: Optional[int] = None   # total tokens allowed in context
     mtp: Optional[MtpUsage] = None           # set when MTP is enabled for the model
+    speculation: Optional[SpeculationUsage] = None  # set when a draft source is on
 
 
 class ChatChunk(BaseModel):

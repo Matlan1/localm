@@ -555,6 +555,45 @@ drafting partway: `draft-decode-failed:*`, `draft-decode-error:*`,
 `GgufBackend.last_mtp_usage` turns these into the `usage.mtp` object of the
 chat API (see server-api.md), which the GUI shows next to the reply's tok/s.
 
+### Draft sources and n-gram (prompt lookup) speculative decoding
+
+The decode loop in `LlamaCpp._generate` speculates through a `DraftSource`
+(`_drafting.py`): `begin_call`, then per step `drafting` / `ready` / `budget` /
+`propose`, then `after_verify` or `after_single_token`, `finish` and always
+`end_call`. Verification is the same for every source: one batch of
+`[token] + drafts`, each row sampled with the request's own sampler, the longest
+matching prefix kept, the rest removed from the cache, and the first mismatch
+carried to the next step as the token to emit. Output is the target model's,
+whatever the source proposes.
+
+`spec_source` chooses the source: `off`, `mtp` (the MTP head above) or `ngram`.
+Unset, it follows `mtp_enabled` (true is `mtp`, false is `off`); an explicit value
+wins. One source is active per loaded model.
+
+**`ngram`** (`_ngram.py`) needs no second model, no draft context and no extra
+VRAM. For the token just sampled it looks up the longest trailing n-gram
+(`NGRAM_N_MAX` 5 down to `NGRAM_N_MIN` 3 tokens) of the tokens in the cache plus
+that token, finds its most recent earlier occurrence, and proposes what followed
+it, up to `spec_draft_tokens` (default 8, at most 16). An end-of-generation token
+is never proposed. The index follows the cache: it keeps the prefix a follow-up
+turn shares with the previous one and indexes only what is new. A step with no
+match decodes one token and is timed by the pacer as a plain step, so a reply
+that never repeats itself costs a dictionary lookup per token. It pays on text
+that repeats earlier text: rewriting a file, quoting a passage, repeated
+tool-call JSON.
+
+A model with recurrent layers needs one state snapshot per draft token to drop
+rejected drafts (`n_rs_seq`), so there the n-gram draft length is capped at 4
+(`NGRAM_RECURRENT_DRAFT_TOKENS_MAX`) and the snapshots are charged in the VRAM
+estimate. A cache that cannot drop a rejected draft at all is found at load
+(status `rewind-unsupported`) or on the first rejection, after which n-gram
+drafting stays off for that model. A turn with an image does not draft
+(`skipped` `image`). `LlamaCpp.speculation_report()` carries the source, its
+status and the reply's figures to the parent in the done envelope
+(`speculation`), and `GgufBackend.last_speculation_usage` turns them into
+`usage.speculation` (see server-api.md). `localm bench-spec MODEL` compares a
+source against no speculation on this machine.
+
 ### Stop-string filter (`_filtered_stream`)
 
 Many models signal end-of-turn with multi-token sequences (e.g. `<|im_end|>` → 6 tokens: `<`, `|`, `im`, `_`, `end`, `|>`). `llama_vocab_is_eog` can't catch these if they aren't registered as special tokens.
@@ -610,6 +649,6 @@ persisted.
   dedicated on-device embedding-model loader (`localm.inference.embedder`),
   loaded independently of whatever chat model is active. HF-format models
   embed fine. (See server-api.md for the `/v1/embeddings` behavior.)
-- **No two-model (separate draft model) speculative decoding.** Only
-  single-model MTP speculative decoding is supported - a model trained with
-  its own next-n draft head (see above) - and it is off by default.
+- **No two-model (separate draft model) speculative decoding.** Drafts come
+  from the model's own MTP head or from n-gram lookup over the conversation
+  (see above); both are off by default.

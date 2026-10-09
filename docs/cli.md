@@ -106,6 +106,14 @@ localm bench-mtp mymodel --draft-tokens 3   # draft tokens per step for the MTP 
 
 Loads the model twice per round, once with Multi-Token Prediction off and once on, and reports which was faster, how many drafted tokens the model accepted, and whether the replies were identical to MTP off. Nothing is written to your config; the settings are left as they were.
 
+```bash
+localm bench-spec mymodel                    # n-gram drafting vs none
+localm bench-spec mymodel --source mtp       # MTP vs none
+localm bench-spec mymodel --draft-tokens 4   # draft tokens per step for the "on" runs
+```
+
+Same comparison for any draft source (`--source ngram`, the default, or `mtp`), over the MTP prompts plus a rewrite that repeats its input, and it also reports whether a greedy reply matched. Takes the same `--gen-tokens`, `--rounds`, `--ctx` and `--gpu-layers` options. Nothing is written to your config.
+
 ---
 
 ## Model management
@@ -572,7 +580,7 @@ Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `code
 localm completion powershell   # also: bash, zsh, fish
 ```
 
-In bash/zsh/fish, model names complete everywhere a model argument is expected. In PowerShell, model-name completion only covers `run`, `serve`, `rm`, and `alias`; other commands that take a model argument (`relocate`, `set-type`, `unload`, `rename`, `benchmark`, `bench-mtp`, `gui`) complete only the command name, not the model.
+In bash/zsh/fish, model names complete everywhere a model argument is expected. In PowerShell, model-name completion only covers `run`, `serve`, `rm`, and `alias`; other commands that take a model argument (`relocate`, `set-type`, `unload`, `rename`, `benchmark`, `bench-mtp`, `bench-spec`, `gui`) complete only the command name, not the model.
 
 ---
 

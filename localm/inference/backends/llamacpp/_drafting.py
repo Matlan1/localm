@@ -18,19 +18,44 @@ cache. The loop drives a source through these calls, in this order per reply:
 
 Counters for the reply are recorded through on_verify and on_paused_step, a
 failure that stops drafting for the reply through stop_this_call, and a main
-cache that cannot drop a rejected draft through rewind_unsupported.
+cache that cannot drop a rejected draft through rewind_unsupported. A reply
+that cannot draft at all (a turn with an image) calls skip_call instead of
+begin_call. ``report`` describes the model's state and the last reply.
 """
 from __future__ import annotations
 
 import weakref
 from typing import List, Optional
 
+SPEC_OFF = "off"
+SPEC_MTP = "mtp"
+SPEC_NGRAM = "ngram"
+SPEC_SOURCES = (SPEC_OFF, SPEC_MTP, SPEC_NGRAM)
+
+
+def resolve_spec_source(spec_source: Optional[str], mtp_enabled: bool) -> str:
+    """The draft source a model uses: *spec_source* when it names one of
+    ``SPEC_SOURCES``, else ``mtp`` when *mtp_enabled* and ``off`` otherwise.
+    None and "" count as unset; any other value raises ValueError."""
+    if spec_source is None or spec_source == "":
+        return SPEC_MTP if mtp_enabled else SPEC_OFF
+    value = str(spec_source).strip().lower()
+    if value not in SPEC_SOURCES:
+        raise ValueError("spec_source must be one of %s, got %r"
+                         % (", ".join(SPEC_SOURCES), spec_source))
+    return value
+
 
 class DraftSource:
-    """The interface the decode loop drives. This base never drafts."""
+    """The interface the decode loop drives. This base never drafts.
+
+    ``free_miss`` is True for a source whose proposal costs next to nothing, so
+    a step it proposes nothing for is timed as a plain step.
+    """
 
     name = "off"
     needs_rewind = True
+    free_miss = False
 
     def begin_call(self) -> bool:
         return False
@@ -74,6 +99,20 @@ class DraftSource:
     def extra_vram_bytes(self) -> int:
         """Bytes of VRAM this source needs beyond the main model and context."""
         return 0
+
+    def skip_call(self, reason: str) -> None:
+        """Record that the reply about to run cannot draft, and why."""
+
+    def report(self) -> dict:
+        """The model's speculation state and the last reply's figures:
+        ``status`` (model level), ``active`` (the reply speculated),
+        ``call_status`` (why it stopped partway, "" when it did not),
+        ``skipped`` (why it could not draft at all, "" when it could),
+        ``drafted``, ``accepted``, ``steps``, ``paused_steps`` and
+        ``draft_max``."""
+        return {"status": "disabled", "active": False, "call_status": "",
+                "skipped": "", "drafted": 0, "accepted": 0, "steps": 0,
+                "paused_steps": 0, "draft_max": 0}
 
 
 class MtpSource(DraftSource):
@@ -145,6 +184,16 @@ class MtpSource(DraftSource):
 
     def on_paused_step(self) -> None:
         self._llm.mtp_paused_steps += 1
+
+    def report(self) -> dict:
+        llm = self._llm
+        return {"status": str(getattr(llm, "mtp_status", "") or ""),
+                "active": bool(llm.mtp_active_this_call),
+                "call_status": str(llm.mtp_call_status or ""),
+                "skipped": str(llm.mtp_skipped or ""),
+                "drafted": int(llm.mtp_drafted), "accepted": int(llm.mtp_accepted),
+                "steps": int(llm.mtp_steps), "paused_steps": int(llm.mtp_paused_steps),
+                "draft_max": int(llm._mtp_draft_max)}
 
     def rewind_unsupported(self) -> None:
         llm = self._llm

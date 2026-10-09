@@ -134,6 +134,18 @@ draft tokens sent to verification and kept; `paused_steps` counts the steps
 generated without drafting because drafting was slower. The field is `null`
 when `mtp_enabled` is off.
 
+With any draft source on (`spec_source` `mtp` or `ngram`), chat completions
+also carry `usage.speculation`, the same object plus the source:
+
+```json
+{"speculation": {"source": "ngram", "state": "on", "drafted": 96, "accepted": 71, "paused_steps": 0, "reason": null}}
+```
+
+For `mtp` the other fields equal `usage.mtp`. For `ngram`, `idle` means
+nothing in the reply matched earlier text, and `unavailable` carries the model
+status as `reason` (`rewind-unsupported` when the model's cache cannot drop a
+rejected draft). The field is `null` when no draft source is on.
+
 #### How a generation failure is reported
 
 Both generation endpoints answer failures the same way on both routes and in

@@ -48,6 +48,8 @@ class GgufWorker(VramSizingMixin):
         mtp_enabled: bool = False,
         main_gpu: Optional[int] = None,
         mtp_draft_tokens: Optional[int] = None,
+        spec_source: Optional[str] = None,
+        spec_draft_tokens: Optional[int] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -55,6 +57,8 @@ class GgufWorker(VramSizingMixin):
         self.n_gpu_layers = n_gpu_layers
         self.mtp_enabled = mtp_enabled
         self.mtp_draft_tokens = mtp_draft_tokens   # None = LlamaCpp's default
+        self.spec_source = spec_source             # None = follow mtp_enabled
+        self.spec_draft_tokens = spec_draft_tokens # None = the n-gram default
         # Already resolved by the parent - VramSizingMixin's _check_context_fit
         # reads this in preference to n_gpu_layers, matching GgufBackend's shape.
         self.effective_gpu_layers = n_gpu_layers
@@ -148,6 +152,15 @@ class GgufWorker(VramSizingMixin):
         """Why the last call could not draft at all ("grammar", "image"), or ""."""
         return str(getattr(self._llm, "mtp_skipped", "") or "") if self._llm is not None else ""
 
+    @property
+    def spec_report(self) -> Optional[dict]:
+        """The loaded model's speculation report (LlamaCpp.speculation_report):
+        its draft source, status and the last call's figures. None with no model."""
+        if self._llm is None:
+            return None
+        report = getattr(self._llm, "speculation_report", None)
+        return report() if callable(report) else None
+
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
         ``{"n_layers", "kv_bytes_per_token", "supports_images",
@@ -218,6 +231,10 @@ class GgufWorker(VramSizingMixin):
             verbose=False,
             **({"mtp_draft_tokens": self.mtp_draft_tokens}
                if self.mtp_draft_tokens is not None else {}),
+            **({"spec_source": self.spec_source}
+               if self.spec_source is not None else {}),
+            **({"spec_draft_tokens": self.spec_draft_tokens}
+               if self.spec_draft_tokens is not None else {}),
         )
         self._loaded = True
         return {

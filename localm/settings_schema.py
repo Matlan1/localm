@@ -244,6 +244,17 @@ CORE_FIELDS: list = [
                  "when most drafts are accepted; `localm bench-mtp <model> "
                  "--draft-tokens N` measures it.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=3),
+    SettingField("spec_source", Widget.SELECT, "Speculative drafting",
+                 "Where draft tokens come from. mtp = the model's own MTP head; "
+                 "ngram = repeats of earlier text in the chat, no second model; "
+                 "off = none. Inherit follows the MTP toggle. Run `localm "
+                 "bench-spec <model>` to check yours.",
+                 group="Engine", applies=Applies.NEXT_LOAD,
+                 options=["", "off", "mtp", "ngram"]),
+    SettingField("spec_draft_tokens", Widget.NUMBER, "N-gram draft tokens",
+                 "Most tokens one n-gram step proposes. Blank uses 8; models "
+                 "with recurrent layers use at most 4.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=16),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.
@@ -1385,6 +1396,11 @@ def _validate_user_name(key: str, val) -> str:
     return s
 
 
+# NUMBER fields whose default is None (unset) and whose value is an integer;
+# a blank value clears them.
+_NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens"})
+
+
 def _validate_one(key: str, val, field: "SettingField", default):
     nullable = default is None
     widget = field.widget
@@ -1398,6 +1414,10 @@ def _validate_one(key: str, val, field: "SettingField", default):
         return _to_bool(key, val)
 
     if widget == Widget.NUMBER:
+        if key in _NULLABLE_INT_NUMBERS:
+            if isinstance(val, str) and not val.strip():
+                return None
+            return _to_number(key, val, want_int=True, lo=field.min, hi=field.max)
         want_int = isinstance(default, int) and not isinstance(default, bool)
         return _to_number(key, val, want_int=want_int, lo=field.min, hi=field.max)
 

@@ -215,6 +215,10 @@ macOS; no llama-cpp-python). Key behaviour:
   by default (`mtp_enabled`) and engages only where the runtime can build
   and feed a real draft head for that model; see
   [llamacpp-binding.md](llamacpp-binding.md) for the mechanism.
+- **N-gram (prompt lookup) speculative decoding**: any model can draft the
+  tokens that followed the same few tokens earlier in the conversation and
+  verify them the same way, with no second model and no extra VRAM. Off by
+  default (`spec_source`); `localm bench-spec` measures whether it pays.
 - **Output filtering**: a stop-string filter handles end-of-turn sequences
   split across tokens; an internal-marker scrubber (`localm/textnorm.py`)
   strips thinking-channel tags and leaked chat-template control tokens some
