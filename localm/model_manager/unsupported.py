@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 GGUF_MAX_VERSION = 3
+_GGUF_MAX_PLAUSIBLE_VERSION = 255
 GGUF_MIN_VERSION = 2
 _GGUF_BE_COUNT_LIMIT = 1_000_000
 
@@ -40,9 +41,10 @@ def gguf_header_refusal(head: bytes) -> Optional[str]:
 
     Mirrors llama.cpp's own checks: a version whose low 16 bits are zero is a
     byte-swapped (big-endian) file, version 1 is no longer supported, and a
-    version above 3 is newer than the loader understands. Version 0 gets no
-    verdict: a magic followed by zero bytes is also what a placeholder or a
-    zero-filled partial copy looks like, and the loader reports it itself."""
+    version from 4 to 255 is newer than the loader understands. Any other value
+    gets no verdict: a magic followed by zero bytes or text is also what a
+    placeholder or a damaged copy looks like, and the loader reports it
+    itself."""
     if len(head) < 8 or head[:4] != b"GGUF":
         return None
     (version,) = struct.unpack_from("<I", head, 4)
@@ -58,6 +60,8 @@ def gguf_header_refusal(head: bytes) -> Optional[str]:
     if version == 1:
         return ("This is a GGUF version 1 file, an early format llama.cpp no longer "
                 "loads. Use a current GGUF (version 3) of the same model.")
+    if version > _GGUF_MAX_PLAUSIBLE_VERSION:
+        return None
     return (f"This GGUF declares version {version}, which this build of llama.cpp "
             f"does not understand (it loads versions {GGUF_MIN_VERSION} to "
             f"{GGUF_MAX_VERSION}). Use a GGUF of version {GGUF_MAX_VERSION}, or "

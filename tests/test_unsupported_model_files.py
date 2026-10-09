@@ -185,9 +185,17 @@ class TestGgufVersionAndEndianness:
         assert gguf_unusable_reason(f) is None
         assert _has_gguf_magic(f) is True
 
-    def test_version_zero_gets_no_verdict(self, tmp_path):
-        f = _gguf(tmp_path / "m.gguf", version=0)
+    @pytest.mark.parametrize("version", [0, 256, 1000, 0x6D656720])
+    def test_values_that_are_not_a_plausible_version_get_no_verdict(self, tmp_path, version):
+        f = _gguf(tmp_path / "m.gguf", version=version)
         assert gguf_header_refusal(f.read_bytes()[:24]) is None
+        assert gguf_unusable_reason(f) is None
+
+    @pytest.mark.parametrize("content", [b"GGUF-bytes", b"GGUF gemma model bytes",
+                                         b"GGUF\x00\x00\x00\x00name"])
+    def test_placeholder_files_with_the_magic_get_no_verdict(self, tmp_path, content):
+        f = tmp_path / "placeholder.gguf"
+        f.write_bytes(content)
         assert gguf_unusable_reason(f) is None
 
     def test_non_gguf_and_short_files_get_no_verdict(self, tmp_path):
