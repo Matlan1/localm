@@ -147,7 +147,7 @@ print("staged:" + (lib / ".localm-cuda-staged").read_text().strip())
     grep -q "gpus all" <<<"$nogpu" || fail "the refusal did not say how to give the container a GPU: $nogpu"
 
     echo "== ${BACKEND_LABEL}: localm doctor reports the runtime as not load-tested at install"
-    doctor="$(docker run --rm "${GPU_ARGS[@]}" "$IMAGE" doctor 2>&1)" || true
+    doctor="$(timeout 300 docker run --rm "${GPU_ARGS[@]}" "$IMAGE" doctor 2>&1)" || true
     grep -q "fetched without a GPU" <<<"$doctor" || fail "doctor did not report the staged runtime: $doctor"
     grep -q "${LINE}" <<<"$doctor" || fail "doctor did not name the ${LINE} line: $doctor"
     ;;
