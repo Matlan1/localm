@@ -10,6 +10,7 @@ import re
 
 from localm import pathscrub
 
+
 # The home/username policy lives in localm.pathscrub, shared with the
 # API-response scrubber (embedder status, /debug/stacks). It replaces
 # Path.home() with "~" in both separator forms (case-insensitively on Windows),

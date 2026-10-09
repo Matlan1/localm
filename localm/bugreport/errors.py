@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+
 class LocalmError(Exception):
     """A user-facing, reportable failure.
 
@@ -14,6 +15,8 @@ class LocalmError(Exception):
     wrong because Y" message and offers a bug report - the command that raises it
     knows nothing about reporting. Carries a human *summary*, an optional
     *reason*, and diagnostic *context* for the report."""
+
+    __module__ = "localm.bugreport"
 
     def __init__(self, summary: str, reason: str = "",
                  context: Optional[dict] = None, *,
@@ -35,6 +38,8 @@ class RateLimitedError(LocalmError):
     (seconds) so a caller can wait and retry once instead of failing outright. A
     subclass of LocalmError, so existing ``except LocalmError`` handlers still treat
     it as a (non-fatal) send failure; callers that want the retry catch it first."""
+
+    __module__ = "localm.bugreport"
 
     def __init__(self, retry_after: int = 30, reason: str = ""):
         try:

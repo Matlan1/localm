@@ -13,6 +13,7 @@ from localm.bugreport.logs import _recent_hang_traces, _recent_log_tail_result
 from localm.bugreport.assembly import build_report, report_title
 import localm.bugreport as _br
 
+
 def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
     """Write the report to the data dir and return its path (or None on failure).
     *when* is a caller-supplied timestamp string (kept injectable for tests)."""

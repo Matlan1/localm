@@ -14,7 +14,8 @@ A test file is selected when any of these holds:
     import written as a string), a changed script by file name, or a changed
     non-Python file by file name;
   - a change to a module inside a package listed in _REEXPORT_FACADES also
-    counts as a change to that package, for both rules above;
+    counts as a change to that package, for both rules above, and that package
+    counts as importing every module its own modules import;
   - it imports a changed dependency, names it in a string literal, imports a
     module that imports it (with --depth N, also that module's importers, up
     to N hops), or sits under the folder of a conftest.py that imports it. A
@@ -210,6 +211,13 @@ class Graph:
             names = imported_names(_read(rel), module_name(rel), False)
             self.test_top[rel] = _top_levels(names)
             self.test_imports[rel] = self.resolve(names)
+        for facade in _REEXPORT_FACADES:
+            if facade not in self.sources:
+                continue
+            for dep, users in self.reverse.items():
+                inside = dep == facade or dep.startswith(facade + ".")
+                if not inside and any(u.startswith(facade + ".") for u in users):
+                    users.add(facade)
 
     def resolve(self, names: set[str]) -> set[str]:
         """The known modules the dotted *names* refer to, by longest prefix."""

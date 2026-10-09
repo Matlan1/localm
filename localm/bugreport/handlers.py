@@ -10,6 +10,7 @@ import threading
 
 import localm.bugreport as _br
 
+
 # --------------------------------------------------------------------------- #
 #  Process-wide net: catch a bug ANYWHERE, not just in a CLI command           #
 #                                                                              #

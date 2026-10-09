@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import localm.bugreport as _br
 
+
 # Outer safety cap on how much of the raw log FILE is even read before digesting -
 # a per-run debug log is not expected to reach this, but a pathological long-lived
 # run must not make digest-building read (and regex-scan) an unbounded file.

@@ -12,6 +12,7 @@ from localm.bugreport._common import MAINTAINER_EMAIL
 from localm.bugreport.diagnostics import _ring_activity, collect_diagnostics
 import localm.bugreport as _br
 
+
 def _format_error(error: Optional[BaseException]) -> str:
     if error is None:
         return ""
@@ -153,7 +154,8 @@ def build_report(summary: str, reason: str = "",
     ctx = context or {}
     # A user-composed report (save_user_report/the GUI form) can supply these
     # three DISTINCT fields via context, the same threading pattern used for
-    # native_trace/recent_log_tail/hang_traces/client below. Absent for every
+    # native_trace/recent_log_tail/hang_traces (_context_diagnostic_sections)
+    # and client below. Absent for every
     # automatic (crash/LocalmError) report, whose "What happened" renders as
     # summary+reason. Scrubbed here, at the same choke point as summary/reason
     # above.

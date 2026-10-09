@@ -13,6 +13,7 @@ from typing import Optional
 
 from localm.bugreport.scrub import _scrub_home, _scrub_query_and_header_secrets, _scrub_url_creds
 
+
 def _localm_version() -> str:
     # Live VERSION-file read, falling back to installed metadata.
     try:

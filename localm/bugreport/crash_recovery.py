@@ -13,6 +13,7 @@ from localm.bugreport.assembly import trim_trace_for_report
 from localm.bugreport.crash_guard import _all_crash_markers, _all_crash_stopping_records, _read_exit_record, _trace_path_for_marker, _trace_path_for_stopping_record
 import localm.bugreport as _br
 
+
 # A native/ggml status line printed via raw fprintf (no "TIMESTAMP LEVEL NAME:"
 # prefix - see debuglog.py's dedup_native_stderr) - the vocabulary a hard native
 # crash mid-load/mid-generate is seen stopping inside, e.g. a log stopping dead

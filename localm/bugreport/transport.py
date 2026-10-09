@@ -13,6 +13,7 @@ from localm.bugreport.errors import LocalmError, RateLimitedError
 from localm.bugreport.assembly import _strip_report_footer
 import localm.bugreport as _br
 
+
 # Cap on the mailto body, which mail clients and some browsers truncate: the
 # prefilled body is a short pointer and the full detail lives in the saved file
 # the user attaches or pastes.

@@ -15,6 +15,7 @@ from localm.bugreport.assembly import build_report
 from localm.bugreport.transport import mailto_url
 import localm.bugreport as _br
 
+
 def report_failure(*, summary: str, reason: str = "",
                    error: Optional[BaseException] = None,
                    context: Optional[dict] = None,

@@ -492,6 +492,17 @@ def test_save_report_fallback_location(world, monkeypatch):
     assert seen == [Path(localm.__file__).resolve().parents[1] / "home" / "bug-reports"]
 
 
+def test_exception_types_keep_their_public_name():
+    import importlib
+    for cls in (bugreport.LocalmError, bugreport.RateLimitedError):
+        assert cls.__module__ == "localm.bugreport"
+        assert getattr(importlib.import_module(cls.__module__), cls.__qualname__) is cls
+    assert bugreport._format_error(bugreport.LocalmError("setup failed")) == (
+        "localm.bugreport.LocalmError: setup failed")
+    assert bugreport._format_error(bugreport.RateLimitedError(7)) == (
+        "localm.bugreport.RateLimitedError: the bug-report server is rate limiting reports")
+
+
 def test_report_title_and_mailto(world, tmp_path):
     assert bugreport.report_title("", "", "") == "user-reported issue"
     assert bugreport.report_title("", "first\nsecond", "desc") == "first"

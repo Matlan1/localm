@@ -9,6 +9,7 @@ from typing import Optional
 
 import localm.bugreport as _br
 
+
 # --------------------------------------------------------------------------- #
 #  asyncio + native-crash net: "fire the bug reporter no matter what"          #
 #                                                                              #
