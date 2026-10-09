@@ -468,6 +468,7 @@ def test_the_draft_model_is_split_over_the_targets_devices(tmp_path, main_gpu, r
         api.llama_load_model_from_file.return_value = None
         llm._load_draft_model(path, None, True)
     assert params.n_gpu_layers == 99
+    assert not hasattr(params, "devices")
     if main_gpu is None:
         main.assert_called_once_with(params)
     else:
@@ -476,18 +477,25 @@ def test_the_draft_model_is_split_over_the_targets_devices(tmp_path, main_gpu, r
     mmap.assert_called_once_with(params, False)
 
 
-def test_a_cpu_draft_model_is_not_split(tmp_path):
+def test_a_cpu_draft_model_is_not_split_and_gets_no_gpu_device(tmp_path):
     llm, path, llama_mod = _loading_llama(tmp_path)
     llm._gpu_split_ratios_arg = [(0, 0.5), (1, 0.5)]
-    params = SimpleNamespace(n_gpu_layers=-1, split_mode=1, main_gpu=0)
+    params = SimpleNamespace(n_gpu_layers=-1, split_mode=1, main_gpu=0, devices=None)
+    seen = {}
+
+    def load(p, mp):
+        device_list = ctypes.cast(mp.devices, ctypes.POINTER(ctypes.c_void_p))
+        seen["first"] = device_list[0]
+        return None
     with patch.object(llama_mod, "api") as api, \
          patch.object(llama_mod, "set_use_mmap"), \
          patch("localm.discover.apply_main_gpu") as main, \
          patch("localm.discover.apply_gpu_split") as split:
         api.llama_model_default_params.return_value = params
-        api.llama_load_model_from_file.return_value = None
+        api.llama_load_model_from_file.side_effect = load
         llm._load_draft_model(path, None, True, on_gpu=False)
     assert params.n_gpu_layers == 0
+    assert params.devices and seen == {"first": None}
     main.assert_not_called()
     split.assert_not_called()
 

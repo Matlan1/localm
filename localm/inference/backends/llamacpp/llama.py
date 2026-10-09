@@ -2749,8 +2749,10 @@ class LlamaCpp:
         """Load the draft GGUF at *path* and attach a DraftModelSource drafting
         with it on its own context: on the GPU split over the same devices as
         the target (the same ``main_gpu`` and ``gpu_split_ratios`` through
-        ``discover.apply_main_gpu`` and ``apply_gpu_split``), or on the CPU when
-        *on_gpu* is False, which sets the source's status to "ok-cpu".
+        ``discover.apply_main_gpu`` and ``apply_gpu_split``), or, when *on_gpu*
+        is False, with an empty device list so neither the model nor its
+        context allocates GPU memory, which sets the source's status to
+        "ok-cpu".
 
         Any failure leaves the model working without drafting, with the
         source's status naming why: "draft-model-missing", "draft-load-failed",
@@ -2769,7 +2771,10 @@ class LlamaCpp:
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = 99 if on_gpu else 0
         _tensor_split_keepalive = None
-        if on_gpu:
+        _no_devices = (ctypes.c_void_p * 1)(None)
+        if not on_gpu:
+            mp.devices = ctypes.cast(_no_devices, ctypes.c_void_p).value
+        else:
             from localm.discover import apply_gpu_split, apply_main_gpu
             if self._main_gpu_arg is not None:
                 apply_main_gpu(mp, slot=self._main_gpu_arg)
