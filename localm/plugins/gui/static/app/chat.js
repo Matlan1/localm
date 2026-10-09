@@ -1767,31 +1767,48 @@ export function mtpUsageText(mtp) {
 // The n-gram drafting part of the usage line for a reply's usage.speculation,
 // as {text, title}, in the same states as mtpUsageText. Empty when the source
 // is mtp (usage.mtp already covers it), for no figures, or for an idle turn.
+const SPECULATION_USAGE_KEYS = {
+  ngram: {
+    on: "chat.usage.ngramOn", onTitle: "chat.usage.ngramOn.title",
+    paused: "chat.usage.ngramPaused", pausedTitle: "chat.usage.ngramPaused.title",
+    off: "chat.usage.ngramOff", offImage: "chat.usage.ngramOff.image",
+    stopped: "chat.usage.ngramStopped", unavailable: "chat.usage.ngramUnavailable",
+    reason: "chat.usage.ngramReason",
+  },
+  draft: {
+    on: "chat.usage.draftOn", onTitle: "chat.usage.draftOn.title",
+    paused: "chat.usage.draftPaused", pausedTitle: "chat.usage.draftPaused.title",
+    off: "chat.usage.draftOff", offImage: "chat.usage.draftOff.image",
+    stopped: "chat.usage.draftStopped", unavailable: "chat.usage.draftUnavailable",
+    reason: "chat.usage.draftReason",
+  },
+};
+
 export function speculationUsageText(spec) {
-  if (!spec || typeof spec !== "object" || spec.source !== "ngram") {
+  const keys = spec && typeof spec === "object"
+    && Object.prototype.hasOwnProperty.call(SPECULATION_USAGE_KEYS, spec.source)
+    ? SPECULATION_USAGE_KEYS[spec.source] : null;
+  if (!keys) {
     return { text: "", title: "" };
   }
   if (spec.state === "on" && spec.drafted > 0) {
     const pct = Math.round((100 * spec.accepted) / spec.drafted);
-    return { text: t("chat.usage.ngramOn", { pct }),
-             title: t("chat.usage.ngramOn.title", { accepted: spec.accepted, drafted: spec.drafted }) };
+    return { text: t(keys.on, { pct }),
+             title: t(keys.onTitle, { accepted: spec.accepted, drafted: spec.drafted }) };
   }
   if (spec.state === "paused") {
-    return { text: t("chat.usage.ngramPaused"),
-             title: t("chat.usage.ngramPaused.title", { steps: spec.paused_steps || 0 }) };
+    return { text: t(keys.paused),
+             title: t(keys.pausedTitle, { steps: spec.paused_steps || 0 }) };
   }
   if (spec.state === "off") {
-    const why = { image: "chat.usage.ngramOff.image" }[spec.reason];
-    return { text: t("chat.usage.ngramOff"),
-             title: why ? t(why) : t("chat.usage.ngramReason", { reason: spec.reason || "" }) };
+    return { text: t(keys.off),
+             title: spec.reason === "image" ? t(keys.offImage) : t(keys.reason, { reason: spec.reason || "" }) };
   }
   if (spec.state === "stopped") {
-    return { text: t("chat.usage.ngramStopped"),
-             title: t("chat.usage.ngramReason", { reason: spec.reason || "" }) };
+    return { text: t(keys.stopped), title: t(keys.reason, { reason: spec.reason || "" }) };
   }
   if (spec.state === "unavailable") {
-    return { text: t("chat.usage.ngramUnavailable"),
-             title: t("chat.usage.ngramReason", { reason: spec.reason || "" }) };
+    return { text: t(keys.unavailable), title: t(keys.reason, { reason: spec.reason || "" }) };
   }
   return { text: "", title: "" };
 }
