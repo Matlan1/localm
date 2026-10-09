@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import operator
 import re
 from typing import Optional
@@ -12,8 +13,15 @@ from localm.rag import store as _st
 
 from ..bm25 import BM25, ENGLISH_STOP_WORDS
 from .cache import _COLLECTION_CACHE
-from .types import EmbedFn
+from .types import EmbedFn, RerankFn
 from .vectors import _cosine, _maxnorm, _vectors_finite
+
+
+#: Chunks handed to the reranker when ``Collection.query`` is given a
+#: ``rerank_fn`` and no explicit ``rerank_candidates``.
+DEFAULT_RERANK_CANDIDATES = 20
+
+_WARNED_RERANK_DEGRADES: set = set()
 
 
 #: Absolute relevance floors applied by ``Collection.query(relevant_only=True)``
@@ -59,7 +67,9 @@ class _CollectionSearch:
 
     def query(self, text: str, k: int = 4,
               embed_fn: Optional[EmbedFn] = None, *,
-              relevant_only: bool = False) -> list[dict]:
+              relevant_only: bool = False,
+              rerank_fn: Optional[RerankFn] = None,
+              rerank_candidates: int = DEFAULT_RERANK_CANDIDATES) -> list[dict]:
         """Top-*k* chunks for *text*: max-normalised BM25, blended 50/50 with
         max-normalised cosine similarity when vectors cover the corpus and the
         query can be embedded. ``score`` is that blend, relative to the best
@@ -71,7 +81,17 @@ class _CollectionSearch:
         ``LEXICAL_RELEVANCE_COVERAGE`` of the query's words (``BM25.coverage``)
         for a chunk with no calibrated cosine. A query that ``refers_to_conversation``
         keeps only hits over the strong cosine floor, and none without one. A
-        query unrelated to the collection then returns []."""
+        query unrelated to the collection then returns [].
+
+        With *rerank_fn*, the best *rerank_candidates* chunks by the blend above
+        (never fewer than *k*, after the *relevant_only* floor) are re-scored by
+        ``rerank_fn(query, chunk_texts)``, which returns one finite float per
+        text, and the top *k* by that score are returned, each carrying
+        ``rerank_score`` next to the blended ``score``. A *rerank_fn* that raises
+        or returns the wrong number of scores, or a non-finite one, leaves the
+        blended order in place and records why in ``rerank_degrade_reason``
+        (None after a query that reranked or was not asked to)."""
+        self.rerank_degrade_reason = None
         if not text.strip() or not self._chunks:
             return []
         index = self._lexical_index()
@@ -86,15 +106,55 @@ class _CollectionSearch:
             scores = [0.5 * lex + 0.5 * vec
                       for lex, vec in zip(scores, vec_scores, strict=False)]
 
+        k = max(1, k)
+        pool = k if rerank_fn is None else max(k, rerank_candidates)
         order = sorted(range(len(scores)), key=lambda i: scores[i],
-                       reverse=True)[:max(1, k)]
+                       reverse=True)[:pool]
         order = [i for i in order if scores[i] > 0]
         if relevant_only:
             order = self._relevant(text, order, index, cosines)
+        reranked: dict[int, float] = {}
+        if rerank_fn is not None and len(order) > 1:
+            reranked = self._rerank_scores(text, order, rerank_fn)
+            if reranked:
+                order = sorted(order, key=lambda i: reranked[i], reverse=True)
+        order = order[:k]
         return [
-            {**self._chunks[i], "score": round(scores[i], 4)}
+            {**self._chunks[i], "score": round(scores[i], 4),
+             **({"rerank_score": round(reranked[i], 4)} if reranked else {})}
             for i in order
         ]
+
+    def _rerank_scores(self, text: str, order: list[int],
+                       rerank_fn: RerankFn) -> dict[int, float]:
+        """``rerank_fn``'s score for each chunk index in *order*; {} when it
+        raised or returned something unusable, with the reason recorded in
+        ``rerank_degrade_reason`` and logged once per distinct reason."""
+        try:
+            raw = rerank_fn(text, [self._chunks[i]["text"] for i in order])
+            values = [float(v) for v in raw]
+        except Exception as e:
+            return self._note_rerank_degrade(
+                f"reranking failed ({type(e).__name__}); "
+                f"using the unreranked order")
+        if len(values) != len(order):
+            return self._note_rerank_degrade(
+                f"the reranker returned {len(values)} scores for "
+                f"{len(order)} chunks; using the unreranked order")
+        if not all(math.isfinite(v) for v in values):
+            return self._note_rerank_degrade(
+                "the reranker returned a non-finite score; using the "
+                "unreranked order")
+        return dict(zip(order, values, strict=True))
+
+    def _note_rerank_degrade(self, reason: str) -> dict[int, float]:
+        """Record *reason* as why this query was not reranked and return {}."""
+        self.rerank_degrade_reason = reason
+        key = (str(self.dir), reason)
+        if key not in _WARNED_RERANK_DEGRADES:
+            _WARNED_RERANK_DEGRADES.add(key)
+            _log.warning("RAG collection %r: %s", self.name, reason)
+        return {}
 
     def _relevant(self, text: str, order: list[int], index: BM25,
                   cosines: Optional[list[float]]) -> list[int]:

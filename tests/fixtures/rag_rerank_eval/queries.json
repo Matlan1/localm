@@ -1,0 +1,55 @@
+{
+  "description": "Labelled retrieval set for the Knowledge rerank stage. A chunk of the named document is relevant when its text (whitespace collapsed) contains any of the gold phrases.",
+  "queries": [
+    {"id": "docker-exit", "doc": "docker.md", "query": "The container quits immediately after I start it, what went wrong?", "gold": ["container exits with code 2"]},
+    {"id": "docker-cuda", "doc": "docker.md", "query": "Can I run the container image on an Nvidia graphics card?", "gold": ["NVIDIA GPUs through CUDA are not supported"]},
+    {"id": "docker-verify", "doc": "docker.md", "query": "How can I confirm a published image really came from the project's own build?", "gold": ["build provenance attestation"]},
+    {"id": "docker-chown", "doc": "docker.md", "query": "My bind-mounted folder cannot be written to by the server inside the container", "gold": ["chown 10001"]},
+    {"id": "docker-port", "doc": "docker.md", "query": "How do I make the service listen on another port inside the container?", "gold": ["LOCALM_CONTAINER_PORT=9000"]},
+    {"id": "docker-proxy", "doc": "docker.md", "query": "A reverse proxy already handles HTTPS in front of the container; how do I switch off its own encryption?", "gold": ["`--no-tls` after the image name"]},
+    {"id": "docker-arch", "doc": "docker.md", "query": "Which processor architectures are the images built for?", "gold": ["Images are `linux/amd64` only"]},
+    {"id": "docker-amd", "doc": "docker.md", "query": "Giving an AMD graphics card to the container", "gold": ["--device /dev/dri"]},
+
+    {"id": "phone-store", "doc": "phone.md", "query": "Do I have to download something from an app store to use it on my phone?", "gold": ["no app-store download and no localm cloud"]},
+    {"id": "phone-remote", "doc": "phone.md", "query": "Reaching my machine from outside the house without opening router ports", "gold": ["Remote access needs a private network"]},
+    {"id": "phone-qr", "doc": "phone.md", "query": "Can I scan a code instead of typing the address into the phone?", "gold": ["--qr` prints a scannable QR"]},
+    {"id": "phone-name", "doc": "phone.md", "query": "Change the .local hostname that the phone uses to find my computer", "gold": ["localm config mdns_name studio"]},
+    {"id": "phone-upnp", "doc": "phone.md", "query": "Why is forwarding a port on my router discouraged?", "gold": ["Avoid UPnP / manual"]},
+    {"id": "phone-secure", "doc": "phone.md", "query": "The browser will not offer to install the app until I trust the certificate. Why is that?", "gold": ["secure context"]},
+    {"id": "phone-tailnet", "doc": "phone.md", "query": "Make my Tailscale hostname literally be localm", "gold": ["tailscale up --hostname=localm"]},
+
+    {"id": "tls-firefox", "doc": "tls.md", "query": "Firefox still complains about the certificate although I installed it in Windows", "gold": ["Firefox keeps its OWN certificate store"]},
+    {"id": "tls-expiry", "doc": "tls.md", "query": "What happens when the generated certificate is close to running out?", "gold": ["regenerated as it nears"]},
+    {"id": "tls-reset", "doc": "tls.md", "query": "My certificates seem broken, how do I start over from scratch?", "gold": ["stop localm, delete"]},
+    {"id": "tls-sse", "doc": "tls.md", "query": "Streaming chat arrives in bursts when I put nginx in front", "gold": ["proxy_buffering off"]},
+    {"id": "tls-cors", "doc": "tls.md", "query": "Is it safe to let any website make cross-site requests to my server?", "gold": ["steal the management shell"]},
+    {"id": "tls-firewall", "doc": "tls.md", "query": "Which range of ports should my firewall restrict?", "gold": ["Firewall the localm port (8642-8741)"]},
+    {"id": "tls-ca-life", "doc": "tls.md", "query": "How long does the local certificate authority stay valid?", "gold": ["issued for about 10 years"]},
+    {"id": "tls-fallback", "doc": "tls.md", "query": "I set the bind address in the settings page but it keeps serving only on localhost", "gold": ["falls back to 127.0.0.1 with a loud warning"]},
+    {"id": "tls-own-cert", "doc": "tls.md", "query": "Can I use a certificate issued for my own domain name instead of the generated one?", "gold": ["let you supply your own certificate"]},
+
+    {"id": "jobs-weekday", "doc": "jobs.md", "query": "Run a prompt every weekday morning", "gold": ["09:00 Monday-Friday"]},
+    {"id": "jobs-missed", "doc": "jobs.md", "query": "What happens to scheduled work that came due while my computer was switched off?", "gold": ["single catch-up"]},
+    {"id": "jobs-watch", "doc": "jobs.md", "query": "I dropped new files into an indexed folder but search does not find them", "gold": ["there is no filesystem watcher"]},
+    {"id": "jobs-deleted", "doc": "jobs.md", "query": "Does a re-sync remove entries for files I deleted from disk?", "gold": ["A deleted file is flagged, not removed"]},
+    {"id": "jobs-edit", "doc": "jobs.md", "query": "How do I change the schedule of an existing job in the app?", "gold": ["There is no edit action in the GUI"]},
+    {"id": "jobs-overlap", "doc": "jobs.md", "query": "Can two scheduled runs overlap and load models at the same time?", "gold": ["jobs never stack model loads"]},
+    {"id": "jobs-tick", "doc": "jobs.md", "query": "How often does the scheduler look for due work?", "gold": ["polls about every 30 seconds"]},
+    {"id": "jobs-drive", "doc": "jobs.md", "query": "An external drive was unplugged during a sync; will my index be wiped?", "gold": ["An unreachable folder is skipped whole"]},
+
+    {"id": "mem-default", "doc": "memory.md", "query": "Why does the assistant remember nothing between conversations out of the box?", "gold": ["memory does nothing out of the box"]},
+    {"id": "mem-cap", "doc": "memory.md", "query": "How many remembered facts can be kept at most?", "gold": ["at most 256 records"]},
+    {"id": "mem-auto", "doc": "memory.md", "query": "How frequently does the automatic extraction of facts from my chats run?", "gold": ["at most once every 15 minutes"]},
+    {"id": "mem-clear", "doc": "memory.md", "query": "Wipe everything remembered, including what was archived", "gold": ["`clear` erases everything"]},
+    {"id": "mem-count", "doc": "memory.md", "query": "How many remembered facts are put into a single reply?", "gold": ["Up to 6 facts are injected"]},
+    {"id": "mem-degrade", "doc": "memory.md", "query": "How do I find out why meaning-based recall was not used for a turn?", "gold": ["`no_embedder`"]},
+    {"id": "mem-overwrite", "doc": "memory.md", "query": "What prevents a model-written fact from replacing something I typed myself?", "gold": ["pending correction"]},
+
+    {"id": "net-router", "doc": "network.md", "query": "Keep the assistant away from my router's admin page", "gold": ["your router's admin page"]},
+    {"id": "net-localhost", "doc": "network.md", "query": "The coder needs to call a dev server running on localhost:3000", "gold": ["localm config net_allow_private true"]},
+    {"id": "net-search", "doc": "network.md", "query": "Which search services are used when I have no account or key?", "gold": ["chain of no-key search services"]},
+    {"id": "net-pull", "doc": "network.md", "query": "Does disabling network access also stop model downloads?", "gold": ["still kills them, with no exception"]},
+    {"id": "net-allow", "doc": "network.md", "query": "Restrict the assistant to a short list of approved websites", "gold": ["only listed domains"]},
+    {"id": "net-redirect", "doc": "network.md", "query": "What stops a malicious page from bouncing the agent into my home network through a redirect?", "gold": ["every hop is re-validated"]}
+  ]
+}
