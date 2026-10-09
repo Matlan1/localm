@@ -497,6 +497,34 @@ layers on CPU"). See
 [docs/gpu-setup.md](../docs/gpu-setup.md#mixture-of-experts-reducing-vram-footprint)
 for measured numbers.
 
+### Memory-mapping: models larger than system RAM
+
+`use_mmap` controls whether the model file is memory-mapped, so only the pages a
+run touches are resident instead of the whole model being read into RAM first.
+
+```bash
+localm config use_mmap auto       # localm decides - the default
+localm config use_mmap on         # always memory-map
+localm config use_mmap off        # always read the whole model into memory first
+```
+
+With `auto` and every layer on the GPU, localm reads the weights that stay in
+system RAM (the token embeddings, and any MoE experts kept off the GPU) into
+memory when they fit available RAM with 2 GiB to spare (inside a container,
+its memory limit counts). When they do not, the model is memory-mapped and the
+load output says so:
+
+```
+  mmap on: model may not fit in available RAM, running from disk-backed memory, first tokens slower
+```
+
+Reads then come from disk until the pages are cached, which is why the first
+tokens are slower. A model split between GPU and CPU, a load on a machine with
+no GPU, and a load where available RAM cannot be read use llama.cpp's own
+default instead, which memory-maps the file wherever the device supports it. `on` and `off` are used as given and the load output names
+them (`mmap on` / `mmap off`). The setting applies to the loaded model on its
+next load; the Settings page has the same field ("Memory-map model files").
+
 ### Multi-GPU: splitting one model across several cards
 
 A model too large for any single card's VRAM can load using the combined VRAM of 2 or more GPUs, instead of picking just one:

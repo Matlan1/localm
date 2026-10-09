@@ -282,6 +282,29 @@ slow from RAM by design. Has no effect on a normal (dense) model, and says so
 instead of silently doing nothing. The Settings page has the same field ("MoE
 expert layers on CPU").
 
+## Memory-mapping: models larger than system RAM
+
+A model whose weights do not fit in system RAM can still load when the file is
+memory-mapped: only the pages a run touches are resident, and the rest are read
+from disk on demand. `use_mmap` chooses:
+
+```bash
+localm config use_mmap auto       # localm decides - the default
+localm config use_mmap on         # always memory-map
+localm config use_mmap off        # always read the whole model into memory first
+```
+
+With `auto` and every layer on the GPU, localm reads the weights that stay in
+system RAM (the token embeddings, and any MoE experts kept off the GPU) into
+memory when they fit available RAM with 2 GiB to spare (inside a container, its
+memory limit counts), and memory-maps the model when they do not. The load
+output, the GUI load toast and the load response (`mmap`, `mmap_from_disk`)
+then say it runs from disk-backed memory and that first tokens are slower. A
+model split between GPU and CPU, a machine with no GPU, and a load where
+available RAM cannot be read use llama.cpp's own default, which memory-maps the
+file wherever the device supports it. `on` and `off` are used as given. The
+Settings page has the same field ("Memory-map model files").
+
 ## Vision projector (image understanding) placement
 
 Loading an image runs the vision projector (mtmd) on the GPU by default,

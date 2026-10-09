@@ -111,6 +111,54 @@ test("a load with MoE experts in system RAM warns with the expert count, not a l
   assert.ok(toastEl.className.includes("error"));
 });
 
+test("a model running from disk-backed memory warns even when every layer is on the GPU", async () => {
+  const { window } = loadApp();
+  stubLoad(window, {
+    status: "loaded", model: "huge-model",
+    gpu_layers_offloaded: 48, gpu_layers_total: 48, degraded: false,
+    use_mmap: "auto", mmap: true, mmap_from_disk: true,
+  });
+
+  await selectAndLoad(window, "huge-model");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.match(toastEl.textContent,
+    /Model switched to huge-model \(running from disk-backed memory, first tokens slower\)/);
+  assert.ok(toastEl.className.includes("error"),
+    "first tokens being slower is a warning, not a plain success");
+});
+
+test("disk-backed memory is named after the placement when the load is also partly on the CPU", async () => {
+  const { window } = loadApp();
+  stubLoad(window, {
+    status: "loaded", model: "huge-model",
+    gpu_layers_offloaded: 12, gpu_layers_total: 32, degraded: true,
+    use_mmap: "auto", mmap: true, mmap_from_disk: true,
+  });
+
+  await selectAndLoad(window, "huge-model");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.match(toastEl.textContent,
+    /12\/32 layers on GPU, rest on CPU - slower; running from disk-backed memory, first tokens slower/);
+});
+
+test("a mapped load that is not from disk toasts plain success", async () => {
+  const { window } = loadApp();
+  stubLoad(window, {
+    status: "loaded", model: "small-model",
+    gpu_layers_offloaded: 32, gpu_layers_total: 32, degraded: false,
+    use_mmap: "on", mmap: true, mmap_from_disk: false,
+  });
+
+  await selectAndLoad(window, "small-model");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.match(toastEl.textContent, /Model switched to small-model/);
+  assert.ok(!/disk-backed/.test(toastEl.textContent));
+  assert.ok(!toastEl.className.includes("error"));
+});
+
 test("a superseded load skips the toast entirely, degraded or not", async () => {
   const { window } = loadApp();
   stubLoad(window, {

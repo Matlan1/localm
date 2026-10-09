@@ -462,6 +462,8 @@ def test_headless_web_enabled_job_without_a_model_routes_to_a_tool_capable_model
         home, monkeypatch):
     from localm.plugins.builtin.jobs import runner
     _install_routing_registry(monkeypatch)
+    monkeypatch.setattr("localm.inference.capability_routing.configured_mode",
+                        lambda: "auto")
     monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)
     calls = []
     monkeypatch.setattr(runner, "_load_engine",
@@ -471,6 +473,24 @@ def test_headless_web_enabled_job_without_a_model_routes_to_a_tool_capable_model
     result = runner.run_job(job, engine=None)
 
     assert calls == ["tooly"]
+    assert result["status"] == "ok", result
+
+
+def test_headless_web_enabled_job_stays_on_the_default_model_under_the_default_autoswitch(
+        home, monkeypatch):
+    from localm.inference import capability_routing as cr
+    from localm.plugins.builtin.jobs import runner
+    _install_routing_registry(monkeypatch)
+    assert cr.configured_mode() == "image"
+    monkeypatch.setattr("localm.plugins.builtin.jobs.webtool.web_enabled", lambda: True)
+    calls = []
+    monkeypatch.setattr(runner, "_load_engine",
+                        lambda model: (calls.append(model) or _FakeEngine(["ok"]), False))
+
+    job = _make_job(task_kind="chat", prompt="hi")
+    result = runner.run_job(job, engine=None)
+
+    assert calls == ["plain"]
     assert result["status"] == "ok", result
 
 

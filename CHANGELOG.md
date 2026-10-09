@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
+  a model runs from disk.** With `auto`, a model that may not fit in available
+  RAM is memory-mapped, so it can run from disk-backed memory instead of failing
+  to load; `on` and `off` force it. The load output, the model-switch toast and the
+  load response now say when a model runs from disk-backed memory and that first
+  tokens are slower.
 - **Speculative decoding for any GGUF model, with no draft model.** The new
   Speculative drafting setting (`spec_source`) adds `ngram`: the model drafts the
   tokens that followed the same few tokens earlier in the conversation and checks
@@ -276,6 +282,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   know a model's architecture, the error names the architecture and says the model is
   newer than the runtime (with `localm setup-llama --tag latest` to try a newer build),
   instead of telling you to repair the runtime.
+- **A model whose weights in system RAM do not fit free RAM now loads from disk-backed
+  memory instead of failing.** With every layer on the GPU, localm read the weights it
+  keeps in system RAM (the routed experts of a Mixture-of-Experts model that it moves
+  off the GPU, and the token embeddings) fully into memory, and on a computer without a
+  GPU it did the same with the whole model, so a model larger than free RAM failed to
+  load or pushed the system into swap. localm now checks free RAM first (inside a
+  container, the container's memory limit): when those weights fit, nothing changes;
+  when they do not, or there is no GPU, the model file is memory-mapped wherever the
+  device supports it, so only the parts in use stay in RAM and the rest is read from
+  disk as needed.
 - **Setup can pick up after being interrupted, on every platform.** `setup.sh`,
   `setup.bat` and the graphical installer keep a short journal of the steps they have
   started and finished. Run again after Ctrl+C, a closed window or a crash, setup says

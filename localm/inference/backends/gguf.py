@@ -130,6 +130,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         mtp_draft_tokens: Optional[int] = None,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
+        use_mmap: str = "auto",
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -138,6 +139,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # Opt-in MoE expert placement: keep the expert weights of the first N
         # layers in system RAM (llama.cpp's --n-cpu-moe). 0 = off, the default.
         self.n_cpu_moe = n_cpu_moe
+        # The use_mmap mode (auto, on, off). effective_use_mmap and
+        # mmap_forced_by_ram are what the last load did with it: None / False
+        # until a load reports them.
+        from localm.inference.mmap_setting import coerce_use_mmap
+        mode = coerce_use_mmap(use_mmap)
+        if mode is None:
+            raise ValueError("use_mmap must be one of auto, on, off, got %r" % (use_mmap,))
+        self.use_mmap = mode
+        self.effective_use_mmap: Optional[bool] = None
+        self.mmap_forced_by_ram = False
         # The draft source (off, mtp, ngram); None follows mtp_enabled. MTP is
         # enabled exactly when the source is mtp.
         from .llamacpp._drafting import SPEC_MTP, resolve_spec_source
@@ -601,6 +612,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         ctx_max = self._effective_ctx_max(split_budget=ctx_budget)
         self.effective_ctx_max = ctx_max
 
+        # Whether the worker memory-maps the model file (VramSizingMixin.
+        # _resolve_use_mmap): forced on, forced off, or the build's default.
+        mmap_decision = self._resolve_use_mmap(gpu_layers, vram_before)
+
         # Record what this load applies, for the GUI's loaded-model status: the
         # auto override when computed, else the config ratios, else equal, through
         # the same resolve_gpu_split validation, normalized to shares. Display data
@@ -642,6 +657,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             gpu_split_ratios=worker_split,
             n_cpu_moe=self._load_n_cpu_moe(),
             mtp_enabled=self.mtp_enabled,
+            use_mmap=mmap_decision.use_mmap,
         )
         if self.mtp_draft_tokens is not None:
             params["mtp_draft_tokens"] = int(self.mtp_draft_tokens)
@@ -676,6 +692,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._loaded = True
         self._supports_images = bool(meta.get("supports_images"))
         self._supports_mtp = bool(meta.get("supports_mtp"))
+
+        # Whether the model is memory-mapped: the worker's report from the
+        # native load log, else the forced mode, else None (not known).
+        # mmap_forced_by_ram marks an auto load mapped because its host-resident
+        # weights do not fit available system RAM.
+        reported = meta.get("mmap")
+        self.effective_use_mmap = (reported if isinstance(reported, bool)
+                                   else mmap_decision.use_mmap)
+        self.mmap_forced_by_ram = (self.effective_use_mmap is True
+                                   and mmap_decision.reason == "exceeds_ram")
 
         # Record the model's true transformer layer count, reported once by the
         # child, so the next load and the GUI VRAM estimate can size a partial GPU
@@ -772,7 +798,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         f"generation speed is limited by RAM bandwidth (at most "
                         f"about {40 / gb:.0f} tokens/s at 40 GB/s)[/dim]")
 
+        self._print_mmap_note()
         console.print("[green]✓[/green] Model loaded")
+
+    def _print_mmap_note(self) -> None:
+        """Print the one-line mmap note for the load just finished (see
+        ``mmap_setting.describe_mmap``), or nothing when there is none."""
+        from localm.inference.mmap_setting import describe_mmap
+        note = describe_mmap(self.use_mmap, self.effective_use_mmap,
+                             self.mmap_forced_by_ram)
+        if note:
+            console.print(f"[dim]  {note}[/dim]")
 
     @staticmethod
     def _load_timeout_seconds() -> float:

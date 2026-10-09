@@ -23,7 +23,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = ROOT / "install.sh"
 
-pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+pytestmark = pytest.mark.skipif(
+    os.name == "nt" or shutil.which("bash") is None,
+    reason="install.sh and setup.sh are the Linux/macOS installer; Windows uses setup.bat",
+)
 
 _GIT_STUB = """#!/bin/sh
 echo "git $*" >> "$STUB_LOG"
@@ -71,8 +74,6 @@ def _run_install(tmp_path):
         "LOCALM_DIR": str(dest),
         "TMPDIR": str(tmp_path),
     }
-    if os.name == "nt":
-        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
     r = subprocess.run([bash, str(INSTALL_SH)], env=env, capture_output=True,
                        text=True, timeout=120)
     return r, log.read_text(encoding="utf-8"), home, dest

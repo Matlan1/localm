@@ -2,12 +2,12 @@
 """Load-time gate on a pulled model's tokenizer.json.
 
 Which backtracking engine a validator probes with decides what it can see: a
-lookahead-in-a-loop pattern, ``((?=(a+))a)+b``, that Python `re` handles in
-well under a second at N=2000 is ALREADY hung past 12 seconds in Oniguruma (the
-engine ``tokenizers.Regex`` actually runs) on the identical input - the reverse
-of the ``(a|a)*b`` direction, which is catastrophic in `re` and fast in
-Oniguruma. A validator reusing `_trigger_probe.py`'s `re`-based probe would
-score that pattern "safe".
+lookahead-in-a-loop pattern, ``((?=(a+))a)+b``, that Python `re` runs far
+faster than Oniguruma (the engine ``tokenizers.Regex`` actually runs) on the
+identical input, with Oniguruma's time growing polynomially in the input
+length - the reverse of the ``(a|a)*b`` direction, which is catastrophic in
+`re` and fast in Oniguruma. A validator reusing `_trigger_probe.py`'s
+`re`-based probe would score that pattern "safe".
 """
 
 from __future__ import annotations
@@ -23,11 +23,14 @@ tokenizers = pytest.importorskip("tokenizers")
 from localm.inference import hf_tokenizer_safety as safety  # noqa: E402
 from localm.inference._hf_tokenizer_probe import _check_one  # noqa: E402
 
-# A lookahead-in-a-loop pattern. re.compile accepts it and is still sub-second
-# at N=2000, while Oniguruma is already hung there. 1800 is the input length
-# used by the "must be rejected" tests below.
+# A lookahead-in-a-loop pattern that re.compile accepts and runs quickly, while
+# Oniguruma's time on it grows roughly with the cube of the input length.
 _UNTESTED_DIRECTION_PATTERN = r"((?=(a+))a)+b"
-_UNTESTED_DIRECTION_INPUT = "a" * 1800
+_UNTESTED_DIRECTION_LENGTH = 1000
+_RE_BUDGET_SECONDS = 2.0
+_MIN_ONIG_OVER_RE_RATIO = 5.0
+_MIN_ONIG_DOUBLING_GROWTH = 4.0
+_MIN_ONIG_SECONDS = 0.05
 
 # The classic nested-quantifier shape: catastrophic (unbounded hang) in `re`,
 # but hits Oniguruma's own internal backtrack ceiling almost immediately -
@@ -56,6 +59,11 @@ def _timed(fn, *a, **kw):
     return result, time.perf_counter() - start
 
 
+def _fastest_of(repeats, fn, *a):
+    """Smallest wall-clock time over ``repeats`` calls of ``fn(*a)``."""
+    return min(_timed(fn, *a)[1] for _ in range(repeats))
+
+
 def _model_dir(tmp_path, name, tokenizer_json_obj=None, skip_tokenizer_json=False):
     d = tmp_path / name
     d.mkdir()
@@ -76,19 +84,42 @@ def _with_pre_tokenizer_regex(pattern):
 # ---------------------------------------------------------------------------
 
 def test_the_untested_direction_is_real_re_tolerable_oniguruma_hung():
-    """`re` completes on the witness well inside a budget a per-request check
-    could plausibly use, while raw Oniguruma (bypassing this validator) is
-    already far past it on the identical pattern and input."""
-    _, re_elapsed = _timed(re.compile(_UNTESTED_DIRECTION_PATTERN).search,
-                           _UNTESTED_DIRECTION_INPUT)
-    assert re_elapsed < 2.0, f"re took {re_elapsed:.2f}s - weakens the contrast"
+    """On the identical pattern and input, `re` finishes inside its budget,
+    raw Oniguruma (bypassing this validator) takes several times longer, and
+    Oniguruma's time at least quadruples when the input length doubles.
 
+    Every bound is a ratio between two timings taken on the same machine, plus
+    a floor that only rules out a clock-resolution result. The `re` time and
+    the half-length Oniguruma time are the fastest of three runs.
+    """
+    length = _UNTESTED_DIRECTION_LENGTH
+    text = "a" * length
+    half_text = "a" * (length // 2)
+
+    re_search = re.compile(_UNTESTED_DIRECTION_PATTERN).search
     regex = tokenizers.Regex(_UNTESTED_DIRECTION_PATTERN)
-    splitter = tokenizers.pre_tokenizers.Split(regex, behavior="isolated")
-    _, onig_elapsed = _timed(splitter.pre_tokenize_str, _UNTESTED_DIRECTION_INPUT)
-    assert onig_elapsed > 5.0, (
-        f"onig took only {onig_elapsed:.2f}s - the pattern is no longer a "
-        "witness for the untested direction, update it")
+    onig_split = tokenizers.pre_tokenizers.Split(
+        regex, behavior="isolated").pre_tokenize_str
+
+    re_elapsed = _fastest_of(3, re_search, text)
+    onig_half_elapsed = _fastest_of(3, onig_split, half_text)
+    onig_elapsed = _fastest_of(1, onig_split, text)
+
+    assert re_elapsed < _RE_BUDGET_SECONDS, (
+        f"re took {re_elapsed:.2f}s - weakens the contrast")
+    assert onig_elapsed > _MIN_ONIG_SECONDS, (
+        f"onig took only {onig_elapsed:.4f}s at N={length} - too fast to "
+        "measure against, the pattern is no longer a witness, update it")
+    ratio = onig_elapsed / max(re_elapsed, 1e-6)
+    assert ratio >= _MIN_ONIG_OVER_RE_RATIO, (
+        f"onig {onig_elapsed:.3f}s vs re {re_elapsed:.3f}s at N={length} "
+        f"(x{ratio:.1f}) - the pattern is no longer a witness for the "
+        "untested direction, update it")
+    growth = onig_elapsed / max(onig_half_elapsed, 1e-6)
+    assert growth >= _MIN_ONIG_DOUBLING_GROWTH, (
+        f"onig went {onig_half_elapsed:.3f}s -> {onig_elapsed:.3f}s when N "
+        f"doubled to {length} (x{growth:.1f}) - not super-linear enough to "
+        "be a witness for the untested direction, update it")
 
 
 def test_oniguruma_retry_limit_is_a_baseexception_not_an_exception():
