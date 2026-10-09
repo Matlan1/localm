@@ -478,6 +478,7 @@ def test_measured_ngram_never_drafts_where_verifying_costs_more_than_it_yields(p
     assert blind._source.drafted > 0 and blind_s > plain
     assert measured._source.drafted == 0
     assert measured_s == pytest.approx(plain)
+    assert set(measured._source._observed) == {0}
 
 
 def test_measured_ngram_keeps_drafting_where_verifying_is_cheap():
