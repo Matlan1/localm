@@ -655,6 +655,10 @@ class VramSizingMixin:
             n_layer_all = inputs["n_layer_all"]
             layer_bytes = [0] * n_layer_all
             for name, size in inputs["sizes"].items():
+                # An encoder-decoder model's enc.blk.<i> and dec.blk.<i> both
+                # belong to layer i.
+                if name.startswith(("enc.blk.", "dec.blk.")):
+                    name = name[4:]
                 if not name.startswith("blk."):
                     continue
                 head, _, _rest = name[4:].partition(".")
@@ -821,8 +825,9 @@ class VramSizingMixin:
 
     def _draft_model_charge_bytes(self) -> int:
         """VRAM the draft source's second model needs on the GPU for THIS load,
-        0 unless ``spec_source`` is "draft" and ``spec_draft_model`` is a
-        readable GGUF that ``_draft_model_rejected_by_metadata`` does not
+        0 unless ``spec_source`` is "draft", this model is not an
+        encoder-decoder model (which never drafts), and ``spec_draft_model`` is
+        a readable GGUF that ``_draft_model_rejected_by_metadata`` does not
         reject.
 
         The draft model's file size (its weights), its KV cache for
@@ -841,10 +846,13 @@ class VramSizingMixin:
                 DRAFT_COMPUTE_MARGIN_BYTES, DRAFT_CONTEXT_BATCH)
             from localm.inference.backends.llamacpp._split_fit import logits_buffer_bytes
             from localm.model_manager.gguf import (
-                _gguf_split_layout_meta, gguf_file_bytes, gguf_kv_bytes_per_token)
+                _GGUF_ENCODER_DECODER_ARCHITECTURES, _gguf_split_layout_meta, gguf_architecture,
+                gguf_file_bytes, gguf_kv_bytes_per_token)
             raw = getattr(self, "spec_draft_model", None)
             path = Path(raw) if raw else None
-            if (path is not None and path.is_file()
+            encoder_decoder = (gguf_architecture(Path(self.model_path))
+                               in _GGUF_ENCODER_DECODER_ARCHITECTURES)
+            if (path is not None and path.is_file() and not encoder_decoder
                     and not self._draft_model_rejected_by_metadata(path)):
                 kv_per_token = int(gguf_kv_bytes_per_token(path))
                 meta = _gguf_split_layout_meta(path)

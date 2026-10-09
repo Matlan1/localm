@@ -1377,6 +1377,19 @@ def test_a_disabled_draft_source_frees_its_native_state():
     api.llama_sampler_free.assert_called_once()
 
 
+def test_no_charge_for_a_draft_model_beside_an_encoder_decoder_model(tmp_path):
+    from localm.inference.backends.gguf import GgufBackend
+    tokens = ["x%d" % i for i in range(40)]
+    draft = _vocab_gguf(tmp_path / "d.gguf", tokens)
+    charges = {}
+    for arch in ("qwen2", "t5"):
+        target = _vocab_gguf(tmp_path / ("m-%s.gguf" % arch), tokens, arch=arch)
+        b = GgufBackend(str(target), spec_source="draft", spec_draft_model=str(draft), n_ctx=2048)
+        with patch("localm.model_manager.gguf.gguf_kv_bytes_per_token", return_value=1000),              patch("localm.model_manager.gguf._gguf_split_layout_meta", return_value=(2, 40)),              patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=0):
+            charges[arch] = b._draft_model_charge_bytes()
+    assert charges["qwen2"] > 0 and charges["t5"] == 0
+
+
 @pytest.mark.parametrize("draft_model,recurrent,arch,charged", [
     ("gpt2", 0, "qwen2", True), ("llama", 0, "qwen2", False), ("gpt2", 4096, "qwen2", False),
     ("gpt2", 0, "eagle3", False)])

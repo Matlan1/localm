@@ -73,6 +73,8 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
     # _BESPOKE_GATED_ROUTES. See test_every_kernel_route_is_gated_or_explicitly_allowlisted.
     _CROSS_ORIGIN_OK = (
         "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
+        # OpenAI-compatible media routes mounted by the voice and image plugins.
+        "/v1/audio/transcriptions", "/v1/images/generations",
         # Surface management (phase 5 on-demand GUI mount) is driven by a local
         # process (the attaching `localm gui`), not the browser shell: no Origin,
         # no shell_token. The route does its OWN strict auth (this instance's

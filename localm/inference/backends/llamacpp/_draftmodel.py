@@ -73,17 +73,22 @@ def draft_vocab_mismatch(target: VocabView, draft: VocabView) -> Optional[str]:
 def draft_role_refusal(path) -> Optional[str]:
     """Why the GGUF at *path* cannot be a draft model by its own metadata: its
     architecture is not a causal chat model (``gguf_chat_refusal``: a draft
-    head, a diffusion, encoder-decoder, audio or image model), or it is an
-    embedding model (``gguf_embedding_signal``). None when neither shows,
-    including when the metadata cannot be read."""
+    head, a diffusion, audio or image model), it is an encoder-decoder model
+    (``_GGUF_ENCODER_DECODER_ARCHITECTURES``), or it is an embedding model
+    (``gguf_embedding_signal``). None when none of these shows, including when
+    the metadata cannot be read."""
     from pathlib import Path
 
     from localm.model_manager.gguf import (
-        gguf_architecture, gguf_chat_refusal, gguf_embedding_signal)
+        _GGUF_ENCODER_DECODER_ARCHITECTURES, gguf_architecture, gguf_chat_refusal,
+        gguf_embedding_signal)
     gguf = Path(path)
-    refusal = gguf_chat_refusal(gguf_architecture(gguf))
+    architecture = gguf_architecture(gguf)
+    refusal = gguf_chat_refusal(architecture)
     if refusal is not None:
         return refusal
+    if architecture in _GGUF_ENCODER_DECODER_ARCHITECTURES:
+        return "This model is an encoder-decoder model, not a decoder-only chat model."
     if gguf_embedding_signal(gguf):
         return "This model is an embedding model, not a causal chat model."
     return None

@@ -18,8 +18,9 @@ below; the `admin` scope implies every other one). CORS is locked to
 localhost by default; widen it with the `cors_origins` config key. See
 [tls.md](tls.md) before exposing the server beyond 127.0.0.1.
 
-The three OpenAI-compatible inference routes below (`/v1/chat/completions`,
-`/v1/completions`, `/v1/embeddings`) are the one exception: they accept a
+The OpenAI-compatible inference routes below (`/v1/chat/completions`,
+`/v1/completions`, `/v1/embeddings`, `/v1/audio/transcriptions` and
+`/v1/images/generations`) are the one exception: they accept a
 cross-origin request from any local app - LM Studio/Ollama-style clients and
 AI browsers included - without needing `cors_origins` widened first, so
 pointing one at localm works the same way it would against LM Studio or
@@ -306,6 +307,77 @@ Returns OpenAI-format embedding vectors. 422 when the loaded model cannot
 embed. Against a HuggingFace-format model, 413 when the request exceeds the
 configured text-count or character-count cap (`hf_embed_max_texts`,
 `hf_embed_max_chars`).
+
+### `POST /v1/audio/transcriptions`
+
+Scope: `voice`. Served by the voice plugin (`pip install "localm[voice]"`), so the
+route exists while that plugin is enabled. The official `openai` SDK works against it:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8642/v1", api_key="<key, or any text in open mode>")
+with open("speech.wav", "rb") as f:
+    result = client.audio.transcriptions.create(model="whisper-1", file=f)
+print(result.text)
+```
+
+A `multipart/form-data` upload. The audio is decoded and transcribed in memory by the
+speech worker and is never written to disk, in any session mode, and the file name is
+never used as a path.
+
+| Field | Meaning |
+| --- | --- |
+| `file` | Required. One audio file, any format PyAV decodes (wav, mp3, m4a, ogg, flac, webm). At most 25 MB; larger is a `413` before it is fully read. |
+| `model` | Optional. `whisper-1` or the configured `voice_stt_model`; any other name is a `404` naming the model this server transcribes with. |
+| `language` | Optional ISO 639-1 code such as `en`. Detected when omitted. An unsupported code is a `400`. |
+| `prompt` | Optional text that biases the transcript (names, jargon). |
+| `response_format` | `json` (default, `{"text": ...}`), `text`, `srt`, `vtt`, or `verbose_json` (task, language name, duration, text, segments with timing and confidence). |
+| `temperature` | Optional, 0 to 1. |
+| `timestamp_granularities[]` | `segment` and/or `word`, with `verbose_json` only. `word` adds a `words` list; asking for `word` alone omits `segments`. |
+
+`stream`, `include[]`, `chunking_strategy` and `known_speaker_*` change the output and
+are not implemented, so sending them is a `400`; other unknown fields are ignored. A
+recording with no speech is a `200` with empty text. Failures: `400` an unreadable
+file or bad field, `413` too large, `415` not multipart, `501` the speech package is
+not installed, `409` the first-use model download is blocked by the network policy,
+`504` the speech engine hung and was restarted.
+
+### `POST /v1/images/generations`
+
+Scope: `image`. Served by the image plugin (ComfyUI today), which ships disabled:
+enable it on the Plugins page first. The route exists while the plugin is enabled.
+
+```python
+result = client.images.generate(model="any", prompt="a lighthouse at dusk",
+                                size="1024x1024", response_format="b64_json")
+```
+
+A JSON body. The request waits for the generation (it runs as the same background job
+as `POST /api/imagine`, so it shows in the activity list and frees and restores VRAM the
+same way) and answers `{"created": <unix time>, "data": [{"b64_json": ...} | {"url": ...}]}`.
+
+| Field | Meaning |
+| --- | --- |
+| `prompt` | Required, up to 32000 characters. |
+| `n` | 1 to 4 images, generated one after another. |
+| `size` | `WIDTHxHEIGHT` (each side 64 to 2048 and a multiple of 8, at most 2048 x 2048 pixels) or `auto`. Omitted or `auto` keeps the workflow's own size. A workflow with no `EmptyLatentImage` or `EmptySD3LatentImage` node cannot take a size and the request fails saying so. |
+| `response_format` | `b64_json` or `url`. |
+| `output_format` | Only `png` (the default). |
+| `model`, `quality`, `style`, `user` | Accepted and ignored: the image model is the one the active workflow loads. |
+
+Outside privacy mode the image is kept in the gallery with its sidecar. With an API key
+configured, `response_format` defaults to `url`: the gallery file route
+(`/api/imagine/file/<name>`), fetched with the same key. With no key configured that
+route cannot be fetched by an API client, so `b64_json` is the default and asking for
+`url` is a `400`. In privacy mode nothing is kept: the image is generated into a
+private directory, returned as `b64_json` (the default there; asking for `url` is a
+`400`), and the directory is deleted before the response is sent.
+
+### Speech synthesis (`/v1/audio/speech`)
+
+Not served. Text-to-speech runs in the browser (the tts plugin's Kokoro voices) and
+localm has no server-side speech synthesis yet, so a client calling
+`/v1/audio/speech` gets a `404` rather than a stub.
 
 ### `GET /v1/models`
 

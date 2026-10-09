@@ -12,6 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5 and other `t5`
+  GGUFs register as chat models and answer through `localm run`, the GUI chat and
+  `/v1/chat/completions`, where they were refused before.
+  These models have no chat template: a single message is read as typed, and a
+  conversation is read as one labelled transcript. A prompt can be up to 2,048 tokens
+  (fewer when the context window is smaller); a longer one is refused with that limit
+  named. They read text only, and speculative decoding does not apply to them.
 - **Files and folders localm cannot run now say why.** `localm add`, `localm pull <path>`
   and the GUI add and pull routes name the format and the nearest runnable alternative for
   GGUF version 1 and big-endian GGUF files, legacy GGML `.bin` files, importance-matrix
@@ -31,6 +38,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model (and projector) is unpacked into the models folder with a progress bar.
   Moving models out of the Hugging Face cache is refused, since it would break the
   cache; copy them instead.
+- **OpenAI-compatible speech-to-text and image endpoints.** `POST /v1/audio/transcriptions`
+  takes a multipart upload and returns `json`, `text`, `srt`, `vtt` or `verbose_json` (with
+  segment and word timestamps), transcribed locally with Whisper; the audio is never written
+  to disk. `POST /v1/images/generations` generates through the image plugin (ComfyUI) and
+  returns `b64_json`, or a gallery `url` when an API key is configured, honouring `n` and
+  `size`; in privacy mode no image is kept on disk. The official `openai` SDK works against
+  both, and local apps can call them like `/v1/chat/completions`. Speech synthesis
+  (`/v1/audio/speech`) is not served yet. See docs/server-api.md.
 - **An Ollama-compatible API on the same server and port.** `/api/chat`, `/api/generate`,
   `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
   answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies
