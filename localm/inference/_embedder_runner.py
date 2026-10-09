@@ -408,12 +408,12 @@ class EmbedderRunner:
         while result is None:
             try:
                 result = self._resp_q.get(timeout=_POLL_INTERVAL)
-            except _queue.Empty:
+            except _queue.Empty as e:
                 if not self._proc.is_alive():
                     raise RuntimeError(
                         f"The embedding worker process crashed (exit code "
                         f"{self._exit_reason()}) during '{label}'. The server "
-                        "stayed up." + self._crash_detail())
+                        "stayed up." + self._crash_detail()) from e
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
                     from localm.debuglog import native_fault_hint
@@ -421,7 +421,7 @@ class EmbedderRunner:
                         f"Embedding worker '{label}' timed out after "
                         f"{timeout:.0f}s - the worker process may be hung "
                         f"({native_fault_hint()}). The server stayed up and the "
-                        "worker was stopped; retry the request.")
+                        "worker was stopped; retry the request.") from e
         kind = result[0]
         if kind == "ok":
             return result[1]

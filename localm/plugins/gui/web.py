@@ -876,7 +876,7 @@ def attach_gui(
             return await run_in_threadpool_bounded(
                 _sw_js_response, request.headers.get("if-none-match"), timeout=15.0)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Serving the service worker timed out: {e}")
+            raise HTTPException(504, f"Serving the service worker timed out: {e}") from e
 
     app.mount("/", _RevalidatingStatic(directory=str(STATIC_DIR), html=True), name="gui")
 

@@ -446,7 +446,7 @@ def _provisioning_lock(target: Path):
             os.mkdir(str(lock))              # ATOMIC: creates or raises
             acquired = True
             break
-        except FileExistsError:
+        except FileExistsError as exc:
             pid = _provision_lock_holder_pid(lock)
             if pid is not None and not pid_alive(pid):
                 # The holder is provably gone. Reclaim once, then retry the
@@ -458,20 +458,20 @@ def _provisioning_lock(target: Path):
                     continue
                 raise ProvisioningBusyError(
                     "Another setup-llama run is already provisioning the "
-                    "runtime. Wait for it to finish, then try again.")
+                    "runtime. Wait for it to finish, then try again.") from exc
             if pid is None:
                 # Cannot tell who holds it: do NOT steal (that is how two
                 # provisions end up interleaved). Say how to clear it by hand.
                 raise ProvisioningBusyError(
                     f"A provisioning lock exists at {lock} but its owner could "
                     "not be read. If no setup-llama run is in progress, remove "
-                    "that folder and try again.")
+                    "that folder and try again.") from exc
             raise ProvisioningBusyError(
                 f"Another setup-llama run is already provisioning the runtime "
-                f"(process {pid}). Wait for it to finish, then try again.")
+                f"(process {pid}). Wait for it to finish, then try again.") from exc
         except OSError as e:
             raise ProvisioningBusyError(
-                f"Could not take the provisioning lock at {lock}: {e}")
+                f"Could not take the provisioning lock at {lock}: {e}") from e
     if not acquired:
         raise ProvisioningBusyError(
             "Another setup-llama run is already provisioning the runtime. "

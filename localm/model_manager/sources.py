@@ -175,9 +175,9 @@ def _civitai_get(path: str, params: Optional[dict] = None, *,
             extra_headers=extra_headers)
         return _json.loads(body.decode("utf-8"))
     except netpolicy.NetworkPolicyError as e:
-        raise CivitAIError(f"CivitAI request failed: {e}", off=e.off)
+        raise CivitAIError(f"CivitAI request failed: {e}", off=e.off) from e
     except Exception as e:
-        raise CivitAIError(f"CivitAI request failed: {e}")
+        raise CivitAIError(f"CivitAI request failed: {e}") from e
 
 
 def _passes_content_policy(item: dict) -> bool:

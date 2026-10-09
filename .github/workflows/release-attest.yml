@@ -131,12 +131,36 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          if gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
-              --pattern "localm-*.zip" --dir out/; then
-            ls -l out/*.zip
-          else
-            echo "::warning::release ${TAG} has no localm-*.zip asset at this time; no zip attestation. Re-run this workflow with that tag once the zip is attached."
-          fi
+          for attempt in 1 2 3 4 5; do
+            if gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}"                 --pattern "localm-*.zip" --dir out/ 2>/dev/null; then
+              ls -l out/*.zip
+              exit 0
+            fi
+            echo "no localm-*.zip on ${TAG} yet (attempt ${attempt}/5)"
+            sleep 20
+          done
+          echo "::warning::release ${TAG} has no localm-*.zip asset; no zip attestation. Re-run this workflow with that tag and dry_run=false once the zip is attached."
+
+      - name: Compare the built files with PyPI
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, urllib.error, urllib.request
+          version = os.environ["VERSION"]
+          try:
+              with urllib.request.urlopen(f"https://pypi.org/pypi/localm/{version}/json", timeout=30) as r:
+                  published = {u["filename"]: u["digests"]["sha256"] for u in json.load(r)["urls"]}
+          except urllib.error.URLError as exc:
+              print(f"::notice::PyPI comparison skipped: {exc}")
+              raise SystemExit(0)
+          for name in (f"localm-{version}.tar.gz", f"localm-{version}-py3-none-any.whl"):
+              built = hashlib.sha256(pathlib.Path("out", name).read_bytes()).hexdigest()
+              if name not in published:
+                  print(f"::notice::{name} is not on PyPI yet")
+              elif published[name] == built:
+                  print(f"::notice::{name} is byte-identical to the PyPI file")
+              else:
+                  print(f"::notice::{name} differs from the PyPI file (built {built}, PyPI {published[name]})")
+          PY
 
       - name: List the files to attest
         run: |

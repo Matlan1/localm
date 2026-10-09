@@ -135,7 +135,7 @@ def _confine(cwd: Path, path: str) -> Path:
         raise PermissionError(
             f"'{path}' resolves outside the working directory '{cwd.resolve()}'. "
             f"All file operations must stay within the project root. ({e})"
-        )
+        ) from e
 
 
 @dataclass

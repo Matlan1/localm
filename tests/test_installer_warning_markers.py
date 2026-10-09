@@ -79,7 +79,7 @@ def _line_containing(bat_text, needle):
     for line in bat_text.splitlines():
         if needle in line:
             return line
-    raise AssertionError("no line contains: {!r}".format(needle))
+    raise AssertionError(f"no line contains: {needle!r}")
 
 
 def _own_backend_block(bat_text):

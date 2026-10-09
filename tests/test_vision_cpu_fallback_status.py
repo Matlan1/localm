@@ -89,8 +89,8 @@ class TestInteractiveVisionCpuFallbackWarning:
         def _fake_input(*a, **kw):
             try:
                 return next(inputs)
-            except StopIteration:
-                raise EOFError()
+            except StopIteration as e:
+                raise EOFError() from e
         monkeypatch.setattr(chat_mod.console, "input", _fake_input)
 
         chat_mod._interactive(engine, None, {})

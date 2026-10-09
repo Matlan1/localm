@@ -380,7 +380,7 @@ async def create_job(req: JobCreate, request: Request):
             owner_is_owner_key=_caller_is_owner_key(request),
         )
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     _store().add(job)
     return _job_dict(job)
 
@@ -427,10 +427,10 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
         changes["owner_is_owner_key"] = True
     try:
         job = store.update(job_id, **changes)
-    except KeyError:
-        raise HTTPException(404, f"No such job: {job_id}")
+    except KeyError as exc:
+        raise HTTPException(404, f"No such job: {job_id}") from exc
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     return _job_dict(job)
 
 

@@ -548,7 +548,7 @@ def test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_file(home):
             continue
         # Must match ONE writer's PARSED content completely, not a torn mix
         # (e.g. one writer's keys with another's values, or a truncated tail).
-        assert data == small_data or data == large_data, (
+        assert data in (small_data, large_data), (
             f"parsed content did not match either writer's payload in full "
             f"(a torn, mixed write): {data!r}")
 

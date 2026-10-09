@@ -86,7 +86,7 @@ def register(app: FastAPI, ctx) -> None:
             reject_unsafe_path_string(
                 dest, reject_network_drives=not _network_drives_allowed())
         except ValueError as e:
-            raise HTTPException(400, f"Invalid destination: {e}")
+            raise HTTPException(400, f"Invalid destination: {e}") from e
         dest_dir = Path(dest).expanduser()
         if not dest_dir.is_dir():
             raise HTTPException(400, "That folder does not exist.")
@@ -128,7 +128,7 @@ def register(app: FastAPI, ctx) -> None:
                         # below rather than a "no files" success.
                         errors.append(f"{p.name}: {ce}")
         except OSError as e:
-            raise HTTPException(500, f"Could not write to that folder: {e}")
+            raise HTTPException(500, f"Could not write to that folder: {e}") from e
         if found == 0:
             # Genuinely empty: there were no *.log files anywhere to export.
             return {"copied": 0, "found": 0, "dest": str(out),
@@ -206,12 +206,12 @@ def register(app: FastAPI, ctx) -> None:
                     raise HTTPException(409, "Launcher script already exists")
                 script.write_text("#!/bin/bash\ncd \"$(dirname \"$0\")\"\n[ -f venv/bin/activate ] && source venv/bin/activate\npython3 main.py\n", encoding="utf-8")
                 script.chmod(0o755)
-        except PermissionError:
-            raise HTTPException(403, "Permission denied while checking or writing the launcher script")
+        except PermissionError as exc:
+            raise HTTPException(403, "Permission denied while checking or writing the launcher script") from exc
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(500, f"Failed to create launcher: {e}")
+            raise HTTPException(500, f"Failed to create launcher: {e}") from e
 
         return {"status": "ok"}
 
@@ -289,7 +289,7 @@ def register(app: FastAPI, ctx) -> None:
             try:
                 reject_unsafe_path_string(path, reject_network_drives=not allow_net)
             except ValueError as e:
-                raise HTTPException(400, f"Invalid path: {e}")
+                raise HTTPException(400, f"Invalid path: {e}") from e
         if not path:
             if os.name == "nt":
                 import string
@@ -351,8 +351,8 @@ def register(app: FastAPI, ctx) -> None:
                                         "size": size, "mtime": mtime})
                 except OSError:
                     continue   # broken junction / reparse point
-        except PermissionError:
-            raise HTTPException(403, f"Permission denied: {path}")
+        except PermissionError as exc:
+            raise HTTPException(403, f"Permission denied: {path}") from exc
         at_root = p.parent == p
         result = {"path": str(p),
                   "parent": "" if at_root else str(p.parent),
@@ -387,7 +387,7 @@ def register(app: FastAPI, ctx) -> None:
             reject_unsafe_path_string(
                 parent_raw, reject_network_drives=not _network_drives_allowed())
         except ValueError as e:
-            raise HTTPException(400, f"Invalid path: {e}")
+            raise HTTPException(400, f"Invalid path: {e}") from e
         parent = Path(parent_raw).expanduser()
         if not parent.is_dir():
             raise HTTPException(404, f"Not a directory: {parent_raw}")
@@ -399,14 +399,14 @@ def register(app: FastAPI, ctx) -> None:
         child = confined_name(parent, name)
         try:
             child.mkdir()
-        except FileExistsError:
+        except FileExistsError as exc:
             # mkdir refuses an existing target on every platform; there is no
             # overwrite mode, so this branch is race-free.
-            raise HTTPException(409, f"'{name}' already exists")
-        except PermissionError:
-            raise HTTPException(403, f"Permission denied: {name}")
+            raise HTTPException(409, f"'{name}' already exists") from exc
+        except PermissionError as exc:
+            raise HTTPException(403, f"Permission denied: {name}") from exc
         except OSError as e:
-            raise HTTPException(500, f"Could not create folder: {e}")
+            raise HTTPException(500, f"Could not create folder: {e}") from e
         return {"path": str(child), "parent": str(parent), "name": child.name}
 
     @app.post("/api/fs/rename",
@@ -441,7 +441,7 @@ def register(app: FastAPI, ctx) -> None:
             reject_unsafe_path_string(
                 target_raw, reject_network_drives=not _network_drives_allowed())
         except ValueError as e:
-            raise HTTPException(400, f"Invalid path: {e}")
+            raise HTTPException(400, f"Invalid path: {e}") from e
         p = Path(target_raw).expanduser()
         if not p.exists():
             raise HTTPException(404, f"Not found: {target_raw}")
@@ -456,12 +456,12 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(409, f"'{new_name}' already exists")
         try:
             p.rename(new_path)
-        except FileExistsError:
-            raise HTTPException(409, f"'{new_name}' already exists")
-        except PermissionError:
-            raise HTTPException(403, f"Permission denied: {new_name}")
+        except FileExistsError as exc:
+            raise HTTPException(409, f"'{new_name}' already exists") from exc
+        except PermissionError as exc:
+            raise HTTPException(403, f"Permission denied: {new_name}") from exc
         except OSError as e:
-            raise HTTPException(500, f"Could not rename: {e}")
+            raise HTTPException(500, f"Could not rename: {e}") from e
         return {"path": str(new_path), "parent": str(parent), "name": new_path.name}
 
     @app.get("/api/fs/places", dependencies=[Depends(require_fs_host)])

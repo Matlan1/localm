@@ -141,7 +141,7 @@ def register(app: FastAPI, ctx) -> None:
             path = await run_in_threadpool_bounded(
                 _save, timeout=_BUG_REPORT_SAVE_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Saving the bug report timed out: {e}")
+            raise HTTPException(504, f"Saving the bug report timed out: {e}") from e
         if path is None:
             # A failed save must not report success.
             raise HTTPException(500, "Could not save the bug report to disk.")
@@ -275,7 +275,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             info = await asyncio.to_thread(updater.check)
         except LocalmError as e:
-            raise HTTPException(502, format_localm_error(e))
+            raise HTTPException(502, format_localm_error(e)) from e
         if not info.get("newer"):
             return {"applied": False, "reason": "already up to date",
                     "current": info.get("current")}
@@ -374,7 +374,7 @@ def register(app: FastAPI, ctx) -> None:
         # A precondition failure, so nothing was touched: either there is no backup,
         # or an update/rollback already holds the single-flight lock. Kept distinct
         # from the partial-restore case below, where the install HAS been modified.
-            raise HTTPException(409, format_localm_error(e))
+            raise HTTPException(409, format_localm_error(e)) from e
         except Exception as e:
         # _apply_update.rollback reports a PARTIAL restore by raising, listing which
         # restores failed, and keeps the backup for manual recovery. The install may
@@ -386,7 +386,7 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(
                 500, f"The rollback failed partway, so the install may be "
                      f"half-restored. The backup was kept for manual recovery. "
-                     f"Details: {e}")
+                     f"Details: {e}") from e
         # Only now: the restore completed, so re-exec into it. Same port pinning as
         # /v1/server/restart, so the GUI's reconnect overlay finds the new process.
         _request_restart(port=getattr(app.state, "instance_port", None),

@@ -309,12 +309,12 @@ class _GracefulGroup(click.Group):
                     sys.stdout.close()
                 except Exception:
                     pass
-                raise SystemExit(0)
+                raise SystemExit(0) from e
             self._report_failure(ctx, e)
-            raise SystemExit(1)
+            raise SystemExit(1) from e
         except Exception as e:  # an actual, unexpected failure
             self._report_failure(ctx, e)
-            raise SystemExit(1)
+            raise SystemExit(1) from e
 
     @staticmethod
     def _report_failure(ctx, e):

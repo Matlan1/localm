@@ -2314,7 +2314,7 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
         renamed, notes = await loop.run_in_executor(
             get_plugin_executor(), rename_model_with_notes, model, new_name_raw)
     except Exception as e:
-        raise HTTPException(400, f"Rename failed: {e}")
+        raise HTTPException(400, f"Rename failed: {e}") from e
     if not renamed:
         # rename_model_with_notes distinguishes "vanished" from "name taken" in
         # its own console output, but only the bool crosses the executor
@@ -5875,7 +5875,7 @@ async def _complete(
             # before generation starts), but it does carry the same reason and
             # marks finish_reason="error" - so both paths tell the caller what went
             # wrong, which is the property that was actually broken.
-            raise HTTPException(backend_error_status(e), str(e))
+            raise HTTPException(backend_error_status(e), str(e)) from e
         except RuntimeError as e:
             # A generation FAILURE (not enough free VRAM for this prompt, a
             # conversation that outgrew n_ctx_max, a native decode error) is raised

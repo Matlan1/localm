@@ -2219,7 +2219,7 @@ def _reclaim_guard(d: Path, filename: str):
         raise PullInFlight(
             f"could not open {guard} to take over the stale download lock for "
             f"{filename}: {e}. If you are certain no download is running, "
-            f"remove {d}.")
+            f"remove {d}.") from e
     with f:
         try:
             _lock_guard_file(f)
@@ -2227,11 +2227,11 @@ def _reclaim_guard(d: Path, filename: str):
             if e.errno in _GUARD_BUSY_ERRNOS:
                 raise PullInFlight(
                     f"{filename} is already being taken over by another "
-                    f"download.")
+                    f"download.") from e
             raise PullInFlight(
                 f"could not lock {guard} to take over the stale download lock "
                 f"for {filename}: {e}. If you are certain no download is "
-                f"running, remove {d}.")
+                f"running, remove {d}.") from e
         try:
             yield
         finally:
@@ -2274,7 +2274,7 @@ def _stage_lock_record(locks: Path, filename: str, token: str) -> Path:
             shutil.rmtree(staging, ignore_errors=True)
             raise PullInFlight(
                 f"could not record ownership of the download lock for "
-                f"{filename}: {e}")
+                f"{filename}: {e}") from e
     raise PullInFlight(
         f"could not record ownership of the download lock for {filename}")
 
@@ -2292,7 +2292,7 @@ def _take_over_stale_lock(d: Path, filename: str, staging: Path) -> None:
             pass
         except OSError as e:
             raise PullInFlight(
-                f"could not take the download lock for {filename}: {e}")
+                f"could not take the download lock for {filename}: {e}") from e
         if not _lock_is_reclaimable(d):
             if os.path.lexists(d):
                 raise _lock_held_error(d, filename)
@@ -2305,15 +2305,15 @@ def _take_over_stale_lock(d: Path, filename: str, staging: Path) -> None:
         except OSError as e:
             raise PullInFlight(
                 f"could not take over the stale download lock for {filename}: "
-                f"{e}. If you are certain no download is running, remove {d}.")
+                f"{e}. If you are certain no download is running, remove {d}.") from e
         try:
             _rename_noreplace(staging, d)
-        except FileExistsError:
+        except FileExistsError as exc:
             raise PullInFlight(
-                f"{filename} is already being downloaded by another process.")
+                f"{filename} is already being downloaded by another process.") from exc
         except OSError as e:
             raise PullInFlight(
-                f"could not take the download lock for {filename}: {e}")
+                f"could not take the download lock for {filename}: {e}") from e
         finally:
             _remove_tombstone(tomb)
         return
@@ -2334,7 +2334,7 @@ def _acquire_part_lock(d: Path, filename: str, staging: Path) -> None:
             pass
         except OSError as e:
             raise PullInFlight(
-                f"could not take the download lock for {filename}: {e}")
+                f"could not take the download lock for {filename}: {e}") from e
         if _lock_is_reclaimable(d):
             with _reclaim_guard(d, filename):
                 _take_over_stale_lock(d, filename, staging)

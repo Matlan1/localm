@@ -133,13 +133,13 @@ def register(app: FastAPI, ctx) -> None:
             _final, content_type, body = await run_in_threadpool_bounded(
                 _fetch, timeout=_fetch_budget_s())
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Fetching the image timed out: {e}")
+            raise HTTPException(504, f"Fetching the image timed out: {e}") from e
         except netpolicy.NetworkPolicyError as e:
             # The SSRF guard, the domain lists and the redirect re-check all land
             # here.
-            raise HTTPException(403, f"Refused by the network policy: {e}")
+            raise HTTPException(403, f"Refused by the network policy: {e}") from e
         except Exception as e:
-            raise HTTPException(502, f"Could not fetch the image: {e}")
+            raise HTTPException(502, f"Could not fetch the image: {e}") from e
 
         # safe_fetch_bytes TRUNCATES at the cap rather than refusing, so a body
         # that reaches the cap is a partial image. Refuse it rather than serving
