@@ -504,8 +504,9 @@ def test_the_jobs_the_policy_needs_still_exist_with_their_gating():
     assert "full-ci" in ci["jobs"]["python-pr-gate"]["if"]
     assert ci["jobs"]["lint"]["if"] == "github.event_name != 'push'"
     assert "full-ci" in ci["jobs"]["gui-tests"]["if"]
-    assert _norm(ci["jobs"]["gui-tests"]["if"]) == _norm(ci["jobs"]["test"]["if"]), (
+    assert _norm(ci["jobs"]["gui-tests"]["if"]) == _norm(ci["jobs"]["test-shard"]["if"]), (
         "gui-tests runs under exactly the matrix's label gate")
+    assert _norm(ci["jobs"]["test"]["if"]) == "!cancelled() && " + _norm(ci["jobs"]["test-shard"]["if"])
     # merge-policy requires mutation-scope on both arms: it runs on every pull_request.
     assert ci["jobs"]["mutation-scope"]["if"] == "github.event_name == 'pull_request'"
     assert "needs" not in ci["jobs"]["mutation-scope"]
