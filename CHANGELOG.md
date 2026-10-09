@@ -27,6 +27,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   models and GPU memory in Prometheus text format. It needs an admin API key, answers only
   on a loopback bind when no key exists, and carries no prompt, reply, model name or model
   path in any label. Off by default.
+- **Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) run as chat models.**
+  A GGUF of one of these architectures now loads and answers through `localm run`,
+  the GUI chat and `/v1/chat/completions`, instead of being refused. These models
+  write the whole reply at once over a number of denoising steps, so the reply
+  appears when it is finished and the status line shows the progress meanwhile.
+  Two settings control them: "Diffusion steps" (`diffusion_steps`, more steps give
+  better text and a slower reply) and "Diffusion reply length"
+  (`diffusion_max_tokens`, 256 by default). Grammar-constrained output, images and
+  speculative decoding are not available with these models; a request for a
+  grammar is refused with a message saying so.
 - **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5 and other `t5`
   GGUFs register as chat models and answer through `localm run`, the GUI chat and
   `/v1/chat/completions`, where they were refused before.

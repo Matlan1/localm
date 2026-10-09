@@ -818,7 +818,7 @@ from localm.vram import VRAM_OVERHEAD_BYTES as _VRAM_OVERHEAD_BYTES
 def estimate_vram(model_bytes: int, n_ctx: int,
                   n_gpu_layers: int = 99, n_layers: int | None = None,
                   kv_bytes_per_token: int = 0, moe_pinned_bytes: int = 0,
-                  input_layer_bytes: int = 0) -> dict:
+                  input_layer_bytes: int = 0, keeps_kv: bool = True) -> dict:
     """Rough VRAM footprint (bytes) to load a GGUF model at *n_ctx* with
     *n_gpu_layers* offloaded. Returns a breakdown {weights, kv_cache, overhead,
     needed} so the UI can show where the memory goes. A model/ctx of 0 yields 0
@@ -846,7 +846,10 @@ def estimate_vram(model_bytes: int, n_ctx: int,
     gguf_input_layer_bytes(path) - the exact byte count of the input-layer
     tensors (token_embd and its siblings) llama.cpp keeps on the CPU for
     every load, not only an n_cpu_moe one. Same contract and same mirrored
-    function as moe_pinned_bytes above; applied first, unconditionally."""
+    function as moe_pinned_bytes above; applied first, unconditionally.
+
+    *keeps_kv* False (a diffusion language model, which llama.cpp gives no KV
+    cache) charges no KV cache at all."""
     model_bytes = max(0, int(model_bytes or 0))
     n_ctx = max(0, int(n_ctx or 0))
     # The input-layer share never touches VRAM for any load, dense or MoE -
@@ -868,7 +871,9 @@ def estimate_vram(model_bytes: int, n_ctx: int,
     weights = int(model_bytes * frac)
     # KV cache grows with context; bytes-per-token is the model's real
     # attention shape when the caller could read it, else the size-class guess.
-    if kv_bytes_per_token > 0:
+    if not keeps_kv:
+        bytes_per_token = 0
+    elif kv_bytes_per_token > 0:
         bytes_per_token = kv_bytes_per_token
     else:
         from localm.inference.backends.gguf import GgufBackend

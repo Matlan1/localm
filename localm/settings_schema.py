@@ -259,6 +259,17 @@ CORE_FIELDS: list = [
                  "Most tokens one n-gram step proposes. Blank uses 8; models "
                  "with recurrent layers use at most 4.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=16),
+    SettingField("diffusion_steps", Widget.NUMBER, "Diffusion steps",
+                 "Denoising steps per reply for diffusion language models "
+                 "(Dream, LLaDA, RND1). More steps: better text, slower reply. "
+                 "Blank uses 128, or the reply length when shorter.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=1, max=4096),
+    SettingField("diffusion_max_tokens", Widget.NUMBER, "Diffusion reply length",
+                 "Tokens a diffusion language model writes per reply. It fills "
+                 "the whole length every time, so longer is slower. Shortened "
+                 "when the prompt leaves less room in the model's window (2048 "
+                 "tokens at most).",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=16, max=4096),
     # VRAM reserved beyond model weights for the KV cache's compute buffers and
     # llama.cpp's graph/scratch allocations, deducted before GPU layers or
     # context are auto-sized.
@@ -1408,7 +1419,7 @@ def _validate_user_name(key: str, val) -> str:
 
 # NUMBER fields whose default is None (unset) and whose value is an integer;
 # a blank value clears them.
-_NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens"})
+_NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens", "diffusion_steps"})
 
 
 def _validate_one(key: str, val, field: "SettingField", default):

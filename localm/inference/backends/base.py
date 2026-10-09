@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from abc import ABC, abstractmethod
 from typing import Callable, Iterator, Optional
 
@@ -180,11 +182,44 @@ class PretokenizerUnusableModelError(RuntimeError):
     """
 
 
+_STREAM_STOP: contextvars.ContextVar[Optional[Callable[[], bool]]] = (
+    contextvars.ContextVar("localm_stream_stop", default=None))
+
+
+@contextlib.contextmanager
+def stream_stop_check(check: Callable[[], bool]):
+    """Publish *check* for the stream the caller iterates inside this block, in
+    this thread. A backend that waits a long time without reaching a ``yield``
+    (a GGUF diffusion language model) polls it through
+    :func:`stream_stop_requested` and stops the generation once it returns True;
+    every other backend ignores it."""
+    token = _STREAM_STOP.set(check)
+    try:
+        yield
+    finally:
+        _STREAM_STOP.reset(token)
+
+
+def stream_stop_requested() -> bool:
+    """True when the check published by :func:`stream_stop_check` asks the
+    current stream to stop. False when none is published; a check that raises
+    is logged at debug and read as False."""
+    check = _STREAM_STOP.get()
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:
+        from localm.debuglog import logger
+        logger.debug("stream stop check raised (read as not stopping)", exc_info=True)
+        return False
+
+
 class UnsupportedModelRoleError(RuntimeError):
     """Raised by a load when the file is a model localm cannot chat with (a
-    speculative-decoding draft head, a diffusion language model, an
-    encoder-decoder model, an audio codec). The message says which and is
-    reported as-is, with no runtime-repair advice appended."""
+    speculative-decoding draft head, an encoder-decoder model, an audio codec,
+    a text-to-speech model, an image or video checkpoint). The message says
+    which and is reported as-is, with no runtime-repair advice appended."""
 
 
 class AdapterLoadError(RuntimeError):
@@ -257,6 +292,17 @@ GRAMMAR_LOAD_FAILED_MESSAGE = (
     "requested grammar would be ignored and the reply would not match it. "
     "Update the extra with: pip install -U 'localm[grammar]', or use a "
     "GGUF-format model (grammar support is built in)."
+)
+
+
+# Shown when any grammar, lazy or forced, is requested of a diffusion language
+# model. Contains "would be ignored", which the GUI's web-tool retry matches
+# on. See test_grammar_refusals_carry_the_retry_phrase.
+GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE = (
+    "This model is a diffusion language model: it fills in its whole reply at "
+    "once instead of token by token, so the requested grammar would be ignored "
+    "and the reply would not match it. Use a regular chat model for "
+    "grammar-constrained output."
 )
 
 

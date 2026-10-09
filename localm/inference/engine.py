@@ -402,6 +402,13 @@ class Engine:
         return getattr(self._backend, "effective_ctx_max", None)
 
     @property
+    def reply_reserve(self) -> Optional[int]:
+        """Tokens of the context capacity the loaded model's reply always takes
+        (a diffusion model's reply canvas), or None when the reply grows into
+        whatever room is left."""
+        return getattr(self._backend, "reply_reserve", None)
+
+    @property
     def encoder_decoder(self) -> bool:
         """True when the loaded model encodes its whole prompt in one pass
         before decoding (a T5 GGUF); its context capacity is then that pass's

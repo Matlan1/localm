@@ -107,7 +107,7 @@ from localm.inference.backends.base import (
     AdapterLoadError, ContextCapacityExceededError,
     GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled,
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
-    UnsupportedInputError)
+    UnsupportedInputError, UnsupportedModelRoleError, stream_stop_requested)
 
 
 class RunnerBusy(Exception):
@@ -318,6 +318,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 if os.environ.get(_FORCE_LOAD_CANCEL_ENV):
                     raise ModelLoadCancelled("forced cancellation (test-only)")
                 worker = GgufWorker(cancel_event=load_cancel_event, **payload)
+                worker.stream_cancel = stream_cancel_event
                 meta = worker.load()
                 resp_q.put(("ok", meta))
             except ModelLoadCancelled as e:
@@ -326,6 +327,8 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 resp_q.put(("error", str(e), "PretokenizerUnusableModelError"))
             except AdapterLoadError as e:
                 resp_q.put(("error", str(e), "AdapterLoadError"))
+            except UnsupportedModelRoleError as e:
+                resp_q.put(("error", str(e), "UnsupportedModelRoleError"))
             except Exception as e:
                 resp_q.put(("error", str(e)))
             # A hard native abort during worker.load() is NOT caught here -
@@ -857,11 +860,14 @@ class ModelRunner:
                 raise PretokenizerUnusableModelError(result[1])
             if len(result) > 2 and result[2] == "AdapterLoadError":
                 raise AdapterLoadError(result[1])
+            if len(result) > 2 and result[2] == "UnsupportedModelRoleError":
+                raise UnsupportedModelRoleError(result[1])
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the model-loading process: {result!r}")
 
     def chat_stream(self, *, first_chunk_timeout: Optional[float] = None,
-                    on_status: Optional[Callable[[str], None]] = None, **kwargs):
+                    on_status: Optional[Callable[[str], None]] = None,
+                    stop_on_request: bool = False, **kwargs):
         """Yield text tokens. On the caller's ``GeneratorExit`` (a plain
         generator ``.close()``, which is how ``http_server.py`` cancels a
         stream), relays a ``cancel_stream`` signal to the child and drains for
@@ -873,6 +879,17 @@ class ModelRunner:
         after the full per-token ceiling - while still allowing up to
         ``_STREAM_CHUNK_TIMEOUT`` of genuine native decode time per token
         before treating it as stalled.
+
+        With *stop_on_request* (a child that stops between the steps of a long
+        call, a diffusion model), the stop check the caller published with
+        :func:`~localm.inference.backends.base.stream_stop_check` is polled on
+        every envelope and every poll interval; once it asks to stop, the
+        generation in the child is cancelled, its confirmation awaited for up to
+        ``_STREAM_CHUNK_TIMEOUT``, and this stream ends without yielding more.
+        A ``KeyboardInterrupt`` raised while this waits cancels and drains the
+        child the same way (``_STREAM_CHUNK_TIMEOUT`` with *stop_on_request*,
+        else ``_CANCEL_DRAIN_TIMEOUT``) before propagating, so the next request
+        never reads this one's envelopes.
 
         The FIRST envelope gets its own, much larger budget
         (*first_chunk_timeout*, default ``FIRST_TOKEN_TIMEOUT_DEFAULT``): it
@@ -907,6 +924,11 @@ class ModelRunner:
                         first_budget if awaiting_first else _STREAM_CHUNK_TIMEOUT)
                     result = None
                     while result is None:
+                        if stop_on_request and stream_stop_requested():
+                            logger.info("gguf worker: generation stopped by caller "
+                                        "after %d token(s)", chunks_received)
+                            self._cancel_stream_and_drain(_STREAM_CHUNK_TIMEOUT)
+                            return
                         try:
                             result = self._poll(_LOAD_POLL_INTERVAL)
                         except _RunnerTornDown as e:
@@ -1041,8 +1063,18 @@ class ModelRunner:
                     "token(s)", chunks_received)
                 self._cancel_stream_and_drain()
                 raise
+            except KeyboardInterrupt:
+                logger.info(
+                    "gguf worker: generation interrupted after %d token(s)",
+                    chunks_received)
+                self._cancel_stream_and_drain(
+                    _STREAM_CHUNK_TIMEOUT if stop_on_request else _CANCEL_DRAIN_TIMEOUT)
+                raise
 
-    def _cancel_stream_and_drain(self) -> None:
+    def _cancel_stream_and_drain(self, timeout: float = _CANCEL_DRAIN_TIMEOUT) -> None:
+        """Ask the child to stop the running stream and consume its envelopes
+        until its "done" (stored as ``last_done``), for at most *timeout*
+        seconds; past that the child is killed."""
         if not self.is_alive():
             return
         try:
@@ -1050,7 +1082,7 @@ class ModelRunner:
         except Exception:
             self.shutdown(grace=0)
             return
-        deadline = time.monotonic() + _CANCEL_DRAIN_TIMEOUT
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 result = self._poll(0.5)
@@ -1061,6 +1093,8 @@ class ModelRunner:
                     return   # died on its own - nothing left to drain
                 continue
             if result[0] == "done":
+                if len(result) > 1 and isinstance(result[1], dict):
+                    self.last_done = result[1]
                 return
             # A stray chunk racing the cancel is expected - keep draining.
         # Timed out waiting for "done": the child may be wedged inside a native
@@ -1069,7 +1103,7 @@ class ModelRunner:
         # one that never confirmed it stopped.
         from localm.debuglog import logger as _dbg
         _dbg.warning("gguf runner: cancel_stream did not confirm within %.0fs; "
-                     "killing the worker process", _CANCEL_DRAIN_TIMEOUT)
+                     "killing the worker process", timeout)
         self.shutdown(grace=0)
 
     def _simple_request(self, name: str, payload, timeout: float = _SIMPLE_CMD_TIMEOUT,

@@ -34,6 +34,7 @@ from localm.textguard import (
 )
 
 from . import _api as api
+from . import _diffusion
 from ._drafting import (
     SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource, resolve_spec_source)
 from ._ngram import NgramSource, ngram_draft_cap, ngram_rs_seq
@@ -807,6 +808,14 @@ def mtp_rs_seq(default_n_rs_seq, draft_tokens) -> int:
 _MTP_QUEUED_ROWS_MAX = 32
 
 
+# Speculation status of a diffusion language model, which never drafts.
+_DIFFUSION_SPEC_STATUS = "diffusion-model"
+
+
+class _DiffusionStopped(Exception):
+    """The model is being unloaded under a running diffusion generation."""
+
+
 def _greedy_chain():
     """A sampler chain holding one greedy sampler; it reuses its candidate
     buffer from one sample to the next."""
@@ -1208,6 +1217,14 @@ class LlamaCpp:
     # chunk's key with its n_pos. The reply decoded after it is not recorded.
     # None when the KV cache does not start with such a prompt.
     _vision_kv: Optional[List[Tuple[object, int]]] = None
+    # Diffusion language model state, set by _detect_diffusion() at load.
+    is_diffusion = False
+    architecture: Optional[str] = None
+    _diffusion_mask = _diffusion.LLAMA_TOKEN_NULL
+    _diffusion_shift_logits = True
+    _diffusion_capacity = 0
+    _diffusion_steps: Optional[int] = None
+    _diffusion_max_tokens: Optional[int] = None
 
     @property
     def _cached_tokens(self) -> List[int]:
@@ -1243,9 +1260,13 @@ class LlamaCpp:
         spec_draft_tokens: Optional[int] = None,
         use_mmap: Optional[bool] = None,
         adapters: Optional[List[Tuple[str, float]]] = None,
+        diffusion_steps: Optional[int] = None,
+        diffusion_max_tokens: Optional[int] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
+        self._diffusion_steps = diffusion_steps
+        self._diffusion_max_tokens = diffusion_max_tokens
         # spec_source names the draft source (off, mtp, ngram); None follows
         # mtp_enabled. MTP is enabled exactly when the source is mtp.
         self._spec_source_name = resolve_spec_source(spec_source, mtp_enabled)
@@ -1497,13 +1518,14 @@ class LlamaCpp:
 
         try:
             self.is_encoder_decoder = self._detect_encoder_decoder()
+            self._detect_diffusion()
         except Exception:
             api.llama_free_model(self._model_ptr)
             self._model_ptr = None
             raise
-        if self.is_encoder_decoder:
-            # No draft source runs on an encoder-decoder model, and nothing
-            # below may decode on its context before llama_encode has run.
+        if self.is_encoder_decoder or self.is_diffusion:
+            # No draft source runs on an encoder-decoder or a diffusion
+            # model, and nothing below may decode on its context.
             self._spec_source_name = SPEC_OFF
             self._mtp_enabled = False
 
@@ -1532,7 +1554,8 @@ class LlamaCpp:
         # decision (GgufBackend._check_context_fit, which reads this attribute) uses
         # it instead of a file-size heuristic that under-counted wide-KV models by
         # ~2.6x.
-        self.kv_bytes_per_token: int = self._read_kv_bytes_per_token()
+        self.kv_bytes_per_token: int = (
+            0 if self.is_diffusion else self._read_kv_bytes_per_token())
 
         # llama.cpp already offloads min(n_gpu_layers, actual), so an over-large
         # value is harmless - but silently clamping a SPECIFIC number is
@@ -1572,6 +1595,8 @@ class LlamaCpp:
         _ctx = _quiet_stderr if not verbose else contextlib.nullcontext
         with _ctx():
             self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+            if self._ctx_ptr and self.is_diffusion:
+                api.llama_set_causal_attn(self._ctx_ptr, False)
         if not self._ctx_ptr:
             self._free_adapters()
             api.llama_free_model(self._model_ptr)
@@ -1589,10 +1614,14 @@ class LlamaCpp:
                 raise
         if self.is_encoder_decoder:
             self.encoder_input_limit = self._read_encoder_input_limit(cp)
+        if self.is_diffusion:
+            self._diffusion_capacity = self._read_diffusion_capacity()
 
         # Multi-Token Prediction (MTP) draft context initialization
         if self.is_encoder_decoder:
             self.mtp_status = "encoder-decoder"
+        elif self.is_diffusion:
+            self.mtp_status = _DIFFUSION_SPEC_STATUS
         elif not self._mtp_enabled:
             self.mtp_status = "disabled"
         else:
@@ -1639,8 +1668,63 @@ class LlamaCpp:
             _mtp_log.warning(
                 "vision: an encoder-decoder model reads text only, so the "
                 "projector %s was not loaded", os.path.basename(mmproj_path))
+        elif mmproj_path and self.is_diffusion:
+            _mtp_log.warning(
+                "vision: a diffusion language model reads text only, so the "
+                "projector %s was not loaded", os.path.basename(mmproj_path))
         elif mmproj_path:
             self._load_mmproj(mmproj_path, verbose)
+
+    def _detect_diffusion(self) -> None:
+        """Set ``is_diffusion``, ``architecture`` and the diffusion settings the
+        loaded model declares (mask token, ``diffusion.shift_logits``).
+
+        Raises RuntimeError when the runtime lacks the calls the sampler needs,
+        and UnsupportedModelRoleError for a diffusion model whose vocabulary
+        declares no mask token."""
+        from localm.model_manager.gguf import gguf_is_diffusion_architecture
+        model = self._model_ptr
+        if model is None:
+            return
+        arch = None
+        if api.has_model_meta_api():
+            arch = api.llama_model_meta_val_str(model, "general.architecture")
+        if not isinstance(arch, str):
+            arch = None
+        self.architecture = arch
+        self.is_diffusion = (api.llama_model_is_diffusion(model) is True
+                             or gguf_is_diffusion_architecture(arch))
+        if not self.is_diffusion:
+            return
+        if not api.has_diffusion_api():
+            raise RuntimeError(
+                f"This model ('{arch}') is a diffusion language model and this llama "
+                "runtime does not export the calls needed to run one. Update the "
+                "runtime with: localm setup-llama")
+        vocab = api.llama_model_get_vocab(model)
+        self._diffusion_mask = api.llama_vocab_mask(vocab)
+        if self._diffusion_mask == _diffusion.LLAMA_TOKEN_NULL:
+            from localm.inference.backends.base import UnsupportedModelRoleError
+            raise UnsupportedModelRoleError(
+                f"This diffusion language model ('{arch}') declares no mask token, "
+                "so it cannot be run.")
+        shift = None
+        if api.has_model_meta_api():
+            shift = api.llama_model_meta_val_str(model, "diffusion.shift_logits")
+        self._diffusion_shift_logits = True if shift is None else shift == "true"
+
+    def _read_diffusion_capacity(self) -> int:
+        """The most tokens (prompt plus reply canvas) one diffusion decode may
+        hold: the context's micro-batch, bounded by the trained context."""
+        ctx, model = self._ctx_ptr, self._model_ptr
+        if ctx is None or model is None:
+            return 0
+        capacity = int(api.llama_n_ubatch(ctx) or 0)
+        try:
+            trained = int(api.llama_model_n_ctx_train(model))
+        except Exception:
+            trained = 0
+        return min(capacity, trained) if trained > 0 else capacity
 
     def _load_mmproj(self, mmproj_path: str, verbose: bool) -> None:
         """Load *mmproj_path* via mtmd and set self._mtmd, or leave it None on
@@ -2605,6 +2689,121 @@ class LlamaCpp:
             finally:
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
+
+    def _generate_diffusion(
+        self,
+        prompt_tokens: List[int],
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        seed: Optional[int] = None,
+        grammar: Optional[str] = None,
+        on_status: Optional[Callable[[str], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> Iterator[int]:
+        """Yield a diffusion model's reply tokens, all of them after the canvas
+        is fully denoised (a diffusion model has no token stream).
+
+        While denoising, *on_status* receives ``"Denoising reply (N%)..."`` at
+        every 10% of the steps. *should_stop* is polled before every step; a
+        True return ends the generation with nothing yielded. The reply ends at
+        the first end-of-generation token and is cut to *max_new_tokens*
+        (``last_finish_reason`` "stop", or "length" when no end token appeared
+        or the cut applied). Repetition penalty does not apply.
+
+        Raises GrammarUnsupportedError when *grammar* is set, and
+        ContextCapacityExceededError when the prompt leaves too little of the
+        diffusion window for a reply; both before any native call."""
+        from localm.debuglog import logger
+        from localm.inference.backends.base import (
+            GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE, ContextCapacityExceededError,
+            GrammarUnsupportedError)
+        if grammar:
+            raise GrammarUnsupportedError(GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE)
+        with self._inference_lock:
+            if not self._model_ptr:
+                raise RuntimeError("Model not loaded")
+            self.last_finish_reason = "stop"
+            n_input = len(prompt_tokens)
+            if n_input == 0:
+                return
+            try:
+                params = _diffusion.resolve_params(
+                    architecture=self.architecture, n_input=n_input,
+                    max_tokens=(max_new_tokens if max_new_tokens > 0
+                                else _diffusion.DEFAULT_MAX_TOKENS),
+                    canvas_tokens=self._diffusion_max_tokens,
+                    steps=self._diffusion_steps,
+                    capacity=self._diffusion_capacity,
+                    mask_token_id=self._diffusion_mask,
+                    shift_logits=self._diffusion_shift_logits,
+                    temperature=temperature, top_k=top_k, top_p=top_p,
+                    seed=self._seed if seed is None else seed)
+            except _diffusion.DiffusionConfigError as exc:
+                raise ContextCapacityExceededError(
+                    f"{exc}. Start a new chat or shorten the message.") from exc
+            params.validate(n_input)
+            reply_total = max(1, _diffusion.reply_steps(params, n_input))
+            logger.info(
+                "gguf diffusion: %d prompt token(s), canvas %d, %d step(s), "
+                "algorithm %d, schedule %d", n_input, params.max_length - n_input,
+                params.steps, params.algorithm, params.schedule)
+
+            last_tenth = [-1]
+
+            def _on_step(step: int, _total: int, _canvas: List[int]) -> bool:
+                if self._stop.is_set() or (should_stop is not None and should_stop()):
+                    return False
+                if on_status is not None:
+                    tenth = min(10, step * 10 // reply_total)
+                    if tenth != last_tenth[0]:
+                        last_tenth[0] = tenth
+                        on_status(f"Denoising reply ({tenth * 10}%)...")
+                return True
+
+            @contextlib.contextmanager
+            def _guard():
+                with self._gen_lock:
+                    if self._stop.is_set() or self._ctx_ptr is None:
+                        raise _DiffusionStopped()
+                    yield
+
+            native = None
+            _ctx = _stderr_ctx_for_generate(self._verbose)
+            _t0 = time.monotonic()
+            try:
+                with self._gen_lock:
+                    tokenizer = self._tokenizer
+                    if self._stop.is_set() or self._ctx_ptr is None or tokenizer is None:
+                        self.last_finish_reason = "error"
+                        return
+                    native = _diffusion.NativeCanvas(
+                        api, self._ctx_ptr, tokenizer._vocab,
+                        api.llama_vocab_n_tokens(tokenizer._vocab),
+                        params, _guard)
+                with _ctx():
+                    canvas = _diffusion.denoise(native, prompt_tokens, params, _on_step)
+            except _DiffusionStopped:
+                self.last_finish_reason = "error"
+                return
+            finally:
+                if native is not None:
+                    with self._gen_lock:
+                        native.close()
+            if canvas is None:
+                logger.info("gguf diffusion: stopped before the reply was complete")
+                self.last_finish_reason = "error" if self._stop.is_set() else "stop"
+                return
+            reply, ended = _diffusion.reply_tokens(
+                canvas, n_input, params.mask_token_id, tokenizer.is_eog)
+            if max_new_tokens > 0 and len(reply) > max_new_tokens:
+                reply = reply[:max_new_tokens]
+                ended = False
+            self.last_finish_reason = "stop" if ended else "length"
+            logger.info("gguf diffusion: %d reply token(s) in %.2fs (finish=%s)",
+                        len(reply), time.monotonic() - _t0, self.last_finish_reason)
+        yield from reply
 
     @staticmethod
     def _messages_with_markers(messages: List[Dict], marker: str):
@@ -3681,6 +3880,8 @@ class LlamaCpp:
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+        if self._ctx_ptr and self.is_diffusion:
+            api.llama_set_causal_attn(self._ctx_ptr, False)
         if self._ctx_ptr:
             try:
                 self._apply_adapters(self._ctx_ptr)
@@ -3770,6 +3971,7 @@ class LlamaCpp:
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
         **_ignored,
     ):
         """
@@ -3787,6 +3989,9 @@ class LlamaCpp:
         An encoder-decoder model generates through
         ``_generate_encoder_decoder``; ``thinking`` does not apply to it and is
         ignored.
+
+        A diffusion language model answers through ``_generate_diffusion``,
+        which polls *should_stop* between denoising steps.
         """
         if self.is_encoder_decoder:
             return self._completion_result(self._generate_encoder_decoder(
@@ -3837,7 +4042,19 @@ class LlamaCpp:
         tokens = self._tokenizer.encode(
             prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges)
 
-        if going_to_vision:
+        if self.is_diffusion:
+            gen = self._generate_diffusion(
+                tokens,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                seed=seed,
+                grammar=grammar,
+                on_status=on_status,
+                should_stop=should_stop,
+            )
+        elif going_to_vision:
             # Image present + an mmproj is loaded: evaluate the image+text via mtmd
             # instead of the text-only prefill. The text path below is untouched.
             gen = self._generate_image(
