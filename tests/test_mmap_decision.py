@@ -295,6 +295,18 @@ class TestLoadNativeWiring:
         assert b.effective_use_mmap is None
         assert b.mmap_forced_by_ram is False
 
+    @pytest.mark.parametrize("setting, want", [("off", False), ("on", True)])
+    def test_the_configured_setting_reaches_the_worker_through_the_constructor(
+            self, tmp_path, setting, want):
+        b = _backend(_moe_model(tmp_path), n_cpu_moe=2, use_mmap=setting)
+        free = 1 * GIB if setting == "off" else 64 * GIB
+        with _ram(64 * GIB, free):
+            params = _load(b, want)
+        assert params["use_mmap"] is want
+        assert b.last_mmap_decision.reason == f"user_{setting}"
+        assert b.effective_use_mmap is want
+        assert b.mmap_forced_by_ram is False
+
     def test_the_loads_own_gpu_reading_decides_whether_layers_reach_a_gpu(self, tmp_path):
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
         with _ram(64 * GIB, 32 * GIB):
