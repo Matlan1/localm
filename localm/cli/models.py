@@ -199,6 +199,7 @@ _SPEC_REPEAT_PROMPT = (
     "Rename `subtotal` to `net_total` everywhere and output the complete "
     "function in a code block. Change nothing else.")
 _SPEC_PROBE_PROMPTS = _MTP_PROBE_PROMPTS + (_SPEC_REPEAT_PROMPT,)
+_SPEC_PROBE_KINDS = ("prose", "code", "explanation", "rewrite")
 
 # The label bench output uses for each draft source.
 _SPEC_LABELS = {"mtp": "MTP", "ngram": "N-gram drafting"}
@@ -208,10 +209,11 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
                     draft_tokens=None):
     """Load *model_path* with draft source *source* ("off", "mtp" or "ngram")
     and return ``(decode rates, usable, status, gpu_placement, (drafted,
-    accepted), texts, greedy_text)``: ``usable`` is False when the source cannot
-    draft on this model (``status`` says why), ``texts`` is the seeded reply
-    per prompt in prompt order and ``greedy_text`` a temperature-0 reply to the
-    repetition prompt."""
+    accepted), texts, greedy_text, per_prompt)``: ``usable`` is False when the
+    source cannot draft on this model (``status`` says why), ``texts`` is the
+    seeded reply per prompt in prompt order, ``greedy_text`` a temperature-0
+    reply to the repetition prompt, and ``per_prompt`` one ``(rate or None,
+    drafted, accepted)`` per prompt in prompt order."""
     import time as _time
 
     from ..inference.engine import Engine
@@ -236,7 +238,8 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
         status = usage.get("reason")
         usable = source == "off" or usage.get("state") not in (None, "unavailable")
         if not usable:
-            return ([], False, status, engine.gpu_placement, (0, 0), [], "")
+            return ([], False, status, engine.gpu_placement, (0, 0), [], "", [])
+        per_prompt = []
         for prompt in _SPEC_PROBE_PROMPTS:
             first_at = None
             generated = 0
@@ -251,27 +254,33 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
                 pieces.append(piece)
             texts.append("".join(pieces))
             usage = engine.speculation_usage() or {}
-            drafted += int(usage.get("drafted") or 0)
-            accepted += int(usage.get("accepted") or 0)
-            if first_at is None or generated < 2:
-                continue
-            decode_s = _time.perf_counter() - first_at
-            if decode_s > 0:
-                rates.append((generated - 1) / decode_s)
+            p_drafted = int(usage.get("drafted") or 0)
+            p_accepted = int(usage.get("accepted") or 0)
+            drafted += p_drafted
+            accepted += p_accepted
+            rate = None
+            if first_at is not None and generated >= 2:
+                decode_s = _time.perf_counter() - first_at
+                if decode_s > 0:
+                    rate = (generated - 1) / decode_s
+                    rates.append(rate)
+            per_prompt.append((rate, p_drafted, p_accepted))
         greedy = "".join(engine.chat_stream(
             [{"role": "user", "content": _SPEC_REPEAT_PROMPT}],
             max_tokens=gen_tokens, seed=_MTP_PROBE_SEED, temperature=0.0,
             top_p=1.0, top_k=1, repeat_penalty=1.0))
         return (rates, True, status, engine.gpu_placement, (drafted, accepted),
-                texts, greedy)
+                texts, greedy, per_prompt)
     finally:
         engine.unload()
 
 
-def _run_spec_bench(model, label, arm, rounds):
+def _run_spec_bench(model, label, arm, rounds, kinds=None):
     """Run *rounds* paired off/on measurements with ``arm(enabled)`` (the
-    _mtp_probe_arm result shape, optionally with a greedy text appended) and
-    print the comparison and the verdict for *label*. Writes no config."""
+    _mtp_probe_arm result shape, optionally with a greedy text and per-prompt
+    figures appended) and print the comparison and the verdict for *label*;
+    with *kinds* (one name per prompt) also a table per prompt. Writes no
+    config."""
     import statistics as _stats
 
     from rich.markup import escape
@@ -281,6 +290,7 @@ def _run_spec_bench(model, label, arm, rounds):
     drafted = accepted = 0
     texts_off, texts_on = [], []
     greedy_off, greedy_on = [], []
+    per_off, per_on = [], []
     for rnd in range(rounds):
         for enabled in (False, True):
             console.print(f"  round {rnd + 1}, {label} "
@@ -293,6 +303,7 @@ def _run_spec_bench(model, label, arm, rounds):
                 sys.exit(1)
             rates, sup, st, plc, counts, texts = result[:6]
             greedy = result[6] if len(result) > 6 else None
+            per_prompt = result[7] if len(result) > 7 else []
             console.print("done")
             placement = plc or placement
             if enabled:
@@ -302,6 +313,7 @@ def _run_spec_bench(model, label, arm, rounds):
                 on_rates += rates
                 if greedy is not None:
                     greedy_on.append(greedy)
+                per_on.append(per_prompt)
                 if not sup:
                     if label == "MTP":
                         console.print(
@@ -322,6 +334,7 @@ def _run_spec_bench(model, label, arm, rounds):
                 off_rates += rates
                 if greedy is not None:
                     greedy_off.append(greedy)
+                per_off.append(per_prompt)
 
     if not off_rates or not on_rates:
         console.print("[red]Not enough generated tokens to time.[/red] "
@@ -341,6 +354,8 @@ def _run_spec_bench(model, label, arm, rounds):
         table.add_row(name, f"{_stats.median(vals):.1f}",
                       f"{min(vals):.1f} - {max(vals):.1f}")
     console.print(table)
+    if kinds:
+        _print_per_prompt(label, kinds, per_off, per_on)
     if drafted:
         console.print(f"Drafts accepted: {accepted} of {drafted} "
                       f"({100.0 * accepted / drafted:.0f}%).")
@@ -398,6 +413,33 @@ def _run_spec_bench(model, label, arm, rounds):
                   "quantisation, or GPU can give the opposite answer, and a "
                   "busy machine skews the result - close other heavy work "
                   "before trusting a close call.[/dim]")
+
+
+def _print_per_prompt(label, kinds, per_off, per_on):
+    """Print the median decode rate of each prompt with *label* off and on, the
+    ratio, and the share of drafted tokens accepted, from per-round lists of
+    ``(rate or None, drafted, accepted)`` per prompt."""
+    import statistics as _stats
+
+    from rich.table import Table
+    table = Table(title="per prompt")
+    for col in ("prompt", "off tok/s", "on tok/s", "ratio", "accepted"):
+        table.add_column(col, justify="left" if col == "prompt" else "right")
+    for i, kind in enumerate(kinds):
+        off = [r[i][0] for r in per_off if len(r) > i and r[i][0]]
+        on = [r[i][0] for r in per_on if len(r) > i and r[i][0]]
+        dr = sum(r[i][1] for r in per_on if len(r) > i)
+        ac = sum(r[i][2] for r in per_on if len(r) > i)
+        if not off or not on:
+            table.add_row(kind, "-", "-", "-", "-")
+            continue
+        off_m, on_m = _stats.median(off), _stats.median(on)
+        table.add_row(kind, f"{off_m:.1f}", f"{on_m:.1f}", f"{on_m / off_m:.2f}x",
+                      f"{100.0 * ac / dr:.0f}%" if dr else "-")
+    console.print(table)
+    console.print(f"[dim]{label} pays most where the reply repeats text it was "
+                  "given (the rewrite prompt). Judge it by the prompt closest to "
+                  "your own work.[/dim]")
 
 
 @main.command()
@@ -488,7 +530,7 @@ def bench_spec(model, source, gen_tokens, rounds, ctx, gpu_layers, draft_tokens)
         lambda enabled: _spec_probe_arm(
             model_path, model, source if enabled else "off", gen_tokens, ctx,
             gpu_layers, draft_tokens=draft_tokens if enabled else None),
-        rounds)
+        rounds, kinds=_SPEC_PROBE_KINDS)
 
 
 # ------------------------------------------------------------------ #

@@ -376,9 +376,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         ``source`` is the draft source. For ``mtp`` the other fields are those
         of ``last_mtp_usage``. For ``ngram``, ``state`` is "stopped" when the
-        reply stopped drafting partway (``reason`` names why), "unavailable"
-        when the model cannot speculate (``reason`` is the model status, e.g.
-        "rewind-unsupported"), "paused" when drafting was measured slower than
+        reply stopped drafting partway or turned drafting off for the model
+        (``reason`` names why), "unavailable" when the model cannot speculate
+        (``reason`` is the model status, e.g. "rewind-unsupported"), "paused" when drafting was measured slower than
         one-token decoding for at least as many steps as it ran, "on" when it
         speculated, "off" when this reply could not draft (``reason`` "image"),
         and "idle" when nothing matched. ``drafted``, ``accepted`` and
@@ -399,7 +399,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         if call_status:
             state, reason = "stopped", call_status
         elif status and not status.startswith("ok"):
-            state, reason = "unavailable", status
+            state = "stopped" if rep.get("active") else "unavailable"
+            reason = status
         elif paused and paused >= steps:
             state, reason = "paused", "slower-than-plain"
         elif rep.get("active"):

@@ -84,7 +84,9 @@ def test_the_setting_validates_as_a_nullable_choice():
     assert ss.validate_update({"spec_source": ""}) == {"spec_source": None}
     with pytest.raises(ValueError):
         ss.validate_update({"spec_source": "draft-model"})
-    assert ss.validate_update({"spec_draft_tokens": 12}) == {"spec_draft_tokens": 12}
+    stored = ss.validate_update({"spec_draft_tokens": "12"})
+    assert stored == {"spec_draft_tokens": 12} and type(stored["spec_draft_tokens"]) is int
+    assert ss.validate_update({"spec_draft_tokens": ""}) == {"spec_draft_tokens": None}
     with pytest.raises(ValueError):
         ss.validate_update({"spec_draft_tokens": 17})
     assert DEFAULT_CONFIG["spec_source"] is None
@@ -186,6 +188,8 @@ def _report(**kw):
     (_report(), "idle", None),
     (_report(skipped="image"), "off", "image"),
     (_report(status="rewind-unsupported"), "unavailable", "rewind-unsupported"),
+    (_report(status="rewind-unsupported", active=True, drafted=4, steps=1), "stopped",
+     "rewind-unsupported"),
     (_report(call_status="draft-out-of-step", drafted=2, steps=1), "stopped",
      "draft-out-of-step"),
     (_report(paused_steps=9, steps=3, drafted=3), "paused", "slower-than-plain"),
@@ -262,10 +266,12 @@ def _spec_arm(rates_off, rates_on, *, usable=True, status=None, counts=(20, 15),
         if seen is not None:
             seen.append((source, draft_tokens))
         if source == "off":
-            return (rates_off, True, None, None, (0, 0), ["a", "b", "c", "d"], "g")
+            per = [(rates_off[0], 0, 0)] * 4
+            return (rates_off, True, None, None, (0, 0), ["a", "b", "c", "d"], "g", per)
         if not usable:
-            return ([], False, status, None, (0, 0), [], "")
-        return (rates_on, True, None, None, counts, ["a", "b", "c", "d"], greedy_on)
+            return ([], False, status, None, (0, 0), [], "", [])
+        per = [(rates_on[0], 0, 0)] * 3 + [(rates_on[0] * 2, counts[0], counts[1])]
+        return (rates_on, True, None, None, counts, ["a", "b", "c", "d"], greedy_on, per)
     return _arm
 
 
@@ -289,6 +295,8 @@ def test_bench_spec_reports_the_measured_verdict(cli_runner, off, on, phrase):
     assert "Output identical to N-gram drafting off: 4 of 4 replies" in res.output
     assert "Greedy replies matched: 1 of 1." in res.output
     assert seen == [("off", None), ("ngram", 6)]
+    rewrite = next(line for line in res.output.splitlines() if "rewrite" in line)
+    assert "%.2fx" % (2 * on[0] / off[0]) in rewrite and "75%" in rewrite
 
 
 def test_bench_spec_reports_a_greedy_mismatch(cli_runner):

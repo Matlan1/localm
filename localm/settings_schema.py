@@ -1396,6 +1396,11 @@ def _validate_user_name(key: str, val) -> str:
     return s
 
 
+# NUMBER fields whose default is None (unset) and whose value is an integer;
+# a blank value clears them.
+_NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens"})
+
+
 def _validate_one(key: str, val, field: "SettingField", default):
     nullable = default is None
     widget = field.widget
@@ -1409,6 +1414,10 @@ def _validate_one(key: str, val, field: "SettingField", default):
         return _to_bool(key, val)
 
     if widget == Widget.NUMBER:
+        if key in _NULLABLE_INT_NUMBERS:
+            if isinstance(val, str) and not val.strip():
+                return None
+            return _to_number(key, val, want_int=True, lo=field.min, hi=field.max)
         want_int = isinstance(default, int) and not isinstance(default, bool)
         return _to_number(key, val, want_int=want_int, lo=field.min, hi=field.max)
 
