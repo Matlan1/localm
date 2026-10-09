@@ -9910,6 +9910,16 @@
                 }
             }
         ],
+        "./localm/plugins/mcpserver/tools/media_coder.py": [
+            {
+                "code": "reportAttributeAccessIssue",
+                "range": {
+                    "startColumn": 23,
+                    "endColumn": 28,
+                    "lineCount": 1
+                }
+            }
+        ],
         "./localm/plugins/mcpserver/tools/models.py": [
             {
                 "code": "reportAttributeAccessIssue",
