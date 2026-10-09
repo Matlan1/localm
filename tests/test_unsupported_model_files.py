@@ -605,3 +605,11 @@ class TestPulledFile:
         self._fake_hub(monkeypatch, tmp_path, lambda p: _gguf(p))
         assert mm.pull_model("owner/repo:pulled.gguf") is True
         assert "pulled" in mm.load_registry()
+
+    def test_a_file_already_in_the_models_folder_is_not_registered_either(
+            self, home, tmp_path, monkeypatch, printed):
+        _gguf(home / "models" / "pulled.gguf", version=1)
+        self._fake_hub(monkeypatch, tmp_path, lambda p: pytest.fail("downloaded again"))
+        assert mm.pull_model("owner/repo:pulled.gguf") is False
+        assert mm.load_registry() == {}
+        assert V1_SENTENCE in "\n".join(printed)
