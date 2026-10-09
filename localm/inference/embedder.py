@@ -622,12 +622,12 @@ class GGUFEmbedder:
         # What the GGUF declares versus what is actually pooled with. Reported
         # up to IsolatedEmbedder through the runner's load meta.
         self.declared_pooling: Optional[int] = None
-        self.pooling_type: int = _POOLING_DEFAULT
+        self.pooling_type = _POOLING_DEFAULT
         # Classifier head facts, read only for a RANK-pooled (reranker) model.
         self.n_cls_out = 1
         self.cls_labels: list[str] = []
         self._rerank_template: Optional[str] = None
-        self._specials: Optional[VocabSpecials] = None
+        self._specials = None
 
         if not api.has_embeddings_api():
             raise RuntimeError(
@@ -720,14 +720,17 @@ class GGUFEmbedder:
         ``rerank`` chat template and the vocabulary's special tokens: what a
         RANK-pooled model needs to build and score a query / document pair."""
         api = self._api
+        model, vocab = self._model, self._vocab
+        if model is None or vocab is None:
+            raise RuntimeError("embedder is closed")
         if not api.has_rerank_api():
             raise RuntimeError(
                 "this llama.dll build does not expose the reranking API")
-        self.n_cls_out = max(1, int(api.llama_model_n_cls_out(self._model)))
-        self.cls_labels = [api.llama_model_cls_label(self._model, i) or ""
+        self.n_cls_out = max(1, int(api.llama_model_n_cls_out(model)))
+        self.cls_labels = [api.llama_model_cls_label(model, i) or ""
                            for i in range(self.n_cls_out)]
-        self._rerank_template = api.llama_model_chat_template(self._model, b"rerank")
-        self._specials = VocabSpecials.read(api, self._vocab)
+        self._rerank_template = api.llama_model_chat_template(model, b"rerank")
+        self._specials = VocabSpecials.read(api, vocab)
 
     def rank_head_meta(self) -> dict:
         """The classifier-head facts a RANK-pooled model reports when it loads:
@@ -741,17 +744,20 @@ class GGUFEmbedder:
         """Tokenise *text* in full with the given special-token flags, with no
         truncation. An empty text gives no tokens."""
         api = self._api
+        vocab = self._vocab
+        if vocab is None:
+            raise RuntimeError("embedder is closed")
         raw = text.encode("utf-8")
         if not raw:
             return []
         cap = len(raw) + 8
         buf = (self._llama_token * cap)()
-        n = api.llama_tokenize(self._vocab, raw, len(raw), buf, cap,
+        n = api.llama_tokenize(vocab, raw, len(raw), buf, cap,
                                add_special, parse_special)
         if n < 0:
             cap = -n
             buf = (self._llama_token * cap)()
-            n = api.llama_tokenize(self._vocab, raw, len(raw), buf, cap,
+            n = api.llama_tokenize(vocab, raw, len(raw), buf, cap,
                                    add_special, parse_special)
         if n < 0:
             raise RuntimeError(f"tokenizer failed on a {len(raw)}-byte text ({n})")
@@ -838,7 +844,10 @@ class GGUFEmbedder:
         """The L2-normalised pooled embedding of sequence *seq* of a decoded
         batch of *n_seq*."""
         api = self._api
-        ptr = api.llama_get_embeddings_seq(self._ctx, seq)
+        ctx = self._ctx
+        if ctx is None:
+            raise RuntimeError("embedder is closed")
+        ptr = api.llama_get_embeddings_seq(ctx, seq)
         if not ptr:
             raise RuntimeError(
                 f"null embedding for sequence {seq} of {n_seq} in a "
@@ -855,7 +864,10 @@ class GGUFEmbedder:
         """The classifier-head outputs (``n_cls_out`` values, label order) of
         sequence *seq* of a decoded batch of *n_seq*."""
         api = self._api
-        ptr = api.llama_get_embeddings_seq(self._ctx, seq)
+        ctx = self._ctx
+        if ctx is None:
+            raise RuntimeError("embedder is closed")
+        ptr = api.llama_get_embeddings_seq(ctx, seq)
         if not ptr:
             raise RuntimeError(
                 f"no score for sequence {seq} of {n_seq} in a batched decode "
@@ -1006,14 +1018,14 @@ class GGUFEmbedder:
                 built.append(build_pair(
                     self._tokenize_plain, self._specials, self._rerank_template,
                     self._effective_seq_ctx, query, document))
-            out: list[Optional[dict]] = [None] * len(pairs)
+            results: dict[int, dict] = {}
             for group in self._pack_groups([b.tokens for b in built]):
                 scores = self._run_batch(
                     [built[i].tokens for i in group], self._read_scores, "rerank")
                 for i, s in zip(group, scores, strict=True):
-                    out[i] = {"scores": s, "tokens": len(built[i].tokens),
-                              "truncated": built[i].truncated}
-            return out
+                    results[i] = {"scores": s, "tokens": len(built[i].tokens),
+                                  "truncated": built[i].truncated}
+            return [results[i] for i in range(len(pairs))]
 
     def close(self) -> None:
         with self._lock:
@@ -1069,7 +1081,7 @@ class IsolatedEmbedder(VramSizingMixin):
         # Reported by the child at load (see _reload): what the GGUF declares and
         # what is actually pooled with.
         self.declared_pooling: Optional[int] = None
-        self.effective_pooling: Optional[int] = None
+        self.effective_pooling = None
         # Reported by the child at load for a RANK-pooled (reranker) model.
         self.n_cls_out = 1
         self.cls_labels: list[str] = []

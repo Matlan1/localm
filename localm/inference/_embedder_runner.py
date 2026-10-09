@@ -230,6 +230,10 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
             continue
 
         if name in ("embed", "rerank"):
+            if embedder is None or payload is None:
+                resp_q.put(("error", f"the embedder worker got '{name}' before a model "
+                                     "was loaded"))
+                continue
             if embed_stderr_ctx is None:
                 embed_stderr_ctx = dedup_native_stderr()
                 embed_stderr_ctx.__enter__()
@@ -402,15 +406,20 @@ class EmbedderRunner:
         no request id, so two overlapping RPCs would be two threads blocked in
         the same resp_q.get(), each free to receive the OTHER's response. The
         sole caller, IsolatedEmbedder.embed(), serializes on its _rpc_lock."""
-        self._req_q.put(("embed", texts))
-        return self._wait(timeout, "embed")
+        return self._request("embed", texts, timeout)
 
     def rerank(self, pairs: list[tuple[str, str]],
                timeout: float = _EMBED_TIMEOUT_DEFAULT) -> list[dict]:
         """Score *pairs* via the isolated worker; the same failure contract and
         the same one-RPC-at-a-time restriction as :meth:`embed`."""
-        self._req_q.put(("rerank", pairs))
-        return self._wait(timeout, "rerank")
+        return self._request("rerank", pairs, timeout)
+
+    def _request(self, command: str, payload, timeout: float):
+        """Send one command to the worker and wait for its response."""
+        if self._req_q is None:
+            raise RuntimeError("The embedding worker is not running.")
+        self._req_q.put((command, payload))
+        return self._wait(timeout, command)
 
     def _wait(self, timeout: float, label: str, *, shutdown_on_error: bool = False):
         """Block for the next response envelope for *label*.

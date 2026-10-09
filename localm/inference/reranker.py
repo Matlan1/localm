@@ -276,13 +276,13 @@ def reset_reranker(*, force: bool = True) -> bool:
     with _LOCK:
         if not force and _RERANKER is not None and _RERANKER.active_requests > 0:
             return False
-        released = _RERANKER is not None
-        if released:
-            _RERANKER.close()
+        current = _RERANKER
+        if current is not None:
+            current.close()
         _RERANKER = None
         _RERANKER_KEY = None
         _LOAD_FAILED.clear()
-        return released
+        return current is not None
 
 
 def release_for_exit() -> bool:
@@ -292,7 +292,9 @@ def release_for_exit() -> bool:
     worker is terminated without waiting, an idle one is closed politely. The
     module state is left for reset_reranker() to clear."""
     emb = _RERANKER
-    runner = getattr(emb, "_runner", None) if emb is not None else None
+    if emb is None:
+        return False
+    runner = getattr(emb, "_runner", None)
     if runner is None:
         return False
     runner.shutdown(grace=0 if emb.active_requests > 0 else 5.0)

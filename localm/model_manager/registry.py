@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
 from pathlib import PureWindowsPath
+from typing import Any
 from typing import Callable
 from typing import List
 from typing import NamedTuple
@@ -1861,7 +1862,8 @@ def _register(
     reason: a stored ``tool_use=False`` is a real answer (the model's own chat
     template was read and renders no tool calls) and must stay distinct from a
     key never written, which means nobody has looked."""
-    entry = {"path": str(logical_model_path(path)), "source": source, "model_type": model_type}
+    entry: dict[str, Any] = {"path": str(logical_model_path(path)), "source": source,
+                             "model_type": model_type}
     if sha256:
         entry["sha256"] = sha256.lower()
     if mmproj:
