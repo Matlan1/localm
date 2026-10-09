@@ -291,8 +291,8 @@ def test_default_inventory_is_the_unfiltered_git_list(tmp_path, monkeypatch):
         seen.append(list(cmd))
 
         class R:
-            stdout = ("localm/app.py\0localm/svc.py\0localm/svc2.py\0"
-                      "localm/util.py\0localm/vendor/x.py\0").encode("utf-8")
+            stdout = (b"localm/app.py\0localm/svc.py\0localm/svc2.py\0"
+                      b"localm/util.py\0localm/vendor/x.py\0")
         return R()
 
     monkeypatch.setattr(ch.subprocess, "run", fake_run)
@@ -310,7 +310,7 @@ def test_git_inventory_keeps_a_non_ascii_unit_name(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         class R:
             stdout = ("localm/app.py\0localm/svc.py\0localm/svc2.py\0"
-                      "localm/util.py\0localm/café.py\0").encode("utf-8")
+                      "localm/util.py\0localm/café.py\0").encode()
         return R()
 
     monkeypatch.setattr(ch.subprocess, "run", fake_run)
