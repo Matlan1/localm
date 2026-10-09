@@ -17,7 +17,7 @@ Two halves of one contract:
 
 import importlib.util
 import json
-from typing import Iterator, List, Optional
+from typing import Iterator, Optional
 from unittest.mock import MagicMock
 
 import pytest

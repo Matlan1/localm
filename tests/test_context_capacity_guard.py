@@ -10,7 +10,7 @@ Two guards:
    letting the worker process crash with exit code 1 and evicting the loaded model.
 """
 
-from typing import Iterator, List, Optional
+from typing import Iterator, Optional
 from unittest.mock import MagicMock
 
 import pytest

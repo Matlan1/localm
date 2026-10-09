@@ -3,7 +3,6 @@
 
 import multiprocessing as mp
 import threading
-from typing import List
 
 from localm.inference.backends.llamacpp._runner import ModelRunner
 

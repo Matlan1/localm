@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import inspect
 import sys
-from typing import Iterator, List
+from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient

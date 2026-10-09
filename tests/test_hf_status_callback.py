@@ -29,7 +29,6 @@ from __future__ import annotations
 import inspect
 import multiprocessing as mp
 import threading
-from typing import List
 from unittest.mock import MagicMock
 
 import pytest

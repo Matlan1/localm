@@ -42,7 +42,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 _SRC = Path(__file__).resolve().parents[1]
