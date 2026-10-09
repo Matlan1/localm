@@ -50,6 +50,9 @@ updates:
       - dependency-name: "rocm"
       - dependency-name: "rocm-sdk-core"
       - dependency-name: "rocm-sdk-libraries-gfx103x-all"
+      # Pinned exactly: .github/basedpyright-baseline.json is regenerated with the
+      # version it was written by. Bump by hand together with the baseline.
+      - dependency-name: "basedpyright"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
