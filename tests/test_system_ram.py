@@ -70,7 +70,7 @@ def test_a_platform_read_failure_is_unknown_not_an_exception(monkeypatch):
     def _boom(_name):
         raise ValueError("unsupported")
 
-    monkeypatch.setattr(sysstats.os, "sysconf", _boom)
+    monkeypatch.setattr(sysstats.os, "sysconf", _boom, raising=False)
     assert sysstats._platform_ram() == (None, None)
 
 
