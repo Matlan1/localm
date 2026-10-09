@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import AsyncIterator, Callable, NamedTuple, Optional
+from typing import Any, AsyncIterator, Callable, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -5678,6 +5678,7 @@ class _ReplyRouter:
         if reasoning:
             self.reasoning.append(reasoning)
             out.append(("reasoning", reasoning))
+        events: list[tuple[str, Any]]
         if self._tools is None:
             events = [("text", content)]
         else:

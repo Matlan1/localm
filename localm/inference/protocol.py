@@ -79,7 +79,7 @@ class Message(BaseModel):
     # the memory recall query and the audit user line.
     # Optional and additive: a client that omits it gets exactly the previous
     # behaviour. Request-only, so a response message never carries it.
-    origin: Optional[Literal["tool", "client"]] = Field(None, exclude=True)
+    origin: Optional[Literal["tool", "client"]] = Field(default=None, exclude=True)
 
     @field_validator("content", mode="before")
     @classmethod

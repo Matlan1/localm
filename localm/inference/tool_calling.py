@@ -169,7 +169,8 @@ def tools_prompt(tools: list[Tool], choice: ToolChoice) -> str:
 
 
 def _call_text(call: dict[str, Any]) -> str:
-    fn = call.get("function") if isinstance(call.get("function"), dict) else call
+    inner = call.get("function")
+    fn: dict[str, Any] = inner if isinstance(inner, dict) else call
     name = fn.get("name", "")
     args = fn.get("arguments", {})
     if isinstance(args, str):

@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Tool calling with any chat model.** `/v1/chat/completions` takes OpenAI `tools`,
+  `tool_choice` and `parallel_tool_calls`, and the Ollama API takes `tools` and
+  `tool_calls`. The model's calls come back in `message.tool_calls` (a streamed call arrives
+  whole in one delta) with `finish_reason` `tool_calls`. `required` or a named function
+  constrains the reply to a well-formed call whose arguments follow the function's JSON
+  schema; `auto` constrains a call once the model starts one. Earlier calls and tool results
+  in the conversation are given back to the model, with tool output treated as untrusted
+  text.
 - **The Ollama API's `format` takes a JSON schema.** The reply is constrained, token by
   token, to documents that satisfy the schema: objects with required and optional
   properties, arrays with length bounds, enums, integer ranges, `anyOf`, recursive `$ref`
