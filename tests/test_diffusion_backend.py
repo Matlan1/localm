@@ -142,21 +142,7 @@ class _FakeCanvas:
 
 
 def _bare_llama(monkeypatch, *, capacity=256, steps=8, max_tokens=None, arch="dream"):
-    llm = LlamaCpp.__new__(LlamaCpp)
-    llm._inference_lock = threading.Lock()
-    llm._gen_lock = threading.RLock()
-    llm._stop = threading.Event()
-    llm._model_ptr = 1
-    llm._ctx_ptr = 1
-    llm._seed = 0
-    llm._verbose = True
-    llm.is_diffusion = True
-    llm.architecture = arch
-    llm._diffusion_mask = 99
-    llm._diffusion_shift_logits = False
-    llm._diffusion_capacity = capacity
-    llm._diffusion_steps = steps
-    llm._diffusion_max_tokens = max_tokens
+    from tests._bare_llama import make_bare_llama
 
     class _Tok:
         _vocab = 1
@@ -164,7 +150,11 @@ def _bare_llama(monkeypatch, *, capacity=256, steps=8, max_tokens=None, arch="dr
         @staticmethod
         def is_eog(t):
             return t == 2
-    llm._tokenizer = _Tok()
+    llm = make_bare_llama(
+        _model_ptr=1, _ctx_ptr=1, _seed=0, _verbose=True, _tokenizer=_Tok(),
+        is_diffusion=True, architecture=arch, _diffusion_mask=99,
+        _diffusion_shift_logits=False, _diffusion_capacity=capacity,
+        _diffusion_steps=steps, _diffusion_max_tokens=max_tokens)
     native_calls = []
     monkeypatch.setattr(llama_mod.api, "llama_set_causal_attn",
                         lambda ctx, causal: native_calls.append(("causal", causal)))
