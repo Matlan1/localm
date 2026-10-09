@@ -23,12 +23,14 @@ from localm.inference.gbnf import TOOL_CALL_TRIGGER
 from localm.inference.json_schema_grammar import (
     SchemaGrammarError, literal, schema_to_grammar,
 )
+from localm.textguard import compose, untrusted_span
 
 MAX_TOOLS = 64
 MAX_TOOLS_BYTES = 65536
 OPEN_TAG = "<tool_call>"
 CLOSE_TAG = "</tool_call>"
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_RESPONSE_TAG = re.compile(r"<((?:\s*/)?\s*tool_response)", re.IGNORECASE)
 
 
 class ToolsError(ValueError):
@@ -53,9 +55,22 @@ class ParsedCall:
     name: str
     arguments: dict[str, Any]
     id: str = field(default_factory=lambda: "call_" + uuid.uuid4().hex[:24])
+    index: int = 0
 
     def arguments_json(self) -> str:
         return json.dumps(self.arguments, ensure_ascii=False, separators=(",", ":"))
+
+    def as_openai(self, with_index: bool = False) -> dict[str, Any]:
+        """The call as an OpenAI ``tool_calls`` entry (with ``index`` in a stream delta)."""
+        out: dict[str, Any] = {"id": self.id, "type": "function", "function": {
+            "name": self.name, "arguments": self.arguments_json()}}
+        if with_index:
+            out = {"index": self.index, **out}
+        return out
+
+    def block(self) -> str:
+        """The call written the way the model writes it."""
+        return _call_text({"name": self.name, "arguments": self.arguments})
 
 
 # ------------------------------------------------------------------ request
@@ -193,11 +208,14 @@ def render_messages(messages: list[dict], tools: list[Tool], choice: ToolChoice)
             rendered["content"] = (text + "\n" if text else "") + blocks
             out.append(rendered)
         elif role == "tool":
-            body = f"<tool_response>\n{_text_of(m.get('content'))}\n</tool_response>"
+            body = compose("<tool_response>\n",
+                           untrusted_span(_RESPONSE_TAG.sub(r"&lt;\1", _text_of(m.get("content")))),
+                           "\n</tool_response>")
             if out and out[-1].get("_tool_results"):
-                out[-1]["content"] += "\n" + body
+                out[-1]["content"] = compose(out[-1]["content"], "\n", body)
             else:
-                out.append({"role": "user", "content": body, "_tool_results": True})
+                out.append({"role": "user", "content": body, "origin": "tool",
+                            "_tool_results": True})
         else:
             out.append(dict(m))
     for m in out:

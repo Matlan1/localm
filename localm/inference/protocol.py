@@ -56,6 +56,13 @@ class Message(BaseModel):
     # assistant responses when the model emitted a <think> block; ignored on
     # input. Clients that do not know the field ignore it.
     reasoning_content: Optional[str] = None
+    # Function calls the assistant made, as OpenAI ``tool_calls`` entries
+    # (``id``, ``type``, ``function.name``, ``function.arguments``). On a request
+    # message they are earlier calls; on a response they are the model's calls.
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    # On a ``tool`` message: the ``id`` of the call it answers.
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
     # Character ranges of ``content`` that came from an untrusted source, as
     # ``[[start, end], ...]``. The backend tokenises those ranges with
     # special-token parsing off. Optional and additive: a client that omits it
@@ -76,6 +83,12 @@ class Message(BaseModel):
     # Optional and additive: a client that omits it gets exactly the previous
     # behaviour. Request-only, so a response message never carries it.
     origin: Optional[Literal["tool", "client"]] = Field(None, exclude=True)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _null_content_is_empty(cls, v):
+        """An assistant message that only calls functions may send ``content: null``."""
+        return "" if v is None else v
 
     def text_only(self) -> str:
         """Flatten content to plain text (discards media)."""
@@ -182,16 +195,17 @@ class ChatRequest(BaseModel):
     # Text that ends the reply when generated: one string or a list. The reply
     # is cut before the first match and finish_reason is "stop".
     stop: Optional[List[str]] = None
+    # OpenAI function tools and how the model may use them: "auto" (default when
+    # tools are given), "none", "required", or {"type": "function", "function":
+    # {"name": ...}}. Calls come back in message.tool_calls (delta.tool_calls
+    # when streaming) with finish_reason "tool_calls".
+    tools: Optional[List[Any]] = None
+    tool_choice: Optional[Any] = None
     # Capabilities the answering model must have, e.g. ["tool_use"]. Consulted
     # ONLY when no model is pinned: with an explicit `model`, a gap is reported
-    # and the pinned model still answers.
-    #
-    # Deliberately not named `tools` and deliberately not the OpenAI
-    # tools/tool_choice schema. Accepting that shape would advertise
-    # tool-calling protocol support this server does not implement; this field
-    # claims only what it does, which is to steer model selection. Vision and
-    # context length need no entry here - both are derived from the request
-    # itself (an image part, the prompt's size).
+    # and the pinned model still answers. Vision and context length need no
+    # entry here - both are derived from the request itself (an image part, the
+    # prompt's size).
     required_capabilities: Optional[List[str]] = None
     # Whether `model` is a pin. Unset: a named model is pinned and an absent,
     # empty or "localm" one is not. False: `model` names the preferred model,
@@ -252,6 +266,8 @@ class ChoiceDelta(BaseModel):
     # Streamed reasoning tokens, routed out of `content`. A delta carries one
     # or the other; clients that do not know the field ignore it.
     reasoning_content: Optional[str] = None
+    # Complete calls, each with its ``index`` in the reply (see Message.tool_calls).
+    tool_calls: Optional[List[Dict[str, Any]]] = None
     status: Optional[str] = None
     # Stable id for `status` (see STATUS_CODE_BY_TEXT), for a client that
     # localizes the status text instead of displaying it verbatim. None when

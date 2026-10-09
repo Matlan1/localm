@@ -211,7 +211,7 @@ def test_show_describes_a_registered_model(client, home):
     _write_registry(home, {"alpha": {"path": str(weights), "architecture": "llama",
                                      "context_length": 8192}})
     body = client.post("/api/show", json={"model": "alpha"}).json()
-    assert body["capabilities"] == ["completion"]
+    assert body["capabilities"] == ["completion", "tools"]
     assert body["details"]["format"] == "gguf"
     assert body["model_info"]["general.architecture"] == "llama"
     assert body["model_info"]["llama.context_length"] == 8192
@@ -224,10 +224,12 @@ def test_show_accepts_the_legacy_name_field_and_the_latest_tag(client, home):
     assert client.post("/api/show", json={"model": "alpha:latest"}).status_code == 200
 
 
-def test_show_never_claims_tools(client, home):
-    _write_registry(home, {"alpha": {"path": str(home / "x.gguf"), "tool_use": True}})
-    caps = client.post("/api/show", json={"model": "alpha"}).json()["capabilities"]
-    assert "tools" not in caps
+def test_show_offers_tools_on_chat_models_only(client, home):
+    _write_registry(home, {"alpha": {"path": str(home / "x.gguf")},
+                           "emb": {"path": str(home / "e.gguf"), "model_type": "embedding"}})
+    chat_caps = client.post("/api/show", json={"model": "alpha"}).json()["capabilities"]
+    assert chat_caps[:2] == ["completion", "tools"]
+    assert "tools" not in client.post("/api/show", json={"model": "emb"}).json()["capabilities"]
 
 
 def test_show_marks_an_embedding_model(client, home):
@@ -336,9 +338,92 @@ def test_chat_format_schema_the_grammar_cannot_enforce_is_a_400(client):
     assert r.status_code == 400 and "pattern" in _error_of(r)
 
 
-def test_chat_tools_are_refused_not_dropped(client):
-    r = _chat(client, tools=[{"type": "function", "function": {"name": "f"}}])
-    assert r.status_code == 400 and "tools" in _error_of(r)
+WEATHER_TOOL = {"type": "function", "function": {
+    "name": "get_weather", "description": "Weather for a city",
+    "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                   "required": ["city"]}}}
+CALL_TEXT = ('<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}\n'
+             '</tool_call>')
+
+
+def _tool_client(home, tokens=None):
+    engine = _mock_engine(tokens or [CALL_TEXT[i:i + 6] for i in range(0, len(CALL_TEXT), 6)])
+    app = create_app(engine)
+    return engine, TestClient(app, headers={"Authorization": f"Bearer {app.state.shell_token}"})
+
+
+def test_chat_tools_come_back_as_tool_calls(home):
+    engine, client = _tool_client(home)
+    r = _chat(client, stream=False, tools=[WEATHER_TOOL])
+    assert r.status_code == 200
+    body = r.json()
+    [call] = body["message"]["tool_calls"]
+    assert call["function"]["name"] == "get_weather"
+    assert call["function"]["arguments"] == {"city": "Paris"}
+    assert call["function"]["index"] == 0 and call["id"].startswith("call_")
+    assert body["message"]["content"] == "" and body["done"] is True
+    assert body["done_reason"] == "stop"
+    messages, kwargs = engine.seen["calls"][-1]
+    assert messages[0]["role"] == "system" and "get_weather" in messages[0]["content"]
+    assert kwargs["grammar"].startswith("root ::=") and kwargs["grammar_lazy"] is True
+
+
+def test_chat_tool_calls_stream_as_their_own_line_before_done(home):
+    _engine, client = _tool_client(home)
+    lines = _lines(_chat(client, tools=[WEATHER_TOOL]))
+    assert lines[-1]["done"] is True and lines[-1]["done_reason"] == "stop"
+    carriers = [ln for ln in lines if ln.get("message", {}).get("tool_calls")]
+    assert len(carriers) == 1 and not carriers[0]["done"]
+    assert carriers[0]["message"]["tool_calls"][0]["function"]["arguments"] == {"city": "Paris"}
+    assert "<tool_call>" not in "".join(ln["message"]["content"] for ln in lines)
+
+
+def test_chat_a_plain_answer_with_tools_offered_has_no_tool_calls(home):
+    _engine, client = _tool_client(home, tokens=["It is ", "sunny."])
+    body = _chat(client, stream=False, tools=[WEATHER_TOOL]).json()
+    assert body["message"]["content"] == "It is sunny." and "tool_calls" not in body["message"]
+
+
+def test_chat_earlier_tool_calls_and_results_reach_the_model(home):
+    engine, client = _tool_client(home, tokens=["Sunny."])
+    r = _chat(client, stream=False, tools=[WEATHER_TOOL], messages=[
+        {"role": "user", "content": "weather in Paris?"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]},
+        {"role": "tool", "tool_name": "get_weather", "content": "sunny, 21C"}])
+    assert r.status_code == 200
+    messages, _kwargs = engine.seen["calls"][-1]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert '"city": "Paris"' in messages[2]["content"] and "<tool_call>" in messages[2]["content"]
+    assert "sunny, 21C" in messages[3]["content"] and "<tool_response>" in messages[3]["content"]
+
+
+@pytest.mark.parametrize("message", [
+    {"role": "assistant", "tool_calls": [{"function": {}}]},
+    {"role": "assistant", "tool_calls": ["get_weather"]},
+    {"role": "user", "tool_calls": [{"function": {"name": "f", "arguments": {}}}]},
+])
+def test_chat_malformed_tool_calls_are_a_400(client, message):
+    r = _chat(client, messages=[{"role": "user", "content": "hi"}, message])
+    assert r.status_code == 400 and "tool_calls" in _error_of(r)
+
+
+def test_chat_malformed_tools_are_a_400_in_the_ollama_shape(client):
+    r = _chat(client, tools=[{"type": "function", "function": {"name": "has space"}}])
+    assert r.status_code == 400 and "name" in _error_of(r)
+
+
+def test_tool_call_translation_round_trips():
+    openai = P.tool_call_to_openai(
+        {"function": {"name": "f", "arguments": {"a": [1, "é"]}}}, 0)
+    assert openai["type"] == "function" and openai["id"].startswith("call_")
+    assert json.loads(openai["function"]["arguments"]) == {"a": [1, "é"]}
+    [back] = P.tool_calls_to_ollama([{**openai, "index": 3}])
+    assert back == {"id": openai["id"], "function": {"index": 3, "name": "f",
+                                                      "arguments": {"a": [1, "é"]}}}
+    assert P.tool_calls_to_ollama(None) == [] and P.tool_calls_to_ollama([{"x": 1}]) == []
+    [bad_args] = P.tool_calls_to_ollama([{"id": "c", "function": {"name": "f", "arguments": "{oops"}}])
+    assert bad_args["function"]["arguments"] == {}
 
 
 def test_chat_think_false_disables_thinking(client, engine):

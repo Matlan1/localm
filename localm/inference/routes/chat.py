@@ -20,6 +20,7 @@ import asyncio
 import functools
 import time
 from types import SimpleNamespace
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -34,6 +35,10 @@ from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
 from localm.inference.pretokenizer_guard import count_tokens_or_estimate
 from localm.inference.stop_sequences import apply_stop
+from localm.inference.tool_calling import (
+    ToolChoice, ToolsError, has_tool_history, parse_tool_choice, render_messages,
+    tool_grammar, validate_tools,
+)
 from localm.inference.protocol import (
     CHECKING_GRAMMAR_STATUS, LOADING_MODEL_STATUS, PROCESSING_PROMPT_STATUS,
     RUNNING_CHAT_HOOKS_STATUS, ChatRequest, CompletionRequest, EmbeddingRequest,
@@ -69,12 +74,15 @@ def register(app: FastAPI, ctx) -> None:
         return None
 
     async def _prepare_chat(req: ChatRequest, request: Request, messages: list,
-                            route, say) -> SimpleNamespace:
+                            route, say, tools=(),
+                            choice: Optional[ToolChoice] = None) -> SimpleNamespace:
         """Resolve (loading if needed) the engine that answers *req*, run the
         inlet hooks and every pre-generation check. Returns the prepared request,
         which holds an engine pin the caller must release; raises HTTPException
         for a refused request, holding no pin. ``say(text)`` is called with the
-        status of each phase as it starts, on the event loop thread."""
+        status of each phase as it starts, on the event loop thread. *tools* and
+        *choice* are the request's validated tools and tool_choice."""
+        choice = choice or ToolChoice("none")
         say(LOADING_MODEL_STATUS)
         engine = None
         if route.routed:
@@ -156,6 +164,9 @@ def register(app: FastAPI, ctx) -> None:
                     say(RUNNING_CHAT_HOOKS_STATUS)
                     messages = await pipeline.run_inlet(messages, ctx)
 
+            if tools or has_tool_history(messages):
+                messages = render_messages(messages, list(tools), choice)
+
             sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
 
             # Reject image input on a text-only model with a 400 instead of dropping
@@ -184,16 +195,29 @@ def register(app: FastAPI, ctx) -> None:
                                    + "; ".join(route.load_errors))
                     raise HTTPException(400, detail)
 
+            grammar, grammar_lazy, grammar_triggers = (
+                req.grammar, req.grammar_lazy, req.grammar_triggers)
+            from_tools = bool(tools) and choice.kind != "none"
+            tool_names = None
+            if from_tools:
+                tool_names = ({choice.name} if choice.kind == "function"
+                              else {t.name for t in tools})
+                try:
+                    grammar, grammar_lazy, grammar_triggers = tool_grammar(
+                        list(tools), choice)
+                except ToolsError as e:
+                    raise HTTPException(400, str(e)) from e
             gen_kwargs = dict(
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
                 top_k=req.top_k,
                 repeat_penalty=req.repeat_penalty,
-                grammar=req.grammar,
+                grammar=grammar,
                 seed=req.seed,
                 stop=req.stop,
                 thinking=(req.chat_template_kwargs or {}).get("enable_thinking"),
+                tool_names=tool_names,
             )
             # Strip None so Engine uses its config defaults
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
@@ -202,38 +226,40 @@ def register(app: FastAPI, ctx) -> None:
             if ignored:
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("chat_template_kwargs keys ignored: %s", ignored)
-            if req.grammar_lazy:
+            if grammar_lazy:
                 # A lazy grammar without its trigger patterns can never engage.
-                if not req.grammar or not req.grammar_triggers:
+                if not grammar or not grammar_triggers:
                     raise HTTPException(
                         400, "grammar_lazy requires both grammar and grammar_triggers")
-                # A caller-supplied trigger pattern reaches native std::regex matching
-                # against an uncapped, growing buffer on every token, so it is rejected
-                # up front. run_in_executor, not a direct call: the probe can block
-                # until its timeout and must not hold the event loop.
-                say(CHECKING_GRAMMAR_STATUS)
-                try:
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, validate_trigger_patterns, req.grammar_triggers)
-                except TriggerValidatorUnavailableError as e:
-                    # Handled before the InvalidGrammarError arm: the pattern was
-                    # never checked. Status comes from the shared table.
-                    raise HTTPException(_hs.backend_error_status(e), str(e)) from e
-                except InvalidGrammarError as e:
-                    raise HTTPException(400, f"Invalid grammar trigger: {e}") from e
+                if not from_tools:
+                    # A caller-supplied trigger pattern reaches native std::regex
+                    # matching against an uncapped, growing buffer on every token,
+                    # so it is rejected up front. run_in_executor, not a direct
+                    # call: the probe can block until its timeout and must not
+                    # hold the event loop.
+                    say(CHECKING_GRAMMAR_STATUS)
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, validate_trigger_patterns, grammar_triggers)
+                    except TriggerValidatorUnavailableError as e:
+                        # Handled before the InvalidGrammarError arm: the pattern was
+                        # never checked. Status comes from the shared table.
+                        raise HTTPException(_hs.backend_error_status(e), str(e)) from e
+                    except InvalidGrammarError as e:
+                        raise HTTPException(400, f"Invalid grammar trigger: {e}") from e
                 gen_kwargs["grammar_lazy"] = True
-                gen_kwargs["grammar_triggers"] = req.grammar_triggers
+                gen_kwargs["grammar_triggers"] = grammar_triggers
 
             # Reject a malformed grammar with a 400 up front, before streaming starts,
             # so both the stream and non-stream paths get a real 4xx.
-            if req.grammar:
+            if grammar:
                 say(CHECKING_GRAMMAR_STATUS)
                 try:
                     # Pure-Python structural check first and unconditionally, with no
                     # RPC, so it also covers the RunnerBusy-deferred path below.
                     # Rejects a deeply unbalanced grammar before the native GBNF
                     # parser sees it.
-                    check_grammar_structure(req.grammar)
+                    check_grammar_structure(grammar)
                     # Off the event loop, for the same reason the trigger probe
                     # above is: validate_grammar's backend RPC waits on the
                     # isolated model worker, so a direct call here would freeze
@@ -243,15 +269,27 @@ def register(app: FastAPI, ctx) -> None:
                     # below still catches exactly what it caught before.
                     await asyncio.get_running_loop().run_in_executor(
                         None, lambda: engine.validate_grammar(
-                            req.grammar, lazy=bool(req.grammar_lazy)))
+                            grammar, lazy=bool(grammar_lazy)))
                 except GrammarUnsupportedError as e:
                     # The backend cannot apply a grammar at all. Separate from the
                     # InvalidGrammarError arm below, and above the `if req.stream:`
                     # branch so the streaming and non-streaming paths get the same
                     # status and reason.
-                    raise HTTPException(400, str(e)) from e
+                    if from_tools and choice.kind == "auto":
+                        for key in ("grammar", "grammar_lazy", "grammar_triggers"):
+                            gen_kwargs.pop(key, None)
+                        from localm.debuglog import logger as _dbg
+                        _dbg.info("tools: %s cannot apply a grammar; tool calls are "
+                                  "read from the reply without one", engine.display_name)
+                    elif from_tools:
+                        raise HTTPException(
+                            400, f"tool_choice {choice.kind!r} needs grammar-constrained "
+                                 f"sampling, which this model cannot do: {e}") from e
+                    else:
+                        raise HTTPException(400, str(e)) from e
                 except InvalidGrammarError as e:
-                    raise HTTPException(400, f"Invalid grammar: {e}") from e
+                    raise HTTPException(
+                        400, f"Invalid {'tool grammar' if from_tools else 'grammar'}: {e}") from e
                 except RuntimeError as e:
                     # A bare RuntimeError means the isolated worker crashed, timed
                     # out, or returned something unexpected while checking the
@@ -409,8 +447,17 @@ def register(app: FastAPI, ctx) -> None:
                 body=peer_routing.forward_body(_peer, await request.body()),
                 headers=_capability_route_header(route))
 
+        try:
+            tools = validate_tools(req.tools)
+            choice = parse_tool_choice(req.tool_choice, tools)
+        except ToolsError as e:
+            raise HTTPException(400, str(e)) from e
+        if tools and choice.kind != "none" and req.grammar:
+            raise HTTPException(400, "tools cannot be combined with a grammar")
+
         if not req.stream:
-            prepared = await _prepare_chat(req, request, messages, route, _no_status)
+            prepared = await _prepare_chat(req, request, messages, route, _no_status,
+                                           tools, choice)
             try:
                 return await _respond_complete(prepared, request)
             finally:
@@ -420,7 +467,7 @@ def register(app: FastAPI, ctx) -> None:
         # stream opens at once and reports each phase until the reply starts.
         progress = _hs.PrepProgress()
         task = asyncio.ensure_future(
-            _prepare_chat(req, request, messages, route, progress.set))
+            _prepare_chat(req, request, messages, route, progress.set, tools, choice))
         try:
             done, _pending = await asyncio.wait({task}, timeout=_hs.PREP_STATUS_GRACE_S)
         except BaseException:
