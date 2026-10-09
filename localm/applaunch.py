@@ -114,14 +114,14 @@ class LauncherResult:
     path: Optional[Path] = None
     icon_stamped: bool = False
     desktop_file: Optional[Path] = None
-    notes: List[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
-def _copy_runtime_dlls(src_dir: Path, dst_dir: Path) -> List[str]:
+def _copy_runtime_dlls(src_dir: Path, dst_dir: Path) -> list[str]:
     """Copy the loader-critical DLLs (python3*.dll, vcruntime*.dll) next to the
     launcher so a base-interpreter copy can start outside its original directory.
     Best-effort per file; returns the names copied."""
-    copied: List[str] = []
+    copied: list[str] = []
     for pattern in ("python3*.dll", "vcruntime*.dll"):
         for dll in src_dir.glob(pattern):
             try:
@@ -229,7 +229,7 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
                               notes=["could not locate the base interpreter to copy; "
                                      "cannot build LocaLM.exe"])
     dst = windows_launcher_path()
-    notes: List[str] = []
+    notes: list[str] = []
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
         if not force and dst.is_file():
@@ -274,7 +274,7 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
 
 # ---- PE icon stamping (ctypes UpdateResource, no dependency) --------------- #
 
-def _parse_ico(data: bytes) -> List[tuple]:
+def _parse_ico(data: bytes) -> list[tuple]:
     """Parse a .ico into ``[(header_fields, image_bytes), ...]``. Returns [] on any
     malformation - the caller treats that as "cannot stamp" (best-effort)."""
     if len(data) < 6:
@@ -282,7 +282,7 @@ def _parse_ico(data: bytes) -> List[tuple]:
     _reserved, itype, count = struct.unpack("<HHH", data[:6])
     if itype != 1 or count == 0:
         return []
-    entries: List[tuple] = []
+    entries: list[tuple] = []
     off = 6
     for _ in range(count):
         if off + 16 > len(data):
@@ -297,7 +297,7 @@ def _parse_ico(data: bytes) -> List[tuple]:
     return entries
 
 
-def _build_group_icon(entries: List[tuple]) -> bytes:
+def _build_group_icon(entries: list[tuple]) -> bytes:
     """Build the RT_GROUP_ICON directory referencing RT_ICON ids 1..N."""
     out = struct.pack("<HHH", 0, 1, len(entries))
     for idx, (fields, _img) in enumerate(entries, start=1):
@@ -484,7 +484,7 @@ def make_linux_launcher(*, force: bool = False) -> LauncherResult:
         return LauncherResult(ok=False,
                               notes=["no interpreter found to copy for bin/LocaLM"])
     dst = linux_launcher_path()
-    notes: List[str] = []
+    notes: list[str] = []
     built_ok = False
     try:
         entrypoint = _venv_root() / "bin" / "localm"

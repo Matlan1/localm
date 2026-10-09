@@ -45,7 +45,7 @@ from typing import List, TypedDict
 class LogRecord(TypedDict):
     level: str      # "" when the record did not start with a recognized header
     logger: str
-    lines: List[str]
+    lines: list[str]
 
 
 # The logger group excludes whitespace from its first character as well as the
@@ -125,9 +125,9 @@ def is_content_record(rec: LogRecord) -> bool:
     return any(p.search(header) for p in _CONTENT_MARKER_RES)
 
 
-def parse_records(text: str) -> List[LogRecord]:
+def parse_records(text: str) -> list[LogRecord]:
     """Group raw log lines into records (see module docstring)."""
-    records: List[LogRecord] = []
+    records: list[LogRecord] = []
     for line in text.splitlines():
         m = _LOG_LINE_RE.match(line)
         if m:
@@ -142,7 +142,7 @@ def parse_records(text: str) -> List[LogRecord]:
     return records
 
 
-def _unleveled_lines(rec: LogRecord) -> List[str]:
+def _unleveled_lines(rec: LogRecord) -> list[str]:
     """The lines of *rec* that never went through the "TIMESTAMP LEVEL NAME:"
     header check - i.e. the ones is_error_record cannot trust rec["level"] to
     have already judged. When the record itself has no recognized header
@@ -192,7 +192,7 @@ def _record_timestamp(rec: LogRecord) -> str:
     return rec["lines"][0][:19]   # "YYYY-MM-DD HH:MM:SS" prefix, or "" if absent
 
 
-def _collapse_line_runs(lines: List[str]) -> List[str]:
+def _collapse_line_runs(lines: list[str]) -> list[str]:
     """The line-level twin of collapse_records' record-level collapsing,
     applied WITHIN a single (already-grouped) benign record's own lines: a run
     of _MIN_RUN_TO_COLLAPSE+ consecutive near-duplicate lines (numbers masked,
@@ -201,7 +201,7 @@ def _collapse_line_runs(lines: List[str]) -> List[str]:
     "TIMESTAMP LEVEL NAME:" prefix of its own - always lands as CONTINUATION
     LINES of whatever record precedes it (see parse_records), so it is never a
     run of multiple RECORDS for collapse_records itself to fold."""
-    out: List[str] = []
+    out: list[str] = []
     i, n = 0, len(lines)
     while i < n:
         tmpl = _NUMERIC_RE.sub("#", lines[i])
@@ -217,7 +217,7 @@ def _collapse_line_runs(lines: List[str]) -> List[str]:
     return out
 
 
-def collapse_records(records: List[LogRecord]) -> List[str]:
+def collapse_records(records: list[LogRecord]) -> list[str]:
     """Render *records* to lines: every error record kept verbatim; a run of
     _MIN_RUN_TO_COLLAPSE+ consecutive near-duplicate BENIGN records (now
     matched on their FULL content via record_template, continuation lines
@@ -228,7 +228,7 @@ def collapse_records(records: List[LogRecord]) -> List[str]:
     record_template hashes every line, so records only collapse when they are
     near-duplicates END TO END, and the survivor below keeps ALL of its own
     lines rather than only lines[0]."""
-    out: List[str] = []
+    out: list[str] = []
     i, n = 0, len(records)
     while i < n:
         rec = records[i]
@@ -264,8 +264,8 @@ def collapse_records(records: List[LogRecord]) -> List[str]:
 
 
 def _drop_content_records(
-        records: List[LogRecord], *, start_tainted: bool = False
-) -> "tuple[List[LogRecord], int]":
+        records: list[LogRecord], *, start_tainted: bool = False
+) -> tuple[list[LogRecord], int]:
     """Remove every content record (is_content_record) AND everything that
     follows one until we are confident we have resynchronized to genuine
     operational logging - BEFORE anything else touches *records*.
@@ -292,7 +292,7 @@ def _drop_content_records(
     at all (parse_records' "starts mid-record" branch gives it level=="").
 
     Returns (kept, count_dropped)."""
-    kept: List[LogRecord] = []
+    kept: list[LogRecord] = []
     dropped = 0
     tainted = start_tainted
     i, n = 0, len(records)
@@ -364,7 +364,7 @@ _TRUNCATED_MARK = ("... (this error was truncated for space - its start is in "
 _MIN_ERROR_TAIL = 40
 
 
-def _fit_budget(records: List[LogRecord], max_chars: int, *,
+def _fit_budget(records: list[LogRecord], max_chars: int, *,
                 content_notice: str = "") -> str:
     """Re-render, this time dropping benign (collapsed or not) lines from the
     FRONT first - oldest activity goes first, errors are never touched -
@@ -391,7 +391,7 @@ def _fit_budget(records: List[LogRecord], max_chars: int, *,
         benign_lines = collapse_records(
             [r for i, r in enumerate(records) if i not in set(error_idxs)])
         budget_left = budget - len(errors_text) - 2
-        kept: List[str] = []
+        kept: list[str] = []
         for ln in reversed(benign_lines):
             if budget_left - len(ln) - 1 < 0:
                 break
@@ -406,7 +406,7 @@ def _fit_budget(records: List[LogRecord], max_chars: int, *,
 
     # Even the errors alone do not fit: keep the most recent ones (most
     # actionable) and say how many earlier ones were cut - never silent.
-    kept_blocks: List[str] = []
+    kept_blocks: list[str] = []
     used = 0
     omitted = 0
     for block in reversed(error_blocks):

@@ -735,7 +735,7 @@ _CHARSET_RE_META = re.compile(
     rb'<meta[^>]{0,512}?charset\s*=\s*["\']?([\w.:-]+)', re.IGNORECASE)
 
 
-def _declared_charset(content_type: str, body: bytes) -> "str | None":
+def _declared_charset(content_type: str, body: bytes) -> str | None:
     """The charset named by the Content-Type header, else by an HTML
     <meta charset> or <meta http-equiv=Content-Type content=...charset=...>
     tag in the first 2048 bytes. None when neither declares one, or the
