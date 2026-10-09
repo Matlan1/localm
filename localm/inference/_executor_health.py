@@ -250,14 +250,14 @@ def start_executor_saturation_watch(loop, *, threshold: float = _DEFAULT_SATURAT
     # the CURRENT unbroken streak, or None while not saturated. Tracked per
     # pool name so one pool's exhaustion is never blamed on, or hidden
     # behind, the others' state.
-    streak_started: "dict[str, Optional[float]]" = {
+    streak_started: dict[str, Optional[float]] = {
         "default": None, "plugin": None, "anyio": None}
-    warned: "dict[str, bool]" = {"default": False, "plugin": False, "anyio": False}
+    warned: dict[str, bool] = {"default": False, "plugin": False, "anyio": False}
     # Tracked separately from `warned` above: a pool can be dead WITHOUT ever
     # having been saturated (that is the normal shape - see pool_health's note
     # on why a shut-down pool computes saturated=False), so sharing one flag
     # would let either state suppress the other's line.
-    warned_shutdown: "dict[str, bool]" = {
+    warned_shutdown: dict[str, bool] = {
         "default": False, "plugin": False, "anyio": False}
 
     def _run() -> None:

@@ -216,9 +216,9 @@ def register(app: FastAPI, ctx) -> None:
                 except TriggerValidatorUnavailableError as e:
                     # Handled before the InvalidGrammarError arm: the pattern was
                     # never checked. Status comes from the shared table.
-                    raise HTTPException(_hs.backend_error_status(e), str(e))
+                    raise HTTPException(_hs.backend_error_status(e), str(e)) from e
                 except InvalidGrammarError as e:
-                    raise HTTPException(400, f"Invalid grammar trigger: {e}")
+                    raise HTTPException(400, f"Invalid grammar trigger: {e}") from e
                 gen_kwargs["grammar_lazy"] = True
                 gen_kwargs["grammar_triggers"] = req.grammar_triggers
 
@@ -247,9 +247,9 @@ def register(app: FastAPI, ctx) -> None:
                     # InvalidGrammarError arm below, and above the `if req.stream:`
                     # branch so the streaming and non-streaming paths get the same
                     # status and reason.
-                    raise HTTPException(400, str(e))
+                    raise HTTPException(400, str(e)) from e
                 except InvalidGrammarError as e:
-                    raise HTTPException(400, f"Invalid grammar: {e}")
+                    raise HTTPException(400, f"Invalid grammar: {e}") from e
                 except RuntimeError as e:
                     # A bare RuntimeError means the isolated worker crashed, timed
                     # out, or returned something unexpected while checking the
@@ -257,7 +257,7 @@ def register(app: FastAPI, ctx) -> None:
                     # the model will reload.
                     raise HTTPException(
                         503, f"Grammar validation failed: the model worker "
-                        f"faulted ({e}).")
+                        f"faulted ({e}).") from e
 
             # Pre-dispatch context capacity guard: count prompt tokens on the
             # inlet-transformed messages, compact when approaching the ceiling, and
@@ -271,7 +271,7 @@ def register(app: FastAPI, ctx) -> None:
                 # Counting tokenizes, so this is where the refusal surfaces on an
                 # ordinary chat: before the generation call whose own handler
                 # would otherwise be the one to report it.
-                raise HTTPException(400, str(e))
+                raise HTTPException(400, str(e)) from e
 
             from localm.inference.compact import compactable
             capacity = engine.context_capacity()
@@ -301,7 +301,7 @@ def register(app: FastAPI, ctx) -> None:
                             # The compaction SUMMARY is model-generated text, so
                             # it can carry a run of its own. This count gates the
                             # generation, so it refuses rather than estimating.
-                            raise HTTPException(400, str(e))
+                            raise HTTPException(400, str(e)) from e
 
             if (not compact_in_stream and isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
@@ -486,12 +486,12 @@ def register(app: FastAPI, ctx) -> None:
                 # A permanent property of this text against this model, not a
                 # transient worker condition, so 400 rather than the 503 below:
                 # retrying the same request cannot succeed.
-                raise HTTPException(400, str(e))
+                raise HTTPException(400, str(e)) from e
             except RuntimeError as e:
                 # The isolated embedder worker can hard-crash mid-embed on a native
                 # GPU-backend fault, which IsolatedEmbedder.embed re-raises. Reported
                 # as a 503 carrying the cause.
-                raise HTTPException(503, f"Embedding failed: {e}")
+                raise HTTPException(503, f"Embedding failed: {e}") from e
             if vecs_emb is None:
                 # Off the event loop: last_error() takes embedder._LOCK, which
                 # get_embedder holds across a spawn plus a native load.
@@ -549,9 +549,9 @@ def register(app: FastAPI, ctx) -> None:
             async with sem:
                 vecs = await loop.run_in_executor(None, lambda: engine.embed(texts))
         except NotImplementedError as e:
-            raise HTTPException(422, str(e))
+            raise HTTPException(422, str(e)) from e
         except EmbedBatchTooLargeError as e:
-            raise HTTPException(413, str(e))
+            raise HTTPException(413, str(e)) from e
         finally:
             _hs._unpin(engine)
 
@@ -663,9 +663,9 @@ def register(app: FastAPI, ctx) -> None:
                 except TriggerValidatorUnavailableError as e:
                     # Same arm order and same table-derived status as
                     # /v1/chat/completions: "could not check" is a 503, not a 400.
-                    raise HTTPException(_hs.backend_error_status(e), str(e))
+                    raise HTTPException(_hs.backend_error_status(e), str(e)) from e
                 except InvalidGrammarError as e:
-                    raise HTTPException(400, f"Invalid grammar trigger: {e}")
+                    raise HTTPException(400, f"Invalid grammar trigger: {e}") from e
                 gen_kwargs["grammar_lazy"] = True
                 gen_kwargs["grammar_triggers"] = req.grammar_triggers
 
@@ -687,15 +687,15 @@ def register(app: FastAPI, ctx) -> None:
                 except GrammarUnsupportedError as e:
                     # Same capability refusal as /v1/chat/completions: the backend
                     # cannot apply a grammar at all.
-                    raise HTTPException(400, str(e))
+                    raise HTTPException(400, str(e)) from e
                 except InvalidGrammarError as e:
-                    raise HTTPException(400, f"Invalid grammar: {e}")
+                    raise HTTPException(400, f"Invalid grammar: {e}") from e
                 except RuntimeError as e:
                     # Same fault attribution as /v1/chat/completions, including not
                     # claiming the model will reload.
                     raise HTTPException(
                         503, f"Grammar validation failed: the model worker "
-                        f"faulted ({e}).")
+                        f"faulted ({e}).") from e
 
             # Count tokens on the (possibly inlet-transformed) messages, matching the
             # chat path. Off the event loop: count_tokens is a native tokenizer call.
@@ -704,7 +704,7 @@ def register(app: FastAPI, ctx) -> None:
                 prompt_tokens = await loop.run_in_executor(
                     None, engine.count_tokens, _messages_prompt_text(messages))
             except PretokenizerUnsafeInputError as e:
-                raise HTTPException(400, str(e))
+                raise HTTPException(400, str(e)) from e
 
             capacity = engine.context_capacity()
             if (isinstance(capacity, int) and capacity > 0
@@ -735,7 +735,7 @@ def register(app: FastAPI, ctx) -> None:
                 try:
                     text = await _generate_full(engine, messages, request, **gen_kwargs)
                 except _hs._BACKEND_ERROR_TYPES as e:
-                    raise HTTPException(_hs.backend_error_status(e), str(e))
+                    raise HTTPException(_hs.backend_error_status(e), str(e)) from e
                 except RuntimeError as e:
                     # A generation failure: not enough free VRAM for this prompt, a
                     # conversation that outgrew n_ctx_max, or a native decode error.

@@ -44,7 +44,7 @@ import math
 import re
 import threading
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 from localm import pathscrub
 from localm.debuglog import dedup_native_stderr, logger
@@ -688,7 +688,7 @@ class GGUFEmbedder:
         self._effective_seq_ctx = (
             self.n_ctx if sliced_seq_ctx is None else sliced_seq_ctx)
 
-    def _tokenize(self, text: str) -> List[int]:
+    def _tokenize(self, text: str) -> list[int]:
         """Tokenize *text*, truncated to fit ``self._effective_seq_ctx`` -
         n_ctx, or the smaller window the runtime granted per sequence.
 
@@ -731,7 +731,7 @@ class GGUFEmbedder:
             return []
         return list(buf[:n])
 
-    def _decode_single(self, tokens: List[int]) -> List[float]:
+    def _decode_single(self, tokens: list[int]) -> list[float]:
         """One sequence via ``llama_batch_get_one`` - the path a lone text
         takes. A single text never goes through the multi-sequence batching
         below."""
@@ -752,7 +752,7 @@ class GGUFEmbedder:
         norm = math.sqrt(sum(x * x for x in v))
         return [x / norm for x in v] if norm else v
 
-    def _decode_batch(self, token_lists: List[List[int]]) -> List[List[float]]:
+    def _decode_batch(self, token_lists: list[list[int]]) -> list[list[float]]:
         """Decode 2+ texts in ONE native ``llama_decode`` call, each as its
         own sequence (`self._n_seq_max` computed at load time - see
         ``_choose_n_seq_max``).
@@ -811,7 +811,7 @@ class GGUFEmbedder:
         finally:
             api.llama_batch_free(batch)
 
-    def _pack_groups(self, token_lists: List[List[int]]) -> List[List[int]]:
+    def _pack_groups(self, token_lists: list[list[int]]) -> list[list[int]]:
         """Group token-list INDICES for one embed() call into batches of up
         to ``self._n_seq_max`` texts, never letting a group's SUMMED token
         count exceed ``self.n_ctx`` (== n_ubatch here) - llama.cpp's own hard
@@ -824,8 +824,8 @@ class GGUFEmbedder:
         that per-sequence window, so it always fits alone; a group of multiple
         texts is shrunk automatically when their combined length would
         overflow. See test_pack_groups_bounds_by_n_ctx_not_by_the_sliced_window."""
-        groups: List[List[int]] = []
-        current: List[int] = []
+        groups: list[list[int]] = []
+        current: list[int] = []
         current_tokens = 0
         for i, toks in enumerate(token_lists):
             n = len(toks)
@@ -840,7 +840,7 @@ class GGUFEmbedder:
             groups.append(current)
         return groups
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """L2-normalised embedding per text (aligned 1:1 with *texts*).
 
         Multiple texts sharing one call are packed into groups of up to
@@ -859,12 +859,12 @@ class GGUFEmbedder:
             if not texts:
                 return []
             token_lists = [self._tokenize(t) for t in texts]
-            out: List[Optional[List[float]]] = [None] * len(texts)
+            out: list[Optional[list[float]]] = [None] * len(texts)
             # A text that failed to tokenize needs no native call: it is
             # short-circuited to a zero vector and kept out of the packing
             # below.
-            pending_idx: List[int] = []
-            pending_toks: List[List[int]] = []
+            pending_idx: list[int] = []
+            pending_toks: list[list[int]] = []
             for i, toks in enumerate(token_lists):
                 if toks:
                     pending_idx.append(i)
@@ -877,7 +877,7 @@ class GGUFEmbedder:
                 group_toks = [pending_toks[j] for j in group]
                 vecs = ([self._decode_single(group_toks[0])] if len(group_toks) == 1
                         else self._decode_batch(group_toks))
-                for gi, v in zip(group_idx, vecs):
+                for gi, v in zip(group_idx, vecs, strict=False):
                     out[gi] = v
             return out
 
@@ -1071,7 +1071,7 @@ class IsolatedEmbedder(VramSizingMixin):
             Path(self.model_path).name, pooling_name(declared),
             pooling_name(effective), pooling_name(effective))
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts* via the isolated worker, transparently respawning it
         first if a PRIOR call's crash left it dead. A crash DURING this call is
         raised to the caller, never swallowed; only the NEXT call recovers
@@ -1227,7 +1227,7 @@ def _explicit_embedder_gpu_layers(cfg: dict) -> Optional[int]:
 
 
 def _choose_embedder_gpu_layers(path: str, cfg: dict, *,
-                                read_free=None) -> "tuple[int, Optional[str]]":
+                                read_free=None) -> tuple[int, Optional[str]]:
     """Pick the embedder's ``n_gpu_layers``: ``(layers, reason)`` where
     *reason* is a user-facing explanation only when automatic placement chose
     CPU over a GPU that cannot hold the model.
@@ -1444,7 +1444,7 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
                 return None
 
 
-def embed_texts(texts: List[str]) -> Optional[List[List[float]]]:
+def embed_texts(texts: list[str]) -> Optional[list[list[float]]]:
     """Embed *texts* with the shared embedder, or None when unavailable."""
     emb = get_embedder()
     if emb is None:

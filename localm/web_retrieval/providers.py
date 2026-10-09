@@ -463,8 +463,8 @@ class DuckDuckGoHTMLProvider:
                              "Accept-Language": "en-US,en;q=0.9",
                              "Referer": "https://html.duckduckgo.com/"},
                     bot_statuses=_BOT_CHECK_STATUSES, finish_by=finish_by)
-            except BotCheckError:
-                raise BotCheckError(BOT_CHECK_MESSAGE)
+            except BotCheckError as e:
+                raise BotCheckError(BOT_CHECK_MESSAGE) from e
             text = resp.text
             if _CHALLENGE_RE.search(text):
                 raise BotCheckError(BOT_CHECK_MESSAGE)

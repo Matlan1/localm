@@ -43,7 +43,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Maintainer contact for bug reports; kept in sync by hand with localm/bugreport.py.
+# Maintainer contact for bug reports; kept in sync by hand with localm/bugreport/_common.py.
 MAINTAINER_EMAIL = "theilige@gmail.com"
 
 
@@ -113,14 +113,15 @@ def read_proxy(config_path: Path | None = None) -> tuple:
 
 
 # --------------------------------------------------------------------------- #
-#  Privacy scrub (mirrors localm/bugreport.py _scrub_home / _scrub_secrets)    #
+#  Privacy scrub (mirrors localm/bugreport/scrub.py _scrub_home /              #
+#  _scrub_secrets)                                                             #
 # --------------------------------------------------------------------------- #
 
 _BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 # Credential-named URL query parameters and pasted header lines. Kept
-# byte-identical to the counterparts in localm/bugreport.py.
+# byte-identical to the counterparts in localm/bugreport/scrub.py.
 _QUERY_SECRET_RE = re.compile(
     r"(?i)((?:"
     # 1. Immediately after a query delimiter.
@@ -324,10 +325,10 @@ def post_report(url: str, token: str | None, title: str, body: str,
                     detail = e.read().decode("utf-8", "replace")[:300]
                 except Exception:
                     pass
-                raise RuntimeError(f"HTTP {e.code}: {detail}".strip())
+                raise RuntimeError(f"HTTP {e.code}: {detail}".strip()) from e
             except (urllib.error.URLError, OSError) as e:
                 raise RuntimeError(f"could not reach the server: "
-                                   f"{getattr(e, 'reason', e)}")
+                                   f"{getattr(e, 'reason', e)}") from e
 
     status, raw = opener(url, payload, headers, timeout)
     if not (200 <= int(status) < 300):

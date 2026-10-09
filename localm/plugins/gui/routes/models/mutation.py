@@ -74,7 +74,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             created = await loop.run_in_executor(
                 get_plugin_executor(), alias_model, req.model, req.alias)
         except Exception as e:
-            raise HTTPException(400, f"Alias failed: {e}")
+            raise HTTPException(400, f"Alias failed: {e}") from e
         if not created:
             # alias_model returns False for "model vanished" and "name taken" alike,
             # and both were prechecked above, so reaching here means a concurrent
@@ -143,7 +143,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             pathsafe.reject_unsafe_path_string(
                 req.new_path, reject_network_drives=not _network_drives_allowed())
         except ValueError as e:
-            raise HTTPException(400, f"Invalid path: {e}")
+            raise HTTPException(400, f"Invalid path: {e}") from e
         from localm.model_manager.registry import relocate_model, relocate_target
 
         def _do():

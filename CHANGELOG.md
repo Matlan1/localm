@@ -19,6 +19,30 @@ permanent public record of what shipped and are never rewritten; the in-progress
   conversation is read as one labelled transcript. A prompt can be up to 2,048 tokens
   (fewer when the context window is smaller); a longer one is refused with that limit
   named. They read text only, and speculative decoding does not apply to them.
+- **Files and folders localm cannot run now say why.** `localm add`, `localm pull <path>`
+  and the GUI add and pull routes name the format and the nearest runnable alternative for
+  GGUF version 1 and big-endian GGUF files, legacy GGML `.bin` files, importance-matrix
+  GGUFs, Mistral-native folders, `.onnx`, TensorRT, LiteRT and NeMo files, and MLC,
+  OpenVINO and EXL2/EXL3 folders. An MLX-quantized, EXL2/EXL3 or OpenVINO folder still
+  registers, with a note that it cannot be loaded, and is refused at load with the same
+  sentence before any worker starts. Direct-URL and Ollama-blob pulls apply the same
+  checks, and the automatic models-folder scan quietly skips the GGUFs it cannot load. A
+  Mistral-style folder holding both Hugging Face shards and `consolidated*` files is sized
+  by the shards only.
+- **Models other tools already downloaded can be added in place.** `localm add` (and
+  the Models page's add-path box) now takes the Hugging Face cache folder
+  (`~/.cache/huggingface`, or `HF_HOME`), registering one model per repository from
+  its current revision and named after the repo; an Ollama model folder
+  (`~/.ollama`, or `OLLAMA_MODELS`), registering every GGUF model in it as
+  `model-tag`, with a vision model's projector attached; and a `.llamafile`, whose
+  model (and projector) is unpacked into the models folder with a progress bar.
+  Moving models out of the Hugging Face cache is refused, since it would break the
+  cache; copy them instead.
+- **Release files carry build provenance and a software bill of materials.** The release
+  zip, the sdist, the wheel and a CycloneDX SBOM of the pinned dependencies are attested by
+  the release workflow, so `gh attestation verify` proves which workflow built a file and
+  from which commit. SECURITY.md has the commands.
+- **Docker images for the API server.** Releases publish CPU and Vulkan images to `ghcr.io/matlan1/localm`, and `docker/Dockerfile` builds the same image from a clone. The container keeps its data in a `/data` volume, serves HTTPS, and refuses to start until an API key exists (`docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate`). See docs/docker.md.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing
@@ -163,6 +187,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for it, including an older one kept in the project's `.localcoder` folder;
   your project files are left alone. A session that is open, or a project
   with an open session, has to be ended first.
+- **A browsable documentation site, with an API reference generated from the
+  server's OpenAPI schema.** The `docs/` guides are built into a searchable site,
+  and the API reference lists every route, parameter and schema the server
+  declares. `scripts/export_openapi.py` writes the schema without loading a model.
+  The site is published with each release.
 
 ### Changed
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
@@ -262,6 +291,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **`localm doctor` recognises the macOS runtime.** On a Mac it reported the Metal build as "no llama library", skipped the native ABI check and the GPU probe, and ended with "CPU mode only"; it now checks the library like on other systems and names the Metal GPU.
+- **A knowledge collection whose `meta.json` is not valid UTF-8 no longer breaks the collection list.** The list, the collection detail view and a model rename now treat that collection as unreadable, flag it as corrupt and carry on with the others, instead of failing for every collection.
 - **Models you already have on disk are found where LM Studio and llama.cpp keep them.**
   `localm add <folder>` and the models-folder scan now look inside subfolders (as far
   as the Folder import depth setting allows, three levels by default, so LM Studio's

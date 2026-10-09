@@ -111,7 +111,7 @@ class FakeNative:
             last = max(self.main_cache, default=-1)
             if positions[0] != last + 1:
                 return -1
-            for p, t in zip(positions, tokens):
+            for p, t in zip(positions, tokens, strict=True):
                 self.main_cache[p] = t
             rows = (ctypes.c_float * (len(tokens) * N_EMBD))()
             for i, p in enumerate(positions):
@@ -127,7 +127,7 @@ class FakeNative:
         last = max(self.draft_cache, default=-1)
         if positions[0] != last + 1:
             return -1
-        for p, t, hv in zip(positions, tokens, h):
+        for p, t, hv in zip(positions, tokens, h, strict=True):
             self.draft_cache[p] = (t, hv)
         rows = (ctypes.c_float * (len(tokens) * N_EMBD))()
         for i, p in enumerate(positions):
@@ -327,7 +327,7 @@ def test_an_accepted_step_costs_one_draft_decode():
     # One draft decode per verification, plus at most one final flush.
     assert len(reply_draft_decodes) <= len(verifies) + 1
     # Queued rows never request an output row.
-    for positions, _tokens, _h, logits in fake.draft_decodes:
+    for _positions, _tokens, _h, logits in fake.draft_decodes:
         assert all(flag == 0 for flag in logits[:-1]), logits
 
 

@@ -62,7 +62,7 @@ def print_banner(
     cwd: Path,
     agent_name: str = "localcoder",
     file_count: int = 0,
-    session_mode: "str | None" = None,
+    session_mode: str | None = None,
 ) -> None:
     map_info  = f"  ·  [dim]indexed:[/dim] [dim]{file_count} files[/dim]" if file_count else ""
     mode_colours = {"privacy": "dim", "log": "yellow", "full": "green"}

@@ -76,7 +76,7 @@ def _matches(path: str, route: str) -> bool:
     r = [s for s in route.split("/") if s]
     if len(p) != len(r):
         return False
-    return all(a == b or _WILD in (a, b) for a, b in zip(p, r))
+    return all(a == b or _WILD in (a, b) for a, b in zip(p, r, strict=True))
 
 
 def _declared_routes() -> set:

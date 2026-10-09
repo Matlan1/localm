@@ -283,7 +283,7 @@ def _get_collection(name: str):
     try:
         coll = Collection(name)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     if not coll.exists():
         raise HTTPException(404, f"No such collection: {name}")
     return coll
@@ -307,7 +307,7 @@ def _require_rag_confinement(name: str, request: Request) -> list:
     return key_roots
 
 
-def _dim_mismatch(stats: dict, active_dim) -> "bool | None":
+def _dim_mismatch(stats: dict, active_dim) -> bool | None:
     """Best-effort: does *stats* (a ``stats()``-shaped dict) disagree with
     *active_dim* (the currently RESIDENT embedder's dimension, from
     ``embedder.loaded_dim()`` - or None when nothing is loaded)?
@@ -530,7 +530,7 @@ async def _write_off_loop(call):
     try:
         return await loop.run_in_executor(get_plugin_executor(), call)
     except CollectionLockedError as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e)) from e
 
 
 @_router.get("/api/rag/collections")
@@ -596,7 +596,7 @@ async def rag_create(req: RagCreateRequest):
     try:
         coll = Collection(req.name.strip())
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     if coll.exists():
         raise HTTPException(409, f"Collection already exists: {coll.name}")
     # Off the loop like every other write: create() takes the collection write
@@ -621,7 +621,7 @@ async def rag_detail(name: str, request: Request):
             try:
                 coll = Collection.load_and_maybe_backfill(name)
             except ValueError as e:
-                raise HTTPException(400, str(e))
+                raise HTTPException(400, str(e)) from e
             if not coll.exists():
                 raise HTTPException(404, f"No such collection: {name}")
             return {**coll.stats(), "docs": coll.docs()}
@@ -640,7 +640,7 @@ async def rag_delete(name: str, request: Request):
     try:
         checked_name = check_collection_name(name)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     # Existence (404) before confinement (403), same order rag_detail uses: a
     # cheap meta.json-presence check, matching delete_collection's own, never
     # a full Collection() load. See TestRagDeleteRouteKeyScopedRoots
@@ -653,7 +653,7 @@ async def rag_delete(name: str, request: Request):
         if not await _write_off_loop(lambda: delete_collection(name)):
             raise HTTPException(404, f"No such collection: {name}")
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     return {"status": "deleted", "name": name}
 
 
@@ -799,8 +799,8 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
             raise HTTPException(413, "Upload too large (max 100 MB per request)")
         try:
             data = base64.b64decode(item.content_b64, validate=True)
-        except Exception:
-            raise HTTPException(400, f"content_b64 is not valid base64: {item.filename}")
+        except Exception as exc:
+            raise HTTPException(400, f"content_b64 is not valid base64: {item.filename}") from exc
         uploads.append({"filename": item.filename, "data": data})
     # The whole request is already decoded here, so the job reports a real
     # denominator from its first event. add_uploads has no per-file progress signal,
@@ -860,7 +860,7 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
     try:
         check_collection_name(name)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     # Resolved (never raises) here; the raising confinement check is the
     # in-executor recheck below. See
     # TestRagQueryRouteKeyScopedRoots.test_query_missing_collection_gets_404_not_403.
@@ -1109,7 +1109,7 @@ async def rag_embedding_status(request: Request):
     except ThreadCallTimeout as e:
         # Past READ_TIMEOUT_S the lock is wedged: report that, rather than returning
         # dim: null / error: null, which reads as "nothing loaded, nothing wrong".
-        raise HTTPException(504, f"Could not read the embedder state: {e}")
+        raise HTTPException(504, f"Could not read the embedder state: {e}") from e
     return {
         "model": model,
         "default": DEFAULT_EMBEDDING_MODEL,
@@ -1399,8 +1399,8 @@ async def rag_extract(req: RagExtractRequest):
         raise HTTPException(413, "Attachment too large (max 30 MB)")
     try:
         data = base64.b64decode(req.content_b64, validate=True)
-    except Exception:
-        raise HTTPException(400, "content_b64 is not valid base64")
+    except Exception as exc:
+        raise HTTPException(400, "content_b64 is not valid base64") from exc
     if len(data) > 30_000_000:
         raise HTTPException(413, "Attachment too large (max 30 MB)")
     # Extraction walks an archive's members and can take tens of seconds on a large
@@ -1412,7 +1412,7 @@ async def rag_extract(req: RagExtractRequest):
         text = await loop.run_in_executor(
             get_plugin_executor(), extract_bytes, data, req.filename)
     except ExtractError as e:
-        raise HTTPException(422, _extract_refusal(str(e), req.filename))
+        raise HTTPException(422, _extract_refusal(str(e), req.filename)) from e
     # No cap unless one was asked for; the 30 MB byte guard above is the memory bound.
     if req.max_chars is None:
         return {"filename": req.filename, "text": text,

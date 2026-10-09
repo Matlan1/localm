@@ -690,14 +690,9 @@ class TestCorruptFiles:
         assert c.docs() == [{"path": "/x/b.txt", "chunks": 1},
                             {"path": "upload:a.txt", "chunks": 2, "uploaded": True}]
         assert c._meta["name"] == "kb" and "created" not in c._meta
-        if raw.startswith(b"\xff"):
-            with pytest.raises(UnicodeDecodeError):
-                Collection.peek_stats("kb", base)
-            with pytest.raises(UnicodeDecodeError):
-                Collection.confined_to("kb", [str(tmp_path)], base)
-        else:
-            assert Collection.peek_stats("kb", base) is None
-            assert Collection.confined_to("kb", [str(tmp_path)], base) is None
+        assert Collection.peek_stats("kb", base) is None
+        assert Collection.peek_detail("kb", base) is None
+        assert Collection.confined_to("kb", [str(tmp_path)], base) is None
         assert c.is_confined_to([str(tmp_path)]) is False
         assert c.is_confined_to([]) is True
         c.add_uploads([])
@@ -1009,6 +1004,17 @@ class TestRelabelAndProvenance:
             "new", "new", "keep"]
         assert relabel_embedding_model("old", "new", base) == ([], [])
 
+    def test_relabel_skips_an_undecodable_meta(self, base):
+        for name in ("a", "b"):
+            Collection(name, base=base).create().add_uploads(
+                _uploads({"x.txt": "apple"}), embed_fn=_embed, model_name="old")
+        Collection("u", base=base).create()
+        (base / "u" / "meta.json").write_bytes(b"\xff\xfe\x00bad")
+        assert relabel_embedding_model("old", "new", base) == (["a", "b"], [])
+        assert [Collection(n, base=base).embedding_model() for n in "ab"] == [
+            "new", "new"]
+        assert (base / "u" / "meta.json").read_bytes() == b"\xff\xfe\x00bad"
+
     def test_provenance_report(self):
         base = store.rag_dir()
         Collection("emb", base=base).create().add_uploads(
@@ -1267,7 +1273,7 @@ FUNCTION_SIGNATURES = {
     '_files_changing': "(coll_dir: 'Path')",
     '_first_dim': "(vectors: 'list') -> 'Optional[int]'",
     '_freeze_rows': "(vectors: 'Optional[list]', compact: 'bool')",
-    '_freeze_snapshot': '(coll: "\'Collection\'", key: \'str\', fingerprint: \'dict\') -> \'_Snapshot\'',
+    '_freeze_snapshot': "(coll: 'Collection', key: 'str', fingerprint: 'dict') -> '_Snapshot'",
     '_get_cached_collection_data': "(coll_dir: 'Path') -> 'Optional[_Snapshot]'",
     '_invalidate_collection_cache': "(coll_dir: 'Path') -> 'None'",
     '_json_nbytes': "(value) -> 'int'",
@@ -1290,7 +1296,7 @@ FUNCTION_SIGNATURES = {
     'indexing_policy': "(cfg: 'Optional[dict]' = None, key_roots: 'Optional[list]' = None) -> 'dict'",
     'rag_dir': "() -> 'Path'",
     'refers_to_conversation': "(text: 'str') -> 'bool'",
-    'relabel_embedding_model': '(old_name: \'str\', new_name: \'str\', base: \'Optional[Path]\' = None) -> "\'tuple[list, list]\'"',
+    'relabel_embedding_model': "(old_name: 'str', new_name: 'str', base: 'Optional[Path]' = None) -> 'tuple[list, list]'",
 }
 COLLECTION_METHODS = {
     '__init__': ('function', "(self, name: 'str', base: 'Optional[Path]' = None, *, cache: 'bool' = True) -> 'None'"),
@@ -1313,7 +1319,7 @@ COLLECTION_METHODS = {
     '_min_cached_nbytes': ('function', "(self) -> 'int'"),
     '_note_vector_degrade': ('function', "(self, reason: 'str', *, warn: 'bool') -> 'None'"),
     '_partition_roots': ('function', "(self, policy: 'Optional[dict]', say: 'ProgressFn')"),
-    '_peek_meta': ('classmethod', '(name: \'str\', base: \'Optional[Path]\' = None) -> "\'tuple[str, Path, dict] | None\'"'),
+    '_peek_meta': ('classmethod', "(name: 'str', base: 'Optional[Path]' = None) -> 'tuple[str, Path, dict] | None'"),
     '_prune_rejected_vectors': ('function', "(self) -> 'None'"),
     '_quarantine_rejected_vectors': ('function', "(self) -> 'None'"),
     '_raw_cosines': ('function', "(self, text: 'str', embed_fn: 'Optional[EmbedFn]') -> 'Optional[list[float]]'"),
@@ -1337,14 +1343,14 @@ COLLECTION_METHODS = {
     'add_paths': ('function', "(self, paths: 'list', *, embed_fn: 'Optional[EmbedFn]' = None, classify_fn: 'Optional[ClassifyFn]' = None, describe_image_fn: 'Optional[DescribeImageFn]' = None, on_progress: 'Optional[ProgressFn]' = None, policy: 'Optional[dict]' = None, force: 'bool' = False, model_name: 'Optional[str]' = None) -> 'dict'"),
     'add_uploads': ('function', "(self, uploads: 'list', *, embed_fn: 'Optional[EmbedFn]' = None, classify_fn: 'Optional[ClassifyFn]' = None, describe_image_fn: 'Optional[DescribeImageFn]' = None, on_progress: 'Optional[ProgressFn]' = None, force: 'bool' = False, model_name: 'Optional[str]' = None) -> 'dict'"),
     'confined_to': ('classmethod', "(name: 'str', key_roots: 'list', base: 'Optional[Path]' = None) -> 'Optional[bool]'"),
-    'create': ('function', '(self) -> "\'Collection\'"'),
+    'create': ('function', "(self) -> 'Collection'"),
     'docs': ('function', "(self) -> 'list[dict]'"),
     'documents': ('function', "(self) -> 'list'"),
     'embedding_model': ('function', "(self) -> 'Optional[str]'"),
     'embedding_model_mixed': ('function', "(self) -> 'bool'"),
     'exists': ('function', "(self) -> 'bool'"),
     'is_confined_to': ('function', "(self, key_roots: 'list') -> 'bool'"),
-    'load_and_maybe_backfill': ('classmethod', '(name: \'str\', base: \'Optional[Path]\' = None) -> "\'Collection\'"'),
+    'load_and_maybe_backfill': ('classmethod', "(name: 'str', base: 'Optional[Path]' = None) -> 'Collection'"),
     'peek_detail': ('classmethod', "(name: 'str', base: 'Optional[Path]' = None) -> 'Optional[dict]'"),
     'peek_stats': ('classmethod', "(name: 'str', base: 'Optional[Path]' = None) -> 'Optional[dict]'"),
     'query': ('function', "(self, text: 'str', k: 'int' = 4, embed_fn: 'Optional[EmbedFn]' = None, *, relevant_only: 'bool' = False) -> 'list[dict]'"),

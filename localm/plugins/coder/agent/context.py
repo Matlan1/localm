@@ -99,7 +99,7 @@ class _NameKeyGate:
         self.for_name = False   # which key the colon/value steps are for
 
 
-def _advance_name_key_gate(g: "_NameKeyGate", buf: str, tool_names) -> "str | None":
+def _advance_name_key_gate(g: _NameKeyGate, buf: str, tool_names) -> str | None:
     """Advance *g* as far as *buf* (the fence body, from right after its
     opening ``{``) allows. Returns:
 

@@ -54,7 +54,7 @@ class TestBM25InvertedIndex:
                         num = tf * (_K1 + 1)
                         den = tf + _K1 * (1 - _B + _B * d_len / bm._avg_len)
                         expected[i] += bm._idf[term] * (num / den)
-            for p_score, exp_score in zip(postings_scores, expected):
+            for p_score, exp_score in zip(postings_scores, expected, strict=True):
                 assert math.isclose(p_score, exp_score, rel_tol=1e-5, abs_tol=1e-5)
 
 
@@ -100,13 +100,13 @@ class TestVectorMatrixAcceleration:
             if denom == 0.0:
                 expected_raw.append(0.0)
             else:
-                dot = sum(a * b for a, b in zip(query_vec, v))
+                dot = sum(a * b for a, b in zip(query_vec, v, strict=True))
                 expected_raw.append(max(0.0, dot / denom))
 
         top = max(expected_raw) if expected_raw else 0.0
         expected = [s / top for s in expected_raw] if top > 0 else expected_raw
 
-        for actual, exp in zip(vector_scores, expected):
+        for actual, exp in zip(vector_scores, expected, strict=True):
             assert math.isclose(actual, exp, rel_tol=1e-5, abs_tol=1e-5)
 
     def test_vector_scores_with_empty_and_zero_vectors(self, tmp_path):

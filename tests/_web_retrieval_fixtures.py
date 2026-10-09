@@ -130,7 +130,7 @@ class Transport:
         self.calls: list[tuple[str, str, dict]] = []
         self._lock = threading.Lock()
 
-    def route(self, method: str, url: str, handler) -> "Transport":
+    def route(self, method: str, url: str, handler) -> Transport:
         self.routes[(method.upper(), url)] = handler
         return self
 
@@ -154,7 +154,7 @@ class Transport:
             return handler
         return handler(url, **kw)
 
-    def install(self, monkeypatch) -> "Transport":
+    def install(self, monkeypatch) -> Transport:
         monkeypatch.setattr("localm.netpolicy._session_for",
                             lambda url: FakeSession(self.responder))
         return self

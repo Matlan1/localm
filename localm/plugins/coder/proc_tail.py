@@ -15,7 +15,7 @@ class StderrTail:
     fixed no matter how chatty the child is."""
 
     def __init__(self, proc: subprocess.Popen, maxlines: int = 20) -> None:
-        self._lines: "collections.deque[str]" = collections.deque(maxlen=maxlines)
+        self._lines: collections.deque[str] = collections.deque(maxlen=maxlines)
         self._lock = threading.Lock()
         threading.Thread(target=self._drain, args=(proc,), daemon=True).start()
 

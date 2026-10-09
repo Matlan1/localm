@@ -187,12 +187,13 @@ def _tray_callbacks(app, hs):
     hs._do_restart and hs._do_shutdown are keyword-only with None defaults, so
     the instance_id has to be supplied here. A tray Restart/Stop that called
     disarm_crash_guard(instance_id=None) would clear the LEGACY unscoped marker
-    (bugreport.py's per-instance-scoping fallback) and leave this instance's real
-    server-crash.<instance_id>.marker still armed, so the NEXT start would report
-    a crash that never happened. The HTTP routes (routes/admin.py's restart/stop
-    endpoints) pass the real instance_id the same way. _do_restart without its
-    port makes _restart_argv omit ``-p``, so a re-exec'd server can come back on
-    a different port, stranding the tray/GUI's own open window on a dead one."""
+    (localm/bugreport/crash_guard.py's per-instance-scoping fallback) and leave
+    this instance's real server-crash.<instance_id>.marker still armed, so the
+    NEXT start would report a crash that never happened. The HTTP routes
+    (routes/admin.py's restart/stop endpoints) pass the real instance_id the
+    same way. _do_restart without its port makes _restart_argv omit ``-p``, so a
+    re-exec'd server can come back on a different port, stranding the tray/GUI's
+    own open window on a dead one."""
     def on_restart():
         hs._do_restart(instance_id=getattr(app.state, "instance_id", None),
                        port=getattr(app.state, "instance_port", None))

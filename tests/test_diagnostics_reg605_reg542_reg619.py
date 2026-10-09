@@ -9,7 +9,7 @@ tail always included the innermost exception type+message - the most actionable
 line there is - so a bug report for exactly the deep native-load crash this code
 targets must not surface no error at all.
 
-localm/bugreport.py - _recent_hang_traces attaching the newest hang_*.log with no
+localm/bugreport/logs.py - _recent_hang_traces attaching the newest hang_*.log with no
 recency or run filter, while nothing ever prunes them. The watchdog is on by
 default, so any transient >10s stall writes one. Weeks later an unrelated report
 ("the model gave a wrong answer") renders that stale freeze under "## Server hang

@@ -111,7 +111,7 @@ def register(app: FastAPI, ctx) -> None:
         except Exception as e:
             from localm.debuglog import logger as _dbg
             _dbg.exception("GUI mount failed")
-            raise HTTPException(500, f"GUI mount failed: {type(e).__name__}: {e}")
+            raise HTTPException(500, f"GUI mount failed: {type(e).__name__}: {e}") from e
         return {"status": "mounted" if mounted else "already_mounted",
                 "mode": "full"}
 

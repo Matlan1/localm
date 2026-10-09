@@ -144,7 +144,7 @@ class Episode:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Episode":
+    def from_dict(cls, data: dict) -> Episode:
         # Keep only known fields so a forward-compat record with extra keys loads.
         known = set(cls.__dataclass_fields__)        # type: ignore[attr-defined]
         ep = cls(**{k: v for k, v in data.items() if k in known})
@@ -168,7 +168,7 @@ class Episode:
         return " ".join(p for p in parts if p)
 
 
-def _derive_id(ep: "Episode") -> str:
+def _derive_id(ep: Episode) -> str:
     """A stable, content-derived id. Pure function of the episode's own text, so
     a legacy record becomes citable on load and stays citable across reads."""
     raw = "\x00".join([
@@ -178,7 +178,7 @@ def _derive_id(ep: "Episode") -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
-def _dedup_signature(ep: "Episode") -> str:
+def _dedup_signature(ep: Episode) -> str:
     """The content-word text near-duplicate detection compares.
 
     Task AND distilled lesson: a duplicate restates both. Comparing the lesson
@@ -202,7 +202,7 @@ def _similarity(a: str, b: str) -> float:
     return m.ratio()
 
 
-def _episode_value(ep: "Episode", now: float) -> float:
+def _episode_value(ep: Episode, now: float) -> float:
     """Eviction value: how much this episode teaches, decayed by age.
 
     Same shape as the chat store's ``_decayed`` (importance * recency, lifted by
@@ -227,7 +227,7 @@ def _episode_value(ep: "Episode", now: float) -> float:
     return imp * math.exp(-age_days / _VALUE_TAU_DAYS)
 
 
-def _absorb(new: "Episode", dupes: list) -> None:
+def _absorb(new: Episode, dupes: list) -> None:
     """Fold near-identical predecessors *dupes* into *new*, in place.
 
     *new* keeps its own (newer) wording, but INHERITS any field the newer
@@ -792,7 +792,7 @@ def _build_consolidate_prompt(members: list):
     return compose_join("\n", lines)
 
 
-def consolidate(store: "EpisodeStore", *, complete: Callable[[str], str],
+def consolidate(store: EpisodeStore, *, complete: Callable[[str], str],
                 max_groups: int = 5, group_max: int = 6) -> dict:
     """OPT-IN: ask a model to merge RELATED (not near-identical) lessons into one.
 

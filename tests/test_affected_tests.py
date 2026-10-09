@@ -281,7 +281,9 @@ def test_an_untracked_new_test_file_selects_itself(repo):
 _FACADE_FILES = {
     "localm/__init__.py": "",
     "localm/setup_llama/__init__.py": "from localm.setup_llama.versions import pinned_tag\n",
-    "localm/setup_llama/versions.py": "def pinned_tag():\n    return None\n",
+    "localm/setup_llama/versions.py": (
+        "from localm.pins import TAG\n\n\ndef pinned_tag():\n    return TAG\n"),
+    "localm/pins.py": "TAG = None\n",
     "localm/updater.py": "from localm import setup_llama\n",
     "tests/conftest.py": "",
     "tests/test_facade_import.py": "import localm.setup_llama\n",
@@ -318,7 +320,17 @@ def test_a_change_inside_a_reexport_facade_counts_as_a_change_to_the_package(fac
     assert at_one["tests/test_facade_caller.py"] == [
         "imports localm.updater (1 hop(s) from a change)"]
     assert "tests/test_none.py" not in at_one
-    assert mod._REEXPORT_FACADES == ("localm.setup_llama",)
+    assert mod._REEXPORT_FACADES == ("localm.setup_llama", "localm.bugreport")
+
+
+def test_a_reexport_facade_counts_as_importing_what_its_modules_import(facade_repo):
+    mod, _ = facade_repo
+    assert "tests/test_facade_import.py" not in _select(mod, ["localm/pins.py"])
+    at_one = _select(mod, ["localm/pins.py"], depth=1)
+    assert "imports localm.setup_llama (1 hop(s) from a change)" in \
+        at_one["tests/test_facade_import.py"]
+    assert "tests/test_facade_caller.py" not in at_one
+    assert "tests/test_none.py" not in at_one
 
 
 # --------------------------------------------------------------------------- #
@@ -337,6 +349,9 @@ dev = ["devtool>=1"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
+
+[tool.ruff.lint]
+select = ["F"]
 """
 
 _LOCK = """\
@@ -499,6 +514,21 @@ def test_a_pyproject_change_outside_the_requirement_lists_affects_every_test(dep
     mod, root = dep_repo
     _edit(root, "pyproject.toml", 'addopts = "-q"', 'addopts = "-q -x"')
     assert _everything(mod, _select(mod, ["pyproject.toml"]), "pyproject.toml")
+
+
+def test_a_ruff_config_change_selects_only_the_tests_naming_pyproject(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "pyproject.toml", 'select = ["F"]', 'select = ["F", "B"]')
+    assert _select(mod, ["pyproject.toml"]) == {
+        "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
+
+
+def test_a_basedpyright_config_change_selects_only_the_tests_naming_pyproject(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "pyproject.toml", "[tool.ruff.lint]",
+          '[tool.basedpyright]\ntypeCheckingMode = "standard"\n\n[tool.ruff.lint]')
+    assert _select(mod, ["pyproject.toml"]) == {
+        "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
 
 
 def test_a_lock_change_outside_the_packages_affects_every_test(dep_repo):

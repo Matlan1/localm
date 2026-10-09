@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import AsyncIterator, Callable, List, NamedTuple, Optional
+from typing import AsyncIterator, Callable, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -138,7 +138,7 @@ _inference_sem: asyncio.Semaphore | None = None
 # get_engine's fast path and ignores the in-flight pin). None until a real server
 # lifespan runs (a bare create_app() test app / headless import never sets it), so an
 # off-loop caller detects "no loop" and degrades safely instead of racing the registry.
-_server_loop: "asyncio.AbstractEventLoop | None" = None
+_server_loop: asyncio.AbstractEventLoop | None = None
 
 # Preemptive model switching (see switch_engine). _switch_desired = most-recent
 # switch request; _switch_loading = model whose load is in flight; _switch_cancel
@@ -147,7 +147,7 @@ _server_loop: "asyncio.AbstractEventLoop | None" = None
 # load-progress callback reads (threading.Event is thread-safe).
 _switch_desired: Optional[str] = None
 _switch_loading: Optional[str] = None
-_switch_cancel: Optional["threading.Event"] = None
+_switch_cancel: Optional[threading.Event] = None
 
 # Cross-install GPU/VRAM coordination (multi-instance, see localm.gpu_registry).
 # None until lifespan startup populates it, and ONLY for a real, non-isolated,
@@ -287,7 +287,9 @@ def _model_file_size(name: str) -> Optional[int]:
         if p.is_file():
             return p.stat().st_size
         if p.is_dir():
-            total = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            skipped = residency.alternate_layout_files(p)
+            total = sum(f.stat().st_size for f in p.rglob("*")
+                        if f.is_file() and f not in skipped)
             return total if total > 0 else None
     except (OSError, TypeError, ValueError):
         return None
@@ -2314,7 +2316,7 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
         renamed, notes = await loop.run_in_executor(
             get_plugin_executor(), rename_model_with_notes, model, new_name_raw)
     except Exception as e:
-        raise HTTPException(400, f"Rename failed: {e}")
+        raise HTTPException(400, f"Rename failed: {e}") from e
     if not renamed:
         # rename_model_with_notes distinguishes "vanished" from "name taken" in
         # its own console output, but only the bool crosses the executor
@@ -2799,7 +2801,7 @@ def _diagnostics_allowed() -> bool:
     """Whether localm may write an AUTOMATIC diagnostic trace right now: the
     log/full session modes, or privacy mode with ``keep_diagnostics`` on.
     Alias of :func:`localm.audit.diagnostics_allowed`, which also gates the
-    crash guard's trace file and crash report (bugreport.py)."""
+    crash guard's trace file and crash report (localm.bugreport)."""
     from localm.audit import diagnostics_allowed
     return diagnostics_allowed()
 
@@ -2944,7 +2946,7 @@ class _BodyStreamCapMiddleware:
                     break
                 try:
                     message = await asyncio.wait_for(receive(), timeout=remaining)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
                 if message["type"] == "http.disconnect":
                     real_stream_done = True
@@ -3618,9 +3620,10 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     Safe to run twice: every step tolerates already-stopped state.
 
     *instance_id* (app.state.instance_id, set by instances.advertise()) scopes
-    the crash-marker clear to THIS instance only - see bugreport.py's
-    per-instance-scoping note; omitting it falls back to the legacy shared
-    marker name rather than silently skipping the clear."""
+    the crash-marker clear to THIS instance only - see
+    localm/bugreport/crash_guard.py's per-instance-scoping note; omitting it
+    falls back to the legacy shared marker name rather than silently skipping
+    the clear."""
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os._exit below bypasses atexit, the job worker
@@ -3888,9 +3891,10 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     from the route so it can be tested without actually re-execing.
 
     *instance_id* (app.state.instance_id, set by instances.advertise()) scopes
-    the crash-marker clear to THIS instance only - see _do_shutdown/bugreport.py's
-    per-instance-scoping note. The re-exec'd process re-advertises and gets a
-    fresh instance_id of its own, so no persistence across the restart is needed.
+    the crash-marker clear to THIS instance only - see _do_shutdown and
+    localm/bugreport/crash_guard.py's per-instance-scoping note. The re-exec'd
+    process re-advertises and gets a fresh instance_id of its own, so no
+    persistence across the restart is needed.
 
     *port* is the port this instance is actually bound to (app.state.instance_port,
     set by advertise()); it is pinned into the re-exec command line so "comes back
@@ -4843,7 +4847,7 @@ class PrepProgress:
             self.text = text
             self._changed.set()
 
-    async def wait_changed(self, task: "asyncio.Future", timeout: float) -> None:
+    async def wait_changed(self, task: asyncio.Future, timeout: float) -> None:
         """Return when the text changes, *task* finishes, or *timeout* passes."""
         self._changed.clear()
         waiter = asyncio.ensure_future(self._changed.wait())
@@ -4854,12 +4858,12 @@ class PrepProgress:
             waiter.cancel()
 
 
-def release_prepared_on_done(task: "asyncio.Future", engine_of) -> None:
+def release_prepared_on_done(task: asyncio.Future, engine_of) -> None:
     """Unpin the engine a preparation *task* pinned, once it finishes, for a
     caller that will never stream it. ``engine_of(result)`` returns that
     engine, or None when the result holds no pin. A failed or cancelled task
     holds no pin."""
-    def _release(t: "asyncio.Future") -> None:
+    def _release(t: asyncio.Future) -> None:
         if t.cancelled():
             return
         exc = t.exception()
@@ -4879,7 +4883,7 @@ def release_prepared_on_done(task: "asyncio.Future", engine_of) -> None:
 
 
 async def stream_after_prep(
-    task: "asyncio.Future",
+    task: asyncio.Future,
     progress: PrepProgress,
     model_id: str,
     start_stream: Callable[[object, str], AsyncIterator[str]],
@@ -5823,8 +5827,8 @@ def inference_error_text(exc: BaseException) -> str:
     loader raises `Failed to load model: <absolute path>` with a native stderr
     tail appended, and an auto-reload inside chat_stream can surface exactly
     that here. Handing a client the machine's directory layout is the
-    disclosure `pathscrub` exists for, and `bugreport.py` already names
-    scrub_paths as the rule for a response to a lower-privileged caller.
+    disclosure `pathscrub` exists for, and `localm/bugreport/scrub.py` already
+    names scrub_paths as the rule for a response to a lower-privileged caller.
 
     scrub_paths REDACTS, it does not mute: the cause, the file name and the
     line number survive, and only the leading directories are replaced. A caller
@@ -5894,7 +5898,7 @@ async def _complete(
             # before generation starts), but it does carry the same reason and
             # marks finish_reason="error" - so both paths tell the caller what went
             # wrong, which is the property that was actually broken.
-            raise HTTPException(backend_error_status(e), str(e))
+            raise HTTPException(backend_error_status(e), str(e)) from e
         except RuntimeError as e:
             # A generation FAILURE (not enough free VRAM for this prompt, a
             # conversation that outgrew n_ctx_max, a native decode error) is raised
@@ -5964,7 +5968,7 @@ async def _complete(
     return JSONResponse(response.model_dump())
 
 
-def _protocol_messages_to_dicts(messages: List[Message]) -> list:
+def _protocol_messages_to_dicts(messages: list[Message]) -> list:
     """Convert Pydantic Message objects to plain dicts for backends. A message's
     ``origin`` marker, when set, is kept as an ``"origin"`` key; an unmarked
     message has no such key."""

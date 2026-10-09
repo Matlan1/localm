@@ -100,7 +100,7 @@ class FakeT5:
                 return code
         if positions[0] != max(self.kv, default=-1) + 1:
             return -1
-        for p, t in zip(positions, tokens):
+        for p, t in zip(positions, tokens, strict=True):
             self.kv[p] = t
         return 0
 

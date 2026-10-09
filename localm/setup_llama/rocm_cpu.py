@@ -66,7 +66,7 @@ def rocm_build(target: Path) -> str:
     return _ROCM_TAG
 
 
-def _best_variant(variants: "list[Path]") -> "tuple[Optional[Path], dict]":
+def _best_variant(variants: list[Path]) -> tuple[Optional[Path], dict]:
     """The variant with the highest positive ``ggml_backend_score()`` on this
     CPU, and every variant's score (None when its probe failed)."""
     from localm.cpu_backend_select import _probe_score

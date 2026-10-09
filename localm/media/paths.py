@@ -159,8 +159,8 @@ def check_input_image(raw: str) -> Path:
             "image; network (UNC) and device paths are not accepted.")
     try:
         resolved = Path(raw).expanduser().resolve()
-    except (OSError, ValueError, RuntimeError):
-        raise InputImageRefused("Invalid input image path")
+    except (OSError, ValueError, RuntimeError) as e:
+        raise InputImageRefused("Invalid input image path") from e
     if not any(_under(resolved, h) for h in _home_input_roots(home)):
         raise InputImageRefused(
             "Input image must be a file you uploaded (the Settings page's "
@@ -181,9 +181,9 @@ def confined_input_image(raw: str) -> Path:
     try:
         return check_input_image(raw)
     except InputImageUnavailable as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, str(e)) from e
     except InputImageRefused as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
 
 
 def confined_move_dest(request: Request, raw: str) -> Path:
@@ -220,13 +220,13 @@ def confined_move_dest(request: Request, raw: str) -> Path:
                  "path; it has no host filesystem access.")
     try:
         resolved = Path(raw).expanduser().resolve()
-    except (OSError, ValueError, RuntimeError):
-        raise HTTPException(400, "Invalid destination path")
+    except (OSError, ValueError, RuntimeError) as e:
+        raise HTTPException(400, "Invalid destination path") from e
     if fs_host:
         return resolved
     try:
         home = home_dir().resolve()
-    except OSError:
+    except OSError as e:
         # The boundary itself is unavailable, so the destination cannot be
         # proven inside it. Deny with the REAL reason, not the ordinary "outside
         # the data directory" one.
@@ -242,7 +242,7 @@ def confined_move_dest(request: Request, raw: str) -> Path:
                        "could not be resolved", exc_info=True)
         raise HTTPException(
             500, "Cannot resolve the localm data directory, so the destination "
-                 "could not be authorised. See the server log for the cause.")
+                 "could not be authorised. See the server log for the cause.") from e
     if not _under(resolved, home):
         raise HTTPException(
             403, "This key cannot move media outside the localm data "

@@ -149,7 +149,7 @@ def _cosine(a: list, b: list) -> float:
         # Not a bare except: a real numerical error from a usable numpy still
         # propagates. The degrade is announced once per process.
         _warn_numpy_degrade(e, "cosine similarity")
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=False))
         na = math.sqrt(sum(x * x for x in a))
         nb = math.sqrt(sum(y * y for y in b))
         sim = dot / (na * nb) if na and nb else 0.0

@@ -159,7 +159,7 @@ def _fetch_release_by_tag_http(repo: str, tag: str):
         return json.loads(r.read().decode("utf-8"))
 
 
-def release_date(tag: str, repo: str = _REPO, *, opener=None) -> "_dt.datetime | None":
+def release_date(tag: str, repo: str = _REPO, *, opener=None) -> _dt.datetime | None:
     """*tag*'s own ``published_at``, looked up directly - for when the fetched
     listing page does not reach it (an old, stale pin is exactly the one that
     has fallen off page 1). Never raises: any failure reads as unknown, the same
@@ -218,7 +218,7 @@ _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def resolve_tag_commit(tag: str, repo: str = _REPO, *,
-                       ref_opener=None, tag_opener=None) -> "str | None":
+                       ref_opener=None, tag_opener=None) -> str | None:
     """The 40-hex commit sha *tag* actually points at, or None if it could not
     be resolved for ANY reason (unparseable tag, network failure, malformed
     response, a lightweight-vs-annotated mismatch that does not resolve to a
@@ -290,18 +290,18 @@ def _parse_version(tag) -> tuple[int, ...] | None:
     return tuple(int(p) for p in m.group(1).split("."))
 
 
-def _parse_date(value) -> "_dt.datetime | None":
+def _parse_date(value) -> _dt.datetime | None:
     """'2026-08-12T12:18:24Z' -> aware UTC datetime; anything else -> None."""
     if not isinstance(value, str):
         return None
     try:
         return _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=_dt.timezone.utc)
+            tzinfo=_dt.UTC)
     except ValueError:
         return None
 
 
-def _eligible_releases(releases: list) -> "list[tuple[tuple[int, ...], str, _dt.datetime | None]]":
+def _eligible_releases(releases: list) -> list[tuple[tuple[int, ...], str, _dt.datetime | None]]:
     """[(parsed version tuple, tag name, published_at or None), ...] for every
     release eligible to be a "latest"/"behind" candidate: not a dict, or
     draft/prerelease, are excluded; the tag must parse as vX.Y[.Z...]. Shared by
@@ -350,7 +350,7 @@ def _compare(pinned_tag: str, releases: list) -> dict:
     }
 
 
-def _pin_published_at(releases: list, tag: str) -> "_dt.datetime | None":
+def _pin_published_at(releases: list, tag: str) -> _dt.datetime | None:
     """*tag*'s own published_at read out of the raw (unfiltered) *releases*
     page, or None when the page does not include it. Searches the RAW list,
     not _eligible_releases(): the pin's own publish date is a plain fact,
@@ -443,7 +443,7 @@ def _annotate(level: str, message: str) -> None:
         print(f"::{level}::{message}")
 
 
-def _summarise(lines: "list[str]") -> None:
+def _summarise(lines: list[str]) -> None:
     try:
         ci_runner_files.append(ci_runner_files.STEP_SUMMARY, "\n".join(lines) + "\n")
     except OSError as e:

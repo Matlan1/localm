@@ -141,7 +141,7 @@ def test_comfy_models_returns_the_slots_it_resolved(tmp_path, monkeypatch,
         body = client.get(route).json()
     assert body["reachable"] is True
     assert len(body["slots"]) == len(slots)
-    for got, sent in zip(body["slots"], slots):
+    for got, sent in zip(body["slots"], slots, strict=True):
         assert {k: got[k] for k in sent} == sent, "the offload altered the payload"
         assert {"model_type", "role_id", "role_label", "installed"} <= set(got)
     assert body["api_url"]
