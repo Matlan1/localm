@@ -1854,9 +1854,12 @@ def _gguf_declared_min_size(path: Path) -> Optional[int]:
 
 
 def _gguf_metadata_probe(path: Path) -> dict:
-    """Best-effort read of the GGUF header metadata needed for embedding-model
-    detection: ``general.architecture`` and whether any ``*.pooling_type`` key
-    is present. Reads only a bounded prefix of the file (see
+    """Best-effort read of the GGUF header metadata needed for model-role
+    detection: ``general.architecture``, ``general.type``, ``adapter.type`` and
+    whether any ``*.pooling_type`` key is present. The result carries the keys
+    ``architecture``, ``general_type``, ``adapter_type``, ``has_pooling_type``
+    and ``non_causal``; a string key the file does not declare is None. Reads
+    only a bounded prefix of the file (see
     ``_GGUF_META_PROBE_BYTES`` - real metadata always precedes the large
     tokenizer vocab arrays and tensor data), never the whole model. Returns
     ``{}`` on any parse failure or truncation within that bound; it never
@@ -1871,6 +1874,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
     except OSError:
         return {}
     architecture = None
+    general_type = None
+    adapter_type = None
     has_pooling_type = False
     non_causal = False
     try:
@@ -1890,6 +1895,10 @@ def _gguf_metadata_probe(path: Path) -> dict:
             off += 4
             if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
                 architecture, off = _gguf_read_string(buf, off)
+            elif key == "general.type" and vtype == _GGUF_TYPE_STRING:
+                general_type, off = _gguf_read_string(buf, off)
+            elif key == "adapter.type" and vtype == _GGUF_TYPE_STRING:
+                adapter_type, off = _gguf_read_string(buf, off)
             else:
                 if key.endswith(".pooling_type"):
                     has_pooling_type = True
@@ -1898,8 +1907,11 @@ def _gguf_metadata_probe(path: Path) -> dict:
                 off = _gguf_skip_value(buf, off, vtype)
             # Stop as soon as the answer is decided: a definitive embedding
             # architecture, or any pooling_type key at all, makes the rest of
-            # the KV block irrelevant to classification.
-            if has_pooling_type or architecture in _GGUF_EMBEDDING_ARCHITECTURES:
+            # the KV block irrelevant to classification. After such a signal,
+            # keep reading through the general.* keys until general.type is
+            # seen or a non-general key comes.
+            if ((has_pooling_type or architecture in _GGUF_EMBEDDING_ARCHITECTURES)
+                    and (general_type is not None or not key.startswith("general."))):
                 break
     except (struct.error, IndexError, UnicodeDecodeError):
         # Truncated within our bounded read, or a malformed/unexpected layout -
@@ -1907,7 +1919,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
         # failure, rather than discarding a signal found earlier in the walk.
         pass
     return {"architecture": architecture, "has_pooling_type": has_pooling_type,
-            "non_causal": non_causal}
+            "non_causal": non_causal, "general_type": general_type,
+            "adapter_type": adapter_type}
 
 
 _GGUF_PRE_TOKENIZER_KEY = "tokenizer.ggml.pre"
@@ -2060,6 +2073,76 @@ def gguf_is_mmproj(path: Path, meta: Optional[dict] = None) -> bool:
     if meta is None:
         meta = _gguf_metadata_probe(path)
     return meta.get("architecture") == _GGUF_MMPROJ_ARCHITECTURE
+
+
+_GGUF_ADAPTER_GENERAL_TYPE = "adapter"
+GGUF_LORA_ADAPTER_KIND = "lora"
+
+
+def _starts_with_gguf_magic(path: Path) -> bool:
+    """True when *path* is a readable file that begins with the GGUF magic. A
+    folder, a missing file or an unreadable one is False. The name's extension
+    is not consulted: an Ollama blob is a GGUF with no extension."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+
+def gguf_adapter_kind(path: Path, meta: Optional[dict] = None) -> Optional[str]:
+    """The ``adapter.type`` of a GGUF adapter file (``"lora"`` for a LoRA), or
+    None when *path* is not an adapter, i.e. its ``general.type`` is not
+    ``"adapter"``. An adapter that declares no ``adapter.type`` reports
+    ``"unknown"``. Hard metadata from the file's own header, never a filename
+    guess.
+
+    *meta*, when given, is an already-computed ``_gguf_metadata_probe(path)``
+    result (see ``gguf_embedding_signal``)."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    if meta.get("general_type") != _GGUF_ADAPTER_GENERAL_TYPE:
+        return None
+    return meta.get("adapter_type") or "unknown"
+
+
+def gguf_adapter_chat_refusal(path: Path) -> Optional[str]:
+    """The reason the GGUF at *path* cannot be chatted with because it is an
+    adapter rather than a model, or None when it is not an adapter."""
+    kind = gguf_adapter_kind(path)
+    if kind is None:
+        return None
+    return (f"{Path(path).name} is a GGUF {kind} adapter, not a chat model, so localm "
+            "cannot load it on its own. Attach it to its base model with "
+            "'localm adapter attach <adapter> <base>' and run the base model.")
+
+
+def gguf_adapter_incompatibility(adapter_path: Path, base_path: Path) -> Optional[str]:
+    """Why the GGUF adapter at *adapter_path* cannot be applied to the model at
+    *base_path*, or None when no certain reason exists. Refuses only on a
+    certain signature: a file that is not a GGUF LoRA adapter, a base that is
+    not a GGUF file, or two declared ``general.architecture`` values that
+    differ (both are named). A header that cannot be read yields no refusal
+    here; the native loader judges tensor shapes itself."""
+    adapter_path, base_path = Path(adapter_path), Path(base_path)
+    if not _starts_with_gguf_magic(base_path):
+        return (f"{base_path.name} is not a GGUF file; GGUF adapters apply to "
+                "GGUF base models only.")
+    adapter_meta = _gguf_metadata_probe(adapter_path)
+    kind = gguf_adapter_kind(adapter_path, meta=adapter_meta)
+    if kind is None:
+        found = adapter_meta.get("general_type")
+        what = f"general.type '{found}'" if found else "no general.type"
+        return f"{adapter_path.name} is not a GGUF adapter (it declares {what})."
+    if kind != GGUF_LORA_ADAPTER_KIND:
+        return (f"{adapter_path.name} is a GGUF adapter of type '{kind}'; only "
+                f"'{GGUF_LORA_ADAPTER_KIND}' adapters are supported.")
+    adapter_arch = adapter_meta.get("architecture")
+    base_arch = _gguf_metadata_probe(base_path).get("architecture")
+    if adapter_arch and base_arch and adapter_arch != base_arch:
+        return (f"{adapter_path.name} was made for the '{adapter_arch}' architecture "
+                f"but {base_path.name} is '{base_arch}'.")
+    return None
 
 
 # Projector types whose output width llama.cpp's clip_n_mmproj_embd reads from

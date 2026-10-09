@@ -72,11 +72,15 @@ def registry_models_of_type(model_type: str, registry: Optional[dict] = None) ->
 
     ``filename`` is the BASENAME of the registered path, because that is the
     name ComfyUI reports in an ``/object_info`` combo, which is what makes the two
-    lists comparable. The full path is NOT returned."""
-    from localm.model_manager import _entry_path
+    lists comparable. The full path is NOT returned. A GGUF text-model LoRA
+    adapter is a ``lora`` entry too but is not a ComfyUI component, so it is
+    left out."""
+    from localm.model_manager import _entry_path, is_gguf_adapter_entry
     from localm.model_manager.registry import models_of_type
     out = []
     for name, entry in sorted(models_of_type(model_type, registry).items()):
+        if is_gguf_adapter_entry(entry):
+            continue
         epath = _entry_path(entry)
         if epath is None:
             # A malformed entry is skipped rather than crashing the picker.

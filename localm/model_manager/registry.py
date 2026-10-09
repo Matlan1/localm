@@ -5,6 +5,7 @@ dedup, disk sync, add-local, and removal. Depends on the gguf helpers."""
 import localm.model_manager as _mm  # read package-patchable names at call time
 
 import json
+import math
 import os
 import re
 import shutil
@@ -44,6 +45,7 @@ from .gguf import split_gguf_parts
 from .gguf import gguf_non_chat_model_type
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_is_mmproj
+from .gguf import gguf_adapter_incompatibility, gguf_adapter_kind
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
 from .gguf import _gguf_metadata_probe
 from .gguf import HubCacheScan
@@ -73,9 +75,23 @@ def is_auto_chat_eligible(entry: dict) -> bool:
     embeddings-mode context (see ``inference/embedder.py``), not the causal chat
     path, so it is never auto-picked as the default chat model - and
     ``setup-embeddings`` can register one into the main registry, making an
-    embedding-only registry a reachable first-run state.
+    embedding-only registry a reachable first-run state. A GGUF LoRA adapter
+    (see :func:`is_gguf_adapter_entry`) cannot load on its own and is excluded
+    too.
     """
-    return isinstance(entry, dict) and entry.get("model_type", "llm") not in ("unknown", "embedding")
+    return (isinstance(entry, dict)
+            and entry.get("model_type", "llm") not in ("unknown", "embedding")
+            and not is_gguf_adapter_entry(entry))
+
+
+def is_gguf_adapter_entry(entry) -> bool:
+    """True when a registry *entry* is a GGUF LoRA adapter: type ``lora`` whose
+    stored file is a ``.gguf``. ComfyUI LoRAs and HuggingFace adapter folders
+    are ``lora`` too but are never a ``.gguf`` file."""
+    if not isinstance(entry, dict) or entry.get("model_type") != "lora":
+        return False
+    path = entry.get("path")
+    return isinstance(path, str) and path.lower().endswith(".gguf")
 
 
 def is_llm(entry: dict) -> bool:
@@ -199,8 +215,10 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     Returns ``(model_type, gguf_metadata)``.
 
     A .gguf file or Ollama blob (the same GGUF byte format under a renamed file)
-    is first checked for a vision-projector signal in its OWN GGUF metadata
-    (``gguf_is_mmproj`` - ``general.architecture == "clip"``; see gguf.py) ->
+    is first checked for an adapter signal in its OWN GGUF metadata
+    (``gguf_adapter_kind`` - ``general.type == "adapter"``; an adapter carries
+    its base's ``general.architecture``) -> 'lora'; then a vision-projector
+    signal (``gguf_is_mmproj`` - ``general.architecture == "clip"``; see gguf.py) ->
     'mmproj'; then an embedding/pooling signal (``gguf_embedding_signal`` -
     architecture or a ``*.pooling_type`` key) -> 'embedding'; otherwise it is a
     llama.cpp text model -> 'llm'. An HF directory is classified from
@@ -219,6 +237,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
         if is_gguf or is_blob:
             meta = _gguf_metadata_probe(path)
             gguf_metadata = gguf_registry_metadata(path, meta=meta)
+            if gguf_adapter_kind(path, meta=meta) is not None:
+                return "lora", gguf_metadata
             if gguf_is_mmproj(path, meta=meta):
                 return "mmproj", gguf_metadata
             if gguf_embedding_signal(path, meta=meta):
@@ -766,6 +786,140 @@ def get_operator_model_mmproj(name: str, *, reg: Optional[dict] = None,
     if recorded:
         return recorded
     return _sibling_mmproj(get_operator_model_info(name, reg=reg), dir_cache)
+
+
+class AdapterError(ValueError):
+    """A LoRA adapter cannot be attached, detached or resolved; the message
+    names the adapter and says why."""
+
+
+def _adapter_scale(value, name: str) -> float:
+    """*value* as an adapter scale: a finite non-zero number. A zero scale
+    applies nothing and a non-finite one corrupts the output, so both are
+    refused. Raises :class:`AdapterError` naming adapter *name*."""
+    try:
+        scale = float(value)
+    except (TypeError, ValueError):
+        scale = float("nan")
+    if not math.isfinite(scale) or scale == 0.0:
+        raise AdapterError(
+            f"adapter '{name}' has an invalid scale {value!r}; it must be a "
+            "finite number other than 0")
+    return scale
+
+
+def attach_adapter(adapter: str, base: str, scale: float = 1.0) -> None:
+    """Record that the registered GGUF LoRA adapter *adapter* is applied
+    whenever the registered model *base* loads, with *scale*. Attaching an
+    adapter that is already attached moves it to *base* (an adapter belongs to
+    one base) and updates its scale.
+
+    The adapter's own header decides what it is: a file whose ``general.type``
+    is ``adapter`` is accepted and, when it was registered before adapters were
+    recognised (as a chat model), is re-typed ``lora``. Raises
+    :class:`AdapterError` when either name is unknown, the adapter file is
+    missing or not a GGUF LoRA adapter, *base* is not a GGUF chat model, the
+    two architectures differ (both are named), or *scale* is invalid."""
+    scale = _adapter_scale(scale, adapter)
+    reg = _mm.load_registry()
+    a_entry, b_entry = reg.get(adapter), reg.get(base)
+    if not isinstance(a_entry, dict):
+        raise AdapterError(f"'{adapter}' is not a registered model")
+    if not isinstance(b_entry, dict):
+        raise AdapterError(f"'{base}' is not a registered model")
+    if adapter == base:
+        raise AdapterError("an adapter cannot be attached to itself")
+    a_path, b_path = _entry_path(a_entry), _entry_path(b_entry)
+    if a_path is None or not Path(a_path).is_file():
+        raise AdapterError(f"the file of '{adapter}' is missing")
+    if b_path is None or not Path(b_path).exists():
+        raise AdapterError(f"the file of '{base}' is missing")
+    if not is_llm(b_entry):
+        raise AdapterError(
+            f"'{base}' is not a chat model (its type is "
+            f"{b_entry.get('model_type', 'llm')}); adapters attach to GGUF chat models")
+    if gguf_adapter_kind(Path(b_path)) is not None:
+        raise AdapterError(f"'{base}' is itself an adapter, not a base model")
+    reason = gguf_adapter_incompatibility(Path(a_path), Path(b_path))
+    if reason is not None:
+        raise AdapterError(f"cannot attach '{adapter}' to '{base}': {reason}")
+
+    def _apply(r: dict) -> None:
+        entry = r.get(adapter)
+        if isinstance(entry, dict):
+            entry["model_type"] = "lora"
+            entry["base"] = base
+            entry["scale"] = scale
+
+    _mm.update_registry(_apply)
+
+
+def detach_adapter(adapter: str) -> bool:
+    """Stop applying the registered adapter *adapter* to its base model.
+    Returns False when it is not registered or was not attached."""
+    changed = False
+
+    def _apply(r: dict) -> None:
+        nonlocal changed
+        entry = r.get(adapter)
+        if isinstance(entry, dict) and "base" in entry:
+            entry.pop("base", None)
+            entry.pop("scale", None)
+            changed = True
+
+    _mm.update_registry(_apply)
+    return changed
+
+
+def list_adapters(*, reg: Optional[dict] = None) -> List[dict]:
+    """Every registered GGUF LoRA adapter as ``{"name", "path", "base",
+    "scale"}``, sorted by name. ``base`` is None for an adapter attached to
+    nothing; ``scale`` is the stored value or None when it is absent or
+    invalid."""
+    reg = _mm.load_registry() if reg is None else reg
+    out = []
+    for name in sorted(reg):
+        entry = reg[name]
+        if not is_gguf_adapter_entry(entry):
+            continue
+        base = entry.get("base")
+        try:
+            scale = _adapter_scale(entry.get("scale", 1.0), name) if base else None
+        except AdapterError:
+            scale = None
+        out.append({"name": name, "path": _entry_path(entry),
+                    "base": base if isinstance(base, str) and base else None,
+                    "scale": scale})
+    return out
+
+
+def get_model_adapters(base: str, *, reg: Optional[dict] = None) -> List[tuple]:
+    """The ``(path, scale)`` of every adapter attached to the registered model
+    *base*, in adapter-name order, for the backend to apply when it loads.
+    An adapter attached to any registered name of the same model file as *base*
+    counts, and entries that point at the same adapter file count once. Empty
+    when none is attached. Raises :class:`AdapterError` when an attached adapter's entry has
+    no usable path or an invalid scale, because loading the base without an
+    adapter its owner attached would answer with the wrong model."""
+    reg = _mm.load_registry() if reg is None else reg
+    out, seen = [], set()
+    for name in sorted(reg):
+        entry = reg[name]
+        if not is_gguf_adapter_entry(entry):
+            continue
+        attached_to = entry.get("base")
+        if not isinstance(attached_to, str) or not attached_to:
+            continue
+        if attached_to != base and not names_same_model(base, attached_to, reg):
+            continue
+        path = _entry_path(entry)
+        if path is None:
+            raise AdapterError(f"adapter '{name}' attached to '{base}' has no usable file path")
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append((path, _adapter_scale(entry.get("scale", 1.0), name)))
+    return out
 
 
 
@@ -1461,6 +1615,8 @@ def alias_model(existing: str, new_name: str) -> bool:
     def _apply(r: dict) -> None:
         if existing in r and safe_name not in r:
             r[safe_name] = dict(r[existing])
+            r[safe_name].pop("base", None)
+            r[safe_name].pop("scale", None)
     _mm.update_registry(_apply)
     # existing: a confirmed registry key here, but a hand-edited registry.json
     # is not restricted to a safe charset - escaped anyway.
@@ -1535,6 +1691,9 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[s
         nonlocal moved
         if old_name in r and safe_name not in r:
             r[safe_name] = r.pop(old_name)
+            for entry in r.values():
+                if isinstance(entry, dict) and entry.get("base") == old_name:
+                    entry["base"] = safe_name
             moved = True
 
     _mm.update_registry(_apply)
@@ -2091,7 +2250,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                     # sync can be reverted one step if it goes wrong.
                     _mm._backup_registry()
                     backed_up = True
-                del reg[name]
+                _pop_model_entry(reg, name)
                 pruned += 1
             elif not entry.get("missing"):
                 entry["missing"] = True
@@ -3030,6 +3189,17 @@ def engine_holding_model_file(
     return unknown
 
 
+def _pop_model_entry(reg: dict, name: str) -> None:
+    """Remove *name* from registry dict *reg* and detach every adapter attached
+    to it, so a model later registered under the same name does not silently
+    inherit them."""
+    reg.pop(name, None)
+    for entry in reg.values():
+        if isinstance(entry, dict) and entry.get("base") == name:
+            entry.pop("base", None)
+            entry.pop("scale", None)
+
+
 def remove_model(name: str) -> None:
     # escape(): reachable via `POST /api/models/remove`, which spawns
     # `localm rm <model> --yes` and re-pushes its stdout into the GUI
@@ -3049,7 +3219,7 @@ def remove_model(name: str) -> None:
         # deleting, so just drop the NAME. This is the CLI recovery path for a
         # registry that `localm list` / `add` would otherwise choke on - without
         # it, a single bad entry could only be cleared by hand-editing the JSON.
-        _mm.update_registry(lambda r: r.pop(name, None))
+        _mm.update_registry(lambda r: _pop_model_entry(r, name))
         console.print(f"[green]✓[/green] Removed corrupt entry [bold]{escape(name)}[/bold]")
         return
 
@@ -3059,7 +3229,7 @@ def remove_model(name: str) -> None:
     # this name - never delete a file out from under another alias.
     other_aliases = [a for a in find_aliases_by_path(path, reg) if a != name]
     if other_aliases:
-        _mm.update_registry(lambda r: r.pop(name, None))   # atomic RMW
+        _mm.update_registry(lambda r: _pop_model_entry(r, name))   # atomic RMW
         console.print(
             f"[green]✓[/green] Removed [bold]{escape(name)}[/bold] "
             f"[dim](file kept - still registered as: "
@@ -3108,7 +3278,7 @@ def remove_model(name: str) -> None:
                     console.print(f"[dim]Deleted {escape(str(part_path))}[/dim]")
     elif path.exists():
         console.print("[dim]Unregistered (file not deleted - lives outside <data dir>/models)[/dim]")
-    _mm.update_registry(lambda r: r.pop(name, None))       # atomic RMW
+    _mm.update_registry(lambda r: _pop_model_entry(r, name))       # atomic RMW
     console.print(f"[green]✓[/green] Removed [bold]{escape(name)}[/bold]")
 
 

@@ -143,6 +143,10 @@ def register(app: FastAPI, ctx) -> None:
         # inspected, which is not the same claim as false.
         if vision is not None:
             out["vision"] = vision
+        resident = _hs._engines.get(model_id)
+        applied = getattr(resident, "applied_adapters", None) if resident is not None else None
+        if isinstance(applied, list) and applied and out["loaded"]:
+            out["adapters"] = applied
         from localm import peer_routing
         route = peer_routing.get_route(model_id)
         if route is not None:
