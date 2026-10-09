@@ -169,10 +169,10 @@ _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 
 # Characters that end an address token: ASCII whitespace and controls, C1
-# controls, no-break space, quotes, and the brackets and delimiters an address
-# sits between in prose, markup, URLs, paths and JSON. Every other character,
-# non-ASCII included, belongs to the token.
-_EMAIL_TOKEN_END = r"\x00-\x20\x7f-\xa0\x22\x27<>()\[\]{},;:/\\|\x60=?&#!*^~$"
+# controls, no-break space, the double quote, backtick, ``< > ( ) [ ]`` and
+# ``, ; : / \ = ? & *``. Every other character, non-ASCII and the single quote
+# included, belongs to the token.
+_EMAIL_TOKEN_END = r"\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*"
 
 # A whole token that contains ``local@domain.tld`` (or ``local%40domain.tld``),
 # matched from the token's first character to its last. The TLD is at least two
@@ -182,8 +182,8 @@ _EMAIL_RE = re.compile(
     "(?<![^" + _EMAIL_TOKEN_END + "])"
     "[^" + _EMAIL_TOKEN_END + "]*?"
     "[^@" + _EMAIL_TOKEN_END + "](?:@|%40)"
-    "[^@._%+" + _EMAIL_TOKEN_END + "]+"
-    r"(?:\.[^@._%+" + _EMAIL_TOKEN_END + "]+)*"
+    "[^@.%+" + _EMAIL_TOKEN_END + "]+"
+    r"(?:\.[^@.%+" + _EMAIL_TOKEN_END + "]+)*"
     r"\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}"
     "[^" + _EMAIL_TOKEN_END + "]*"
 )
@@ -191,18 +191,22 @@ _EMAIL_RE = re.compile(
 
 def _email_replacement(m: re.Match) -> str:
     token = m.group(0)
-    core = token.rstrip(".")
+    core = token.lstrip("'")
+    lead = token[:len(token) - len(core)]
+    core = core.rstrip("'.")
+    trail = token[len(lead) + len(core):]
     address = core.replace("%40", "@")
     if address.isascii() and address.lower() == MAINTAINER_EMAIL.lower():
         return token
-    return "<redacted-email>" + token[len(core):]
+    return lead + "<redacted-email>" + trail
 
 
 def _scrub_emails(text: str) -> str:
     """Replace every token that contains an email address with
-    ``<redacted-email>``, keeping any trailing periods. A token that is exactly
-    ``MAINTAINER_EMAIL`` (ASCII, compared case-insensitively, ``%40`` read as
-    ``@``, trailing periods ignored) is kept as written. Idempotent: the
+    ``<redacted-email>``, keeping its leading single quotes and its trailing
+    single quotes and periods. A token that is exactly ``MAINTAINER_EMAIL``
+    once those are set aside (ASCII, compared case-insensitively, ``%40`` read
+    as ``@``) is kept as written. Idempotent: the
     replacement contains no ``@``. A ``user@`` URL credential already rewritten
     to ``<redacted>@`` by ``_scrub_url_creds`` is left as it is."""
     if not text:

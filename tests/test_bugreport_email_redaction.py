@@ -54,6 +54,11 @@ _CASES = [
     ('{"email":"bob@example.com","n":1}', '{"email":"<redacted-email>","n":1}'),
     ("ask bob@example.com.", "ask <redacted-email>."),
     ("bob@x.xn--p1ai", "<redacted-email>"),
+    ("sean.o'brien@example.com", "<redacted-email>"),
+    ("bob!x@example.com ~a@x.io {b}c@x.io", "<redacted-email> <redacted-email> <redacted-email>"),
+    ("'bob@example.com', 'alice@x.org'.", "'<redacted-email>', '<redacted-email>'."),
+    ("**bob@example.com** `carol@x.io`", "**<redacted-email>** `<redacted-email>`"),
+    ("bob@my_host.example.com", "<redacted-email>"),
     ("http://bob@host.example.com:8188/ and https://u:pw@h.example.org/x",
      "http://<redacted>@host.example.com:8188/ and https://<redacted>@h.example.org/x"),
     ("user@host a@b x@localhost npm @scope/pkg@1.2.3 v1@2.0",
@@ -78,7 +83,7 @@ def test_scrub_is_idempotent(scrub, text, expected):
 def test_maintainer_address_is_kept_as_written(scrub):
     upper = MAINTAINER.upper()
     encoded = MAINTAINER.replace("@", "%40")
-    text = f"write to {MAINTAINER}. or {upper}, or {encoded}"
+    text = f"write to {MAINTAINER}. or {upper}, or {encoded} or '{MAINTAINER}'."
     assert scrub(text) == text
 
 
@@ -97,12 +102,14 @@ def test_config_subset_redacts_emails(monkeypatch):
         "net_search_url": f"https://searx.example.org/search?contact={OTHER}",
         "comfy_launch_cmd": f"run.bat --notify {OTHER}",
         "coder_reviewer": OTHER,
+        "cors_origins": [OTHER, "http://localhost:3000"],
     })
     out = diagnostics._safe_config_subset()
     assert out == {
         "net_search_url": "https://searx.example.org/search?contact=<redacted-email>",
         "comfy_launch_cmd": "run.bat --notify <redacted-email>",
         "coder_reviewer": "<redacted-email>",
+        "cors_origins": ["<redacted-email>", "http://localhost:3000"],
     }
 
 
@@ -161,7 +168,7 @@ def _run_ps_scrub(tmp_path: Path, lines: list[str], no_email: bool = False) -> l
 @pytest.mark.skipif(os.name != "nt",
                     reason="the PowerShell fallback reporter only runs on Windows")
 def test_powershell_scrub_matches_python_when_actually_executed(tmp_path):
-    keep = f"keep {MAINTAINER.upper()}. and {MAINTAINER.replace('@', '%40')}"
+    keep = f"keep {MAINTAINER.upper()}. and {MAINTAINER.replace('@', '%40')} '{MAINTAINER}'"
     inputs = [text for text, _ in _CASES] + [keep]
     expected = [want for _, want in _CASES] + [keep]
     got = _run_ps_scrub(tmp_path, inputs)
@@ -194,6 +201,7 @@ _HOSTILE = [
     pytest.param(lambda n: "a.b@c" * n, id="chained-addresses"),
     pytest.param(lambda n: "a%40" * n, id="many-encoded-at-signs"),
     pytest.param(lambda n: (E_ACUTE + "@") * n, id="non-ascii-at-signs"),
+    pytest.param(lambda n: "'a@" * n, id="quoted-at-signs"),
 ]
 
 

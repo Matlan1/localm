@@ -149,28 +149,32 @@ _HEADER_SECRET_RE = re.compile(
 )
 # A whole token that contains an email address. Byte-identical to _EMAIL_RE in
 # localm/bugreport/scrub.py, where the token rules are described.
-_EMAIL_TOKEN_END = r"\x00-\x20\x7f-\xa0\x22\x27<>()\[\]{},;:/\\|\x60=?&#!*^~$"
+_EMAIL_TOKEN_END = r"\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*"
 _EMAIL_RE = re.compile(
     "(?<![^" + _EMAIL_TOKEN_END + "])"
     "[^" + _EMAIL_TOKEN_END + "]*?"
     "[^@" + _EMAIL_TOKEN_END + "](?:@|%40)"
-    "[^@._%+" + _EMAIL_TOKEN_END + "]+"
-    r"(?:\.[^@._%+" + _EMAIL_TOKEN_END + "]+)*"
+    "[^@.%+" + _EMAIL_TOKEN_END + "]+"
+    r"(?:\.[^@.%+" + _EMAIL_TOKEN_END + "]+)*"
     r"\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}"
     "[^" + _EMAIL_TOKEN_END + "]*"
 )
 
 
 def _email_replacement(m: re.Match) -> str:
-    """``<redacted-email>`` plus the token's trailing periods, or the token
-    unchanged when it is MAINTAINER_EMAIL (ASCII, case-insensitive, ``%40`` read
-    as ``@``). Mirrors localm/bugreport/scrub.py."""
+    """``<redacted-email>`` between the token's leading single quotes and its
+    trailing single quotes and periods, or the token unchanged when what is
+    between them is MAINTAINER_EMAIL (ASCII, case-insensitive, ``%40`` read as
+    ``@``). Mirrors localm/bugreport/scrub.py."""
     token = m.group(0)
-    core = token.rstrip(".")
+    core = token.lstrip("'")
+    lead = token[:len(token) - len(core)]
+    core = core.rstrip("'.")
+    trail = token[len(lead) + len(core):]
     address = core.replace("%40", "@")
     if address.isascii() and address.lower() == MAINTAINER_EMAIL.lower():
         return token
-    return "<redacted-email>" + token[len(core):]
+    return lead + "<redacted-email>" + trail
 
 
 def scrub(text: str) -> str:
