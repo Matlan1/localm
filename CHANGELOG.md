@@ -12,6 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Encoder-decoder (T5) GGUF models now run.** Flan-T5, LaMini-Flan-T5 and other `t5`
+  GGUFs register as chat models and answer through `localm run`, the GUI chat and
+  `/v1/chat/completions`, where they were refused before.
+  These models have no chat template: a single message is read as typed, and a
+  conversation is read as one labelled transcript. A prompt can be up to 2,048 tokens
+  (fewer when the context window is smaller); a longer one is refused with that limit
+  named. They read text only, and speculative decoding does not apply to them.
 - **Files and folders localm cannot run now say why.** `localm add`, `localm pull <path>`
   and the GUI add and pull routes name the format and the nearest runnable alternative for
   GGUF version 1 and big-endian GGUF files, legacy GGML `.bin` files, importance-matrix

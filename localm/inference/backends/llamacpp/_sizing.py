@@ -647,6 +647,10 @@ class VramSizingMixin:
             n_layer_all = inputs["n_layer_all"]
             layer_bytes = [0] * n_layer_all
             for name, size in inputs["sizes"].items():
+                # An encoder-decoder model's enc.blk.<i> and dec.blk.<i> both
+                # belong to layer i.
+                if name.startswith(("enc.blk.", "dec.blk.")):
+                    name = name[4:]
                 if not name.startswith("blk."):
                     continue
                 head, _, _rest = name[4:].partition(".")
