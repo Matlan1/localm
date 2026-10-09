@@ -49,9 +49,13 @@ def _collected(suite_dir, *args):
 
 def _shard_ids(suite_dir, index, count, *extra):
     out = suite_dir / f"ids-{index}.json"
-    run = _pytest(suite_dir, "--shard", f"{index}/{count}", "--shard-ids-out", str(out), *extra)
+    measured = suite_dir / f"measured-{index}.json"
+    run = _pytest(suite_dir, "--shard", f"{index}/{count}", "--shard-ids-out", str(out),
+                  "--shard-durations-out", str(measured), *extra)
     assert run.returncode == 0, run.stdout + run.stderr
-    return json.loads(out.read_text(encoding="utf-8"))
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    payload["executed"] = sorted(json.loads(measured.read_text(encoding="utf-8")))
+    return payload
 
 
 def test_parse_shard_accepts_i_of_n_and_rejects_the_rest():
@@ -63,7 +67,7 @@ def test_parse_shard_accepts_i_of_n_and_rejects_the_rest():
 
 
 def test_assign_balances_by_duration_and_ignores_input_order():
-    durations = {"a": 10.0, "b": 9.0, "c": 5.0, "d": 5.0, "e": 1.0}
+    durations = {"a": 1.0, "b": 5.0, "c": 5.0, "d": 9.0, "e": 10.0}
     ids = list(durations)
     owner = _shard.assign(ids, 1.0, durations, 2)
     loads = [sum(durations[n] for n in ids if owner[n] == s) for s in (0, 1)]
@@ -84,7 +88,8 @@ def test_every_selected_test_runs_in_exactly_one_shard(suite):
     assert len(full) == 13
     parts = [_shard_ids(suite, i, 3) for i in (1, 2, 3)]
     assert _shard.verify_partition(parts, 3) == []
-    ran = sorted(n for p in parts for n in p["selected"])
+    assert [p["executed"] for p in parts] == [p["selected"] for p in parts]
+    ran = sorted(n for p in parts for n in p["executed"])
     assert ran == full
     assert all(len(p["selected"]) >= 4 for p in parts)
 
@@ -100,6 +105,7 @@ def test_a_shard_run_under_xdist_selects_the_same_tests(suite):
     serial = _shard_ids(suite, 2, 3)
     parallel = _shard_ids(suite, 2, 3, "-n", "2")
     assert parallel["selected"] == serial["selected"]
+    assert parallel["executed"] == parallel["selected"]
 
 
 def test_durations_file_decides_which_tests_share_a_shard(suite):
