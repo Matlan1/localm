@@ -16,9 +16,12 @@ from __future__ import annotations
 import pytest
 
 from localm.cli import chat as chat_mod
+from localm.inference import capability_routing as cr
 from localm.inference.backends.base import (ContextCapacityExceededError,
                                             UnsupportedInputError)
 from localm.inference.compact import estimate_tokens
+
+_REAL_CONFIGURED_MODE = cr.configured_mode
 
 
 class _Engine:
@@ -138,6 +141,13 @@ def _words(n, word="word"):
     """*n* copies of *word* joined by spaces: about 5*n/4 estimated tokens, and
     unchanged by the REPL's strip of what is typed."""
     return " ".join([word] * n)
+
+
+@pytest.fixture(autouse=True)
+def _autoswitch_auto(monkeypatch):
+    """These tests route on context and tool needs, which only the ``auto``
+    family acts on."""
+    monkeypatch.setattr(cr, "configured_mode", lambda: "auto")
 
 
 @pytest.fixture
@@ -261,6 +271,32 @@ class TestInProcessRouting:
         assert router.failed_to_load == ("roomy", "seer")
         assert router.engine_for(turn) is seer
         assert router.failed_to_load == ()
+
+
+class TestUnderTheDefaultAutoswitch:
+    """With model_autoswitch unset the setting reads as its default, ``image``:
+    a long conversation stays on the loaded model and an image it cannot read
+    still moves."""
+
+    @pytest.fixture(autouse=True)
+    def _real_default(self, monkeypatch):
+        monkeypatch.setattr(cr, "configured_mode", _REAL_CONFIGURED_MODE)
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        assert cr.configured_mode() == "image"
+
+    def test_a_long_conversation_stays_on_the_loaded_model(self, reg):
+        router, engines, _ = _router()
+        eng = router.engine_for([{"role": "user", "content": "word " * 4000}])
+        assert eng is engines["plain"]
+        assert "roomy" not in engines
+        assert router.note(eng) is None
+
+    def test_an_image_the_loaded_model_cannot_read_still_moves_the_turn(self, reg):
+        _, img = reg
+        router, engines, _ = _router()
+        eng = router.engine_for(_image_turn(img))
+        assert eng is engines["seer"]
+        assert "reading images" in router.note(eng)
 
 
 class TestNamingTheAnsweringModel:
