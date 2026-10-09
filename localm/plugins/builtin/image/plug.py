@@ -421,7 +421,8 @@ async def create_image(req: ImageGenerationRequest, request: Request):
                                  "be determined.")
     instance_token = getattr(request.app.state, "instance_token", None)
     owner = principal_id(request)
-    gen_req = ImagineRequest(prompt=prompt)
+    gen_req = ImagineRequest(prompt=prompt, guidance=None, cfg=None, denoise=None,
+                             lora_strength_model=None, lora_strength_clip=None)
     width, height = size if size else (None, None)
 
     private_dir = None
