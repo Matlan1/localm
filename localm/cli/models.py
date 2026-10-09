@@ -582,15 +582,16 @@ def bench_spec(model, source, draft_model, gen_tokens, rounds, ctx, gpu_layers,
 def spec_drafts(model):
     """List downloaded GGUF models that can be MODEL's draft model.
 
-    A draft model must share MODEL's vocabulary: the same tokenizer type, the
-    same BOS/EOS handling, sizes at most 128 tokens apart and the same token
-    text. Read from each file's metadata; nothing is loaded. Smaller files are
-    listed first, since a draft only pays when it runs much faster than MODEL.
+    A draft model must be a causal chat model and share MODEL's vocabulary:
+    the same tokenizer type, the same BOS/EOS handling, sizes at most 128
+    tokens apart and the same token text. Read from each file's metadata;
+    nothing is loaded. Smaller files are listed first, since a draft only pays
+    when it runs much faster than MODEL.
     """
     from rich.markup import escape
 
     from ..inference.backends.llamacpp._draftmodel import (
-        draft_vocab_mismatch, gguf_vocab_view)
+        draft_role_refusal, draft_vocab_mismatch, gguf_vocab_view)
     from localm.model_manager import load_registry
     from ..model_manager.gguf import gguf_file_bytes, gguf_vocab_signature
 
@@ -615,6 +616,8 @@ def spec_drafts(model):
             continue
         sig = gguf_vocab_signature(path)
         if sig is None or draft_vocab_mismatch(target, gguf_vocab_view(sig)) is not None:
+            continue
+        if draft_role_refusal(path) is not None:
             continue
         fits.append((gguf_file_bytes(path), name))
     if not fits:

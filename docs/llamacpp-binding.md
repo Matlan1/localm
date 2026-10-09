@@ -649,12 +649,15 @@ spread over the devices in proportion to their shares. The draft goes on the
 GPU only when it fits beside the whole target (on an implicit split: when the
 per-device plan with it keeps the target's split and fits every device);
 otherwise it runs on the CPU, so it never costs the target layers or devices,
-and the reply's usage reports `draft-on-cpu`. A draft model that is missing, fails to load, does not share the
-vocabulary, has recurrent layers, or whose context is refused leaves the model
-working without drafting, with the status naming why (`draft-model-missing`,
-`draft-load-failed`, `draft-vocab-mismatch`, `draft-rewind-unsupported`,
-`draft-context-refused`). `localm spec-drafts MODEL` lists the downloaded models
-whose metadata passes the vocabulary rule.
+and the reply's usage reports `draft-on-cpu`. A draft model that is missing, is
+not a causal chat model by its metadata (a draft head, a diffusion,
+encoder-decoder, embedding, audio or image model; nothing is loaded), fails to
+load, does not share the vocabulary, has recurrent layers, or whose context is
+refused leaves the model working without drafting, with the status naming why
+(`draft-model-missing`, `draft-unsupported-role`, `draft-load-failed`,
+`draft-vocab-mismatch`, `draft-rewind-unsupported`, `draft-context-refused`).
+`localm spec-drafts MODEL` lists the downloaded causal chat models whose
+metadata passes the vocabulary rule.
 
 A model with recurrent layers needs one state snapshot per draft token to drop
 rejected drafts (`n_rs_seq`), so there the n-gram or draft-model draft length is

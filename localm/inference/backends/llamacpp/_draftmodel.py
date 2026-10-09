@@ -70,6 +70,25 @@ def draft_vocab_mismatch(target: VocabView, draft: VocabView) -> Optional[str]:
     return None
 
 
+def draft_role_refusal(path) -> Optional[str]:
+    """Why the GGUF at *path* cannot be a draft model by its own metadata: its
+    architecture is not a causal chat model (``gguf_chat_refusal``: a draft
+    head, a diffusion, encoder-decoder, audio or image model), or it is an
+    embedding model (``gguf_embedding_signal``). None when neither shows,
+    including when the metadata cannot be read."""
+    from pathlib import Path
+
+    from localm.model_manager.gguf import (
+        gguf_architecture, gguf_chat_refusal, gguf_embedding_signal)
+    gguf = Path(path)
+    refusal = gguf_chat_refusal(gguf_architecture(gguf))
+    if refusal is not None:
+        return refusal
+    if gguf_embedding_signal(gguf):
+        return "This model is an embedding model, not a causal chat model."
+    return None
+
+
 def gguf_vocab_view(signature: dict) -> VocabView:
     """The VocabView of a GGUF's ``gguf_vocab_signature``. A flag the file
     does not carry reads as False and an id it does not carry as -1."""

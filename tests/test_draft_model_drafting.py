@@ -57,10 +57,11 @@ def _kv_bool(value: bool) -> bytes:
     return struct.pack("<I", 7) + struct.pack("<?", value)
 
 
-def _vocab_gguf(path, tokens, *, model="gpt2", add_bos=None, bos=None):
-    kv = [("general.architecture", _kv_string("qwen2")),
+def _vocab_gguf(path, tokens, *, model="gpt2", add_bos=None, bos=None, arch="qwen2",
+                extra=()):
+    kv = [("general.architecture", _kv_string(arch)),
           ("tokenizer.ggml.model", _kv_string(model)),
-          ("tokenizer.ggml.tokens", _kv_string_array(tokens))]
+          ("tokenizer.ggml.tokens", _kv_string_array(tokens)), *extra]
     if add_bos is not None:
         kv.append(("tokenizer.ggml.add_bos_token", _kv_bool(add_bos)))
     if bos is not None:
@@ -88,6 +89,18 @@ def test_two_gguf_files_compare_by_their_metadata(tmp_path):
         _vocab_gguf(tmp_path / "c.gguf", tokens, model="llama")))
     assert draft_vocab_mismatch(a, b) is None
     assert draft_vocab_mismatch(a, c) is not None
+
+
+@pytest.mark.parametrize("arch,extra,refused", [
+    ("qwen2", (), False), ("eagle3", (), True), ("dflash", (), True), ("llada", (), True),
+    ("t5", (), True), ("bert", (), True), ("qwen2", (("qwen2.pooling_type", 1),), True)])
+def test_only_a_causal_chat_model_can_be_a_draft_model(tmp_path, arch, extra, refused):
+    from localm.inference.backends.llamacpp._draftmodel import draft_role_refusal
+    kv = [(k, _kv_uint32(v)) for k, v in extra]
+    path = _vocab_gguf(tmp_path / "d.gguf", ["x%d" % i for i in range(40)], arch=arch, extra=kv)
+    assert (draft_role_refusal(path) is not None) is refused
+    (tmp_path / "junk.gguf").write_bytes(b"nope")
+    assert draft_role_refusal(tmp_path / "junk.gguf") is None
 
 
 def test_a_file_without_a_vocabulary_has_no_signature(tmp_path):
@@ -1037,6 +1050,15 @@ def test_a_cancelled_draft_load_frees_the_target_and_raises(tmp_path):
     assert (llm._model_ptr, llm._ctx_ptr) == (None, None)
 
 
+def test_a_draft_file_that_is_not_a_chat_model_is_never_loaded(tmp_path):
+    llm, _path, llama_mod = _loading_llama(tmp_path)
+    head = _vocab_gguf(tmp_path / "head.gguf", ["x%d" % i for i in range(40)], arch="eagle3")
+    with patch.object(llama_mod, "api") as api:
+        llm._load_draft_model(str(head), None, True)
+    assert (llm._source.status, llm._source.usable) == ("draft-unsupported-role", False)
+    api.llama_load_model_from_file.assert_not_called()
+
+
 @pytest.mark.parametrize("main_gpu,ratios", [(None, None), (1, [(0, 0.6), (1, 0.4)])])
 def test_the_draft_model_is_split_over_the_targets_devices(tmp_path, main_gpu, ratios):
     llm, path, llama_mod = _loading_llama(tmp_path)
@@ -1355,14 +1377,15 @@ def test_a_disabled_draft_source_frees_its_native_state():
     api.llama_sampler_free.assert_called_once()
 
 
-@pytest.mark.parametrize("draft_model,recurrent,charged", [
-    ("gpt2", 0, True), ("llama", 0, False), ("gpt2", 4096, False)])
+@pytest.mark.parametrize("draft_model,recurrent,arch,charged", [
+    ("gpt2", 0, "qwen2", True), ("llama", 0, "qwen2", False), ("gpt2", 4096, "qwen2", False),
+    ("gpt2", 0, "eagle3", False)])
 def test_no_charge_for_a_draft_model_the_metadata_already_rejects(tmp_path, draft_model,
-                                                                  recurrent, charged):
+                                                                  recurrent, arch, charged):
     from localm.inference.backends.gguf import GgufBackend
     tokens = ["x%d" % i for i in range(40)]
     target = _vocab_gguf(tmp_path / "m.gguf", tokens)
-    draft = _vocab_gguf(tmp_path / "d.gguf", tokens, model=draft_model)
+    draft = _vocab_gguf(tmp_path / "d.gguf", tokens, model=draft_model, arch=arch)
     b = GgufBackend(str(target), spec_source="draft", spec_draft_model=str(draft), n_ctx=2048)
     with patch("localm.model_manager.gguf.gguf_kv_bytes_per_token", return_value=1000), \
          patch("localm.model_manager.gguf._gguf_split_layout_meta", return_value=(2, 40)), \
@@ -1524,6 +1547,9 @@ def _registry_models(tmp_path):
         "tiny": (_vocab_gguf(tmp_path / "tiny.gguf", same[:30]), "llm"),
         "foreign": (_vocab_gguf(tmp_path / "foreign.gguf", other), "llm"),
         "embedder": (_vocab_gguf(tmp_path / "embed.gguf", same), "embedding"),
+        "head": (_vocab_gguf(tmp_path / "head.gguf", same, arch="eagle3"), "llm"),
+        "pooler": (_vocab_gguf(tmp_path / "pool.gguf", same,
+                               extra=[("qwen2.pooling_type", _kv_uint32(1))]), "llm"),
     }
     return target, {n: {"path": str(p), "model_type": t} for n, (p, t) in files.items()}
 

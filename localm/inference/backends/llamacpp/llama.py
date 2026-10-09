@@ -2922,9 +2922,11 @@ class LlamaCpp:
         "ok-cpu".
 
         Any failure leaves the model working without drafting, with the
-        source's status naming why: "draft-model-missing", "draft-load-failed",
-        "draft-vocab-mismatch", "draft-rewind-unsupported" (a draft with
-        recurrent layers) or "draft-context-refused". A load the cancel event
+        source's status naming why: "draft-model-missing",
+        "draft-unsupported-role" (a file whose metadata shows it is not a
+        causal chat model, ``draft_role_refusal``; nothing is loaded),
+        "draft-load-failed", "draft-vocab-mismatch", "draft-rewind-unsupported"
+        (a draft with recurrent layers) or "draft-context-refused". A load the cancel event
         stopped frees everything this instance loaded and raises
         ModelLoadCancelled. Unless *verbose*, llama.cpp's output while the draft
         context is created or anything is freed goes where ``_quiet_stderr``
@@ -2937,6 +2939,12 @@ class LlamaCpp:
         self._source = source
         if not path or not os.path.isfile(path):
             source.disable("draft-model-missing")
+            return
+        from ._draftmodel import draft_role_refusal
+        role = draft_role_refusal(path)
+        if role is not None:
+            logger.warning("draft model %s cannot draft: %s", os.path.basename(path), role)
+            source.disable("draft-unsupported-role")
             return
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = 99 if on_gpu else 0

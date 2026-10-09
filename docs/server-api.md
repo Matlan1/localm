@@ -148,11 +148,10 @@ held drafting back (otherwise nothing in the reply matched earlier text), and
 `unavailable` carries the model status as `reason` (`rewind-unsupported` when
 the model's cache cannot drop a rejected draft, `ngram-cannot-pay` when drafts
 accepted 90% of the time were measured not to beat one-token decoding by 5%).
-`draft`
-reports the same states; its `unavailable` reasons also include
-`draft-model-missing`, `draft-load-failed`, `draft-vocab-mismatch`,
-`draft-context-refused` and `draft-cannot-pay` (measured too slow to help at an
-85% acceptance), and `stopped` carries `draft-decode-failed:<code>`
+`draft` reports the same states; its `unavailable` reasons also include
+`draft-model-missing`, `draft-unsupported-role` (the file is not a causal chat
+model), `draft-load-failed`, `draft-vocab-mismatch`, `draft-context-refused` and
+`draft-cannot-pay` (measured too slow to help at an 85% acceptance), and `stopped` carries `draft-decode-failed:<code>`
 when a draft decode failed partway through the reply. An `on` reply carries
 `reason` `draft-on-cpu` when the draft model runs on the CPU (the model runs on
 the CPU, or the draft model did not fit in VRAM beside it). The field is `null` when no draft source is on.
