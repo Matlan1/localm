@@ -527,6 +527,11 @@ CORE_FIELDS: list = [
                  "<name>.local, so there is no IP to type. Letters, digits and "
                  "hyphens only.",
                  group="Server", applies=Applies.RESTART),
+    SettingField("metrics_enabled", Widget.TOGGLE, "Prometheus metrics",
+                 "Serve request, token and GPU-memory counters at /metrics for "
+                 "Prometheus. Needs an admin API key; carries no prompts, "
+                 "replies or model names.",
+                 group="Server", applies=Applies.RESTART, admin_only=True),
     SettingField("mdns_enabled", Widget.TOGGLE, "Advertise on the network (mDNS)",
                  "Broadcast <name>.local over mDNS/Bonjour when bound past loopback "
                  "so devices can reach localm by name. Off = reachable by IP "

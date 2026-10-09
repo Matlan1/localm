@@ -4516,6 +4516,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     pin the resulting stack."""
     from localm.inference.app_assembly import (
         context, diagnostics, errors, mounting, security, transport)
+    from localm.inference.app_assembly import metrics as metrics_assembly
 
     # 1. Process state: the engine registry and the server's session audit.
     _init_engine_state(engine)
@@ -4532,6 +4533,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # 3. Exception handlers, then the app.state the middleware and routes read.
     errors.register_exception_handlers(app)
     context.init_app_state(app)
+    metrics_assembly.configure_metrics()
 
     # 4. Kernel routes and middleware, innermost middleware first.
     if api_landing:
@@ -4542,7 +4544,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     security.add_origin_guard(app, cors_cfg)
     security.add_security_headers(app)
     security.add_docs_loopback_gate(app)
-    transport.add_transport_middleware(app)  # outermost
+    transport.add_transport_middleware(app)
+    metrics_assembly.add_metrics(app)        # outermost; only when enabled
 
     # 5. Route groups (localm/inference/routes/*.py).
     mounting.mount_route_groups(app, ctx)
@@ -4591,6 +4594,14 @@ def _speculation_usage(engine) -> Optional[SpeculationUsage]:
         _dbg.debug("usage.speculation left out: the engine's figures did not "
                    "validate (%s)", type(exc).__name__)
         return None
+
+
+def _record_generation_metrics(prompt_tokens, completion_tokens, ttft_ms,
+                               tokens_per_sec) -> None:
+    """Hand one finished generation's figures to the metrics collector."""
+    from localm.inference import metrics
+    metrics.observe_generation(prompt_tokens, completion_tokens, ttft_ms,
+                               tokens_per_sec)
 
 
 def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[float]:
@@ -5280,6 +5291,8 @@ async def _stream_sse(
         mtp=_mtp_usage(engine),
         speculation=_speculation_usage(engine),
     )
+    _record_generation_metrics(usage.prompt_tokens, usage.completion_tokens,
+                               usage.ttft_ms, usage.tokens_per_sec)
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
                           finish_reason=finish_reason)
     yield f"data: {done.model_dump_json()}\n\n"
@@ -5484,6 +5497,9 @@ async def _stream_sse_completion(
                 completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         },
     }
+    _record_generation_metrics(prompt_tokens, completion_tokens,
+                               done["usage"]["ttft_ms"],
+                               done["usage"]["tokens_per_sec"])
     yield f"data: {json.dumps(done)}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -6069,6 +6085,9 @@ async def _complete(
         mtp=_mtp_usage(engine),
         speculation=_speculation_usage(engine),
     )
+
+    _record_generation_metrics(usage.prompt_tokens, usage.completion_tokens,
+                               usage.ttft_ms, usage.tokens_per_sec)
 
     response = ChatResponse(
         id=make_chunk_id(),
