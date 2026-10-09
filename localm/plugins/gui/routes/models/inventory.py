@@ -26,6 +26,41 @@ from localm.plugins.gui.web import (LoadModelRequest, ScanRequest,
                                     UnloadModelRequest)
 
 
+def _adapter_maps(registry: dict, row_names: list) -> tuple:
+    """Adapter facts for the model list, computed off the event loop.
+
+    Returns ``(adapter_info, attached_to)``: *adapter_info* maps each GGUF LoRA
+    adapter's name to its ``adapter`` / ``base`` / ``scale`` row fields, and
+    *attached_to* maps each non-adapter row name to the adapters applied
+    whenever it loads, as ``{"name", "file", "scale"}`` (an adapter attached to
+    any registered name of the same model file counts)."""
+    from pathlib import Path as _P
+
+    from localm.model_manager import (list_adapters, names_same_model)
+    adapters = list_adapters(reg=registry)
+    adapter_info: dict = {}
+    for a in adapters:
+        info = {"adapter": True, "adapter_file": _P(str(a["path"])).name}
+        if a["base"]:
+            info["base"] = a["base"]
+            info["base_registered"] = a["base"] in registry
+            if a["scale"] is not None:
+                info["scale"] = a["scale"]
+        adapter_info[a["name"]] = info
+    attached_to: dict = {}
+    for a in adapters:
+        if not a["base"]:
+            continue
+        for name in row_names:
+            if name in adapter_info:
+                continue
+            if name == a["base"] or names_same_model(name, a["base"], registry):
+                attached_to.setdefault(name, []).append(
+                    {"name": a["name"], "file": _P(str(a["path"])).name,
+                     "scale": a["scale"]})
+    return adapter_info, attached_to
+
+
 def register(app: FastAPI, context: ModelRouteContext) -> None:
     active_model = context.active_model
     switch_model = context.switch_model
@@ -129,6 +164,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
          context_lens, tool_caps) = await loop.run_in_executor(
             get_plugin_executor(), _probe_rows)
 
+        adapter_info, attached_to = await loop.run_in_executor(
+            get_plugin_executor(), _adapter_maps, registry,
+            [name for name, _e, _m, _p in rows])
+
         models = []
         for name, entry, mtype, epath in rows:
             size = sizes.get(epath)
@@ -182,6 +221,17 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if missing_flags.get(epath):
                 row_out["missing"] = True
                 row_out["last_path"] = epath
+            if name in adapter_info:
+                row_out.update(adapter_info[name])
+            elif attached_to.get(name):
+                row_out["adapters"] = attached_to[name]
+                applied = getattr(engine, "applied_adapters", None) if loaded else None
+                if isinstance(applied, list):
+                    row_out["applied_adapters"] = applied
+            elif loaded and engine is not None:
+                applied = getattr(engine, "applied_adapters", None)
+                if isinstance(applied, list) and applied:
+                    row_out["applied_adapters"] = applied
             models.append(row_out)
         out = {"models": models, "active": current}
         # Models this instance answers through a peer instance on the same

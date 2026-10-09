@@ -219,6 +219,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localm adapter list` manage them. An adapter made for a different architecture is
   refused with both architectures named, and a loaded model's load response lists the
   adapters it runs with.
+- **LoRA adapters are managed from the Models page.** An adapter row shows what it is
+  attached to and its scale, with attach, change and detach controls; a refusal such as a
+  mismatched architecture appears inside the dialog. A base model shows the adapters it
+  will run with, the ones it is running, and asks for an unload and reload when they
+  differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
