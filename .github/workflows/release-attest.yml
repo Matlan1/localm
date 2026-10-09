@@ -9,8 +9,10 @@ name: Release attestations and SBOM
 # PEP 740 attestations from that workflow; the files attested here are the ones
 # attached to the GitHub release.
 #
-# workflow_dispatch with dry_run (the default) builds and validates everything
-# and writes nothing: no attestation, no release upload.
+# workflow_dispatch with dry_run (the default) and a pull request that edits this
+# file build and validate everything and write nothing: no attestation, no
+# release upload. A pull request run builds the checked-out tree and looks for
+# the zip on the release matching VERSION, warning when there is none.
 #
 # Invariant: the `attest` job is the only one with id-token or attestations
 # write, and the only one that writes to the release.
@@ -28,12 +30,15 @@ on:
         description: "Build and validate only; no attestation, no release upload"
         type: boolean
         default: true
+  pull_request:
+    paths:
+      - ".github/workflows/release-attest.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-attest-${{ inputs.tag || github.event.release.tag_name }}
+  group: release-attest-${{ inputs.tag || github.event.release.tag_name || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -44,12 +49,13 @@ jobs:
       contents: read
     env:
       TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      EVENT: ${{ github.event_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
-          ref: ${{ inputs.tag || github.event.release.tag_name }}
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.sha }}
           fetch-depth: 1
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -64,6 +70,10 @@ jobs:
         run: |
           set -euo pipefail
           file_version="$(tr -d '[:space:]' < VERSION)"
+          if [ "${EVENT}" = "pull_request" ]; then
+            TAG="v${file_version}"
+            echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          fi
           echo "tag=${TAG}  VERSION=${file_version}"
           if [ "${TAG}" != "v${file_version}" ]; then
             echo "::error::tag ${TAG} does not match VERSION ${file_version} (expected v${file_version})"
@@ -144,7 +154,7 @@ jobs:
   attest:
     name: attest and attach
     needs: build
-    if: github.event_name == 'release' || inputs.dry_run == false
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
     runs-on: ubuntu-latest
     permissions:
       contents: write

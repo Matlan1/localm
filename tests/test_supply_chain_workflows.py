@@ -74,15 +74,19 @@ def test_codeql_actions_are_sha_pinned_and_dependabot_does_not_ignore_them():
     assert not any(name.startswith("github/codeql-action") for name in ignored)
 
 
-def test_release_attest_triggers_on_published_release_and_dispatch():
+def test_release_attest_triggers_on_published_release_dispatch_and_its_own_edits():
     on = _triggers(_load("release-attest.yml"))
     assert on["release"]["types"] == ["published"]
     assert on["workflow_dispatch"]["inputs"]["dry_run"]["default"] is True
+    assert on["pull_request"]["paths"] == [".github/workflows/release-attest.yml"]
 
 
 def test_release_attest_attest_job_runs_only_for_a_release_or_a_real_dispatch():
     condition = _load("release-attest.yml")["jobs"]["attest"]["if"]
-    assert condition == "github.event_name == 'release' || inputs.dry_run == false"
+    assert condition == (
+        "github.event_name == 'release' || "
+        "(github.event_name == 'workflow_dispatch' && inputs.dry_run == false)"
+    )
 
 
 def test_release_attest_only_the_attest_job_holds_write_scopes():
