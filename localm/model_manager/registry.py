@@ -35,6 +35,8 @@ from .gguf import _find_model_units
 from .gguf import _is_hf_model_dir
 from .gguf import _gguf_declared_min_size
 from .gguf import _has_gguf_magic
+from .gguf import gguf_unusable_reason
+from .unsupported import explain_unsupported_model, hf_folder_refusal
 from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
@@ -1210,6 +1212,8 @@ def relocate_target(new_path: str) -> "tuple[Path | None, str | None]":
             return None, f"Not a HuggingFace model directory: {p}"
     elif p.suffix.lower() != ".gguf":
         return None, f"Not a GGUF model file: {p}"
+    elif (unusable := gguf_unusable_reason(p)) is not None:
+        return None, f"{p}: {unusable}"
     elif not _has_gguf_magic(p):
         declared_min = _gguf_declared_min_size(p)
         try:
@@ -1885,6 +1889,10 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                 # .gguf, an empty/partial copy): registering it would pollute the
                 # model list and could crash a later load. Note it so a
                 # genuinely-broken file is not silently invisible.
+                unusable = gguf_unusable_reason(child)
+                if unusable is not None:
+                    logger.debug("skipping %s: %s", child.name, unusable)
+                    continue
                 if not _has_gguf_magic(child):
                     logger.debug("skipping %s: not a GGUF (bad/missing magic)",
                                  child.name)
@@ -3430,6 +3438,22 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
 
 
 
+def _skip_unusable_ggufs(first_parts: List[Path]) -> List[Path]:
+    """*first_parts* without the GGUF files that cannot be registered
+    (unsupported version, byte-swapped, importance matrix); each skipped file is
+    reported with its reason."""
+    from rich.markup import escape
+
+    usable: List[Path] = []
+    for gguf in first_parts:
+        reason = gguf_unusable_reason(gguf)
+        if reason is None:
+            usable.append(gguf)
+        else:
+            console.print(f"[yellow]Skipped {escape(gguf.name)}:[/yellow] {escape(reason)}")
+    return usable
+
+
 def _add_local_gguf_dir(
     first_parts: List[Path],
     name: Optional[str],
@@ -3723,6 +3747,11 @@ def _register_ollama_blob(
     is set. Returns False when nothing was registered; see ``add_local``."""
     from rich.markup import escape
 
+    blob_unusable = gguf_unusable_reason(blob_path)
+    if blob_unusable is not None:
+        console.print(f"[red]Not a usable model:[/red] {escape(str(blob_path))}\n"
+                      f"{escape(blob_unusable)}")
+        return False
     if store and _mm.is_external_path(blob_path):
         # Refuse before touching the filesystem when registration is already
         # known to be refused (a name collision with no terminal to confirm an
@@ -4070,6 +4099,10 @@ def add_local(
             p = parent
             is_hf = True
         else:
+            explanation = explain_unsupported_model(parent)
+            if explanation is not None:
+                console.print(f"[red]Not a model:[/red] {escape(str(p))}\n{escape(explanation)}")
+                return False
             console.print(
                 f"[red]Incomplete model:[/red] {escape(str(p))}\n"
                 "A .safetensors weight file loads only as part of a HuggingFace model "
@@ -4085,6 +4118,11 @@ def add_local(
     # type detection are the same as for `localm add <hf dir>`. An HF dir (is_hf)
     # falls through to the dir-as-one-model path below; a folder holding no
     # model falls through to the "Not a model" message.
+    if p.is_file() and (is_gguf or is_blob):
+        unusable = gguf_unusable_reason(p)
+        if unusable is not None:
+            console.print(f"[red]Not a usable model:[/red] {escape(str(p))}\n{escape(unusable)}")
+            return False
     if p.is_dir() and not is_hf:
         hub = scan_hub_cache(p)
         if hub is not None:
@@ -4094,6 +4132,7 @@ def add_local(
     max_depth = _import_max_depth()
     if p.is_dir() and not is_hf:
         first_parts, hf_dirs = _find_model_units(p, max_depth=max_depth)
+        first_parts = _skip_unusable_ggufs(first_parts)
         if first_parts or hf_dirs:
             only_one = len(first_parts) + len(hf_dirs) == 1
             registered_any = False
@@ -4117,11 +4156,14 @@ def add_local(
             return registered_any
 
     if not (is_gguf or is_hf or is_blob):
-        detail = ("Expected a .gguf file or a HuggingFace model directory "
-                  "(config.json plus weights or a tokenizer).")
-        if p.is_dir():
-            detail += (f" Looked {max_depth} folder level(s) deep; point at a "
-                       "folder closer to the model, or raise 'import_max_depth'.")
+        detail = explain_unsupported_model(p)
+        if detail is None:
+            detail = ("Expected a .gguf file or a HuggingFace model directory "
+                      "(config.json plus weights or a tokenizer).")
+            if p.is_dir():
+                detail += (f" Looked {max_depth} folder level(s) deep; point at a "
+                           "folder closer to the model, or raise 'import_max_depth'.")
+        detail = escape(detail)
         console.print(f"[red]Not a model:[/red] {escape(str(p))}\n{detail}")
         return False
 
@@ -4232,6 +4274,11 @@ def add_local(
             "under an automatic name the next time models are scanned "
             "(`localm list`, or the next server start)."
         )
+    if registered and is_hf:
+        cannot_load = hf_folder_refusal(p)
+        if cannot_load is not None:
+            console.print("[yellow]Registered, but localm cannot load it:[/yellow] "
+                          f"{escape(cannot_load)}")
     return registered
 
 

@@ -25,7 +25,7 @@ CLI (localm/cli/)                  Plugin engine (localm/plugins/)
 
 ## Layering
 
-[layering.toml](layering.toml) declares the package's tiers, top to bottom,
+[layering.toml](https://github.com/Matlan1/localm/blob/master/docs/layering.toml) declares the package's tiers, top to bottom,
 and places every top-level unit under `localm/` in exactly one of them. The
 rule is small: a module-level import may target only a unit in a lower tier;
 units that share a tier are peers and never import each other at module

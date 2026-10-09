@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Files and folders localm cannot run now say why.** `localm add`, `localm pull <path>`
+  and the GUI add and pull routes name the format and the nearest runnable alternative for
+  GGUF version 1 and big-endian GGUF files, legacy GGML `.bin` files, importance-matrix
+  GGUFs, Mistral-native folders, `.onnx`, TensorRT, LiteRT and NeMo files, and MLC,
+  OpenVINO and EXL2/EXL3 folders. An MLX-quantized, EXL2/EXL3 or OpenVINO folder still
+  registers, with a note that it cannot be loaded, and is refused at load with the same
+  sentence before any worker starts. Direct-URL and Ollama-blob pulls apply the same
+  checks, and the automatic models-folder scan quietly skips the GGUFs it cannot load. A
+  Mistral-style folder holding both Hugging Face shards and `consolidated*` files is sized
+  by the shards only.
 - **Models other tools already downloaded can be added in place.** `localm add` (and
   the Models page's add-path box) now takes the Hugging Face cache folder
   (`~/.cache/huggingface`, or `HF_HOME`), registering one model per repository from
@@ -170,6 +180,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for it, including an older one kept in the project's `.localcoder` folder;
   your project files are left alone. A session that is open, or a project
   with an open session, has to be ended first.
+- **A browsable documentation site, with an API reference generated from the
+  server's OpenAPI schema.** The `docs/` guides are built into a searchable site,
+  and the API reference lists every route, parameter and schema the server
+  declares. `scripts/export_openapi.py` writes the schema without loading a model.
+  The site is published with each release.
 
 ### Changed
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU

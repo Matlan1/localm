@@ -296,6 +296,12 @@ dev = [
     # Property-based fuzzing of the untrusted-input parsers (tests/fuzz/).
     "hypothesis>=6.168.5",
 ]
+# Documentation site (mkdocs.yml). Install with:  pip install -e ".[docs]"
+# Build with:  mkdocs build --strict
+docs = [
+    "mkdocs>=1.6.1,<2",
+    "mkdocs-material>=9.7.7,<10",
+]
 
 [project.scripts]
 # console_main wraps the CLI group with the venv guard (NEW-J); the bare `main`

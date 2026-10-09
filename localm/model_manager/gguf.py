@@ -24,6 +24,7 @@ from rich.progress import TextColumn
 from rich.progress import TimeRemainingColumn
 from ..debuglog import logger
 from ._shared import console
+from .unsupported import GGUF_IMATRIX_REFUSAL, gguf_file_refusal, gguf_header_refusal, gguf_version_supported
 
 
 
@@ -357,7 +358,8 @@ _GGUF_MIN_BYTES = 1024
 
 
 def _has_gguf_magic(path: Path) -> bool:
-    """True when *path* begins with the GGUF magic ``b"GGUF"``, is at least
+    """True when *path* begins with the GGUF magic ``b"GGUF"``, declares a GGUF
+    version that loads (2 or 3), is at least
     ``_GGUF_MIN_BYTES`` long, and - when its header can be parsed - is not
     shorter than what that header's own tensor-info section declares it must
     be (see ``_gguf_declared_min_size`` for exactly what that check does and
@@ -381,10 +383,15 @@ def _has_gguf_magic(path: Path) -> bool:
     floor = _mm._GGUF_MIN_BYTES
     try:
         with open(path, "rb") as fh:
-            if fh.read(4) != b"GGUF":
-                return False
+            head = fh.read(24)
         size = path.stat().st_size
     except OSError:
+        return False
+    if head[:4] != b"GGUF":
+        return False
+    version_refusal = gguf_header_refusal(head)
+    if version_refusal is not None:
+        logger.debug("skipping %s: %s", path.name, version_refusal)
         return False
     if size < floor:
         logger.debug(
@@ -975,7 +982,7 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
         if buf[:4] != b"GGUF":
             return 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return 0            # v1's 32-bit counts predate every arch we size
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1108,7 +1115,7 @@ def gguf_nextn_predict_layers(path: Path) -> "tuple[str, int]":
         if buf[:4] != b"GGUF":
             return "", 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return "", 0
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1176,7 +1183,7 @@ def gguf_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int) -> int:
         if buf[:4] != b"GGUF":
             return 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return 0
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1267,7 +1274,7 @@ def gguf_expert_counts(path: Path) -> "tuple[int, int]":
         if buf[:4] != b"GGUF":
             return 0, 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return 0, 0
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1358,7 +1365,7 @@ def _gguf_tensor_offset_entries(
             if f.read(4) != b"GGUF":
                 return None
             (version,) = struct.unpack("<I", f.read(4))
-            if version < 2:
+            if not gguf_version_supported(version):
                 return None
             tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
             for _ in range(kv_count):
@@ -1648,7 +1655,7 @@ def gguf_recurrent_state_bytes(path: Path, *, _parsed: object = _UNSET) -> int:
         if buf[:4] != b"GGUF":
             return 0
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return 0
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1707,7 +1714,7 @@ def _gguf_split_layout_meta(path: Path) -> "Optional[tuple[int, int]]":
             if f.read(4) != b"GGUF":
                 return None
             (version,) = struct.unpack("<I", f.read(4))
-            if version < 2:
+            if not gguf_version_supported(version):
                 return None
             _tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
             architecture = None
@@ -1799,7 +1806,7 @@ def _gguf_declared_min_size(path: Path) -> Optional[int]:
             if f.read(4) != b"GGUF":
                 return None
             (version,) = struct.unpack("<I", f.read(4))
-            if version < 2:
+            if not gguf_version_supported(version):
                 return None
             tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
             if tensor_count > _GGUF_MAX_TENSOR_COUNT:
@@ -1854,7 +1861,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
         if buf[:4] != b"GGUF":
             return {}
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             # v1 used 32-bit tensor/kv counts and predates every architecture
             # this detector cares about; no signal rather than mis-parsing it
             # with the v2+ 64-bit layout.
@@ -1908,7 +1915,7 @@ def gguf_pretokenizer(path: Path) -> Optional[str]:
         if buf[:4] != b"GGUF":
             return None
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return None
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -1922,6 +1929,51 @@ def gguf_pretokenizer(path: Path) -> Optional[str]:
             off = _gguf_skip_value(buf, off, vtype)
     except (struct.error, IndexError, UnicodeDecodeError):
         pass
+    return None
+
+
+_GGUF_GENERAL_TYPE_KEY = "general.type"
+
+
+def gguf_general_type(path: Path) -> Optional[str]:
+    """The ``general.type`` string a GGUF declares, or ``None`` when it declares
+    none within the bounded read or the header could not be read or parsed.
+    Never raises."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return None
+    try:
+        if buf[:4] != b"GGUF":
+            return None
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if not gguf_version_supported(version):
+            return None
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == _GGUF_GENERAL_TYPE_KEY and vtype == _GGUF_TYPE_STRING:
+                value, _off = _gguf_read_string(buf, off)
+                return value
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        pass
+    return None
+
+
+def gguf_unusable_reason(path: Path) -> Optional[str]:
+    """The sentence explaining why the GGUF file *path* cannot be registered or
+    loaded as a model (unsupported GGUF version, byte-swapped file, importance
+    matrix), or None when nothing is wrong with it. Never raises."""
+    reason = gguf_file_refusal(path)
+    if reason is not None:
+        return reason
+    if gguf_general_type(path) == "imatrix":
+        return GGUF_IMATRIX_REFUSAL
     return None
 
 
@@ -2088,7 +2140,7 @@ def gguf_n_embd(path: Path) -> Optional[int]:
         if buf[:4] != b"GGUF":
             return None
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return None
         tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -2160,7 +2212,7 @@ def _gguf_header_layout(f) -> _GgufLayout:
     if f.read(4) != b"GGUF":
         raise struct.error("not a GGUF file")
     (version,) = struct.unpack("<I", f.read(4))
-    if version < 2:
+    if not gguf_version_supported(version):
         raise struct.error(f"unsupported GGUF version {version}")
     tensor_count, kv_count = struct.unpack("<QQ", f.read(16))
     if tensor_count > _GGUF_MAX_TENSOR_COUNT:
@@ -2370,7 +2422,7 @@ def _gguf_capability_probe(path: Path) -> dict:
             return {"chat_template": None, "context_length": None,
                     "complete": False}
         (version,) = struct.unpack_from("<I", buf, 4)
-        if version < 2:
+        if not gguf_version_supported(version):
             return {"chat_template": None, "context_length": None,
                     "complete": False}
         _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
