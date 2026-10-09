@@ -33,6 +33,7 @@ from localm.textguard import (
 )
 
 from . import _api as api
+from ._drafting import DraftSource, MtpSource
 from ._structs import (
     llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
     set_use_mmap)
@@ -1076,6 +1077,7 @@ class LlamaCpp:
     mtp_paused_steps = 0         # steps THIS generation ran plain because drafting was slower
     mtp_skipped = ""             # why THIS generation could not draft at all: "image" or ""
     _draft_pacer = None          # _DraftPacer for this model, created on first use
+    _source = None               # the DraftSource for this model, created on first use
     _clock = time.perf_counter
     _draft_pos = 0               # the draft cache holds positions [0, _draft_pos)
     _queued_tokens: Tuple[int, ...] = ()  # tokens at _draft_pos.. not yet in the draft cache
@@ -1735,7 +1737,7 @@ class LlamaCpp:
             # any raise out of prefill, both exit early. Binding one inside the
             # try loses the real error to an UnboundLocalError.
             sampler = None
-            draft_sampler = None
+            source = None
             # Carries a rejected speculation's replacement token into the next
             # loop iteration; set only by the reject branch below.
             pending_token = None
@@ -1774,18 +1776,12 @@ class LlamaCpp:
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
                 )
-                # Drafting proposes tokens greedily off the MTP context and never
-                # hands them to the request's sampler: every emitted token, with
-                # or without a grammar in that sampler, is one the sampler itself
-                # sampled from a verification or decode row, in emission order.
+                # A draft source never hands its proposals to the request's
+                # sampler: every emitted token, with or without a grammar in that
+                # sampler, is one the sampler itself sampled from a verification
+                # or decode row, in emission order.
                 # See test_a_grammar_reply_drafts_and_its_sampler_sees_only_emitted_tokens.
-                draft_sampler = (
-                    _greedy_chain()
-                    if self._mtp_ctx_ptr is not None and self._mtp_usable
-                    else None
-                )
-
-                self._mtp_drafting = draft_sampler is not None
+                source = self._draft_source()
                 self.mtp_skipped = ""
                 self.mtp_active_this_call = False
                 self.mtp_call_status = ""
@@ -1793,7 +1789,7 @@ class LlamaCpp:
                 self.mtp_accepted = 0
                 self.mtp_steps = 0
                 self.mtp_paused_steps = 0
-                if draft_sampler is not None and self._draft_pacer is None:
+                if source.begin_call() and self._draft_pacer is None:
                     self._draft_pacer = _DraftPacer()
                 pacer = self._draft_pacer
                 clock = self._clock
@@ -1897,7 +1893,7 @@ class LlamaCpp:
                                         self._cached_tokens.append(token)
                                         pos += 1
                                         if decoded:
-                                            self._after_main_token(token, pos - 1)
+                                            source.after_single_token(token, pos - 1)
                                     except Exception as exc:
                                         from localm.debuglog import logger as _dbg
                                         _dbg.debug("gguf generate: final-token bookkeeping raised %s",
@@ -1907,18 +1903,17 @@ class LlamaCpp:
                                             api.llama_batch_free(batch)
                             break
 
-                        # --- Speculative MTP drafting (if draft context is active) ---
+                        # --- Speculative drafting (while the source drafts) ---
                         drafts: List[int] = []
                         accepted: List[int] = []
                         timed = speculate = False
-                        if (self._mtp_ctx_ptr is not None and draft_sampler is not None
-                                and self._mtp_usable and self._mtp_drafting):
+                        if source.drafting():
                             if pacer.paused:
                                 timed = True
                                 pacer.speculate()
-                                self.mtp_paused_steps += 1
-                            elif self._pending_h_pos == pos - 1:
-                                n_max = self._mtp_draft_budget(
+                                source.on_paused_step()
+                            elif source.ready(pos):
+                                n_max = source.budget(
                                     pos, max_new_tokens - tokens_generated
                                     if max_new_tokens > 0 else None)
                                 if n_max > 0:
@@ -1930,11 +1925,10 @@ class LlamaCpp:
                                 with self._gen_lock:
                                     if not (self._stop.is_set() or self._ctx_ptr is None):
                                         try:
-                                            drafts = self._propose_drafts(
-                                                token, pos, n_max, draft_sampler)
+                                            drafts = source.propose(token, pos, n_max)
                                         except Exception as exc:
                                             drafts = []
-                                            self._stop_drafting_this_call(
+                                            source.stop_this_call(
                                                 "draft-decode-error:%s" % type(exc).__name__)
 
                         if drafts:
@@ -1961,17 +1955,13 @@ class LlamaCpp:
                                                 break
                                             accepted.append(draft)
                                         n_acc = len(accepted)
-                                        self.mtp_steps += 1
-                                        self.mtp_drafted += len(drafts)
-                                        self.mtp_accepted += n_acc
-                                        self.mtp_active_this_call = True
+                                        source.on_verify(len(drafts), n_acc)
                                         removed = True
                                         if n_acc < len(drafts):
-                                            # Rejected drafts leave the main cache;
-                                            # the draft cache already ends at pos.
+                                            # Rejected drafts leave the main cache.
                                             removed = api.llama_kv_cache_seq_rm(
                                                 self._ctx_ptr, 0, pos + n_acc + 1, -1)
-                                        self._after_verify(accepted, pos)
+                                        source.after_verify(accepted, pos)
                                         self._cached_tokens.extend([token] + accepted)
                                         pos += n_acc + 1
                                         if not removed:
@@ -1981,13 +1971,7 @@ class LlamaCpp:
                                             # positions. Rebuild from the tokens
                                             # emitted so far and stop speculating.
                                             # See test_a_stuck_draft_cell_disables_mtp_and_keeps_generating.
-                                            self._mtp_usable = False
-                                            self.supports_mtp = False
-                                            self.mtp_status = "rewind-unsupported"
-                                            from localm.debuglog import logger as _dbg_rewind
-                                            _dbg_rewind.warning(
-                                                "MTP: this model's KV cache cannot drop a rejected "
-                                                "draft token; speculation disabled for this model")
+                                            source.rewind_unsupported()
                                             if not self._rebuild_kv_after_stuck_draft():
                                                 self.last_finish_reason = "error"
                                                 self._cached_tokens = []
@@ -2003,7 +1987,7 @@ class LlamaCpp:
                                         batch = self._create_batch([token], pos, logits_at_last_only=True)
                                         ret = api.llama_decode(self._ctx_ptr, batch)
                                         if ret == 0:
-                                            self._after_main_token(token, pos)
+                                            source.after_single_token(token, pos)
                                             self._cached_tokens.append(token)
                                             pos += 1
                                         else:
@@ -2059,7 +2043,7 @@ class LlamaCpp:
                                             self.last_finish_reason = "length"
                                             self._cached_tokens = []
                                             break
-                                    self._after_main_token(token, pos)
+                                    source.after_single_token(token, pos)
                                     self._cached_tokens.append(token)
                                     pos += 1
                                     if timed:
@@ -2074,7 +2058,7 @@ class LlamaCpp:
                         self.last_finish_reason = "length"
                     with self._gen_lock:
                         if not (self._stop.is_set() or self._ctx_ptr is None):
-                            self._finish_draft_tracking()
+                            source.finish()
                 logger.info(
                     "gguf generate: complete, %d token(s) in %.2fs, finish_reason=%s",
                     tokens_generated, time.monotonic() - _decode_t0, self.last_finish_reason)
@@ -2091,8 +2075,8 @@ class LlamaCpp:
             finally:
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
-                if draft_sampler is not None:
-                    api.llama_sampler_free(draft_sampler)
+                if source is not None:
+                    source.end_call()
 
     @staticmethod
     def _messages_with_markers(messages: List[Dict], marker: str):
@@ -2682,6 +2666,12 @@ class LlamaCpp:
         if n and self._draft_tracking():
             self._queue_draft_rows(accepted, self._main_h_rows(n))
         self._capture_h(n, pos + n)
+
+    def _draft_source(self) -> DraftSource:
+        """The draft source the decode loop drives for this model."""
+        if self._source is None:
+            self._source = MtpSource(self)
+        return self._source
 
     def _mtp_draft_budget(self, pos: int, tokens_left: Optional[int]) -> int:
         """How many drafts the step at *pos* may propose: the configured count,
