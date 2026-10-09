@@ -205,7 +205,7 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
                 os.environ["HIP_VISIBLE_DEVICES"] = "-1"
                 os.environ["ROCR_VISIBLE_DEVICES"] = "-1"
                 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-            from localm.inference.embedder import GGUFEmbedder
+            from localm.inference.embedder import _POOLING_RANK, GGUFEmbedder
             try:
                 embedder = GGUFEmbedder(**payload)
                 # The pooling facts (and, when n_ctx was None/"auto", the
@@ -214,15 +214,15 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
                 # can warn about a mis-pooled model / report the real window:
                 # only the child ever holds the model handle either is read
                 # from.
-                resp_q.put(("ok", {
+                meta = {
                     "dim": embedder.dim,
                     "declared_pooling": embedder.declared_pooling,
                     "effective_pooling": embedder.pooling_type,
                     "n_ctx": embedder.n_ctx,
-                    "n_cls_out": embedder.n_cls_out,
-                    "cls_labels": embedder.cls_labels,
-                    "has_rerank_template": embedder._rerank_template is not None,
-                }))
+                }
+                if embedder.pooling_type == _POOLING_RANK:
+                    meta.update(embedder.rank_head_meta())
+                resp_q.put(("ok", meta))
             except Exception as e:
                 resp_q.put(("error", str(e)))
             # A hard native abort during GGUFEmbedder(...) is NOT caught here -
@@ -405,8 +405,8 @@ class EmbedderRunner:
         self._req_q.put(("embed", texts))
         return self._wait(timeout, "embed")
 
-    def rerank(self, pairs: List["tuple[str, str]"],
-               timeout: float = _EMBED_TIMEOUT_DEFAULT) -> List[dict]:
+    def rerank(self, pairs: list[tuple[str, str]],
+               timeout: float = _EMBED_TIMEOUT_DEFAULT) -> list[dict]:
         """Score *pairs* via the isolated worker; the same failure contract and
         the same one-RPC-at-a-time restriction as :meth:`embed`."""
         self._req_q.put(("rerank", pairs))

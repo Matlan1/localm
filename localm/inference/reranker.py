@@ -21,7 +21,7 @@ from __future__ import annotations
 import atexit
 import threading
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple, Optional
 
 from localm import pathscrub
 from localm.debuglog import logger
@@ -33,10 +33,12 @@ from localm.inference.backends.base import RerankerHeadMissingError
 # unbounded in waiting: none of them may be called from an `async def` handler.
 _LOCK = threading.RLock()
 _RERANKER = None
+# _file_key of the file _RERANKER was loaded from, taken when it was loaded.
+_RERANKER_KEY: Optional[tuple[str, int, int]] = None
 # (resolved path, mtime_ns, size) -> why that file failed to load. A file that
 # failed once is refused again without respawning a worker until it changes or
 # reset_reranker() runs.
-_LOAD_FAILED: Dict[Tuple[str, int, int], str] = {}
+_LOAD_FAILED: dict[tuple[str, int, int], str] = {}
 
 
 class RerankerModelError(Exception):
@@ -52,7 +54,7 @@ class RerankerUnavailableError(RuntimeError):
     """The reranker model is registered but could not be loaded."""
 
 
-def _file_key(path: str) -> Tuple[str, int, int]:
+def _file_key(path: str) -> tuple[str, int, int]:
     try:
         st = Path(path).stat()
         return (str(Path(path).resolve()), st.st_mtime_ns, st.st_size)
@@ -74,7 +76,7 @@ def _registered_gguf_path(name: str) -> Optional[str]:
     return str(path) if Path(path).is_file() else None
 
 
-def registered_rerankers() -> List[str]:
+def registered_rerankers() -> list[str]:
     """Names of the registered models that are rerankers, sorted."""
     from localm.config import load_registry
     from localm.model_manager.registry import entry_is_reranker
@@ -83,7 +85,7 @@ def registered_rerankers() -> List[str]:
                   if isinstance(entry, dict) and entry_is_reranker(name, entry))
 
 
-def resolve_reranker(model: Optional[str]) -> Tuple[str, str]:
+def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
     """``(registry name, GGUF path)`` for the reranker a request names.
 
     An omitted or ``localm`` model resolves to the only registered reranker.
@@ -146,14 +148,13 @@ def get_reranker(path: str):
     :class:`RerankerHeadMissingError` for a model without a classifier head and
     :class:`RerankerUnavailableError` when the load fails; a failed file is not
     retried until it changes."""
-    global _RERANKER
+    global _RERANKER, _RERANKER_KEY
     from localm.config import load_config
     from localm.inference import embedder as emb
     key = _file_key(path)
     with _LOCK:
-        current = _RERANKER
-        if current is not None and _file_key(current.model_path) == key:
-            return current
+        if _RERANKER is not None and _RERANKER_KEY == key:
+            return _RERANKER
         failed = _LOAD_FAILED.get(key)
         if failed is not None:
             raise RerankerUnavailableError(failed)
@@ -167,11 +168,12 @@ def get_reranker(path: str):
     from localm.inference.engine import _LOAD_LOCK
     with _LOAD_LOCK:
         with _LOCK:
+            if _RERANKER is not None and _RERANKER_KEY == key:
+                return _RERANKER
             current = _RERANKER
-            if current is not None and _file_key(current.model_path) == key:
-                return current
             if current is not None:
                 _RERANKER = None
+                _RERANKER_KEY = None
                 current.close()
             try:
                 _RERANKER = emb.IsolatedEmbedder(
@@ -183,6 +185,7 @@ def get_reranker(path: str):
                 logger.warning("could not load reranker %s (%s)",
                                Path(path).name, e)
                 raise RerankerUnavailableError(reason) from e
+            _RERANKER_KEY = key
             logger.info("reranker ready: %s (labels=%s)", Path(path).name,
                         _RERANKER.cls_labels or "none declared")
             return _RERANKER
@@ -192,11 +195,11 @@ class RerankOutcome(NamedTuple):
     """What :func:`rerank` returns: one entry per document, in request order,
     each ``{"scores", "tokens", "truncated"}``, and the classifier head's label
     names (empty when the model declares none)."""
-    scored: List[dict]
-    labels: List[str]
+    scored: list[dict]
+    labels: list[str]
 
 
-def rerank(path: str, query: str, documents: List[str]) -> RerankOutcome:
+def rerank(path: str, query: str, documents: list[str]) -> RerankOutcome:
     """Score *query* against each of *documents* with the reranker at *path*."""
     emb = get_reranker(path)
     scored = emb.rerank([(query, d) for d in documents])
@@ -228,7 +231,7 @@ def reset_reranker(*, force: bool = True) -> bool:
     True when a reranker was released; with ``force=False`` a reranker with a
     request in flight is left alone (and nothing is cleared), checked and
     released in one locked step."""
-    global _RERANKER
+    global _RERANKER, _RERANKER_KEY
     with _LOCK:
         if not force and _RERANKER is not None and _RERANKER.active_requests > 0:
             return False
@@ -236,6 +239,7 @@ def reset_reranker(*, force: bool = True) -> bool:
         if released:
             _RERANKER.close()
         _RERANKER = None
+        _RERANKER_KEY = None
         _LOAD_FAILED.clear()
         return released
 
@@ -254,8 +258,8 @@ def release_for_exit() -> bool:
     return True
 
 
-def rank_results(scored: List[dict], top_n: Optional[int] = None,
-                 labels: Optional[List[str]] = None) -> List[dict]:
+def rank_results(scored: list[dict], top_n: Optional[int] = None,
+                 labels: Optional[list[str]] = None) -> list[dict]:
     """Rerank results from per-document *scored* entries (as returned by
     :func:`rerank`, aligned with the request's documents): ``{"index",
     "relevance_score"}`` for each, best first (ties keep request order), cut to

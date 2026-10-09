@@ -19,7 +19,7 @@ localhost by default; widen it with the `cors_origins` config key. See
 [tls.md](tls.md) before exposing the server beyond 127.0.0.1.
 
 The OpenAI-compatible inference routes below (`/v1/chat/completions`,
-`/v1/completions`, `/v1/embeddings`, `/v1/audio/transcriptions` and
+`/v1/completions`, `/v1/embeddings`, `/v1/rerank`, `/v1/audio/transcriptions` and
 `/v1/images/generations`) are the one exception: they accept a
 cross-origin request from any local app - LM Studio/Ollama-style clients and
 AI browsers included - without needing `cors_origins` widened first, so
@@ -298,6 +298,42 @@ Returns OpenAI-format embedding vectors. 422 when the loaded model cannot
 embed. Against a HuggingFace-format model, 413 when the request exceeds the
 configured text-count or character-count cap (`hf_embed_max_texts`,
 `hf_embed_max_chars`).
+
+### `POST /v1/rerank`
+
+Scope: any valid key (no specific scope required once auth is enabled).
+
+```json
+{"model": "bge-reranker", "query": "what is a panda?",
+ "documents": ["The giant panda is a bear.", {"text": "Pandas is a Python library."}],
+ "top_n": 2, "return_documents": false}
+```
+
+Scores each document against the query with a registered reranker (a GGUF
+cross-encoder such as bge-reranker-v2-m3, or a decoder reranker such as
+Qwen3-Reranker) and returns them best first, in the Jina / Cohere / llama-server
+shape:
+
+```json
+{"object": "list", "model": "bge-reranker",
+ "usage": {"prompt_tokens": 61, "total_tokens": 61},
+ "results": [{"index": 1, "relevance_score": 2.24}, {"index": 0, "relevance_score": 1.58}]}
+```
+
+`index` is the document's position in the request; a higher `relevance_score` is
+more relevant, on a scale that belongs to the model (bge returns an unbounded score,
+Qwen3-Reranker the probability of "yes"). `top_n` keeps the best N and
+`return_documents` adds each document's text. A classifier head with several outputs
+also reports them as `label_scores`, and the first is the relevance score. A document
+longer than the model's window is cut to fit and its result carries `"truncated": true`.
+
+`model` names a registered reranker and may be left out when exactly one is
+registered; a path is never accepted. One reranker is resident at a time and a
+request for another replaces it. Errors: 400 for an empty query, a query too long
+for the model's window, or several rerankers with no `model`; 404 for an unregistered
+model or no reranker at all; 422 for an invalid body, a model that is not a reranker
+(an embedding or chat model), or a file without a classifier head; 503 when the
+model cannot be loaded or its worker fails.
 
 ### `POST /v1/audio/transcriptions`
 

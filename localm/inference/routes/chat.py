@@ -602,7 +602,7 @@ def register(app: FastAPI, ctx) -> None:
             name, path = await loop.run_in_executor(
                 None, _rr.resolve_reranker, req.model)
         except _rr.RerankerModelError as e:
-            raise HTTPException(e.status, str(e))
+            raise HTTPException(e.status, str(e)) from e
         # The reranker shares the embedder's one-worker bound: further requests
         # queue here on the loop, holding no default-pool worker.
         try:
@@ -610,13 +610,13 @@ def register(app: FastAPI, ctx) -> None:
                 outcome = await loop.run_in_executor(
                     None, lambda: _rr.rerank(path, req.query, texts))
         except (RerankInputError, PretokenizerUnsafeInputError) as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         except RerankerHeadMissingError as e:
-            raise HTTPException(422, str(e))
+            raise HTTPException(422, str(e)) from e
         except _rr.RerankerUnavailableError as e:
-            raise HTTPException(503, f"Reranker unavailable: {e}")
+            raise HTTPException(503, f"Reranker unavailable: {e}") from e
         except RuntimeError as e:
-            raise HTTPException(503, f"Reranking failed: {e}")
+            raise HTTPException(503, f"Reranking failed: {e}") from e
         results = _rr.rank_results(outcome.scored, req.top_n, outcome.labels)
         if req.return_documents:
             for row in results:

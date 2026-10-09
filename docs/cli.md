@@ -250,6 +250,25 @@ is a real HuggingFace model (config plus weights and tokenizer), the folder is
 registered; otherwise the file is rejected with an "incomplete model" message
 rather than added as a half-model.
 
+### Rerankers
+
+A reranker scores each of several documents against a query, so a search result list can be
+reordered by relevance. A GGUF cross-encoder such as bge-reranker-v2-m3, or a decoder reranker
+such as Qwen3-Reranker, registers as type `embedding` and is recognised as a reranker from the
+classification head in its own header. Rank documents with it from the command line, the
+server's `POST /v1/rerank` or the MCP `rerank` tool; `/v1/embeddings` refuses it.
+
+```bash
+localm add bge-reranker-v2-m3-Q8_0.gguf -n bge-reranker
+localm rerank "what is a panda?" "The giant panda is a bear." "Paris is a city." --model bge-reranker
+localm rerank "what is a panda?" --file documents.txt --top-n 5 --json
+```
+
+`--model` can be left out when exactly one reranker is registered. A higher score is more
+relevant; the scale depends on the model (bge returns an unbounded score, Qwen3-Reranker the
+probability of "yes"). Only the best `--top-n` are shown. The model runs in this process; a
+document longer than the model's window is cut to fit and marked.
+
 ### LoRA adapters
 
 A GGUF LoRA adapter (a `.gguf` whose header says `general.type = adapter`, as made by

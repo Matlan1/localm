@@ -587,7 +587,14 @@ def _warn_if_context_config_drifted(api, ctx,
 
 
 class GGUFEmbedder:
-    """A dedicated embedding GGUF loaded in embeddings mode via the native llama.dll."""
+    """A dedicated embedding GGUF loaded in embeddings mode via the native llama.dll.
+
+    A model loaded with RANK pooling is a reranker: it scores query / document
+    pairs through :meth:`rerank` and refuses :meth:`embed`."""
+
+    pooling_type: int = _POOLING_DEFAULT
+    n_cls_out: int = 1
+    _specials: Optional[VocabSpecials] = None
 
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
                  n_ctx: Optional[int] = None,
@@ -618,7 +625,7 @@ class GGUFEmbedder:
         self.pooling_type: int = _POOLING_DEFAULT
         # Classifier head facts, read only for a RANK-pooled (reranker) model.
         self.n_cls_out = 1
-        self.cls_labels: List[str] = []
+        self.cls_labels: list[str] = []
         self._rerank_template: Optional[str] = None
         self._specials: Optional[VocabSpecials] = None
 
@@ -722,8 +729,15 @@ class GGUFEmbedder:
         self._rerank_template = api.llama_model_chat_template(self._model, b"rerank")
         self._specials = VocabSpecials.read(api, self._vocab)
 
+    def rank_head_meta(self) -> dict:
+        """The classifier-head facts a RANK-pooled model reports when it loads:
+        ``n_cls_out``, ``cls_labels`` and whether the model has a ``rerank`` chat
+        template."""
+        return {"n_cls_out": self.n_cls_out, "cls_labels": list(self.cls_labels),
+                "has_rerank_template": self._rerank_template is not None}
+
     def _tokenize_plain(self, text: str, add_special: bool,
-                        parse_special: bool) -> List[int]:
+                        parse_special: bool) -> list[int]:
         """Tokenise *text* in full with the given special-token flags, with no
         truncation. An empty text gives no tokens."""
         api = self._api
@@ -820,7 +834,7 @@ class GGUFEmbedder:
         group rather than one text."""
         return self._run_batch(token_lists, self._read_embedding, "embedding")
 
-    def _read_embedding(self, seq: int, n_seq: int) -> List[float]:
+    def _read_embedding(self, seq: int, n_seq: int) -> list[float]:
         """The L2-normalised pooled embedding of sequence *seq* of a decoded
         batch of *n_seq*."""
         api = self._api
@@ -837,7 +851,7 @@ class GGUFEmbedder:
                 "in a batched decode")
         return [x / norm for x in v] if norm else v
 
-    def _read_scores(self, seq: int, n_seq: int) -> List[float]:
+    def _read_scores(self, seq: int, n_seq: int) -> list[float]:
         """The classifier-head outputs (``n_cls_out`` values, label order) of
         sequence *seq* of a decoded batch of *n_seq*."""
         api = self._api
@@ -853,7 +867,7 @@ class GGUFEmbedder:
                 "batched decode")
         return scores
 
-    def _run_batch(self, token_lists: List[List[int]], read, label: str) -> list:
+    def _run_batch(self, token_lists: list[list[int]], read, label: str) -> list:
         """Decode *token_lists* as one multi-sequence batch and return
         ``read(seq, n_seq)`` for each sequence, in order. *label* names the
         operation in a decode-failure message."""
@@ -966,7 +980,7 @@ class GGUFEmbedder:
                     out[gi] = v
             return out
 
-    def rerank(self, pairs: List["tuple[str, str]"]) -> List[dict]:
+    def rerank(self, pairs: list[tuple[str, str]]) -> list[dict]:
         """Score each ``(query, document)`` pair (aligned 1:1 with *pairs*).
 
         Each result is ``{"scores": [...], "tokens": N, "truncated": bool}``:
@@ -992,11 +1006,11 @@ class GGUFEmbedder:
                 built.append(build_pair(
                     self._tokenize_plain, self._specials, self._rerank_template,
                     self._effective_seq_ctx, query, document))
-            out: List[Optional[dict]] = [None] * len(pairs)
+            out: list[Optional[dict]] = [None] * len(pairs)
             for group in self._pack_groups([b.tokens for b in built]):
                 scores = self._run_batch(
                     [built[i].tokens for i in group], self._read_scores, "rerank")
-                for i, s in zip(group, scores):
+                for i, s in zip(group, scores, strict=True):
                     out[i] = {"scores": s, "tokens": len(built[i].tokens),
                               "truncated": built[i].truncated}
             return out
@@ -1031,6 +1045,8 @@ class IsolatedEmbedder(VramSizingMixin):
     GgufBackend) runs HERE, before a child is even spawned, so a load that can
     never fit fails fast without paying a process-spawn cost."""
 
+    effective_pooling: Optional[int] = None
+
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
                  n_ctx: Optional[int] = None,
                  pooling_type: object = _POOLING_DEFAULT,
@@ -1056,7 +1072,7 @@ class IsolatedEmbedder(VramSizingMixin):
         self.effective_pooling: Optional[int] = None
         # Reported by the child at load for a RANK-pooled (reranker) model.
         self.n_cls_out = 1
-        self.cls_labels: List[str] = []
+        self.cls_labels: list[str] = []
         self.has_rerank_template = False
         # Set once a GPU-offloaded embed() crashes the worker and this embedder
         # falls back to CPU (see embed()'s crash-recovery branch), or seeded at
@@ -1224,7 +1240,7 @@ class IsolatedEmbedder(VramSizingMixin):
         texts = list(texts)
         return self._call_worker(lambda runner: runner.embed(texts))
 
-    def rerank(self, pairs: List["tuple[str, str]"]) -> List[dict]:
+    def rerank(self, pairs: list[tuple[str, str]]) -> list[dict]:
         """Score ``(query, document)`` pairs via the isolated worker, with the
         same respawn, serialisation and CPU-fallback behaviour as :meth:`embed`.
         Each result is ``{"scores": [...], "tokens": N, "truncated": bool}`` (see
@@ -1237,7 +1253,7 @@ class IsolatedEmbedder(VramSizingMixin):
                 f"{Path(self.model_path).name} was not loaded for reranking "
                 f"(pooling is {pooling_name(self.effective_pooling)}, not rank)")
         pairs = [(q, d) for q, d in pairs]
-        out: List[dict] = []
+        out: list[dict] = []
         self.active_requests += 1
         try:
             for start in range(0, len(pairs), RERANK_PAIRS_PER_CALL):

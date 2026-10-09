@@ -22,7 +22,7 @@ def _read_documents(documents, docs_file) -> list:
         try:
             raw = Path(docs_file).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
-            raise click.ClickException(f"cannot read {docs_file}: {e}")
+            raise click.ClickException(f"cannot read {docs_file}: {e}") from e
         texts.extend(line for line in raw.splitlines() if line.strip())
     return texts
 

@@ -35,6 +35,7 @@ always present; several are conditional (marked below).
 | `disable_plugin` | Disable an installed plugin | |
 | `uninstall_plugin` | Uninstall a plugin (and its data with `delete_data`) | **destructive** |
 | `embed` | Embedding vectors from the local model (only when the backend can embed) | |
+| `rerank` | Rank documents by relevance to a query with a registered reranker model | |
 | `run_coder_task` | Delegate a whole coding task to the local coder agent (only when the coder plugin is active and not `--no-coder`) | |
 | `generate_image` | Local FLUX via ComfyUI (omit with `--no-images`; needs a reachable ComfyUI) | |
 | `memory_recall` | Read the owner's durable chat memory (only when the memory plugin is active and not `--no-memory`) | read-only |

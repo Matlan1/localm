@@ -204,6 +204,7 @@ _KERNEL_ROUTES = {
     # routes/chat.py
     ("api", "POST", "/v1/chat/completions"): ("auth",),
     ("api", "POST", "/v1/embeddings"): ("auth",),
+    ("api", "POST", "/v1/rerank"): ("auth",),
     ("api", "POST", "/v1/completions"): ("auth",),
     # routes/ollama.py
     ("api", "GET", "/api/version"): ("auth",),

@@ -521,14 +521,6 @@ def llama_vocab_sep(vocab: ctypes.c_void_p) -> int:
     return _bind("llama_vocab_sep", llama_token, LlamaVocab)(vocab)
 
 
-def llama_vocab_get_add_bos(vocab: ctypes.c_void_p) -> bool:
-    return bool(_bind("llama_vocab_get_add_bos", ctypes.c_bool, LlamaVocab)(vocab))
-
-
-def llama_vocab_get_add_eos(vocab: ctypes.c_void_p) -> bool:
-    return bool(_bind("llama_vocab_get_add_eos", ctypes.c_bool, LlamaVocab)(vocab))
-
-
 def llama_vocab_get_add_sep(vocab: ctypes.c_void_p) -> bool:
     return bool(_bind("llama_vocab_get_add_sep", ctypes.c_bool, LlamaVocab)(vocab))
 

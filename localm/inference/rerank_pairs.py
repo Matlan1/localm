@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 from localm.inference.backends.base import RerankInputError
 
 # (text, add_special, parse_special) -> token ids.
-Tokenize = Callable[[str, bool, bool], List[int]]
+Tokenize = Callable[[str, bool, bool], list[int]]
 
 # A document is cut to this many characters per window token before it is
 # tokenised, so a document far larger than the window is never tokenised whole.
@@ -45,7 +45,7 @@ class VocabSpecials:
     add_sep: bool
 
     @classmethod
-    def read(cls, api, vocab) -> "VocabSpecials":
+    def read(cls, api, vocab) -> VocabSpecials:
         """Read the specials of *vocab* through the native binding *api*."""
         return cls(
             bos=int(api.llama_vocab_bos(vocab)),
@@ -59,7 +59,7 @@ class VocabSpecials:
 @dataclass(frozen=True)
 class PairTokens:
     """One tokenised pair and whether its document was cut to fit."""
-    tokens: List[int]
+    tokens: list[int]
     truncated: bool
 
 
@@ -96,7 +96,7 @@ def _query_too_long(n_tokens: int, window: int) -> RerankInputError:
 def _build_plain(tokenize: Tokenize, sp: VocabSpecials, window: int,
                  query: str, document: str) -> PairTokens:
     eos = sp.eos if sp.eos >= 0 else sp.sep
-    head: List[int] = []
+    head: list[int] = []
     if sp.add_bos and sp.bos >= 0:
         head.append(sp.bos)
     head.extend(tokenize(query, False, False))
