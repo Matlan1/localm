@@ -292,3 +292,24 @@ def test_the_source_holds_its_model_weakly():
     finally:
         if was:
             gc.enable()
+
+
+def test_a_truncated_tail_is_never_matched():
+    idx = _index([1, 2, 3, 4, 5, 6, 7, 8])
+    idx.truncate(3)
+    idx.extend([9, 4, 5])
+    # "4 5 6" ended at 5 in the dropped tail; after the cut it never occurred.
+    assert idx.lookup(6, 4) == []
+    assert idx._ends == _index([1, 2, 3, 9, 4, 5])._ends
+
+
+def test_a_longer_new_conversation_rebuilds_the_index_from_its_first_token():
+    llm = _llama()
+    fake = FakeNative(llm)
+    _generate(llm, fake, max_new_tokens=4, prompt=PROMPT)
+
+    other = [31 + i for i in range(40)]
+    tokens, _ = _generate(llm, fake, max_new_tokens=6, prompt=other)
+
+    assert tokens == _reference(other, 6)
+    assert llm._source.index.tokens[:len(other)] == other
