@@ -245,11 +245,10 @@ CORE_FIELDS: list = [
                  "--draft-tokens N` measures it.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=3),
     SettingField("spec_source", Widget.SELECT, "Speculative drafting",
-                 "Where draft tokens come from. mtp = the model's own MTP head; "
-                 "ngram = repeats of earlier text in the chat, no second model; "
-                 "draft = a smaller model (Draft model); off = none. Inherit "
-                 "follows the MTP toggle. Run `localm bench-spec <model>` to "
-                 "check yours.",
+                 "Where drafts come from: mtp (the model's MTP head), ngram "
+                 "(repeats of earlier text), draft (a smaller model, Draft "
+                 "model) or off. Inherit follows the MTP toggle. Check: `localm "
+                 "bench-spec <model>`.",
                  group="Engine", applies=Applies.NEXT_LOAD,
                  options=["", "off", "mtp", "ngram", "draft"]),
     SettingField("spec_draft_tokens", Widget.NUMBER, "Draft tokens per step",

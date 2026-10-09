@@ -263,7 +263,8 @@ def test_the_worker_hands_the_report_to_the_done_envelope():
 
 def _spec_arm(rates_off, rates_on, *, usable=True, status=None, counts=(20, 15),
               greedy_on="g", seen=None):
-    def _arm(model_path, display, source, gen_tokens, ctx, gpu_layers, draft_tokens=None):
+    def _arm(model_path, display, source, gen_tokens, ctx, gpu_layers, draft_tokens=None,
+             draft_model=None):
         if seen is not None:
             seen.append((source, draft_tokens))
         if source == "off":

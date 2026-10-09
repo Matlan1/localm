@@ -496,6 +496,87 @@ def test_the_draft_model_charge_covers_the_measured_buffers():
 
 
 # --------------------------------------------------------------------------- #
+#  bench-spec --source draft and spec-drafts                                  #
+# --------------------------------------------------------------------------- #
+
+def test_bench_spec_drafts_with_the_named_draft_model(cli_runner, tmp_path):
+    from localm.cli import models as models_mod
+    from localm.inference import engine
+    from tests.test_spec_source_settings import _spec_arm
+    stub = _spec_arm([50.0], [70.0])
+    seen = []
+
+    def arm(*a, draft_tokens=None, draft_model=None):
+        seen.append((a[2], draft_tokens, draft_model))
+        return stub(*a, draft_tokens=draft_tokens)
+
+    small = tmp_path / "small.gguf"
+    with patch.object(models_mod, "get_operator_model_info",
+                      return_value=("model.gguf", None)), \
+         patch("localm.model_manager.registry.get_operator_model_info",
+               side_effect=lambda n: (small, None) if n == "small" else None), \
+         patch.object(models_mod, "_spec_probe_arm", arm):
+        res = cli_runner.invoke(models_mod.main,
+                                ["bench-spec", "model.gguf", "--source", "draft",
+                                 "--draft-model", "small", "--rounds", "1", "-d", "3"])
+    assert res.exit_code == 0, res.output
+    assert "Draft model is 1.40x faster" in res.output
+    assert seen == [("off", None, None), ("draft", 3, str(small))]
+    assert engine.resolve_spec_draft_model({}) is None
+
+
+def test_bench_spec_without_a_draft_model_says_how_to_find_one(cli_runner):
+    from localm.cli import models as models_mod
+    arm = MagicMock()
+    with patch.object(models_mod, "get_operator_model_info",
+                      return_value=("model.gguf", None)), \
+         patch.object(models_mod, "_spec_probe_arm", arm):
+        res = cli_runner.invoke(models_mod.main,
+                                ["bench-spec", "model.gguf", "--source", "draft"])
+    assert res.exit_code == 1
+    assert "No draft model" in res.output and "spec-drafts" in res.output
+    arm.assert_not_called()
+
+
+def _registry_models(tmp_path):
+    same = ["x%d" % i for i in range(40)]
+    other = ["y%d" % i for i in range(40)]
+    target = _vocab_gguf(tmp_path / "big.gguf", same)
+    with open(target, "ab") as f:
+        f.write(b"\0" * 8192)
+    files = {
+        "big": (target, "llm"),
+        "small": (_vocab_gguf(tmp_path / "small.gguf", same), "llm"),
+        "tiny": (_vocab_gguf(tmp_path / "tiny.gguf", same[:30]), "llm"),
+        "foreign": (_vocab_gguf(tmp_path / "foreign.gguf", other), "llm"),
+        "embedder": (_vocab_gguf(tmp_path / "embed.gguf", same), "embedding"),
+    }
+    return target, {n: {"path": str(p), "model_type": t} for n, (p, t) in files.items()}
+
+
+def test_spec_drafts_lists_only_models_that_share_the_vocabulary(cli_runner, tmp_path):
+    from localm.cli import models as models_mod
+    target, registry = _registry_models(tmp_path)
+    with patch.object(models_mod, "get_operator_model_info", return_value=(str(target), None)), \
+         patch("localm.model_manager.load_registry", return_value=registry):
+        res = cli_runner.invoke(models_mod.main, ["spec-drafts", "big"], terminal_width=200)
+    assert res.exit_code == 0, res.output
+    rows = [ln for ln in res.output.splitlines() if " GB " in ln]
+    assert [r.split()[1] for r in rows] == ["tiny", "small"]
+
+
+def test_spec_drafts_says_so_when_nothing_fits(cli_runner, tmp_path):
+    from localm.cli import models as models_mod
+    target, registry = _registry_models(tmp_path)
+    registry = {"foreign": registry["foreign"]}
+    with patch.object(models_mod, "get_operator_model_info", return_value=(str(target), None)), \
+         patch("localm.model_manager.load_registry", return_value=registry):
+        res = cli_runner.invoke(models_mod.main, ["spec-drafts", "big"])
+    assert res.exit_code == 0, res.output
+    assert "No downloaded model shares" in res.output
+
+
+# --------------------------------------------------------------------------- #
 #  Settings                                                                   #
 # --------------------------------------------------------------------------- #
 

@@ -505,7 +505,8 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
 @click.option("-g", "--gpu-layers", default=None, type=click.IntRange(0, 1000))
 @click.option("-d", "--draft-tokens", default=None, type=click.IntRange(1, 16),
               help="Draft tokens per step for the 'on' runs (MTP: 1-3, default "
-                   "mtp_draft_tokens; n-gram: 1-16, default spec_draft_tokens).")
+                   "mtp_draft_tokens; n-gram and draft model: 1-16, default "
+                   "spec_draft_tokens).")
 def bench_spec(model, source, draft_model, gen_tokens, rounds, ctx, gpu_layers,
                draft_tokens):
     """Measure whether speculative drafting makes MODEL faster on this machine.
