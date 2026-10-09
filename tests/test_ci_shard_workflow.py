@@ -75,7 +75,8 @@ def test_the_test_job_cannot_pass_over_a_failed_shard():
     assert names.index(verify["name"]) < names.index(_step(gather, "Combine coverage")["name"])
     record = _step(_jobs()["test-shard"], "Record this shard's result")
     assert record["if"] == "always()"
-    assert "${{ job.status }}" in record["run"]
+    assert record["env"]["JOB_STATUS"] == "${{ job.status }}"
+    assert "${{" not in record["run"], "expressions reach the shell through env, not inline"
 
 
 def test_shard_results_are_uploaded_and_downloaded_under_matching_names():
@@ -94,7 +95,7 @@ def test_each_shard_writes_the_coverage_file_the_combine_step_reads():
     written = jobs["test-shard"]["env"]["COVERAGE_FILE"]
     assert written == "shard-out/coverage-${{ matrix.shard }}.dat"
     combine = _step(jobs["test"], "Combine coverage")["run"]
-    assert 'coverage combine "shard-out/coverage-*.dat"' in combine
+    assert 'coverage combine shard-out/coverage-*.dat' in combine
     assert "coverage json -o coverage.json" in combine
 
 
@@ -102,8 +103,9 @@ def test_the_ids_and_durations_each_shard_writes_are_the_names_the_gathering_job
     shard_run = _norm(_step(_jobs()["test-shard"], "Tests")["run"])
     assert "--shard-ids-out shard-out/ids-${{ matrix.shard }}.json" in shard_run
     assert "--shard-durations-out shard-out/durations-${{ matrix.shard }}.json" in shard_run
-    record = _step(_jobs()["test-shard"], "Record this shard's result")["run"]
-    assert 'shard-out/status-${{ matrix.shard }}.txt' in record
+    record = _step(_jobs()["test-shard"], "Record this shard's result")
+    assert record["env"]["SHARD"] == "${{ matrix.shard }}"
+    assert 'shard-out/status-$SHARD.txt' in record["run"]
 
 
 def test_the_coverage_gates_are_the_ones_the_unsharded_job_ran():

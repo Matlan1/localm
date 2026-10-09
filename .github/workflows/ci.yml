@@ -213,9 +213,12 @@ jobs:
       - name: Record this shard's result
         if: always()
         shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          SHARD: ${{ matrix.shard }}
         run: |
           mkdir -p shard-out
-          echo "${{ job.status }}" > "shard-out/status-${{ matrix.shard }}.txt"
+          echo "$JOB_STATUS" > "shard-out/status-$SHARD.txt"
 
       - name: Upload this shard's results
         if: always()
@@ -300,7 +303,7 @@ jobs:
       # the build on a real drop of the combined number.
       - name: Combine coverage
         run: |
-          python -m coverage combine "shard-out/coverage-*.dat"
+          python -m coverage combine shard-out/coverage-*.dat
           python -m coverage json -o coverage.json
       - name: Coverage ratchet (fail_under)
         run: python -m coverage report
