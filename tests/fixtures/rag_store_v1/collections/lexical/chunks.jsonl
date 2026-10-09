@@ -7,3 +7,4 @@
 {"pos": 1, "text": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes.", "source": "upload:fruit.md", "format": "markdown"}
 {"pos": 1, "text": "Salary review notes for the river team.", "source": "upload:pay.txt", "format": "text"}
 {"pos": 1, "text": "Nothing from the vocabulary is mentioned in this sentence at all.", "source": "upload:plain.txt", "format": "text"}
+{"pos": 1, "text": "Crème brûlée notes from the river café.\u2028A second line after a line separator.", "source": "upload:crème.txt", "format": "text"}

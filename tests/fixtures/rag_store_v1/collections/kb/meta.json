@@ -1,6 +1,6 @@
 {
   "name": "kb",
-  "created": 1791540471.2998571,
+  "created": 1791541875.1185007,
   "docs": {
     "upload:turbines.txt": {
       "size": 4546,
@@ -25,22 +25,28 @@
       "hash": "fbbb9bd819ae24c982d7a8a557fb4a3078f86d86794ceba73949c9b7a4133e24",
       "chunks": 1,
       "uploaded": true
+    },
+    "upload:cr\u00e8me.txt": {
+      "size": 83,
+      "hash": "ed675283df7d5f54a5a6bf877976b36727e05214122bce4b7100d0495e31cd29",
+      "chunks": 1,
+      "uploaded": true
     }
   },
   "_stats_cache": {
-    "n_chunks": 9,
+    "n_chunks": 10,
     "has_vectors": true,
     "vector_degrade_reason": null,
     "corrupt": false,
     "chunks_bad_lines": 0,
     "fingerprint": {
       "chunks": [
-        1791540471316567200,
-        5377
+        1791541875123181500,
+        5536
       ],
       "vectors": [
-        1791540471318092400,
-        401
+        1791541875124734800,
+        443
       ]
     },
     "vector_dim": 8

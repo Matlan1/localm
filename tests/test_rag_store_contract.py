@@ -66,6 +66,8 @@ FIXTURE_DOCS = {
     "fruit.md": "# Fruit\n\nApple and banana and cherry are fruit.\n\nBanana bread notes.",
     "pay.txt": "Salary review notes for the river team.",
     "plain.txt": "Nothing from the vocabulary is mentioned in this sentence at all.",
+    "crème.txt": "Crème brûlée notes from the river café."
+                      " A second line after a line separator.",
 }
 
 FIXTURE_QUERIES = (
@@ -517,6 +519,24 @@ class TestSnapshotCache:
         Collection("kb", base=base)
         assert len(store._COLLECTION_CACHE) == 0
         assert store._COLLECTION_CACHE.total_bytes() == 0
+
+    def test_an_oversized_snapshot_leaves_the_others_cached(self, base, monkeypatch):
+        Collection("small", base=base).create().add_uploads(_uploads({"a.txt": "pear"}))
+        Collection("big", base=base).create().add_uploads(
+            _uploads({"b.txt": "apple " * 400}))
+        store._COLLECTION_CACHE.clear()
+        small = store._get_cached_collection_data(Collection("small", base=base).dir)
+        big_coll = Collection("big", base=base)
+        big = store._get_cached_collection_data(big_coll.dir)
+        floor = max(small.nbytes, big_coll._min_cached_nbytes())
+        assert floor < big.nbytes
+        limit = (floor + big.nbytes) // 2
+        store._COLLECTION_CACHE.clear()
+        monkeypatch.setattr(store, "_COLLECTION_CACHE_MAX_BYTES", limit)
+        Collection("small", base=base)
+        Collection("big", base=base)
+        assert store._get_cached_collection_data(base / "small") is not None
+        assert store._get_cached_collection_data(base / "big") is None
 
 
 # --------------------------------------------------------------------------- #
