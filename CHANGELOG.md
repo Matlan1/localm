@@ -12,6 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Files and folders localm cannot run now say why.** `localm add`, `localm pull <path>`
+  and the GUI add and pull routes name the format and the nearest runnable alternative for
+  GGUF version 1 and big-endian GGUF files, legacy GGML `.bin` files, importance-matrix
+  GGUFs, Mistral-native folders, `.onnx`, TensorRT, LiteRT and NeMo files, and MLC,
+  OpenVINO and EXL2/EXL3 folders. An MLX-quantized or EXL2/EXL3 folder that is already
+  registered is refused at load with the same sentence, before any worker starts, and the
+  automatic models-folder scan quietly skips the GGUFs it cannot load.
 - **Release files carry build provenance and a software bill of materials.** The release
   zip, the sdist, the wheel and a CycloneDX SBOM of the pinned dependencies are attested by
   the release workflow, so `gh attestation verify` proves which workflow built a file and

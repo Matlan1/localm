@@ -1427,6 +1427,10 @@ def _pull_gguf_file(
                 )
                 return False
         if register:
+            unusable = _mm.gguf_unusable_reason(dest)
+            if unusable is not None:
+                console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
+                return False
             reg_type = model_type
             # One shared header probe backs the mmproj/embedding refinement
             # below AND the persisted architecture/expert_count. Captured
@@ -1587,6 +1591,10 @@ def _pull_gguf_file(
                         f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
 
     if register:
+        unusable = _mm.gguf_unusable_reason(base_dir / filename)
+        if unusable is not None:
+            console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
+            return False
         reg_type = model_type
         # One shared header probe, as in the "already downloaded" branch above,
         # for the freshly-downloaded case.

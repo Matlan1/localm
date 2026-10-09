@@ -37,6 +37,7 @@ from .base import (
     BaseBackend,
     EmbedBatchTooLargeError,
     UnsupportedInputError,
+    UnsupportedModelRoleError,
     image_unsupported_message,
     messages_contain_image,
 )
@@ -115,6 +116,19 @@ def _check_custom_code_allowed(model_path: str) -> None:
         "If you trust the source of this model, enable it with:\n"
         "  localm config hf_trust_remote_code true\n"
         "Only do that for a model you obtained from a source you trust.")
+
+
+def _check_format_supported(model_path: str) -> None:
+    """Refuse a model folder in a format this backend cannot load (MLX-quantized
+    weights, or a quantization only another runtime runs), with a sentence naming
+    the format and an alternative. No-op for any other folder.
+
+    Runs in the parent before a child is spawned and needs no torch or
+    transformers."""
+    from localm.model_manager.unsupported import hf_folder_refusal
+    refusal = hf_folder_refusal(Path(model_path))
+    if refusal is not None:
+        raise UnsupportedModelRoleError(refusal)
 
 
 class HFBackend(BaseBackend):
@@ -267,6 +281,7 @@ class HFBackend(BaseBackend):
         #   3. A shard index whose weight_map points outside the model
         #      directory. See test_hf_shard_index_safety.py.
         _check_custom_code_allowed(self.model_path)
+        _check_format_supported(self.model_path)
         from localm.inference.hf_tokenizer_safety import validate_tokenizer_json
         validate_tokenizer_json(self.model_path)
         from localm.inference.hf_shard_index_safety import validate_shard_index
