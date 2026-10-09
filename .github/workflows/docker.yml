@@ -12,8 +12,10 @@ name: docker
 #                      no login, no push). Untick dry_run and run it on the tag
 #                      v<VERSION> to publish that release's images again.
 #
-# Tags: <version> and <version>-<backend> for every release; latest, cpu and
-# vulkan only when that release is the repository's latest (never a pre-release).
+# Backends: cpu, vulkan, cuda (CUDA 12 line) and cuda13 (CUDA 13 line, Blackwell).
+# Tags: <version> and <version>-<backend> for every release; latest, cpu, vulkan,
+# cuda and cuda13 only when that release is the repository's latest (never a
+# pre-release). The CUDA images are built and smoke-tested without a GPU.
 
 on:
   pull_request:
@@ -74,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [cpu, vulkan]
+        backend: [cpu, vulkan, cuda, cuda13]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -124,12 +126,6 @@ jobs:
         with:
           pattern: image-*
           merge-multiple: true
-      - name: Load the tested images
-        run: |
-          set -eu
-          for archive in image-*.tar.gz; do
-            gunzip -c "$archive" | docker load
-          done
       - name: Log in to GHCR
         if: needs.prepare.outputs.push == 'true'
         env:
@@ -145,7 +141,9 @@ jobs:
         run: |
           set -eu
           digests="{}"
-          for backend in cpu vulkan; do
+          for backend in cpu vulkan cuda cuda13; do
+            gunzip -c "image-$backend.tar.gz" | docker load
+            rm "image-$backend.tar.gz"
             tags="$VERSION-$backend"
             if [ "$backend" = "cpu" ]; then
               tags="$tags $VERSION"
@@ -169,6 +167,10 @@ jobs:
               digests="$(printf '%s' "$digests" | python3 -c 'import json,sys; d=json.load(sys.stdin); d[sys.argv[1]]=sys.argv[2]; print(json.dumps(d))' "$backend" "$digest")"
               echo "$backend: $digest" >> "$GITHUB_STEP_SUMMARY"
             fi
+            for tag in $tags; do
+              docker image rm "$IMAGE:$tag" >/dev/null
+            done
+            docker image rm "localm:$backend" >/dev/null
           done
           echo "digests=$digests" >> "$GITHUB_OUTPUT"
 
@@ -186,7 +188,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [cpu, vulkan]
+        backend: [cpu, vulkan, cuda, cuda13]
     steps:
       - name: Read the pushed digest
         id: digest

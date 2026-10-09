@@ -4,10 +4,15 @@
 #
 #   docker build -f docker/Dockerfile --build-arg BACKEND=cpu    -t localm:cpu .
 #   docker build -f docker/Dockerfile --build-arg BACKEND=vulkan -t localm:vulkan .
+#   docker build -f docker/Dockerfile --build-arg BACKEND=cuda   -t localm:cuda .
+#   docker build -f docker/Dockerfile --build-arg BACKEND=cuda13 -t localm:cuda13 .
 #
 # BACKEND is the llama.cpp runtime `localm setup-llama` provisions into the image:
-# cpu or vulkan. The runtime is part of the image; models, settings, API keys and
-# TLS certificates live in /data, which is meant to be a volume.
+# cpu, vulkan, cuda (the CUDA 12 line, every NVIDIA architecture before Blackwell)
+# or cuda13 (the CUDA 13 line, Blackwell). The CUDA runtimes are fetched without a
+# GPU and load-tested when a container starts. The runtime is part of the image;
+# models, settings, API keys and TLS certificates live in /data, which is meant to
+# be a volume.
 
 ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 FROM ${UBUNTU_IMAGE}
@@ -29,7 +34,7 @@ LABEL org.opencontainers.image.title="localm" \
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN case "${BACKEND}" in cpu|vulkan) ;; *) echo "BACKEND must be cpu or vulkan, got '${BACKEND}'" >&2; exit 1 ;; esac \
+RUN case "${BACKEND}" in cpu|vulkan|cuda|cuda13) ;; *) echo "BACKEND must be cpu, vulkan, cuda or cuda13, got '${BACKEND}'" >&2; exit 1 ;; esac \
  && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl tini \
  && if [ "${BACKEND}" = "vulkan" ]; then \
@@ -61,7 +66,12 @@ COPY --chown=localm:localm runtime /opt/localm/runtime
 RUN uv venv --python 3.12 /opt/venv \
  && uv pip install --python /opt/venv/bin/python -e "/opt/localm[${EXTRAS}]" -e /opt/localm/runtime
 
-RUN LOCALM_HOME=/tmp/localm-build-home /opt/venv/bin/localm setup-llama --backend "${BACKEND}" --yes \
+RUN case "${BACKEND}" in \
+      cuda)   backend_args="--backend cuda --cuda-line cuda-12" ;; \
+      cuda13) backend_args="--backend cuda --cuda-line cuda-13" ;; \
+      *)      backend_args="--backend ${BACKEND}" ;; \
+    esac \
+ && LOCALM_HOME=/tmp/localm-build-home /opt/venv/bin/localm setup-llama ${backend_args} --yes \
  && rm -rf /tmp/localm-build-home
 
 COPY --chown=root:root --chmod=0755 docker/entrypoint.sh /usr/local/bin/localm-docker-entrypoint
@@ -70,6 +80,7 @@ COPY --chown=root:root --chmod=0755 docker/healthcheck.sh /usr/local/bin/localm-
 ENV PATH=/opt/venv/bin:${PATH} \
     LOCALM_HOME=/data \
     LOCALM_CONTAINER_PORT=8642 \
+    LOCALM_IMAGE_BACKEND=${BACKEND} \
     PYTHONUNBUFFERED=1
 
 WORKDIR /data
