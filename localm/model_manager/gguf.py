@@ -740,9 +740,16 @@ def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
 _GGUF_FIXED_TYPE_SIZES = {
     0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8,
 }
+_GGUF_TYPE_UINT32 = 4
+_GGUF_TYPE_INT32 = 5
 _GGUF_TYPE_BOOL = 7
 _GGUF_TYPE_STRING = 8
 _GGUF_TYPE_ARRAY = 9
+_GGUF_INT32_TYPES = (_GGUF_TYPE_UINT32, _GGUF_TYPE_INT32)
+
+# llama.cpp's LLAMA_POOLING_TYPE_RANK: the value a reranker / classifier GGUF
+# writes under "<architecture>.pooling_type".
+_GGUF_POOLING_RANK = 4
 
 # struct formats for the same fixed-width types, keyed identically to
 # _GGUF_FIXED_TYPE_SIZES so the two tables cannot drift apart.
@@ -1952,6 +1959,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
     general_type = None
     adapter_type = None
     has_pooling_type = False
+    pooling_type = None
+    has_classifier_labels = False
     non_causal = False
     try:
         if buf[:4] != b"GGUF":
@@ -1966,6 +1975,13 @@ def _gguf_metadata_probe(path: Path) -> dict:
         off = 24
         for _ in range(kv_count):
             key, off = _gguf_read_string(buf, off)
+            # The classification is decided (an embedding architecture or a
+            # pooling_type key was seen), so only the model-parameter keys that
+            # precede the tokenizer arrays remain worth reading.
+            if (key.startswith("tokenizer.ggml.")
+                    and (has_pooling_type
+                         or architecture in _GGUF_EMBEDDING_ARCHITECTURES)):
+                break
             (vtype,) = struct.unpack_from("<I", buf, off)
             off += 4
             if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
@@ -1977,16 +1993,18 @@ def _gguf_metadata_probe(path: Path) -> dict:
             else:
                 if key.endswith(".pooling_type"):
                     has_pooling_type = True
+                    if (architecture is not None
+                            and key == f"{architecture}.pooling_type"
+                            and vtype in _GGUF_INT32_TYPES):
+                        pooling_type = struct.unpack_from(
+                            "<i" if vtype == _GGUF_TYPE_INT32 else "<I",
+                            buf, off)[0]
+                elif key.endswith(".classifier.output_labels"):
+                    has_classifier_labels = True
                 elif key.endswith(".attention.causal") and vtype == _GGUF_TYPE_BOOL:
                     non_causal = not struct.unpack_from("<?", buf, off)[0]
                 off = _gguf_skip_value(buf, off, vtype)
-            # Stop as soon as the answer is decided: a definitive embedding
-            # architecture, or any pooling_type key at all, makes the rest of
-            # the KV block irrelevant to classification. After such a signal,
-            # keep reading through the general.* keys until general.type is
-            # seen or a non-general key comes.
-            if ((has_pooling_type or architecture in _GGUF_EMBEDDING_ARCHITECTURES)
-                    and (general_type is not None or not key.startswith("general."))):
+            if pooling_type == _GGUF_POOLING_RANK:
                 break
     except (struct.error, IndexError, UnicodeDecodeError):
         # Truncated within our bounded read, or a malformed/unexpected layout -
@@ -1994,6 +2012,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
         # failure, rather than discarding a signal found earlier in the walk.
         pass
     return {"architecture": architecture, "has_pooling_type": has_pooling_type,
+            "pooling_type": pooling_type,
+            "has_classifier_labels": has_classifier_labels,
             "non_causal": non_causal, "general_type": general_type,
             "adapter_type": adapter_type}
 
@@ -2109,12 +2129,66 @@ def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
         return False
     if arch in _GGUF_EMBEDDING_ARCHITECTURES:
         return True
-    if meta.get("has_pooling_type"):
+    if meta.get("has_pooling_type") or meta.get("has_classifier_labels"):
         return True
     # llama.cpp reads "<arch>.attention.causal"; a file declaring it false is
     # an encoder, not a text generator.
     return (bool(meta.get("non_causal")) and arch not in _GGUF_NON_CHAT_ARCHITECTURES
             and arch not in _GGUF_ENCODER_DECODER_ARCHITECTURES)
+
+
+# The tensors llama.cpp loads as the classification head of a reranker or
+# classifier ("cls" and "cls.output" in its tensor table). A model with either
+# one produces a score; a model with neither pools to a plain embedding.
+_GGUF_CLASSIFIER_HEAD_TENSORS = frozenset({"cls.weight", "cls.output.weight"})
+
+
+def gguf_classifier_head_tensors(path: Path) -> Optional[frozenset]:
+    """The classification-head tensors (``cls.weight`` / ``cls.output.weight``)
+    present in the GGUF at *path*, as a possibly empty frozenset.
+
+    None - "could not tell" - when the tensor list cannot be read in full: an
+    unreadable or malformed header, or one part of a split GGUF (the head may sit
+    in another part). An empty frozenset is a confirmed answer: the complete
+    tensor list was read and holds no head."""
+    if _SPLIT_GGUF_RE.match(Path(path).name):
+        return None
+    parsed = _gguf_tensor_offset_entries(Path(path))
+    if parsed is None:
+        return None
+    return frozenset(name for name, _offset in parsed[0]
+                     if name in _GGUF_CLASSIFIER_HEAD_TENSORS)
+
+
+def gguf_reranker_state(path: Path, meta: Optional[dict] = None) -> Optional[bool]:
+    """Whether *path*'s own GGUF marks it as a reranker / classifier: it declares
+    ``<architecture>.pooling_type`` = rank, or carries
+    ``<architecture>.classifier.output_labels``, or - for an embedding-style
+    file that declares neither, as community conversions often do - carries a
+    classification-head tensor. All hard header facts, never a filename guess.
+
+    None when the answer depends on a tensor list that could not be read in full
+    (see :func:`gguf_classifier_head_tensors`): "could not tell", which a caller
+    must not record as "not a reranker".
+
+    *meta* is an already-computed ``_gguf_metadata_probe(path)`` result. The
+    tensor list is read only for a file that already classifies as an
+    embedding model."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    if (meta.get("pooling_type") == _GGUF_POOLING_RANK
+            or meta.get("has_classifier_labels")):
+        return True
+    if not gguf_embedding_signal(path, meta=meta):
+        return False
+    heads = gguf_classifier_head_tensors(path)
+    return None if heads is None else bool(heads)
+
+
+def gguf_reranker_signal(path: Path, meta: Optional[dict] = None) -> bool:
+    """True when :func:`gguf_reranker_state` is True; an undecidable file reads as
+    False."""
+    return gguf_reranker_state(path, meta) is True
 
 
 def gguf_architecture(path: Path, meta: Optional[dict] = None) -> Optional[str]:

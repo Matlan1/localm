@@ -28,8 +28,8 @@ from fastapi.responses import StreamingResponse
 import localm.inference.http_server as _hs
 from localm.inference.backends.base import (
     EmbedBatchTooLargeError, GrammarUnsupportedError, InvalidGrammarError,
-    PretokenizerUnsafeInputError, TriggerValidatorUnavailableError,
-    messages_contain_image,
+    PretokenizerUnsafeInputError, RerankerHeadMissingError, RerankInputError,
+    TriggerValidatorUnavailableError, messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
@@ -42,7 +42,7 @@ from localm.inference.tool_calling import (
 from localm.inference.protocol import (
     CHECKING_GRAMMAR_STATUS, LOADING_MODEL_STATUS, PROCESSING_PROMPT_STATUS,
     RUNNING_CHAT_HOOKS_STATUS, ChatRequest, CompletionRequest, EmbeddingRequest,
-    make_chunk_id,
+    RerankRequest, make_chunk_id,
 )
 
 
@@ -519,6 +519,14 @@ def register(app: FastAPI, ctx) -> None:
         _entry = _reg.get((resolved_model or "").strip()) if _reg else None
         _is_registered_embedder = isinstance(_entry, dict) and _entry.get("model_type") == "embedding"
         _is_configured_embedder = bool(_emb_cfg_name) and (resolved_model or "").strip() == _emb_cfg_name
+        if (_is_registered_embedder and not _is_configured_embedder
+                and isinstance(_entry, dict)):
+            from localm.model_manager.registry import entry_is_reranker
+            if await asyncio.get_running_loop().run_in_executor(
+                    None, entry_is_reranker, (resolved_model or "").strip(), _entry):
+                raise HTTPException(
+                    422, f"Model {resolved_model!r} is a reranker, not an embedding "
+                    "model: it scores query and document pairs (POST /v1/rerank).")
         if _is_registered_embedder or _is_configured_embedder:
             from localm.inference.embedder import embed_texts, last_error
             loop = asyncio.get_running_loop()
@@ -638,6 +646,44 @@ def register(app: FastAPI, ctx) -> None:
             # engine.display_name. An explicit "localm" echoes back unchanged.
             "model": resolved_model or engine.display_name,
             "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+        }
+
+    @app.post("/v1/rerank", dependencies=[Depends(_require_auth)])
+    async def rerank(req: RerankRequest):
+        from localm.inference import reranker as _rr
+        if not req.query.strip():
+            raise HTTPException(400, '"query" must not be empty')
+        texts = [d if isinstance(d, str) else d.text for d in req.documents]
+        loop = asyncio.get_running_loop()
+        try:
+            name, path = await loop.run_in_executor(
+                None, _rr.resolve_reranker, req.model)
+        except _rr.RerankerModelError as e:
+            raise HTTPException(e.status, str(e)) from e
+        # The reranker shares the embedder's one-worker bound: further requests
+        # queue here on the loop, holding no default-pool worker.
+        try:
+            async with _hs._get_embedder_sem():
+                outcome = await loop.run_in_executor(
+                    None, lambda: _rr.rerank(path, req.query, texts))
+        except (RerankInputError, PretokenizerUnsafeInputError) as e:
+            raise HTTPException(400, str(e)) from e
+        except RerankerHeadMissingError as e:
+            raise HTTPException(422, str(e)) from e
+        except _rr.RerankerUnavailableError as e:
+            raise HTTPException(503, f"Reranker unavailable: {e}") from e
+        except RuntimeError as e:
+            raise HTTPException(503, f"Reranking failed: {e}") from e
+        results = _rr.rank_results(outcome.scored, req.top_n, outcome.labels)
+        if req.return_documents:
+            for row in results:
+                row["document"] = {"text": texts[row["index"]]}
+        total_tokens = sum(item["tokens"] for item in outcome.scored)
+        return {
+            "object": "list",
+            "model": name,
+            "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+            "results": results,
         }
 
     @app.post("/v1/completions", dependencies=[Depends(_require_auth)])

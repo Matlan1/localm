@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
 from pathlib import PureWindowsPath
+from typing import Any
 from typing import Callable
 from typing import List
 from typing import NamedTuple
@@ -44,6 +45,7 @@ from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_non_chat_model_type
 from .gguf import gguf_embedding_signal
+from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
 from .gguf import gguf_adapter_incompatibility, gguf_adapter_kind
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
@@ -1860,7 +1862,8 @@ def _register(
     reason: a stored ``tool_use=False`` is a real answer (the model's own chat
     template was read and renders no tool calls) and must stay distinct from a
     key never written, which means nobody has looked."""
-    entry = {"path": str(logical_model_path(path)), "source": source, "model_type": model_type}
+    entry: dict[str, Any] = {"path": str(logical_model_path(path)), "source": source,
+                             "model_type": model_type}
     if sha256:
         entry["sha256"] = sha256.lower()
     if mmproj:
@@ -1878,9 +1881,47 @@ def _register(
         entry["tool_use"] = tool_use
     if context_length is not None:
         entry["context_length"] = context_length
+    if model_type == "embedding" and path.suffix.lower() == ".gguf":
+        reranker = gguf_reranker_state(path)
+        if reranker is not None:
+            entry["reranker"] = reranker
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
     # a parallel pull, sync_models_dir) can't clobber this entry.
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
+
+
+def entry_is_reranker(name: str, entry: dict) -> bool:
+    """True when the registered model *name* is a reranker or classifier: an
+    ``embedding``-type model whose GGUF header marks it so (see
+    ``gguf_reranker_state``).
+
+    Reads the stored ``reranker`` flag. An entry registered before the flag
+    existed has none, so the GGUF is classified once here and the answer is
+    written back to the registry. A file that cannot be read, or whose tensor
+    list cannot be read in full, answers False and stores nothing, so the next
+    call tries again."""
+    if entry.get("model_type") != "embedding":
+        return False
+    flag = entry.get("reranker")
+    if isinstance(flag, bool):
+        return flag
+    path = _entry_path(entry)
+    if path is None or not Path(path).is_file():
+        return False
+    flag = gguf_reranker_state(Path(path))
+    if flag is None:
+        return False
+
+    def _store(reg: dict) -> None:
+        stored = reg.get(name)
+        if isinstance(stored, dict) and _entry_path(stored) == path:
+            stored["reranker"] = flag
+
+    try:
+        _mm.update_registry(_store)
+    except OSError as e:
+        logger.debug("could not store the reranker flag for %s: %s", name, e)
+    return flag
 
 
 

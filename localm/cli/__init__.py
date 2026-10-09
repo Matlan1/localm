@@ -52,6 +52,7 @@ from . import (  # noqa: F401
     maintenance as _maint,
     plugins as _plugins,
     browser as _browser,
+    rerank as _rerank,
 )
 
 # Re-export the names tests (and other callers) import directly from localm.cli.

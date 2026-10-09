@@ -20,6 +20,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   schema; `auto` constrains a call once the model starts one. Earlier calls and tool results
   in the conversation are given back to the model, with tool output treated as untrusted
   text.
+- **Reranker models rank documents.** A reranker GGUF (bge-reranker-v2-m3, Qwen3-Reranker,
+  a BERT or XLM-R cross-encoder) added with `localm add` or `localm pull` scores documents
+  against a query. `POST /v1/rerank` takes `query`, `documents` and `top_n` in the Jina /
+  Cohere / llama-server shape, `localm rerank` does the same from the command line, and the
+  MCP server has a `rerank` tool. A file without a classifier head is refused instead of
+  returning arbitrary scores, and a reranker chosen as the embedding model says what it is
+  instead of producing vectors.
 - **The Ollama API's `format` takes a JSON schema.** The reply is constrained, token by
   token, to documents that satisfy the schema: objects with required and optional
   properties, arrays with length bounds, enums, integer ranges, `anyOf`, recursive `$ref`
