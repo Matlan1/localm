@@ -31,7 +31,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN case "${BACKEND}" in cpu|vulkan) ;; *) echo "BACKEND must be cpu or vulkan, got '${BACKEND}'" >&2; exit 1 ;; esac \
  && apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl tini libgomp1 \
+ && apt-get install -y --no-install-recommends ca-certificates curl tini \
  && if [ "${BACKEND}" = "vulkan" ]; then \
       apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers; \
     fi \

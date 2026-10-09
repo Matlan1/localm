@@ -15,14 +15,14 @@ NAME="localm-smoke-$$"
 VOLUME="${NAME}-data"
 
 cleanup() {
-  docker rm -f "$NAME" "${NAME}-env" >/dev/null 2>&1 || true
+  docker rm -f "$NAME" "${NAME}-env" "${NAME}-refuse" >/dev/null 2>&1 || true
   docker volume rm "$VOLUME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 fail() {
   echo "FAIL: $*" >&2
-  for c in "$NAME" "${NAME}-env"; do
+  for c in "$NAME" "${NAME}-env" "${NAME}-refuse"; do
     if docker inspect "$c" >/dev/null 2>&1; then
       echo "---- logs of $c ----" >&2
       docker logs "$c" >&2 || true
@@ -54,7 +54,7 @@ published_port() {
 
 echo "== no key: the container must refuse to start"
 set +e
-refusal="$(docker run --rm "$IMAGE" 2>&1)"
+refusal="$(timeout 90 docker run --name "${NAME}-refuse" "$IMAGE" 2>&1)"
 rc=$?
 set -e
 [ "$rc" -eq 2 ] || fail "expected exit code 2 without a key, got $rc: $refusal"
