@@ -785,7 +785,9 @@ def _extract_docx(data: bytes, filename: str) -> str:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             xml = _read_zip_member(zf, "word/document.xml", filename)
-    except (zipfile.BadZipFile, KeyError, OSError) as e:
+    except ExtractError:
+        raise
+    except Exception as e:
         raise ExtractError(f"Cannot parse {filename} as .docx: {e}") from e
     # Tabs and explicit breaks inside runs. The attribute span excludes both < and
     # >, so a match stops at the next tag instead of scanning past it.

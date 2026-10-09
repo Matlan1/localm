@@ -184,6 +184,8 @@ def save_workflow(media: str, name: str, content: bytes) -> str:
         data = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ValueError(f"not valid JSON: {e}") from e
+    except RecursionError as e:
+        raise ValueError("not valid JSON: nested too deeply") from e
     if not is_workflow_json(data):
         raise ValueError(
             "not a ComfyUI API-format workflow (expected a dict of nodes, each "

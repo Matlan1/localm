@@ -824,6 +824,8 @@ def _gguf_skip_value(buf: bytes, off: int, vtype: int) -> int:
         size = _GGUF_FIXED_TYPE_SIZES.get(elem_type)
         if size is None:
             raise struct.error(f"unsupported gguf array element type {elem_type}")
+        if size * count > len(buf) - off:
+            raise struct.error("gguf array runs past the end of the buffer")
         return off + size * count
     size = _GGUF_FIXED_TYPE_SIZES.get(vtype)
     if size is None:

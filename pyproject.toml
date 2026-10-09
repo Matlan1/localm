@@ -293,6 +293,8 @@ dev = [
     # results on this tree, while this finds template expansion into run
     # blocks and credential persistence through checkout.
     "zizmor>=1.30.0",
+    # Property-based fuzzing of the untrusted-input parsers (tests/fuzz/).
+    "hypothesis>=6.168.5",
 ]
 
 [project.scripts]

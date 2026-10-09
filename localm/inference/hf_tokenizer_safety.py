@@ -126,12 +126,12 @@ def _extract_unique_patterns(model_path: str) -> list[str]:
     try:
         text = path.read_text(encoding="utf-8")
         data = json.loads(text)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        return list(dict.fromkeys(_iter_regex_patterns(data)))
+    except (OSError, ValueError, RecursionError) as e:
         raise RuntimeError(
             f"'{Path(model_path).name}' ships a tokenizer.json that could not "
             f"be read as valid JSON ({type(e).__name__}: {e}), so its regex "
             "patterns cannot be verified safe; refusing to load.") from e
-    return list(dict.fromkeys(_iter_regex_patterns(data)))
 
 
 def _readline_with_timeout(stream, timeout: float):

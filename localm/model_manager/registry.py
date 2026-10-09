@@ -784,14 +784,19 @@ def _hf_is_vision(model_dir: Path) -> bool:
         cfg = model_dir / "config.json"
         if cfg.is_file():
             data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
+            if not isinstance(data, dict):
+                return False
             if any(k in data for k in
                    ("vision_config", "image_token_index", "image_token_id")):
                 return True
-            arch = " ".join(data.get("architectures") or []).lower()
+            architectures = data.get("architectures") or []
+            if not isinstance(architectures, list):
+                return False
+            arch = " ".join(a for a in architectures if isinstance(a, str)).lower()
             if any(k in arch for k in ("vision", "imagetext", "-vl",
                                        "qwen2vl", "qwen2_5_vl")):
                 return True
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         pass
     return False
 
