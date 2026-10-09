@@ -13,6 +13,7 @@ from localm.config import load_config
 from localm.console import console
 from localm.debuglog import logger
 from localm.inference.backends.base import LOADING_MODEL_STATUS, BaseBackend
+from localm.inference.mmap_setting import describe_mmap, resolve_use_mmap
 from localm.textnorm import scrub_stream
 
 
@@ -211,6 +212,7 @@ def create_backend(
             ctx_auto=bool(cfg.get("ctx_auto", False)),
             n_gpu_layers_auto=bool(cfg.get("n_gpu_layers_auto", True)),
             n_cpu_moe=int(cfg.get("n_cpu_moe", 0) or 0),
+            use_mmap=resolve_use_mmap(cfg),
             mtp_enabled=source == "mtp",
             spec_source=source,
             spec_draft_tokens=_resolve_spec_draft_tokens(cfg, spec_draft_tokens),
@@ -433,6 +435,28 @@ class Engine:
         any load."""
         sizing = getattr(self._backend, "last_gpu_sizing", None)
         return dict(sizing) if isinstance(sizing, dict) else None
+
+    @property
+    def mmap_state(self) -> Optional[dict]:
+        """What the last load did with memory-mapping, or None when the backend
+        did not report it: ``use_mmap`` (the setting: auto, on or off), ``mmap``
+        (bool, whether the model was memory-mapped) and ``mmap_from_disk`` (bool,
+        True when ``auto`` mapped it because the model may not fit in available
+        RAM). ``mmap_note`` is the one-line description
+        (``mmap_setting.describe_mmap``), present only when there is something
+        to say."""
+        effective = getattr(self._backend, "effective_use_mmap", None)
+        if effective is None:
+            return None
+        setting = getattr(self._backend, "use_mmap", "auto")
+        forced = (setting == "auto" and bool(effective) and bool(
+            getattr(self._backend, "mmap_forced_by_ram", False)))
+        state = {"use_mmap": setting, "mmap": bool(effective),
+                 "mmap_from_disk": forced}
+        note = describe_mmap(setting, bool(effective), forced)
+        if note:
+            state["mmap_note"] = note
+        return state
 
     @property
     def last_finish_reason(self) -> str:

@@ -499,6 +499,30 @@ layers on CPU"). See
 [docs/gpu-setup.md](../docs/gpu-setup.md#mixture-of-experts-reducing-vram-footprint)
 for measured numbers.
 
+### Memory-mapping: models larger than system RAM
+
+`use_mmap` controls whether the model file is memory-mapped, so only the pages a
+run touches are resident instead of the whole model being read into RAM first.
+
+```bash
+localm config use_mmap auto       # localm decides - the default
+localm config use_mmap on         # always memory-map
+localm config use_mmap off        # always read the whole model into memory first
+```
+
+With `auto`, localm memory-maps a model whose system-RAM share may not fit in
+available RAM (or when available RAM cannot be read), and says so in the load
+output:
+
+```
+  mmap on: model may not fit in available RAM, running from disk-backed memory, first tokens slower
+```
+
+Reads then come from disk until the pages are cached, which is why the first
+tokens are slower. `on` and `off` are used as given and the load output names
+them (`mmap on` / `mmap off`). The setting applies to the loaded model on its
+next load; the Settings page has the same field ("Memory-map model files").
+
 ### Multi-GPU: splitting one model across several cards
 
 A model too large for any single card's VRAM can load using the combined VRAM of 2 or more GPUs, instead of picking just one:

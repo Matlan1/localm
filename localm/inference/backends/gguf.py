@@ -118,6 +118,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
         spec_draft_model: Optional[str] = None,
+        use_mmap: str = "auto",
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -126,6 +127,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # Opt-in MoE expert placement: keep the expert weights of the first N
         # layers in system RAM (llama.cpp's --n-cpu-moe). 0 = off, the default.
         self.n_cpu_moe = n_cpu_moe
+        # The use_mmap mode (auto, on, off). effective_use_mmap and
+        # mmap_forced_by_ram are what the last load did with it: None / False
+        # until a load reports them.
+        from localm.inference.mmap_setting import coerce_use_mmap
+        mode = coerce_use_mmap(use_mmap)
+        if mode is None:
+            raise ValueError("use_mmap must be one of auto, on, off, got %r" % (use_mmap,))
+        self.use_mmap = mode
+        self.effective_use_mmap: Optional[bool] = None
+        self.mmap_forced_by_ram = False
         # The draft source (off, mtp, ngram); None follows mtp_enabled. MTP is
         # enabled exactly when the source is mtp.
         from .llamacpp._drafting import SPEC_MTP, resolve_spec_source
@@ -770,7 +781,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         f"generation speed is limited by RAM bandwidth (at most "
                         f"about {40 / gb:.0f} tokens/s at 40 GB/s)[/dim]")
 
+        self._print_mmap_note()
         console.print("[green]✓[/green] Model loaded")
+
+    def _print_mmap_note(self) -> None:
+        """Print the one-line mmap note for the load just finished (see
+        ``mmap_setting.describe_mmap``), or nothing when there is none."""
+        from localm.inference.mmap_setting import describe_mmap
+        note = describe_mmap(self.use_mmap, self.effective_use_mmap,
+                             self.mmap_forced_by_ram)
+        if note:
+            console.print(f"[dim]  {note}[/dim]")
 
     @staticmethod
     def _load_timeout_seconds() -> float:
