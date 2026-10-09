@@ -35,7 +35,7 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 
 from .proc_tail import StderrTail
 from .provenance import neutralise

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 
 from ..server import EngineCache, _log, _quiet_stdout, _text_result, report_progress
 from ._common import MODEL_PARAM

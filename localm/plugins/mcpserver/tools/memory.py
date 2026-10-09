@@ -10,7 +10,6 @@ binds.
 
 from __future__ import annotations
 
-from typing import Dict
 
 from .. import server as _srv
 from ..server import _quiet_stdout, _text_result

@@ -51,7 +51,7 @@ import json
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 from localm.inference.backends.base import LOADING_MODEL_STATUS
 

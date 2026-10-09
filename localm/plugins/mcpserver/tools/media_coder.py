@@ -12,7 +12,6 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from typing import Dict
 
 from localm import pathsafe
 from localm.pathsafe import is_unc_or_device_path

@@ -4,7 +4,6 @@ uninstall."""
 
 from __future__ import annotations
 
-from typing import Dict
 
 from ..server import _quiet_stdout, _text_result
 

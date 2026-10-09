@@ -33,7 +33,6 @@ agent the same way: discovered once at agent start, failures warn and continue.
 
 from __future__ import annotations
 
-from typing import List, Tuple
 
 from .provenance import neutralise
 from .tool_registration import register_foreign_tool

@@ -34,7 +34,7 @@ import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from localm.plugins.contract import KNOWN_PLUGIN_KEYS
 
