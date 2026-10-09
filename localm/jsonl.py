@@ -74,3 +74,5 @@ def dumps_line(obj: Any) -> str:
 def dumps_lines(objs) -> str:
     """Serialize *objs* into a JSONL body (no trailing newline)."""
     return "\n".join(dumps_line(o) for o in objs)
+
+_deliberate_type_error: int = "not an int"
