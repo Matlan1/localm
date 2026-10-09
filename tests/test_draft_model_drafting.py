@@ -454,17 +454,42 @@ def test_a_cancelled_draft_load_frees_the_target_and_raises(tmp_path):
     assert (llm._model_ptr, llm._ctx_ptr) == (None, None)
 
 
-def test_the_draft_model_loads_on_the_main_gpu_without_splitting(tmp_path):
+@pytest.mark.parametrize("main_gpu,ratios", [(None, None), (1, [(0, 0.6), (1, 0.4)])])
+def test_the_draft_model_is_split_over_the_targets_devices(tmp_path, main_gpu, ratios):
     llm, path, llama_mod = _loading_llama(tmp_path)
-    llm._main_gpu_index = 1
+    llm._main_gpu_arg = main_gpu
+    llm._gpu_split_ratios_arg = ratios
     params = SimpleNamespace(n_gpu_layers=0, split_mode=1, main_gpu=0)
     with patch.object(llama_mod, "api") as api, \
-         patch.object(llama_mod, "set_use_mmap") as mmap:
+         patch.object(llama_mod, "set_use_mmap") as mmap, \
+         patch("localm.discover.apply_main_gpu") as main, \
+         patch("localm.discover.apply_gpu_split", return_value=None) as split:
         api.llama_model_default_params.return_value = params
         api.llama_load_model_from_file.return_value = None
         llm._load_draft_model(path, None, True)
-    assert (params.n_gpu_layers, params.split_mode, params.main_gpu) == (99, 0, 1)
+    assert params.n_gpu_layers == 99
+    if main_gpu is None:
+        main.assert_called_once_with(params)
+    else:
+        main.assert_called_once_with(params, slot=main_gpu)
+    split.assert_called_once_with(params, ratios_override=ratios)
     mmap.assert_called_once_with(params, False)
+
+
+def test_a_cpu_draft_model_is_not_split(tmp_path):
+    llm, path, llama_mod = _loading_llama(tmp_path)
+    llm._gpu_split_ratios_arg = [(0, 0.5), (1, 0.5)]
+    params = SimpleNamespace(n_gpu_layers=-1, split_mode=1, main_gpu=0)
+    with patch.object(llama_mod, "api") as api, \
+         patch.object(llama_mod, "set_use_mmap"), \
+         patch("localm.discover.apply_main_gpu") as main, \
+         patch("localm.discover.apply_gpu_split") as split:
+        api.llama_model_default_params.return_value = params
+        api.llama_load_model_from_file.return_value = None
+        llm._load_draft_model(path, None, True, on_gpu=False)
+    assert params.n_gpu_layers == 0
+    main.assert_not_called()
+    split.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -504,7 +529,7 @@ GiB = 1024 ** 3
 _TARGET, _KV, _OVERHEAD, _CHARGE = 8 * GiB, 1000, 512 * 1024 * 1024, 1 * GiB
 
 
-def _placed(tmp_path, free, *, n_gpu_layers=99, layer_count=48):
+def _placed(tmp_path, free, *, n_gpu_layers=99, layer_count=48, split=None):
     from localm.inference.backends.gguf import GgufBackend
     draft = tmp_path / "d.gguf"
     draft.write_bytes(b"x")
@@ -518,7 +543,8 @@ def _placed(tmp_path, free, *, n_gpu_layers=99, layer_count=48):
          patch.object(GgufBackend, "_split_overhead_bytes", return_value=_OVERHEAD), \
          patch.object(GgufBackend, "_mtp_draft_context_vram_bytes", return_value=0), \
          patch.object(GgufBackend, "_recurrent_state_vram_bytes", return_value=0), \
-         patch.object(GgufBackend, "_cached_layer_count", return_value=layer_count):
+         patch.object(GgufBackend, "_cached_layer_count", return_value=layer_count), \
+         patch.object(GgufBackend, "_implicit_split_fit", side_effect=split or (lambda *a: None)):
         on_gpu = b._decide_draft_placement()
         extra = b._spec_extra_vram_bytes()
     return b, on_gpu, extra
@@ -530,7 +556,18 @@ def test_the_draft_model_goes_on_the_gpu_only_beside_the_whole_target(tmp_path):
     assert (on_gpu, b.draft_model_on_gpu, extra) == (True, True, _CHARGE)
     b, on_gpu, extra = _placed(tmp_path, need - 1)
     assert (on_gpu, b.draft_model_on_gpu, extra) == (False, False, 0)
-    assert b._spec_kv_per_token() == 0
+
+
+@pytest.mark.parametrize("on_gpu", [True, False])
+def test_the_draft_kv_grows_the_gpu_charge_only_while_the_draft_is_on_the_gpu(tmp_path, on_gpu):
+    from localm.inference.backends.gguf import GgufBackend
+    b = GgufBackend(str(tmp_path / "m.gguf"), spec_source="draft",
+                    spec_draft_model=str(tmp_path / "d.gguf"))
+    b.draft_model_on_gpu = on_gpu
+    b._draft_kv_per_token_cached = 1000
+    with patch.object(GgufBackend, "_draft_model_charge_bytes", return_value=_CHARGE), \
+         patch.object(GgufBackend, "_mtp_draft_kv_per_token", return_value=0):
+        assert b._spec_kv_per_token() == (1000 if on_gpu else 0)
 
 
 def test_a_partial_target_counts_only_its_gpu_layers(tmp_path):
@@ -538,6 +575,44 @@ def test_a_partial_target_counts_only_its_gpu_layers(tmp_path):
     assert _placed(tmp_path, need, n_gpu_layers=24)[1] is True
     assert _placed(tmp_path, need - 1, n_gpu_layers=24)[1] is False
     assert _placed(tmp_path, 10 ** 15, n_gpu_layers=0)[1] is False
+
+
+def _two_gpus(draft_charge):
+    from localm.inference.backends.llamacpp._split_fit import plan_split
+    devices = [{"index": 0, "free": 14 * GiB}, {"index": 1, "free": 14 * GiB}]
+    return plan_split(devices, layer_bytes=[2 * GiB] * 10, layer_kv_bytes=[0] * 10,
+                      output_bytes=0, n_gpu_layers=99, logits_bytes=0,
+                      reserve_bytes=0, spread_bytes=draft_charge)
+
+
+def test_the_draft_is_charged_across_split_devices_by_share():
+    from localm.inference.backends.llamacpp._split_fit import charge_devices
+    devices = [{"index": 0, "free": 30 * GiB}, {"index": 1, "free": 10 * GiB}]
+    charges = charge_devices(devices, [3.0, 1.0], layer_bytes=[GiB] * 8,
+                             layer_kv_bytes=[0] * 8, output_bytes=0, n_gpu_layers=99,
+                             logits_bytes=0, reserve_bytes=7, spread_bytes=4 * GiB)
+    assert [c.reserve for c in charges] == [7 + 3 * GiB, 7 + GiB]
+    idle = charge_devices(devices, [1.0, 0.0], layer_bytes=[GiB] * 8,
+                          layer_kv_bytes=[0] * 8, output_bytes=0, n_gpu_layers=99,
+                          logits_bytes=0, reserve_bytes=7, spread_bytes=4 * GiB)
+    assert [c.reserve for c in idle] == [7 + 4 * GiB, 0]
+
+
+@pytest.mark.parametrize("charge,expected", [(1 * GiB, True), (5 * GiB, False)])
+def test_on_an_implicit_split_the_draft_goes_on_the_gpus_only_if_the_split_holds(
+        tmp_path, charge, expected):
+    from localm.inference.backends.gguf import GgufBackend
+    draft = tmp_path / "d.gguf"
+    draft.write_bytes(b"x")
+    b = GgufBackend(str(tmp_path / "m.gguf"), spec_source="draft",
+                    spec_draft_model=str(draft), n_ctx=2048)
+    with patch.object(GgufBackend, "_draft_model_charge_bytes", return_value=charge), \
+         patch.object(GgufBackend, "_implicit_split_fit",
+                      side_effect=lambda layers: _two_gpus(b._draft_model_vram_bytes())), \
+         patch.object(GgufBackend, "_split_free_total_bytes") as combined:
+        assert b._decide_draft_placement() is expected
+        assert b._spec_extra_vram_bytes() == (charge if expected else 0)
+    combined.assert_not_called()
 
 
 def test_unmeasurable_vram_keeps_the_draft_model_on_the_gpu(tmp_path):
@@ -597,7 +672,8 @@ def test_the_worker_hands_a_cpu_placement_to_the_draft_load():
 def test_a_cpu_placed_draft_model_loads_without_gpu_layers_and_says_so(tmp_path):
     llm, path, llama_mod = _loading_llama(tmp_path)
     with patch.object(llama_mod, "api") as api, \
-         patch.object(llama_mod, "set_use_mmap"):
+         patch.object(llama_mod, "set_use_mmap"), \
+         patch("localm.discover.apply_gpu_split", return_value=None):
         params = SimpleNamespace(n_gpu_layers=-1, split_mode=1, main_gpu=0)
         api.llama_model_default_params.return_value = params
         _view_api(api)

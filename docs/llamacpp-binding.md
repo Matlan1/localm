@@ -589,8 +589,9 @@ share the target's vocabulary (`draft_vocab_mismatch`): the same tokenizer type,
 the same add-BOS / add-EOS flags and the same BOS / EOS id where one is added,
 sizes at most `DRAFT_VOCAB_SIZE_MAX_DIFFERENCE` (128) apart, and the same token
 text for every id from `DRAFT_VOCAB_CHECK_START_ID` (5) up. It loads after the
-target, fully on the target's main GPU without splitting, and drafts on its own
-context of the main context's size, recreated when the main one grows. Its
+target with every layer on the GPU, split over the same devices as the target
+(the same `main_gpu` and split ratios), and drafts on its own context of the
+main context's size, recreated when the main one grows. Its
 cache follows the main cache lazily: each step keeps the prefix the two share,
 removes the rest, decodes what is new plus the sampled token, then samples up
 to `spec_draft_tokens` drafts greedily (default 2, at most 16), decoding each
@@ -599,7 +600,12 @@ failed draft decode clears the draft cache and stops drafting for that reply; a
 draft cache that cannot drop a rejected draft turns drafting off for the model.
 The draft model is freed before the target. Its weights, its KV cache at the
 main context's size, its logits buffer and a fixed margin are charged in the
-VRAM estimate. A draft model that is missing, fails to load, does not share the
+VRAM estimate; under llama.cpp's implicit multi-GPU split that charge is
+spread over the devices in proportion to their shares. The draft goes on the
+GPU only when it fits beside the whole target (on an implicit split: when the
+per-device plan with it keeps the target's split and fits every device);
+otherwise it runs on the CPU, so it never costs the target layers or devices,
+and the reply's usage reports `draft-on-cpu`. A draft model that is missing, fails to load, does not share the
 vocabulary, has recurrent layers, or whose context is refused leaves the model
 working without drafting, with the status naming why (`draft-model-missing`,
 `draft-load-failed`, `draft-vocab-mismatch`, `draft-rewind-unsupported`,

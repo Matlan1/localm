@@ -494,7 +494,10 @@ class VramSizingMixin:
         them otherwise; with MTP enabled the MTP draft context
         (:meth:`_mtp_draft_context_vram_bytes`) is charged as the KV cache of
         those layers. The recurrent state (:meth:`_recurrent_state_vram_bytes`)
-        is charged in equal parts to the layers that keep one. A plan that writes a split or reports a shortfall is
+        is charged in equal parts to the layers that keep one. A draft model on
+        the GPU (:meth:`_draft_model_vram_bytes`) is split over the same devices
+        as the target, so it is charged to them in proportion to their shares.
+        A plan that writes a split or reports a shortfall is
         returned only when :func:`localm.discover.runtime_split_devices_match`
         confirms the device numbering; when the runtime instead keeps the
         integrated GPUs (:func:`localm.discover.runtime_identity_split_devices`),
@@ -572,8 +575,8 @@ class VramSizingMixin:
                 "fit_kw": dict(output_bytes=int(output_bytes),
                                layer_kv_bytes=layer_kv, n_gpu_layers=int(gpu_layers),
                                logits_bytes=logits,
-                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES
-                                                 + self._draft_model_vram_bytes())),
+                               reserve_bytes=int(self._VRAM_OVERHEAD_BYTES),
+                               spread_bytes=int(self._draft_model_vram_bytes())),
             }
         except Exception as e:
             from localm.debuglog import logger as _dbg
@@ -810,18 +813,31 @@ class VramSizingMixin:
 
         True when the draft source is not configured, its charge is 0, or free
         VRAM cannot be read. False when the target runs on the CPU
-        (``n_gpu_layers`` 0). Otherwise True exactly when free VRAM covers the
-        target's GPU weights (every layer, or ``n_gpu_layers`` of them when
-        fewer are configured), its KV cache for ``self.n_ctx`` tokens, the
-        compute overhead, any MTP draft context, the recurrent state and the
-        draft charge. A draft model that does not fit runs on the CPU, so it
-        never takes GPU layers from the target. Reads free VRAM, so it must not
-        run on an event loop thread."""
+        (``n_gpu_layers`` 0). Under llama.cpp's implicit split over 2+ devices
+        (:meth:`_implicit_split_fit` applies), True exactly when the per-device
+        plan with the draft split over the target's devices keeps the
+        target's split and fits every device. Otherwise True exactly when free
+        VRAM covers the target's GPU weights (every layer, or ``n_gpu_layers``
+        of them when fewer are configured), its KV cache for ``self.n_ctx``
+        tokens, the compute overhead, any MTP draft context, the recurrent
+        state and the draft charge. A draft model that does not fit runs on the
+        CPU, so it never takes GPU layers or devices from the target. Reads
+        free VRAM, so it must not run on an event loop thread."""
         on_gpu = True
         charge = self._draft_model_charge_bytes()
         if getattr(self, "spec_source", None) == "draft" and charge > 0:
+            self.draft_model_on_gpu = True
+            with_draft = (self._implicit_split_fit(self.n_gpu_layers)
+                          if self.n_gpu_layers > 0 else None)
             if self.n_gpu_layers <= 0:
                 on_gpu = False
+            elif with_draft is not None:
+                self.draft_model_on_gpu = False
+                without = self._implicit_split_fit(self.n_gpu_layers)
+                charges = with_draft.chosen or with_draft.default
+                on_gpu = (without is not None
+                          and with_draft.tensor_split == without.tensor_split
+                          and all(c.fits for c in charges))
             else:
                 free, _total, split_devices = self._split_free_total_bytes()
                 if free is None:

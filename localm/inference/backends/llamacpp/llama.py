@@ -1140,6 +1140,8 @@ class LlamaCpp:
         # spec_draft_gpu False loads it on the CPU.
         self._spec_source_name = resolve_spec_source(spec_source, mtp_enabled)
         self._mtp_enabled = self._spec_source_name == SPEC_MTP
+        self._main_gpu_arg = main_gpu
+        self._gpu_split_ratios_arg = gpu_split_ratios
         self._mtp_draft_max = max(1, min(int(mtp_draft_tokens), MTP_DRAFT_TOKENS_MAX))
         self._n_threads = n_threads
         # Optional preflight consulted by _prefill_fresh_context() before
@@ -2745,9 +2747,10 @@ class LlamaCpp:
     def _load_draft_model(self, path: Optional[str], n_threads: Optional[int],
                           verbose: bool, on_gpu: bool = True) -> None:
         """Load the draft GGUF at *path* and attach a DraftModelSource drafting
-        with it on its own context: on the main GPU without splitting, or on
-        the CPU when *on_gpu* is False, which sets the source's status to
-        "ok-cpu".
+        with it on its own context: on the GPU split over the same devices as
+        the target (the same ``main_gpu`` and ``gpu_split_ratios`` through
+        ``discover.apply_main_gpu`` and ``apply_gpu_split``), or on the CPU when
+        *on_gpu* is False, which sets the source's status to "ok-cpu".
 
         Any failure leaves the model working without drafting, with the
         source's status naming why: "draft-model-missing", "draft-load-failed",
@@ -2765,9 +2768,15 @@ class LlamaCpp:
             return
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = 99 if on_gpu else 0
-        if hasattr(mp, "split_mode"):
-            mp.split_mode = 0
-        mp.main_gpu = self._main_gpu_index
+        _tensor_split_keepalive = None
+        if on_gpu:
+            from localm.discover import apply_gpu_split, apply_main_gpu
+            if self._main_gpu_arg is not None:
+                apply_main_gpu(mp, slot=self._main_gpu_arg)
+            else:
+                apply_main_gpu(mp)
+            _tensor_split_keepalive = apply_gpu_split(
+                mp, ratios_override=self._gpu_split_ratios_arg)
         set_use_mmap(mp, False)
         if self._load_progress_cb is not None:
             mp.progress_callback = ctypes.cast(self._load_progress_cb, ctypes.c_void_p)
