@@ -495,8 +495,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         unusable = gguf_unusable_reason(Path(self.model_path))
         if unusable is not None:
             raise UnsupportedModelRoleError(unusable)
-        # A file that is not a chat model (draft head, diffusion LM, codec) is
-        # refused here, before any VRAM probe or worker spawn.
+        # A file that is not a chat model (draft head, codec, TTS, image
+        # checkpoint) is refused here, before any VRAM probe or worker spawn.
         from localm.model_manager import gguf_architecture, gguf_chat_refusal
         role_refusal = gguf_chat_refusal(gguf_architecture(Path(self.model_path)))
         if role_refusal is not None:
@@ -712,6 +712,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             params["spec_draft_tokens"] = int(self.spec_draft_tokens)
         if main_gpu is not None:
             params["main_gpu"] = main_gpu
+        if self.is_diffusion:
+            for key in ("diffusion_steps", "diffusion_max_tokens"):
+                value = cfg.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    params[key] = value
         timeout = self._load_timeout_seconds()
 
         cap_label = f"→{ctx_max}" if ctx_max else "→∞"
@@ -738,6 +743,14 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._supports_mtp = bool(meta.get("supports_mtp"))
         reported = meta.get("adapters")
         self.applied_adapters = list(reported) if isinstance(reported, list) else []
+        if meta.get("diffusion") is True:
+            self._diffusion_loaded = True
+            capacity = meta.get("diffusion_capacity")
+            if isinstance(capacity, int) and capacity > 0:
+                self.effective_ctx_max = capacity
+            reply = meta.get("diffusion_reply_tokens")
+            if isinstance(reply, int) and reply > 0:
+                self.diffusion_reply_tokens = min(reply, self.effective_ctx_max or reply)
 
         # An encoder-decoder model reads at most encoder_input_limit prompt
         # tokens per request, which becomes this load's context capacity.
@@ -939,10 +952,27 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         is_alive = getattr(self._runner, "is_alive", None)
         return True if is_alive is None else bool(is_alive())
 
-    # llama.cpp applies a GBNF grammar natively in the sampler, so this backend can
-    # always honour one. A plain class attribute, shadowing BaseBackend's
-    # deny-by-default property.
-    supports_grammar: bool = True
+    @property
+    def is_diffusion(self) -> bool:
+        """True when the model is a diffusion language model: read from the
+        file's own GGUF header, or reported by the worker that loaded it."""
+        return self._keeps_no_kv_cache()
+
+    @property
+    def reply_reserve(self) -> Optional[int]:
+        """For a loaded diffusion model, the reply length every generation
+        takes out of ``effective_ctx_max``; None otherwise."""
+        reserve = getattr(self, "diffusion_reply_tokens", None)
+        if self.loaded and self.is_diffusion and isinstance(reserve, int) and reserve > 0:
+            return reserve
+        return None
+
+    @property
+    def supports_grammar(self) -> bool:
+        """llama.cpp applies a GBNF grammar natively in the sampler, so True for
+        every model except a diffusion language model, which writes its reply
+        all at once."""
+        return not self.is_diffusion
 
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
@@ -967,7 +997,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         carries that type across the worker IPC as a tagged envelope, so the
         caller gets the same clean 400 an up-front check would have given - one
         request later, and never a reply that silently does not match the
-        grammar."""
+        grammar.
+
+        A diffusion language model refuses any grammar with
+        :class:`GrammarUnsupportedError`, loaded or not."""
+        if grammar and self.is_diffusion:
+            from .base import GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
+            raise GrammarUnsupportedError(GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE)
         if grammar and self.loaded and self._runner is not None:   # the loaded property, not the raw flag
             try:
                 self._runner.check_grammar(grammar)
@@ -1142,6 +1178,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             yield from self._runner.chat_stream(
                 first_chunk_timeout=self._first_token_timeout_seconds(),
                 on_status=on_status,
+                stop_on_request=self.is_diffusion,
                 **kwargs)
         except RuntimeError:
             # The isolated worker crashed or stalled and the model is gone. Drop it

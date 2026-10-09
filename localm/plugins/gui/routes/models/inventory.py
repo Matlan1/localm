@@ -443,8 +443,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_meta import cached_n_layers
         from localm.model_manager import _entry_path
         from localm.model_manager.gguf import (
-            gguf_input_layer_bytes, gguf_kv_bytes_per_token,
-            gguf_moe_pinned_expert_bytes)
+            gguf_architecture, gguf_input_layer_bytes, gguf_is_diffusion_architecture,
+            gguf_kv_bytes_per_token, gguf_moe_pinned_expert_bytes)
         from localm.sysstats import estimate_vram
         name = model or active_model()
         model_bytes = 0
@@ -452,6 +452,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         kv_bytes_per_token = 0
         moe_pinned_bytes = 0
         input_layer_bytes = 0
+        keeps_kv = True
         # n_cpu_moe has no GUI slider of its own (unlike n_ctx / n_gpu_layers, which
         # the caller sends as the sliders' live positions), so it is read from the
         # saved config.
@@ -509,20 +510,22 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                     "%s; the VRAM estimate charges the whole "
                                     "file (today's behavior)",
                                     type(exc).__name__, ep)
+                        kv = not gguf_is_diffusion_architecture(gguf_architecture(p))
                         return (p.stat().st_size, cached_n_layers(str(p)), kv_bpt,
-                                moe_pinned, input_bytes)
+                                moe_pinned, input_bytes, kv)
                 except (OSError, ValueError):
                     pass
                 return (model_bytes, n_layers, kv_bytes_per_token,
-                        moe_pinned_bytes, input_layer_bytes)
+                        moe_pinned_bytes, input_layer_bytes, keeps_kv)
 
             (model_bytes, n_layers, kv_bytes_per_token, moe_pinned_bytes,
-             input_layer_bytes) = await asyncio.get_running_loop().run_in_executor(
+             input_layer_bytes, keeps_kv) = await asyncio.get_running_loop().run_in_executor(
                 get_plugin_executor(), _measure, epath)
         est = estimate_vram(model_bytes, n_ctx, n_gpu_layers, n_layers=n_layers,
                             kv_bytes_per_token=kv_bytes_per_token,
                             moe_pinned_bytes=moe_pinned_bytes,
-                            input_layer_bytes=input_layer_bytes)
+                            input_layer_bytes=input_layer_bytes,
+                            keeps_kv=keeps_kv)
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it off the event
         # loop so a stats read never stalls the WebUI. return_status=True so a stale
         # (timed-out) or process-blind free reading is not weighed as current. When
