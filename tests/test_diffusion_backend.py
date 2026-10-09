@@ -177,7 +177,7 @@ class TestGenerateDiffusion:
         out = _run(llm, [5, 6, 7], on_status=statuses.append)
         assert out == [11, 12]
         assert llm.last_finish_reason == "stop"
-        assert ("causal", False) in calls
+        assert calls == []
         assert statuses[0] == "Denoising reply (0%)..."
         assert all(s.startswith("Denoising reply (") for s in statuses)
         assert len(statuses) == len(set(statuses)) <= 11
@@ -522,6 +522,8 @@ class TestLoadSetup:
         assert llm._diffusion_capacity == 512
         assert llm._diffusion_shift_logits is False
         assert llm._diffusion_mask == 126336
+        api.llama_set_causal_attn.assert_called_once_with(
+            api.llama_init_from_model.return_value, False)
 
     def test_shift_logits_defaults_to_true_when_undeclared(self, monkeypatch):
         llm, _ = self._build(self._api(meta={"diffusion.shift_logits": None}), monkeypatch)
@@ -555,6 +557,7 @@ class TestLoadSetup:
             llm = LlamaCpp("m.gguf", n_ctx=512, n_gpu_layers=99, verbose=True)
             llm.close()
         assert llm.is_diffusion is False and llm.kv_bytes_per_token == 4096
+        api.llama_set_causal_attn.assert_not_called()
 
 
 class TestWindowAndReplyReserve:

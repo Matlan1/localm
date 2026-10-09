@@ -326,7 +326,7 @@ def llama_model_is_hybrid(model: ctypes.c_void_p) -> bool:
 
 _DIFFUSION_SYMBOLS = ("llama_model_is_diffusion", "llama_vocab_mask",
                       "llama_set_causal_attn", "llama_sampler_apply",
-                      "llama_n_ubatch")
+                      "llama_n_ubatch", "llama_encode")
 
 
 def has_diffusion_api() -> bool:
@@ -550,6 +550,12 @@ def llama_batch_free(batch: LlamaBatch) -> None:
 # ---------------------------------------------------------------------------
 #  Inference
 # ---------------------------------------------------------------------------
+
+def llama_encode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
+    """Run the model on *batch* without the KV cache, every position output.
+    Returns 0 on success, non-zero on error."""
+    return _bind("llama_encode", ctypes.c_int32, LlamaContext, LlamaBatch)(ctx, batch)
+
 
 def llama_decode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
     """

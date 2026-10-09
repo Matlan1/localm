@@ -1502,6 +1502,8 @@ class LlamaCpp:
         _ctx = _quiet_stderr if not verbose else contextlib.nullcontext
         with _ctx():
             self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+            if self._ctx_ptr and self.is_diffusion:
+                api.llama_set_causal_attn(self._ctx_ptr, False)
         if not self._ctx_ptr:
             api.llama_free_model(self._model_ptr)
             raise RuntimeError("Failed to create llama context")
@@ -2301,7 +2303,6 @@ class LlamaCpp:
                     if self._stop.is_set() or self._ctx_ptr is None:
                         self.last_finish_reason = "error"
                         return
-                    api.llama_set_causal_attn(self._ctx_ptr, False)
                     native = _diffusion.NativeCanvas(
                         api, self._ctx_ptr, self._tokenizer._vocab,
                         api.llama_vocab_n_tokens(self._tokenizer._vocab),

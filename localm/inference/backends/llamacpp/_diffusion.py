@@ -218,7 +218,8 @@ class Native(Protocol):
     """What the step loop needs from the model."""
 
     def decode(self, tokens: Sequence[int]) -> int:
-        """Decode the whole canvas; 0 on success, the native code otherwise."""
+        """Run the model over the whole canvas; 0 on success, the native code
+        otherwise."""
 
     def sample(self, row: int, algorithm: int, greedy: bool) -> Tuple[int, float]:
         """Sample a token from logit row *row* of the last decode and return it
@@ -467,7 +468,7 @@ class NativeCanvas:
     def decode(self, tokens: Sequence[int]) -> int:
         with self._guard():
             ctypes.memmove(self._batch.token, self._tokens_t(*tokens), self._token_bytes)
-            code = self._api.llama_decode(self._ctx, self._batch)
+            code = self._api.llama_encode(self._ctx, self._batch)
             if code == 0:
                 ptr = self._api.llama_get_logits(self._ctx)
                 self._logits = ctypes.cast(ptr, ctypes.c_void_p).value or 0
