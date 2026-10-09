@@ -222,11 +222,12 @@ class TestChildDispatchContextCapacityTransport:
         import threading
 
         import localm._mp_spawn as mp_spawn
-        from localm.inference.backends import _hf_runner, _hf_worker
+        from localm.inference.backends import _hf_hub_gate, _hf_runner, _hf_worker
         from localm.inference.backends.base import ContextCapacityExceededError
 
         monkeypatch.setattr(mp_spawn, "install_parent_death_watchdog", lambda *a: None)
         monkeypatch.setattr(mp_spawn, "suppress_native_error_dialogs", lambda *a: None)
+        monkeypatch.setattr(_hf_hub_gate, "close_hub_gate", lambda: None)
 
         class _FakeWorker:
             last_finish_reason = "stop"
