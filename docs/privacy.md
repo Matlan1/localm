@@ -168,9 +168,11 @@ no way to show the confirmation prompt at all.
   path lookup can't leave the raw text unscrubbed.
 - URL credentials (`user:pass@...`), credential-named query parameters and
   HTTP header lines (`api_key=`, `token=`, `X-Api-Key:`, `Auth-Token:`, ...),
-  and bearer / API-key-shaped tokens - so `Authorization: Bearer ...` is
-  caught, but a raw or Basic-auth `Authorization:` value is not, wherever
-  they appear in diagnostic text, recent log tails, or the activity ring.
+  and bearer / API-key-shaped tokens - an `Authorization:` value is caught
+  whole whatever its scheme (Bearer, Basic or a raw token) - wherever they
+  appear in diagnostic text, recent log tails, or the activity ring.
+- Email addresses, replaced with `<redacted-email>`, except the maintainer's
+  contact address the report is addressed to.
 - Config values are sent only from a small allowlist of operational keys
   (port, context size, GPU layer count, mode, ...); the API key itself is
   never stored in config and never included.

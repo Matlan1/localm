@@ -77,7 +77,7 @@ Current thread 0x0000beef (most recent call first):
 2026-10-09 11:59:03,004 ERROR    localm.engine: load failed
 Traceback (most recent call last):
   File "C:\Users\<redacted>\Documents\localm\notes.txt", line 7, in load
-RuntimeError: Authorization: <redacted> for bob.builder@example.com
+RuntimeError: Authorization: <redacted> for <redacted-email>
 llama_context: constructing llama_co
 ```
 
@@ -93,7 +93,7 @@ Thread 0x0002 (most recent call first):
 ```
 12:00:00 INFO localm: loaded ~/models/private-model.gguf
 12:00:01 WARNING localm: GET http://<redacted>@alice-desktop.local/?sig=<redacted> failed
-12:00:02 INFO localm: reviewer bob.builder@example.com at \\FILESERVER01\share\report.txt
+12:00:02 INFO localm: reviewer <redacted-email> at \\FILESERVER01\share\report.txt
 12:00:03 ERROR localm: header X-Api-Key: <redacted> key <redacted>
 ```
 

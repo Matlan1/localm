@@ -59,7 +59,7 @@ it broke
 ```
 12:00:00 INFO localm: loaded ~/models/private-model.gguf
 12:00:01 WARNING localm: GET http://<redacted>@alice-desktop.local/?sig=<redacted> failed
-12:00:02 INFO localm: reviewer bob.builder@example.com at \\FILESERVER01\share\report.txt
+12:00:02 INFO localm: reviewer <redacted-email> at \\FILESERVER01\share\report.txt
 12:00:03 ERROR localm: header X-Api-Key: <redacted> key <redacted>
 ```
 

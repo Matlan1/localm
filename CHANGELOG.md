@@ -271,6 +271,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Fixed
 - **`localm doctor` recognises the macOS runtime.** On a Mac it reported the Metal build as "no llama library", skipped the native ABI check and the GPU probe, and ended with "CPU mode only"; it now checks the library like on other systems and names the Metal GPU.
 - **A knowledge collection whose `meta.json` is not valid UTF-8 no longer breaks the collection list.** The list, the collection detail view and a model rename now treat that collection as unreadable, flag it as corrupt and carry on with the others, instead of failing for every collection.
+- **Bug reports no longer carry email addresses.** Any email address in a report
+  (your description, an error, the log, a hang trace or the browser console) is
+  replaced with `<redacted-email>` before the report is shown, saved or sent, in the
+  app and in the standalone `report-issue` scripts. The maintainer's contact address
+  is kept.
 - **Models you already have on disk are found where LM Studio and llama.cpp keep them.**
   `localm add <folder>` and the models-folder scan now look inside subfolders (as far
   as the Folder import depth setting allows, three levels by default, so LM Studio's

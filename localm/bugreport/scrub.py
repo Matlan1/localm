@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from localm import pathscrub
+from localm.bugreport._common import MAINTAINER_EMAIL
 
 
 # The home/username policy lives in localm.pathscrub, shared with the
@@ -167,13 +168,33 @@ _BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 
+# An email address, matched from the first character of its local part.
+_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
+)
+
+
+def _scrub_emails(text: str) -> str:
+    """Replace every email address with ``<redacted-email>``, except
+    ``MAINTAINER_EMAIL`` (compared case-insensitively), which is kept as
+    written. Idempotent: the replacement contains no ``@``. A ``user@`` URL
+    credential already rewritten to ``<redacted>@`` by ``_scrub_url_creds`` is
+    left as it is."""
+    if not text:
+        return text
+    keep = MAINTAINER_EMAIL.lower()
+    return _EMAIL_RE.sub(
+        lambda m: m.group(0) if m.group(0).lower() == keep else "<redacted-email>", text)
+
+
 def _scrub_secrets(text: str) -> str:
     """Run every scrubber over untrusted text: home paths (username), URL
     ``user:pass@`` credentials, credential-named query params / header lines,
-    and bearer / API-key tokens. Used for client-supplied fields and the
-    bundled log tails / activity ring a share-intended report carries - each
-    of which is untrusted, free-form text that could contain a secret the
-    plain home-scrub alone would leave in."""
+    bearer / API-key tokens, and email addresses other than the maintainer's.
+    Used for client-supplied fields and the bundled log tails / activity ring
+    a share-intended report carries - each of which is untrusted, free-form
+    text that could contain a secret the plain home-scrub alone would leave
+    in."""
     if not text:
         return text
     text = _scrub_home(text)
@@ -181,4 +202,5 @@ def _scrub_secrets(text: str) -> str:
     text = _scrub_query_and_header_secrets(text)
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)
+    text = _scrub_emails(text)
     return text

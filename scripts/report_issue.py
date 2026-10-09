@@ -147,11 +147,17 @@ _HEADER_SECRET_RE = re.compile(
     r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
     r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
 )
+# An email address, matched from the first character of its local part.
+# Byte-identical to _EMAIL_RE in localm/bugreport/scrub.py.
+_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
+)
 
 
 def scrub(text: str) -> str:
-    """Strip the account name from any path and any obvious credential from free
-    text before it is shown or sent. A privacy scrub must fail safe: if it cannot
+    """Strip the account name from any path, any obvious credential and every
+    email address other than MAINTAINER_EMAIL from free text before it is
+    shown or sent. A privacy scrub must fail safe: if it cannot
     run it must NOT pass the text through as if scrubbed, so the home-root strip
     below ALWAYS runs (it never depends on Path.home succeeding)."""
     if not text:
@@ -181,6 +187,10 @@ def scrub(text: str) -> str:
     # Bearer tokens and API keys anywhere in the text.
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)
+    # Email addresses, except the maintainer's (compared case-insensitively).
+    keep = MAINTAINER_EMAIL.lower()
+    text = _EMAIL_RE.sub(
+        lambda m: m.group(0) if m.group(0).lower() == keep else "<redacted-email>", text)
     return text
 
 

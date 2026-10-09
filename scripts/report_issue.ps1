@@ -59,6 +59,9 @@ function Scrub([string]$t) {
   # Bearer tokens and OpenAI-style / localm API keys.
   $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')
   $t = [regex]::Replace($t, '(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}', '<redacted>')
+  # Email addresses, except the maintainer's ($email, compared case-insensitively).
+  # Same pattern as _EMAIL_RE in localm/bugreport/scrub.py.
+  $t = [regex]::Replace($t, '(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}', [System.Text.RegularExpressions.MatchEvaluator]{ param($m) if ($email -and $m.Value -ieq $email) { $m.Value } else { '<redacted-email>' } })
   return $t
 }
 
