@@ -106,7 +106,7 @@ class Module:
         self.name = ".".join(parts)
         self.tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         self.imports: dict[str, str] = {}
-        self.funcs: dict[str, "Func"] = {}
+        self.funcs: dict[str, Func] = {}
         self.classes: dict[str, ast.ClassDef] = {}
         self.routes: list[tuple[str, str, str]] = []
 

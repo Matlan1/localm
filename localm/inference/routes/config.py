@@ -201,7 +201,7 @@ def register(app: FastAPI, ctx) -> None:
             try:
                 cred_updates = validate_credential_updates(cred_updates)
             except ValueError as e:
-                raise HTTPException(400, str(e))
+                raise HTTPException(400, str(e)) from e
         # The second writer of `embedding_model`, besides POST /api/rag/embedding.
         # A switch that would invalidate existing collections' semantic search
         # returns needs_confirm instead of taking effect. Placed after the
@@ -223,7 +223,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             validated = validate_update(body)
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         held = _hs.caller_scopes(request)
         is_owner = held is None or scopes.ADMIN in held
         # Refuse to enable require_auth while no API key exists: the next keyless
@@ -247,7 +247,7 @@ def register(app: FastAPI, ctx) -> None:
             try:
                 check_credentials_readable()
             except ConfigUnreadable as e:
-                raise HTTPException(409, str(e))
+                raise HTTPException(409, str(e)) from e
         # update_config() is the atomic read-modify-write helper: a bare
         # load_config()/save_config() pair has an unlocked window in which a
         # concurrent config write can be lost.
@@ -263,14 +263,14 @@ def register(app: FastAPI, ctx) -> None:
                 update_config, lambda cfg: cfg.update(validated),
                 timeout=_CONFIG_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Saving the config timed out: {e}")
+            raise HTTPException(504, f"Saving the config timed out: {e}") from e
         except ConfigUnreadable as e:
-            raise HTTPException(409, str(e))
+            raise HTTPException(409, str(e)) from e
         if cred_updates:
             try:
                 set_credentials(cred_updates)
             except ConfigUnreadable as e:
-                raise HTTPException(409, _credentials_not_saved(str(e), bool(validated)))
+                raise HTTPException(409, _credentials_not_saved(str(e), bool(validated))) from e
             except OSError as e:
                 from localm.debuglog import logger as _dbg
                 if isinstance(e, TimeoutError):
@@ -280,7 +280,7 @@ def register(app: FastAPI, ctx) -> None:
                     reason = (f"{credentials_path().name} could not be written "
                               f"({e.strerror or type(e).__name__})")
                 _dbg.warning("credential write after a config save failed: %s", reason)
-                raise HTTPException(status, _credentials_not_saved(reason, bool(validated)))
+                raise HTTPException(status, _credentials_not_saved(reason, bool(validated))) from e
         # update_config() returns the FULL merged config, not just the changed
         # keys, so an admin_only field's value is stripped from a non-owner's
         # response echo - the same boundary get_config applies above.
@@ -348,7 +348,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             merge = validate_media_block(name, body or {})
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
 
         def _deep_merge(dst: dict, src: dict) -> None:
             for k, v in src.items():
@@ -374,9 +374,9 @@ def register(app: FastAPI, ctx) -> None:
             await run_in_threadpool_bounded(update_config, _mutate,
                                             timeout=_CONFIG_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Saving the {name} config timed out: {e}")
+            raise HTTPException(504, f"Saving the {name} config timed out: {e}") from e
         except ConfigUnreadable as e:
-            raise HTTPException(409, str(e))
+            raise HTTPException(409, str(e)) from e
         cfg = load_config()
         block = (cfg.get("plugins") or {}).get(name) or {}
         # Same admin_only filter as the GET route above: a non-owner config:write
@@ -448,7 +448,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             merge = validate_tts_block(body or {})
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
 
         def _mutate(cfg: dict) -> None:
             plugins = cfg.get("plugins")
@@ -466,9 +466,9 @@ def register(app: FastAPI, ctx) -> None:
             await run_in_threadpool_bounded(update_config, _mutate,
                                             timeout=_CONFIG_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Saving the tts config timed out: {e}")
+            raise HTTPException(504, f"Saving the tts config timed out: {e}") from e
         except ConfigUnreadable as e:
-            raise HTTPException(409, str(e))
+            raise HTTPException(409, str(e)) from e
         return _tts_payload(request)
 
     # ---------------------------------------------------------------- #
@@ -542,7 +542,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             merge = validate_plugin_settings_update(fields, body or {})
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
 
         def _mutate(cfg: dict) -> None:
             plugins = cfg.get("plugins")
@@ -558,9 +558,9 @@ def register(app: FastAPI, ctx) -> None:
             await run_in_threadpool_bounded(update_config, _mutate,
                                             timeout=_CONFIG_RMW_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Saving {name}'s settings timed out: {e}")
+            raise HTTPException(504, f"Saving {name}'s settings timed out: {e}") from e
         except ConfigUnreadable as e:
-            raise HTTPException(409, str(e))
+            raise HTTPException(409, str(e)) from e
         cfg = load_config()
         block = (cfg.get("plugins") or {}).get(name) or {}
         held = _hs.caller_scopes(request)
@@ -592,7 +592,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             return await run_in_threadpool_bounded(_check, timeout=_COMFY_STATUS_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Checking ComfyUI status timed out: {e}")
+            raise HTTPException(504, f"Checking ComfyUI status timed out: {e}") from e
 
     @app.post("/v1/comfy/stop", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_stop():
@@ -604,7 +604,7 @@ def register(app: FastAPI, ctx) -> None:
             ok, message = await run_in_threadpool_bounded(
                 stop_comfy, timeout=_COMFY_STOP_TIMEOUT_S)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Stopping ComfyUI timed out: {e}")
+            raise HTTPException(504, f"Stopping ComfyUI timed out: {e}") from e
         return {"ok": ok, "message": message}
 
     @app.post("/v1/comfy/restart", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
@@ -620,5 +620,5 @@ def register(app: FastAPI, ctx) -> None:
         try:
             ok, message = await run_in_threadpool_bounded(restart_comfy, timeout=budget)
         except ThreadCallTimeout as e:
-            raise HTTPException(504, f"Restarting ComfyUI timed out: {e}")
+            raise HTTPException(504, f"Restarting ComfyUI timed out: {e}") from e
         return {"ok": ok, "message": message}

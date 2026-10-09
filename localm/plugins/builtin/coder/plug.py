@@ -464,7 +464,7 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
     try:
         check_url_shape(base)
     except NetworkPolicyError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
 
     leaves = _url_leaves_machine(base)
 
@@ -492,7 +492,7 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
         try:
             check_url(base)
         except NetworkPolicyError as e:
-            raise HTTPException(403, f"Network policy refused {base}: {e}")
+            raise HTTPException(403, f"Network policy refused {base}: {e}") from e
 
     # Privacy mode REFUSES an off-machine model. Not a checkbox, not a fallback:
     # localm already answers this question this way for memory (fully off in
@@ -586,7 +586,7 @@ async def _ensure_model_loaded(request: Request, model: str, *,
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Failed to load {model}: {e}")
+        raise HTTPException(500, f"Failed to load {model}: {e}") from e
     status = res.get("status") if isinstance(res, dict) else None
     if status in (None, "loaded", "already_active"):
         return
@@ -610,7 +610,7 @@ def _set_session_model(session: CoderSession, model: str,
     try:
         switched = session.set_model(model, pinned=pinned)
     except ModelSwitchUnsupported as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e)) from e
     if not switched:
         raise HTTPException(409, "Session is busy; cannot switch models mid-task")
 
@@ -747,7 +747,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         try:
             requested_mode = parse_mode(req.mode)
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         # A scoped key must not force a less-private mode than the project's
         # configured floor - the same shape as the req.model gate above (a
         # restricted key cannot switch models either).
@@ -971,9 +971,9 @@ async def session_estimate(session_id: str, req: EstimateRequest, request: Reque
         # invites a retry.
         raise HTTPException(
             409, "Session is closed" if e.reason == "closed"
-            else "Session is busy - estimate before starting a task")
+            else "Session is busy - estimate before starting a task") from e
     except Exception as e:                                     # noqa: BLE001
-        raise HTTPException(502, f"Estimate failed: {type(e).__name__}: {e}")
+        raise HTTPException(502, f"Estimate failed: {type(e).__name__}: {e}") from e
     return result
 
 
@@ -1086,8 +1086,8 @@ async def session_file_download(session_id: str, request: Request, path: str = "
     try:
         root = Path(session.cwd).resolve()
         abs_path = (root / path).resolve()
-    except (OSError, ValueError, RuntimeError):
-        raise HTTPException(400, "Invalid path")
+    except (OSError, ValueError, RuntimeError) as e:
+        raise HTTPException(400, "Invalid path") from e
     if abs_path != root and root not in abs_path.parents:
         raise HTTPException(400, "Path escapes the session root")
     if not abs_path.is_file():
@@ -1192,7 +1192,7 @@ async def session_settings(session_id: str, req: SessionSettingsRequest,
         try:
             session.set_verify(req.verify, detect=bool(req.auto_verify))
         except SessionUnavailable as e:
-            raise HTTPException(409, str(e))
+            raise HTTPException(409, str(e)) from e
         changed.append("verify")
     # info() reports the EFFECTIVE state, so the caller reads back what actually
     # took rather than an echo of what it asked for - a re-detect that found no
@@ -1290,7 +1290,7 @@ async def session_remember(session_id: str, req: MemoryRequest, request: Request
     try:
         return session.remember(text)
     except OSError as e:
-        raise HTTPException(500, f"Could not write the memory file: {e}")
+        raise HTTPException(500, f"Could not write the memory file: {e}") from e
 
 
 @_router.post("/api/coder/sessions/{session_id}/memory/forget")
@@ -1311,7 +1311,7 @@ async def session_forget(session_id: str, req: MemoryForgetRequest,
     try:
         return session.forget(pattern)
     except OSError as e:
-        raise HTTPException(500, f"Could not rewrite the memory file: {e}")
+        raise HTTPException(500, f"Could not rewrite the memory file: {e}") from e
 
 
 @_router.get("/api/coder/sessions/{session_id}/background")
@@ -1358,7 +1358,7 @@ async def session_delete(session_id: str, request: Request):
         removed = await run_in_threadpool_bounded(
             _sessions(request).remove, session_id, timeout=60.0)
     except ThreadCallTimeout as e:
-        raise HTTPException(504, f"Closing the session timed out: {e}")
+        raise HTTPException(504, f"Closing the session timed out: {e}") from e
     if removed is None:
         raise HTTPException(404, f"No such session: {session_id}")
     return {"status": "closed"}
@@ -1443,8 +1443,8 @@ async def coder_resumable(request: Request, cwd: str = ""):
         raise HTTPException(400, "cwd is required")
     try:
         p = Path(cwd).expanduser()
-    except (OSError, ValueError, RuntimeError):
-        raise HTTPException(400, "Invalid cwd")
+    except (OSError, ValueError, RuntimeError) as e:
+        raise HTTPException(400, "Invalid cwd") from e
     # `cwd` is a raw HTTP query parameter, and this is a GET route with no CSRF
     # check on it (CSRF only applies to unsafe methods) - refuse UNC/device
     # syntax unconditionally, BEFORE p.is_dir()/.resolve() below ever run.
@@ -1514,8 +1514,8 @@ async def coder_dormant(request: Request, cwd: str = ""):
     if cwd.strip():
         try:
             p = Path(cwd).expanduser()
-        except (OSError, ValueError, RuntimeError):
-            raise HTTPException(400, "Invalid cwd")
+        except (OSError, ValueError, RuntimeError) as e:
+            raise HTTPException(400, "Invalid cwd") from e
         # Same guard, in the same order, as the resumable probe above: refuse
         # UNC/device syntax on the EXPANDED string before any filesystem call.
         if _is_unc_or_device_path(str(p)):
@@ -1523,8 +1523,8 @@ async def coder_dormant(request: Request, cwd: str = ""):
                 400, "'cwd' must be a local directory path, not a UNC or device path.")
         try:
             current = str(p.resolve())
-        except (OSError, ValueError, RuntimeError):
-            raise HTTPException(400, "Invalid cwd")
+        except (OSError, ValueError, RuntimeError) as e:
+            raise HTTPException(400, "Invalid cwd") from e
 
     def _collect() -> list:
         from localm.plugins.coder.projects import list_projects
@@ -1561,8 +1561,8 @@ def _local_path(value: str, field: str) -> Path:
         raise HTTPException(400, f"{field} is required")
     try:
         p = Path(value).expanduser()
-    except (OSError, ValueError, RuntimeError):
-        raise HTTPException(400, f"Invalid {field}")
+    except (OSError, ValueError, RuntimeError) as e:
+        raise HTTPException(400, f"Invalid {field}") from e
     if _is_unc_or_device_path(str(p)):
         raise HTTPException(
             400, f"'{field}' must be a local directory path, not a UNC or device path.")
@@ -1586,7 +1586,7 @@ async def _saved_session_op(fn, failure: str):
     except HTTPException:
         raise
     except Exception as e:                                     # noqa: BLE001
-        raise HTTPException(500, f"{failure}: {type(e).__name__}: {e}")
+        raise HTTPException(500, f"{failure}: {type(e).__name__}: {e}") from e
 
 
 @_router.delete("/api/coder/checkpoints")
@@ -1697,8 +1697,8 @@ def _episode_root(cwd: str) -> Path:
         raise HTTPException(400, "cwd is required")
     try:
         p = Path(cwd).expanduser()
-    except (OSError, ValueError, RuntimeError):
-        raise HTTPException(400, "Invalid cwd")
+    except (OSError, ValueError, RuntimeError) as e:
+        raise HTTPException(400, "Invalid cwd") from e
     if _is_unc_or_device_path(str(p)):
         raise HTTPException(
             400, "'cwd' must be a local directory path, not a UNC or device path.")
@@ -1716,7 +1716,7 @@ async def _episode_op(fn):
         raise
     except Exception as e:                                     # noqa: BLE001
         raise HTTPException(
-            500, f"Episode store operation failed: {type(e).__name__}: {e}")
+            500, f"Episode store operation failed: {type(e).__name__}: {e}") from e
 
 
 @_router.get("/api/coder/episodes")
@@ -1759,7 +1759,7 @@ async def coder_episodes(request: Request, cwd: str = ""):
         # own archive path refuses to do (see cli/_main.py's --episodes-archive).
         raise HTTPException(
             500, f"Could not read the episode store for {root}: "
-                 f"{type(e).__name__}: {e}")
+                 f"{type(e).__name__}: {e}") from e
     return {"episodes": episodes, "cwd": str(root)}
 
 

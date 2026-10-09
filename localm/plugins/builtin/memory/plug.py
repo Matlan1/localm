@@ -262,7 +262,7 @@ async def _off_loop(fn, *, embedder_bound: bool = True):
                 return await loop.run_in_executor(None, fn)
         return await loop.run_in_executor(None, fn)
     except CollectionLockedError as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e)) from e
 
 
 def _legacy_memory_file() -> Path:

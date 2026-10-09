@@ -151,9 +151,9 @@ def _get(url: str, params: Optional[dict] = None, *,
             extra_headers=_hf_auth_headers(token))
         return _json.loads(body.decode("utf-8"))
     except netpolicy.NetworkPolicyError as e:
-        raise DiscoverError(f"HuggingFace request failed: {e}", off=e.off)
+        raise DiscoverError(f"HuggingFace request failed: {e}", off=e.off) from e
     except Exception as e:
-        raise DiscoverError(f"HuggingFace request failed: {e}")
+        raise DiscoverError(f"HuggingFace request failed: {e}") from e
 
 
 # Tag-set fallback for LLM / embedding-ness, consulted alongside pipeline_tag

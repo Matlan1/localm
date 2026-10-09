@@ -91,7 +91,7 @@ async def _assert_event_loop_stays_responsive(make_awaitable, *, lock_hold_s=2.0
     main_task = asyncio.ensure_future(make_awaitable())
     try:
         await asyncio.wait_for(trivial_task, timeout=lock_hold_s * 0.5)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         release_lock.set()
         holder.join(timeout=5)
         pytest.fail(

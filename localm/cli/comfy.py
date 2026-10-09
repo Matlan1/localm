@@ -374,7 +374,7 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
     except ManagedComfyBusy as e:
         console.print(f"[red]Cannot remove the managed ComfyUI right now:[/red] "
                       f"{escape(e.reason)}")
-        raise SystemExit(1)
+        raise SystemExit(1) from e
     if failed:
         console.print("[red]Could not remove:[/red]\n  "
                       + "\n  ".join(escape(str(f)) for f in failed))
@@ -614,7 +614,7 @@ def workflow_add(media: str, file: Path, name, activate: bool) -> None:
         if activate:
             select_workflow(media, saved)
     except ValueError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
     # saved is the stored (user-chosen) filename - see workflow_list's comment.
     console.print(f"[green]Saved[/green] {media} workflow [bold]{escape(saved)}[/bold]"
                  + (" and selected it." if activate else "."))
@@ -650,7 +650,7 @@ def workflow_use(media: str, name, clear: bool) -> None:
     try:
         selected = select_workflow(media, None if clear else name)
     except ValueError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
     if selected:
         # selected is the user-chosen workflow filename - see workflow_list.
         console.print(f"[green]{media} now uses[/green] [bold]{escape(selected)}[/bold]")
@@ -676,6 +676,6 @@ def workflow_rm(media: str, name: str, yes: bool) -> None:
     try:
         delete_workflow(media, name)
     except ValueError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
     # name is the user-supplied workflow filename argument - see workflow_list.
     console.print(f"[green]Deleted[/green] {media} workflow [bold]{escape(name)}[/bold].")

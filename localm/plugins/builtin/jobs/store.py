@@ -163,8 +163,8 @@ class Job:
         if self.schedule_kind == "interval":
             try:
                 secs = int(self.schedule)
-            except (TypeError, ValueError):
-                raise ValueError("interval schedule must be an integer of seconds")
+            except (TypeError, ValueError) as e:
+                raise ValueError("interval schedule must be an integer of seconds") from e
             if secs < 1:
                 raise ValueError("interval schedule must be >= 1 second")
             self.schedule = secs

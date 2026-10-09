@@ -1758,10 +1758,10 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         name = _valid_name_or_404(name)
         try:
             manager.install(name)
-        except KeyError:
-            raise HTTPException(404, f"No such plugin: {name}")
+        except KeyError as exc:
+            raise HTTPException(404, f"No such plugin: {name}") from exc
         except Exception as e:
-            raise HTTPException(400, f"Install failed: {e}")
+            raise HTTPException(400, f"Install failed: {e}") from e
         return {"status": "installed", "name": name}
 
     @app.post("/api/plugins/install-external",
@@ -1781,9 +1781,9 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         try:
             spec = manager.set_installed_from_dir(src, force=bool((body or {}).get("force")))
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         except Exception as e:
-            raise HTTPException(400, f"Install failed: {e}")
+            raise HTTPException(400, f"Install failed: {e}") from e
         return {"status": "installed", "name": spec.name, "version": spec.version}
 
     @app.post("/api/plugins/{name}/uninstall",
@@ -1795,12 +1795,12 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         existed = manager.is_installed_or_on_disk(name)
         try:
             complete = manager.uninstall(name, delete_data=delete_data)
-        except KeyError:
-            raise HTTPException(404, f"No such plugin: {name}")
+        except KeyError as exc:
+            raise HTTPException(404, f"No such plugin: {name}") from exc
         except ValueError as e:
-            raise HTTPException(409, str(e))
+            raise HTTPException(409, str(e)) from e
         except Exception as e:
-            raise HTTPException(400, f"Uninstall failed: {e}")
+            raise HTTPException(400, f"Uninstall failed: {e}") from e
         if complete:
             return {"status": "uninstalled", "name": name}
         if not existed:
@@ -1826,10 +1826,10 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         name = _valid_name_or_404(name)
         try:
             refreshed = manager.refresh(name)
-        except KeyError:
-            raise HTTPException(404, f"No such installed builtin plugin: {name}")
+        except KeyError as exc:
+            raise HTTPException(404, f"No such installed builtin plugin: {name}") from exc
         except Exception as e:
-            raise HTTPException(400, f"Refresh failed: {e}")
+            raise HTTPException(400, f"Refresh failed: {e}") from e
         return {"status": "refreshed" if refreshed else "up-to-date", "name": name}
 
     @app.post("/api/plugins/{name}/enable",
@@ -1838,12 +1838,12 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         name = _valid_name_or_404(name)
         try:
             manager.enable(name)
-        except KeyError:
-            raise HTTPException(404, f"No such plugin: {name}")
+        except KeyError as exc:
+            raise HTTPException(404, f"No such plugin: {name}") from exc
         except ValueError as e:
-            raise HTTPException(409, str(e))      # e.g. not installed
+            raise HTTPException(409, str(e)) from e      # e.g. not installed
         except Exception as e:
-            raise HTTPException(400, f"Enable failed: {e}")
+            raise HTTPException(400, f"Enable failed: {e}") from e
         return {"status": "enabled", "name": name}
 
     @app.post("/api/plugins/{name}/disable",
@@ -1853,7 +1853,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         try:
             manager.disable(name)
         except ValueError as e:
-            raise HTTPException(409, str(e))
+            raise HTTPException(409, str(e)) from e
         return {"status": "disabled", "name": name}
 
     # Host-side dependency install (pip extras). In its own module so its
