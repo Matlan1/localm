@@ -555,7 +555,7 @@ drafting partway: `draft-decode-failed:*`, `draft-decode-error:*`,
 `GgufBackend.last_mtp_usage` turns these into the `usage.mtp` object of the
 chat API (see server-api.md), which the GUI shows next to the reply's tok/s.
 
-### Draft sources and n-gram (prompt lookup) speculative decoding
+### Draft sources: n-gram (prompt lookup) and draft-model speculative decoding
 
 The decode loop in `LlamaCpp._generate` speculates through a `DraftSource`
 (`_drafting.py`): `begin_call`, then per step `drafting` / `ready` / `budget` /
@@ -566,7 +566,8 @@ matching prefix kept, the rest removed from the cache, and the first mismatch
 carried to the next step as the token to emit. Output is the target model's,
 whatever the source proposes.
 
-`spec_source` chooses the source: `off`, `mtp` (the MTP head above) or `ngram`.
+`spec_source` chooses the source: `off`, `mtp` (the MTP head above), `ngram` or
+`draft`.
 Unset, it follows `mtp_enabled` (true is `mtp`, false is `off`); an explicit value
 wins. One source is active per loaded model.
 
@@ -582,11 +583,34 @@ that never repeats itself costs a dictionary lookup per token. It pays on text
 that repeats earlier text: rewriting a file, quoting a passage, repeated
 tool-call JSON.
 
+**`draft`** (`_draftmodel.py`) drafts with a second, smaller GGUF named by
+`spec_draft_model` (a registered model name or a path). The draft model must
+share the target's vocabulary (`draft_vocab_mismatch`): the same tokenizer type,
+the same add-BOS / add-EOS flags and the same BOS / EOS id where one is added,
+sizes at most `DRAFT_VOCAB_SIZE_MAX_DIFFERENCE` (128) apart, and the same token
+text for every id from `DRAFT_VOCAB_CHECK_START_ID` (5) up. It loads after the
+target, fully on the target's main GPU without splitting, and drafts on its own
+context of the main context's size, recreated when the main one grows. Its
+cache follows the main cache lazily: each step keeps the prefix the two share,
+removes the rest, decodes what is new plus the sampled token, then samples up
+to `spec_draft_tokens` drafts greedily (default 2, at most 16), decoding each
+before sampling the next. An end-of-generation draft ends the proposal. A
+failed draft decode clears the draft cache and stops drafting for that reply; a
+draft cache that cannot drop a rejected draft turns drafting off for the model.
+The draft model is freed before the target. Its weights, its KV cache at the
+main context's size, its logits buffer and a fixed margin are charged in the
+VRAM estimate. A draft model that is missing, fails to load, does not share the
+vocabulary, has recurrent layers, or whose context is refused leaves the model
+working without drafting, with the status naming why (`draft-model-missing`,
+`draft-load-failed`, `draft-vocab-mismatch`, `draft-rewind-unsupported`,
+`draft-context-refused`). `localm spec-drafts MODEL` lists the downloaded models
+whose metadata passes the vocabulary rule.
+
 A model with recurrent layers needs one state snapshot per draft token to drop
-rejected drafts (`n_rs_seq`), so there the n-gram draft length is capped at 4
-(`NGRAM_RECURRENT_DRAFT_TOKENS_MAX`) and the snapshots are charged in the VRAM
-estimate. A cache that cannot drop a rejected draft at all is found at load
-(status `rewind-unsupported`) or on the first rejection, after which n-gram
+rejected drafts (`n_rs_seq`), so there the n-gram or draft-model draft length is
+capped at 4 (`NGRAM_RECURRENT_DRAFT_TOKENS_MAX`) and the snapshots are charged in
+the VRAM estimate. A cache that cannot drop a rejected draft at all is found at
+load (status `rewind-unsupported`) or on the first rejection, after which
 drafting stays off for that model. A turn with an image does not draft
 (`skipped` `image`). `LlamaCpp.speculation_report()` carries the source, its
 status and the reply's figures to the parent in the done envelope
@@ -649,6 +673,3 @@ persisted.
   dedicated on-device embedding-model loader (`localm.inference.embedder`),
   loaded independently of whatever chat model is active. HF-format models
   embed fine. (See server-api.md for the `/v1/embeddings` behavior.)
-- **No two-model (separate draft model) speculative decoding.** Drafts come
-  from the model's own MTP head or from n-gram lookup over the conversation
-  (see above); both are off by default.

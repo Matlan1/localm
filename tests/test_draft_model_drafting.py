@@ -359,6 +359,25 @@ def test_the_draft_model_is_freed_before_the_target_model():
     assert order == [("ctx", 6), ("model", 5), ("ctx", 2), ("model", 1)]
 
 
+@pytest.mark.parametrize("configured,recurrent,cap", [
+    (None, False, 2), (6, False, 6), (None, True, 2), (8, True, 4)])
+def test_the_draft_source_takes_its_own_default_and_the_recurrent_cap(configured, recurrent, cap):
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    from localm.inference.backends.llamacpp._draftmodel import DRAFT_MODEL_DRAFT_TOKENS_DEFAULT
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1))
+    llm._spec_source_name = "draft"
+    llm._mtp_enabled = False
+    cp = SimpleNamespace(n_rs_seq=0)
+    with patch.object(llama_mod, "api") as api:
+        api.has_hybrid_api.return_value = True
+        api.llama_model_is_recurrent.return_value = recurrent
+        api.llama_model_is_hybrid.return_value = False
+        llm._apply_initial_spec_params(cp, configured)
+    assert DRAFT_MODEL_DRAFT_TOKENS_DEFAULT == 2
+    assert llm._spec_draft_max == cap
+    assert cp.n_rs_seq == cap
+
+
 # --------------------------------------------------------------------------- #
 #  Loading the draft model                                                    #
 # --------------------------------------------------------------------------- #

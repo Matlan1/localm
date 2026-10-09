@@ -19,6 +19,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tool-call JSON come out faster. Replies are the same model's replies. It is off
   by default; `localm bench-spec <model>` measures whether it pays on your machine,
   and the reply's usage line shows how many drafted tokens were accepted.
+- **Speculative decoding with a draft model.** Speculative drafting can now use a
+  smaller model of the same family (`spec_source` `draft`, with the Draft model
+  setting): it drafts a few tokens and your model checks them in one pass, so
+  ordinary replies can come out faster too, not only ones that repeat earlier
+  text. Replies are the same model's replies. It is off by default; `localm
+  spec-drafts <model>` lists the downloaded models that can draft for yours, and
+  `localm bench-spec <model> --source draft` measures whether it pays on your
+  machine.
 - **A "Model autoswitch" setting controls when a chat may be answered by a different
   model.** `off` never switches; `image` (the default) switches only for an image
   your model cannot read; `ask` keeps your model and offers the better one on the

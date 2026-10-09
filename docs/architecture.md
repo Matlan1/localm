@@ -219,6 +219,11 @@ macOS; no llama-cpp-python). Key behaviour:
   tokens that followed the same few tokens earlier in the conversation and
   verify them the same way, with no second model and no extra VRAM. Off by
   default (`spec_source`); `localm bench-spec` measures whether it pays.
+- **Draft-model speculative decoding**: a smaller model sharing the loaded
+  model's vocabulary (`spec_draft_model`) drafts on its own context on the
+  main GPU, and the loaded model verifies the drafts the same way. Off by
+  default (`spec_source` `draft`); `localm spec-drafts` lists the downloaded
+  models that fit.
 - **Output filtering**: a stop-string filter handles end-of-turn sequences
   split across tokens; an internal-marker scrubber (`localm/textnorm.py`)
   strips thinking-channel tags and leaked chat-template control tokens some
