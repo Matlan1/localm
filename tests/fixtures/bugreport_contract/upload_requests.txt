@@ -1,0 +1,21 @@
+POST https://bugreport-proxy.example.invalid/report
+timeout: 15.0
+Content-type: application/json
+User-agent: localm-bugreport
+X-localm-token: Arch08UploadSharedSecret
+
+{"title": "Crash in C:\\Users\\<redacted>\\Documents\\localm\\notes.txt token=<redacted> <redacted> on alice-desktop.local", "body": "# report\n\nalready scrubbed body"}
+POST https://other.example.invalid/r
+timeout: 3.0
+Content-type: application/json
+User-agent: localm-bugreport
+X-localm-token: Arch08UploadSharedSecret
+
+{"title": "localm bug report", "body": "body without newline"}
+POST https://other.example.invalid/r
+timeout: 15.0
+Content-type: application/json
+User-agent: localm-bugreport
+X-localm-token: explicit-token
+
+{"title": "t", "body": "edited footer\n\n---\nSent to the localm maintainer ({{MAINTAINER_EMAIL}}). You can edit anything above before sending. (edited)\n"}

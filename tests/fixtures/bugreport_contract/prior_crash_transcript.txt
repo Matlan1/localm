@@ -1,0 +1,5 @@
+
+Sorry - localm server crashed - native fault captured: Windows fatal exception: access violation.
+Reason: a native crash was caught by the fault handler; see the captured trace below for the exact fault and thread/frame. The process exited with 3221225477 (0xC0000005, access violation).
+A bug report was saved (edit it before sending): <REPORT>
+Run localm bug-report --send to send it now (no GitHub account needed) - or email/Discord it yourself.
