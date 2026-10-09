@@ -295,7 +295,7 @@ localm config use_mmap off        # always read the whole model into memory firs
 ```
 
 With `auto`, localm memory-maps the model when the weights that stay in system
-RAM would not fit in available RAM. The load output, the GUI load toast and the
+RAM may not fit in available RAM (or when available RAM cannot be read). The load output, the GUI load toast and the
 load response (`mmap`, `mmap_from_disk`) then say it runs from disk-backed
 memory and that first tokens are slower. `on` and `off` are used as given. The
 Settings page has the same field ("Memory-map model files").

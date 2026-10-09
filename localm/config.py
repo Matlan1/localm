@@ -530,9 +530,9 @@ DEFAULT_CONFIG: dict = {
     # tensors to move, so any value is a no-op there.
     "n_cpu_moe": 0,
     # Memory-map the model file: "auto" (the loader decides), "on" (only the
-    # pages a run touches are resident, so a model larger than system RAM can
-    # run from disk-backed memory, first tokens slower) or "off" (the whole
-    # model is read into memory first).
+    # pages a run touches are resident, so a model that may not fit in
+    # available RAM can run from disk-backed memory, first tokens slower) or
+    # "off" (the whole model is read into memory first).
     "use_mmap": "auto",
     # When n_gpu_layers is left at its "everything" default, auto-size how many
     # layers actually go on the GPU from free VRAM at load: a model too big for

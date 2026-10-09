@@ -420,7 +420,7 @@ class Engine:
         """What the last load did with memory-mapping, or None when the backend
         did not report it: ``use_mmap`` (the setting: auto, on or off), ``mmap``
         (bool, whether the model was memory-mapped) and ``mmap_from_disk`` (bool,
-        True when ``auto`` mapped it because the model is larger than system
+        True when ``auto`` mapped it because the model may not fit in available
         RAM). ``mmap_note`` is the one-line description
         (``mmap_setting.describe_mmap``), present only when there is something
         to say."""
@@ -428,8 +428,8 @@ class Engine:
         if effective is None:
             return None
         setting = getattr(self._backend, "use_mmap", "auto")
-        forced = bool(effective) and bool(
-            getattr(self._backend, "mmap_forced_by_ram", False))
+        forced = (setting == "auto" and bool(effective) and bool(
+            getattr(self._backend, "mmap_forced_by_ram", False)))
         state = {"use_mmap": setting, "mmap": bool(effective),
                  "mmap_from_disk": forced}
         note = describe_mmap(setting, bool(effective), forced)

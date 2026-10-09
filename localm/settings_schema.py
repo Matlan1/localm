@@ -229,8 +229,8 @@ CORE_FIELDS: list = [
                  "needed, before a whole layer moves to the CPU.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
     SettingField("use_mmap", Widget.SELECT, "Memory-map model files",
-                 "auto runs from disk-backed memory only when the model is larger than "
-                 "system RAM. on forces it; off reads the whole model into memory first.",
+                 "auto runs from disk-backed memory when the model may not fit in "
+                 "available RAM. on forces it; off reads the whole model into memory first.",
                  group="Engine", applies=Applies.NEXT_LOAD,
                  options=["auto", "on", "off"]),
     SettingField("n_gpu_layers_auto", Widget.TOGGLE, "Auto-size GPU layers from VRAM",

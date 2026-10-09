@@ -508,11 +508,12 @@ localm config use_mmap on         # always memory-map
 localm config use_mmap off        # always read the whole model into memory first
 ```
 
-With `auto`, localm memory-maps a model whose system-RAM share does not fit in
-available RAM, and says so in the load output:
+With `auto`, localm memory-maps a model whose system-RAM share may not fit in
+available RAM (or when available RAM cannot be read), and says so in the load
+output:
 
 ```
-  mmap on: model larger than system RAM, running from disk-backed memory, first tokens slower
+  mmap on: model may not fit in available RAM, running from disk-backed memory, first tokens slower
 ```
 
 Reads then come from disk until the pages are cached, which is why the first

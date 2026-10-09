@@ -1085,7 +1085,7 @@ export async function switchModel(model) {
 // res.degraded (from /api/models/load's gpu_layers_offloaded/gpu_layers_total,
 // and moe_cpu_layers when routed experts stayed in system RAM)
 // says so; warn instead of a bare success toast. res.mmap_from_disk marks a
-// model larger than system RAM that runs from disk-backed memory.
+// model that may not fit in available RAM and runs from disk-backed memory.
 export function toastLoadResult(res, model) {
   const fromDisk = !!(res && res.mmap_from_disk);
   if (res && res.degraded) {

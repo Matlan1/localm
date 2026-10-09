@@ -1526,7 +1526,7 @@
   "settings.field.updateAllowPrerelease.label": "Prerelease-Updates anbieten",
   "settings.field.updateIgnoreNetPolicy.help": "Die Update-Prüfung folgt normalerweise Netzwerkzugriff, daher schaltet dessen Ausschalten auch Update-Prüfungen aus. Aktivieren, um den Update-Kanal unabhängig davon durchzulassen.",
   "settings.field.updateIgnoreNetPolicy.label": "Auch bei ausgeschaltetem Netzwerkzugriff nach Updates suchen",
-  "settings.field.useMmap.help": "auto läuft nur dann aus festplattengestütztem Speicher, wenn das Modell größer als der System-RAM ist. on erzwingt es; off liest zuerst das ganze Modell in den Speicher.",
+  "settings.field.useMmap.help": "auto läuft aus festplattengestütztem Speicher, wenn das Modell möglicherweise nicht in den verfügbaren RAM passt. on erzwingt es; off liest zuerst das ganze Modell in den Speicher.",
   "settings.field.useMmap.label": "Modelldateien in den Speicher abbilden (mmap)",
   "settings.field.voiceSttLanguage.help": "Erzwingt eine Sprache für die Transkription, z. B. en oder de. Leer erkennt sie automatisch aus dem Audio.",
   "settings.field.voiceSttLanguage.label": "Sprache-zu-Text-Sprache",

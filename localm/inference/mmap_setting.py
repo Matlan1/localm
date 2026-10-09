@@ -13,8 +13,8 @@ USE_MMAP_ON = "on"
 USE_MMAP_OFF = "off"
 USE_MMAP_MODES = (USE_MMAP_AUTO, USE_MMAP_ON, USE_MMAP_OFF)
 
-MMAP_FROM_DISK_NOTE = ("model larger than system RAM, running from disk-backed "
-                       "memory, first tokens slower")
+MMAP_FROM_DISK_NOTE = ("model may not fit in available RAM, running from "
+                       "disk-backed memory, first tokens slower")
 
 
 def coerce_use_mmap(val) -> Optional[str]:
@@ -51,7 +51,7 @@ def describe_mmap(setting: str, effective: Optional[bool],
 
     *effective* is whether the load memory-mapped the model (None when the
     loader did not report it). *forced_by_ram* marks an ``auto`` load that
-    turned mmap on because the model exceeds system RAM. Nothing is said for
+    turned mmap on because the model may not fit in available RAM. Nothing is said for
     any other ``auto`` load, or when *effective* is unknown. An explicit ``on``
     or ``off`` is confirmed, and a load that did the opposite says so."""
     if effective is None:

@@ -173,7 +173,7 @@ def test_describe_mmap(setting, effective, forced, expected):
 
 
 def test_the_hint_names_what_happened_and_what_it_costs():
-    assert "larger than system RAM" in MMAP_FROM_DISK_NOTE
+    assert "may not fit in available RAM" in MMAP_FROM_DISK_NOTE
     assert "disk-backed memory" in MMAP_FROM_DISK_NOTE
     assert "first tokens slower" in MMAP_FROM_DISK_NOTE
 
@@ -203,13 +203,30 @@ def test_the_load_output_stays_silent_when_there_is_nothing_to_say(setting, effe
     console.print.assert_not_called()
 
 
-def test_the_load_prints_the_note_just_before_it_reports_the_model_loaded():
-    import inspect
-    src = inspect.getsource(GgufBackend._load_native)
-    note = src.index("self._print_mmap_note()")
-    loaded = src.index("Model loaded")
-    assert note < loaded
-    assert src.count("self._print_mmap_note()") == 1
+@pytest.mark.parametrize("setting", USE_MMAP_MODES)
+def test_a_real_load_reports_mmap_once_just_before_model_loaded(tmp_path, setting):
+    """GgufBackend._load_native run for real (isolated worker and GPU probe
+    stubbed), with no MoE placement requested: the note is reported exactly
+    once, as the last step before the "Model loaded" line."""
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"\0" * 4096)
+    b = GgufBackend(str(model), n_gpu_layers=99, n_ctx=512, use_mmap=setting)
+    order = []
+
+    def _printed(*args, **kwargs):
+        if args and "Model loaded" in str(args[0]):
+            order.append("loaded")
+
+    with patch("localm.discover.list_gpus", return_value=([], "ok")), \
+         patch("localm.inference.backends.llamacpp._runner.ModelRunner."
+               "spawn_and_load",
+               return_value={"n_layers": 8, "kv_bytes_per_token": 0,
+                             "supports_images": False}), \
+         patch.object(GgufBackend, "_print_mmap_note",
+                      lambda self: order.append("note")), \
+         patch("localm.inference.backends.gguf.console.print", _printed):
+        b._load_native()
+    assert order == ["note", "loaded"]
 
 
 def _engine(backend):
@@ -237,6 +254,11 @@ def test_engine_mmap_state_is_none_until_a_load_reports_it():
 
 def test_mmap_from_disk_needs_mmap_actually_on():
     assert _engine(_backend("auto", False, True)).mmap_state["mmap_from_disk"] is False
+
+
+@pytest.mark.parametrize("setting", ["on", "off"])
+def test_mmap_from_disk_is_an_auto_decision_only(setting):
+    assert _engine(_backend(setting, True, True)).mmap_state["mmap_from_disk"] is False
 
 
 def test_the_load_payload_carries_the_mmap_fields():
