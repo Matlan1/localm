@@ -216,6 +216,178 @@ let _modelsRenderGen = 0;
 // succeeded; false again after a failed fetch.
 let _pullShortcutsLoaded = false;
 
+// ---- GGUF LoRA adapters ----
+// The unfiltered list from the last /api/models read: the attach dialog offers
+// its chat models as bases.
+let _modelsSnapshot = [];
+
+/** "x0.8" for an adapter scale; "x1" for a whole number. */
+export function fmtAdapterScale(scale) {
+  const n = Number(scale);
+  if (!Number.isFinite(n)) return "?";
+  return "\u00d7" + String(Math.round(n * 1000) / 1000);
+}
+
+/** How a base model's attached adapters relate to what it runs with right now:
+ *  "none" (nothing attached or applied), "attached" (not loaded; applied at the
+ *  next load), "active" (loaded and running exactly the attached set),
+ *  "pending" (loaded and running a different set: reload to apply the change). */
+export function adapterLoadState(m) {
+  const attached = Array.isArray(m.adapters) ? m.adapters : [];
+  const applied = Array.isArray(m.applied_adapters) ? m.applied_adapters : [];
+  if (!m.loaded) return attached.length ? "attached" : "none";
+  if (!attached.length && !applied.length) return "none";
+  const key = (a) => `${a.file || a.name}|${Number(a.scale)}`;
+  const want = attached.map(key).sort();
+  const have = applied.map(key).sort();
+  return want.length === have.length && want.every((k, i) => k === have[i])
+    ? "active" : "pending";
+}
+
+/** The adapter badges for one registered-models row as [{text, title, cls}].
+ *  An adapter row says what it is attached to; a base row names the adapters it
+ *  runs with (loaded), will run with (not loaded) or needs a reload to change. */
+export function adapterBadgeSpecs(m) {
+  const out = [];
+  if (m.adapter) {
+    if (m.base) {
+      out.push({
+        text: t("models.adapter.attachedTo", { base: m.base, scale: fmtAdapterScale(m.scale) }),
+        title: m.base_registered === false ? t("models.adapter.baseMissing", { base: m.base }) : "",
+        cls: m.base_registered === false ? "adapter-badge adapter-warn" : "adapter-badge",
+      });
+    } else {
+      out.push({ text: t("models.adapter.notAttached"), title: t("models.adapter.notAttachedTitle"),
+                 cls: "adapter-badge adapter-idle" });
+    }
+    return out;
+  }
+  const state = adapterLoadState(m);
+  if (state === "none") return out;
+  const listing = (m.adapters || []).map((a) => `${a.name} ${fmtAdapterScale(a.scale)}`).join(", ");
+  if (state === "active") {
+    for (const a of m.applied_adapters) {
+      out.push({ text: t("models.adapter.running", { name: a.name, scale: fmtAdapterScale(a.scale) }),
+                 title: t("models.adapter.runningTitle"), cls: "adapter-badge adapter-active" });
+    }
+  } else if (state === "pending") {
+    out.push({ text: t("models.adapter.pendingReload"),
+               title: t("models.adapter.pendingReloadTitle", { listing: listing || t("chat.none") }),
+               cls: "adapter-badge adapter-warn" });
+  } else {
+    out.push({ text: tn("models.adapter.attachedCount", m.adapters.length), title: listing,
+               cls: "adapter-badge" });
+  }
+  return out;
+}
+
+/** POST an attach. Resolves {ok, data}: data.detail carries the server's own
+ *  refusal (a mismatched architecture names both). */
+export async function postAdapterAttach(adapter, base, scale) {
+  const r = await fetch("/api/models/adapters/attach", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ adapter, base, scale }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ok: r.ok, data };
+}
+
+export async function postAdapterDetach(adapter) {
+  const r = await fetch("/api/models/adapters/detach", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ adapter }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ok: r.ok, data };
+}
+
+/** The chat models an adapter can be attached to, from the last list read. */
+export function adapterBaseCandidates() {
+  return _modelsSnapshot.filter((x) => !x.adapter && !x.missing
+    && (!x.model_type || x.model_type === "llm"));
+}
+
+export function openAdapterAttachModal(m) {
+  const bases = adapterBaseCandidates();
+  openModal(t("models.adapter.attachTitle", { name: m.name }), (body) => {
+    if (!bases.length) {
+      body.appendChild(el("p", "", t("models.adapter.noBases")));
+      return;
+    }
+    const baseSel = el("select", "adapter-base-select");
+    baseSel.id = "adapter-base";
+    baseSel.setAttribute("aria-label", t("models.adapter.baseLabel"));
+    for (const b of bases) {
+      const opt = el("option", "", b.name);
+      opt.value = b.name;
+      if (b.name === m.base) opt.selected = true;
+      baseSel.appendChild(opt);
+    }
+    const scaleIn = el("input", "adapter-scale-input");
+    scaleIn.id = "adapter-scale";
+    scaleIn.type = "number";
+    scaleIn.step = "0.05";
+    scaleIn.value = String(m.scale ?? 1);
+    scaleIn.setAttribute("aria-label", t("models.adapter.scaleLabel"));
+    const err = el("p", "form-error adapter-error");
+    err.setAttribute("role", "alert");
+    err.hidden = true;
+    for (const [label, input] of [[t("models.adapter.baseLabel"), baseSel],
+                                  [t("models.adapter.scaleLabel"), scaleIn]]) {
+      const row = el("div", "adapter-field");
+      row.appendChild(el("label", "", label));
+      row.appendChild(input);
+      body.appendChild(row);
+    }
+    body.appendChild(el("p", "sub", t("models.adapter.scaleHint")));
+    body.appendChild(err);
+    const actions = el("div", "actions adapter-actions");
+    const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
+    cancel.onclick = () => ($("modal").style.display = "none");
+    const ok = el("button", "btn-secondary adapter-attach-confirm", t("models.adapter.attachConfirm"));
+    ok.onclick = async () => {
+      const scale = Number(scaleIn.value);
+      if (!Number.isFinite(scale) || scale === 0) {
+        err.textContent = t("models.adapter.badScale");
+        err.hidden = false;
+        return;
+      }
+      ok.disabled = true;
+      err.hidden = true;
+      try {
+        const { ok: good, data } = await postAdapterAttach(m.name, baseSel.value, scale);
+        if (!good) {
+          err.textContent = data.detail || t("models.adapter.attachFailed");
+          err.hidden = false;
+          return;
+        }
+        $("modal").style.display = "none";
+        toast(t(data.needs_reload ? "models.adapter.attachedReload" : "models.adapter.attachedToast",
+                { name: m.name, base: baseSel.value }));
+        refreshModelsPage();
+      } catch (e) {
+        err.textContent = t("models.adapter.attachFailedWith", { message: e.message });
+        err.hidden = false;
+      } finally { ok.disabled = false; }
+    };
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    body.appendChild(actions);
+  });
+}
+
+export async function detachAdapterAction(m) {
+  try {
+    const { ok, data } = await postAdapterDetach(m.name);
+    if (!ok) { toast(data.detail || t("models.adapter.detachFailed"), true); return; }
+    toast(t(data.needs_reload ? "models.adapter.detachedReload" : "models.adapter.detachedToast",
+            { name: m.name }));
+    refreshModelsPage();
+  } catch (e) {
+    toast(t("models.adapter.detachFailedWith", { message: e.message }), true);
+  }
+}
+
 export async function refreshModelsPage() {
   const myGen = ++_modelsRenderGen;
   // Fire-and-forget. This authenticated read must run only after the boot auth
@@ -254,6 +426,7 @@ export async function refreshModelsPage() {
     }
     const data = await r.json();
     models = (data && Array.isArray(data.models)) ? data.models : [];
+    _modelsSnapshot = models;
   } catch (e) {
     if (myGen !== _modelsRenderGen) return;
     box.replaceChildren(el("div", "sub", t("models.loadException", { message: e.message })));
@@ -376,6 +549,11 @@ export async function refreshModelsPage() {
     }
     const visBadge = visionBadge(m.vision);
     if (visBadge) nameLine.appendChild(visBadge);
+    for (const b of adapterBadgeSpecs(m)) {
+      const badge = el("span", b.cls, b.text);
+      if (b.title) badge.title = b.title;
+      nameLine.appendChild(badge);
+    }
     if (m.active) nameLine.appendChild(el("span", "active-tag job-state st-ok", t("models.tag.active")));
     // Independent of "active": a model can sit resident in VRAM without being
     // the one currently serving requests. Wears job-state's "on" variant rather
@@ -466,6 +644,19 @@ export async function refreshModelsPage() {
         else toast(data.detail || t("models.relocate.failed"), true);
       };
       actions.appendChild(relocateBtn);
+    }
+
+    if (m.adapter) {
+      const attachBtn = el("button", "secondary adapter-attach",
+        t(m.base ? "models.adapter.change" : "models.adapter.attach"));
+      attachBtn.title = t("models.adapter.attachTitleHint");
+      attachBtn.onclick = () => openAdapterAttachModal(m);
+      actions.appendChild(attachBtn);
+      if (m.base) {
+        const detachBtn = el("button", "secondary adapter-detach", t("models.adapter.detach"));
+        detachBtn.onclick = () => detachAdapterAction(m);
+        actions.appendChild(detachBtn);
+      }
     }
 
     // Only LLMs support use/alias/remove
@@ -634,6 +825,10 @@ export async function showModelDetail(name) {
                                     : t("models.detail.statusActiveNotLoaded"))
                     : t("models.detail.statusRegistered")],
     ];
+    if (Array.isArray(data.adapters) && data.adapters.length) {
+      rows.push(["adapters", t("models.detail.adapters"),
+        data.adapters.map((a) => `${a.name} ${fmtAdapterScale(a.scale)}`).join(", ")]);
+    }
     for (const [rowKind, label, v] of rows) {
       const row = el("div", "log-entry");
       row.appendChild(el("span", "t", label));

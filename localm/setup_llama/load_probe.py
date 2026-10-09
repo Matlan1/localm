@@ -108,6 +108,26 @@ sys.exit(0 if _loader.compute_backends_available() else {_PROBE_NO_BACKENDS})
 """
 
 
+_PROBE_NO_GPU_DEVICE = 90
+
+
+_GPU_LOAD_PROBE_CODE = f"""\
+import sys
+from localm.inference.backends.llamacpp import _loader
+from localm.inference.backends.llamacpp._abi import AbiMismatch
+try:
+    _loader.load_lib()
+except AbiMismatch as e:
+    sys.stderr.write(str(e))
+    sys.exit({_PROBE_ABI_MISMATCH})
+devices = _loader.compute_devices()
+if any(kind == _loader.GGML_DEV_TYPE_GPU for _, kind in devices):
+    sys.exit(0)
+sys.stdout.write(", ".join(name for name, _ in devices) or "none")
+sys.exit({_PROBE_NO_GPU_DEVICE})
+"""
+
+
 def _is_abi_rejection(detail: Optional[str]) -> bool:
     """Whether *detail* is _native_loads_ok reporting OUR OWN ABI gate refusing
     the runtime, as opposed to any other load failure.
@@ -141,6 +161,30 @@ def _native_loads_ok() -> tuple:
     if r.returncode == _PROBE_ABI_MISMATCH:
         # Kept behind its own prefix so callers can recognise this specific
         # outcome without re-parsing upstream's wording - see _is_abi_rejection.
+        why = _informative_error_line((r.stderr or "").strip()) or "layout drift"
+        return False, f"{_ABI_REJECT_PREFIX}: {why}"
+    detail = (r.stderr or r.stdout or "").strip()
+    return False, _informative_error_line(detail)
+
+
+def _native_gpu_loads_ok() -> tuple:
+    """Like :func:`_native_loads_ok`, but passes only when the runtime registers
+    a GPU-type compute device. A GPU build whose GPU library fails to load still
+    registers the CPU device, which satisfies :func:`_native_loads_ok`. Returns
+    (ok, last_error_line); the failure line names the devices that did register."""
+    try:
+        r = subprocess.run([sys.executable, "-c", _GPU_LOAD_PROBE_CODE],
+                           capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        return False, str(e)
+    if r.returncode == 0:
+        return True, ""
+    if r.returncode == _PROBE_NO_GPU_DEVICE:
+        registered = (r.stdout or "").strip() or "none"
+        return False, ("the runtime loaded but registered no GPU device "
+                       f"(registered: {registered}); the NVIDIA driver libraries "
+                       "may be missing from the container")
+    if r.returncode == _PROBE_ABI_MISMATCH:
         why = _informative_error_line((r.stderr or "").strip()) or "layout drift"
         return False, f"{_ABI_REJECT_PREFIX}: {why}"
     detail = (r.stderr or r.stdout or "").strip()

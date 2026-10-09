@@ -128,7 +128,8 @@ from localm.setup_llama.cuda import (
     _CUDA_LINE, _BLACKWELL_MIN_CAP, _MIN_DRIVER_CUDA, _ver_tuple, _ver_at_least,
     NvidiaInfo, _nvidia_smi, nvidia_preflight, _CUDA_RUNTIME_PYPI_PACKAGES,
     _pypi_wheel_url_and_sha, _fetch_pypi_runtime_lib, _fetch_cuda_runtime_libs,
-    _cuda_setup_dialogue,
+    _cuda_setup_dialogue, STAGED_NOTE, IMAGE_TAG_FOR_LINE, CUDA_CHECK_FAILED,
+    record_staged_cuda, staged_cuda_line, check_staged_cuda_runtime, cuda_container_check,
 )
 from localm.setup_llama.native_deps import (
     _LIBGOMP_SONAME, _LIBGOMP_DEB_URL, _LIBGOMP_DEB_SHA256, _LIBGOMP_DEB_MIN_BYTES,
@@ -139,6 +140,7 @@ from localm.setup_llama.load_probe import (
     _EXC_HEADER_RE, _informative_error_line, _KNOWN_SHARED_LIB_PACKAGES, _MISSING_SO_RE,
     _name_missing_shared_lib, _PROBE_NO_BACKENDS, _PROBE_ABI_MISMATCH,
     _ABI_REJECT_PREFIX, _LOAD_PROBE_CODE, _is_abi_rejection, _native_loads_ok,
+    _PROBE_NO_GPU_DEVICE, _GPU_LOAD_PROBE_CODE, _native_gpu_loads_ok,
 )
 from localm.setup_llama.rocm_cpu import (
     CPU_OVERLAY_MARKER, install_rocm_simd_cpu, installed_cpu_overlay, rocm_build,
@@ -158,6 +160,8 @@ __all__ = [
     "_BLACKWELL_MIN_CAP", "_BLAS_DIRS_REQUIRING_KERNELS", "blas_kernel_problems",
     "_BLAS_LIBRARY_DIRS", "_bundle_missing_native_deps", "check_runtime_update",
     "_clear_target", "_clear_target_or_refuse", "_clearable_files", "console",
+    "STAGED_NOTE", "IMAGE_TAG_FOR_LINE", "CUDA_CHECK_FAILED", "record_staged_cuda",
+    "staged_cuda_line", "check_staged_cuda_runtime", "cuda_container_check",
     "_copy_binaries", "_copy_blas_library_dirs", "_copy_license_files", "CPU_OVERLAY_MARKER",
     "_CUDA_LINE",
     "_CUDA_LINUX_REPO", "_CUDA_RUNTIME_PYPI_PACKAGES", "_cuda_setup_dialogue",
@@ -179,7 +183,8 @@ __all__ = [
     "nvidia_preflight", "_nvidia_smi", "NvidiaInfo", "_pick_asset", "_PIN_CONFIRMATION",
     "_pin_note_for_backend", "_PINNED_FALLBACK_SHA256", "_PINNED_TAG", "pinned_tag",
     "_platform_key", "_PRESERVED_TARGET_FILES", "previous_tag", "_PROBE_ABI_MISMATCH",
-    "_PROBE_NO_BACKENDS", "_provision_backend", "_provision_lock_holder_pid",
+    "_PROBE_NO_BACKENDS", "_PROBE_NO_GPU_DEVICE", "_GPU_LOAD_PROBE_CODE",
+    "_native_gpu_loads_ok", "_provision_backend", "_provision_lock_holder_pid",
     "_PROVISION_LOCK_OWNER", "_provision_lock_path", "_provision_with_fallback",
     "_provisioned_backend", "_provisioned_build", "_provisioning_lock",
     "ProvisioningBusyError", "_pypi_wheel_url_and_sha", "_read_ar_archive",

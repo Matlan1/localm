@@ -7,6 +7,10 @@
 #   sh, bash                              run that shell
 #   anything else                         run as `localm <arguments>`
 #                                         (key generate, pull, doctor, ...)
+#
+# Serving from a cuda or cuda13 image first checks that the CUDA runtime loads on
+# the GPU the container can see, and exits 3 when it does not. LOCALM_ALLOW_NO_GPU=1
+# lets a container without a GPU start.
 set -eu
 
 PORT="${LOCALM_CONTAINER_PORT:-8642}"
@@ -65,5 +69,18 @@ EOF
   esac
   rm -f "$errfile"
 fi
+
+case "${LOCALM_IMAGE_BACKEND:-}" in
+  cuda|cuda13)
+    cuda_rc=0
+    python -c 'import sys; from localm.setup_llama import cuda_container_check; sys.exit(cuda_container_check())' || cuda_rc=$?
+    if [ "$cuda_rc" -eq 3 ]; then
+      exit 3
+    elif [ "$cuda_rc" -ne 0 ]; then
+      echo "localm: could not check the CUDA runtime (see the error above)" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 exec localm serve -H 0.0.0.0 -p "$PORT" "$@"

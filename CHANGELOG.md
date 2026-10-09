@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The Ollama API's `format` takes a JSON schema.** The reply is constrained, token by
+  token, to documents that satisfy the schema: objects with required and optional
+  properties, arrays with length bounds, enums, integer ranges, `anyOf`, recursive `$ref`
+  and more. A keyword that cannot be enforced (`pattern`, `multipleOf`, number bounds)
+  is refused with a 400 naming it rather than ignored.
 - **`stop` sequences on `/v1/chat/completions` and `/v1/completions`.** A string or a list
   of up to 16: the reply is cut before the first match, the generation ends there instead of
   running to its token budget, and `finish_reason` is `stop`. A stop sequence inside a
@@ -64,7 +69,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
   answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies
   stream as NDJSON, `format: "json"`, `options.stop`, `think` and images work, and the same
-  API keys and scopes apply. Tool calling and a JSON-schema `format` are not supported yet.
+  API keys and scopes apply. Tool calling is not supported yet.
   `/api/copy` makes an alias; pulling, deleting and creating models stay in `localm`. See
   docs/ollama-api.md.
 - **Release files carry build provenance and a software bill of materials.** The release
@@ -72,6 +77,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the release workflow, so `gh attestation verify` proves which workflow built a file and
   from which commit. SECURITY.md has the commands.
 - **Docker images for the API server.** Releases publish CPU and Vulkan images to `ghcr.io/matlan1/localm`, and `docker/Dockerfile` builds the same image from a clone. The container keeps its data in a `/data` volume, serves HTTPS, and refuses to start until an API key exists (`docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate`). See docs/docker.md.
+- **NVIDIA CUDA Docker images.** Releases also publish `cuda` (every NVIDIA architecture before Blackwell) and `cuda13` (Blackwell) images, started with `docker run --gpus all`. On start the container checks that the CUDA runtime loads on the GPU it can see, and exits with the cause instead of serving on the CPU when it does not, for example with no GPU attached or with the wrong tag for the GPU. `localm setup-llama --backend cuda --cuda-line cuda-12` (or `cuda-13`) fetches the CUDA runtime on a machine without a GPU, which is how the images are built. See docs/docker.md.
 - **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
   a model runs from disk.** With `auto`, a model that may not fit in available
   RAM is memory-mapped, so it can run from disk-backed memory instead of failing
@@ -229,6 +235,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localm adapter list` manage them. An adapter made for a different architecture is
   refused with both architectures named, and a loaded model's load response lists the
   adapters it runs with.
+- **LoRA adapters are managed from the Models page.** An adapter row shows what it is
+  attached to and its scale, with attach, change and detach controls; a refusal such as a
+  mismatched architecture appears inside the dialog. A base model shows the adapters it
+  will run with, the ones it is running, and asks for an unload and reload when they
+  differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
