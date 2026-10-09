@@ -17,7 +17,7 @@ If you land a new site here, EITHER route it through
 below with a review comment proving the file carries no secret - never widen
 the scan to stop noticing it.
 
-  localm/bugreport.py::save_report   its ``path.chmod(0o600)`` on the saved
+  localm/bugreport/persistence.py::save_report   its ``path.chmod(0o600)`` on the saved
                              bug-report markdown. Reviewed: the report carries
                              NO secrets (no API key, env, config secrets, or
                              chat content), so the 0600 here is multi-user-box
@@ -43,7 +43,7 @@ from localm import config as _config
 # non-secret chmod(..., 0o600) site. Paths use forward slashes regardless of
 # host OS so the assertion is platform-stable.
 _REVIEWED_SITES = {
-    ("localm/bugreport.py", "save_report"),
+    ("localm/bugreport/persistence.py", "save_report"),
 }
 
 
@@ -109,7 +109,7 @@ def test_the_scan_detects_a_planted_os_chmod_call():
 
 
 def test_the_scan_detects_a_planted_path_chmod_call():
-    """``Path.chmod(0o600)`` is a real second spelling (bugreport.py uses it),
+    """``Path.chmod(0o600)`` is a real second spelling (localm.bugreport uses it),
     not covered by matching only ``os.chmod``."""
     planted = ast.parse("path.chmod(0o600)\n")
     hits = [n for n in ast.walk(planted)

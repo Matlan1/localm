@@ -4,7 +4,7 @@ model-worker processes (GGUF, HF, embedder).
 
 Each runner's ``_spawn()`` used to call ``debuglog.child_crash_trace_path()``
 unconditionally on every worker start, in every session mode - the crash
-guard's own trace (bugreport.py) and the server's hang alarm are already
+guard's own trace (localm.bugreport) and the server's hang alarm are already
 gated on ``audit.diagnostics_allowed()`` (log/full mode, or privacy with
 ``keep_diagnostics`` on); these three call sites were the ones still missed.
 

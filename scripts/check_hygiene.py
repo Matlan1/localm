@@ -7,7 +7,7 @@ Scans tracked files and fails on:
   2. Personal or machine-specific disclosure: a local username used as a path
      component, a leaked secret (token / key / private key), or a known private
      external path. NOTE: the maintainer's contact email is intentionally
-     published for bug reports (see localm/bugreport.py) and is NOT flagged.
+     published for bug reports (see localm/bugreport/_common.py) and is NOT flagged.
   3. An absolute or machine-specific path used in code/config (not docs), which
      a default must never assume.
   4. A CHANGELOG.md that is not append-only: a shipped entry line removed or

@@ -43,7 +43,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Maintainer contact for bug reports; kept in sync by hand with localm/bugreport.py.
+# Maintainer contact for bug reports; kept in sync by hand with localm/bugreport/_common.py.
 MAINTAINER_EMAIL = "theilige@gmail.com"
 
 
@@ -113,14 +113,15 @@ def read_proxy(config_path: Path | None = None) -> tuple:
 
 
 # --------------------------------------------------------------------------- #
-#  Privacy scrub (mirrors localm/bugreport.py _scrub_home / _scrub_secrets)    #
+#  Privacy scrub (mirrors localm/bugreport/scrub.py _scrub_home /              #
+#  _scrub_secrets)                                                             #
 # --------------------------------------------------------------------------- #
 
 _BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 # Credential-named URL query parameters and pasted header lines. Kept
-# byte-identical to the counterparts in localm/bugreport.py.
+# byte-identical to the counterparts in localm/bugreport/scrub.py.
 _QUERY_SECRET_RE = re.compile(
     r"(?i)((?:"
     # 1. Immediately after a query delimiter.

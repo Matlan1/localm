@@ -2,3 +2,6 @@
 *.sh text eol=lf
 # Windows batch files must stay CRLF.
 *.bat text eol=crlf
+
+# ARCH-07 rag store fixture: byte-exact on every platform.
+tests/fixtures/rag_store_v1/** -text

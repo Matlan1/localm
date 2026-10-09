@@ -281,7 +281,9 @@ def test_an_untracked_new_test_file_selects_itself(repo):
 _FACADE_FILES = {
     "localm/__init__.py": "",
     "localm/setup_llama/__init__.py": "from localm.setup_llama.versions import pinned_tag\n",
-    "localm/setup_llama/versions.py": "def pinned_tag():\n    return None\n",
+    "localm/setup_llama/versions.py": (
+        "from localm.pins import TAG\n\n\ndef pinned_tag():\n    return TAG\n"),
+    "localm/pins.py": "TAG = None\n",
     "localm/updater.py": "from localm import setup_llama\n",
     "tests/conftest.py": "",
     "tests/test_facade_import.py": "import localm.setup_llama\n",
@@ -318,7 +320,17 @@ def test_a_change_inside_a_reexport_facade_counts_as_a_change_to_the_package(fac
     assert at_one["tests/test_facade_caller.py"] == [
         "imports localm.updater (1 hop(s) from a change)"]
     assert "tests/test_none.py" not in at_one
-    assert mod._REEXPORT_FACADES == ("localm.setup_llama",)
+    assert mod._REEXPORT_FACADES == ("localm.setup_llama", "localm.bugreport")
+
+
+def test_a_reexport_facade_counts_as_importing_what_its_modules_import(facade_repo):
+    mod, _ = facade_repo
+    assert "tests/test_facade_import.py" not in _select(mod, ["localm/pins.py"])
+    at_one = _select(mod, ["localm/pins.py"], depth=1)
+    assert "imports localm.setup_llama (1 hop(s) from a change)" in \
+        at_one["tests/test_facade_import.py"]
+    assert "tests/test_facade_caller.py" not in at_one
+    assert "tests/test_none.py" not in at_one
 
 
 # --------------------------------------------------------------------------- #
@@ -632,3 +644,64 @@ def test_real_tree_a_locked_uvicorn_bump_is_a_targeted_selection(monkeypatch):
     assert "imports localm.portmux, which imports uvicorn: changed dependency uvicorn" in \
         selected["tests/test_portmux_redirect.py"]
     assert len(selected) <= 0.25 * len(graph.test_files)
+
+
+_MODULE_FACADE_FILES = {
+    "localm/__init__.py": "",
+    "localm/rag/__init__.py": "from localm.rag.store import Collection\n",
+    "localm/rag/store.py": "from localm.rag._store.cache import Collection\n",
+    "localm/rag/_store/__init__.py": "",
+    "localm/rag/_store/cache.py": ("from localm.rag.chunk import chunk_text\n\n\n"
+                                   "class Collection:\n    pass\n"),
+    "localm/rag/chunk.py": "def chunk_text(text):\n    return [text]\n",
+    "localm/plugins/__init__.py": "",
+    "localm/plugins/rag.py": "from localm.rag import store\n",
+    "tests/conftest.py": "",
+    "tests/test_store_import.py": "import localm.rag.store\n",
+    "tests/test_store_caller.py": "import localm.plugins.rag\n",
+    "tests/test_store_patch.py": (
+        "def test_patch(monkeypatch):\n"
+        "    monkeypatch.setattr('localm.rag.store.Collection', object)\n"),
+    "tests/test_none.py": "def test_none():\n    assert True\n",
+}
+
+
+@pytest.fixture
+def module_facade_repo(tmp_path, monkeypatch):
+    """A committed throwaway checkout holding a re-export facade module."""
+    for rel, src in _MODULE_FACADE_FILES.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src, encoding="utf-8")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+    mod = _load()
+    monkeypatch.setattr(mod, "REPO", tmp_path)
+    return mod, tmp_path
+
+
+def test_a_change_behind_a_reexport_module_counts_as_a_change_to_the_module(
+        module_facade_repo):
+    mod, _ = module_facade_repo
+    at_zero = _select(mod, ["localm/rag/_store/cache.py"])
+    assert "imports localm.rag.store" in at_zero["tests/test_store_import.py"]
+    assert at_zero["tests/test_store_patch.py"] == ["names localm.rag.store"]
+    assert "tests/test_store_caller.py" not in at_zero
+    at_one = _select(mod, ["localm/rag/_store/cache.py"], depth=1)
+    assert at_one["tests/test_store_caller.py"] == [
+        "imports localm.plugins.rag (1 hop(s) from a change)"]
+    assert "tests/test_none.py" not in at_one
+    assert mod._REEXPORT_MODULE_FACADES == {"localm.rag.store": "localm.rag._store"}
+
+
+def test_a_reexport_module_counts_as_importing_what_its_package_imports(
+        module_facade_repo):
+    mod, _ = module_facade_repo
+    at_zero = _select(mod, ["localm/rag/chunk.py"])
+    assert "tests/test_store_import.py" not in at_zero
+    at_one = _select(mod, ["localm/rag/chunk.py"], depth=1)
+    assert at_one["tests/test_store_import.py"] == [
+        "imports localm.rag.store (1 hop(s) from a change)"]
+    assert "tests/test_store_caller.py" not in at_one
+    assert "tests/test_none.py" not in at_one

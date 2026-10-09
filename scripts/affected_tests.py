@@ -14,7 +14,10 @@ A test file is selected when any of these holds:
     import written as a string), a changed script by file name, or a changed
     non-Python file by file name;
   - a change to a module inside a package listed in _REEXPORT_FACADES also
-    counts as a change to that package, for both rules above;
+    counts as a change to that package, and a change to a module inside a
+    package mapped in _REEXPORT_MODULE_FACADES also counts as a change to the
+    module it is mapped from, for both rules above, and that module counts as
+    importing every module the package's modules import;
   - it imports a changed dependency, names it in a string literal, imports a
     module that imports it (with --depth N, also that module's importers, up
     to N hops), or sits under the folder of a conftest.py that imports it. A
@@ -73,11 +76,15 @@ REPO = Path(__file__).resolve().parent.parent
 _ROUTE_METHODS = {"get", "post", "put", "delete", "patch", "websocket", "api_route"}
 _EVERYTHING = {"tests/conftest.py"}
 # Packages whose callers import and patch the package itself, which re-exports
-# its submodules' names.
-_REEXPORT_FACADES = ("localm.setup_llama",)
+# its submodules' names. Each counts as importing every module its own modules
+# import.
+_REEXPORT_FACADES = ("localm.setup_llama", "localm.bugreport")
 _DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
+# Modules whose callers import and patch the module itself, which re-exports the
+# names of the modules in the package mapped to it.
+_REEXPORT_MODULE_FACADES = {"localm.rag.store": "localm.rag._store"}
 _ROOT_DECLARATIONS = ("dependencies", "optional-dependencies", "dev-dependencies")
 _ROOT_METADATA_DECLARATIONS = ("requires-dist", "requires-dev", "provides-extras")
 _SOURCE_ROOTS = ("localm", "scripts", "tests")
@@ -206,10 +213,24 @@ class Graph:
             for dep in self.resolve(names):
                 if dep != mod:
                     self.reverse.setdefault(dep, set()).add(mod)
+        for facade, pkg in _REEXPORT_MODULE_FACADES.items():
+            if facade not in self.sources:
+                continue
+            inside = {m for m in self.sources if m == pkg or m.startswith(pkg + ".")}
+            for dep, users in self.reverse.items():
+                if dep != facade and dep not in inside and users & inside:
+                    users.add(facade)
         for rel in self.test_files:
             names = imported_names(_read(rel), module_name(rel), False)
             self.test_top[rel] = _top_levels(names)
             self.test_imports[rel] = self.resolve(names)
+        for facade in _REEXPORT_FACADES:
+            if facade not in self.sources:
+                continue
+            for dep, users in self.reverse.items():
+                inside = dep == facade or dep.startswith(facade + ".")
+                if not inside and any(u.startswith(facade + ".") for u in users):
+                    users.add(facade)
 
     def resolve(self, names: set[str]) -> set[str]:
         """The known modules the dotted *names* refer to, by longest prefix."""
@@ -488,6 +509,9 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
             changed_modules.add(mod)
             facades.update(f for f in _REEXPORT_FACADES
                            if mod.startswith(f + ".") and f in graph.sources)
+            facades.update(f for f, pkg in _REEXPORT_MODULE_FACADES.items()
+                           if (mod == pkg or mod.startswith(pkg + "."))
+                           and f in graph.sources)
             text = _read(rel) + "\n" + _read_at(base_ref, rel)
             for prefix in sorted(route_prefixes(text)):
                 needles.append((f"names route {prefix}", re.compile(re.escape(prefix))))

@@ -108,7 +108,7 @@ def test_each_matrix_category_matches_its_files(mp, path, category):
     "localm/plugins/coder/plug.py",
     "localm/plugins/builtin/chat/plug.py",
     "localm/plugins/mcpserver/server.py",
-    "localm/bugreport.py",
+    "localm/bugreport/__init__.py",
     "localm/discover.py",
     "scripts/check_hygiene.py",
     "scripts/write_coverage_summary.py",

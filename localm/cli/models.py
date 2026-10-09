@@ -1004,7 +1004,7 @@ def rm(model, yes):
                    "instead of registering it in place at its original location. "
                    "'copy' leaves the original untouched; 'move' relocates it.")
 def add(path, name, no_hash, fast, on_duplicate, type, store):
-    """Register a local model file or HuggingFace directory.
+    """Register a local model file, a HuggingFace model directory, or a folder of them.
 
     Duplicate detection is two-tier: the resolved path is checked first,
     then the file's SHA256 against digests stored in the registry. For large
@@ -1017,6 +1017,7 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
       localm add D:\\models\\gemma.gguf --name gemma4-12b
       localm add D:\\models\\gemma.gguf -n g2 --on-duplicate alias
       localm add D:\\models\\bulk-dir --fast
+      localm add D:\\models\\lmstudio   # every GGUF and safetensors model inside
       localm add D:\\models\\mymodel.gguf --store copy   # copy into <data dir>/models
       localm add D:\\models\\mymodel.gguf --store move   # move into <data dir>/models
     """

@@ -29,6 +29,36 @@ class TestRecentLogTail:
         assert "n_ctx overflow" in tail
         assert "other-run line" not in tail
 
+    def test_a_newer_hang_trace_never_replaces_the_run_log(self, tmp_path):
+        import os
+        run = _make_log(tmp_path, 444, "2026-10-09 11:59:00,000 ERROR x: run-log failure marker\n")
+        hang = tmp_path / "logs" / "hang_2026-10-09_120000_444.log"
+        hang.write_text("2026-10-09 12:00:00,000 ERROR x: hang-trace marker\n", encoding="utf-8")
+        os.utime(run, (1_000_000, 1_000_000))
+        os.utime(hang, (2_000_000, 2_000_000))
+        assert br._find_run_log(tmp_path, 444) == run
+        tail = br._recent_log_tail(home=tmp_path, pid=444)
+        assert "run-log failure marker" in tail
+        assert "hang-trace marker" not in tail
+
+    def test_no_pid_fallback_ignores_hang_traces(self, tmp_path):
+        import os
+        run = _make_log(tmp_path, 555, "run line\n")
+        hang = tmp_path / "logs" / "hang_2026-10-09_120000_666.log"
+        hang.write_text("hang line\n", encoding="utf-8")
+        os.utime(run, (1_000_000, 1_000_000))
+        os.utime(hang, (2_000_000, 2_000_000))
+        assert br._find_run_log(tmp_path, None) == run
+
+    def test_truncation_signal_reads_the_run_log_not_a_newer_hang_trace(self, tmp_path):
+        import os
+        run = _make_log(tmp_path, 777, "ok line\nllama_co")
+        hang = tmp_path / "logs" / "hang_2026-10-09_120000_777.log"
+        hang.write_text("complete hang line\n", encoding="utf-8")
+        os.utime(run, (1_000_000, 1_000_000))
+        os.utime(hang, (2_000_000, 2_000_000))
+        assert br._raw_tail_truncation_signal(tmp_path, 777) == (True, "llama_co")
+
     def test_no_logs_returns_empty(self, tmp_path):
         assert br._recent_log_tail(home=tmp_path, pid=999) == ""
 

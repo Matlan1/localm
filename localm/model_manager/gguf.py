@@ -12,9 +12,11 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from typing import Collection
 from typing import List
 from typing import NamedTuple
 from typing import Optional
+from typing import Tuple
 from rich.progress import BarColumn
 from rich.progress import DownloadColumn
 from rich.progress import Progress
@@ -51,7 +53,8 @@ def split_gguf_parts(filename: str) -> Optional[List[str]]:
     if total < 2:
         return None
     stem = m.group("stem")
-    return [f"{stem}-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
+    ext = Path(filename).name[-5:]
+    return [f"{stem}-{i:05d}-of-{total:05d}{ext}" for i in range(1, total + 1)]
 
 
 
@@ -427,21 +430,56 @@ def _gguf_recently_written(path: Path) -> bool:
     return (time.time() - mtime) < _mm._GGUF_SETTLE_SECONDS
 
 
-def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:
-    """First-part GGUF files inside *d*, scanning up to *max_depth* levels deep.
+def _is_non_first_split_part(name: str) -> bool:
+    """True for ``stem-0000N-of-0000M.gguf`` with N != 1, in any filename case."""
+    m = _SPLIT_GGUF_RE.match(name)
+    return bool(m and split_gguf_parts(name) and int(m.group("idx")) != 1)
 
-    *max_depth* counts the filename as level 1 (depth 1 = files directly in *d*,
-    depth 3 = up to two subfolders down), so batch imports of models organised in
-    subdirectories are picked up. Split GGUFs (``model-00001-of-00003.gguf``)
-    contribute only their first part - llama.cpp finds the siblings on its own;
-    loose single-file GGUFs contribute themselves. Mirrors the first-part filter
-    in sync_models_dir.
 
-    Walks breadth-first, one level at a time, and never descends into a
-    subfolder past *max_depth* - an unrelated deep or wide subtree past that
-    depth (a cache folder, an old install) is never traversed at all.
-    """
-    out: List[Path] = []
+def _is_hf_model_dir(folder: Path) -> bool:
+    """True for a HuggingFace model directory the HF backend can load: the
+    loader's own ``_is_hf_dir`` (config.json plus weights or a tokenizer), except
+    a folder that holds ``.gguf`` files and none of the HF weight files, which is
+    a GGUF repository download that ships its config.json and tokenizer."""
+    from localm.inference.engine import _HF_WEIGHT_GLOBS, _is_hf_dir
+
+    if not _is_hf_dir(str(folder)):
+        return False
+    try:
+        has_gguf = any(c.name.lower().endswith(".gguf") and c.is_file()
+                       for c in folder.iterdir())
+        has_weights = any(next(folder.glob(g), None) is not None
+                          for g in _HF_WEIGHT_GLOBS)
+    except OSError:
+        return True
+    return not has_gguf or has_weights
+
+
+def _find_model_units(d: Path, max_depth: int = 3, *,
+                      skip_hidden: bool = False,
+                      skip_dirs: Collection[str] = ()) -> Tuple[List[Path], List[Path]]:
+    """``(gguf_first_parts, hf_model_dirs)`` found inside *d*, up to *max_depth*
+    folder levels (*d* itself is level 1, so a model sitting directly in *d* or
+    a subfolder two levels down - LM Studio's ``<publisher>/<repo>/<file>`` -
+    is within the default of 3).
+
+    A GGUF is any ``*.gguf`` file (extension in any case); a split set
+    contributes only its first part. A HuggingFace model directory
+    (``_is_hf_model_dir``) is ONE unit: the walk does not descend into it, so its
+    files and any folders inside it are never reported separately. *d* itself is
+    never reported as an HF dir - the caller decides what *d* is.
+
+    Never walked into and never reported: a diffusers pipeline (a folder holding
+    ``model_index.json``, whose component folders are not models of their own,
+    *d* included) and any folder whose resolved path is in *skip_dirs* (folders
+    that are already registered models). *skip_hidden* leaves out folders whose
+    name starts with a dot (staging and cache folders).
+
+    Breadth-first, and never opens a folder past *max_depth*, so an unrelated
+    deep or wide subtree is never traversed. An unreadable folder is skipped.
+    Both lists are sorted."""
+    ggufs: List[Path] = []
+    hf_dirs: List[Path] = []
     frontier: List[Path] = [d]
     level = 0
     while frontier and level < max_depth:
@@ -449,20 +487,27 @@ def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:
         next_frontier: List[Path] = []
         for folder in frontier:
             try:
-                out.extend(f for f in folder.glob("*.gguf") if f.is_file())
-                next_frontier.extend(p for p in folder.iterdir() if p.is_dir())
+                if (folder / "model_index.json").is_file():
+                    continue
+                if folder != d:
+                    if skip_dirs and str(folder.resolve()) in skip_dirs:
+                        continue
+                    if _is_hf_model_dir(folder):
+                        hf_dirs.append(folder)
+                        continue
+                for child in folder.iterdir():
+                    if child.is_dir():
+                        if not (skip_hidden and child.name.startswith(".")):
+                            next_frontier.append(child)
+                    elif (child.name.lower().endswith(".gguf") and child.is_file()
+                          and not _is_non_first_split_part(child.name)):
+                        ggufs.append(child)
             except OSError:
                 continue
         frontier = next_frontier
-    out.sort()
-
-    kept: List[Path] = []
-    for f in out:
-        parts = split_gguf_parts(f.name)
-        if parts and f.name != parts[0]:
-            continue   # non-first split part -> registered via its first part
-        kept.append(f)
-    return kept
+    ggufs.sort()
+    hf_dirs.sort()
+    return ggufs, hf_dirs
 
 
 
@@ -482,8 +527,53 @@ def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:
 _GGUF_EMBEDDING_ARCHITECTURES = frozenset({
     "bert", "modern-bert", "nomic-bert", "nomic-bert-moe", "neo-bert",
     "jina-bert-v2", "jina-bert-v3", "eurobert", "gemma-embedding",
-    "t5encoder", "pangu-embedded",
+    "t5encoder", "llama-embed", "gemma-embedding2",
 })
+
+# Architectures llama.cpp loads that are not causal chat models, each with the
+# user-facing description of what the file is.
+_GGUF_NON_CHAT_ARCHITECTURES = {
+    "eagle3": "a speculative-decoding draft head",
+    "dflash": "a speculative-decoding draft head",
+    "gemma4-assistant": "a speculative-decoding draft head",
+    "dream": "a diffusion language model",
+    "llada": "a diffusion language model",
+    "llada-moe": "a diffusion language model",
+    "rnd1": "a diffusion language model",
+    "t5": "an encoder-decoder (T5) model",
+    "wavtokenizer-dec": "an audio codec decoder",
+    "qwen3tts": "a text-to-speech model",
+    "pockettts": "a text-to-speech model",
+}
+
+# general.architecture values ComfyUI-GGUF's converter writes for image and
+# video generation checkpoints; none is a llama.cpp architecture.
+_GGUF_IMAGE_ARCHITECTURES = frozenset({
+    "flux", "sd3", "aura", "hidream", "cosmos", "hyvid", "wan", "ltxv",
+    "sdxl", "sd1", "lumina2",
+})
+_GGUF_NON_CHAT_ARCHITECTURES.update(
+    {arch: "an image or video generation model" for arch in _GGUF_IMAGE_ARCHITECTURES})
+
+
+def gguf_non_chat_model_type(architecture: Optional[str]) -> Optional[str]:
+    """The registry type for a GGUF whose ``general.architecture`` is not a chat
+    model (``diffusion-unet`` for image/video checkpoints, ``unknown`` for the
+    other non-chat roles), or None when it may be a chat model."""
+    if architecture in _GGUF_IMAGE_ARCHITECTURES:
+        return "diffusion-unet"
+    return "unknown" if architecture in _GGUF_NON_CHAT_ARCHITECTURES else None
+
+
+def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
+    """The reason a GGUF with this ``general.architecture`` cannot be chatted
+    with, or None when it can (including an unknown or missing architecture,
+    which the native loader judges for itself)."""
+    what = _GGUF_NON_CHAT_ARCHITECTURES.get(architecture or "")
+    if what is None:
+        return None
+    return (f"This model's architecture ('{architecture}') is {what}, not a chat "
+            "model, so localm cannot chat with it.")
 
 # GGUF metadata value types (ggml gguf.h `enum gguf_type`). STRING(8) and
 # ARRAY(9) are variable-length and handled specially; every other type here
@@ -491,6 +581,7 @@ _GGUF_EMBEDDING_ARCHITECTURES = frozenset({
 _GGUF_FIXED_TYPE_SIZES = {
     0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8,
 }
+_GGUF_TYPE_BOOL = 7
 _GGUF_TYPE_STRING = 8
 _GGUF_TYPE_ARRAY = 9
 
@@ -1676,6 +1767,7 @@ def _gguf_metadata_probe(path: Path) -> dict:
         return {}
     architecture = None
     has_pooling_type = False
+    non_causal = False
     try:
         if buf[:4] != b"GGUF":
             return {}
@@ -1696,6 +1788,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
             else:
                 if key.endswith(".pooling_type"):
                     has_pooling_type = True
+                elif key.endswith(".attention.causal") and vtype == _GGUF_TYPE_BOOL:
+                    non_causal = not struct.unpack_from("<?", buf, off)[0]
                 off = _gguf_skip_value(buf, off, vtype)
             # Stop as soon as the answer is decided: a definitive embedding
             # architecture, or any pooling_type key at all, makes the rest of
@@ -1707,7 +1801,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
         # fall through and report whatever was already resolved before the
         # failure, rather than discarding a signal found earlier in the walk.
         pass
-    return {"architecture": architecture, "has_pooling_type": has_pooling_type}
+    return {"architecture": architecture, "has_pooling_type": has_pooling_type,
+            "non_causal": non_causal}
 
 
 _GGUF_PRE_TOKENIZER_KEY = "tokenizer.ggml.pre"
@@ -1757,7 +1852,8 @@ def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
     writes that key for a pooling-configured export (e.g. Qwen3-Embedding,
     gte-Qwen2, e5-mistral all reuse a decoder architecture whose
     general.architecture is unchanged from the chat variant, so the pooling-type
-    key is the only signal that catches them). Both are hard metadata baked
+    key is the only signal that catches them), or it declares
+    ``"<architecture>.attention.causal"`` false. All are hard metadata baked
     into the file itself - never a filename guess. Used by
     ``_detect_local_model_type`` (local add + folder auto-sync) and by
     ``pull.py`` (a freshly-downloaded remote GGUF).
@@ -1768,9 +1864,22 @@ def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
     the same bytes a second time. Defaults to None (reads *path* itself)."""
     if meta is None:
         meta = _gguf_metadata_probe(path)
-    if meta.get("architecture") in _GGUF_EMBEDDING_ARCHITECTURES:
+    arch = meta.get("architecture")
+    if arch in _GGUF_EMBEDDING_ARCHITECTURES:
         return True
-    return bool(meta.get("has_pooling_type"))
+    if meta.get("has_pooling_type"):
+        return True
+    # llama.cpp reads "<arch>.attention.causal"; a file declaring it false is
+    # an encoder, not a text generator.
+    return bool(meta.get("non_causal")) and arch not in _GGUF_NON_CHAT_ARCHITECTURES
+
+
+def gguf_architecture(path: Path, meta: Optional[dict] = None) -> Optional[str]:
+    """``general.architecture`` of the GGUF at *path*, or None when it cannot be
+    read. *meta* is an already-computed ``_gguf_metadata_probe`` result."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    return meta.get("architecture")
 
 
 # llama.cpp's clip.cpp writes this exact general.architecture value for every

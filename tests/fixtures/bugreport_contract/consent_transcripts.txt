@@ -1,0 +1,228 @@
+=== no endpoint, pick 1
+asked: ['  Pick a number']
+opened: 0
+requests: 0
+bodies match the saved file: []
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+No report sent. It is saved if you change your mind.
+=== not now
+asked: ['  Pick a number']
+opened: 0
+requests: 0
+bodies match the saved file: []
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+No report sent. It is saved if you change your mind.
+=== self
+asked: ['  Pick a number']
+opened: 0
+requests: 0
+bodies match the saved file: []
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+Thanks. Send <REPORT> to {{MAINTAINER_EMAIL}} or on Discord when you can.
+=== email
+asked: ['  Pick a number']
+opened: 1
+requests: 0
+bodies match the saved file: []
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+Opened your mail app to {{MAINTAINER_EMAIL}}.
+=== upload
+asked: ['  Pick a number']
+opened: 0
+requests: 1
+bodies match the saved file: [True]
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+Sent to the maintainer. Tracking issue: https://example.invalid/issues/42
+=== upload after a rejection, retry yes
+asked: ['  Pick a number', '  Retry sending now? [y/N]']
+opened: 0
+requests: 2
+bodies match the saved file: [True, True]
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+Could not send it. The bug-report server received the report but rejected it (HTTP 503). This is likely a temporary server-side issue, not your connection.
+The report is saved at <REPORT>.
+Sent to the maintainer. Tracking issue: https://example.invalid/issues/42
+=== upload rejected, retry no
+asked: ['  Pick a number', '  Retry sending now? [y/N]']
+opened: 0
+requests: 1
+bodies match the saved file: [True]
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+Could not send it. The bug-report server received the report but rejected it (HTTP 503). This is likely a temporary server-side issue, not your connection.
+The report is saved at <REPORT>.
+Not retried - email <REPORT> to {{MAINTAINER_EMAIL}} when you can.
+=== upload rejected three times
+asked: ['  Pick a number', '  Retry sending now? [y/N]', '  Retry sending now? [y/N]']
+opened: 0
+requests: 3
+bodies match the saved file: [True, True, True]
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+Could not send it. The bug-report server received the report but rejected it (HTTP 503). This is likely a temporary server-side issue, not your connection.
+The report is saved at <REPORT>.
+Could not send it. The bug-report server received the report but rejected it (HTTP 503). This is likely a temporary server-side issue, not your connection.
+The report is saved at <REPORT>.
+Could not send it. The bug-report server received the report but rejected it (HTTP 503). This is likely a temporary server-side issue, not your connection.
+The report is saved at <REPORT>.
+Email it to {{MAINTAINER_EMAIL}} when you can.
+=== rate limited then sent
+asked: ['  Pick a number']
+opened: 0
+requests: 2
+bodies match the saved file: [True, True]
+slept: [7]
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+The bug-report server is busy right now and asked to wait about 7s before trying again. Your report is saved either way. Retrying in 7s...
+Sent to the maintainer. Tracking issue: https://example.invalid/issues/42
+=== rate limited twice
+asked: ['  Pick a number']
+opened: 0
+requests: 2
+bodies match the saved file: [True, True]
+slept: [7, 8]
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+The bug-report server is busy right now and asked to wait about 7s before trying again. Your report is saved either way. Retrying in 7s...
+The bug-report server is busy right now and asked to wait about 8s before trying again. Your report is saved either way. Retrying in 8s...
+Still rate limited. The report is at <REPORT> - email it to {{MAINTAINER_EMAIL}}.
+=== non-interactive
+asked: []
+opened: 0
+requests: 0
+bodies match the saved file: []
+slept: []
+Run localm bug-report --send to send it now (no GitHub account needed) - or email/Discord it yourself.
+=== non-interactive without endpoint
+asked: []
+opened: 0
+requests: 0
+bodies match the saved file: []
+slept: []
+Send it to the maintainer ({{MAINTAINER_EMAIL}}) by email or Discord.
+=== assume yes
+asked: []
+opened: 0
+requests: 0
+bodies match the saved file: []
+slept: []
+Run localm bug-report --send to send it now (no GitHub account needed) - or email/Discord it yourself.
+=== auto send without endpoint
+asked: []
+opened: 0
+requests: 0
+bodies match the saved file: []
+slept: []
+No hosted send channel is configured - the report is saved at <REPORT>; email it to {{MAINTAINER_EMAIL}} instead.
+=== auto send
+asked: []
+opened: 0
+requests: 1
+bodies match the saved file: [True]
+slept: []
+Sent to the maintainer. Tracking issue: https://example.invalid/issues/42
+=== auto send rate limited then sent
+asked: []
+opened: 0
+requests: 2
+bodies match the saved file: [True, True]
+slept: [5]
+Rate limited. Retrying in 5s...
+Sent to the maintainer. Tracking issue: https://example.invalid/issues/42
+=== auto send rate limited then refused
+asked: []
+opened: 0
+requests: 2
+bodies match the saved file: [True, True]
+slept: [5]
+Rate limited. Retrying in 5s...
+Still could not send it. The bug-report server received the report but rejected it (HTTP 503). This is likely a temporary server-side issue, not your connection.
+The report is at <REPORT> - email it to {{MAINTAINER_EMAIL}} instead.
+=== auto send refused
+asked: []
+opened: 0
+requests: 1
+bodies match the saved file: [True]
+slept: []
+Could not send it. The bug-report server received the report but rejected it (HTTP 503). This is likely a temporary server-side issue, not your connection.
+The report is at <REPORT> - email it to {{MAINTAINER_EMAIL}} instead.
+=== edited file is what is sent
+asked: ['  Pick a number']
+opened: 0
+requests: 1
+bodies match the saved file: [False]
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+Sent to the maintainer. Tracking issue: https://example.invalid/issues/42
+=== save failed, upload from memory
+asked: ['  Pick a number']
+opened: 0
+requests: 1
+bodies match the saved file: [True]
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+Sent to the maintainer. Tracking issue: https://example.invalid/issues/42
+=== save failed, self
+asked: ['  Pick a number']
+opened: 0
+requests: 0
+bodies match the saved file: []
+slept: []
+How would you like to send it (edit the file first if you want)?
+  [1] Send to the maintainer now  (uploads the report - no GitHub account needed)
+  [2] Email the maintainer  (opens your mail app, works anywhere)
+  [3] I'll send it myself   (Discord / email to {{MAINTAINER_EMAIL}})
+  [Enter] not now
+Thanks. Send the text above (it could not be saved to a file) to {{MAINTAINER_EMAIL}} or on Discord when you can.
