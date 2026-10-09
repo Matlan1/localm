@@ -475,6 +475,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 f"Split GGUF is incomplete - missing part(s): {names}. "
                 f"Re-run 'localm pull' to download all parts."
             )
+        # A GGUF the loader cannot read (unsupported version, byte-swapped file)
+        # or that is not a model (importance matrix) is refused here, before any
+        # VRAM probe or worker spawn.
+        from localm.model_manager import gguf_unusable_reason
+        unusable = gguf_unusable_reason(Path(self.model_path))
+        if unusable is not None:
+            raise UnsupportedModelRoleError(unusable)
         # A file that is not a chat model (draft head, diffusion LM, T5, codec)
         # is refused here, before any VRAM probe or worker spawn.
         from localm.model_manager import gguf_architecture, gguf_chat_refusal
