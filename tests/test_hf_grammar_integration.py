@@ -103,5 +103,5 @@ def test_unconstrained_baseline_is_not_json(hf_backend):
     running, does NOT emit valid JSON - so test_grammar_forces_parseable_json
     is really measuring the grammar, not the model."""
     out = _generate(hf_backend, None, max_tokens=16)
-    with pytest.raises(Exception):
+    with pytest.raises(json.JSONDecodeError):
         json.loads(out)

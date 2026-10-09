@@ -98,8 +98,8 @@ def test_a_handler_is_invoked_exactly_once_even_when_it_raises_typeerror():
 
 def test_the_answer_is_relayed_verbatim_and_never_invented():
     for answer in (True, False):
-        assert invoke_confirm(lambda call: answer, _Call()) is answer
-        assert invoke_confirm(lambda call, agent=None: answer, _Call(),
+        assert invoke_confirm(lambda call, answer=answer: answer, _Call()) is answer
+        assert invoke_confirm(lambda call, agent=None, answer=answer: answer, _Call(),
                               agent="child1") is answer
 
 

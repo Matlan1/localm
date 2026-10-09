@@ -337,7 +337,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
             # the model is loaded here if that instance stops answering.
             from localm.plugins.coder.backends.http import HTTPBackend
             backend = peer_backend = PeerCoderBackend(engines, model_name, engine, HTTPBackend(
-                getattr(engine, "_base"), model=getattr(engine, "_model", None) or model_name,
+                engine._base, model=getattr(engine, "_model", None) or model_name,
                 api_key=getattr(engine, "_token", None) or "localm",
                 localm_server=True))
         else:

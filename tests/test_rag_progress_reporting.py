@@ -54,7 +54,7 @@ class TestReembedStructuredProgress:
                   on_progress=lambda text, **kw: calls.append((text, kw)))
 
         assert len(calls) == 3, "one call per batch: 2, 2, then the last 1 of 5"
-        texts, kwargs = zip(*calls)
+        texts, kwargs = zip(*calls, strict=True)
         assert texts == ("re-embedding 2/5", "re-embedding 4/5", "re-embedding 5/5")
         assert kwargs[0] == {"phase": "re-embedding", "done": 2, "total": 5,
                               "unit": "chunks"}

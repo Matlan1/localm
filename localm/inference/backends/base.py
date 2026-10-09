@@ -405,7 +405,7 @@ class BaseBackend(ABC):
         :meth:`set_load_cancel` is set during the load (preemptive switching).
         """
 
-    def set_load_cancel(self, event) -> None:
+    def set_load_cancel(self, event) -> None:  # noqa: B027
         """Install a ``threading.Event`` that, when set during ``load()``, aborts
         the load mid-flight (raising :class:`ModelLoadCancelled`).
 

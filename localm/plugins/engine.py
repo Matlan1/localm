@@ -646,7 +646,7 @@ class PluginManager:
     def get_all_model_roles(self) -> list[dict]:
         """All registered ModelRoleDescriptors across active/loaded plugins."""
         roles = []
-        for name, entry in self._loaded.items():
+        for entry in self._loaded.values():
             spec, module, host, uniq = entry
             if hasattr(host, "model_roles"):
                 for r in host.model_roles:

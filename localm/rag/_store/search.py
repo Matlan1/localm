@@ -84,7 +84,7 @@ class _CollectionSearch:
         if cosines is not None:
             vec_scores = _maxnorm(cosines)
             scores = [0.5 * lex + 0.5 * vec
-                      for lex, vec in zip(scores, vec_scores)]
+                      for lex, vec in zip(scores, vec_scores, strict=False)]
 
         order = sorted(range(len(scores)), key=lambda i: scores[i],
                        reverse=True)[:max(1, k)]
@@ -117,7 +117,7 @@ class _CollectionSearch:
                 return cosines[i] >= strong or (cosines[i] >= weak and cov >= need)
             return not conversational and cov >= LEXICAL_RELEVANCE_COVERAGE
 
-        keep = [i for i, cov in zip(order, coverage) if passes(i, cov)]
+        keep = [i for i, cov in zip(order, coverage, strict=True) if passes(i, cov)]
         if len(keep) < len(order):
             _log.debug("RAG collection %r: %d of %d hit(s) below the relevance "
                        "floor (%s%s)", self.name, len(order) - len(keep), len(order),

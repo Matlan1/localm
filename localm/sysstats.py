@@ -29,7 +29,7 @@ def _clamped_field_deltas(t1, t2):
     occasionally regress even while total CPU time moves forward, so each field is
     trimmed to zero independently - the same shape as psutil's own
     ``_cpu_times_deltas``."""
-    return type(t2)(*(max(0.0, float(b) - float(a)) for a, b in zip(t1, t2)))
+    return type(t2)(*(max(0.0, float(b) - float(a)) for a, b in zip(t1, t2, strict=True)))
 
 
 def _busy_total(times) -> tuple[float, float]:

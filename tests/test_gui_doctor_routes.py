@@ -47,7 +47,7 @@ def app(home):
 
 def _report(*statuses):
     checks = []
-    for key, status in zip(d.CHECK_KEYS, statuses):
+    for key, status in zip(d.CHECK_KEYS, statuses, strict=True):
         checks.append(d.CheckResult(key=key, label=d.CHECK_LABELS[key],
                                     status=status, summary=f"{key} says {status}",
                                     findings=()))

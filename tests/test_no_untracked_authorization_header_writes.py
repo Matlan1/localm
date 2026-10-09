@@ -221,7 +221,7 @@ def _authorization_header_hits(tree: ast.AST):
                         and _is_authorization_key(target.slice)):
                     hits.append((scopes[id(node)], ast.unparse(node.value)))
         elif isinstance(node, ast.Dict):
-            for key, value in zip(node.keys, node.values):
+            for key, value in zip(node.keys, node.values, strict=True):
                 if key is not None and _is_authorization_key(key):
                     hits.append((scopes[id(node)], ast.unparse(value)))
         elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)

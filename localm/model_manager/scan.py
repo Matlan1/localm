@@ -177,7 +177,7 @@ def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
             inputs = spec.get("input", {})
             for section in ("required", "optional"):
                 sec = inputs.get(section, {})
-                for input_name, input_def in sec.items():
+                for _input_name, input_def in sec.items():
                     if isinstance(input_def, list) and input_def and isinstance(input_def[0], list):
                         options = [o for o in input_def[0] if isinstance(o, str)]
                         if _looks_like_model_files(options):
@@ -188,7 +188,7 @@ def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
                             if inferred_type != "unknown":
                                 for opt in options:
                                     opt_norm = opt.replace("\\", "/").lower()
-                                    for path, cur_type in list(found_files.items()):
+                                    for path in list(found_files):
                                         try:
                                             path_rel = path.relative_to(models_path).as_posix().lower()
                                         except ValueError:
