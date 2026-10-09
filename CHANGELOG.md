@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A "Memory-map model files" setting (`use_mmap`: `auto`, `on`, `off`) and a note when
+  a model runs from disk.** With `auto`, a model that may not fit in available
+  RAM is memory-mapped, so it can run from disk-backed memory instead of failing
+  to load; `on` and `off` force it. The load output, the model-switch toast and the
+  load response now say when a model runs from disk-backed memory and that first
+  tokens are slower.
 - **Speculative decoding for any GGUF model, with no draft model.** The new
   Speculative drafting setting (`spec_source`) adds `ngram`: the model drafts the
   tokens that followed the same few tokens earlier in the conversation and checks
