@@ -183,8 +183,8 @@ class TestGenerateDiffusion:
         assert len(statuses) == len(set(statuses)) <= 11
         assert _FakeCanvas.instances[0].closed is True
 
-    def test_request_max_tokens_cuts_the_reply(self, monkeypatch):
-        llm, _ = _bare_llama(monkeypatch)
+    def test_request_max_tokens_cuts_a_block_rounded_reply(self, monkeypatch):
+        llm, _ = _bare_llama(monkeypatch, arch="llada")
         _FakeCanvas.reply = [11, 12, 13, 14, 2]
         try:
             out = _run(llm, [5, 6, 7], max_new_tokens=2)

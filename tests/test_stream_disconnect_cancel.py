@@ -823,8 +823,8 @@ class _StatusOnlyEngine(_LockingEngine):
     which here is never, while reporting progress through on_status when it is
     given one. It stops only when the caller's published stop check asks it to
     (stream_stop_requested), which is what the GGUF runner polls for such a
-    model. Without the HTTP layer publishing the check, this holds the lock
-    forever."""
+    model. Without the HTTP layer publishing the check, it runs out its 8 s
+    budget with ``cancelled`` still False."""
 
     cancelled = False
 
@@ -833,10 +833,11 @@ class _StatusOnlyEngine(_LockingEngine):
 
     def _denoise(self, on_status):
         from localm.inference.backends.base import stream_stop_requested
+        deadline = time.monotonic() + 8.0
         with self.inference_lock:
             self.entered.set()
             step = 0
-            while True:
+            while time.monotonic() < deadline:
                 if stream_stop_requested():
                     self.cancelled = True
                     return
