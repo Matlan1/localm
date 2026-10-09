@@ -523,6 +523,14 @@ def test_a_ruff_config_change_selects_only_the_tests_naming_pyproject(dep_repo):
         "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
 
 
+def test_a_basedpyright_config_change_selects_only_the_tests_naming_pyproject(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "pyproject.toml", "[tool.ruff.lint]",
+          '[tool.basedpyright]\ntypeCheckingMode = "standard"\n\n[tool.ruff.lint]')
+    assert _select(mod, ["pyproject.toml"]) == {
+        "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
+
+
 def test_a_lock_change_outside_the_packages_affects_every_test(dep_repo):
     mod, root = dep_repo
     _edit(root, "uv.lock", 'requires-python = ">=3.12"', 'requires-python = ">=3.13"')
