@@ -222,6 +222,15 @@ class UnsupportedModelRoleError(RuntimeError):
     which and is reported as-is, with no runtime-repair advice appended."""
 
 
+class AdapterLoadError(RuntimeError):
+    """Raised by a load when a LoRA adapter attached to the model cannot be
+    applied: its architecture differs from the base's, its file is missing or
+    unreadable, or the native loader rejected it. The message names the adapter
+    and the reason (the native loader's own text when it refused) and is
+    reported as-is, with no runtime-repair advice appended. Carried across IPC
+    as a typed load error."""
+
+
 class ModelLoadCancelled(Exception):
     """Raised by ``load()`` when an in-flight model load was aborted because a
     newer model selection superseded it (preemptive model switching).

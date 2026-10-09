@@ -217,6 +217,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and the API reference lists every route, parameter and schema the server
   declares. `scripts/export_openapi.py` writes the schema without loading a model.
   The site is published with each release.
+- **GGUF LoRA adapters can be attached to a base model.** A GGUF adapter file (made by
+  llama.cpp's `convert_lora_to_gguf.py`, or downloaded) now registers as type `lora`
+  instead of a chat model that cannot load. `localm adapter attach ADAPTER BASE
+  [--scale S]` ties it to a registered GGUF model, and `localm run BASE`, the server
+  and the GUI then load BASE with the adapter applied; `localm adapter detach` and
+  `localm adapter list` manage them. An adapter made for a different architecture is
+  refused with both architectures named, and a loaded model's load response lists the
+  adapters it runs with.
 
 ### Changed
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
