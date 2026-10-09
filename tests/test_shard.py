@@ -199,3 +199,17 @@ def test_merge_cli_writes_a_file_load_durations_reads_back(tmp_path):
 def test_a_missing_durations_file_weighs_every_test_the_same(tmp_path):
     assert _shard.load_durations(tmp_path / "absent.json") == (_shard.UNKNOWN_WEIGHT, {})
     assert _shard.load_durations(None) == (_shard.UNKNOWN_WEIGHT, {})
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_the_committed_durations_for_each_ci_platform_are_well_formed(platform):
+    path = _shard.TESTS_DIR / f"shard_durations_{platform}.json"
+    default, tests = _shard.load_durations(path)
+    assert 0 < default < _shard.KEEP_AT_LEAST
+    assert len(tests) > 500
+    assert all(node_id.startswith("tests/") and "::" in node_id for node_id in tests)
+    assert all(seconds >= _shard.KEEP_AT_LEAST for seconds in tests.values())
+
+
+def test_the_default_durations_file_is_named_for_the_running_platform():
+    assert _shard.default_durations_path().name == f"shard_durations_{sys.platform}.json"

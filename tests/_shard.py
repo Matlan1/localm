@@ -13,6 +13,10 @@ Load it with ``python -m pytest -p tests._shard``. Options:
 * ``--shard-durations-out PATH``  write the measured seconds (setup + call + teardown) of
                                   every test this run executed as JSON.
 
+Refreshing the durations: every CI run uploads the artifacts ``shard-durations-windows-latest``
+and ``shard-durations-ubuntu-latest``; ``gh run download <run> -n <artifact>`` and copy the file
+to ``tests/shard_durations_win32.json`` / ``tests/shard_durations_linux.json``.
+
 The split is a greedy longest-first assignment over the selection that remains after
 ``-m`` / ``-k`` deselection, so it depends only on the selection and the durations file.
 Each xdist worker computes it on its own; xdist refuses to run when the workers disagree.
@@ -40,7 +44,7 @@ import pytest
 
 TESTS_DIR = Path(__file__).resolve().parent
 UNKNOWN_WEIGHT = 1.0
-KEEP_AT_LEAST = 0.1
+KEEP_AT_LEAST = 0.25
 
 
 def default_durations_path() -> Path:
