@@ -15,6 +15,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = REPO_ROOT / "docker" / "entrypoint.sh"
+HEALTHCHECK = REPO_ROOT / "docker" / "healthcheck.sh"
 DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docker.yml"
 
@@ -126,6 +127,47 @@ class TestEntrypoint:
         assert proc.returncode == 1
         assert "could not check the API key configuration" in proc.stderr
         assert invoked == []
+
+
+@posix_only
+class TestHealthcheck:
+    @staticmethod
+    def _run(tmp_path, https, http):
+        """Run the healthcheck against a stand-in curl that answers HTTPS URLs with
+        *https* and HTTP URLs with *http* ("000" is a refused connection)."""
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        curl = bindir / "curl"
+        script = (
+            "#!/bin/sh\n"
+            'for last in "$@"; do :; done\n'
+            'case "$last" in\n'
+            f"  https://*) code={https} ;;\n"
+            f"  *) code={http} ;;\n"
+            "esac\n"
+            'printf "%s" "$code"\n'
+            '[ "$code" != 000 ]\n'
+        )
+        curl.write_text(script, encoding="utf-8")
+        curl.chmod(curl.stat().st_mode | stat.S_IEXEC)
+        env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}"}
+        return subprocess.run(["sh", str(HEALTHCHECK)], env=env, capture_output=True,
+                              text=True, timeout=30).returncode
+
+    def test_healthy_when_https_answers_200(self, tmp_path):
+        assert self._run(tmp_path, https=200, http=308) == 0
+
+    def test_healthy_on_plain_http_when_tls_is_off(self, tmp_path):
+        assert self._run(tmp_path, https="000", http=200) == 0
+
+    def test_a_redirect_is_not_healthy(self, tmp_path):
+        assert self._run(tmp_path, https=404, http=308) == 1
+
+    def test_an_error_status_is_not_healthy(self, tmp_path):
+        assert self._run(tmp_path, https=401, http=401) == 1
+
+    def test_nothing_listening_is_not_healthy(self, tmp_path):
+        assert self._run(tmp_path, https="000", http="000") == 1
 
 
 class TestDockerfile:

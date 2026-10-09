@@ -96,7 +96,7 @@ by another hostname shows a certificate warning even with the CA trusted. Put a
 reverse proxy with your own certificate in front for a public name, or pass
 `--tls-cert` and `--tls-key` with files mounted into the container.
 
-To serve plain HTTP, for example behind a reverse proxy that terminates TLS, add
+A plain HTTP request to the port is answered with a redirect to HTTPS. To serve plain HTTP, for example behind a reverse proxy that terminates TLS, add
 `--no-tls` after the image name:
 
 ```bash
