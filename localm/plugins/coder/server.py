@@ -141,7 +141,7 @@ class ManagedServer:
 
     # ------------------------------------------------------------------ #
 
-    def __enter__(self) -> "ManagedServer":
+    def __enter__(self) -> ManagedServer:
         if not self.start():
             raise RuntimeError(f"Failed to start localm serve {self.model}")
         return self

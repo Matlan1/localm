@@ -91,7 +91,7 @@ _FOLDER_MODEL_TYPES = {
 _FOUND_TTL = 1800.0
 _MISS_TTL = 300.0
 _CACHE_MAX = 128
-_cache: dict[str, tuple[float, "ComfyLookup"]] = {}
+_cache: dict[str, tuple[float, ComfyLookup]] = {}
 _cache_lock = threading.Lock()
 _org_rows: Optional[tuple[float, list]] = None
 

@@ -190,7 +190,7 @@ def _filter_row(cur: bytes, prev: bytes, ftype: int, bpp: int) -> bytes:
 
 
 def _make_solid_png(path: Path, rgb: tuple, size: int = 64, *, filter_type: int = 0,
-                    per_row_filters: "list[int] | None" = None) -> None:
+                    per_row_filters: list[int] | None = None) -> None:
     """A real truecolor PNG of a solid color, filtered with *filter_type* (or
     a distinct filter PER ROW, matching how a real adaptive encoder like
     ComfyUI's own PIL-based writer behaves) - exactly the shape

@@ -168,7 +168,7 @@ _RE_PATH_TOKEN = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]{1,8}")
 _UNFOUNDED_MAX_BYTES = 2_000_000
 
 
-def _cited_path(segment: str) -> "str | None":
+def _cited_path(segment: str) -> str | None:
     """The last path-looking token (``dir/name.ext``) in *segment*, or None."""
     cited = None
     for token in _RE_TOKEN_SPLIT.split(segment):
@@ -178,7 +178,7 @@ def _cited_path(segment: str) -> "str | None":
     return cited
 
 
-def unfounded_code(text: str, cwd) -> "list[tuple[str, list[str]]]":
+def unfounded_code(text: str, cwd) -> list[tuple[str, list[str]]]:
     """``[(path, names), ...]`` for each workspace file *text* shows code for
     whose code defines names that file does not contain.
 
@@ -192,8 +192,8 @@ def unfounded_code(text: str, cwd) -> "list[tuple[str, list[str]]]":
     what it read. Pure, so it can be tested without an Agent."""
     from ..tools.base import _confine
     root = Path(cwd)
-    found: "dict[str, list[str]]" = {}
-    contents: "dict[Path, str | None]" = {}
+    found: dict[str, list[str]] = {}
+    contents: dict[Path, str | None] = {}
     prev_end = 0
     for block in _RE_FENCE_BLOCK.finditer(text or ""):
         cited = _cited_path(text[prev_end:block.start()])
@@ -662,7 +662,7 @@ class _LoopMixin:
 
         return final_response
 
-    def _handle_no_tool_calls(self, response, interactive, st) -> "tuple[bool, str]":
+    def _handle_no_tool_calls(self, response, interactive, st) -> tuple[bool, str]:
         """Handle a turn that produced no tool calls (split out of _loop).
 
         Runs, in order: the harness-run exit-code oracle (when a verify command is
@@ -1179,7 +1179,7 @@ class _LoopMixin:
         return (True, response + notice + self._grounding_footer()
                 + self._sensitive_changes_notice())
 
-    def _check_post_batch_breakers(self) -> "str | None":
+    def _check_post_batch_breakers(self) -> str | None:
         """After a tool batch, return a circuit-breaker message (and mark the run
         not-ok + emit it) if a breaker tripped, else None. Split out of _loop."""
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning

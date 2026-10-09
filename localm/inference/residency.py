@@ -48,6 +48,25 @@ UNKNOWN_FOOTPRINT_BYTES = 4 * 1024 ** 3
 _FOOTPRINT_MAX_FILES = 10_000
 
 
+def alternate_layout_files(folder: Path) -> frozenset[Path]:
+    """The ``consolidated*.safetensors`` files at the top of *folder* when it is a
+    HuggingFace folder (``config.json``) that also holds ``model*.safetensors``
+    shards: Mistral's second copy of the same weights, which no load reads and
+    which must not count towards the model's size. Empty for any other folder."""
+    try:
+        if not (folder / "config.json").is_file():
+            return frozenset()
+        consolidated = frozenset(f for f in folder.glob("consolidated*.safetensors")
+                                 if f.is_file())
+        if not consolidated:
+            return frozenset()
+        has_shards = any(f.is_file() and f not in consolidated
+                         for f in folder.glob("*.safetensors"))
+        return consolidated if has_shards else frozenset()
+    except OSError:
+        return frozenset()
+
+
 def model_footprint_bytes(model_path: Any) -> int:
     """On-disk size of a model: a single GGUF file, or a sharded HF directory.
 
@@ -60,6 +79,7 @@ def model_footprint_bytes(model_path: Any) -> int:
     if p.is_dir():
         total = 0
         seen = 0
+        skipped = alternate_layout_files(p)
         for f in p.rglob("*"):
             # Counted before the is_file()/stat() filters, so the bound is on
             # entries walked, not on files successfully measured.
@@ -71,7 +91,7 @@ def model_footprint_bytes(model_path: Any) -> int:
                     "size", seen - 1, p)
                 break
             try:
-                if not f.is_file():
+                if not f.is_file() or f in skipped:
                     continue
                 total += f.stat().st_size
             except OSError as e:

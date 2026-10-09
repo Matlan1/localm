@@ -10,7 +10,6 @@ binds.
 
 from __future__ import annotations
 
-from typing import Dict
 
 from .. import server as _srv
 from ..server import _quiet_stdout, _text_result
@@ -54,7 +53,7 @@ _MEMORY_WRITE_OFF_MSG = (
     "the memory plugin. Relaunch the server with: localm mcp --memory-write")
 
 
-def build(*, enable_memory_write: bool) -> Dict[str, dict]:
+def build(*, enable_memory_write: bool) -> dict[str, dict]:
     """``memory_recall`` and ``memory_append``. *enable_memory_write* is the
     server's write opt-in; ``memory_append`` refuses every call when it is
     False."""

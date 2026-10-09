@@ -47,6 +47,8 @@ def mount_route_groups(app: FastAPI, ctx: AppContext) -> None:
     _routes_admin.register(app, ctx)
     from localm.inference.routes import chat as _routes_chat
     _routes_chat.register(app, ctx)
+    from localm.inference.routes import ollama as _routes_ollama
+    _routes_ollama.register(app, ctx)
 
 
 def attach_plugins(app: FastAPI, engine) -> None:

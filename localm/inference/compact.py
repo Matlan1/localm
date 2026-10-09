@@ -19,7 +19,7 @@ client-side against /v1/chat/completions.
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional
 
 from localm.textguard import (
     compose, compose_join, slice_guarded, untrusted_spans_of,
@@ -64,7 +64,7 @@ def _text_of(message: dict) -> str:
 
 
 def estimate_tokens(
-    messages: List[dict],
+    messages: list[dict],
     count_tokens: Optional[Callable[[str], int]] = None,
 ) -> int:
     """Token estimate for a message list (images count a flat 750 each)."""
@@ -95,7 +95,7 @@ def _is_users_own(message: dict) -> bool:
     return not (isinstance(content, str) and content.lstrip().startswith("<tool_result"))
 
 
-def _split(messages: List[dict]) -> Tuple[List[dict], List[dict], List[dict]]:
+def _split(messages: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     """(leading system messages, older middle, recent tail).
 
     The tail holds at least the last KEEP_RECENT messages. Its first message
@@ -126,7 +126,7 @@ def _split(messages: List[dict]) -> Tuple[List[dict], List[dict], List[dict]]:
     return head, [], rest
 
 
-def _request_part(older: List[dict], recent: List[dict]):
+def _request_part(older: list[dict], recent: list[dict]):
     """A "Current request (verbatim):" section holding the last user-written
     message when it is in *older* and *recent* has none, else ``""``."""
     if any(_is_users_own(m) for m in recent):
@@ -154,7 +154,7 @@ def _excerpt_of(message: dict, limit: int):
     return compose(slice_guarded(text, 0, limit), " ...")
 
 
-def digest_messages(older: List[dict]):
+def digest_messages(older: list[dict]):
     """A bounded digest of *older*: one excerpt per message in conversation
     order; when the budget runs out the oldest messages are left out and
     counted."""
@@ -176,15 +176,15 @@ def digest_messages(older: List[dict]):
     return compose_join("\n\n", [*parts, *lines])
 
 
-def compactable(messages: List[dict]) -> bool:
+def compactable(messages: list[dict]) -> bool:
     """True when ``compact_messages`` would change *messages*."""
     return bool(_split(messages)[1])
 
 
 def compact_messages(
-    messages: List[dict],
-    generate: Callable[[List[dict], int], str],
-) -> Tuple[List[dict], bool]:
+    messages: list[dict],
+    generate: Callable[[list[dict], int], str],
+) -> tuple[list[dict], bool]:
     """
     Summarise everything but the system prompt and the recent tail (see
     ``_split``). Returns (new_messages, changed).
@@ -241,13 +241,13 @@ def compact_messages(
 
 
 def maybe_compact(
-    messages: List[dict],
+    messages: list[dict],
     *,
     limit_tokens: int,
-    generate: Callable[[List[dict], int], str],
+    generate: Callable[[list[dict], int], str],
     count_tokens: Optional[Callable[[str], int]] = None,
     on_compact: Optional[Callable[[], None]] = None,
-) -> Tuple[List[dict], bool]:
+) -> tuple[list[dict], bool]:
     """
     Compact *messages* when they exceed COMPACT_RATIO of *limit_tokens*.
 

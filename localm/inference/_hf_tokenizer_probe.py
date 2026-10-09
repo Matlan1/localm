@@ -74,7 +74,7 @@ _MAX_DERIVED_PROBE_CHARS = 8   # first-line bound on probe COUNT; the wall-clock
                                # budget below bounds the SUM directly.
 
 
-def _pattern_derived_probes(pattern: str) -> "tuple[str, ...]":
+def _pattern_derived_probes(pattern: str) -> tuple[str, ...]:
     """One probe per distinct character IN the pattern (the
     _MAX_DERIVED_PROBE_CHARS most frequent, most-frequent-first), each that
     character alone repeated 60,000 times. Returns () for an empty pattern.
@@ -95,7 +95,7 @@ def _pattern_derived_probes(pattern: str) -> "tuple[str, ...]":
     _MAX_DERIVED_PROBE_CHARS distinct characters, which bounds probe COUNT;
     _check_one's own wall-clock budget (_PROBE_LOOP_BUDGET_SECONDS) is what
     bounds total COST."""
-    counts: "dict[str, int]" = {}
+    counts: dict[str, int] = {}
     for ch in pattern:
         counts[ch] = counts.get(ch, 0) + 1
     most_frequent = sorted(counts, key=lambda ch: counts[ch], reverse=True)

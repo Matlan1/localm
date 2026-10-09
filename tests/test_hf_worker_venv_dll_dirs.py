@@ -150,10 +150,11 @@ class TestHfWorkerRegistersThemBeforeTorch:
     def test_registered_before_the_worker_is_built_or_loaded(self, monkeypatch):
         """The real worker imports torch in HFWorker.load(), so the directories
         must already be registered by the time the worker exists."""
-        from localm.inference.backends import _hf_runner, _hf_worker
+        from localm.inference.backends import _hf_hub_gate, _hf_runner, _hf_worker
 
         monkeypatch.setattr(_mp_spawn, "install_parent_death_watchdog", lambda *a: None)
         monkeypatch.setattr(_mp_spawn, "suppress_native_error_dialogs", lambda *a: None)
+        monkeypatch.setattr(_hf_hub_gate, "close_hub_gate", lambda: None)
         events = []
         monkeypatch.setattr(_mp_spawn, "add_venv_dll_directories",
                             lambda: events.append("dll directories") or [])
@@ -200,7 +201,7 @@ class TestRealSpawnWorkerFindsTheVenvsDlls:
     torch's c10_xpu.dll resolves the oneAPI runtime's sycl*.dll."""
 
     @staticmethod
-    def _probe_dll(base_dir: Path) -> "Path | None":
+    def _probe_dll(base_dir: Path) -> Path | None:
         """A DLL CPython itself ships, needing nothing beyond the C runtime, to
         copy under a name nothing else on the search path has."""
         for name in ("libffi-8.dll", "sqlite3.dll"):
@@ -210,7 +211,7 @@ class TestRealSpawnWorkerFindsTheVenvsDlls:
         return None
 
     @staticmethod
-    def _build_fake_venv(tmp_path: Path, real_base: Path) -> "tuple[Path, Path]":
+    def _build_fake_venv(tmp_path: Path, real_base: Path) -> tuple[Path, Path]:
         """A venv (pyvenv.cfg pointing at the REAL base interpreter's directory)
         whose interpreter is a copy of that base interpreter one level under it,
         the layout of applaunch.py's ``<venv>/localm-app/LocaLM.exe``. Returns

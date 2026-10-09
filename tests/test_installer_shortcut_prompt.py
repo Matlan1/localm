@@ -172,11 +172,11 @@ class TestShortcutBlockDerivesScmadeFromThePath:
         bat_path.write_text(
             "@echo off\r\nsetlocal\r\n"
             'set "SCPICK=1"\r\nset "SCPATH="\r\nset "SCMADE="\r\n'
-            "call :seterr {seed}\r\n"
-            "{block}\r\n"
+            f"call :seterr {seed}\r\n"
+            f"{block}\r\n"
             'if not defined SCMADE set "SCPATH="\r\n'
             'echo RESULT SCPATH=[%SCPATH%] SCMADE=[%SCMADE%]\r\n'
-            "exit /b 0\r\n:seterr\r\nexit /b %1\r\n".format(seed=seed, block=block),
+            "exit /b 0\r\n:seterr\r\nexit /b %1\r\n",
             encoding="utf-8")
         return bat_path
 
@@ -199,7 +199,7 @@ class TestShortcutBlockDerivesScmadeFromThePath:
 
     def _result(self, stdout):
         m = re.search(r"RESULT SCPATH=\[(.*?)\] SCMADE=\[(.*?)\]", stdout)
-        assert m, "RESULT line not found: {!r}".format(stdout)
+        assert m, f"RESULT line not found: {stdout!r}"
         return m.group(1), m.group(2)
 
     def test_a_succeeding_write_is_captured_at_the_default_menu_answer(self, bat, tmp_path):
@@ -272,7 +272,7 @@ class TestBootstrapSurvivesBangInInstallPath:
         out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True,
                               text=True, stdin=subprocess.DEVNULL, timeout=15)
         assert "RC=[0]" in out.stdout, (out.stdout, out.stderr)
-        assert "TRUE_CD=[{}]".format(bangdir) in out.stdout, (out.stdout, out.stderr)
+        assert f"TRUE_CD=[{bangdir}]" in out.stdout, (out.stdout, out.stderr)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="cmd.exe only")
@@ -288,7 +288,7 @@ class TestShortcutSurvivesBangInInstallPath:
     def _write_argv_capturing_stub(self, directory, argv_file, succeed):
         directory.mkdir(parents=True, exist_ok=True)
         stub = directory / "powershell.bat"
-        body = '@echo off\r\necho ARGV=[%*]>>"{}"\r\n'.format(argv_file)
+        body = f'@echo off\r\necho ARGV=[%*]>>"{argv_file}"\r\n'
         body += ("echo C:\\FakeDesktop\\LocaLM.lnk\r\nexit /b 0\r\n" if succeed
                  else "exit /b 1\r\n")
         stub.write_text(body, encoding="utf-8")
@@ -298,12 +298,12 @@ class TestShortcutSurvivesBangInInstallPath:
         probe = directory / "probe.bat"
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
-            'set "SCPICK={scpick}"\r\nset "SCPATH="\r\nset "SCMADE="\r\n'
-            "{block}\r\n"
+            f'set "SCPICK={scpick}"\r\nset "SCPATH="\r\nset "SCMADE="\r\n'
+            f"{block}\r\n"
             'echo RESULT SCPATH=[%SCPATH%] SCMADE=[%SCMADE%]\r\n'
             'set "PROBEVAR=still-here"\r\n'
             'echo DELAYED_EXPANSION_OK=[!PROBEVAR!]\r\n'
-            "exit /b 0\r\n".format(scpick=scpick, block=block),
+            "exit /b 0\r\n",
             encoding="utf-8")
         return probe
 
@@ -316,7 +316,7 @@ class TestShortcutSurvivesBangInInstallPath:
 
     def _result(self, stdout):
         m = re.search(r"RESULT SCPATH=\[(.*?)\] SCMADE=\[(.*?)\]", stdout)
-        assert m, "RESULT line not found: {!r}".format(stdout)
+        assert m, f"RESULT line not found: {stdout!r}"
         return m.group(1), m.group(2)
 
     @pytest.mark.parametrize("scpick,block_index", [("1", 0), ("2", 1)])
@@ -335,8 +335,8 @@ class TestShortcutSurvivesBangInInstallPath:
         # Each fragment embedding %CD% must survive as its OWN intact,
         # separately-quoted argument with the `!` preserved - not merged
         # into a neighbour by a corrupted delayed-expansion scan.
-        assert "\"$s.WorkingDirectory = '{}';\"".format(bang) in argv, argv
-        assert "\"$s.IconLocation = '{}\\assets\\localm.ico';\"".format(bang) in argv, argv
+        assert f"\"$s.WorkingDirectory = '{bang}';\"" in argv, argv
+        assert f"\"$s.IconLocation = '{bang}\\assets\\localm.ico';\"" in argv, argv
         scpath, scmade = self._result(out.stdout)
         assert scmade == "1", (out.stdout, out.stderr)
 
@@ -356,8 +356,8 @@ class TestShortcutSurvivesBangInInstallPath:
         self._run(probe, stub_dir, cwd=bangdir)
         argv = argv_file.read_text(encoding="utf-8")
         bang = str(bangdir)
-        assert "$exe = '{}\\.venv\\localm-app\\LocaLM.exe'".format(bang) in argv, argv
-        assert "$s.TargetPath = '{}\\.venv\\Scripts\\localm.exe'".format(bang) in argv, argv
+        assert f"$exe = '{bang}\\.venv\\localm-app\\LocaLM.exe'" in argv, argv
+        assert f"$s.TargetPath = '{bang}\\.venv\\Scripts\\localm.exe'" in argv, argv
 
     @pytest.mark.parametrize("scpick,block_index", [("1", 0), ("2", 1)])
     def test_a_failed_write_in_a_bang_path_leaves_delayed_expansion_enabled(
@@ -378,7 +378,7 @@ class TestShortcutSurvivesBangInInstallPath:
         assert scpath == "" and scmade == "", (out.stdout, out.stderr)
         assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (
             "delayed expansion was left disabled after a failed shortcut "
-            "write in a bang path: {}".format(out.stdout))
+            f"write in a bang path: {out.stdout}")
 
 
 def test_manifest_record_line_isolates_the_bang_hazard(bat):
@@ -425,11 +425,11 @@ class TestManifestRecordSurvivesBangInInstallPath:
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
             + extra_setup +
-            "{block}\r\n"
+            f"{block_text}\r\n"
             'echo AFTER_MARK\r\n'
             'set "PROBEVAR=still-here"\r\n'
             'echo DELAYED_EXPANSION_OK=[!PROBEVAR!]\r\n'
-            "exit /b 0\r\n".format(block=block_text),
+            "exit /b 0\r\n",
             encoding="utf-8")
         return subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=15, cwd=str(directory))
@@ -449,13 +449,13 @@ class TestManifestRecordSurvivesBangInInstallPath:
             'set "CMDSHIM=C:\\FakeBin\\localm.cmd"\r\nset "PATHMOD=--path-modified"\r\n')
         out = self._run(bangdir, echoed, extra_setup)
         expected = (
-            'MANIFEST_ARGS --root . --venv "{bang}\\.venv" --lib-dir '
-            '"{bang}\\runtime\\localm_llama_runtime\\lib" '
+            f'MANIFEST_ARGS --root . --venv "{bangdir}\\.venv" --lib-dir '
+            f'"{bangdir}\\runtime\\localm_llama_runtime\\lib" '
             '--shortcut "C:\\FakeDesktop\\LocaLM.lnk" --runtime-contained '
             '--python-dir "C:\\FakePython" --cache-dir "C:\\FakeCache" --uv-dir "C:\\FakeUv" '
             '--uv-shared-installed '
             '--path-dir "C:\\FakeBin" --command-shim "C:\\FakeBin\\localm.cmd" --path-modified'
-        ).format(bang=bangdir)
+        )
         assert expected in out.stdout, (out.stdout, out.stderr)
         assert "AFTER_MARK" in out.stdout, (out.stdout, out.stderr)
         assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (out.stdout, out.stderr)
@@ -475,11 +475,11 @@ class TestManifestRecordSurvivesBangInInstallPath:
             'set "CMDSHIM="\r\nset "PATHMOD="\r\n')
         out = self._run(bangdir, echoed, extra_setup)
         expected = (
-            'MANIFEST_ARGS --root . --venv "{bang}\\.venv" --lib-dir '
-            '"{bang}\\runtime\\localm_llama_runtime\\lib" '
+            f'MANIFEST_ARGS --root . --venv "{bangdir}\\.venv" --lib-dir '
+            f'"{bangdir}\\runtime\\localm_llama_runtime\\lib" '
             '--shortcut "C:\\FakeDesktop\\LocaLM.lnk"  --python-dir "" --cache-dir "" '
             '--uv-dir "C:\\FakeUv"  --path-dir "" --command-shim "" '
-        ).format(bang=bangdir)
+        )
         assert expected in out.stdout, (out.stdout, out.stderr)
         assert "AFTER_MARK" in out.stdout, (out.stdout, out.stderr)
         assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (out.stdout, out.stderr)
@@ -500,10 +500,10 @@ class TestManifestRecordSurvivesBangInInstallPath:
             'set "UVSHARED="\r\n')
         out = self._run(bangdir, echoed, extra_setup)
         expected = (
-            'MANIFEST_ARGS --root . --venv "{bang}\\.venv" --runtime-contained '
-            '--python-dir "{bang}\\.python" --cache-dir "{bang}\\.cache" '
-            '--uv-dir "{bang}\\.uv" '
-        ).format(bang=bangdir)
+            f'MANIFEST_ARGS --root . --venv "{bangdir}\\.venv" --runtime-contained '
+            f'--python-dir "{bangdir}\\.python" --cache-dir "{bangdir}\\.cache" '
+            f'--uv-dir "{bangdir}\\.uv" '
+        )
         assert expected in out.stdout, (out.stdout, out.stderr)
         assert "DELAYED_EXPANSION_OK=[still-here]" in out.stdout, (out.stdout, out.stderr)
 
@@ -517,7 +517,7 @@ class TestManifestRecordSurvivesBangInInstallPath:
         lines = block.splitlines()
         assert lines[0] == "setlocal DisableDelayedExpansion"
         assert lines[-1] == "endlocal"
-        substituted = "\r\n".join([lines[0], "cmd /c exit {}".format(exit_code), lines[-1]])
+        substituted = "\r\n".join([lines[0], f"cmd /c exit {exit_code}", lines[-1]])
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
         probe = bangdir / "probe.bat"
@@ -694,9 +694,9 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
             + preamble +
-            "{block}\r\n"
-            "{readback}"
-            "exit /b 0\r\n".format(block=block_text, readback=readback)
+            f"{block_text}\r\n"
+            f"{readback}"
+            "exit /b 0\r\n"
             + _JOURNAL_LABELS,
             encoding="utf-8")
         return subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
@@ -709,13 +709,13 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         manifest-record consumer will use once it is itself protected."""
         lines = ["setlocal DisableDelayedExpansion\r\n"]
         for label, varname in pairs:
-            lines.append('echo {}=[%{}%]\r\n'.format(label, varname))
+            lines.append(f'echo {label}=[%{varname}%]\r\n')
         lines.append("endlocal\r\n")
         return "".join(lines)
 
     @staticmethod
     def _bang_readback(pairs):
-        return "".join('echo {}_BANG=[!{}!]\r\n'.format(label, varname)
+        return "".join(f'echo {label}_BANG=[!{varname}!]\r\n'
                         for label, varname in pairs)
 
     def test_top_install_message_names_the_real_bang_path(self, bat, tmp_path):
@@ -723,7 +723,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
         out = self._run(bangdir, "", block, "")
-        assert "self-contained install in: {}".format(bangdir) in out.stdout, out.stdout
+        assert f"self-contained install in: {bangdir}" in out.stdout, out.stdout
 
     def test_uv_dirs_survive_a_bang_in_the_install_path(self, bat, tmp_path):
         block = _uv_dirs_block(bat)
@@ -732,10 +732,10 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         pairs = [("UPI", "UV_PYTHON_INSTALL_DIR"), ("UCD", "UV_CACHE_DIR")]
         out = self._run(bangdir, 'set "STOREPICK=1"\r\n', block,
                          self._protected_readback(pairs) + self._bang_readback(pairs))
-        assert "UPI=[{}\\.python]".format(bangdir) in out.stdout, out.stdout
-        assert "UCD=[{}\\.cache]".format(bangdir) in out.stdout, out.stdout
-        assert "UPI_BANG=[{}\\.python]".format(bangdir) in out.stdout, out.stdout
-        assert "UCD_BANG=[{}\\.cache]".format(bangdir) in out.stdout, out.stdout
+        assert f"UPI=[{bangdir}\\.python]" in out.stdout, out.stdout
+        assert f"UCD=[{bangdir}\\.cache]" in out.stdout, out.stdout
+        assert f"UPI_BANG=[{bangdir}\\.python]" in out.stdout, out.stdout
+        assert f"UCD_BANG=[{bangdir}\\.cache]" in out.stdout, out.stdout
 
     def test_uv_check_portable_dirs_survive_a_bang_in_the_install_path(self, bat, tmp_path):
         block = _uv_check_portable_block(bat)
@@ -747,22 +747,20 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         probe = bangdir / "probe.bat"
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
-            "{block}\r\n"
+            f"{block}\r\n"
             'echo NOT_REACHED_IF_GOTO_FAILED\r\n'
             ":uv_ready\r\n"
-            "{protected}"
-            "{bang}"
+            f"{self._protected_readback(pairs)}"
+            f"{self._bang_readback(pairs)}"
             'echo PATH_HAS=[%PATH%]\r\n'
-            "exit /b 0\r\n".format(
-                block=block, protected=self._protected_readback(pairs),
-                bang=self._bang_readback(pairs)),
+            "exit /b 0\r\n",
             encoding="utf-8")
         out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
         assert "NOT_REACHED_IF_GOTO_FAILED" not in out.stdout, out.stdout
-        assert "{}\\.uv".format(bangdir) in out.stdout, out.stdout
-        assert "UVDIR=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
-        assert "UVDIR_BANG=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
+        assert f"{bangdir}\\.uv" in out.stdout, out.stdout
+        assert f"UVDIR=[{bangdir}\\.uv]" in out.stdout, out.stdout
+        assert f"UVDIR_BANG=[{bangdir}\\.uv]" in out.stdout, out.stdout
 
     def test_uv_missing_contained_dirs_survive_a_bang_in_the_install_path(self, bat, tmp_path):
         block = _uv_missing_contained_block(bat)
@@ -771,10 +769,10 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         pairs = [("UID", "UV_INSTALL_DIR"), ("UVDIR", "UVDIR")]
         out = self._run(bangdir, 'set "CONTAINED=1"\r\n', block,
                          self._protected_readback(pairs) + self._bang_readback(pairs))
-        assert "UID=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
-        assert "UVDIR=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
-        assert "UID_BANG=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
-        assert "UVDIR_BANG=[{}\\.uv]".format(bangdir) in out.stdout, out.stdout
+        assert f"UID=[{bangdir}\\.uv]" in out.stdout, out.stdout
+        assert f"UVDIR=[{bangdir}\\.uv]" in out.stdout, out.stdout
+        assert f"UID_BANG=[{bangdir}\\.uv]" in out.stdout, out.stdout
+        assert f"UVDIR_BANG=[{bangdir}\\.uv]" in out.stdout, out.stdout
 
     def test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install(
             self, bat, tmp_path):
@@ -806,12 +804,12 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
             'set "CONTAINED=1"\r\n'
-            'set "PATH={minimal_path}"\r\n'
-            "{block}\r\n"
+            f'set "PATH={minimal_path}"\r\n'
+            f"{block}\r\n"
             'echo NOT_REACHED_IF_GOTO_FAILED\r\n'
             ":uv_ready\r\n"
             'where uv\r\n'
-            "exit /b 0\r\n".format(block=block, minimal_path=minimal_path),
+            "exit /b 0\r\n",
             encoding="utf-8")
         out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
@@ -819,7 +817,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         expected_uv = str(bangdir / ".uv" / "uv.exe")
         assert expected_uv in out.stdout.splitlines(), (
             "where uv did not find the just-installed binary at the real "
-            "bang-preserving location: {}".format(out.stdout), out.stderr)
+            f"bang-preserving location: {out.stdout}", out.stderr)
 
     @pytest.mark.parametrize("gcrc", ["0", "20"])
     def test_pathdir_cmdshim_survive_a_bang_in_the_install_path(self, bat, tmp_path, gcrc):
@@ -829,12 +827,12 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         pairs = [("PATHDIR", "PATHDIR"), ("CMDSHIM", "CMDSHIM")]
         out = self._run(
             bangdir,
-            'set "GCRC={}"\r\nset "PATHDIR="\r\nset "CMDSHIM="\r\n'.format(gcrc),
+            f'set "GCRC={gcrc}"\r\nset "PATHDIR="\r\nset "CMDSHIM="\r\n',
             block, self._protected_readback(pairs) + self._bang_readback(pairs))
-        assert "PATHDIR=[{}\\bin]".format(bangdir) in out.stdout, out.stdout
-        assert "CMDSHIM=[{}\\bin\\localm.cmd]".format(bangdir) in out.stdout, out.stdout
-        assert "PATHDIR_BANG=[{}\\bin]".format(bangdir) in out.stdout, out.stdout
-        assert "CMDSHIM_BANG=[{}\\bin\\localm.cmd]".format(bangdir) in out.stdout, out.stdout
+        assert f"PATHDIR=[{bangdir}\\bin]" in out.stdout, out.stdout
+        assert f"CMDSHIM=[{bangdir}\\bin\\localm.cmd]" in out.stdout, out.stdout
+        assert f"PATHDIR_BANG=[{bangdir}\\bin]" in out.stdout, out.stdout
+        assert f"CMDSHIM_BANG=[{bangdir}\\bin\\localm.cmd]" in out.stdout, out.stdout
 
     def test_pathdir_cmdshim_stay_empty_when_gcrc_matches_neither(self, bat, tmp_path):
         block = _pathdir_cmdshim_lines(bat)
@@ -853,10 +851,10 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         pairs = [("PYDIR", "PYDIR"), ("CACHEDIR", "CACHEDIR")]
         out = self._run(bangdir, 'set "CONTAINED=1"\r\nset "PYDIR="\r\nset "CACHEDIR="\r\n',
                          block, self._protected_readback(pairs) + self._bang_readback(pairs))
-        assert "PYDIR=[{}\\.python]".format(bangdir) in out.stdout, out.stdout
-        assert "CACHEDIR=[{}\\.cache]".format(bangdir) in out.stdout, out.stdout
-        assert "PYDIR_BANG=[{}\\.python]".format(bangdir) in out.stdout, out.stdout
-        assert "CACHEDIR_BANG=[{}\\.cache]".format(bangdir) in out.stdout, out.stdout
+        assert f"PYDIR=[{bangdir}\\.python]" in out.stdout, out.stdout
+        assert f"CACHEDIR=[{bangdir}\\.cache]" in out.stdout, out.stdout
+        assert f"PYDIR_BANG=[{bangdir}\\.python]" in out.stdout, out.stdout
+        assert f"CACHEDIR_BANG=[{bangdir}\\.cache]" in out.stdout, out.stdout
 
     def test_uninstall_header_names_the_real_bang_path(self, bat, tmp_path):
         block = _uninstall_header_block(bat)
@@ -905,7 +903,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
                 ("--command-shim", "\\bin\\localm.cmd"),
                 ("--uv-dir", "\\.uv"),
         ]:
-            expected = '{} "{}{}"'.format(flag, bang, suffix)
+            expected = f'{flag} "{bang}{suffix}"'
             assert expected in out.stdout, (expected, out.stdout, out.stderr)
 
 
@@ -945,9 +943,9 @@ class TestDataFolderSubroutinesThroughCmd:
         probe = clone / "probe.bat"
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
-            "call :{entry}\r\n"
+            f"call :{entry}\r\n"
             "echo EXITED=[%errorlevel%]\r\n"
-            "exit /b 0\r\n".format(entry=entry)
+            "exit /b 0\r\n"
             + _data_folder_subroutines(bat) + "\r\n"
             + _flush_block(bat) + "\r\n",
             encoding="utf-8")
@@ -971,10 +969,10 @@ class TestDataFolderSubroutinesThroughCmd:
             self, bat, tmp_path, venv_template, dirname):
         clone = _clone_with_venv(tmp_path / "clone", venv_template)
         target = tmp_path / dirname / "sub"
-        out = self._run(bat, clone, "{}\r\nY\r\n".format(target), "do_custom_home")
+        out = self._run(bat, clone, f"{target}\r\nY\r\n", "do_custom_home")
         assert "EXITED=[0]" in out.stdout, (out.stdout, out.stderr)
         # the confirm prompt names the real path back
-        assert "Use '{}'? [Y/n]:".format(target) in out.stdout, out.stdout
+        assert f"Use '{target}'? [Y/n]:" in out.stdout, out.stdout
         # localm-home.cfg holds the literal path, UTF-8
         cfg = (clone / "localm-home.cfg").read_bytes().decode("utf-8")
         assert cfg.strip() == str(target), out.stdout
@@ -984,7 +982,7 @@ class TestDataFolderSubroutinesThroughCmd:
         rec = self._record(clone)
         assert Path(rec["data_dir"]) == target and rec["data_created"] is True
         # the closing lines name it
-        assert "Data directory: {}".format(target) in out.stdout, out.stdout
+        assert f"Data directory: {target}" in out.stdout, out.stdout
         assert "(recorded in localm-home.cfg)" in out.stdout, out.stdout
 
     def test_an_existing_folder_is_recorded_with_what_was_in_it(
@@ -992,7 +990,7 @@ class TestDataFolderSubroutinesThroughCmd:
         clone = _clone_with_venv(tmp_path / "clone", venv_template)
         shared = tmp_path / "AI models"
         (shared / "models").mkdir(parents=True)
-        out = self._run(bat, clone, "{}\r\nY\r\n".format(shared), "do_custom_home")
+        out = self._run(bat, clone, f"{shared}\r\nY\r\n", "do_custom_home")
         rec = self._record(clone)
         assert rec["data_created"] is False, (out.stdout, out.stderr)
         assert rec["data_preexisting"] == ["models"]
@@ -1016,7 +1014,7 @@ class TestDataFolderSubroutinesThroughCmd:
     def test_a_relative_path_is_refused_and_asked_again(self, bat, tmp_path, venv_template):
         clone = _clone_with_venv(tmp_path / "clone", venv_template)
         target = tmp_path / "second try"
-        out = self._run(bat, clone, "models\r\nY\r\n{}\r\nY\r\n".format(target),
+        out = self._run(bat, clone, f"models\r\nY\r\n{target}\r\nY\r\n",
                         "do_custom_home")
         assert "Cannot use that data folder" in out.stdout, out.stdout
         assert not (clone / "models").exists()
@@ -1026,7 +1024,7 @@ class TestDataFolderSubroutinesThroughCmd:
     def test_answering_no_asks_for_the_path_again(self, bat, tmp_path, venv_template):
         clone = _clone_with_venv(tmp_path / "clone", venv_template)
         wrong, right = tmp_path / "wrong", tmp_path / "right"
-        out = self._run(bat, clone, "{}\r\nn\r\n{}\r\nY\r\n".format(wrong, right),
+        out = self._run(bat, clone, f"{wrong}\r\nn\r\n{right}\r\nY\r\n",
                         "do_custom_home")
         assert not wrong.exists(), out.stdout
         assert right.is_dir(), out.stdout

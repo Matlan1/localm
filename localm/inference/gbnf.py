@@ -164,6 +164,16 @@ MAX_GRAMMAR_REPEAT_COUNT = 1900
 _REPEAT_COUNT_RE = re.compile(r"\{(\d+)(?:,(\d+))?\}")
 
 
+def _repeat_count_exceeds_limit(digits: str) -> bool:
+    """True when the decimal *digits* are above MAX_GRAMMAR_REPEAT_COUNT. A run
+    wider than the limit is over it without being converted: int() refuses a
+    string past Python's integer-conversion digit limit."""
+    significant = digits.lstrip("0")
+    if len(significant) > len(str(MAX_GRAMMAR_REPEAT_COUNT)):
+        return True
+    return bool(significant) and int(significant) > MAX_GRAMMAR_REPEAT_COUNT
+
+
 def check_grammar_structure(grammar: str) -> None:
     """Reject a grammar whose size or structural complexity could drive the
     native GBNF parser into stack overflow, BEFORE any of it reaches that
@@ -194,9 +204,12 @@ def check_grammar_structure(grammar: str) -> None:
 
     for m in _REPEAT_COUNT_RE.finditer(grammar):
         for group in m.groups():
-            if group is not None and int(group) > MAX_GRAMMAR_REPEAT_COUNT:
+            if group is not None and _repeat_count_exceeds_limit(group):
+                shown = m.group(0)
+                if len(shown) > 24:
+                    shown = shown[:21] + "..."
                 raise InvalidGrammarError(
-                    f"grammar repeat count {{{m.group(0)}}} exceeds the "
+                    f"grammar repeat count {{{shown}}} exceeds the "
                     f"{MAX_GRAMMAR_REPEAT_COUNT} limit (llama.cpp's native "
                     "GBNF parser rejects repeat counts above roughly 2000 "
                     "as unreasonable; reduce this repeat count)")
@@ -250,7 +263,7 @@ class _ProbeSlot:
 
 # Free slots, LIFO: the most-recently-returned (and so already-spawned) slot is
 # re-handed to the next caller.
-_PROBE_SLOTS_FREE: "queue.LifoQueue" = queue.LifoQueue()
+_PROBE_SLOTS_FREE: queue.LifoQueue = queue.LifoQueue()
 for _ in range(_TRIGGER_PROBE_POOL_SIZE):
     _PROBE_SLOTS_FREE.put(_ProbeSlot())
 
@@ -297,7 +310,7 @@ _PROBE_UNSAFE = "unsafe"
 _PROBE_UNDETERMINED = "undetermined"
 
 # validate_trigger_patterns's per-process cache.
-_VALIDATED_TRIGGER_PATTERNS: "dict[str, str | None]" = {}
+_VALIDATED_TRIGGER_PATTERNS: dict[str, str | None] = {}
 _MAX_CACHED_TRIGGER_PATTERNS = 1024
 
 # Per-check timeout against an already-running daemon.
@@ -329,7 +342,7 @@ def _readline_with_timeout(stream, timeout: float):
     closes. Returns None on timeout, EOF, or any read error."""
     import queue
 
-    q: "queue.Queue" = queue.Queue(maxsize=1)
+    q: queue.Queue = queue.Queue(maxsize=1)
 
     def _reader():
         try:
@@ -348,7 +361,7 @@ def _readline_with_timeout(stream, timeout: float):
     return line
 
 
-def _slot_kill_and_prewarm(slot: "_ProbeSlot") -> None:
+def _slot_kill_and_prewarm(slot: _ProbeSlot) -> None:
     """Best-effort kill of *slot*'s dead/hung daemon, then hand off to a
     BACKGROUND thread to pre-spawn its replacement, so the respawn cost usually
     lands on nobody's request instead of on whichever caller happens to check
@@ -391,7 +404,7 @@ def _slot_kill_and_prewarm(slot: "_ProbeSlot") -> None:
     t.start()
 
 
-def _static_shape_rejection(pattern: str) -> "str | None":
+def _static_shape_rejection(pattern: str) -> str | None:
     """Cheap, in-process rejection of KNOWN catastrophic-backtracking shapes,
     run BEFORE the daemon probe. Returns a rejection reason string, or None if
     the pattern passes - which does NOT mean the pattern is safe, only that it
@@ -431,7 +444,7 @@ def _static_shape_rejection(pattern: str) -> "str | None":
 
     depth = 0
     in_class = False
-    group_has_quantifier_at: "dict[int, bool]" = {}
+    group_has_quantifier_at: dict[int, bool] = {}
     i, n = 0, len(pattern)
     while i < n:
         ch = pattern[i]
@@ -469,7 +482,7 @@ def _static_shape_rejection(pattern: str) -> "str | None":
     return None
 
 
-def _probe_pattern_is_safe(pattern: str) -> "tuple[str, str]":
+def _probe_pattern_is_safe(pattern: str) -> tuple[str, str]:
     """(verdict, reason) where verdict is _PROBE_SAFE / _PROBE_UNSAFE /
     _PROBE_UNDETERMINED. Never raises.
 
@@ -522,7 +535,7 @@ def _probe_pattern_is_safe(pattern: str) -> "tuple[str, str]":
         pool.put(slot)
 
 
-def _probe_on_slot(slot: "_ProbeSlot", pattern: str) -> "tuple[str, str]":
+def _probe_on_slot(slot: _ProbeSlot, pattern: str) -> tuple[str, str]:
     """One probe round trip on a slot the caller OWNS. Never raises.
 
     No lock is held across the round trip: exclusive access to this daemon comes
@@ -600,7 +613,7 @@ def _probe_on_slot(slot: "_ProbeSlot", pattern: str) -> "tuple[str, str]":
     return _PROBE_UNSAFE, (line[4:] if line.startswith("BAD ") else line)
 
 
-def validate_trigger_patterns(patterns: "list[str]") -> None:
+def validate_trigger_patterns(patterns: list[str]) -> None:
     """Reject a caller-supplied lazy-grammar trigger pattern list that is
     invalid or unsafe to run, BEFORE any of it reaches
     llama_sampler_init_grammar_lazy_patterns.

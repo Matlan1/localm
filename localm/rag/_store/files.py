@@ -426,7 +426,7 @@ class _CollectionFiles:
         checked by ``_fingerprint_matches`` before the cache is ever trusted, so
         a file that changed WITHOUT going through this class is detected and the
         cache refused."""
-        def _stat(name: str) -> "list[int] | None":
+        def _stat(name: str) -> list[int] | None:
             try:
                 st = (self.dir / name).stat()
             except OSError:

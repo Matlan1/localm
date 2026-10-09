@@ -54,7 +54,7 @@ def register(app: FastAPI, ctx) -> None:
             try:
                 target.write_bytes(data)
             except OSError as e:
-                raise HTTPException(500, f"Could not save {safe}: {e}")
+                raise HTTPException(500, f"Could not save {safe}: {e}") from e
             saved.append({"name": target.name, "bytes": len(data)})
         if not saved:
             raise HTTPException(400, "No files were uploaded.")
@@ -88,5 +88,5 @@ def register(app: FastAPI, ctx) -> None:
         try:
             target.unlink()
         except OSError as e:
-            raise HTTPException(500, f"Could not delete {target.name}: {e}")
+            raise HTTPException(500, f"Could not delete {target.name}: {e}") from e
         return {"removed": target.name}

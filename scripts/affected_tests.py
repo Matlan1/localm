@@ -26,8 +26,8 @@ A test file is selected when any of these holds:
     depends on one, transitively.
 
 A change to tests/conftest.py affects every test file. So does a change to
-pyproject.toml or uv.lock outside the [project] requirement lists and the
-locked packages, either file missing or unparsable on either side, a listed
+pyproject.toml or uv.lock outside the [project] requirement lists, the
+[tool.ruff] and [tool.basedpyright] tables and the locked packages, either file missing or unparsable on either side, a listed
 pyproject.toml or uv.lock that does not differ from the base (a committed
 change named with --files), and a changed dependency the project declares
 outside the dev extra that the rules above reach no test file from. A changed
@@ -80,6 +80,7 @@ _EVERYTHING = {"tests/conftest.py"}
 # import.
 _REEXPORT_FACADES = ("localm.setup_llama", "localm.bugreport")
 _DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
+_UNREAD_TOOL_TABLES = ("ruff", "basedpyright")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
 # Modules whose callers import and patch the module itself, which re-exports the
@@ -305,9 +306,11 @@ def _requirements(pyproject: dict) -> dict[str, list[tuple[str, str]]] | None:
 
 
 def _pyproject_rest(pyproject: dict) -> dict:
-    """*pyproject* without the [project] requirement lists."""
+    """*pyproject* without the [project] requirement lists and the [tool.ruff]
+    tables, which no test reads."""
     project = {k: v for k, v in pyproject.get("project", {}).items() if k not in _REQUIREMENT_KEYS}
-    return {**pyproject, "project": project}
+    tool = {k: v for k, v in pyproject.get("tool", {}).items() if k not in _UNREAD_TOOL_TABLES}
+    return {**pyproject, "project": project, "tool": tool}
 
 
 def _lock_packages(lock: dict, project: str) -> dict[str, list[str]]:

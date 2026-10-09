@@ -61,7 +61,7 @@ import os
 import socket
 import threading
 import time
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 from localm.debuglog import logger
 
@@ -136,7 +136,7 @@ class RequestProgress:
             self._inflight.pop(token, None)
             self._last_progress = time.monotonic()
 
-    def snapshot(self) -> Tuple[int, float, float]:
+    def snapshot(self) -> tuple[int, float, float]:
         """(in-flight count, oldest in-flight age seconds, seconds since the
         last response progress). Ages are 0.0 when nothing is in flight."""
         now = time.monotonic()
@@ -146,7 +146,7 @@ class RequestProgress:
                       if self._inflight else now)
             return count, now - oldest, now - self._last_progress
 
-    def observe(self) -> Tuple[Tuple[Tuple[float, str], ...], float]:
+    def observe(self) -> tuple[tuple[tuple[float, str], ...], float]:
         """(per-request (age, "METHOD /path") pairs, seconds since the last
         response progress) - the starvation watch's view. Per-request, not
         just the oldest, so a record can name exactly which requests are
@@ -170,7 +170,7 @@ class RequestProgressMiddleware:
 
     _EXCLUDED_PATHS = frozenset({"/health", "/whoami"})
 
-    def __init__(self, app, tracker: Optional["RequestProgress"] = None) -> None:
+    def __init__(self, app, tracker: Optional[RequestProgress] = None) -> None:
         self.app = app
         # The process singleton by default; injectable so tests can use an
         # isolated tracker instead of sharing cross-test state.
@@ -277,8 +277,8 @@ class HangAlarm:
 
     def __init__(self, *,
                  heartbeat_gap: Callable[[], Optional[float]],
-                 inflight: Optional[Callable[[], Tuple[int, float, float]]],
-                 probe_target: Optional[Callable[[], Optional[Tuple[str, int]]]],
+                 inflight: Optional[Callable[[], tuple[int, float, float]]],
+                 probe_target: Optional[Callable[[], Optional[tuple[str, int]]]],
                  surface: Callable[[str], None],
                  recovered: Callable[[], None],
                  restart: Callable[[str], None],
@@ -323,7 +323,7 @@ class HangAlarm:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start(self) -> "HangAlarm":
+    def start(self) -> HangAlarm:
         t = threading.Thread(target=self._run, name="localm-hang-alarm",
                              daemon=True)
         self._thread = t

@@ -25,7 +25,7 @@ CLI (localm/cli/)                  Plugin engine (localm/plugins/)
 
 ## Layering
 
-[layering.toml](layering.toml) declares the package's tiers, top to bottom,
+[layering.toml](https://github.com/Matlan1/localm/blob/master/docs/layering.toml) declares the package's tiers, top to bottom,
 and places every top-level unit under `localm/` in exactly one of them. The
 rule is small: a module-level import may target only a unit in a lower tier;
 units that share a tier are peers and never import each other at module
@@ -121,6 +121,24 @@ boundary (`auth`, `scopes`, `tls`, `bindhost`, `netlisten`, `portmux`,
 `setup_llama`, `runtime/`), packaging and the installers, and the CI
 workflows and gates. None of those blocks a merge; the list lives in
 `scripts/merge_policy.py`.
+
+`master` is protected by a repository ruleset (`.github/rulesets/master.json`, applied with `gh api repos/<owner>/<repo>/rulesets`): no force-push, no deletion, and every change arrives through a pull request whose `merge-policy` and CodeQL `analyze (<language>)` checks have passed. No approving review is required. Only a `pull_request` run reports a check named `merge-policy`, so the skipped run the narrow `push` trigger creates on the same commit cannot stand in for it.
+
+Scheduled runs on master. The nightly cron (03:23 UTC) runs `test`,
+`gui-tests`, `optional-stacks` and `lint`. The weekly cron (Monday 06:37 UTC)
+runs those and, only on that cron, the mutation shards and gate, `abi-check`,
+`web-search-canary`, `voice-stack` and the two pin-currency checks. A
+weekly-only job's `if:` tests `github.event.schedule == '37 6 * * 1'`;
+`tests/test_ci_schedule_split.py` evaluates every job's `if:` under each
+trigger.
+
+`.github/workflows/macos-smoke.yml` installs localm on an Apple Silicon runner
+with `setup.sh --yes`, then checks `localm doctor`, that the backend
+auto-pick is Metal, that `localm serve --no-model` answers `/v1/models`, and a
+small test selection. It runs nightly, on a dispatch, and on pull requests that
+touch `localm/hwdetect*`, `localm/setup_llama/`, `localm/inference/backends/`
+or `setup.sh`. It is not in `merge-policy`'s `needs`; it is added there once
+it has been green on ten consecutive scheduled runs on master.
 
 `mutation-test` is the mutation-testing gate for the trust boundary: the
 eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`). On the

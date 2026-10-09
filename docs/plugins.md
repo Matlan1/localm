@@ -116,8 +116,8 @@ group = "studio"             # nav group; tabs sharing a group collapse together
 ```
 
 The dataclasses backing this are `Surface` and `PluginSpec` in
-[contract.py](../localm/plugins/contract.py); the parser is `parse_spec` in
-[engine.py](../localm/plugins/engine.py).
+[contract.py](https://github.com/Matlan1/localm/blob/master/localm/plugins/contract.py); the parser is `parse_spec` in
+[engine.py](https://github.com/Matlan1/localm/blob/master/localm/plugins/engine.py).
 
 ## The `register(host)` contract
 
@@ -214,7 +214,7 @@ def register(host):
 Each field lives at `config["plugins"][<name>][key]` - the same block
 `plugin_config()` / `save_plugin_config()` already read and write - and is
 rendered with the same per-widget control the core settings form and the
-tts/media sections use (see [settings_schema.py](../localm/settings_schema.py)'s
+tts/media sections use (see [settings_schema.py](https://github.com/Matlan1/localm/blob/master/localm/settings_schema.py)'s
 `Widget` for the valid `widget` values). `add_settings()` validates the field
 shape immediately: a non-`PluginSettingField` entry or an unknown widget raises
 at `register()` time rather than silently never rendering.
@@ -428,7 +428,7 @@ A plugin's settings live under `config["plugins"][<name>]`, read/written via
 `host.plugin_config()` / `host.save_plugin_config()`. A plugin that writes
 session-derived data to disk (sidecars, caches, generated media) must gate that
 write on the privacy contract - check `effective_mode()` in
-[audit.py](../localm/audit.py) before writing, exactly as the media plugins do.
+[audit.py](https://github.com/Matlan1/localm/blob/master/localm/audit.py) before writing, exactly as the media plugins do.
 Personal model/voice choices, such as the tts plugin's, belong under
 `config["plugins"]["tts"]` in the gitignored `config.json`, never committed;
 the tracked `tts.example.json` only supplies the shipped defaults.
@@ -437,7 +437,7 @@ A plugin block that users are meant to EDIT needs a write surface, or those
 settings are hand-edit-only in practice. The two worked examples are the media
 blocks (`GET /v1/media/config`, `POST /v1/media/config/{name}`) and the tts
 block (`GET/POST /v1/tts/config`): both validate the update in
-[settings_schema.py](../localm/settings_schema.py) and merge it into the plugin's
+[settings_schema.py](https://github.com/Matlan1/localm/blob/master/localm/settings_schema.py) and merge it into the plugin's
 own block, and both are gated on `config:read` / `config:write` rather than on
 the plugin's own capability, so a key that may merely USE a plugin cannot
 reconfigure it. Fields that widen a trust boundary (a shell command, a network
@@ -468,7 +468,7 @@ so bumping the contract is a deliberate, visible break.
 ## Before you ship a plugin (checklist)
 
 **Enforced by the guard suite**
-([tests/test_builtin_plugins_contract.py](../tests/test_builtin_plugins_contract.py),
+([tests/test_builtin_plugins_contract.py](https://github.com/Matlan1/localm/blob/master/tests/test_builtin_plugins_contract.py),
 which enumerates every builtin so a new one is covered the moment it ships):
 
 - **Manifest conforms**: `plugin.toml` parses, targets `api_version = 1`, and

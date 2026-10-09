@@ -1,0 +1,119 @@
+name: docs
+
+# WHAT THIS FILE DOES
+#
+#   pull_request       builds the site with `mkdocs build --strict` when the PR
+#                      touches docs/**, mkdocs.yml, the OpenAPI export or the
+#                      docs hooks. Nothing is uploaded or deployed.
+#   release: published builds the site and, when GitHub Pages is enabled for the
+#                      repository, deploys it.
+#   workflow_dispatch  builds the site. `dry_run` (default true) keeps it a
+#                      build; set it to false to deploy.
+#
+# The site is built on every docs change and published only on a release.
+# When a deploy is wanted but Pages is not enabled (Settings > Pages > Source:
+# GitHub Actions), the build job warns and the deploy job is skipped.
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "scripts/export_openapi.py"
+      - "scripts/openapi_markdown.py"
+      - "scripts/mkdocs_hooks.py"
+      - ".github/workflows/docs.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build the site without deploying it (set to false to deploy)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: docs-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build site (mkdocs --strict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: read
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Create the project venv
+        run: python -m venv .venv
+
+      - name: Put the venv on PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[docs]"
+
+      - name: Build the site
+        env:
+          NO_MKDOCS_2_WARNING: "true"
+        run: mkdocs build --strict
+
+      - name: Decide whether to deploy
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          deploy=false
+          if [ "$EVENT" = "release" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; }; then
+            if out=$(gh api "repos/$REPO/pages" 2>&1); then
+              deploy=true
+            elif printf '%s' "$out" | grep -q "HTTP 404"; then
+              echo "::warning title=GitHub Pages is not enabled::The site was built but not deployed. Enable Settings > Pages > Source: GitHub Actions, then re-run this workflow."
+            else
+              echo "Could not query the Pages configuration: $out" >&2
+              exit 1
+            fi
+          fi
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+          echo "Deploy: $deploy (event: $EVENT)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1

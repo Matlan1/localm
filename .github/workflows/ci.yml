@@ -20,10 +20,15 @@ on:
   #                  into one check - see that job below.
   #   push           paths-scoped to the two native-binding files below, and it
   #                  runs abi-check ONLY. It never starts the test matrix.
-  #   workflow_dispatch / schedule   run the matrix unconditionally. The
-  #                  mutation-run shards (and so the mutation-test gate) run on
-  #                  both as well, so the weekly run gates master; never on
-  #                  push.
+  #   workflow_dispatch   runs the matrix unconditionally, plus the mutation
+  #                  shards (and so the mutation-test gate); never on push.
+  #   schedule       two crons. The nightly one ("23 3 * * *") runs test,
+  #                  gui-tests, optional-stacks and lint on master. The weekly
+  #                  one ("37 6 * * 1") runs those plus every job that is
+  #                  weekly only: the mutation shards and gate, abi-check,
+  #                  web-search-canary, voice-stack and the two pin checks. A
+  #                  weekly-only job tests
+  #                  github.event.schedule == '37 6 * * 1'.
   #
   # THE LABEL GATE IS THE WHOLE MECHANISM. Do not remove the `full-ci`
   # condition on the test job and do not widen the push paths filter; either
@@ -95,6 +100,8 @@ on:
     # of the ABI-drift check and of the mutation gate. The minute stays off
     # the top of the hour, where GitHub drops scheduled runs under load. (#860)
     - cron: "37 6 * * 1"
+    # Nightly, 03:23 UTC, on master: test, gui-tests, optional-stacks and lint.
+    - cron: "23 3 * * *"
 
 concurrency:
   # Supersede a run whose commit has already been replaced by a newer push to
@@ -106,13 +113,15 @@ concurrency:
   # Each term of the group key is load-bearing:
   #   event_name   a push-triggered abi-check and a pull_request run never share
   #                a group, so they can never cancel one another.
+  #   schedule     the nightly and weekly crons never share a group, so a
+  #                nightly run never replaces a queued weekly run.
   #   ref          the branch is the unit of supersession.
   #   full-ci      `synchronize` and `labeled` can fire on the SAME commit a
   #                second apart. Without this term the second to arrive would
   #                cancel the first, so an unlabeled run could kill the
   #                two-platform matrix on a release PR. Separating labeled from
   #                unlabeled runs makes that unrepresentable.
-  group: ci-${{ github.event_name }}-${{ github.ref }}-${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+  group: ci-${{ github.event_name }}-${{ github.event.schedule }}-${{ github.ref }}-${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
   # Cancel pull_request runs ONLY. The push leg is the paths-scoped abi-check on
   # a native binding change and must always run to completion.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -339,6 +348,17 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      # Fails on a type error absent from .github/basedpyright-baseline.json.
+      # basedpyright rewrites the baseline when errors were fixed; the diff
+      # check fails when that shrink was not committed.
+      - name: Type check (basedpyright, baseline ratchet)
+        run: |
+          basedpyright
+          git diff --exit-code -- .github/basedpyright-baseline.json || {
+            echo "::error::The baseline lists type errors that no longer occur. Run basedpyright and commit .github/basedpyright-baseline.json."
+            exit 1
+          }
+
       # Static analysis of the workflow files themselves. --offline keeps it
       # free of network and of any token. It exits non-zero rather than
       # reporting success when it cannot analyze an input.
@@ -421,14 +441,18 @@ jobs:
   abi-check:
     name: native llama.cpp ABI drift
     runs-on: windows-latest
-    # The weekly cron still runs it unconditionally; a dispatch must opt in.
+    # The weekly cron still runs it unconditionally and the nightly cron never
+    # does; a dispatch must opt in.
     # `inputs.run_abi` is undefined (falsy) for push and schedule events, so
     # the schedule arm and the push arm are what keep the drift coverage
     # outside a manual dispatch. The push arm fires only for the narrow,
     # paths-scoped push trigger above (llamacpp backend + setup_llama/) -
     # GitHub Actions has already filtered the run to those paths before this
     # condition is even evaluated.
-    if: github.event_name == 'schedule' || inputs.run_abi || github.event_name == 'push'
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '37 6 * * 1') ||
+      inputs.run_abi ||
+      github.event_name == 'push'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -510,13 +534,14 @@ jobs:
 
   # Maintenance signal for a second bundled-and-pinned dependency, same shape as
   # abi-check above but far cheaper: one GitHub API call, no clone, no prebuilt
-  # download. Runs on every trigger of this workflow (no run_abi-style opt-in
-  # needed) because unlike abi-check it can never fail the build - the script
+  # download. Runs on every trigger of this workflow except the nightly
+  # schedule (no run_abi-style opt-in needed) because unlike abi-check it can never fail the build - the script
   # always exits 0 and the step itself is continue-on-error, so a stale pin (or
   # even a bug in the script) never turns CI red. See scripts/check_comfyui_pin.py.
   comfyui-pin-check:
     name: ComfyUI pin currency (warn-only)
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule' || github.event.schedule == '37 6 * * 1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -586,7 +611,7 @@ jobs:
     timeout-minutes: 180
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'schedule' ||
+      (github.event_name == 'schedule' && github.event.schedule == '37 6 * * 1') ||
       (github.event_name == 'pull_request' &&
        contains(github.event.pull_request.labels.*.name, 'mutation-test'))
     strategy:
@@ -745,12 +770,13 @@ jobs:
 
   # Maintenance signal for a third bundled-and-pinned dependency, same shape as
   # comfyui-pin-check above: one GitHub API call, no clone, no prebuilt
-  # download. Runs on every trigger of this workflow, including the weekly
-  # schedule above, and can never fail the build - the script always exits 0
+  # download. Runs on every trigger of this workflow except the nightly
+  # schedule, and can never fail the build - the script always exits 0
   # and the step itself is continue-on-error. See scripts/check_llama_rocm_pin.py.
   llama-rocm-pin-check:
     name: llama.cpp ROCm pin currency (warn-only)
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule' || github.event.schedule == '37 6 * * 1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -782,7 +808,9 @@ jobs:
   web-search-canary:
     name: web search canary (warn-only, schedule/dispatch only)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '37 6 * * 1') ||
+      github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -813,7 +841,10 @@ jobs:
     name: voice stack (real decode, newest allowed PyAV and faster-whisper)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'schedule' && github.event.schedule == '37 6 * * 1') ||
+      github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -864,8 +895,8 @@ jobs:
   # then FAILS (tests/_require_optional.py). Not required here, on purpose:
   # tkinter (needs a display), playwright and webview (a browser or a window),
   # and the private manifest checker. Same triggers as the test matrix: the
-  # weekly schedule, a manual dispatch, or a pull request labelled full-ci.
-  # Not part of merge-policy.
+  # nightly and weekly schedules, a manual dispatch, or a pull request
+  # labelled full-ci. Not part of merge-policy.
   optional-stacks:
     name: optional stacks (tests that need torch, transformers, ... must run, not skip)
     runs-on: ubuntu-latest
@@ -915,7 +946,10 @@ jobs:
   # label named; every other PR merges without the matrix. A skipped
   # required job never passes.
   merge-policy:
-    name: merge-policy
+    # Skipped runs keep the unevaluated expression as their check name, so only a
+    # pull_request run reports a check called merge-policy. See
+    # test_the_merge_policy_check_name_exists_only_on_pull_request_runs.
+    name: ${{ github.event_name == 'pull_request' && 'merge-policy' || 'merge-policy (pull_request runs only)' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [python-pr-gate, lint, gui-tests, test, mutation-scope, mutation-test]

@@ -126,7 +126,7 @@ def _templates_overlap(a: str, b: str) -> bool:
     matches exactly one path segment."""
     sa, sb = a.split("/"), b.split("/")
     return len(sa) == len(sb) and all(
-        x == y or _is_param(x) or _is_param(y) for x, y in zip(sa, sb))
+        x == y or _is_param(x) or _is_param(y) for x, y in zip(sa, sb, strict=True))
 
 
 def _describe(keys) -> str:
@@ -205,6 +205,22 @@ _KERNEL_ROUTES = {
     ("api", "POST", "/v1/chat/completions"): ("auth",),
     ("api", "POST", "/v1/embeddings"): ("auth",),
     ("api", "POST", "/v1/completions"): ("auth",),
+    # routes/ollama.py
+    ("api", "GET", "/api/version"): ("auth",),
+    ("api", "GET", "/api/tags"): ("scope:models:read",),
+    ("api", "GET", "/api/ps"): ("scope:models:read",),
+    ("api", "POST", "/api/show"): ("scope:models:read",),
+    ("api", "POST", "/api/chat"): ("auth",),
+    ("api", "POST", "/api/generate"): ("auth",),
+    ("api", "POST", "/api/embed"): ("auth",),
+    ("api", "POST", "/api/embeddings"): ("auth",),
+    ("api", "POST", "/api/copy"): ("scope:models:write",),
+    ("api", "POST", "/api/pull"): ("scope:models:write",),
+    ("api", "POST", "/api/push"): ("scope:models:write",),
+    ("api", "POST", "/api/create"): ("scope:models:write",),
+    ("api", "DELETE", "/api/delete"): ("scope:models:write",),
+    ("api", "POST", "/api/blobs/{digest}"): ("scope:models:write",),
+    ("api", "HEAD", "/api/blobs/{digest}"): ("scope:models:write",),
 }
 
 # attach_engine(): plugin management, plugin dependency install, background jobs.
@@ -291,6 +307,12 @@ _HIDDEN_FROM_SCHEMA = {
     ("POST", "/v1/instances/vouch"),
     ("GET", "/v1/instances/status"),
     ("POST", "/v1/surfaces/gui"),
+    ("POST", "/api/pull"),
+    ("POST", "/api/push"),
+    ("POST", "/api/create"),
+    ("DELETE", "/api/delete"),
+    ("POST", "/api/blobs/{digest}"),
+    ("HEAD", "/api/blobs/{digest}"),
 }
 
 

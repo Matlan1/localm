@@ -54,7 +54,7 @@ def _locate(render, messages):
     contents = [c for _r, c in messages]
     rendered = render(messages)
     spans = content_spans_via_sentinels(
-        contents, lambda sents: render([(r, s) for (r, _c), s in zip(messages, sents)]),
+        contents, lambda sents: render([(r, s) for (r, _c), s in zip(messages, sents, strict=True)]),
         rendered)
     return rendered, spans
 

@@ -29,7 +29,7 @@ def _clamped_field_deltas(t1, t2):
     occasionally regress even while total CPU time moves forward, so each field is
     trimmed to zero independently - the same shape as psutil's own
     ``_cpu_times_deltas``."""
-    return type(t2)(*(max(0.0, float(b) - float(a)) for a, b in zip(t1, t2)))
+    return type(t2)(*(max(0.0, float(b) - float(a)) for a, b in zip(t1, t2, strict=True)))
 
 
 def _busy_total(times) -> tuple[float, float]:
@@ -139,7 +139,7 @@ _CGROUP_ROOT = Path("/sys/fs/cgroup")
 _CGROUP_UNLIMITED = 1 << 60
 
 
-def system_ram() -> "tuple[int | None, int | None]":
+def system_ram() -> tuple[int | None, int | None]:
     """``(total, available)`` system RAM in bytes, each None when it cannot be
     read. Never raises; a failed read is logged at debug.
 
@@ -157,7 +157,7 @@ def system_ram() -> "tuple[int | None, int | None]":
     return total, available
 
 
-def _psutil_ram() -> "tuple[int | None, int | None]":
+def _psutil_ram() -> tuple[int | None, int | None]:
     """``(total, available)`` from ``psutil.virtual_memory()``, or
     ``(None, None)`` when psutil is absent or the read fails."""
     try:
@@ -173,7 +173,7 @@ def _psutil_ram() -> "tuple[int | None, int | None]":
         return None, None
 
 
-def _platform_ram() -> "tuple[int | None, int | None]":
+def _platform_ram() -> tuple[int | None, int | None]:
     """``(total, available)`` from this platform's own interface, either None
     when it cannot be read."""
     try:
@@ -189,7 +189,7 @@ def _platform_ram() -> "tuple[int | None, int | None]":
         return None, None
 
 
-def _windows_ram() -> "tuple[int | None, int | None]":
+def _windows_ram() -> tuple[int | None, int | None]:
     """``(ullTotalPhys, ullAvailPhys)`` from ``GlobalMemoryStatusEx``, or
     ``(None, None)`` when the call fails."""
     import ctypes
@@ -218,7 +218,7 @@ def _windows_ram() -> "tuple[int | None, int | None]":
     return int(status.ullTotalPhys), int(status.ullAvailPhys)
 
 
-def _meminfo_ram(path: Path) -> "tuple[int | None, int | None]":
+def _meminfo_ram(path: Path) -> tuple[int | None, int | None]:
     """``(MemTotal, MemAvailable)`` in bytes from a ``/proc/meminfo``-format
     file at *path*, each None when its line is missing or unparseable."""
     fields: dict = {}
@@ -232,7 +232,7 @@ def _meminfo_ram(path: Path) -> "tuple[int | None, int | None]":
     return fields.get("MemTotal"), fields.get("MemAvailable")
 
 
-def _read_int(path: Path) -> "int | None":
+def _read_int(path: Path) -> int | None:
     """The integer in the file at *path*, or None when it is missing, reads
     ``max`` or is not an integer."""
     try:
@@ -242,7 +242,7 @@ def _read_int(path: Path) -> "int | None":
     return int(text) if text.isdigit() else None
 
 
-def _cgroup_levels(root: Path, proc_cgroup: Path) -> "list[tuple[Path, bool]]":
+def _cgroup_levels(root: Path, proc_cgroup: Path) -> list[tuple[Path, bool]]:
     """``(directory, is_v2)`` for each cgroup level whose memory limit applies
     to this process, innermost first: its own cgroup and every ancestor up to
     the mount at *root*, from the cgroup v2 entry (``0::<path>``) and any v1
@@ -294,7 +294,7 @@ def _inactive_file(stat_path: Path, v2: bool) -> int:
     return 0
 
 
-def _cgroup_memory(root: Path, proc_cgroup: Path) -> "tuple[int | None, int | None]":
+def _cgroup_memory(root: Path, proc_cgroup: Path) -> tuple[int | None, int | None]:
     """``(limit, room)`` in bytes for this process's cgroup memory
     controller (:func:`_cgroup_levels`): the smallest memory limit set on any
     level, and the smallest limit minus usage across those levels, where usage
@@ -313,8 +313,8 @@ def _cgroup_memory(root: Path, proc_cgroup: Path) -> "tuple[int | None, int | No
     return limit, room
 
 
-def _cap_to_cgroup(total: "int | None", available: "int | None",
-                   cgroup: "tuple[int | None, int | None]") -> "tuple[int | None, int | None]":
+def _cap_to_cgroup(total: int | None, available: int | None,
+                   cgroup: tuple[int | None, int | None]) -> tuple[int | None, int | None]:
     """*total* and *available* capped by a cgroup ``(limit, room)``
     (:func:`_cgroup_memory`). Unchanged when *total* is None (an unknown
     reading stays unknown), when there is no limit, or when the limit is at or

@@ -265,7 +265,7 @@ def _served_engine(job: Job, live):
             detail = getattr(e, "detail", None) or str(e)
             last_error = RuntimeError(f"could not load {name}: {detail}")
             if job.model:
-                raise last_error
+                raise last_error from e
             logger.warning("jobs: %s", last_error)
     if live is not None:
         return live
@@ -321,7 +321,7 @@ def _headless_routed_model(job: Job) -> Optional[str]:
     return decision.resolved
 
 
-def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
+def _load_engine(model: Optional[str]) -> tuple[Optional[object], bool]:
     """Resolve an inference Engine for *model* (or the active/first registered
     model). Returns ``(engine, reused)``:
 

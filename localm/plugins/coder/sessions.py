@@ -61,7 +61,7 @@ _IDLE_REAP_SECONDS = 24 * 3600
 _EXIT_CLOSE_BUDGET_S = 5.0
 
 # Every SessionManager created in this process, for close_all_for_exit().
-_live_managers: "weakref.WeakSet[SessionManager]" = weakref.WeakSet()
+_live_managers: weakref.WeakSet[SessionManager] = weakref.WeakSet()
 _live_managers_lock = threading.Lock()
 
 
@@ -167,7 +167,7 @@ class CoderSession:
         custom_instructions: Optional[str] = None,
         # A shell string OR an argv list, the same union the agent's verify_cmd
         # holds: auto-detection assigns a list to this very field below.
-        verify: Optional["_VerifyCommand"] = None,
+        verify: Optional[_VerifyCommand] = None,
         auto_verify: bool = True,
         verify_max_retries: int = 2,
         # WHICH model server answers this session, decided ONCE by whoever

@@ -102,7 +102,7 @@ class Finding:
         return out
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Finding":
+    def from_dict(cls, d: dict) -> Finding:
         return cls(status=str(d.get("status") or WARN),
                    text=str(d.get("text") or ""),
                    note=str(d.get("note") or ""),
@@ -136,7 +136,7 @@ class CheckResult:
                 "findings": [f.as_dict() for f in self.findings]}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "CheckResult":
+    def from_dict(cls, d: dict) -> CheckResult:
         return cls(key=str(d.get("key") or ""), label=str(d.get("label") or ""),
                    status=str(d.get("status") or WARN),
                    summary=str(d.get("summary") or ""),
@@ -162,7 +162,7 @@ class DiagnosticsReport:
         return out
 
     @classmethod
-    def from_dict(cls, d: dict) -> "DiagnosticsReport":
+    def from_dict(cls, d: dict) -> DiagnosticsReport:
         return cls(checks=tuple(CheckResult.from_dict(c)
                                 for c in (d.get("checks") or ())),
                    verdict=str(d.get("verdict") or WARN),
@@ -296,7 +296,7 @@ def check_llama_lib(find_binary_dir: Optional[Callable] = None) -> CheckResult:
     if not binary_dir:
         return _result("llama_lib", label, [Finding(
             FAIL, "llama binary dir not found - GGUF backend unavailable")])
-    dll_names = ["llama.dll", "llama.so", "libllama.so", "llama"]
+    dll_names = ["llama.dll", "llama.so", "libllama.so", "libllama.dylib", "llama"]
     found_dll = next(
         (binary_dir / d for d in dll_names if (binary_dir / d).exists()),
         None,
@@ -304,7 +304,7 @@ def check_llama_lib(find_binary_dir: Optional[Callable] = None) -> CheckResult:
     if not found_dll:
         files = [f.name for f in binary_dir.iterdir() if f.is_file()][:8]
         return _result("llama_lib", label, [Finding(
-            WARN, f"binary dir found ({binary_dir}) but no llama .dll/.so - "
+            WARN, f"binary dir found ({binary_dir}) but no llama .dll/.so/.dylib - "
                   f"contents: {files}")])
     try:
         size = found_dll.stat().st_size

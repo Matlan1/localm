@@ -147,11 +147,40 @@ _HEADER_SECRET_RE = re.compile(
     r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
     r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
 )
+# A whole token that contains an email address. Byte-identical to _EMAIL_RE in
+# localm/bugreport/scrub.py, where the token rules are described.
+_EMAIL_TOKEN_END = r"\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*"
+_EMAIL_RE = re.compile(
+    "(?<![^" + _EMAIL_TOKEN_END + "])"
+    "[^" + _EMAIL_TOKEN_END + "]*?"
+    "[^@" + _EMAIL_TOKEN_END + "](?:@|%40)"
+    "[^@.%+" + _EMAIL_TOKEN_END + "]+"
+    r"(?:\.[^@.%+" + _EMAIL_TOKEN_END + "]+)*"
+    r"\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}"
+    "[^" + _EMAIL_TOKEN_END + "]*"
+)
+
+
+def _email_replacement(m: re.Match) -> str:
+    """``<redacted-email>`` between the token's leading single quotes and its
+    trailing single quotes and periods, or the token unchanged when what is
+    between them is MAINTAINER_EMAIL (ASCII, case-insensitive, ``%40`` read as
+    ``@``). Mirrors localm/bugreport/scrub.py."""
+    token = m.group(0)
+    core = token.lstrip("'")
+    lead = token[:len(token) - len(core)]
+    core = core.rstrip("'.")
+    trail = token[len(lead) + len(core):]
+    address = core.replace("%40", "@")
+    if address.isascii() and address.lower() == MAINTAINER_EMAIL.lower():
+        return token
+    return lead + "<redacted-email>" + trail
 
 
 def scrub(text: str) -> str:
-    """Strip the account name from any path and any obvious credential from free
-    text before it is shown or sent. A privacy scrub must fail safe: if it cannot
+    """Strip the account name from any path, any obvious credential and every
+    email address other than MAINTAINER_EMAIL from free text before it is
+    shown or sent. A privacy scrub must fail safe: if it cannot
     run it must NOT pass the text through as if scrubbed, so the home-root strip
     below ALWAYS runs (it never depends on Path.home succeeding)."""
     if not text:
@@ -181,6 +210,8 @@ def scrub(text: str) -> str:
     # Bearer tokens and API keys anywhere in the text.
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)
+    # Email addresses, except the maintainer's.
+    text = _EMAIL_RE.sub(_email_replacement, text)
     return text
 
 
@@ -325,10 +356,10 @@ def post_report(url: str, token: str | None, title: str, body: str,
                     detail = e.read().decode("utf-8", "replace")[:300]
                 except Exception:
                     pass
-                raise RuntimeError(f"HTTP {e.code}: {detail}".strip())
+                raise RuntimeError(f"HTTP {e.code}: {detail}".strip()) from e
             except (urllib.error.URLError, OSError) as e:
                 raise RuntimeError(f"could not reach the server: "
-                                   f"{getattr(e, 'reason', e)}")
+                                   f"{getattr(e, 'reason', e)}") from e
 
     status, raw = opener(url, payload, headers, timeout)
     if not (200 <= int(status) < 300):

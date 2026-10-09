@@ -7,6 +7,7 @@
     loaded, so an embedding-only index fires no chat call.
 """
 
+import pytest
 import requests
 
 from localm.rag import Collection
@@ -149,11 +150,9 @@ def test_self_describe_image_raises_on_a_crashed_generation(monkeypatch):
     monkeypatch.setattr(requests, "request", lambda *a, **k: FakeResp())
     describe = plug._make_self_describe_image(
         "https://127.0.0.1:65535/v1", lambda: "mymodel")
-    try:
+    with pytest.raises(RuntimeError) as caught:
         describe(b"not a real image", "image/png")
-        assert False, "expected a RuntimeError, the crash text was returned instead"
-    except RuntimeError as e:
-        assert "inference error" in str(e)
+    assert "inference error" in str(caught.value)
 
 
 # --------------------------------------------------------------------------- #

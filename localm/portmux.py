@@ -81,7 +81,7 @@ _stop_requested = False
 # The current run_server() call has finished serving and is disarming.
 _stopping = False
 # One callable per server currently serving, each ending that server's serve.
-_stop_hooks: "list[Callable[[], None]]" = []
+_stop_hooks: list[Callable[[], None]] = []
 
 
 def _discard_stop_hook(hook) -> None:
@@ -455,7 +455,7 @@ def _run_uvicorn_own_bind(uvicorn, host, port, config_kwargs) -> None:
         sys.exit(STARTUP_FAILURE)
 
 
-def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
+def _track_conn_task(inflight: set[asyncio.Task], coro) -> None:
     """Schedule *coro* as a tracked, fire-and-forget per-connection task.
 
     ``asyncio.start_server``'s ``client_connected_cb`` gives no way to keep a
@@ -472,7 +472,7 @@ def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
     task.add_done_callback(inflight.discard)
 
 
-async def _cancel_inflight_conns(inflight: "set[asyncio.Task]") -> None:
+async def _cancel_inflight_conns(inflight: set[asyncio.Task]) -> None:
     """Cancel and await every still-pending task tracked via
     :func:`_track_conn_task`, so shutdown never abandons a connection mid-relay.
     A task that already finished on its own (the common case) is not touched."""
@@ -518,7 +518,7 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         return
     _harden_uvicorn_logging()
 
-    inflight: "set[asyncio.Task]" = set()
+    inflight: set[asyncio.Task] = set()
 
     def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         _track_conn_task(inflight, _handle_conn(reader, writer, internal_port, port))
@@ -584,7 +584,7 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
     _harden_uvicorn_logging()
 
     state = {"warned": False, "count": 0}
-    inflight: "set[asyncio.Task]" = set()
+    inflight: set[asyncio.Task] = set()
 
     def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         _track_conn_task(
@@ -739,8 +739,7 @@ async def _redirect_to_https(first, c_reader, c_writer, public_port) -> None:
     the same host:port, plus a small HTML catch page."""
     try:
         rest = await asyncio.wait_for(c_reader.readuntil(b"\r\n\r\n"), timeout=5)
-    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError,
-            asyncio.TimeoutError, ConnectionError, OSError) as exc:
+    except (TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, OSError) as exc:
         rest = getattr(exc, "partial", b"") or b""
 
     head = (first + rest).decode("latin-1", "replace")
@@ -780,7 +779,7 @@ async def _redirect_to_https(first, c_reader, c_writer, public_port) -> None:
             f"<a style=\"color:#4f9cf9\" href=\"{safe}\">{safe}</a> ...</p>"
             "<p style=\"color:#8b94a5\">If your browser does not redirect, "
             "tap the link above.</p></body></html>"
-        ).encode("utf-8")
+        ).encode()
         head_bytes = (
             "HTTP/1.1 308 Permanent Redirect\r\n"
             f"Location: {location}\r\n"
@@ -792,14 +791,14 @@ async def _redirect_to_https(first, c_reader, c_writer, public_port) -> None:
         # No usable Host header (e.g. HTTP/1.0 without one): cannot build a
         # redirect target, so just explain the situation.
         body = (
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-            "<title>localm - secure connection</title></head>"
-            "<body style=\"font-family:system-ui,Segoe UI,sans-serif;"
-            "background:#0f1115;color:#d7dde7;padding:2rem\">"
-            "<h2 style=\"color:#4f9cf9\">localm uses a secure connection</h2>"
-            "<p>This server speaks <b>https</b>, not http. Reopen this address "
-            "with <b>https://</b> in front.</p></body></html>"
-        ).encode("utf-8")
+            b"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            b"<title>localm - secure connection</title></head>"
+            b"<body style=\"font-family:system-ui,Segoe UI,sans-serif;"
+            b"background:#0f1115;color:#d7dde7;padding:2rem\">"
+            b"<h2 style=\"color:#4f9cf9\">localm uses a secure connection</h2>"
+            b"<p>This server speaks <b>https</b>, not http. Reopen this address "
+            b"with <b>https://</b> in front.</p></body></html>"
+        )
         head_bytes = (
             "HTTP/1.1 400 Bad Request\r\n"
             "Content-Type: text/html; charset=utf-8\r\n"

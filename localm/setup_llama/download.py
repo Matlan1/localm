@@ -135,7 +135,7 @@ def _download(url: str, dest: Path) -> _DownloadResult:
             "or provision from a local build with 'localm setup-llama --from "
             "<build-dir>'."
         ) from e
-    except (socket.timeout, TimeoutError) as e:
+    except TimeoutError as e:
         raise ArtifactError(
             f"download stalled (no data for {_DOWNLOAD_STALL_TIMEOUT}s, after "
             f"{nread} of {total or 'an unknown number of'} bytes) - the "
@@ -220,7 +220,7 @@ def _sniff_content_kind(path: Path, peek: int = 4096) -> str:
         return "binary"
 
 
-def _diagnose_bad_artifact(path: Path, dl: Optional["_DownloadResult"]) -> str:
+def _diagnose_bad_artifact(path: Path, dl: Optional[_DownloadResult]) -> str:
     """Turn what the bytes on disk actually look like - plus, when available,
     what the response claimed (:func:`_download`'s result for this same file) -
     into ONE specific, evidence-backed explanation. Never states a cause the

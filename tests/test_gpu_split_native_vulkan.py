@@ -227,7 +227,7 @@ def test_auto_split_ratios_from_native_free_vram(
                for r in caplog.records), (
         "the auto distribution decision must be logged at INFO")
     print(f"\n--- auto ratios computed from native free VRAM: "
-          f"{dict(zip(indices, [f'{r:.3f}' for r in ratios]))} ---")
+          f"{dict(zip(indices, [f'{r:.3f}' for r in ratios], strict=True))} ---")
 
     from localm.inference.backends.llamacpp.llama import LlamaCpp
 
@@ -258,7 +258,7 @@ def test_auto_split_ratios_from_native_free_vram(
         # computed. 0.15 is a generous band for llama.cpp's whole-layer rounding
         # on a ~30-layer model.
         total = len(layer_devices)
-        for idx, ratio in zip(indices, ratios):
+        for idx, ratio in zip(indices, ratios, strict=True):
             share = layer_devices.count(str(idx)) / total
             assert abs(share - ratio) <= 0.15, (
                 f"device {idx}: actual layer share {share:.2f} deviates from "

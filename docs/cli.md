@@ -1,6 +1,6 @@
 # CLI Reference
 
-This page documents the full localm command-line interface. For a quick introduction, see the [README](../README.md#cli-reference).
+This page documents the full localm command-line interface. For a quick introduction, see the [README](https://github.com/Matlan1/localm/blob/master/README.md#cli-reference).
 
 ## Core commands
 
@@ -66,7 +66,7 @@ localm gui -H 0.0.0.0            # bind to all interfaces (requires auth key)
 localm gui --qr                  # [PoC] scannable QR of LAN URL for phones
 ```
 
-Chat, the coder agent, model management, and any enabled plugin tabs in one page. The model preloads in the background so the first reply is fast. See [docs/gui.md](../docs/gui.md) for details.
+Chat, the coder agent, model management, and any enabled plugin tabs in one page. The model preloads in the background so the first reply is fast. See [docs/gui.md](gui.md) for details.
 
 ### Server (OpenAI-compatible API)
 
@@ -82,7 +82,7 @@ localm serve mymodel --debug                # debug logging
 
 localm owns the port range 8642-8741: the default is 8642, and when no `--port` is given the server bumps to the next free port in that range automatically if it is taken. An explicit `--port` is different - it must be free, or startup errors rather than moving you onto another port. Use it with any OpenAI client - set `base_url="http://localhost:8642/v1"` and `api_key="localm"`.
 
-The streaming usage block adds `ttft_ms` and `tokens_per_sec`. See [docs/server-api.md](../docs/server-api.md) for the full API surface, including scope-gated management endpoints.
+The streaming usage block adds `ttft_ms` and `tokens_per_sec`. See [docs/server-api.md](server-api.md) for the full API surface, including scope-gated management endpoints.
 
 ### Benchmark
 
@@ -268,7 +268,7 @@ localm unload [MODEL]           # free VRAM on the running server: all models, o
 
 ## Media generation
 
-These are core CLI commands (they need only a running ComfyUI, not a plugin install). The GUI Media pages and the `/generate-*` chat commands belong to the media plugins. See [docs/flux-setup.md](../docs/flux-setup.md) and [docs/video.md](../docs/video.md) for model setup.
+These are core CLI commands (they need only a running ComfyUI, not a plugin install). The GUI Media pages and the `/generate-*` chat commands belong to the media plugins. See [docs/flux-setup.md](flux-setup.md) and [docs/video.md](video.md) for model setup.
 
 ```bash
 localm image "A cat on a sunny beach"
@@ -280,7 +280,7 @@ localm video "a fox runs through snow" --duration 5
 
 localm can run its own managed ComfyUI instead of depending on your install, so it
 can pin a known-good version and carry fixes. Off by default; your own ComfyUI is
-never modified. Full guide: [docs/managed-comfyui.md](../docs/managed-comfyui.md).
+never modified. Full guide: [docs/managed-comfyui.md](managed-comfyui.md).
 
 ```bash
 localm comfy setup                 # provision it (copies your ComfyUI, or a fresh hardware-matched install)
@@ -368,14 +368,14 @@ GUI's hybrid retrieval.
 entries whose file is gone; off by default so an unplugged drive cannot delete
 your index). Put it on a schedule with
 `localm job add sync-docs --rag --collection NAME --cron "0 3 * * *"` - see
-[docs/jobs.md](../docs/jobs.md#keeping-an-indexed-folder-current).
+[docs/jobs.md](jobs.md#keeping-an-indexed-folder-current).
 
 A named API key's whole RAG reach - indexing, querying, and every other
 collection route - can be confined to specific folders with `localm key
 create NAME --scope rag --rag-root DIR` (repeatable) - see
-[API keys](#api-keys) and [docs/rag.md](../docs/rag.md#per-key-folder-scoping).
+[API keys](#api-keys) and [docs/rag.md](rag.md#per-key-folder-scoping).
 
-Enable the rag plugin and install `pip install "localm[rag]"` for PDF parsing. See [docs/rag.md](../docs/rag.md) for retrieval design.
+Enable the rag plugin and install `pip install "localm[rag]"` for PDF parsing. See [docs/rag.md](rag.md) for retrieval design.
 
 ---
 
@@ -401,7 +401,7 @@ something it lacks, in which case an installed model that has it runs it
 instead), and a coder job needs `--allow-shell` to run unrestricted (off by
 default: read plus confined edits, no shell, no network).
 
-The `localm job` CLI, the Jobs GUI tab, and the plugin's `/api/jobs` routes share one on-disk store. The scheduler only ticks while a `localm gui`/`localm serve` (with the jobs plugin active) is up. See [docs/jobs.md](../docs/jobs.md).
+The `localm job` CLI, the Jobs GUI tab, and the plugin's `/api/jobs` routes share one on-disk store. The scheduler only ticks while a `localm gui`/`localm serve` (with the jobs plugin active) is up. See [docs/jobs.md](jobs.md).
 
 ---
 
@@ -422,7 +422,7 @@ localm memory clear [-y]                   # erase everything (not recoverable)
 Reads and writes the same store the app and the `memory` plugin's chat recall
 use, and works whether or not that plugin is installed - the plugin only adds
 the automatic recall-on-chat and background consolidation hooks. See
-[docs/memory.md](../docs/memory.md).
+[docs/memory.md](memory.md).
 
 ---
 
@@ -439,7 +439,7 @@ localm config autoprune_missing_models true
 localm config language de                        # interface language: en (default) or de
 ```
 
-Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; localm warns when binding to a non-loopback address without a key; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for LAN serving.
+Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; localm warns when binding to a non-loopback address without a key; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -455,7 +455,7 @@ localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of VR
 
 Reading free VRAM needs `torch` (the `[gpu]` extra). On a CPU-only install without it, `ctx_auto` cannot measure VRAM and falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
 
-Long chats compact automatically before they collide with the ceiling. See [docs/architecture.md](../docs/architecture.md) for the compaction and VRAM-sizing details.
+Long chats compact automatically before they collide with the ceiling. See [docs/architecture.md](architecture.md) for the compaction and VRAM-sizing details.
 
 ### Multi-GPU: picking the main device
 
@@ -496,7 +496,7 @@ localm config n_cpu_moe 0         # automatic, only when the model does not fit 
 A value above 0, or an explicit `n_gpu_layers`, is used as given. No effect on
 a normal (dense) model. The Settings page has the same field ("MoE expert
 layers on CPU"). See
-[docs/gpu-setup.md](../docs/gpu-setup.md#mixture-of-experts-reducing-vram-footprint)
+[docs/gpu-setup.md](gpu-setup.md#mixture-of-experts-reducing-vram-footprint)
 for measured numbers.
 
 ### Memory-mapping: models larger than system RAM
@@ -597,10 +597,10 @@ The owner key can also be set outside these commands: the `LOCALM_API_KEY` env v
 `key create` takes three optional confinements beyond `--scope`, each narrowing what the key can do below what the owner can:
 
 - `--fs-access [none|host]` - host filesystem reach for the coder/file tools. Defaults to `none` (device-upload-only); `host` grants the whole server disk, same as the owner.
-- `--rag-root DIR` (repeatable) - confines the key's whole RAG reach (indexing and every other collection route) to exactly these folders instead of the global folder policy. Omit for no per-key restriction. See [docs/rag.md](../docs/rag.md#per-key-folder-scoping).
+- `--rag-root DIR` (repeatable) - confines the key's whole RAG reach (indexing and every other collection route) to exactly these folders instead of the global folder policy. Omit for no per-key restriction. See [docs/rag.md](rag.md#per-key-folder-scoping).
 - `--expires-in SECONDS` - the key stops working this many seconds after creation. Omitted means it never expires.
 
-Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for serving over a LAN.
+Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for serving over a LAN.
 
 ---
 
@@ -648,9 +648,9 @@ value for a field instead of sharing the global `comfy_*` default. Any other
 plugin declares its settings as it loads, so listing or setting those needs a
 running localm (found the way `localm status` finds it, or set `LOCALM_URL`).
 
-The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). A running GUI server picks up new HTTP routes and tabs at runtime; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](../docs/plugins.md).
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). A running GUI server picks up new HTTP routes and tabs at runtime; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](plugins.md).
 
-Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](../docs/plugins.md) for the full authoring contract.
+Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](plugins.md) for the full authoring contract.
 
 ---
 
@@ -828,7 +828,7 @@ localm mcp --no-images        # do not expose generate_image
 localm mcp --no-coder         # do not expose run_coder_task
 ```
 
-Exposes your local models and localm management (chat, model and plugin management, diagnostics, and more) to Claude Desktop and other MCP clients, with tool annotations so a client can confirm destructive calls. See [docs/mcp.md](../docs/mcp.md) for the full tool list and both directions: localm as an MCP server, and the coder consuming external MCP tool servers.
+Exposes your local models and localm management (chat, model and plugin management, diagnostics, and more) to Claude Desktop and other MCP clients, with tool annotations so a client can confirm destructive calls. See [docs/mcp.md](mcp.md) for the full tool list and both directions: localm as an MCP server, and the coder consuming external MCP tool servers.
 
 ---
 
@@ -861,11 +861,11 @@ localm stop --all                        # stop every running localm instance
 
 `localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those.
 
-`localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path. Switching to a different model than the one currently configured reports which existing Knowledge collections have embeddings and asks you to confirm before it happens (`-y`/`--yes` skips the confirmation) - see [docs/rag.md](../docs/rag.md#how-retrieval-works-and-why-its-lexical-first).
+`localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path. Switching to a different model than the one currently configured reports which existing Knowledge collections have embeddings and asks you to confirm before it happens (`-y`/`--yes` skips the confirmation) - see [docs/rag.md](rag.md#how-retrieval-works-and-why-its-lexical-first).
 
 `localm setup-browser` downloads the Chromium build that the automated browser tool drives (the coder's browser tool, and anything else built on `localm.browser`). The `browser` pip extra installs the playwright driver only; this fetches the separate, version-pinned Chromium binary it needs. Respects the network policy and is refused under `net_mode=off` unless `net_allow_model_downloads` exempts it, same as any other explicit download; does nothing on the network when Chromium is already installed. The GUI offers the same download as a Download browser button on the Browser tab and under Settings > Server & network. `--force` reinstalls even if present - note that playwright removes the existing build before redownloading, so a failed `--force` run can leave no Chromium installed at all.
 
-See [docs/gpu-setup.md](../docs/gpu-setup.md) for the full GPU setup guide.
+See [docs/gpu-setup.md](gpu-setup.md) for the full GPU setup guide.
 
 ---
 
@@ -882,7 +882,7 @@ localm issues [NUMBER]          # list the project's issues, or show one by numb
 
 Updates are signed: localm verifies an Ed25519 signature against a key pinned in
 its own source before applying anything, and refuses a build that is not newer.
-See [SECURITY.md](../SECURITY.md) for the update trust model. The GUI Models page
+See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the update trust model. The GUI Models page
 has an "Update now" button for the same flow.
 
 `localm bug-report` needs a working localm. When localm will not start at all (a

@@ -383,7 +383,7 @@ def rag_reembed(collection, url, yes):
             # computed and validated, so the previous one is still intact.
             console.print(f"[red]Re-embed failed: {escape(str(e))}[/red]")
             console.print("[dim]The previous index was left untouched.[/dim]")
-            raise SystemExit(1)
+            raise SystemExit(1) from e
     console.print(
         f"[green]Done.[/green] {res['chunks']} chunks re-embedded at "
         f"{res['dim']} dimensions with {escape(model)}.")

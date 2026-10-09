@@ -31,7 +31,7 @@ import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Iterator, Mapping, Optional, Sequence
 
 from localm.debuglog import logger
 
@@ -170,6 +170,150 @@ def _build_load_kwargs(tr, device_map_kwargs: dict, dtype, trust_remote_code: bo
     else:
         kwargs["torch_dtype"] = dtype
     return kwargs
+
+
+def _plan_fp8(model_path: str, torch, device: str, device_map_kwargs: dict):
+    """The FP8 load plan for *model_path* (``_hf_fp8.plan_load``), or None for
+    a model that is not an FP8 checkpoint. A native plan reopens the Hub
+    kernel gate, and puts huggingface_hub offline when the network policy
+    refuses the Hub. Call before transformers is imported."""
+    from localm.inference.backends import _hf_fp8, _hf_hub_gate
+    plan = _hf_fp8.plan_load(model_path, torch, device, device_map_kwargs,
+                             hub_fetch_refusal=_hf_hub_gate.hub_fetch_refusal)
+    if plan is not None and plan.native:
+        _hf_hub_gate.open_hub_kernels()
+        if plan.offline:
+            _hf_hub_gate.set_hub_offline()
+    if plan is not None:
+        logger.debug("hf load: fp8 plan native=%s offline=%s reason=%s",
+                     plan.native, plan.offline, plan.reason)
+    return plan
+
+
+FP8_KERNEL_REPO = "kernels-community/finegrained-fp8"
+
+
+def _try_fp8_kernel() -> Optional[str]:
+    """Load the finegrained-fp8 kernel through transformers. None on success,
+    else "ExcType: message"."""
+    try:
+        from transformers.integrations.finegrained_fp8 import load_finegrained_fp8_kernel
+        load_finegrained_fp8_kernel()
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+    return None
+
+
+def _fp8_kernel_version():
+    """The finegrained-fp8 kernel version transformers requests, or None."""
+    try:
+        from transformers.integrations.hub_kernels import _HUB_KERNEL_MAPPING
+        return _HUB_KERNEL_MAPPING["finegrained-fp8"].get("version")
+    except Exception as e:
+        logger.debug("hf load: could not read the finegrained-fp8 kernel version: %s", e)
+        return None
+
+
+def _load_fp8_kernel(model_path: str, plan):
+    """Load the finegrained-fp8 Hub kernel for a native *plan*.
+
+    An online plan whose fetch fails retries once from the local cache with
+    huggingface_hub offline (the plan becomes ``offline``). After an online
+    load, records the kernel version's commit in the Hub cache
+    (``_hf_hub_gate.record_kernel_version_ref``) so a later offline load finds
+    it. Returns *plan*, or a bf16-expansion plan naming the error when the
+    kernel cannot load."""
+    from localm.inference.backends import _hf_fp8, _hf_hub_gate
+    error = _try_fp8_kernel()
+    if error is not None and not plan.offline:
+        logger.debug("hf load: finegrained-fp8 fetch failed (%s); trying the local cache",
+                     error)
+        _hf_hub_gate.set_hub_offline()
+        if _try_fp8_kernel() is None:
+            plan.offline = True
+            error = None
+    if error is not None:
+        logger.warning("hf load: the finegrained-fp8 kernel could not be loaded "
+                       "(%s); expanding the FP8 weights to bf16", error)
+        return _hf_fp8.expanded_plan(
+            model_path, f"the finegrained-fp8 kernel could not be loaded ({error})")
+    if not plan.offline:
+        try:
+            _hf_hub_gate.record_kernel_version_ref(FP8_KERNEL_REPO, _fp8_kernel_version())
+        except Exception as e:
+            logger.debug("hf load: could not record the finegrained-fp8 kernel "
+                         "version for offline use: %s", e)
+    return plan
+
+
+def _open_gate_for_quant_method(model_path: str) -> Optional[tuple]:
+    """For a checkpoint whose quantization method needs a Hub kernel
+    (``_hf_hub_gate.HUB_KERNEL_QUANT_METHODS``), reopen the Hub kernel gate when
+    the network policy allows the Hub, else keep it closed. Returns
+    ``(method, refusal)`` when the gate stays closed for such a checkpoint,
+    else None. Call before transformers is imported."""
+    from localm.inference.backends import _hf_fp8, _hf_hub_gate
+    method = _hf_fp8.quant_method(model_path)
+    if method not in _hf_hub_gate.HUB_KERNEL_QUANT_METHODS:
+        return None
+    refusal = _hf_hub_gate.hub_fetch_refusal()
+    if refusal is None:
+        _hf_hub_gate.open_hub_kernels()
+        logger.debug("hf load: %s checkpoint, Hub kernels allowed", method)
+        return None
+    logger.debug("hf load: %s checkpoint, Hub kernels stay blocked (%s)", method, refusal)
+    return method, refusal
+
+
+def _hub_kernel_blocked_message(model_path: str, blocked: tuple) -> str:
+    from localm.inference.backends._hf_fp8 import one_line
+    method, refusal = blocked
+    return (f"'{Path(model_path).name}' uses {method} quantization, which needs a "
+            "kernel downloaded from the Hugging Face Hub, and the network policy does "
+            f"not allow the download: {one_line(refusal)}")
+
+
+def _param_dtype_label(model) -> str:
+    """"<dtype> (about N bytes per parameter)" for the model's first
+    floating-point parameter, or "full precision" when it cannot be read."""
+    try:
+        dtype = next(p.dtype for p in model.parameters() if p.is_floating_point())
+        return (f"{str(dtype).removeprefix('torch.')} "
+                f"(about {int(dtype.itemsize)} bytes per parameter)")
+    except Exception as e:
+        logger.debug("hf load: could not read the parameter dtype: %s", e)
+        return "full precision"
+
+
+def _dequantized_note(model, method: Optional[str], blocked: Optional[tuple]) -> Optional[str]:
+    """A load-output line when transformers expanded a *method*-quantized
+    checkpoint (one of ``_hf_hub_gate.HUB_KERNEL_QUANT_METHODS``) to full
+    precision, which it reports with ``model.is_quantized`` False after load;
+    else None."""
+    from localm.inference.backends import _hf_hub_gate
+    if method not in _hf_hub_gate.HUB_KERNEL_QUANT_METHODS:
+        return None
+    if getattr(model, "is_quantized", None) is not False:
+        return None
+    note = f"{method.upper()} weights expanded to {_param_dtype_label(model)}"
+    if blocked is not None:
+        from localm.inference.backends._hf_fp8 import one_line
+        note += f"; the Hub kernel it needs is blocked: {one_line(blocked[1])}"
+    return note
+
+
+def _refuse_fp8_too_big(model_path: str, plan, torch, device: str,
+                        device_map_kwargs: dict) -> None:
+    """Raise RuntimeError when the bf16-expanded weights of *plan* exceed the
+    memory the load can use (``_hf_fp8.memory_budget``). Returns when either
+    figure cannot be read."""
+    from localm.inference.backends import _hf_fp8
+    if not plan.expanded_bytes:
+        return
+    budget = _hf_fp8.memory_budget(torch, device, device_map_kwargs)
+    logger.debug("hf load: fp8 expanded=%s budget=%s", plan.expanded_bytes, budget)
+    if budget is not None and plan.expanded_bytes > budget:
+        raise RuntimeError(_hf_fp8.too_big_message(model_path, plan, budget))
 
 
 def _require_transformers():
@@ -381,7 +525,7 @@ def _untrusted_prompt_ranges(tokenizer, template_messages, text,
         return ()
 
     def render(sentinels):
-        probe = [dict(m, content=s) for m, s in zip(template_messages, sentinels)]
+        probe = [dict(m, content=s) for m, s in zip(template_messages, sentinels, strict=False)]
         return tokenizer.apply_chat_template(
             probe, tokenize=False, add_generation_prompt=True,
             **(template_kwargs or {}))
@@ -543,13 +687,13 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         import xgrammar as xgr
         from xgrammar.contrib.hf import LogitsProcessor
         from transformers import LogitsProcessorList
-    except ImportError:
+    except ImportError as exc:
         # Normally unreachable: HFBackend.supports_grammar is False without the
         # extra, so the up-front check in the chat routes already refused this
         # request. Reaching it anyway means the parent's check was bypassed or
         # the install changed under a live worker, and the same error that check
         # would have raised is raised here.
-        raise GrammarUnsupportedError(GRAMMAR_UNSUPPORTED_MESSAGE)
+        raise GrammarUnsupportedError(GRAMMAR_UNSUPPORTED_MESSAGE) from exc
     except Exception as e:
         # Installed but not loadable, e.g. its native bindings refuse to load.
         logger.warning("xgrammar is installed but failed to load: %s: %s",
@@ -621,7 +765,7 @@ _AUDIO_UNSUPPORTED_MESSAGE = (
 )
 
 
-def _messages_contain_audio(messages: List[dict]) -> bool:
+def _messages_contain_audio(messages: list[dict]) -> bool:
     """True if any message carries an ``input_audio`` content part."""
     for msg in messages:
         content = msg.get("content")
@@ -645,7 +789,7 @@ def _audio_processor_sampling_rate(processor) -> Optional[int]:
     return None
 
 
-def _build_audio_process_kwargs(processor, audios: List[tuple]) -> Tuple[dict, bool]:
+def _build_audio_process_kwargs(processor, audios: list[tuple]) -> tuple[dict, bool]:
     """``(kwargs, rate_verified)`` for passing *audios* (a list of
     ``(waveform, sample_rate)`` pairs) to *processor*'s ``__call__``.
 
@@ -725,7 +869,7 @@ def _image_content_key(image) -> Optional[str]:
     return digest.hexdigest()
 
 
-def _join_image_features(entries: List[dict]) -> dict:
+def _join_image_features(entries: list[dict]) -> dict:
     """Join per-image feature entries (field name to value) in request order.
 
     ``pooler_output``: tensors are concatenated along dim 0; tuples/lists are
@@ -743,7 +887,7 @@ def _join_image_features(entries: List[dict]) -> dict:
     if all("deepstack_features" in e for e in entries):
         joined["deepstack_features"] = [
             torch.cat(list(layer), dim=0)
-            for layer in zip(*(e["deepstack_features"] for e in entries))]
+            for layer in zip(*(e["deepstack_features"] for e in entries), strict=False)]
     return joined
 
 
@@ -766,7 +910,7 @@ class _VisionFeatureCache:
         self._original = inner.get_image_features
         self._signature = inspect.signature(self._original)
         self._max_images = max_images
-        self._features: "OrderedDict[str, object]" = OrderedDict()
+        self._features: OrderedDict[str, object] = OrderedDict()
         self._armed: Optional[tuple] = None
         self.last_encoded = 0
         inner.get_image_features = self._get_image_features
@@ -777,9 +921,9 @@ class _VisionFeatureCache:
     def __contains__(self, key: str) -> bool:
         return key in self._features
 
-    def missing(self, keys: Sequence[str]) -> List[str]:
+    def missing(self, keys: Sequence[str]) -> list[str]:
         """The distinct keys in *keys* with no cached features, in order."""
-        out: List[str] = []
+        out: list[str] = []
         for key in keys:
             if key not in self._features and key not in out:
                 out.append(key)
@@ -792,7 +936,7 @@ class _VisionFeatureCache:
             del self._features[key]
 
     def arm(self, keys: Sequence[str], image_inputs: Mapping[str, Mapping],
-            pixel_shape: Tuple[int, ...]) -> None:
+            pixel_shape: tuple[int, ...]) -> None:
         """Serve the next ``get_image_features`` call from the cache.
 
         *keys* are the request's image keys in prompt order, *image_inputs*
@@ -950,6 +1094,10 @@ class HFWorker:
         self.resolved_device: Optional[str] = None
         # Maximum context capacity extracted from model config at load time.
         self.context_capacity: Optional[int] = None
+        # How the last load handled an FP8 checkpoint; None for any other model.
+        self.fp8_plan = None
+        # One-line notes about the last load for the load output.
+        self.load_notes: list[str] = []
         # Why the most recent chat_stream() call ended - "stop" (EOS) or
         # "length" (max_tokens exhausted first). Mirrors GgufWorker's
         # identical attribute; recomputed for real by chat_stream() below.
@@ -973,13 +1121,31 @@ class HFWorker:
         # below.
         trust_remote_code = _trust_remote_code_enabled()
         torch = _require_torch()
-        tr = _require_transformers()
 
         device = _auto_device(torch, self._device)
         self.resolved_device = device
         dtype = torch.bfloat16 if device in ("cuda", "xpu") else torch.float32
         device_map_kwargs = (_cuda_device_map(torch) if device == "cuda"
                               else {"device_map": "cpu"})
+
+        # Runs before transformers first checks for the kernels package (the
+        # check is cached): a native FP8 plan, or a Hub-kernel quantization the
+        # network policy allows, reopens the Hub kernel gate. See
+        # test_native_fp8_plan_loads_the_kernel_through_the_reopened_gate.
+        fp8 = _plan_fp8(self.model_path, torch, device, device_map_kwargs)
+        hub_blocked = (_open_gate_for_quant_method(self.model_path)
+                       if fp8 is None else None)
+        tr = _require_transformers()
+        if fp8 is not None and fp8.native:
+            fp8 = _load_fp8_kernel(self.model_path, fp8)
+        if fp8 is not None and not fp8.native:
+            dtype = torch.bfloat16
+            _refuse_fp8_too_big(self.model_path, fp8, torch, device, device_map_kwargs)
+        self.fp8_plan = fp8
+        self.load_notes = []
+        if fp8 is not None:
+            from localm.inference.backends._hf_fp8 import describe
+            self.load_notes.append(describe(fp8))
 
         # logger.debug throughout load(), never console.print: this runs
         # inside the isolated child process (see this module's docstring),
@@ -1054,6 +1220,8 @@ class HFWorker:
             dtype=dtype,
             trust_remote_code=trust_remote_code,
         )
+        if fp8 is not None and not fp8.native:
+            load_kwargs["quantization_config"] = tr.FineGrainedFP8Config(dequantize=True)
 
         # Try Auto classes in order: multimodal (vision/audio + text), then
         # encoder-decoder, then causal LM (text-only), then generic fallback.
@@ -1079,10 +1247,21 @@ class HFWorker:
                 # the actual failures instead of a bare "could not load".
                 errors.append(f"{cls_name}: {type(e).__name__}: {e}")
                 continue
+            except ImportError as e:
+                if hub_blocked is None or "kernels" not in str(e):
+                    raise
+                raise RuntimeError(
+                    _hub_kernel_blocked_message(self.model_path, hub_blocked)) from e
 
         if self._model is None:
             detail = "; tried: " + "; ".join(errors) if errors else ""
             raise RuntimeError(f"Could not load model from {self.model_path}{detail}")
+
+        if fp8 is None:
+            from localm.inference.backends._hf_fp8 import quant_method
+            note = _dequantized_note(self._model, quant_method(self.model_path), hub_blocked)
+            if note:
+                self.load_notes.append(note)
 
         if device == "xpu":
             # The model loaded on CPU (device_map "cpu" above); move it to the Intel
@@ -1189,7 +1368,7 @@ class HFWorker:
                 )
         return max(1, len(text) // 4)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """Return exact token count of the structured messages formatted with the
         HF tokenizer/processor's chat template."""
         if self._tokenizer is not None:
@@ -1243,15 +1422,15 @@ class HFWorker:
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
-    def _single_image_inputs(self, images: list, keys: List[str],
-                             wanted: List[str], device) -> Dict[str, Mapping]:
+    def _single_image_inputs(self, images: list, keys: list[str],
+                             wanted: list[str], device) -> dict[str, Mapping]:
         """Each image in *wanted* (keys into *keys*/*images*) processed on its
         own, as the processor output of a one-image user turn, moved to
         *device*. Text-only outputs are left out."""
         text = self._processor.apply_chat_template(
             [{"role": "user", "content": [{"type": "image"}]}],
             tokenize=False, add_generation_prompt=False)
-        out: Dict[str, Mapping] = {}
+        out: dict[str, Mapping] = {}
         for key in wanted:
             image = images[keys.index(key)]
             batch = self._processor(text=text, images=[image], return_tensors="pt",
@@ -1335,7 +1514,7 @@ class HFWorker:
                 "an embedding model", type(model).__name__, type(e).__name__, e)
             return False
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """
         Return embedding vectors via mean-pooling of the last hidden states.
 
@@ -1380,7 +1559,7 @@ class HFWorker:
 
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,
@@ -1389,7 +1568,7 @@ class HFWorker:
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,   # GBNF/EBNF; masks output via xgrammar ([grammar] extra)
         grammar_lazy: bool = False,
-        grammar_triggers: Optional[List[str]] = None,
+        grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         cancel_event: Optional[threading.Event] = None,
         on_status: Optional[Callable[[str], None]] = None,
@@ -1463,7 +1642,7 @@ class HFWorker:
                 template_messages.append(msg)
 
         vision_cache = getattr(self, "_vision_cache", None)
-        image_keys: Optional[List[str]] = None
+        image_keys: Optional[list[str]] = None
         vision_plan: Optional[tuple] = None
         if vision_cache is not None:
             vision_cache.disarm()
@@ -1501,7 +1680,7 @@ class HFWorker:
                     on_status("Encoding image...")
                 except Exception:
                     logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
-            image_inputs: Dict[str, Mapping] = {}
+            image_inputs: dict[str, Mapping] = {}
             if image_keys is not None and to_encode:
                 try:
                     image_inputs = self._single_image_inputs(
@@ -1617,7 +1796,7 @@ class HFWorker:
         if cancel_event is not None:
             gen_kwargs["stopping_criteria"].append(_CancelCriteria(cancel_event))
 
-        generation_errors: List[Exception] = []
+        generation_errors: list[Exception] = []
 
         def _run_generate() -> None:
             try:

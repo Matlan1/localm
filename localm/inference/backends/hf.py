@@ -19,7 +19,7 @@ whole ``BaseBackend`` public contract is preserved.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, Optional
 
 from localm.console import console
 from localm.debuglog import logger
@@ -37,6 +37,7 @@ from .base import (
     BaseBackend,
     EmbedBatchTooLargeError,
     UnsupportedInputError,
+    UnsupportedModelRoleError,
     image_unsupported_message,
     messages_contain_image,
 )
@@ -115,6 +116,28 @@ def _check_custom_code_allowed(model_path: str) -> None:
         "If you trust the source of this model, enable it with:\n"
         "  localm config hf_trust_remote_code true\n"
         "Only do that for a model you obtained from a source you trust.")
+
+
+def _check_format_supported(model_path: str) -> None:
+    """Refuse a model folder in a format this backend cannot load (MLX-quantized
+    weights, or a quantization only another runtime runs), with a sentence naming
+    the format and an alternative. No-op for any other folder.
+
+    Runs in the parent before a child is spawned and needs no torch or
+    transformers."""
+    from localm.model_manager.unsupported import hf_folder_refusal
+    refusal = hf_folder_refusal(Path(model_path))
+    if refusal is not None:
+        raise UnsupportedModelRoleError(refusal)
+
+
+def _load_notes(notes) -> list[str]:
+    """The ``load_notes`` of the worker's load response as one-line strings;
+    [] when absent or not a list."""
+    if not isinstance(notes, list):
+        return []
+    from ._hf_fp8 import one_line
+    return [one_line(n) for n in notes if isinstance(n, str) and n.strip()]
 
 
 class HFBackend(BaseBackend):
@@ -260,13 +283,15 @@ class HFBackend(BaseBackend):
     # ------------------------------------------------------------------ #
 
     def load(self) -> None:
-        # Three pre-flight refusals, before a child is ever spawned:
+        # Four pre-flight refusals, before a child is ever spawned:
         #   1. Custom code (auto_map) the user has not explicitly trusted.
-        #   2. A tokenizer.json regex pattern that fails the Oniguruma safety
+        #   2. A folder format this backend cannot load (MLX, EXL2/EXL3, OpenVINO).
+        #   3. A tokenizer.json regex pattern that fails the Oniguruma safety
         #      probe.
-        #   3. A shard index whose weight_map points outside the model
+        #   4. A shard index whose weight_map points outside the model
         #      directory. See test_hf_shard_index_safety.py.
         _check_custom_code_allowed(self.model_path)
+        _check_format_supported(self.model_path)
         from localm.inference.hf_tokenizer_safety import validate_tokenizer_json
         validate_tokenizer_json(self.model_path)
         from localm.inference.hf_shard_index_safety import validate_shard_index
@@ -287,6 +312,9 @@ class HFBackend(BaseBackend):
         # UnicodeEncodeError.
         mm_note = " (multimodal)" if self._supports_images else ""
         device = meta.get("device") or "?"
+        from rich.markup import escape
+        for note in _load_notes(meta.get("load_notes")):
+            console.print(f"[dim]  {escape(note)}[/dim]")
         console.print(f"[green]✓[/green] Model loaded{mm_note} (device: {device})")
 
     @staticmethod
@@ -402,7 +430,7 @@ class HFBackend(BaseBackend):
                              "stream; using the chars/4 estimate")
         return max(1, len(text) // 4)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """Return exact token count of the structured messages formatted
         with the HF tokenizer/processor's chat template (an RPC), or the
         base heuristic when the worker is busy or not loaded. Mirrors
@@ -419,7 +447,7 @@ class HFBackend(BaseBackend):
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """
         Return embedding vectors for *texts* via the isolated worker.
         Callers must gate on ``can_embed`` above: this is NOT a valid
@@ -451,7 +479,7 @@ class HFBackend(BaseBackend):
 
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,
@@ -460,7 +488,7 @@ class HFBackend(BaseBackend):
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,
         grammar_lazy: bool = False,
-        grammar_triggers: Optional[List[str]] = None,
+        grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
