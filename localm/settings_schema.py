@@ -251,14 +251,21 @@ CORE_FIELDS: list = [
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=3),
     SettingField("spec_source", Widget.SELECT, "Speculative drafting",
                  "Where drafts come from: mtp (the model's MTP head), ngram "
-                 "(repeats of earlier text, no second model) or off. Inherit "
-                 "follows the MTP toggle. Check: `localm bench-spec <model>`.",
+                 "(repeats of earlier text), draft (a smaller model, Draft "
+                 "model) or off. Inherit follows the MTP toggle. Check: `localm "
+                 "bench-spec <model>`.",
                  group="Engine", applies=Applies.NEXT_LOAD,
-                 options=["", "off", "mtp", "ngram"]),
-    SettingField("spec_draft_tokens", Widget.NUMBER, "N-gram draft tokens",
-                 "Most tokens one n-gram step proposes. Blank uses 8; models "
-                 "with recurrent layers use at most 4.",
+                 options=["", "off", "mtp", "ngram", "draft"]),
+    SettingField("spec_draft_tokens", Widget.NUMBER, "Draft tokens per step",
+                 "Most tokens one n-gram or draft-model step proposes. Blank "
+                 "uses 8; a draft model picks a shorter length when its measured "
+                 "costs pay better. Models with recurrent layers use at most 4.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1, max=16),
+    SettingField("spec_draft_model", Widget.TEXT, "Draft model",
+                 "For Speculative drafting = draft: a smaller model with the same "
+                 "vocabulary, by name or GGUF path. `localm spec-drafts <model>` "
+                 "lists the ones you have.",
+                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
     SettingField("diffusion_steps", Widget.NUMBER, "Diffusion steps",
                  "Denoising steps per reply for diffusion language models "
                  "(Dream, LLaDA, RND1). More steps: better text, slower reply. "

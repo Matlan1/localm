@@ -447,7 +447,8 @@ def get_operator_model_info(name: str, *, reg: Optional[dict] = None):
 
     Only for a name the operator typed on the command line (the ``localm`` CLI,
     the ``localm gui <model>`` startup model, the MCP server's own ``--model``
-    default) or the ``coder_reviewer_model`` setting. Every downstream sink then
+    default) or the ``coder_reviewer_model`` or ``spec_draft_model`` setting
+    (both admin only). Every downstream sink then
     runs on that path, including
     create_backend importing an HF directory's own .py when
     ``hf_trust_remote_code`` is on. A name received over HTTP or MCP goes
@@ -1648,7 +1649,8 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[s
     registry entry to a new key (unlike alias_model, which copies - *old_name*
     stops working here), and best-effort migrates every OTHER place inside
     <data dir> that stores the plain name string (config.json's pinned_models
-    / embedding_model / coder_reviewer_model, scheduled jobs' `model` field,
+    / embedding_model / coder_reviewer_model / spec_draft_model, scheduled
+    jobs' `model` field,
     RAG collection metadata). A per-project ``.localcoder/config.toml``
     ``model`` setting lives OUTSIDE <data dir> (in the user's own project
     repo, discoverable only relative to a `cwd` a coder session supplies) and
@@ -1739,6 +1741,8 @@ def _migrate_model_references(old_name: str, new_name: str) -> List[str]:
                 cfg["embedding_model"] = new_name
             if cfg.get("coder_reviewer_model") == old_name:
                 cfg["coder_reviewer_model"] = new_name
+            if cfg.get("spec_draft_model") == old_name:
+                cfg["spec_draft_model"] = new_name
         update_config(_apply_cfg)
     except Exception as e:
         logger.debug("rename_model: config migration failed for %s -> %s: %s",

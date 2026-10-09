@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 # Bytes per logit: llama.cpp's logits tensor is f32.
 _LOGIT_BYTES = 4
@@ -117,14 +117,17 @@ class SplitFitPlan:
 def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
                    layer_bytes: Sequence[int], output_bytes: int,
                    layer_kv_bytes: Sequence[int], n_gpu_layers: int,
-                   logits_bytes: int, reserve_bytes: int) -> List[DeviceCharge]:
+                   logits_bytes: int, reserve_bytes: int,
+                   spread_bytes: int = 0) -> List[DeviceCharge]:
     """Charge each device in *devices* (``{"index", "free"}``, in split order)
     for what a layer split weighted by *shares* places on it: its layers'
     weights and KV cache, the output layer's weights and the logits buffer on
     the device holding the output layer, and *reserve_bytes* per device that
-    receives a layer or the output layer. A device that receives neither is
-    charged nothing. *layer_kv_bytes* is each layer's KV cache, parallel to
-    *layer_bytes*."""
+    receives a layer or the output layer. *spread_bytes* (a second model split
+    the same way) is shared among those devices in proportion to their
+    shares, rounded up, and added to their ``reserve``. A device that receives
+    neither is charged nothing. *layer_kv_bytes* is each layer's KV cache,
+    parallel to *layer_bytes*."""
     n_layer_all = len(layer_bytes)
     positions, out_pos = layer_devices(shares, n_layer_all, n_gpu_layers)
     charges = [DeviceCharge(index=int(d["index"]), free=int(d["free"]),
@@ -140,9 +143,12 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
         charges[out_pos].output = int(output_bytes)
         charges[out_pos].logits += int(logits_bytes)
         charges[out_pos].holds_output = True
-    for c in charges:
-        if c.layers or c.holds_output:
-            c.reserve = int(reserve_bytes)
+    receiving = [c for c in charges if c.layers or c.holds_output]
+    total_share = sum(c.share for c in receiving)
+    for c in receiving:
+        c.reserve = int(reserve_bytes)
+        if spread_bytes > 0 and total_share > 0:
+            c.reserve += int(-(-int(spread_bytes) * c.share // total_share))
     return charges
 
 
@@ -159,7 +165,8 @@ def logits_buffer_bytes(n_vocab: int, n_ctx: int, *, max_batch: int = 2048,
 
 def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
                layer_kv_bytes: Sequence[int], output_bytes: int, n_gpu_layers: int,
-               logits_bytes: int, reserve_bytes: int) -> SplitFitPlan:
+               logits_bytes: int, reserve_bytes: int,
+               spread_bytes: int = 0) -> SplitFitPlan:
     """Decide whether llama.cpp's default split fits *devices*
     (``[{"index", "free"}, ...]`` in the runtime's device order) and, when it
     does not, which devices to leave out.
@@ -169,10 +176,12 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
     among them gets a zero share and the rest are re-weighted by free memory.
     When one device remains, the plan is that device alone (``tensor_split``
     ``{index: 1.0}``) if it holds the whole charge. When no plan fits,
-    ``tensor_split`` is ``None`` and only ``default`` reports the shortfall."""
-    kw = dict(layer_bytes=layer_bytes, output_bytes=output_bytes,
-              n_gpu_layers=n_gpu_layers, layer_kv_bytes=layer_kv_bytes,
-              logits_bytes=logits_bytes, reserve_bytes=reserve_bytes)
+    ``tensor_split`` is ``None`` and only ``default`` reports the shortfall.
+    *spread_bytes* is charged as in :func:`charge_devices`."""
+    kw: Dict[str, Any] = dict(layer_bytes=layer_bytes, output_bytes=output_bytes,
+                              n_gpu_layers=n_gpu_layers, layer_kv_bytes=layer_kv_bytes,
+                              logits_bytes=logits_bytes, reserve_bytes=reserve_bytes,
+                              spread_bytes=spread_bytes)
     frees = [max(0, int(d["free"])) for d in devices]
     default = charge_devices(devices, frees, **kw)
     if all(c.fits for c in default):

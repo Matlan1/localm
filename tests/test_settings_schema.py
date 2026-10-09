@@ -270,7 +270,7 @@ PRIVACY_OWNER_KEYS = {"mode", "chat_mode", "coder_mode", "keep_diagnostics"}
 # embedder.py accepts any caller-chosen path and hands it to llama.cpp's native
 # GGUF parser (a UNC path on Windows also makes the probe an outbound SMB/NTLM
 # auth).
-LOAD_PATH_OWNER_KEYS = {"embedding_model"}
+LOAD_PATH_OWNER_KEYS = {"embedding_model", "spec_draft_model"}
 
 # Controls whose only job is to be restrictive, so CLEARING one widens reach.
 GUARD_OWNER_KEYS = {

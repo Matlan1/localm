@@ -54,6 +54,8 @@ def make_bare_llama(**overrides) -> LlamaCpp:
     llm._kv_supported = None
     llm.chat_template_fallback_reason = None
     llm._main_gpu_index = 0
+    llm._main_gpu_arg = None
+    llm._gpu_split_ratios_arg = None
     llm._moe_override_keepalive = None
     llm.moe_skip_reason = None
     llm._cancel_event = None
