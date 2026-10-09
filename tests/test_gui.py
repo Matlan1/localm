@@ -4840,7 +4840,7 @@ class TestImageComfyModelPicker:
         # unaltered, and that the annotation happened rather than silently
         # letting new keys through.
         assert len(data["slots"]) == len(fake_slots)
-        for got, sent in zip(data["slots"], fake_slots):
+        for got, sent in zip(data["slots"], fake_slots, strict=True):
             assert {k: got[k] for k in sent} == sent
             assert got["model_type"] == "diffusion-unet"
             assert got["installed"] is True          # "a.gguf" is among options

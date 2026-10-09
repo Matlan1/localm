@@ -364,7 +364,7 @@ def test_route_reasoning_only_summary_keeps_history_and_alternation(stream):
     assert {"role": "user", "content": "expand on that"} in [
         {"role": m["role"], "content": str(m["content"])} for m in forwarded]
     roles = [m["role"] for m in forwarded]
-    assert all(a != b for a, b in zip(roles, roles[1:])), roles
+    assert all(a != b for a, b in zip(roles, roles[1:], strict=False)), roles
     assert r.status_code == 200
     assert r.headers.get("X-Localm-Context-Compacted") == "1"
 

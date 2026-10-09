@@ -283,7 +283,7 @@ def test_both_pinned_cuda_lines_share_the_same_upstream_tag():
     matching cudart bundles - are already pinned for the SAME upstream tag,
     so this was always a selection problem, never a missing-asset one."""
     tag = sl._PINNED_TAG
-    for line, ver in (("cuda-12", "12.4"), ("cuda-13", "13.4")):
+    for ver in ("12.4", "13.4"):
         build_name = f"llama-{tag}-bin-win-cuda-{ver}-x64.zip"
         cudart_name = f"cudart-llama-bin-win-cuda-{ver}-x64.zip"
         assert build_name in sl._PINNED_FALLBACK_SHA256, build_name
