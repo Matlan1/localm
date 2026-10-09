@@ -180,6 +180,7 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
     console.print(f"[bold yellow]Staging the {cuda_line} CUDA runtime without a GPU.[/bold yellow] "
                   "The NVIDIA driver check and the load test are skipped.")
     _pin_note_for_backend("cuda")
+    used_tag: Optional[str] = None
     try:
         _sl._clear_target_or_refuse(target)
         used_tag = _sl._provision_backend("cuda", target, sha256, True, cuda_line)
