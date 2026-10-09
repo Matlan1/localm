@@ -250,18 +250,19 @@ class NgramSource(CountedSource):
     are the counters below, reset by begin_call.
 
     With measured ``costs`` the draft length is chosen in ``propose`` once the
-    step's candidate (the lookup up to ``draft_max`` + 1 tokens) is known: the
-    length up to ``draft_max`` with the most expected tokens per second under
-    ``step_cost``, from ``runs``, which beats a plain step by
-    ``DRAFT_GAIN_MARGIN``, else none. Every candidate a step looks up stays
-    open, drafted or not, and each later proposal checks its tokens against the
-    ones the reply went on to hold, counting each of its first ``draft_max`` in
-    ``runs`` under the candidate's kind, until one is wrong or all are checked.
-    A candidate's place is "continue" when its match ends on the source
-    position of the latest reply token a candidate token was checked right
-    against, "resume" when it ends 1 to ``NGRAM_RESUME_GAP`` positions past it,
-    otherwise "start"; its source is "context" when the match ends before the
-    reply's first token, otherwise "reply".
+    step's candidate (the lookup up to ``draft_max``) is known: the length with
+    the most expected tokens per second under ``step_cost``, from ``runs``,
+    which beats a plain step by ``DRAFT_GAIN_MARGIN``, else none. Every
+    candidate a step looks up stays open, drafted or not, and each later
+    proposal checks its tokens against the ones the reply went on to hold,
+    counting each in ``runs`` under the candidate's kind, until one is wrong or
+    all are checked. The copy position is the source position of the latest
+    reply token a candidate token was checked right against, carried forward
+    while each later reply token equals the next source token. A candidate's
+    place is "continue" when its match ends on the copy position, "resume" when
+    it ends 1 to ``NGRAM_RESUME_GAP`` positions past it, otherwise "start"; its
+    source is "context" when the match ends before the reply's first token,
+    otherwise "reply".
     """
 
     name = SPEC_NGRAM
@@ -277,8 +278,8 @@ class NgramSource(CountedSource):
         self.runs = CandidateRuns(self.draft_max)
         # Open candidates: [position, tokens, tokens checked right, kind, match end].
         self._open: List[list] = []
-        # Source position of the latest reply token a candidate token was
-        # checked right against, and that reply token's position.
+        # The copy position (a source position) and the reply position it is
+        # aligned with.
         self._last_right: Optional[int] = None
         self._last_right_at = -1
         self._reply_start = 0
@@ -333,13 +334,13 @@ class NgramSource(CountedSource):
         if self.costs is None:
             return self._candidate(token, n_max)[0]
         self._check_open(cached, token)
-        drafts, end = self._candidate(token, self.draft_max + 1)
+        drafts, end = self._candidate(token, self.draft_max)
         if not drafts:
             return []
         kind = self._kind(end)
         self.runs.new_candidate(kind)
         self._open.append([pos, drafts, 0, kind, end])
-        k = self._length(kind, min(len(drafts), n_max, self.draft_max))
+        k = self._length(kind, min(len(drafts), n_max))
         if k == 0:
             self.held_steps += 1
         return drafts[:k]
@@ -355,7 +356,8 @@ class NgramSource(CountedSource):
 
     def _check_open(self, cached: List[int], token: int) -> None:
         """Check the open candidates against ``cached`` followed by *token*,
-        closing each at its first wrong token or when all are checked."""
+        closing each at its first wrong token or when all are checked, then
+        carry the copy position forward to the latest reply token it can."""
         held = len(cached) + 1
         still = []
         for item in self._open:
@@ -364,8 +366,7 @@ class NgramSource(CountedSource):
             while done < len(drafts) and pos + 1 + done < held:
                 at = pos + 1 + done
                 right = (cached[at] if at < len(cached) else token) == drafts[done]
-                if done < self.runs.size:
-                    self.runs.check(kind, done + 1, not right)
+                self.runs.check(kind, done + 1, not right)
                 if not right:
                     break
                 done += 1
@@ -375,6 +376,21 @@ class NgramSource(CountedSource):
                 item[2] = done
                 still.append(item)
         self._open = still
+        self._follow(cached, token)
+
+    def _follow(self, cached: List[int], token: int) -> None:
+        """Move the copy position on while the reply token after it, in
+        ``cached`` followed by *token*, equals the source token after it."""
+        if self._last_right is None:
+            return
+        src = self.index.tokens
+        at, right = self._last_right_at + 1, self._last_right + 1
+        while at <= len(cached) and right < len(src):
+            if (cached[at] if at < len(cached) else token) != src[right]:
+                break
+            at += 1
+            right += 1
+        self._last_right, self._last_right_at = right - 1, at - 1
 
     def _kind(self, end: int) -> Tuple[str, str]:
         """The kind of a candidate whose match ends at *end*."""

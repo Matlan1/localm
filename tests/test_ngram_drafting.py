@@ -617,6 +617,17 @@ def test_the_latest_reply_token_sets_where_the_copy_stands():
     assert src._open == []
 
 
+def test_the_copy_position_follows_the_reply_while_it_matches_the_source():
+    src = _llama()._source
+    src.index.extend([10, 11, 12, 13, 14, 15, 16])
+    src._last_right, src._last_right_at = 2, 20
+    cached = [0] * 21 + [13, 14]
+    src._check_open(cached, 15)
+    assert (src._last_right, src._last_right_at) == (5, 23)
+    src._check_open(cached + [15, 99], 16)
+    assert (src._last_right, src._last_right_at) == (5, 23)
+
+
 def test_a_copy_that_runs_on_past_a_full_length_draft_continues():
     llm = _llama(4)
     src = llm._source
