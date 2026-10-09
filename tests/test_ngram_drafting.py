@@ -630,6 +630,10 @@ def test_the_length_with_the_most_expected_tokens_per_second_wins():
     assert src._length(kind, 2) == 2
     src.runs.expected_tokens = lambda k, n: [1.0, 1.4, 1.5][:n + 1]
     assert src._length(kind, 2) == 0
+    src.runs.expected_tokens = lambda k, n: [1.0, 1.55][:n + 1]
+    assert src._length(kind, 1) == 0
+    src.runs.expected_tokens = lambda k, n: [1.0, 1.6][:n + 1]
+    assert src._length(kind, 1) == 1
 
 
 def _renamed_copy(segments=6, run=9):
