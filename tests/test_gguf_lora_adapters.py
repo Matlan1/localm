@@ -859,6 +859,9 @@ def _mock_api(order=None, *, init_result="auto", set_rc=0, lora_api=True):
     m.llama_model_default_params.return_value = SimpleNamespace(
         main_gpu=0, n_gpu_layers=0, use_mmap=True, load_mtp=False)
     m.has_lora_api.return_value = lora_api
+    m.has_encoder_api.return_value = True
+    m.llama_model_has_encoder.return_value = False
+    m.llama_model_has_decoder.return_value = True
     handles = iter(range(1000, 1100))
 
     def lora_init(model, path):
