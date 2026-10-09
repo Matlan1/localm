@@ -17,12 +17,12 @@ import pytest
 
 from localm.inference.backends.llamacpp import _abi
 from localm.inference.backends.llamacpp._abi import (
-    CONTEXT_PARAMS_V1, CONTEXT_PARAMS_V2, MODEL_PARAMS_V1, MODEL_PARAMS_V2,
-    MODEL_PARAMS_V3, AbiMismatch, evaluate, verify_abi,
+    CONTEXT_PARAMS_V1, CONTEXT_PARAMS_V2, CONTEXT_PARAMS_V3, MODEL_PARAMS_V1,
+    MODEL_PARAMS_V2, MODEL_PARAMS_V3, AbiMismatch, evaluate, verify_abi,
 )
 from localm.inference.backends.llamacpp._structs import (
-    LlamaContextParamsV1, LlamaContextParamsV2, LlamaModelParamsV1,
-    LlamaModelParamsV2, LlamaModelParamsV3,
+    LlamaContextParamsV1, LlamaContextParamsV2, LlamaContextParamsV3,
+    LlamaModelParamsV1, LlamaModelParamsV2, LlamaModelParamsV3,
 )
 
 
@@ -388,6 +388,17 @@ def test_anchor_offsets_match_struct():
     assert LlamaContextParamsV2.attention_type.offset == 48
     assert LlamaContextParamsV2.ctx_other.offset == 152
     assert ctypes.sizeof(LlamaContextParamsV1) == ctypes.sizeof(LlamaContextParamsV2)
+    # V3 offsets: moe_cache_size inserted after type_v, shifting everything
+    # from abort_callback on +8 vs V2.
+    assert LlamaContextParamsV3.rope_scaling_type.offset == 40
+    assert LlamaContextParamsV3.type_v.offset == 108
+    assert LlamaContextParamsV3.moe_cache_size.offset == 112
+    assert LlamaContextParamsV3.abort_callback.offset == 120
+    assert LlamaContextParamsV3.offload_kqv.offset == 137
+    assert LlamaContextParamsV3.kv_unified.offset == 141
+    assert LlamaContextParamsV3.samplers.offset == 144
+    assert LlamaContextParamsV3.ctx_other.offset == 160
+    assert ctypes.sizeof(LlamaContextParamsV3) == ctypes.sizeof(LlamaContextParamsV2)
     assert LlamaModelParamsV1.split_mode.offset == 20
     assert LlamaModelParamsV1.use_mmap.offset == 65
     assert LlamaModelParamsV1.main_gpu.offset == 24
@@ -942,8 +953,174 @@ def test_context_params_layout_falls_back_to_v1_when_inconclusive():
 def test_context_params_class_and_layout_helpers():
     assert _abi.context_params_class(CONTEXT_PARAMS_V1) is LlamaContextParamsV1
     assert _abi.context_params_class(CONTEXT_PARAMS_V2) is LlamaContextParamsV2
+    assert _abi.context_params_class(CONTEXT_PARAMS_V3) is LlamaContextParamsV3
     assert _abi.context_params_layout(
         _FakeLib(good_model(), good_ctx_v2())) == CONTEXT_PARAMS_V2
+
+
+# --------------------------------------------------------------------------- #
+#  llama_context_params V3 (moe_cache_size inserted after type_v at upstream
+#  b11480). V2 and V3 share every byte before offset 112; the flag block
+#  (offload_kqv/no_perf/op_offload/swa_full, all true by default) sits at
+#  128 on V2 and 136 on V3.
+# --------------------------------------------------------------------------- #
+
+def _real_ctx_defaults(cls):
+    """llama_context_default_params() as upstream b11480 (V3) and b11118 (V2)
+    define it, in *cls*'s layout."""
+    cp = cls()
+    cp.n_ctx = 512
+    cp.n_batch = 2048
+    cp.n_ubatch = 512
+    cp.n_seq_max = 1
+    if hasattr(cls, "n_outputs_max_per_seq"):
+        cp.n_outputs_max_per_seq = 1
+    cp.n_threads = 4
+    cp.n_threads_batch = 4
+    cp.ctx_type = 0
+    cp.rope_scaling_type = -1
+    cp.pooling_type = -1
+    cp.attention_type = -1
+    cp.flash_attn_type = -1
+    cp.yarn_ext_factor = -1.0
+    cp.yarn_attn_factor = -1.0
+    cp.yarn_beta_fast = -1.0
+    cp.yarn_beta_slow = -1.0
+    cp.defrag_thold = -1.0
+    cp.type_k = 1
+    cp.type_v = 1
+    cp.offload_kqv = True
+    cp.no_perf = True
+    cp.op_offload = True
+    cp.swa_full = True
+    return cp
+
+
+def good_ctx_v2_real() -> LlamaContextParamsV2:
+    return _real_ctx_defaults(LlamaContextParamsV2)
+
+
+def good_ctx_v3() -> LlamaContextParamsV3:
+    return _real_ctx_defaults(LlamaContextParamsV3)
+
+
+def _raw(cp) -> bytes:
+    return bytes(bytearray(
+        (ctypes.c_uint8 * ctypes.sizeof(cp)).from_buffer_copy(cp)))
+
+
+def _recast(cp, cls):
+    out = cls()
+    ctypes.memmove(ctypes.byref(out), ctypes.byref(cp), ctypes.sizeof(cp))
+    return out
+
+
+_TRUE_FLAGS = ["offload_kqv", "no_perf", "op_offload", "swa_full"]
+
+
+def test_detects_ctx_v3_layout():
+    lib = _FakeLib(good_model_v3(), good_ctx_v3())
+    layout, notes, assumed = _abi.detect_context_params_layout(lib)
+    assert (layout, assumed) == (CONTEXT_PARAMS_V3, False), notes
+    v = verify_abi(lib)
+    assert v.status == "ok", v.failures
+    assert v.context_layout == CONTEXT_PARAMS_V3
+
+
+@pytest.mark.parametrize("builder,want", [
+    (good_ctx_v2_real, CONTEXT_PARAMS_V2),
+    (good_ctx_v2, CONTEXT_PARAMS_V2),
+    (good_ctx_v3, CONTEXT_PARAMS_V3)])
+def test_ctx_v2_and_v3_default_bytes_fingerprint_apart(builder, want):
+    """good_ctx_v2 sets only offload_kqv among the flags, so it is the
+    weakest V2 signal the fingerprint has to resolve."""
+    assert _abi._fingerprint_moe_layout(_raw(builder())) == want
+    layout, notes, assumed = _abi.detect_context_params_layout(
+        _FakeLib(good_model_v3(), builder()))
+    assert (layout, assumed) == (want, False), notes
+
+
+def test_ctx_v3_bytes_bound_as_v2_are_refused():
+    """A V3 runtime read through the V2 class: the V2 offload_kqv byte is the
+    low part of V3's NULL abort_callback_data, so it reads False although the
+    build's default is True, and V2's samplers pointer reads the V3 flag block.
+    evaluate() must refuse rather than load with flags written into a pointer."""
+    as_v2 = _recast(good_ctx_v3(), LlamaContextParamsV2)
+    assert as_v2.offload_kqv is False
+    v = evaluate(good_model_v3(), as_v2)
+    assert v.status == "mismatch"
+    assert any(f.startswith("context_params.samplers") for f in v.failures), \
+        v.failures
+
+
+def test_ctx_v2_bytes_bound_as_v3_are_refused():
+    """The reverse misbind: V3's abort_callback_data reads the V2 flag block."""
+    as_v3 = _recast(good_ctx_v2_real(), LlamaContextParamsV3)
+    v = evaluate(good_model_v3(), as_v3)
+    assert v.status == "mismatch"
+    assert any(f.startswith("context_params.abort_callback_data")
+               for f in v.failures), v.failures
+
+
+@pytest.mark.parametrize("builder", [good_ctx_v2_real, good_ctx_v3])
+def test_correctly_bound_ctx_v2_and_v3_pass_the_null_pointer_keystone(builder):
+    v = evaluate(good_model_v3(), builder())
+    assert v.status == "ok", v.failures
+
+
+@pytest.mark.parametrize("field", ["abort_callback", "abort_callback_data",
+                                   "samplers"])
+def test_a_non_null_default_pointer_refuses_and_names_the_field(field):
+    cp = good_ctx_v3()
+    setattr(cp, field, 0x10)
+    v = evaluate(good_model_v3(), cp)
+    assert v.status == "mismatch"
+    assert any(f.startswith(f"context_params.{field} ") for f in v.failures), \
+        v.failures
+
+
+@pytest.mark.parametrize("flag", _TRUE_FLAGS)
+@pytest.mark.parametrize("builder,want", [
+    (good_ctx_v2_real, CONTEXT_PARAMS_V2), (good_ctx_v3, CONTEXT_PARAMS_V3)])
+def test_moe_detection_survives_one_drifted_flag(flag, builder, want):
+    cp = builder()
+    setattr(cp, flag, False)
+    layout, notes, assumed = _abi.detect_context_params_layout(
+        _FakeLib(good_model_v3(), cp))
+    assert (layout, assumed) == (want, False), notes
+
+
+@pytest.mark.parametrize("builder,want", [
+    (good_ctx_v2_real, CONTEXT_PARAMS_V2), (good_ctx_v3, CONTEXT_PARAMS_V3)])
+def test_moe_fingerprint_ignores_bytes_past_the_v2_struct(builder, want):
+    """Bytes from 160 on are never written by a V2 build (stack contents in
+    the oversized return buffer); filling them with 0xFF changes nothing."""
+    cp = builder()
+    ctypes.memset(ctypes.addressof(cp) + 160, 0xFF, ctypes.sizeof(cp) - 160)
+    if isinstance(cp, LlamaContextParamsV3):
+        cp.ctx_other = None
+    assert _abi._fingerprint_moe_layout(_raw(cp)) == want
+
+
+def test_moe_probe_inconclusive_falls_back_to_v2_and_says_so():
+    """With all four true-by-default flags flipped the two layouts tie; the
+    V2-family fallback is V2, flagged as assumed with a note."""
+    cp = good_ctx_v2_real()
+    for flag in _TRUE_FLAGS:
+        setattr(cp, flag, False)
+    assert _abi._fingerprint_moe_layout(_raw(cp)) is None
+    layout, notes, assumed = _abi.detect_context_params_layout(
+        _FakeLib(good_model_v3(), cp))
+    assert (layout, assumed) == (CONTEXT_PARAMS_V2, True)
+    assert any("moe_cache_size" in n for n in notes), notes
+
+
+def test_ctx_v1_bytes_are_not_refined_by_the_moe_probe():
+    """The moe probe runs only inside the V2 family: V1 bytes stay V1."""
+    cp = _real_ctx_defaults(LlamaContextParamsV1)
+    layout, notes, assumed = _abi.detect_context_params_layout(
+        _FakeLib(good_model_v1(), cp))
+    assert (layout, assumed) == (CONTEXT_PARAMS_V1, False), notes
 
 
 def test_unknown_third_layout_still_fails_safe():

@@ -51,6 +51,7 @@ from ._structs import (
     LLAMA_LOAD_MODE_MMAP,
     LlamaContextParamsV1,
     LlamaContextParamsV2,
+    LlamaContextParamsV3,
     LlamaModelParamsV1,
     LlamaModelParamsV2,
     LlamaModelParamsV3,
@@ -71,11 +72,18 @@ _MODEL_PARAMS_CLASSES = {
     MODEL_PARAMS_V3: LlamaModelParamsV3,
 }
 
-# The two llama_context_params layouts localm binds. Both are 224 bytes, so the
-# reorder is not visible in sizeof. Distinct namespace from MODEL_PARAMS_*; the
-# two axes are not interchangeable.
+# The three llama_context_params layouts localm binds. All three classes are
+# 224 bytes, so no insertion is visible in sizeof. Distinct namespace from
+# MODEL_PARAMS_*; the two axes are not interchangeable.
 CONTEXT_PARAMS_V1 = "ctx_v1"  # no n_outputs_max_per_seq
 CONTEXT_PARAMS_V2 = "ctx_v2"  # n_outputs_max_per_seq@24 inserted
+CONTEXT_PARAMS_V3 = "ctx_v3"  # V2 plus moe_cache_size@112 inserted
+
+_CONTEXT_PARAMS_CLASSES = {
+    CONTEXT_PARAMS_V1: LlamaContextParamsV1,
+    CONTEXT_PARAMS_V2: LlamaContextParamsV2,
+    CONTEXT_PARAMS_V3: LlamaContextParamsV3,
+}
 
 # Symbols that appear in llama.h in the same change as the V2 reorder: present
 # together on a V2 or V3 build, absent together on a V1 build. This is the
@@ -130,6 +138,20 @@ _CONTEXT_FINGERPRINT = {
 # ctx_type's own default, graded by _fingerprint_context_layout.
 _CTX_TYPE_DEFAULT = 0
 
+# V2 and V3 share every byte before offset 112, so the fingerprint above cannot
+# tell them apart. This one reads the boolean flag block, which starts at 128 on
+# V2 and at 136 on V3. Each entry is (offsets of the four flags whose default is
+# true: offload_kqv/no_perf/op_offload/swa_full, offset of the 8-byte pointer
+# that occupies the OTHER layout's flag block and defaults to NULL).
+#   V2: flags@129..132, samplers@136 == NULL
+#   V3: flags@137..140, abort_callback_data@128 == NULL
+# Every offset lies inside the 160 bytes a V2 build writes. See
+# test_ctx_v2_and_v3_default_bytes_fingerprint_apart.
+_MOE_FINGERPRINT = {
+    CONTEXT_PARAMS_V2: ((129, 130, 131, 132), 136),
+    CONTEXT_PARAMS_V3: ((137, 138, 139, 140), 128),
+}
+
 
 def _fingerprint_context_layout(raw: bytes) -> Optional[str]:
     """Which llama_context_params layout *raw* is consistent with, or None.
@@ -177,6 +199,27 @@ def _fingerprint_context_layout(raw: bytes) -> Optional[str]:
         return None
     return best[0]
 
+
+def _fingerprint_moe_layout(raw: bytes) -> Optional[str]:
+    """CONTEXT_PARAMS_V2 or CONTEXT_PARAMS_V3 for bytes already known to be in
+    the V2 family, or None when inconclusive.
+
+    Each layout scores one point per true-by-default flag reading exactly 1 at
+    its offset, plus one for its NULL-default pointer reading 0 (at most 5). On
+    real default bytes the right layout scores 5 and the wrong one 0. A winner
+    needs at least 2 points and a strict lead; with all four flags flipped to
+    false the two layouts tie and the result is None."""
+    scores = {}
+    for layout, (flag_offs, null_off) in _MOE_FINGERPRINT.items():
+        try:
+            hits = sum(raw[off] == 1 for off in flag_offs)
+            hits += struct.unpack_from("<Q", raw, null_off)[0] == 0
+        except (IndexError, struct.error):
+            return None
+        scores[layout] = hits
+    best, runner = sorted(scores.items(), key=lambda kv: -kv[1])[:2]
+    return best[0] if best[1] >= 2 and best[1] > runner[1] else None
+
 # ggml version bounds bracketing the llama_sampler_init_penalties signature
 # change, which prepended an int32 n_vocab:
 #   ggml >= 0.18.1  proves 5-arg
@@ -218,7 +261,7 @@ class AbiVerdict:
     diagnostics: List[str] = field(default_factory=list)   # value drift notes (not fatal)
     detail: str = ""                                       # human one-liner
     layout: str = ""                                       # MODEL_PARAMS_V1 / _V2 / _V3
-    context_layout: str = ""                                # CONTEXT_PARAMS_V1 / _V2
+    context_layout: str = ""                                # CONTEXT_PARAMS_V1 / _V2 / _V3
 
     @property
     def ok(self) -> bool:
@@ -375,18 +418,22 @@ def detect_context_params_layout(
 
     Returns ``(layout, notes, assumed)``. Unlike
     :func:`detect_model_params_layout`, there is no accompanying marker SYMBOL
-    for the ``n_outputs_max_per_seq`` insertion (a plain struct field, not a
-    new API), so this rests on the value fingerprint alone - a single signal,
-    not two independent ones to cross-check. ``assumed`` is True when the
-    fingerprint was inconclusive and CONTEXT_PARAMS_V1 was taken as a fallback -
-    callers must not treat that as a determination, same caveat as
-    :func:`detect_model_params_layout`'s ``assumed``. Never raises: a
-    mechanism failure yields the fallback plus a note."""
+    for either insertion (``n_outputs_max_per_seq``, ``moe_cache_size``: plain
+    struct fields, not new API), so this rests on value fingerprints alone. The
+    first (:func:`_fingerprint_context_layout`) decides V1 versus the V2 family;
+    within that family :func:`_fingerprint_moe_layout` decides V2 versus V3.
+
+    ``assumed`` is True when a fingerprint was inconclusive and a fallback was
+    taken: CONTEXT_PARAMS_V1 when the first one was, CONTEXT_PARAMS_V2 when only
+    the second one was. Callers must not treat that as a determination, same
+    caveat as :func:`detect_model_params_layout`'s ``assumed``. Never raises: a
+    mechanism failure yields the V1 fallback plus a note."""
     notes: List[str] = []
     layout: Optional[str] = None
+    raw = b""
     try:
-        layout = _fingerprint_context_layout(
-            _read_raw(lib, "llama_context_default_params"))
+        raw = _read_raw(lib, "llama_context_default_params")
+        layout = _fingerprint_context_layout(raw)
     except Exception as e:  # noqa: BLE001 - probe failure must not condemn the lib
         notes.append(f"context_params fingerprint could not be read ({e})")
 
@@ -396,13 +443,21 @@ def detect_context_params_layout(
         notes.append(
             "context_params layout probe was inconclusive; assuming the "
             f"historical {CONTEXT_PARAMS_V1} llama_context_params layout")
+    elif layout == CONTEXT_PARAMS_V2:
+        moe = _fingerprint_moe_layout(raw)
+        if moe is None:
+            assumed = True
+            notes.append(
+                "context_params moe_cache_size probe was inconclusive; assuming "
+                f"the {CONTEXT_PARAMS_V2} llama_context_params layout")
+        else:
+            layout = moe
     return layout, notes, assumed
 
 
 def context_params_class(layout: str):
-    """The ctypes class for *layout*."""
-    return (LlamaContextParamsV2 if layout == CONTEXT_PARAMS_V2
-            else LlamaContextParamsV1)
+    """The ctypes class for *layout*; any unknown value maps to V1."""
+    return _CONTEXT_PARAMS_CLASSES.get(layout, LlamaContextParamsV1)
 
 
 def _read_default_params(
@@ -431,10 +486,10 @@ def evaluate(mp, cp) -> AbiVerdict:
     non-fatal diagnostics.
 
     The layout of *mp* AND *cp* is taken from their classes (model_params
-    V1/V2/V3, context_params V1/V2 - independent axes), so every check below
+    V1/V2/V3, context_params V1/V2/V3 - independent axes), so every check below
     reads each field at the offset its actual bound layout uses. The checks
     name fields, never raw offsets: ``getattr(cp, name)`` resolves correctly
-    regardless of which of the two context_params layouts *cp* actually is."""
+    regardless of which of the three context_params layouts *cp* actually is."""
     failures: List[str] = []
     diags: List[str] = []
     has_load_mode = isinstance(mp, _LOAD_MODE_LAYOUTS)
@@ -450,6 +505,16 @@ def evaluate(mp, cp) -> AbiVerdict:
             failures.append(
                 f"context_params.{name} = {val} (expected -1, the long-stable "
                 "UNSPECIFIED default)"
+            )
+
+    # --- keystone: the callback and sampler pointers default to NULL ---
+    # A non-NULL read here is a neighbouring field (the flag block) landing on
+    # a pointer, which is how a context_params V2/V3 misbind shows up.
+    for name in ("abort_callback", "abort_callback_data", "samplers"):
+        val = getattr(cp, name)
+        if val:
+            failures.append(
+                f"context_params.{name} = {val:#x} (expected NULL, the default)"
             )
 
     # --- structural invariants: true for ANY aligned build, value-drift safe ---
@@ -534,8 +599,9 @@ def evaluate(mp, cp) -> AbiVerdict:
 
     layout = (MODEL_PARAMS_V3 if is_v3
               else MODEL_PARAMS_V2 if has_load_mode else MODEL_PARAMS_V1)
-    context_layout = (CONTEXT_PARAMS_V2 if isinstance(cp, LlamaContextParamsV2)
-                       else CONTEXT_PARAMS_V1)
+    context_layout = next(
+        (k for k, cls in _CONTEXT_PARAMS_CLASSES.items() if isinstance(cp, cls)),
+        CONTEXT_PARAMS_V1)
     if failures:
         return AbiVerdict(
             status="mismatch", failures=failures, diagnostics=diags, layout=layout,
@@ -739,7 +805,8 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
       refuses. Not always: bytes whose -1 run is longer than the four
       checked fields (a build whose ctx_type is itself -1) put both
       candidate windows inside one run, and every reading then satisfies
-      evaluate().
+      evaluate(). A V2/V3 misbind reads the flag block at a NULL-default
+      pointer (abort_callback_data or samplers) and refuses.
 
     * ``model_params`` - the second layer buys NOTHING. evaluate()'s
       model_params checks are RANGE checks over fields whose plausible

@@ -48,12 +48,13 @@ import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
-# One upstream ref per llama_model_params layout localm binds. The default run
-# checks all three.
+# One upstream ref per llama_model_params layout localm binds, plus one for the
+# newest llama_context_params layout. The default run checks all four.
 LLAMA_ABI_REFS = {
     "v1": "b9870",    # pre-reorder: use_mmap/use_direct_io/use_mlock, main_gpu@24
     "v2": "b10360",   # post-reorder: load_mode@24, main_gpu@28, load_mtp
     "v3": "b10905",   # lazy_mode@28 inserted (b10653; named lazy_mode from b10679)
+    "ctx_v3": "b11505",  # context_params moe_cache_size@112 inserted (b11480)
 }
 LLAMA_ABI_REF = LLAMA_ABI_REFS["v3"]
 _REPO = "ggml-org/llama.cpp"
@@ -266,12 +267,15 @@ def _header_model_params_layout(header: str) -> str:
 
 
 def _header_context_params_layout(header: str) -> str:
-    """Which llama_context_params layout a header carries: 'v1' or 'v2'.
+    """Which llama_context_params layout a header carries: 'v1', 'v2' or 'v3'.
 
     Independent axis from the model_params split above (see _structs' module
-    docstring) - keyed on n_outputs_max_per_seq, the field upstream inserted
-    directly before n_threads sometime between lemonade b1307 and b10360."""
+    docstring). 'v3' is keyed on moe_cache_size (inserted after type_v at
+    upstream b11480), 'v2' on n_outputs_max_per_seq (inserted directly before
+    n_threads sometime between lemonade b1307 and b10360)."""
     body = _strip_comments(_extract_struct_body(header, "llama_context_params"))
+    if re.search(r"\bmoe_cache_size\b", body):
+        return "v3"
     return "v2" if re.search(r"\bn_outputs_max_per_seq\b", body) else "v1"
 
 
@@ -291,8 +295,9 @@ def _localm_layout(struct_name: str, layout: str):
         "llama_model_params": {"v1": S.LlamaModelParamsV1,
                                "v2": S.LlamaModelParamsV2,
                                "v3": S.LlamaModelParamsV3}[layout],
-        "llama_context_params": (S.LlamaContextParamsV2 if layout == "v2"
-                                 else S.LlamaContextParamsV1),
+        "llama_context_params": {"v1": S.LlamaContextParamsV1,
+                                 "v2": S.LlamaContextParamsV2,
+                                 "v3": S.LlamaContextParamsV3}[layout],
         "llama_batch": S.LlamaBatch,
     }[struct_name]
     out = {}
@@ -517,8 +522,10 @@ def main() -> int:
                          "newest release. Default: check ALL pinned refs, "
                          f"{LLAMA_ABI_REFS['v1']} (pre-reorder), "
                          f"{LLAMA_ABI_REFS['v2']} (post-reorder) and "
-                         f"{LLAMA_ABI_REFS['v3']} (lazy_mode inserted), since "
-                         "localm binds all three llama_model_params layouts.")
+                         f"{LLAMA_ABI_REFS['v3']} (lazy_mode inserted) and "
+                         f"{LLAMA_ABI_REFS['ctx_v3']} (context_params "
+                         "moe_cache_size inserted), since localm binds all "
+                         "three layouts of each params struct.")
     ap.add_argument("--header", default=None,
                     help="path to a local llama.h instead of fetching")
     args = ap.parse_args()
@@ -558,10 +565,12 @@ def main() -> int:
               f"saw {sorted(seen_layouts)} - the pinned refs in LLAMA_ABI_REFS no "
               "longer cover the model_params reorder and the lazy_mode insertion.")
         total += 1
-    if not args.header and not args.ref and seen_context_layouts != {"v1", "v2"}:
-        print(f"\nFAIL: expected to check both context_params layouts, only saw "
-              f"{sorted(seen_context_layouts)} - the pinned refs in LLAMA_ABI_REFS "
-              "no longer straddle the context_params reorder.")
+    if (not args.header and not args.ref
+            and seen_context_layouts != {"v1", "v2", "v3"}):
+        print(f"\nFAIL: expected to check all three context_params layouts, only "
+              f"saw {sorted(seen_context_layouts)} - the pinned refs in "
+              "LLAMA_ABI_REFS no longer cover the n_outputs_max_per_seq and "
+              "moe_cache_size insertions.")
         total += 1
 
     if additive:
