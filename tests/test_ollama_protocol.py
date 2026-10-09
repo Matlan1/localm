@@ -58,6 +58,16 @@ def test_num_predict_without_a_cap_sets_no_max_tokens(num_predict):
     assert "max_tokens" not in fields
 
 
+def test_stop_option_is_sent_as_the_request_stop():
+    plan = P.plan_chat(P.OllamaChatRequest(
+        model="m", options={"stop": ["</s>", "END"]},
+        messages=[{"role": "user", "content": "hi"}]), "m")
+    assert plan.body["stop"] == ["</s>", "END"]
+    plan = P.plan_chat(P.OllamaChatRequest(
+        model="m", messages=[{"role": "user", "content": "hi"}]), "m")
+    assert "stop" not in plan.body
+
+
 def test_stop_may_be_one_string_and_must_be_strings():
     assert P.options_to_fields({"stop": "END"})[1] == ["END"]
     with pytest.raises(P.OllamaError) as exc:
@@ -192,50 +202,6 @@ def test_resolve_model_name():
     assert P.resolve_model_name("nope", ["qwen"]) == "nope"
 
 
-# ------------------------------------------------------------------ stop filter
-
-def test_stop_filter_cuts_at_the_first_stop_and_emits_nothing_after():
-    flt = P.StopFilter(["END"])
-    assert flt.feed("hello ") == "hello "
-    assert flt.feed("worldEND and more") == "world"
-    assert flt.hit is True
-    assert flt.feed("still more") == ""
-    assert flt.flush() == ""
-
-
-def test_stop_filter_finds_a_stop_split_across_chunks():
-    flt = P.StopFilter(["</s>"])
-    pieces = [flt.feed(p) for p in ("ab<", "/", "s", ">cd")]
-    assert "".join(pieces) == "ab"
-    assert flt.hit is True
-
-
-def test_stop_filter_releases_a_held_tail_that_never_completed():
-    flt = P.StopFilter(["</s>"])
-    assert flt.feed("ab<") == "ab"
-    assert flt.hit is False
-    assert flt.flush() == "<"
-
-
-def test_stop_filter_picks_the_earliest_of_several_stops():
-    flt = P.StopFilter(["two", "one"])
-    assert flt.feed("zero one two") == "zero "
-    assert flt.hit is True
-
-
-def test_stop_filter_without_stops_is_a_passthrough():
-    flt = P.StopFilter([])
-    assert flt.feed("anything") == "anything"
-    assert flt.flush() == ""
-    assert flt.hit is False
-
-
-def test_apply_stop():
-    assert P.apply_stop("Hello world", ["wor"]) == ("Hello ", True)
-    assert P.apply_stop("Hello world", ["xyz"]) == ("Hello world", False)
-    assert P.apply_stop("ends with <", ["</s>"]) == ("ends with <", False)
-
-
 # ------------------------------------------------------------------ responses
 
 def test_usage_stats_reports_only_what_was_measured():
@@ -286,25 +252,22 @@ def _completion(content="Hello world", reasoning=None, finish="stop", usage=None
 
 def test_completion_to_reply_plain():
     out = P.completion_to_reply("chat", _completion(), "m", want_thinking=False,
-                                stop=[], total_ns=10)
+                                total_ns=10)
     assert out["message"]["content"] == "Hello world"
     assert out["done"] is True and out["done_reason"] == "stop"
     assert out["prompt_eval_count"] == 3 and out["eval_count"] == 2
 
 
-def test_completion_to_reply_length_and_stop():
+def test_completion_to_reply_length():
     out = P.completion_to_reply("generate", _completion(finish="length"), "m",
-                                want_thinking=False, stop=[], total_ns=1)
+                                want_thinking=False, total_ns=1)
     assert out["done_reason"] == "length" and out["response"] == "Hello world"
-    out = P.completion_to_reply("generate", _completion(), "m",
-                                want_thinking=False, stop=["wor"], total_ns=1)
-    assert out["response"] == "Hello " and out["done_reason"] == "stop"
 
 
 def test_completion_to_reply_thinking_only_when_asked():
     data = _completion(reasoning="because")
-    off = P.completion_to_reply("chat", data, "m", want_thinking=False, stop=[], total_ns=1)
-    on = P.completion_to_reply("chat", data, "m", want_thinking=True, stop=[], total_ns=1)
+    off = P.completion_to_reply("chat", data, "m", want_thinking=False, total_ns=1)
+    on = P.completion_to_reply("chat", data, "m", want_thinking=True, total_ns=1)
     assert "thinking" not in off["message"]
     assert on["message"]["thinking"] == "because"
 
@@ -312,7 +275,7 @@ def test_completion_to_reply_thinking_only_when_asked():
 def test_completion_to_reply_error_finish_is_a_500():
     data = _completion(content="\n[inference error: out of memory]", finish="error")
     with pytest.raises(P.OllamaError) as exc:
-        P.completion_to_reply("chat", data, "m", want_thinking=False, stop=[], total_ns=1)
+        P.completion_to_reply("chat", data, "m", want_thinking=False, total_ns=1)
     assert exc.value.status == 500
     assert exc.value.message == "[inference error: out of memory]"
 
@@ -351,14 +314,14 @@ def _sse(delta=None, finish=None, usage=None, extra=None):
     return "data: " + json.dumps(chunk) + "\n\n"
 
 
-def _translate(items, *, kind="chat", want_thinking=False, stop=()):
+def _translate(items, *, kind="chat", want_thinking=False):
     upstream = _Upstream(items)
 
     async def go():
         out = []
         async for line in P.ndjson_stream(
                 P.iter_sse_json(upstream), kind=kind, model="m",
-                want_thinking=want_thinking, stop=list(stop),
+                want_thinking=want_thinking,
                 started=time.perf_counter()):
             out.append(line)
         return out
@@ -402,25 +365,6 @@ def test_stream_thinking_lines_only_when_requested():
     on, _r, _u = _translate(items, want_thinking=True)
     assert on[0]["message"]["thinking"] == "step" and on[0]["message"]["content"] == ""
     assert on[1]["message"]["content"] == "ans"
-
-
-def test_stream_stop_sequence_ends_the_reply_and_closes_upstream():
-    objs, _raw, upstream = _translate([
-        _sse({"content": "Hello"}), _sse({"content": " wo"}), _sse({"content": "rld"}),
-        _sse({"content": " never read"}), _sse(finish="stop")],
-        stop=["world"])
-    assert "".join(o["message"]["content"] for o in objs) == "Hello "
-    assert objs[-1]["done"] is True and objs[-1]["done_reason"] == "stop"
-    assert upstream.closed is True
-    assert upstream.handed == 3
-    assert "eval_count" not in objs[-1]
-
-
-def test_stream_releases_a_held_partial_stop_at_the_end():
-    objs, _raw, _up = _translate([
-        _sse({"content": "ab<"}), _sse(finish="stop")], stop=["</s>"])
-    assert "".join(o["message"]["content"] for o in objs) == "ab<"
-    assert objs[-1]["done_reason"] == "stop"
 
 
 def test_stream_error_finish_is_one_error_line_without_the_error_text_as_content():
@@ -492,45 +436,3 @@ def test_model_details_shape():
     assert d["format"] == "gguf" and d["family"] == "llama"
     assert d["families"] == ["llama"] and d["parent_model"] == ""
     assert P.model_details(fmt="gguf")["families"] is None
-
-
-# ------------------------------------------------------------------ collect
-
-def _collect(objs, kind="chat"):
-    async def lines():
-        for obj in objs:
-            yield P.encode_line(obj)
-
-    return _run(P.collect_reply(lines(), kind))
-
-
-def test_collect_reply_merges_a_chat_stream_into_one_object():
-    out = _collect([
-        P.reply_object("chat", "m", thinking="because "),
-        P.reply_object("chat", "m", thinking="reasons"),
-        P.reply_object("chat", "m", content="Hel"),
-        P.reply_object("chat", "m", content="lo"),
-        P.reply_object("chat", "m", done=True, reason="stop", stats={"eval_count": 2}),
-    ])
-    assert out["message"] == {"role": "assistant", "content": "Hello",
-                              "thinking": "because reasons"}
-    assert out["done"] is True and out["done_reason"] == "stop" and out["eval_count"] == 2
-
-
-def test_collect_reply_merges_a_generate_stream():
-    out = _collect([P.reply_object("generate", "m", content="a"),
-                    P.reply_object("generate", "m", content="b"),
-                    P.reply_object("generate", "m", done=True)], kind="generate")
-    assert out["response"] == "ab" and out["done"] is True and "thinking" not in out
-
-
-def test_collect_reply_turns_an_error_line_into_a_500():
-    with pytest.raises(P.OllamaError) as exc:
-        _collect([P.reply_object("chat", "m", content="par"), {"error": "boom"}])
-    assert exc.value.status == 500 and exc.value.message == "boom"
-
-
-def test_collect_reply_without_a_final_object_is_a_502():
-    with pytest.raises(P.OllamaError) as exc:
-        _collect([P.reply_object("chat", "m", content="par")])
-    assert exc.value.status == 502

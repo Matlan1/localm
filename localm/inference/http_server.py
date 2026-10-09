@@ -50,6 +50,7 @@ from localm.inference.backends.base import (
 from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
+from localm.inference.stop_sequences import StopFilter, apply_stop
 from localm.inference.protocol import (
     COMPACTING_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
     FullChoice, Message, MtpUsage, PROCESSING_PROMPT_STATUS, SpeculationUsage, STATUS_CODE_BY_TEXT,
@@ -5011,6 +5012,11 @@ async def _stream_sse(
     # grammar forced inside an open think block is the reply, not reasoning
     think = ThinkSplitter(exit_marker=think_exit_marker(
         gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+    stop = gen_kwargs.pop("stop", None)
+    stopper = StopFilter(stop) if stop else None
+    stopped = False
+    emitted_content: list[str] = []
+    emitted_reasoning: list[str] = []
 
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
@@ -5178,9 +5184,17 @@ async def _stream_sse(
                     # so usage reflects exactly what the client receives.
                     if pipeline is not None and ctx is not None and pipeline.has("stream"):
                         token = pipeline.run_stream(token, ctx)
+                    content, reasoning = think.feed(token)
+                    if stopper is not None:
+                        content = stopper.feed(content)
+                        stopped = stopper.hit
+                        emitted_content.append(content)
+                        emitted_reasoning.append(reasoning)
                     completion_parts.append(token)
-                    for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
+                    for data in _reason_sse(content, reasoning, model_id, chunk_id, ts):
                         yield data
+                    if stopped:
+                        break
                 drained = True
             finally:
                 # Signal the producer to stop. On a clean finish this is a no-op: the
@@ -5203,9 +5217,17 @@ async def _stream_sse(
             # stops being reachable, same as an unpin with nothing pinned).
             residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
-        # Release any tail held back while disambiguating a partial <think> tag.
-        for data in _reason_sse(*think.flush(), model_id, chunk_id, ts):
-            yield data
+        # Release any tail held back while disambiguating a partial <think> tag
+        # or a partial stop sequence.
+        if not stopped:
+            tail_content, tail_reasoning = think.flush()
+            if stopper is not None:
+                tail_content = stopper.feed(tail_content)
+                stopped = stopper.hit
+                if not stopped:
+                    tail_content += stopper.flush()
+            for data in _reason_sse(tail_content, tail_reasoning, model_id, chunk_id, ts):
+                yield data
 
     error_text = ""
     if gen_error is not None:
@@ -5214,10 +5236,15 @@ async def _stream_sse(
         yield f"data: {err_chunk.model_dump_json()}\n\n"
 
     streamed = "".join(completion_parts)
+    if stopped:
+        reasoning_text = "".join(emitted_reasoning)
+        streamed = (f"<think>{reasoning_text}</think>" if reasoning_text else "") \
+            + "".join(emitted_content)
     # finish_reason is fixed before the outlet phase; ctx.outcome, the audit
     # record and the terminal frame all carry the same value. A mid-stream
     # error reports "error", never a clean "stop".
-    finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
+    finish_reason = ("error" if gen_error is not None
+                     else "stop" if stopped else _engine_finish_reason(engine))
     outcome = _turn_outcome(gen_error, finish_reason)
     if ctx is not None:
         ctx.outcome = outcome
@@ -5268,6 +5295,10 @@ async def _stream_sse_completion(
 ) -> AsyncIterator[str]:
     chunk_id = make_chunk_id()
     ts = int(time.time())
+    stop = gen_kwargs.pop("stop", None)
+    stopper = StopFilter(stop) if stop else None
+    stopped = False
+    emitted: list[str] = []
     # *messages* arrive already inlet-transformed; count tokens on what
     # inference sees (matches the chat path) if not already provided.
     if prompt_tokens is None:
@@ -5366,13 +5397,21 @@ async def _stream_sse_completion(
                     # so usage and the audit trail reflect what the client receives.
                     if pipeline is not None and ctx is not None and pipeline.has("stream"):
                         token = pipeline.run_stream(token, ctx)
+                    piece = token
+                    if stopper is not None:
+                        piece = stopper.feed(token)
+                        stopped = stopper.hit
+                        emitted.append(piece)
                     completion_parts.append(token)
-                    chunk = {
-                        "id": chunk_id, "object": "text_completion.chunk",
-                        "created": ts, "model": model_id,
-                        "choices": [{"text": token, "index": 0, "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    if piece or stopper is None:
+                        chunk = {
+                            "id": chunk_id, "object": "text_completion.chunk",
+                            "created": ts, "model": model_id,
+                            "choices": [{"text": piece, "index": 0, "finish_reason": None}],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                    if stopped:
+                        break
                 drained = True
             finally:
                 # No-op on a clean finish (thread already exited after the sentinel);
@@ -5386,6 +5425,16 @@ async def _stream_sse_completion(
             residency.unregister_cancel(engine.display_name, cancel_event)
         gen_end = time.perf_counter()
 
+    if stopper is not None and not stopped:
+        tail = stopper.flush()
+        if tail:
+            tail_chunk = {
+                "id": chunk_id, "object": "text_completion.chunk",
+                "created": ts, "model": model_id,
+                "choices": [{"text": tail, "index": 0, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(tail_chunk)}\n\n"
+
     error_text = ""
     if gen_error is not None:
         error_text = inference_error_text(gen_error)
@@ -5396,7 +5445,7 @@ async def _stream_sse_completion(
         }
         yield f"data: {json.dumps(err)}\n\n"
 
-    streamed = "".join(completion_parts)
+    streamed = "".join(emitted if stopped else completion_parts)
     outcome = _turn_outcome(gen_error, "stop")
     if ctx is not None:
         ctx.outcome = outcome
@@ -5563,6 +5612,24 @@ async def _compact_for_capacity(engine, messages: list, request=None
     return new_messages, changed, disconnected["v"]
 
 
+class _StopDetector:
+    """Watches a non-streamed generation for a stop sequence in the visible
+    reply (reasoning inside ``<think>`` is not searched), so the generation can
+    end at the token that completes it."""
+
+    def __init__(self, stops, gen_kwargs: dict) -> None:
+        from localm.inference.gbnf import think_exit_marker
+        from localm.textnorm import ThinkSplitter
+        self._think = ThinkSplitter(exit_marker=think_exit_marker(
+            gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+        self._stop = StopFilter(stops)
+
+    def feed(self, token: str) -> bool:
+        content, _reasoning = self._think.feed(token)
+        self._stop.feed(content)
+        return self._stop.hit
+
+
 async def _generate_full(engine, messages: list, request=None, *,
                          timing: Optional[dict] = None, **gen_kwargs) -> str:
     """Consume a whole (non-streaming) generation in an executor while watching for
@@ -5596,6 +5663,8 @@ async def _generate_full(engine, messages: list, request=None, *,
     cancel_event = threading.Event()
     residency.register_cancel(engine.display_name, cancel_event)
     poll = _resolve_disconnect_poll(request)
+    stop = gen_kwargs.pop("stop", None)
+    stop_detector = _StopDetector(stop, gen_kwargs) if stop else None
 
     def _run() -> str:
         _log_assembled_prompt(messages)
@@ -5608,6 +5677,8 @@ async def _generate_full(engine, messages: list, request=None, *,
                 if timing is not None and "first_token_at" not in timing:
                     timing["first_token_at"] = time.perf_counter()
                 parts.append(token)
+                if stop_detector is not None and stop_detector.feed(token):
+                    break
         finally:
             # Close from THIS (suspended) worker thread so GeneratorExit propagates
             # through the backend wrappers into llama.py _generate, whose
@@ -5920,7 +5991,19 @@ async def _complete(
         gen_end = time.perf_counter()
     first_token_at = timing.get("first_token_at")
 
-    finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
+    stop = gen_kwargs.get("stop")
+    stopped = False
+    if stop and gen_error is None:
+        from localm.inference.gbnf import think_exit_marker
+        from localm.textnorm import split_think
+        visible, reasoning_text = split_think(text, exit_marker=think_exit_marker(
+            gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+        visible, stopped = apply_stop(visible, stop)
+        if stopped:
+            text = (f"<think>{reasoning_text}</think>" if reasoning_text else "") + visible
+
+    finish_reason = ("error" if gen_error is not None
+                     else "stop" if stopped else _engine_finish_reason(engine))
     outcome = _turn_outcome(gen_error, finish_reason)
     if ctx is not None:
         ctx.outcome = outcome
