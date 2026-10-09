@@ -148,7 +148,7 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
     for c in receiving:
         c.reserve = int(reserve_bytes)
         if spread_bytes > 0 and total_share > 0:
-            c.reserve += -(-int(spread_bytes) * c.share // total_share)
+            c.reserve += int(-(-int(spread_bytes) * c.share // total_share))
     return charges
 
 

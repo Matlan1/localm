@@ -592,6 +592,7 @@ def test_the_draft_is_charged_across_split_devices_by_share():
                              layer_kv_bytes=[0] * 8, output_bytes=0, n_gpu_layers=99,
                              logits_bytes=0, reserve_bytes=7, spread_bytes=4 * GiB)
     assert [c.reserve for c in charges] == [7 + 3 * GiB, 7 + GiB]
+    assert all(type(c.reserve) is int for c in charges)
     idle = charge_devices(devices, [1.0, 0.0], layer_bytes=[GiB] * 8,
                           layer_kv_bytes=[0] * 8, output_bytes=0, n_gpu_layers=99,
                           logits_bytes=0, reserve_bytes=7, spread_bytes=4 * GiB)
