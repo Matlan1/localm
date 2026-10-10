@@ -274,7 +274,7 @@ class JobStore:
             # cannot silently wipe it.
             raise RuntimeError(
                 f"jobs store unreadable ({self._defs_file}): {e}") from e
-        except json.JSONDecodeError as e:
+        except (ValueError, RecursionError) as e:
             # Corrupt JSON: back it up so a subsequent write cannot destroy it,
             # warn, and start empty (distinct from the absent case).
             self._quarantine_corrupt(raw, e)
@@ -487,7 +487,7 @@ class JobStore:
         for p in files:
             try:
                 out.append(json.loads(p.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, OSError):
+            except (ValueError, OSError, RecursionError):
                 continue
         return out
 

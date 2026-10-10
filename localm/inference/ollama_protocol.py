@@ -286,7 +286,7 @@ def tool_calls_to_ollama(calls: Any) -> list[dict[str, Any]]:
         if isinstance(args, str):
             try:
                 args = json.loads(args) if args.strip() else {}
-            except ValueError:
+            except (ValueError, RecursionError):
                 args = {}
         index = call.get("index")
         out.append({
@@ -542,7 +542,7 @@ def _sse_line_json(line: str) -> Optional[dict[str, Any]]:
         return None
     try:
         obj = json.loads(payload)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return obj if isinstance(obj, dict) else None
 

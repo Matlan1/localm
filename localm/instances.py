@@ -242,7 +242,7 @@ def read_entry(path) -> Optional[dict]:
         return data if isinstance(data, dict) else None
     except FileNotFoundError:
         return None  # missing entry is the normal case; do not log
-    except (json.JSONDecodeError, OSError) as e:
+    except (ValueError, OSError, RecursionError) as e:
         # Surface (not silence) a corrupt/permission-denied entry before it gets
         # treated as missing and potentially reaped while the process is live.
         logger.warning("registry entry %s unreadable: %s (%s)",
@@ -703,7 +703,7 @@ def fetch_any_whoami(scheme: str, port: int, timeout: float,
         return None
     try:
         data = r.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(data, dict):
         return None

@@ -482,7 +482,7 @@ class MemoryStore:
                     if not isinstance(data, dict):
                         raise ValueError("memory record line is not a JSON object")
                     self._records.append(MemoryRecord.from_dict(data))
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
                     # A partial/corrupt line must not break recall, but it may
                     # not vanish silently either: _save() rewrites the whole
                     # file, so every skipped line is erased by the next write
@@ -508,7 +508,7 @@ class MemoryStore:
                 ids = {r.id for r in self._records}
                 self._vectors = {k: v for k, v in vecs.items() if k in ids and v}
                 self._dim = data.get("dim") or _first_dim(self._vectors)
-            except (json.JSONDecodeError, OSError, ValueError) as exc:
+            except (json.JSONDecodeError, OSError, ValueError, RecursionError) as exc:
                 # The sidecar EXISTS but is corrupt/unreadable: degrade to no
                 # vectors (recall falls back to lexical BM25) and warn - unlike an
                 # absent sidecar (a normal cold start, handled by the is_file()
@@ -1162,7 +1162,7 @@ class MemoryStore:
                 if not isinstance(data, dict):
                     raise ValueError("forgotten line is not a JSON object")
                 out.append(data)
-            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError, RecursionError):
                 skipped += 1
         if skipped:
             from localm.debuglog import logger as _dbg
@@ -1328,7 +1328,7 @@ class MemoryStore:
                 if not isinstance(data, dict):
                     raise ValueError("correction line is not a JSON object")
                 out.append(PendingCorrection.from_dict(data))
-            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError, RecursionError):
                 skipped += 1
         if skipped:
             from localm.debuglog import logger as _dbg
@@ -1394,7 +1394,7 @@ class MemoryStore:
             else:
                 return set()
             return {tuple(k) for k in raw if isinstance(k, (list, tuple))}
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError, RecursionError):
             from localm.debuglog import logger as _dbg
             _dbg.warning(
                 "memory corrections-dismissed %s: unparseable, treating as an empty "
