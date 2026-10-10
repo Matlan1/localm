@@ -28,7 +28,7 @@ from .. import shell_guard
 from ..parser import ToolCall
 from ..tools import ToolResult
 from ..tools.base import RESTRICTED_UNWRITABLE_MESSAGE, restricted_unwritable
-from ..audit import AuditLogT, SessionMode
+from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
@@ -41,6 +41,9 @@ from .constants import (
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
 )
 from .scope import _scope_pattern
+
+if TYPE_CHECKING:
+    from localm.audit import AuditLogT
 
 
 def _looks_like_drive_path(tok: str) -> bool:

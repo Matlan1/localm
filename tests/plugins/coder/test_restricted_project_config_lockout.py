@@ -204,6 +204,60 @@ class TestRestrictedSessionLoadsNoExternalCode:
             assert "list_skills" in TOOL_REGISTRY
 
 
+class TestToolsRegisteredLaterStayDenied:
+    """The restricted denial is read off the live registry: a tool another
+    session registers after this one was built is refused too."""
+
+    def test_a_plugin_and_skill_tool_registered_later_are_refused(self, tmp_path):
+        from localm.config import home_dir
+        name = f"lmsp{uuid.uuid4().hex[:8]}"
+        pdir = home_dir() / "plugins" / name
+        pdir.mkdir(parents=True)
+        (pdir / "plugin.toml").write_text(textwrap.dedent(f"""\
+            [plugin]
+            name = "{name}"
+            version = "0.1.0"
+            entry = "entry:main"
+
+            [tools]
+            exports = ["tool_ping"]
+        """), encoding="utf-8")
+        (pdir / "entry.py").write_text(textwrap.dedent("""\
+            def main():
+                pass
+
+            def tool_ping(cwd, **args):
+                return "PLUGIN RAN"
+            tool_ping.tool_destructive = False
+        """), encoding="utf-8")
+        skill = tmp_path / "proj" / ".localcoder" / "skills" / "demo"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: d\n---\nSECRET BODY\n", encoding="utf-8")
+        reg_name = f"plugin_{name}_tool_ping"
+        project = tmp_path / "proj"
+        try:
+            with patch.dict(TOOL_REGISTRY, {}, clear=False):
+                TOOL_REGISTRY.pop("list_skills", None)
+                TOOL_REGISTRY.pop("use_skill", None)
+                restricted = _agent(project, restricted=True)
+                _agent(project, restricted=False)
+                assert reg_name in TOOL_REGISTRY and "use_skill" in TOOL_REGISTRY
+                for tool, args in ((reg_name, {}), ("use_skill", {"name": "demo"}),
+                                   ("list_skills", {})):
+                    assert tool in restricted.disabled_tools, tool
+                    result = restricted._execute_tool(
+                        ToolCall(name=tool, args=args, raw="", start=0, end=0),
+                        interactive=False)
+                    assert result.ok is False, (tool, result.output)
+                    assert "disabled" in result.output
+                    assert "PLUGIN RAN" not in result.output
+                    assert "SECRET BODY" not in result.output
+        finally:
+            TOOL_REGISTRY.pop(reg_name, None)
+            sys.modules.pop(f"_localm_plugin_{name}", None)
+
+
 _CONFIG = 'mode = "privacy"\n'
 
 
@@ -338,6 +392,40 @@ class TestRestrictedWritesCannotReachLocalcoder:
         assert _refused(result), result.output
         assert (project / ".localcoder" / "config.toml").read_text(
             encoding="utf-8") == _CONFIG
+
+    @staticmethod
+    def _linked_config_dir(tmp_path):
+        """A project whose .localcoder is a link to a differently named folder."""
+        root = tmp_path / "proj"
+        real = root / "coder-config"
+        real.mkdir(parents=True)
+        (real / "config.toml").write_text(_CONFIG, encoding="utf-8")
+        (root / "src").mkdir()
+        (root / "src" / "a.txt").write_text("privacy\n", encoding="utf-8")
+        try:
+            os.symlink(real, root / ".localcoder", target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            pytest.skip(f"cannot create a directory symlink here: {e}")
+        return root, real
+
+    def test_the_folder_a_linked_localcoder_points_at_is_refused(self, tmp_path):
+        root, real = self._linked_config_dir(tmp_path)
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="coder-config/config.toml",
+                  content='mode = "normal"\n'), interactive=False)
+        assert _refused(result), result.output
+        assert (real / "config.toml").read_text(encoding="utf-8") == _CONFIG
+
+    def test_a_sweep_skips_the_folder_a_linked_localcoder_points_at(self, tmp_path):
+        root, real = self._linked_config_dir(tmp_path)
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("search_replace", pattern="privacy", replacement="normal",
+                  glob="**/*"), interactive=False)
+        assert result.ok, result.output
+        assert (root / "src" / "a.txt").read_text(encoding="utf-8") == "normal\n"
+        assert (real / "config.toml").read_text(encoding="utf-8") == _CONFIG
 
     def test_ordinary_files_and_lookalike_names_are_still_writable(self, project):
         agent = _agent(project, restricted=True)

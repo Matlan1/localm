@@ -958,8 +958,14 @@ class Agent(
     def disabled_tools(self) -> frozenset:
         """Tools this session may never run: the explicit set, plus every
         ``mcp_*`` tool in the live registry that this agent did not register
-        itself (another project's server), read fresh on every access."""
-        return self._disabled_tools | self._foreign_mcp_names()
+        itself (another project's server), plus, for a restricted session, every
+        live registry tool outside ``SAFE_RESTRICTED_TOOLS`` (so a plugin or
+        skill tool another session registers later is denied too). Read fresh
+        on every access."""
+        disabled = self._disabled_tools | self._foreign_mcp_names()
+        if getattr(self, "restricted", False):
+            disabled |= frozenset(_agent.TOOL_REGISTRY) - SAFE_RESTRICTED_TOOLS
+        return disabled
 
     @disabled_tools.setter
     def disabled_tools(self, value) -> None:

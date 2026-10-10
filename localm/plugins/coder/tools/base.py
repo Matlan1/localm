@@ -158,15 +158,46 @@ def unwritable_component(parts) -> Optional[str]:
     return None
 
 
+def inside_unwritable_dir(cwd_resolved: Path, resolved: Path) -> bool:
+    """Whether the already-resolved *resolved* lies inside a
+    ``RESTRICTED_UNWRITABLE_DIRS`` directory of the project at *cwd_resolved*.
+
+    True when a component below the project root names one, or when *resolved*
+    lies inside what such a directory resolves to (one that is a link to a
+    differently named folder), checked at the project root and at every
+    directory on the way down to *resolved*. An ``OSError`` while checking
+    counts as inside. False for a path outside the project.
+    """
+    try:
+        rel = resolved.relative_to(cwd_resolved).parts
+    except ValueError:
+        return False
+    if unwritable_component(rel) is not None:
+        return True
+    anchor = cwd_resolved
+    for depth in range(len(rel)):
+        if depth:
+            anchor = anchor / rel[depth - 1]
+        for name in RESTRICTED_UNWRITABLE_DIRS:
+            entry = anchor / name
+            try:
+                if entry.exists() and resolved.is_relative_to(entry.resolve()):
+                    return True
+            except OSError:
+                return True
+    return False
+
+
 def restricted_unwritable(cwd: Path, path: str) -> bool:
     """Whether a restricted session must refuse to write the model-named *path*.
 
-    Checked twice: on *path*'s own components relative to *cwd* (so
+    Checked on *path*'s own components relative to *cwd* (so
     ``a/../.localcoder/x`` and a backslash-separated spelling are caught before
-    anything collapses them), and on the location :func:`_confine` resolves it
-    to (so a file link whose target is inside such a directory is caught). A
-    path ``_confine`` refuses is not reported here: the write tool refuses it on
-    its own.
+    anything collapses them), then on the location :func:`_confine` resolves it
+    to, with :func:`inside_unwritable_dir` (so a file link into such a
+    directory, or a write into the folder a linked ``.localcoder`` points at, is
+    caught). A path ``_confine`` refuses is not reported here: the write tool
+    refuses it on its own.
     """
     raw = Path(str(path).replace("\\", "/"))
     lexical: tuple = raw.parts
@@ -184,11 +215,7 @@ def restricted_unwritable(cwd: Path, path: str) -> bool:
         resolved = _confine(cwd, str(path))
     except PermissionError:
         return False
-    try:
-        rel = resolved.relative_to(cwd.resolve()).parts
-    except ValueError:
-        return False
-    return unwritable_component(rel) is not None
+    return inside_unwritable_dir(cwd.resolve(), resolved)
 
 
 @dataclass
