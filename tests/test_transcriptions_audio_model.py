@@ -280,6 +280,28 @@ class TestWhatTheModelReceives:
         assert audio_model.format_label(_wav(0.1), "x.mp3", "audio/mpeg") == "wav"
 
 
+class TestTranscriptCleaning:
+    @pytest.mark.parametrize("reply,expected", [
+        ("language English<asr_text>The quick brown fox.", "The quick brown fox."),
+        ("language None<asr_text>", ""),
+        ("language Chinese<asr_text>你好。", "你好。"),
+        ("  plain words from another model " + chr(10), "plain words from another model"),
+        ("language English<asr_text>One.language English<asr_text> Two.", "One. Two."),
+        ("the language English is spoken here", "the language English is spoken here"),
+    ])
+    def test_clean_transcript(self, reply, expected):
+        assert audio_model.clean_transcript(reply) == expected
+
+    def test_the_route_returns_the_cleaned_text(self, client, state):
+        state.engine = _Engine(reply="language English<asr_text>the quick brown fox")
+        assert _post(client).json() == {"text": "the quick brown fox"}
+
+    def test_a_clip_with_no_speech_is_a_200_with_empty_text(self, client, state):
+        state.engine = _Engine(reply="language None<asr_text>")
+        r = _post(client)
+        assert r.status_code == 200 and r.json() == {"text": ""}
+
+
 class TestResponseFormats:
     def test_text_format(self, client, state):
         r = _post(client, data={"response_format": "text"})

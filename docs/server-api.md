@@ -558,7 +558,7 @@ that is already loaded is used, else the first by name. The response carries
 `verbose_json` are a `400`), takes WAV without any extra and other formats with the voice
 extra (`501` otherwise), accepts clips up to 10 minutes and 25 MB, decodes at 0.0
 temperature unless `temperature` is sent, passes `language` and `prompt` to the model as
-part of its instruction, and answers `413` when the clip does not fit the model's context
+part of its instruction (a dedicated speech model such as Qwen3-ASR ignores them), and answers `413` when the clip does not fit the model's context
 and `502` when the transcript hit the reply limit instead of returning it cut short. The
 audio is not recorded in the audit log or the transcript.
 

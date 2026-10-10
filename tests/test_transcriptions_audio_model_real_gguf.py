@@ -93,7 +93,8 @@ def test_the_clip_is_transcribed_as_json(client, clip):
     assert r.status_code == 200, r.text
     assert client.asked == [NAME]
     assert r.headers["X-Localm-Transcription-Model"] == NAME
-    assert _words(phrase) in _words(r.json()["text"]), r.json()
+    assert "<asr_text>" not in r.json()["text"] and "language" not in r.json()["text"]
+    assert _words(r.json()["text"]) == _words(phrase), r.json()
 
 
 def test_the_clip_is_transcribed_as_text(client, clip):
@@ -102,7 +103,8 @@ def test_the_clip_is_transcribed_as_text(client, clip):
                     files={"file": ("fox.wav", wav, "audio/wav")})
     assert r.status_code == 200, r.text
     assert r.headers["content-type"].startswith("text/plain")
-    assert _words(phrase) in _words(r.text), r.text
+    assert "<asr_text>" not in r.text
+    assert _words(r.text) == _words(phrase), r.text
 
 
 def test_a_bad_clip_is_400_and_the_model_keeps_serving(client, clip):

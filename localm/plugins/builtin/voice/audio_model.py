@@ -24,6 +24,8 @@ SUPPORTED_FORMATS = ("json", "text")
 REPLY_TOKEN_CEILING = 8192
 
 _LABEL_RE = re.compile(r"^[a-z0-9]{1,8}$")
+_ASR_TAG = "<asr_text>"
+_ASR_LANGUAGE_RE = re.compile(r"language [^<\n]{0,40}" + re.escape(_ASR_TAG))
 
 
 def audio_model_names() -> list[str]:
@@ -72,6 +74,13 @@ def instruction(language: Optional[str], prompt: Optional[str]) -> str:
     if prompt:
         text += f" Context that may help: {prompt}"
     return text
+
+
+def clean_transcript(reply: str) -> str:
+    """The spoken words in a model's *reply*. A Qwen3-ASR model opens each
+    transcript with ``language <name>`` and an ``<asr_text>`` marker
+    (``language None`` for a clip with no speech); both are removed."""
+    return _ASR_LANGUAGE_RE.sub("", reply).replace(_ASR_TAG, "").strip()
 
 
 def build_messages(data: bytes, label: str, language: Optional[str],
@@ -135,7 +144,7 @@ async def transcribe(request: Request, model: str, data: bytes, label: str, *,
             raise HTTPException(
                 502, f"The transcript from '{engine.display_name}' was cut off at "
                      f"{budget} tokens. Send a shorter clip.")
-        return text.strip()
+        return clean_transcript(text)
     finally:
         _hs._unpin(engine)
         _hs._touch_activity(engine.display_name)
