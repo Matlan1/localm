@@ -387,8 +387,10 @@ def test_a_scoped_writer_cannot_set_a_native_model_file(env, field, stored):
     assert load_config()["plugins"]["image"]["native"][stored] == "x.gguf"
 
 
-@pytest.mark.parametrize("value", ["1e400", "-inf", 1e400])
-def test_an_out_of_range_number_is_a_400_not_a_server_error(client, value):
-    r = client.post("/v1/media/config/image", json={"native_steps": value})
+@pytest.mark.parametrize("body", ['{"native_steps": "1e400"}', '{"native_steps": "-inf"}',
+                                  '{"native_steps": 1e400}'])
+def test_an_out_of_range_number_is_a_400_not_a_server_error(client, body):
+    r = client.post("/v1/media/config/image", content=body,
+                    headers={"Content-Type": "application/json"})
     assert r.status_code == 400, r.text
     assert "native_steps" in r.text
