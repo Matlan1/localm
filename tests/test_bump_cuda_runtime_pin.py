@@ -350,7 +350,7 @@ def test_an_entry_outside_the_block_is_not_edited(bump):
         f'    "nvidia-cublas": ("13.8.1.7",\n        "{SHA_D}"),\n', "")
     assert block_without_it != CUDA_FIXTURE
     outside = block_without_it + f'\n_OTHER = {{\n    "nvidia-cublas": ("13.8.1.7",\n        "{SHA_D}"),\n}}\n'
-    with pytest.raises(bump.Refused, match="expected exactly one pin entry"):
+    with pytest.raises(bump.Refused, match="outside _CUDA_RUNTIME_PIN"):
         bump.rewrite_pin(outside, "nvidia-cublas", "13.9.0.1", NEW4)
 
 
