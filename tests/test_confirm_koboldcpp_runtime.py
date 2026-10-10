@@ -476,7 +476,8 @@ def test_the_model_table_is_complete_and_matches_localms_defaults(cf):
     assert music["repo"] == models.DEFAULT_REPO
     for comp in models.COMPONENTS:
         size, sha = music["files"][models.DEFAULT_FILES[comp]]
-        assert size > 0 and len(sha) == 64
+        assert size == models.DEFAULT_SIZES[comp] and len(sha) == 64
+    assert set(music["files"]) == set(models.DEFAULT_FILES.values())
     chat = cf.MODELS["chat"]
     assert len(chat["revision"]) == 40 and chat["architecture"] == "llama"
 
@@ -484,8 +485,27 @@ def test_the_model_table_is_complete_and_matches_localms_defaults(cf):
 def test_the_default_cache_dir_follows_the_environment(cf, tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALM_PIN_CACHE", str(tmp_path))
     assert cf.default_cache_dir() == tmp_path / "koboldcpp"
-    monkeypatch.delenv("LOCALM_PIN_CACHE")
-    assert cf.default_cache_dir() == Path.home() / ".cache" / "localm-pin-cache" / "koboldcpp"
+
+
+def test_the_default_cache_dir_finds_the_nearest_ancestor_cache(cf, tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCALM_PIN_CACHE", raising=False)
+    repo = tmp_path / "a" / "b" / "repo"
+    repo.mkdir(parents=True)
+    (tmp_path / ".claude" / "pin-cache").mkdir(parents=True)
+    (tmp_path / "a" / ".claude" / "pin-cache").mkdir(parents=True)
+    monkeypatch.setattr(cf, "REPO", repo)
+    assert cf.default_cache_dir() == tmp_path / "a" / ".claude" / "pin-cache" / "koboldcpp"
+
+
+def test_the_default_cache_dir_falls_back_to_the_home_cache(cf, tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCALM_PIN_CACHE", raising=False)
+    monkeypatch.setattr(cf, "REPO", tmp_path / "nowhere" / "repo")
+    real_is_dir = cf.Path.is_dir
+    monkeypatch.setattr(cf.Path, "is_dir",
+                        lambda self, *a, **k: False if self.name == "pin-cache"
+                        else real_is_dir(self, *a, **k))
+    monkeypatch.setattr(cf.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    assert cf.default_cache_dir() == tmp_path / "home" / ".cache" / "localm-pin-cache" / "koboldcpp"
 
 
 # --------------------------------------------------------------------------- #

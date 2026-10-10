@@ -498,7 +498,8 @@ def test_another_file_naming_the_pin_is_refused(bump, confirm, tmp_path):
         seen["needles"] = needles
         return ["docs/music.md", "localm/media/koboldcpp/pins.py", "CHANGELOG.md"]
     _refuses(bump, tmp_path, make_receipt(confirm), "docs/music.md", scanner=scanner)
-    assert OLD_TAG in seen["needles"]
+    assert f'TAG = "{OLD_TAG}"' in seen["needles"]
+    assert f"download/{OLD_TAG}/" in seen["needles"]
     assert all(s in seen["needles"] for s in OLD_SHAS.values())
 
 
@@ -543,7 +544,7 @@ def test_the_real_tree_names_the_pin_only_in_pins_py(bump):
 def test_the_pin_is_found_in_pins_py_by_the_scan(bump):
     real = (_ROOT / "localm" / "media" / "koboldcpp" / "pins.py").read_text(encoding="utf-8")
     try:
-        hits = bump.git_grep_mentions(_ROOT, [bump.pinned_tag(real)])
+        hits = bump.git_grep_mentions(_ROOT, [f'TAG = "{bump.pinned_tag(real)}"'])
     except bump.Refused as e:
         pytest.skip(f"git is not available here: {e}")
     assert "localm/media/koboldcpp/pins.py" in hits

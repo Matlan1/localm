@@ -268,9 +268,11 @@ def git_grep_mentions(repo: Path, needles: list) -> list:
 
 
 def other_mentions(repo: Path, old_text: str, scanner=git_grep_mentions) -> list:
-    """Tracked files besides MENTION_EXEMPT that name the pinned tag or any
-    pinned asset sha256."""
-    needles = [pinned_tag(old_text)] + [v[2] for v in pinned_table(old_text).values()]
+    """Tracked files besides MENTION_EXEMPT that assign the pinned tag, link a
+    release download at it, or contain any pinned asset sha256."""
+    tag = pinned_tag(old_text)
+    needles = ([f'TAG = "{tag}"', f"download/{tag}/"]
+               + [v[2] for v in pinned_table(old_text).values()])
     return [p for p in scanner(repo, needles) if p not in MENTION_EXEMPT]
 
 
