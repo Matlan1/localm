@@ -280,6 +280,42 @@ def test_review_only_bump_opens_a_pr_without_a_receipt_and_never_merges(env, mon
     assert pp.load_state(pin="fake")["verdict"] == "REVIEW"
 
 
+@pytest.mark.parametrize("old,new,expected", [
+    ("3.4.13", "3.4.16", True), ("12.0.2", "12.1.0", True), ("12.0.2", "13.0.0", False),
+    ("0.18.4", "0.18.5", True), ("0.18.4", "0.19.0", False), ("0.18.4", "1.0.0", False),
+    ("11.12.0", "11.13.0", True), ("bad", "1.0.0", False)])
+def test_a_bump_that_stays_inside_one_major_line_may_auto_merge(old, new, expected):
+    assert pw._no_major_boundary(old, new) is expected
+
+
+def test_tested_review_pins_merge_on_green_ci_when_no_major_boundary_is_crossed(env):
+    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "print('suite ok')"),),
+                                 auto_merge=lambda o, n: True), dry_run=False)
+    assert out.verdict == pw.MERGED
+    assert [c[0] for c in env.calls] == ["supersede", "branch", "push", "pr", "ci", "merge"]
+
+
+def test_a_tested_pin_that_crosses_a_major_boundary_still_waits_for_review(env):
+    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "print('suite ok')"),),
+                                 auto_merge=lambda o, n: False), dry_run=False)
+    assert out.verdict == pw.REVIEW and "merge" not in [c[0] for c in env.calls]
+
+
+def test_a_failing_post_bump_command_stops_before_any_push(env):
+    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "raise SystemExit(3)"),),
+                                 auto_merge=lambda o, n: True), dry_run=False)
+    assert out.verdict == pw.FAIL and "failed after the bump" in out.detail
+    assert "push" not in [c[0] for c in env.calls]
+
+
+def test_shipped_vendored_advancers_run_the_gui_suite_and_gate_the_merge_on_the_boundary():
+    for adv in pw.build_advancers():
+        if adv.key.startswith("vendored-"):
+            assert adv.post_bump_cmds == (("npm", "ci"), ("npm", "test"))
+            assert adv.auto_merge("1.2.3", "1.2.4") is True
+            assert adv.auto_merge("1.2.3", "2.0.0") is False
+
+
 def test_review_only_dry_run_changes_nothing(env):
     out = pw.advance(_review_adv(), dry_run=True)
     assert out.verdict == pw.DRY_PASS and env.calls == []
@@ -855,7 +891,8 @@ def test_shipped_advancers_cover_every_runtime_with_a_pipeline_or_a_named_gap():
         "llama", "comfyui", "rocm", "koboldcpp", "sdcpp", "uv", "vendored-marked",
         "vendored-dompurify", "vendored-highlightjs", "vendored-katex", "cuda-runtime",
         "amd-wheels", "gguf-node", "docker-base"]
-    assert all(a.auto_merge("1.0.0", "1.0.1") is False for a in advs if a.confirm_script is None)
+    assert all(a.auto_merge("1.0.0", "1.0.1") is False for a in advs
+               if a.confirm_script is None and not a.post_bump_cmds)
     assert len({a.key for a in advs}) == len(advs)
     for a in advs:
         assert a.confirm_script is None or a.confirm_script.startswith("scripts/confirm_")

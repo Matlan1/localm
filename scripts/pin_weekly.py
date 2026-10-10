@@ -38,6 +38,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -125,10 +126,11 @@ class Advancer:
     delegate: Callable[[bool], int] | None = None
     verify_current_cmd: Callable[[Path, Path], list[str]] | None = None
     bump_args: tuple[str, ...] = ()
+    post_bump_cmds: tuple[tuple[str, ...], ...] = ()
     extra: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        if self.confirm_script is None:
+        if self.confirm_script is None and not self.post_bump_cmds:
             self.auto_merge = lambda old, new: False
 
 
@@ -151,6 +153,12 @@ def ensure_github_token() -> str:
         return "none"
     os.environ["GITHUB_TOKEN"] = token
     return "gh"
+
+
+def _resolve_exe(cmd: list[str]) -> list[str]:
+    """Replace the program name with its full path (Windows needs npm.cmd resolved)."""
+    exe = shutil.which(cmd[0])
+    return [exe, *cmd[1:]] if exe else cmd
 
 
 def _kill_tree(pid: int) -> None:
@@ -400,6 +408,12 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
             pp.insert_changelog_bullet(changelog.read_text(encoding="utf-8"), bullet),
             encoding="utf-8")
 
+    for cmd in adv.post_bump_cmds:
+        rc, cmd_out = run_cmd(_resolve_exe(list(cmd)), cwd=worktree, timeout=TEST_TIMEOUT_SECONDS,
+                              env=pp._worktree_env(worktree))
+        if rc != 0:
+            raise pp.PipelineError(f"`{' '.join(cmd)}` failed after the bump:\n{cmd_out[-2000:]}")
+
     if adv.tests:
         rc, test_out = run_cmd(
             [sys.executable, "-m", "pytest", *adv.tests, "-m", "not integration", "-q"],
@@ -408,9 +422,12 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
             raise pp.PipelineError(f"targeted tests failed after the bump:\n{test_out[-2000:]}")
 
     title = f"Advance the bundled {adv.title} to {new}"
-    tested = ("The new build was installed and exercised on real hardware before the pin changed."
-              if adv.confirm_script else
-              "This build could not be exercised on this machine; review before merging.")
+    if adv.confirm_script:
+        tested = "The new build was installed and exercised on real hardware before the pin changed."
+    elif adv.post_bump_cmds and adv.auto_merge(old, new):
+        tested = "The GUI test suite was run against the new files before this pull request was opened."
+    else:
+        tested = "This build could not be exercised on this machine; review before merging."
     body = (f"Moves the bundled {adv.title} from {old} to {new}. {tested}\n\n"
             "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
     how = (f"confirmed with {adv.confirm_script}" if adv.confirm_script
@@ -658,8 +675,14 @@ def _semver_major(tag: str) -> int | None:
     return key[0] if key else None
 
 
-def _same_major_only(old: str, new: str) -> bool:
-    return _semver_major(old) is not None and _semver_major(old) == _semver_major(new)
+def _no_major_boundary(old: str, new: str) -> bool:
+    """True unless the move from *old* to *new* crosses a MAJOR boundary (a 0.x minor counts)."""
+    a, b = cp._semver_key(old), cp._semver_key(new)
+    if a is None or b is None:
+        return False
+    if a[0] == 0 or b[0] == 0:
+        return a[:2] == b[:2]
+    return a[0] == b[0]
 
 
 def _comfyui_candidate() -> tuple[str, str] | None:
@@ -742,7 +765,8 @@ def _review_only_advancers() -> list[Advancer]:
     vendored = [
         Advancer(f"vendored-{name.lower().replace('.', '')}", f"vendored {name}", None,
                  "scripts/bump_vendored_js.py", candidate=_vendored_candidate(name),
-                 bump_args=("--lib", name), gpu=False)
+                 bump_args=("--lib", name), gpu=False, auto_merge=_no_major_boundary,
+                 post_bump_cmds=(("npm", "ci"), ("npm", "test")))
         for name in ("marked", "DOMPurify", "highlight.js", "KaTeX")
     ]
     return [
