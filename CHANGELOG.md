@@ -1682,11 +1682,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
-- **`setup.sh` and `setup-gui.sh` install a fixed uv release and check it before running it.**
+- **`setup.sh`, `setup-gui.sh`, `setup.bat` and `setup-gui.bat` install a fixed uv release and check it before running it.**
   They used to run whatever Astral's installer URL returned. They now download the installer
   of one pinned uv release and run it only when its checksum matches; a failed download, a
-  checksum mismatch, or a machine with no `sha256sum`, `shasum` or `openssl` stops the uv
-  install with the reason instead of running unchecked code.
+  checksum mismatch, or (on Linux and macOS) a machine with no `sha256sum`, `shasum` or
+  `openssl` stops the uv install with the reason instead of running unchecked code. On
+  Windows, installing uv from a PowerShell 7 window no longer fails.
 - **Hugging Face models no longer download and run code from the Hugging Face kernel
   hub unless the network policy allows it.** transformers could fetch a compiled kernel
   package from the Hub while a model was loading or replying and import it, even with
