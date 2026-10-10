@@ -18,9 +18,9 @@ always exits 0 regardless of outcome.
 
 A second block covers ``--gate`` mode (added alongside pin-currency.yml):
 0/1/2 exit codes tracking CURRENT/STALE/UNKNOWN, the age-vs-tolerance boundary,
-and that a missing release date - real and reproduced here, not synthetic; the
-live bundled pin genuinely has no GitHub Release object for its exact tag -
-reports UNKNOWN rather than guessing.
+and that a pin with no GitHub Release object (the live bundled pin is one) is
+dated from the commit its tag points at, and reports UNKNOWN rather than
+guessing when no route yields a date.
 """
 
 from __future__ import annotations
@@ -562,22 +562,149 @@ def test_gate_falls_back_to_a_per_tag_lookup_when_the_pin_is_off_the_page(monkey
     assert rc == pincheck.EXIT_STALE == 1
 
 
-def test_gate_reports_unknown_when_even_the_per_tag_lookup_fails(monkeypatch, capsys):
-    """The pin is behind by count, but NEITHER its own date NOR a fallback
-    lookup can be resolved - UNKNOWN, never a guessed STALE or CURRENT."""
-    fixture = [_release("v0.32.0", published_at="2026-02-01T00:00:00Z")]
+_SHA = "fe4195f7f4275f2626cbafc703acc3ddde1e5490"
 
-    def failing_by_tag(repo, tag):
+
+def _release_less_pin(monkeypatch, *, commit_body, tag_ref=None, tag_object=None,
+                      fixture=None):
+    """Wire --gate for a pin that has no GitHub Release (by-tag lookup 404s)
+    and whose date can only come from the tag's commit. Returns the list that
+    records every commit sha looked up."""
+    fixture = fixture if fixture is not None else [
+        _release("v0.32.0", published_at="2026-10-05T00:00:00Z")]
+    commit_calls = []
+
+    def no_release(repo, tag):
         raise urllib.error.HTTPError("url", 404, "Not Found", {}, None)
 
+    def ref(repo, tag):
+        return tag_ref or {"ref": f"refs/tags/{tag}",
+                           "object": {"sha": _SHA, "type": "commit"}}
+
+    def commit(repo, sha):
+        commit_calls.append(sha)
+        if isinstance(commit_body, Exception):
+            raise commit_body
+        return commit_body
+
     monkeypatch.setattr(pincheck, "_fetch_releases_http", lambda repo: fixture)
-    monkeypatch.setattr(pincheck, "_fetch_release_by_tag_http", failing_by_tag)
+    monkeypatch.setattr(pincheck, "_fetch_release_by_tag_http", no_release)
+    monkeypatch.setattr(pincheck, "_fetch_tag_ref_http", ref)
+    if tag_object is not None:
+        monkeypatch.setattr(pincheck, "_fetch_tag_object_http", tag_object)
+    monkeypatch.setattr(pincheck, "_fetch_commit_http", commit)
+    return commit_calls
+
+
+def _commit_body(date):
+    return {"sha": _SHA, "commit": {"committer": {"date": date}}}
+
+
+def test_gate_dates_a_release_less_pin_from_its_tag_commit_and_goes_stale(
+        monkeypatch, capsys):
+    """The live shape: the pin is a bare tag with no Release, upstream's newest
+    release is 57 days after the tag's commit."""
+    calls = _release_less_pin(
+        monkeypatch, commit_body=_commit_body("2026-08-08T05:04:30Z"))
+    rc = pincheck.main(["--pinned", "v0.31.1", "--gate"])
+    out = capsys.readouterr().out
+
+    assert calls == [_SHA]
+    assert rc == pincheck.EXIT_STALE == 1
+    assert "2026-08-08, from its tag commit" in out
+    assert "57 day(s)" in out
+    assert "COULD NOT CHECK" not in out
+
+
+def test_gate_release_less_pin_within_tolerance_is_current(monkeypatch, capsys):
+    _release_less_pin(monkeypatch, commit_body=_commit_body("2026-09-25T00:00:00Z"))
+    rc = pincheck.main(["--pinned", "v0.31.1", "--gate"])
+    out = capsys.readouterr().out
+    assert rc == pincheck.EXIT_CURRENT == 0
+    assert "from its tag commit" in out
+    assert "within the 21-day tolerance" in out
+
+
+def test_gate_dates_an_annotated_release_less_tag_through_the_tag_object(
+        monkeypatch, capsys):
+    tag_sha = "a" * 40
+    calls = _release_less_pin(
+        monkeypatch, commit_body=_commit_body("2026-08-08T05:04:30Z"),
+        tag_ref={"ref": "refs/tags/v0.31.1",
+                 "object": {"sha": tag_sha, "type": "tag"}},
+        tag_object=lambda repo, sha: {"object": {"sha": _SHA, "type": "commit"}})
+    rc = pincheck.main(["--pinned", "v0.31.1", "--gate"])
+    assert calls == [_SHA]
+    assert rc == pincheck.EXIT_STALE
+    assert "from its tag commit" in capsys.readouterr().out
+
+
+def test_gate_a_published_release_date_wins_over_the_tag_commit(monkeypatch, capsys):
+    """The commit route is only a fallback: a pin with a Release is dated from
+    the Release and never touches the commit endpoint."""
+    fixture = [_release("v0.32.0", published_at="2026-02-01T00:00:00Z"),
+               _release("v0.31.1", published_at="2026-01-01T00:00:00Z")]
+    calls = _release_less_pin(
+        monkeypatch, commit_body=_commit_body("2020-01-01T00:00:00Z"), fixture=fixture)
+    rc = pincheck.main(["--pinned", "v0.31.1", "--gate", "--max-age-days", "10"])
+    out = capsys.readouterr().out
+    assert calls == []
+    assert rc == pincheck.EXIT_STALE
+    assert "from its release" in out and "31 day(s)" in out
+
+
+@pytest.mark.parametrize("commit_body", [
+    urllib.error.HTTPError("url", 404, "Not Found", {}, None),
+    urllib.error.URLError("simulated: unreachable"),
+    {"commit": {"committer": {}}},
+    {"commit": "not a dict"},
+    ["not", "a", "dict"],
+    _commit_body("not a date"),
+])
+def test_gate_reports_unknown_when_the_commit_date_cannot_be_read(
+        monkeypatch, capsys, commit_body):
+    """The pin is behind by count, and neither its Release date nor its tag
+    commit date can be read: UNKNOWN (exit 2), never a guessed STALE or CURRENT."""
+    _release_less_pin(monkeypatch, commit_body=commit_body)
     rc = pincheck.main(["--pinned", "v0.31.1", "--gate"])
     out = capsys.readouterr().out
 
     assert rc == pincheck.EXIT_UNKNOWN == 2
     assert "COULD NOT CHECK" in out
     assert "date is missing" in out
+    assert "STALE" not in out and "OK:" not in out
+
+
+def test_gate_reports_unknown_when_the_tag_ref_cannot_be_resolved(monkeypatch):
+    calls = _release_less_pin(
+        monkeypatch, commit_body=_commit_body("2026-08-08T05:04:30Z"),
+        tag_ref={"ref": "refs/tags/some-other-tag",
+                 "object": {"sha": _SHA, "type": "commit"}})
+    rc = pincheck.main(["--pinned", "v0.31.1", "--gate"])
+    assert calls == []
+    assert rc == pincheck.EXIT_UNKNOWN
+
+
+def test_commit_date_reads_committer_date_and_never_raises():
+    ok = {"commit": {"committer": {"date": "2026-08-08T05:04:30Z"},
+                     "author": {"date": "2020-01-01T00:00:00Z"}}}
+    assert pincheck.commit_date(_SHA, opener=lambda r, s: ok) == dt.datetime(
+        2026, 8, 8, 5, 4, 30, tzinfo=dt.UTC)
+
+    def raiser(repo, sha):
+        raise OSError("simulated")
+    assert pincheck.commit_date(_SHA, opener=raiser) is None
+
+
+def test_fetch_commit_http_hits_the_real_endpoint_shape(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        return _FakeHTTP({"commit": {}})
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    pincheck._fetch_commit_http("owner/repo", _SHA)
+    assert captured["url"] == f"https://api.github.com/repos/owner/repo/commits/{_SHA}"
 
 
 def test_gate_annotates_and_summarises_only_under_github_actions(monkeypatch, capsys, tmp_path):
@@ -634,8 +761,8 @@ class _FakeHTTP:
 
 
 def test_every_api_call_sends_github_token_when_set(monkeypatch):
-    """All four request sites (release listing, release by tag, tag ref, tag
-    object) send GITHUB_TOKEN as a bearer token when it is set, and no
+    """All five request sites (release listing, release by tag, tag ref, tag
+    object, commit) send GITHUB_TOKEN as a bearer token when it is set, and no
     Authorization header when it is not."""
     captured = []
 
@@ -649,13 +776,14 @@ def test_every_api_call_sends_github_token_when_set(monkeypatch):
         pincheck._fetch_release_by_tag_http("owner/repo", "v1.2.3")
         pincheck._fetch_tag_ref_http("owner/repo", "v1.2.3")
         pincheck._fetch_tag_object_http("owner/repo", "a" * 40)
+        pincheck._fetch_commit_http("owner/repo", "a" * 40)
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     call_all()
-    assert [r.get_header("Authorization") for r in captured] == [None] * 4
+    assert [r.get_header("Authorization") for r in captured] == [None] * 5
 
     captured.clear()
     monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
     call_all()
-    assert [r.get_header("Authorization") for r in captured] == ["Bearer tok-123"] * 4
+    assert [r.get_header("Authorization") for r in captured] == ["Bearer tok-123"] * 5
     assert all(r.get_header("Accept") == "application/vnd.github+json" for r in captured)
