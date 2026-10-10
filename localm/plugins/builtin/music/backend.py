@@ -79,7 +79,8 @@ def settings(full_config: dict) -> dict:
     ACE-Step planner) and ``lowvram`` read out of it."""
     block, warning = media_config.resolve_config("music", full_config)
     comfy_blk = block.get("comfy") if isinstance(block.get("comfy"), dict) else {}
-    native_blk = block.get("native") if isinstance(block.get("native"), dict) else {}
+    native_raw = block.get("native")
+    native_blk: dict = native_raw if isinstance(native_raw, dict) else {}
     backend_choice_value = str(block.get("backend") or "auto").strip().lower() or "auto"
     # When the configured backend cannot be loaded the job still falls back to
     # comfy (best-effort), and the warning says so instead of reporting the

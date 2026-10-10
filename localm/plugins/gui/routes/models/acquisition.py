@@ -291,7 +291,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             st = native.status(s)
             configured = s.get("native") or {}
             from localm.media.koboldcpp.models import LABELS
-            unresolved = [LABELS.get(c, c) for c, v in st["models"].items()
+            unresolved = [str(LABELS.get(c, c)) for c, v in st["models"].items()
                           if v is None and configured.get(c)]
             warning = (f"Configured music models not found: {', '.join(unresolved)}."
                        if unresolved else None)
