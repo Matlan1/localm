@@ -897,9 +897,7 @@ def has_penalties_sampler() -> bool:
     ``_abi.penalties_arity``). A build whose arity cannot be PROVEN reports
     False here, so the caller drops the repetition-penalty stage rather than
     make an unsafe call - and says so, rather than quietly sampling without it."""
-    try:
-        getattr(load_lib(), "llama_sampler_init_penalties")
-    except AttributeError:
+    if not hasattr(load_lib(), "llama_sampler_init_penalties"):
         return False
     from ._abi import penalties_arity
     if penalties_arity() == 0:
@@ -1000,11 +998,7 @@ def llama_sampler_init_grammar(
 
 def has_lazy_grammar() -> bool:
     """True when this llama.dll exports llama_sampler_init_grammar_lazy_patterns."""
-    try:
-        getattr(load_lib(), "llama_sampler_init_grammar_lazy_patterns")
-        return True
-    except AttributeError:
-        return False
+    return hasattr(load_lib(), "llama_sampler_init_grammar_lazy_patterns")
 
 
 def llama_sampler_init_grammar_lazy_patterns(
@@ -1263,7 +1257,7 @@ def llama_set_nextn_layer_offset(ctx: ctypes.c_void_p, offset: int) -> bool:
     return True
 
 
-def llama_model_mtp_support(model: ctypes.c_void_p) -> "tuple[bool, str]":
+def llama_model_mtp_support(model: ctypes.c_void_p) -> tuple[bool, str]:
     """Whether an MTP draft context on this model would run a real draft head.
 
     Returns ``(supported, reason)``. The reason is a short stable token so a
@@ -1330,11 +1324,7 @@ def has_max_devices() -> bool:
     assumed) the same way has_memory_api()/has_penalties_sampler() are, so an
     exotic stripped build degrades to a documented fallback instead of an
     AttributeError. See discover.apply_gpu_split for how the fallback is used."""
-    try:
-        getattr(load_lib(), "llama_max_devices")
-        return True
-    except AttributeError:
-        return False
+    return hasattr(load_lib(), "llama_max_devices")
 
 
 def llama_max_devices() -> int:

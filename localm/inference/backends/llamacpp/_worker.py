@@ -16,7 +16,7 @@ abort only ever kills this process, never the server."""
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 from ._sizing import VramSizingMixin
 
@@ -262,7 +262,7 @@ class GgufWorker(VramSizingMixin):
 
         from localm.inference.backends.llamacpp import LlamaCpp
 
-        optional: Dict[str, Any] = {
+        optional: dict[str, Any] = {
             name: value for name, value in (
                 ("mtp_draft_tokens", self.mtp_draft_tokens),
                 ("spec_source", self.spec_source),
@@ -333,7 +333,7 @@ class GgufWorker(VramSizingMixin):
     def count_tokens(self, text: str) -> int:
         return len(self._llm.tokenize(text, add_bos=False))
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """Exact token count of the structured messages formatted with the
         model's embedded chat template, or, for an encoder-decoder model, of
         its encoder input (``LlamaCpp.encoder_tokens``). Raises on failure: the
@@ -374,7 +374,7 @@ class GgufWorker(VramSizingMixin):
 
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,

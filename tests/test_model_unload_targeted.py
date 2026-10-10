@@ -366,6 +366,41 @@ def test_gui_models_list_reports_embedder_loaded_via_path_match(gui_app_with_eng
     assert by_name["model-b"]["loaded"] is False     # different path, not loaded anywhere
 
 
+def test_gui_models_list_reports_reranker_loaded_via_path_match(gui_app_with_engines, monkeypatch):
+    """A registered model that is the resident reranker (never appears in
+    _engines) shows loaded:true on the Models page, keeps its model_type, and
+    a differently-pathed model stays unloaded."""
+    from localm.inference import reranker as rr
+    app, _load_direct = gui_app_with_engines
+    monkeypatch.setattr(emb, "loaded_path", lambda: None)
+    monkeypatch.setattr(rr, "reranker_info",
+                        lambda: {"path": "Z:/models/model-a.gguf", "labels": []})
+    with patch("localm.config.load_registry", return_value={
+        "model-a": {"path": "Z:/models/model-a.gguf", "model_type": "embedding"},
+        "model-b": {"path": "Z:/models/model-b.gguf"},
+    }):
+        with TestClient(app) as client:
+            r = client.get("/api/models")
+    assert r.status_code == 200
+    by_name = {m["name"]: m for m in r.json()["models"]}
+    assert by_name["model-a"]["loaded"] is True
+    assert by_name["model-a"]["model_type"] == "embedding"
+    assert by_name["model-b"]["loaded"] is False
+
+
+def test_gui_models_list_marks_nothing_loaded_without_a_resident_reranker(gui_app_with_engines, monkeypatch):
+    from localm.inference import reranker as rr
+    app, _load_direct = gui_app_with_engines
+    monkeypatch.setattr(emb, "loaded_path", lambda: None)
+    monkeypatch.setattr(rr, "reranker_info", lambda: None)
+    with patch("localm.config.load_registry", return_value={
+        "model-a": {"path": "Z:/models/model-a.gguf"},
+    }):
+        with TestClient(app) as client:
+            r = client.get("/api/models")
+    assert {m["name"]: m["loaded"] for m in r.json()["models"]} == {"model-a": False}
+
+
 # --------------------------------------------------------------------------- #
 #  CLI: `localm unload [MODEL]`                                               #
 # --------------------------------------------------------------------------- #

@@ -1885,7 +1885,7 @@ def _cross_process_lock(target: Path):
                     "update_registry() called back into update_config()/"
                     "update_registry() on the same file. That is not supported "
                     "(the cross-process lock is not reentrant); make both changes "
-                    "in one mutator instead of nesting the calls.")
+                    "in one mutator instead of nesting the calls.") from None
             try:
                 age = time.time() - lockpath.stat().st_mtime
             except OSError:
@@ -1905,7 +1905,7 @@ def _cross_process_lock(target: Path):
             if time.time() >= deadline:
                 raise TimeoutError(
                     f"timed out after {_CROSS_LOCK_TIMEOUT:.0f}s waiting for "
-                    f"{lockpath.name}, held by another localm process")
+                    f"{lockpath.name}, held by another localm process") from None
             _cross_lock_backoff(attempt)
             attempt += 1
             continue

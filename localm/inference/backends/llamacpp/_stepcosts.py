@@ -10,7 +10,7 @@ costs with the step times seen while generating and picks each step's length.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Tuple
+from typing import Callable
 
 # Target batch sizes the load-time measurement times; others are interpolated.
 VERIFY_MEASURE_SIZES = (2, 3, 5, 9, 17)
@@ -63,7 +63,7 @@ def best_length(p: float, k_max: int, step_cost: Callable[[int], float]) -> int:
     return best_k
 
 
-def measure_plan(probe_s: float, top: int) -> Tuple[int, int, List[int]]:
+def measure_plan(probe_s: float, top: int) -> tuple[int, int, list[int]]:
     """``(warm, reps, sizes)`` for measuring a target whose one-token decode
     took *probe_s* seconds with verification batches up to *top* tokens: every
     ``VERIFY_MEASURE_SIZES`` size below *top* plus *top*, with 3 warm-up and 5
@@ -87,7 +87,7 @@ class StepCosts:
     by n (n >= 2), ``draft`` one draft token and ``draft_prefill`` one token of
     a batched draft decode (both 0 for a source without a draft model)."""
     target: float
-    verify: Dict[int, float]
+    verify: dict[int, float]
     draft: float = 0.0
     draft_prefill: float = 0.0
 
@@ -103,7 +103,7 @@ class StepCosts:
             points.append((size, max(seconds, points[-1][1]) if points else seconds))
         if len(points) == 1:
             return self.target * n
-        for (n0, t0), (n1, t1) in zip(points, points[1:]):
+        for (n0, t0), (n1, t1) in zip(points, points[1:], strict=False):
             if n <= n1:
                 return t0 + (t1 - t0) * (n - n0) / (n1 - n0)
         (n0, t0), (n1, t1) = points[-2], points[-1]

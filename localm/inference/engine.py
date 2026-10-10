@@ -8,7 +8,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, Optional
 
 from rich.markup import escape
 
@@ -577,7 +577,7 @@ class Engine:
         """
         return self._backend.count_tokens(text)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """
         Return the number of tokens in a list of structured messages,
         including chat template formatting.
@@ -605,7 +605,7 @@ class Engine:
         except Exception:
             return None
 
-    def _embed_via_dedicated(self, texts: List[str]) -> List[List[float]]:
+    def _embed_via_dedicated(self, texts: list[str]) -> list[list[float]]:
         """Embed with the small DEDICATED on-device embedding model
         (:mod:`localm.inference.embedder`), or raise with the one command that
         fixes it. Raises rather than returning the chat model's own vectors: RAG
@@ -620,7 +620,7 @@ class Engine:
             "set net_mode=allow) to enable semantic search; memory and RAG use "
             "lexical BM25 until then.")
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         """Return embedding vectors for a list of texts.
 
         A backend that can genuinely embed its own loaded model (a HuggingFace
@@ -685,7 +685,7 @@ class Engine:
 
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -694,7 +694,7 @@ class Engine:
         repeat_penalty: Optional[float] = None,
         grammar: Optional[str] = None,
         grammar_lazy: bool = False,
-        grammar_triggers: Optional[List[str]] = None,
+        grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
@@ -738,7 +738,7 @@ class Engine:
             **extra,
         ))
 
-    def __enter__(self) -> "Engine":
+    def __enter__(self) -> Engine:
         self.load()
         return self
 
