@@ -1097,6 +1097,21 @@ def _degraded_beside(monkeypatch, *, a_busy=1, placements=(_PARTIAL, _FULL)):
     return a, b, env
 
 
+def _flip_once_the_wait_starts(monkeypatch, flip, delay=0.05):
+    """Run *flip* *delay* seconds after the first busy-victim wait begins, then
+    run the real ``_wait_for_pin_clear`` unchanged."""
+    real = hs._wait_for_pin_clear
+    fired = []
+
+    async def _wait(engine, **kwargs):
+        if not fired:
+            fired.append(True)
+            asyncio.get_running_loop().call_later(delay, flip)
+        return await real(engine, **kwargs)
+
+    monkeypatch.setattr(hs, "_wait_for_pin_clear", _wait)
+
+
 class TestBusyResidentModel:
     def test_a_non_explicit_load_waits_for_the_busy_model_then_evicts_it(
             self, monkeypatch, caplog):
@@ -1109,9 +1124,9 @@ class TestBusyResidentModel:
         _seat("model-a", a, active=True, busy=1)
         statuses = []
 
+        _flip_once_the_wait_starts(monkeypatch, lambda: setattr(a, "active_requests", 0))
+
         async def scenario():
-            asyncio.get_running_loop().call_later(
-                0.1, lambda: setattr(a, "active_requests", 0))
             return await hs.switch_engine("model-b", env.factory, preempt=False,
                                           activate=False, on_status=statuses.append)
 
@@ -1156,9 +1171,9 @@ class TestBusyResidentModel:
         env = _install(monkeypatch, {"model-a": a, "model-b": b, "model-c": c})
         _seat("model-a", a, active=True, busy=1)
 
+        _flip_once_the_wait_starts(monkeypatch, lambda: setattr(a, "active_requests", 0))
+
         async def scenario():
-            asyncio.get_running_loop().call_later(
-                0.1, lambda: setattr(a, "active_requests", 0))
             return await asyncio.gather(
                 hs.switch_engine("model-b", env.factory, preempt=False, activate=False),
                 hs.switch_engine("model-c", env.factory, preempt=False, activate=False),
@@ -1185,8 +1200,9 @@ class TestBusyResidentModel:
             a.unloading = True
             a.active_requests = 0
 
+        _flip_once_the_wait_starts(monkeypatch, _unload_begins)
+
         async def scenario():
-            asyncio.get_running_loop().call_later(0.1, _unload_begins)
             return await hs.switch_engine("model-b", env.factory, preempt=False,
                                           activate=False)
 
@@ -1246,9 +1262,9 @@ class TestBusyResidentModel:
         _seat("model-a", a, active=True, busy=1)
         statuses = []
 
+        _flip_once_the_wait_starts(monkeypatch, lambda: setattr(a, "active_requests", 0))
+
         async def scenario():
-            asyncio.get_running_loop().call_later(
-                0.1, lambda: setattr(a, "active_requests", 0))
             return await hs.get_engine("model-b", activate=False,
                                        on_status=statuses.append)
 
