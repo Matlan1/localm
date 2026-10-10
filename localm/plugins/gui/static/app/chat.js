@@ -2308,6 +2308,40 @@ export function formatClipTime(seconds) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** The duration in seconds of a RIFF/WAVE file, read from its header (the first
+ *  MiB is enough to reach the fmt and data chunks), or 0 when *blob* is not a
+ *  WAV file it can read. */
+export function wavSeconds(blob) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(0);
+    reader.onload = () => {
+      const buf = reader.result;
+      if (!(buf instanceof ArrayBuffer) || buf.byteLength < 12) { resolve(0); return; }
+      const v = new DataView(buf);
+      const tag = (o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1),
+                                             v.getUint8(o + 2), v.getUint8(o + 3));
+      if (tag(0) !== "RIFF" || tag(8) !== "WAVE") { resolve(0); return; }
+      let byteRate = 0;
+      let off = 12;
+      while (off + 8 <= buf.byteLength) {
+        const id = tag(off);
+        const size = v.getUint32(off + 4, true);
+        if (id === "fmt " && off + 20 <= buf.byteLength) byteRate = v.getUint32(off + 16, true);
+        if (id === "data") {
+          const room = blob.size - (off + 8);
+          const bytes = size === 0 || size === 0xFFFFFFFF || size > room ? room : size;
+          resolve(byteRate > 0 && bytes > 0 ? bytes / byteRate : 0);
+          return;
+        }
+        off += 8 + size + (size % 2);
+      }
+      resolve(0);
+    };
+    reader.readAsArrayBuffer(blob.slice(0, 1 << 20));
+  });
+}
+
 /** The duration in seconds of the audio *blob* as the browser reports it, or 0
  *  when the browser cannot read it (the server then decides). */
 export function probeAudioSeconds(blob) {
@@ -2349,7 +2383,7 @@ export async function attachAudio(file) {
   const clip = { name: file.name, data, format: audioFormat(file), size: file.size, seconds: 0 };
   chat.clips.push(clip);
   renderAttachChips();
-  const seconds = await probeAudioSeconds(file);
+  const seconds = (await wavSeconds(file)) || (await probeAudioSeconds(file));
   if (seconds > AUDIO_MAX_SECONDS) {
     const at = chat.clips.indexOf(clip);
     if (at !== -1) chat.clips.splice(at, 1);

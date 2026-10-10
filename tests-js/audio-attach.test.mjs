@@ -168,6 +168,54 @@ test("a clip the browser reports as longer than 10 minutes is removed again", as
   assert.equal(window.document.querySelectorAll("#attach-chips .chip").length, 0);
 });
 
+/** A RIFF/WAVE byte array: *seconds* of 8 kHz mono 8-bit audio, an optional
+ *  LIST chunk before the data, and the data size field overridden by *sizeField*. */
+function wavBytes({ seconds, list = false, sizeField = null }) {
+  const data = 8000 * seconds;
+  const listChunk = list ? [0x4c, 0x49, 0x53, 0x54, 3, 0, 0, 0, 1, 2, 3, 0] : [];
+  const out = new Uint8Array(12 + 24 + listChunk.length + 8 + data);
+  const v = new DataView(out.buffer);
+  out.set([0x52, 0x49, 0x46, 0x46], 0);
+  out.set([0x57, 0x41, 0x56, 0x45], 8);
+  out.set([0x66, 0x6d, 0x74, 0x20], 12);
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true);
+  v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+  out.set(listChunk, 36);
+  const at = 36 + listChunk.length;
+  out.set([0x64, 0x61, 0x74, 0x61], at);
+  v.setUint32(at + 4, sizeField ?? data, true);
+  return out;
+}
+
+test("wavSeconds reads the length from the WAV header, with extra chunks and streamed sizes", async () => {
+  const { window } = setup();
+  const secs = (bytes) => window.wavSeconds(new window.Blob([bytes]));
+  assert.equal(await secs(wavBytes({ seconds: 3 })), 3);
+  assert.equal(await secs(wavBytes({ seconds: 3, list: true })), 3);
+  assert.equal(await secs(wavBytes({ seconds: 3, sizeField: 0xFFFFFFFF })), 3, "an unknown data size uses the bytes present");
+  assert.equal(await secs(WAV_BYTES), 0, "a truncated header yields 0, not a guess");
+  assert.equal(await secs(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])), 0, "not a WAV");
+});
+
+test("an 11 minute WAV is refused from its header even when the browser cannot play it", async () => {
+  const { window } = setup();
+  window.probeAudioSeconds = async () => 0;
+  const file = new window.File([wavBytes({ seconds: 601 })], "long.wav", { type: "audio/wav" });
+  window.addAttachedFiles([file]);
+  await waitFor(() => /min/.test(toastText(window)), "the refusal toast");
+  assert.match(toastText(window), /long\.wav is about 11 min long/);
+  assert.equal(clipCount(window), 0);
+});
+
+test("a short WAV shows its length from the header", async () => {
+  const { window } = setup();
+  window.probeAudioSeconds = async () => 0;
+  window.addAttachedFiles([new window.File([wavBytes({ seconds: 75 })], "mid.wav", { type: "audio/wav" })]);
+  await waitFor(() => clipCount(window) === 1 && evalIn(window, "chat.clips[0].seconds") === 75, "the length");
+  assert.match(window.document.querySelector("#attach-chips .chip").textContent, /mid\.wav \(1:15\)/);
+});
+
 test("a clip whose length the browser cannot read stays attached for the server to judge", async () => {
   const { window } = setup();
   window.probeAudioSeconds = async () => 0;
