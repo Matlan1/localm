@@ -328,6 +328,31 @@ class TestJobAndPrivacy:
         assert seen_cancel.is_set()
 
 
+class TestRealSdkWireFormat:
+    """The bytes the official openai SDK sent for ``audio.speech.create``
+    (captured with a mock transport into tests/fixtures/openai_sdk), replayed."""
+
+    def test_the_sdk_request_is_served(self, client, synth):
+        import base64
+        from pathlib import Path
+        rec = json.loads((Path(__file__).parent / "fixtures" / "openai_sdk" / "speech.json")
+                         .read_text(encoding="utf-8"))
+        assert "/v1" + rec["path"] == URL
+        r = client.post(URL, content=base64.b64decode(rec["body_b64"]),
+                        headers={"content-type": rec["content_type"]})
+        assert r.status_code == 200, r.text
+        assert r.headers["content-type"] == "audio/wav"
+        assert synth.calls[0]["text"] == "Hello from the SDK."
+        assert synth.calls[0]["model"].name == "voice-1"
+
+
+def test_openapi_describes_both_request_bodies(home):
+    schema = _tts_app(home).openapi()
+    content = schema["paths"][URL]["post"]["requestBody"]["content"]
+    assert content["application/json"]["schema"]["required"] == ["input"]
+    assert "voice_file" in content["multipart/form-data"]["schema"]["properties"]
+
+
 class TestKernelOriginGate:
     """On the real kernel app in open mode the OpenAI SDK (no Origin, any bearer)
     and a local app are served; a non-local page is refused before any work."""
