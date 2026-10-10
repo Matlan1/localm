@@ -454,5 +454,6 @@ def test_a_job_never_downloads_models_and_says_how_to_get_them(monkeypatch, no_c
     ok, msg = native.ensure_available(_s())
     assert ok is False
     assert "not downloaded" in msg and "localm setup-music" in msg and "Music page" in msg
+    assert "ACE-Step text encoder, diffusion, VAE and planner models are not" in msg
     size = sum(models.DEFAULT_SIZES.values()) / 1024 ** 3
     assert f"({size:.1f} GB)" in msg

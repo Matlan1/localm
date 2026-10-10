@@ -1904,7 +1904,7 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("native_dit", ("native", "dit"), "", Widget.TEXT,
                "Native diffusion model",
                "ACE-Step diffusion model (registered name or file path). Blank uses the "
-               "default, downloaded on first use.",
+               "default, which localm setup-music or the Music page downloads.",
                plugins=_MUSIC_ONLY, admin_only=True),
     MediaField("native_text_encoder", ("native", "text_encoder"), "", Widget.TEXT,
                "Native text encoder",

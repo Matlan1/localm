@@ -73,8 +73,12 @@ class ModelError(RuntimeError):
     default could not be pulled."""
 
 
+LABELS = {"text_encoder": "text encoder", "dit": "diffusion", "vae": "VAE",
+          "lm": "planner"}
+
+
 def _label(component: str) -> str:
-    return component.replace("_", " ")
+    return LABELS.get(component, component.replace("_", " "))
 
 
 def default_names(component: str) -> list[str]:
@@ -226,7 +230,8 @@ def resolve_models(native_cfg: dict, *, use_lm: bool = True, pull_missing: bool 
             if arch != ARCHITECTURES[comp]:
                 raise ModelError(
                     f"the configured music {_label(comp)} model '{shown}' is not an "
-                    f"ACE-Step {_label(comp)} (its architecture is {arch or 'unreadable'}, "
+                    f"ACE-Step {_label(comp)} model (its architecture is "
+                    f"{arch or 'unreadable'}, "
                     f"expected {ARCHITECTURES[comp]})")
             paths[comp] = p
             continue
@@ -242,12 +247,15 @@ def resolve_models(native_cfg: dict, *, use_lm: bool = True, pull_missing: bool 
             p = find_default(comp)
             if p is None:
                 raise ModelError(f"{spec} downloaded but is not in the model library as an "
-                                 f"ACE-Step {_label(comp)}")
+                                 f"ACE-Step {_label(comp)} model")
         paths[comp] = p
     if not_downloaded:
         size = sum(DEFAULT_SIZES[c] for c in not_downloaded) / 1024 ** 3
+        labels = [_label(c) for c in not_downloaded]
+        named = (", ".join(labels[:-1]) + " and " + labels[-1]) if len(labels) > 1 \
+            else labels[0]
         raise ModelError(
-            f"the default ACE-Step {', '.join(_label(c) for c in not_downloaded)} "
+            f"the default ACE-Step {named} "
             f"model{'s are' if len(not_downloaded) > 1 else ' is'} not downloaded "
             f"({size:.1f} GB): run 'localm setup-music', or generate from the Music "
             "page, which offers the download")

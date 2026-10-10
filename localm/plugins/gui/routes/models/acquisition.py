@@ -285,7 +285,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             from localm.plugins.builtin.music.backends import native
             st = native.status(s)
             configured = s.get("native") or {}
-            unresolved = [c.replace("_", " ") for c, v in st["models"].items()
+            from localm.media.koboldcpp.models import LABELS
+            unresolved = [LABELS.get(c, c) for c, v in st["models"].items()
                           if v is None and configured.get(c)]
             warning = (f"Configured music models not found: {', '.join(unresolved)}."
                        if unresolved else None)
