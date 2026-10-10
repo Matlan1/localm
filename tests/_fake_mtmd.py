@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from localm.inference.backends.llamacpp import mtmd as lmtmd
 
 MARKER = "<__media__>"
-_TEXT, _IMAGE = 0, 1
+_TEXT, _IMAGE, _AUDIO = 0, 1, 2
 
 
 def word_token(word: str) -> int:
@@ -49,7 +49,8 @@ class FakeKV:
 class FakeMtmdLib:
     """mtmd as MtmdContext sees it. Text between markers becomes one text chunk
     of word tokens; each image becomes *slices* media chunks of *image_tokens*
-    tokens and *image_pos* positions, carrying the bitmap's id."""
+    tokens and *image_pos* positions, carrying the bitmap's id. Each audio
+    bitmap becomes *audio_segments* audio chunks of the same size."""
 
     def __init__(self, kv: FakeKV, *, image_tokens=4, image_pos=None, slices=1,
                  n_embd=3):
@@ -57,7 +58,10 @@ class FakeMtmdLib:
         self.image_tokens = image_tokens
         self.image_pos = image_tokens if image_pos is None else image_pos
         self.slices = slices
+        self.audio_segments = 1
         self.n_embd = n_embd
+        self.localm_has_audio_api = True
+        self.audio_bitmaps = []          # (n_samples, pcm bytes) per audio bitmap
         self.rc_tokenize = 0
         self.fail_encode = False
         self.fail_decode = False
@@ -80,6 +84,14 @@ class FakeMtmdLib:
     def mtmd_bitmap_init(self, w, h, rgb):
         handle = self._handle()
         self.bitmaps[handle] = {"w": w, "h": h, "rgb": bytes(rgb), "id": b""}
+        return handle
+
+    def mtmd_bitmap_init_from_audio(self, n_samples, samples):
+        handle = self._handle()
+        pcm = bytes(samples)
+        self.bitmaps[handle] = {"audio": True, "n": n_samples, "rgb": pcm, "id": b"",
+                                "w": n_samples, "h": 1}
+        self.audio_bitmaps.append((n_samples, pcm))
         return handle
 
     def mtmd_bitmap_set_id(self, bmp, id_bytes):
@@ -116,6 +128,11 @@ class FakeMtmdLib:
                 self._add_chunk(lst, type=_TEXT, tokens=tokens)
             if i < n_bitmaps:
                 bmp = self.bitmaps[arr[i]]
+                if bmp.get("audio"):
+                    for s in range(self.audio_segments):
+                        content = (zlib.crc32(bmp["rgb"]), bmp["w"], bmp["h"], s)
+                        self._add_chunk(lst, type=_AUDIO, id=bmp["id"], content=content)
+                    continue
                 for s in range(self.slices):
                     content = (zlib.crc32(bmp["rgb"]), bmp["w"], bmp["h"], s)
                     self._add_chunk(lst, type=_IMAGE, id=bmp["id"], content=content)
@@ -178,12 +195,16 @@ class FakeMtmdLib:
         pass
 
 
-def make_mtmd_context(lib: FakeMtmdLib, *, on_gpu=True):
-    """A real MtmdContext with its native __init__ bypassed, driving *lib*."""
+def make_mtmd_context(lib: FakeMtmdLib, *, on_gpu=True, vision=True, audio_rate=0):
+    """A real MtmdContext with its native __init__ bypassed, driving *lib*.
+    *audio_rate* non-zero makes the projector take audio at that rate."""
     ctx = lmtmd.MtmdContext.__new__(lmtmd.MtmdContext)
     ctx._m = lib
     ctx._ctx = 0x77
     ctx.on_gpu = on_gpu
+    ctx.supports_vision = vision
+    ctx.supports_audio = bool(audio_rate)
+    ctx.audio_sample_rate = audio_rate
     ctx.marker = MARKER
     ctx._input_text_class = lmtmd._MtmdInputTextV2
     ctx._n_embd_inp = lib.n_embd

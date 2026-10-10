@@ -29,7 +29,7 @@ import localm.inference.http_server as _hs
 from localm.inference.backends.base import (
     EmbedBatchTooLargeError, GrammarUnsupportedError, InvalidGrammarError,
     PretokenizerUnsafeInputError, RerankerHeadMissingError, RerankInputError,
-    TriggerValidatorUnavailableError, messages_contain_image,
+    TriggerValidatorUnavailableError, messages_contain_audio, messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
@@ -184,13 +184,35 @@ def register(app: FastAPI, ctx) -> None:
                     # that cause rather than "text-only".
                     from localm.model_manager import vision_input_guidance
                     backend = getattr(engine, "_backend", None)
-                    mmproj_failed = bool(getattr(backend, "mmproj_path", None))
+                    audio_only = getattr(engine, "supports_audio", False) is True
+                    mmproj_failed = (bool(getattr(backend, "mmproj_path", None))
+                                     and not audio_only)
                     active_model_path = getattr(backend, "model_path", None)
                     detail = vision_input_guidance(
                         mmproj_failed=mmproj_failed,
-                        active_model_path=active_model_path)
+                        active_model_path=active_model_path,
+                        audio_only=audio_only)
                     if route.load_errors:
                         detail += (" An installed model that can read images "
+                                   "could not be loaded: "
+                                   + "; ".join(route.load_errors))
+                    raise HTTPException(400, detail)
+
+            # Reject audio input on a model without an audio encoder the same way.
+            if messages_contain_audio(messages) and getattr(engine, "supports_audio", False) is not True:
+                if not engine.loaded and engine.can_be_multimodal:
+                    say(LOADING_MODEL_STATUS)
+                    loop = asyncio.get_running_loop()
+                    async with sem:
+                        await loop.run_in_executor(None, engine.load)
+                if getattr(engine, "supports_audio", False) is not True:
+                    from localm.model_manager import audio_input_guidance
+                    backend = getattr(engine, "_backend", None)
+                    projector_failed = (bool(getattr(backend, "mmproj_path", None))
+                                        and engine.supports_images is not True)
+                    detail = audio_input_guidance(projector_failed=projector_failed)
+                    if route.load_errors:
+                        detail += (" An installed model that can take audio "
                                    "could not be loaded: "
                                    + "; ".join(route.load_errors))
                     raise HTTPException(400, detail)

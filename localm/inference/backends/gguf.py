@@ -208,6 +208,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._runner = None
         # True once loaded, from the child's load response.
         self._supports_images = False
+        self._supports_audio = False
         self._supports_mtp = False
         # True once loaded with an encoder-decoder model (T5), from the child's
         # load response.
@@ -316,9 +317,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     @property
     def can_be_multimodal(self) -> bool:
-        """A vision GGUF needs an mmproj; only then is it worth loading the model
-        to discover whether vision actually works (the HTTP route uses this to load
-        before deciding to reject an image)."""
+        """A vision or audio GGUF needs an mmproj; only then is it worth loading
+        the model to discover whether its projector actually works (the HTTP route
+        uses this to load before deciding to reject an image or audio clip)."""
         return bool(self.mmproj_path)
 
     @property
@@ -329,6 +330,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         than read live off a real LlamaCpp instance - that instance now lives
         in the isolated worker process, not here."""
         return bool(self.loaded and self._supports_images)   # a dead worker has no vision
+
+    @property
+    def supports_audio(self) -> bool:
+        """True once loaded with an mmproj whose projector has an audio encoder,
+        cached from the child's load response like :attr:`supports_images`."""
+        return bool(self.loaded and self._supports_audio)
 
     def _reset_mtp_call(self) -> None:
         """Clear the per-call MTP figures before a call, so a call that ends
@@ -760,6 +767,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         self._loaded = True
         self._supports_images = bool(meta.get("supports_images"))
+        self._supports_audio = bool(meta.get("supports_audio"))
         self._supports_mtp = bool(meta.get("supports_mtp"))
         reported = meta.get("adapters")
         self.applied_adapters = list(reported) if isinstance(reported, list) else []
@@ -1152,12 +1160,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
     ) -> Iterator[str]:
-        # Image input: with an mmproj loaded it flows through to
-        # create_chat_completion's image path. A text-only model refuses the image
-        # rather than dropping it.
-        from .base import IMAGE_UNSUPPORTED_MESSAGE, UnsupportedInputError, messages_contain_image
+        # Image and audio input: with an mmproj loaded they flow through to
+        # create_chat_completion's media path. A model without the encoder
+        # refuses the input rather than dropping it.
+        from .base import (
+            AUDIO_UNSUPPORTED_MESSAGE, IMAGE_UNSUPPORTED_MESSAGE, UnsupportedInputError,
+            messages_contain_audio, messages_contain_image)
         if messages_contain_image(messages) and not self.supports_images:
             raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+        if messages_contain_audio(messages) and not self.supports_audio:
+            raise UnsupportedInputError(AUDIO_UNSUPPORTED_MESSAGE)
 
         # Once a native grammar fault has been seen, skip grammar up-front and
         # generate unconstrained, so a grammar request never breaks chat.

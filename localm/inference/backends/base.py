@@ -36,6 +36,13 @@ class VisionInputError(UnsupportedInputError):
     """
 
 
+class AudioInputError(UnsupportedInputError):
+    """Raised when an attached audio clip cannot be used: it is malformed,
+    undecodable, in a format no installed decoder reads, or outside the
+    accepted size and duration limits. The message never contains the clip's
+    data. Reported per request; the GGUF worker keeps serving."""
+
+
 class ImageDecodeUnavailable(UnsupportedInputError):
     """Raised when an image cannot be decoded because Pillow is not installed,
     as opposed to the image or the model being at fault.
@@ -278,10 +285,23 @@ def image_unsupported_message(processor_error: Optional[str] = None) -> str:
     )
 
 
+# Shown when an audio clip is attached to a model that cannot take audio input.
+AUDIO_UNSUPPORTED_MESSAGE = (
+    "This model cannot accept audio input, so the attached audio would be "
+    "ignored. To send audio, load a GGUF model whose projector (.mmproj) has an "
+    "audio encoder, or a HuggingFace-format model with an audio processor."
+)
+
 # Emitted via on_status when a GPU vision encode fails and the request is
 # retried on CPU.
 VISION_CPU_FALLBACK_STATUS = (
     "GPU vision encode failed; retrying on CPU (this may take longer)..."
+)
+
+# Emitted via on_status when a GPU audio encode fails and the request is
+# retried on CPU.
+AUDIO_CPU_FALLBACK_STATUS = (
+    "GPU audio encode failed; retrying on CPU (this may take longer)..."
 )
 
 # Emitted via on_status while a model is loaded (or reloaded after an unload)
@@ -362,6 +382,18 @@ def messages_contain_image(messages: list[dict]) -> bool:
     return False
 
 
+def messages_contain_audio(messages: list[dict]) -> bool:
+    """True if any message carries an ``input_audio`` content part, in the
+    plain-dict OpenAI message shape used between the server and the backends."""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "input_audio":
+                    return True
+    return False
+
+
 _EMPTY_THINK_BLOCK = "<think>\n\n</think>\n\n"
 
 
@@ -399,6 +431,12 @@ class BaseBackend(ABC):
     def supports_images(self) -> bool:
         """True when this backend, in its current state, can actually see
         images. Default False; multimodal backends override this."""
+        return False
+
+    @property
+    def supports_audio(self) -> bool:
+        """True when this backend, in its current state, can actually take
+        audio input. Default False; multimodal backends override this."""
         return False
 
     @property

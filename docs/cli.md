@@ -32,6 +32,7 @@ localm run mymodel --temperature 0.5      # sampling temperature
 localm run mymodel --ctx 8192             # context window (GGUF only)
 localm run mymodel --gpu-layers 99        # GPU layers (GGUF only; 99=all)
 localm run mymodel --image photo.jpg --prompt "Describe this image."
+localm run asr-model --audio clip.wav --prompt "Transcribe this."
 localm run mymodel --debug                # write debug log
 localm run mymodel --mode privacy         # privacy/log/full persistence mode
 localm run mymodel --pin-model            # always answer with mymodel

@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
+  `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
+  same from the command line. A GGUF model whose projector has an audio encoder (for example
+  Qwen3-ASR) transcribes the clip or answers questions about it. WAV is always read and other
+  formats need the voice extra; the clip is converted to the rate the model expects. Audio
+  sent to a model that cannot take it is routed to an installed model that can, or refused
+  with a message saying which model to use, instead of being dropped. Model listings report
+  `audio_input`, and a projector that reads only audio no longer makes a model count as
+  able to see images.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the

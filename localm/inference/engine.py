@@ -526,6 +526,12 @@ class Engine:
         return getattr(self._backend, "supports_images", False)
 
     @property
+    def supports_audio(self) -> bool:
+        """True when the active backend can actually take audio input. Like
+        :attr:`supports_images`, only accurate once the model is loaded."""
+        return getattr(self._backend, "supports_audio", False)
+
+    @property
     def can_be_multimodal(self) -> bool:
         """True when the backend class could support images, so it is worth
         loading the model to find out. False for text-only backends (GGUF)."""

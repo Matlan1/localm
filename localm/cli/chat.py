@@ -90,9 +90,11 @@ class _TurnRouter:
         needs = cr.request_needs(messages, min_context=comp)
         known = dict(self._known)
         cur = self._engines.get(self.model_name)
-        if (cur is not None and getattr(cur, "loaded", False)
-                and getattr(cur, "supports_images", False) is True):
-            known[caps.VISION] = True
+        if cur is not None and getattr(cur, "loaded", False):
+            if getattr(cur, "supports_images", False) is True:
+                known[caps.VISION] = True
+            if getattr(cur, "supports_audio", False) is True:
+                known[caps.AUDIO] = True
         decision = cr.plan_route(self.model_name, needs, pinned=self.pinned,
                                  resident=[self.current], reg=reg,
                                  current_known=known, mode=cr.configured_mode())
@@ -160,7 +162,8 @@ class _TurnRouter:
                         f"{', '.join(self.failed_to_load)}")
             return None
         gaps = sorted((self.last_decision.gaps if self.last_decision else {}) or {})
-        why = {"vision": "reading images", "tool_use": "structured tool calls",
+        why = {"vision": "reading images", "audio_input": "listening to audio",
+               "tool_use": "structured tool calls",
                "reasoning": "reasoning",
                "context_length": "a longer conversation"}
         needs = ", ".join(why.get(g, g) for g in gaps) or "this request"
@@ -203,7 +206,8 @@ def _build_cli_engine(name: str, *, n_ctx=None, n_gpu_layers=None, device=None,
 def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
                               is_registered: bool, engine) -> None:
     """Record an explicit --mmproj onto the registry entry once the backend has
-    CONFIRMED supports_images for this load, so a later `localm run model` -
+    CONFIRMED supports_images or supports_audio for this load, so a later
+    `localm run model` -
     including the one vision_input_guidance itself suggests - keeps seeing it
     instead of losing it the moment the flag is left off.
 
@@ -213,7 +217,8 @@ def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
     if not (mmproj and is_registered):
         return
     backend = getattr(engine, "_backend", None)
-    if not getattr(backend, "supports_images", False):
+    if not (getattr(backend, "supports_images", False)
+            or getattr(backend, "supports_audio", False)):
         return
     from rich.markup import escape
 
@@ -244,6 +249,10 @@ def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
 @click.option("--device",             default=None,  help="HF device override (cuda / cpu).")
 @click.option("--image", "images",   multiple=True, type=click.Path(exists=True),
               help="Local image file to include (repeat for multiple). Use with -p.")
+@click.option("--audio", "audios",   multiple=True, type=click.Path(exists=True),
+              help="Local audio file to include (WAV; other formats need the voice "
+                   "extra). Repeat for multiple. Use with -p on a model whose "
+                   "projector takes audio.")
 @click.option("--debug", is_flag=True,
               help="Write a debug log (<data dir>/logs/), capture native llama.cpp "
                    "stderr, and record raw model output (with markers) in the log.")
@@ -263,7 +272,7 @@ def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
                    "conversation than it was trained for) is answered by an "
                    "installed model that can, and says so.")
 def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
-        mmproj, device, images, debug, mode, no_server, pin_model):
+        mmproj, device, images, audios, debug, mode, no_server, pin_model):
     """Run a model - interactive chat or single prompt.
 
     \b
@@ -276,6 +285,10 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     Image input (multimodal models):
       localm run gemma4-12b -p "What is in this photo?" --image photo.jpg
       localm run gemma4-12b -p "Compare" --image a.png --image b.png
+
+    \b
+    Audio input (models whose projector has an audio encoder):
+      localm run qwen3-asr -p "Transcribe this." --audio clip.wav
 
     \b
     In interactive mode, attach images with the /image command:
@@ -478,7 +491,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             engine, model, pinned=pin_model,
             build=lambda name: _build_cli_engine(
                 name, n_gpu_layers=gpu_layers, device=device),
-            known={"vision": True} if mmproj_path else None)
+            known=_projector_known(mmproj_path))
     else:
         router = _TurnRouter(engine, getattr(engine, "_model", None) or model,
                              pinned=pin_model)
@@ -512,7 +525,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         _first = []
         if system:
             _first.append({"role": "system", "content": system})
-        _first.append(_build_user_message(prompt, list(images)))
+        _first.append(_build_user_message(prompt, list(images), list(audios)))
         if router.plan(_first).routed:
             engine = router.engine_for(_first)
             if router.current != model:
@@ -530,7 +543,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 messages = []
                 if system:
                     messages.append({"role": "system", "content": system})
-                messages.append(_build_user_message(prompt, list(images)))
+                messages.append(_build_user_message(prompt, list(images), list(audios)))
                 audit.user(prompt)
                 stream_opts = dict(gen_opts)
                 if not router.in_process:
@@ -567,9 +580,11 @@ def _withdraw(messages: list, msg: dict) -> None:
                       "you can keep chatting)[/dim]")
 
 
-def _build_user_message(text: str, image_paths: list) -> dict:
-    """Build a user message dict, embedding local images as base64 data-URIs."""
-    if not image_paths:
+def _build_user_message(text: str, image_paths: list,
+                        audio_paths: Optional[list] = None) -> dict:
+    """Build a user message dict, embedding local images as base64 data-URIs and
+    local audio files as ``input_audio`` parts."""
+    if not image_paths and not audio_paths:
         return {"role": "user", "content": text}
 
     parts: list = []
@@ -578,9 +593,65 @@ def _build_user_message(text: str, image_paths: list) -> dict:
             "type": "image_url",
             "image_url": {"url": _file_to_data_uri(path)},
         })
+    for path in audio_paths or ():
+        parts.append({"type": "input_audio", "input_audio": _file_to_input_audio(path)})
     if text:
         parts.append({"type": "text", "text": text})
     return {"role": "user", "content": parts}
+
+
+def _file_to_input_audio(path: str) -> dict:
+    """Read a local audio file into an ``input_audio`` payload: base64 data and
+    a format named after the file's extension (``"wav"`` when it has none)."""
+    import base64
+    p = Path(path)
+    fmt = p.suffix.lower().lstrip(".") or "wav"
+    return {"data": base64.b64encode(p.read_bytes()).decode(), "format": fmt}
+
+
+def _projector_known(mmproj_path: Optional[str]) -> Optional[dict]:
+    """The capabilities the projector at *mmproj_path* confirms for routing:
+    vision and audio input as its header records them, vision alone when the
+    header cannot be read, None without a projector."""
+    if not mmproj_path:
+        return None
+    from localm.model_manager import capabilities as caps
+    from localm.model_manager import gguf_mmproj_modalities
+    modalities = gguf_mmproj_modalities(Path(mmproj_path))
+    if modalities is None:
+        return {caps.VISION: True}
+    known = {}
+    if modalities["vision"]:
+        known[caps.VISION] = True
+    if modalities["audio"]:
+        known[caps.AUDIO] = True
+    return known or None
+
+
+def _input_refusal_text(engine, messages: list, exc: Exception) -> str:
+    """What to tell the user when *engine* refused *messages* with the
+    ``UnsupportedInputError`` *exc*: the error itself for an audio clip that
+    could not be used, or for audio a model that takes audio could not process;
+    audio guidance when the message carries audio the model cannot take;
+    otherwise vision guidance."""
+    from localm.inference.backends.base import (
+        AudioInputError, messages_contain_audio, messages_contain_image)
+    from localm.model_manager import audio_input_guidance, vision_input_guidance
+    backend = getattr(engine, "_backend", None)
+    has_projector = bool(getattr(backend, "mmproj_path", None))
+    sees = getattr(engine, "supports_images", False) is True
+    hears = getattr(engine, "supports_audio", False) is True
+    if isinstance(exc, AudioInputError):
+        return str(exc)
+    if messages_contain_audio(messages):
+        if hears and not messages_contain_image(messages):
+            return str(exc)
+        if not hears and (sees or not messages_contain_image(messages)):
+            return audio_input_guidance(projector_failed=has_projector and not sees)
+    return vision_input_guidance(
+        mmproj_failed=has_projector and not hears,
+        active_model_path=getattr(backend, "model_path", None),
+        audio_only=hears and not sees)
 
 
 
@@ -737,15 +808,10 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     except ChatTemplateMissingError as e:
         console.print(f"\n[red]{escape(str(e))}[/red]")
         sys.exit(1)
-    except UnsupportedInputError:
+    except UnsupportedInputError as e:
         # Capability-aware guidance instead of a flat "can't do that": name a
-        # vision model this install has, or how to get one.
-        from localm.model_manager import vision_input_guidance
-        backend = getattr(engine, "_backend", None)
-        mmproj_failed = bool(getattr(backend, "mmproj_path", None))
-        active_model_path = getattr(backend, "model_path", None)
-        guidance = vision_input_guidance(
-            mmproj_failed=mmproj_failed, active_model_path=active_model_path)
+        # model this install has that can take the input, or how to get one.
+        guidance = _input_refusal_text(engine, messages, e)
         console.print(f"\n[yellow]{escape(guidance)}[/yellow]")
         return ""
     except RuntimeError as e:
@@ -891,15 +957,11 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             console.print(f"\n[red]{escape(str(e))}[/red]")
             _withdraw(messages, msg)
             continue
-        except UnsupportedInputError:
-            # The answering model cannot read the attached image. The message is
-            # withdrawn from the conversation.
-            from localm.model_manager import vision_input_guidance
-            backend = getattr(engine, "_backend", None)
-            console.print("\n[yellow]" + escape(vision_input_guidance(
-                mmproj_failed=bool(getattr(backend, "mmproj_path", None)),
-                active_model_path=getattr(backend, "model_path", None)))
-                + "[/yellow]")
+        except UnsupportedInputError as e:
+            # The answering model cannot take the attached image or audio. The
+            # message is withdrawn from the conversation.
+            console.print("\n[yellow]" + escape(_input_refusal_text(engine, messages, e))
+                          + "[/yellow]")
             _withdraw(messages, msg)
             continue
         except Exception as e:

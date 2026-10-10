@@ -1764,10 +1764,15 @@ class LlamaCpp:
                     if captured is not None:
                         _mtmd_detail = captured.tail()
                     raise
-            if mt.supports_vision:
+            if mt.supports_vision or mt.supports_audio:
                 self._mtmd = mt
             else:
                 mt.free()
+                from localm.debuglog import logger
+                logger.warning(
+                    "mmproj %s has neither a vision nor an audio encoder this "
+                    "runtime can use; model stays text-only",
+                    os.path.basename(mmproj_path))
         except Exception as exc:
             from localm.debuglog import logger
             suffix = f"\n{_mtmd_detail}" if _mtmd_detail else ""
@@ -1970,7 +1975,14 @@ class LlamaCpp:
     @property
     def supports_images(self) -> bool:
         """True when an mmproj is loaded and the projector supports vision."""
-        return getattr(self, "_mtmd", None) is not None
+        mt = getattr(self, "_mtmd", None)
+        return mt is not None and bool(getattr(mt, "supports_vision", True))
+
+    @property
+    def supports_audio(self) -> bool:
+        """True when an mmproj is loaded and the projector supports audio input."""
+        mt = getattr(self, "_mtmd", None)
+        return mt is not None and bool(getattr(mt, "supports_audio", False))
 
     def close(self) -> None:
         """Release GPU/CPU memory held by this instance.
@@ -2825,14 +2837,27 @@ class LlamaCpp:
         yield from reply
 
     @staticmethod
-    def _messages_with_markers(messages: List[Dict], marker: str):
-        """Return (text_messages, images): a copy of *messages* where each image
-        content part is replaced by *marker* in the text, plus the decoded RGB
-        images (``(w, h, rgb_bytes)``) in marker order. The templated text_messages
-        carry the marker so mtmd_tokenize can splice each image in at its place."""
-        from localm.inference.media import decode_image_url
+    def _messages_with_markers(messages: List[Dict], marker: str,
+                               audio_rate: int = 0):
+        """Return (text_messages, media): a copy of *messages* where each image
+        and audio content part is replaced by *marker* in the text, plus the
+        decoded media in marker order: an image as ``(w, h, rgb_bytes)``, an
+        ``input_audio`` part as an ``AudioClip`` of mono samples at *audio_rate*
+        Hz. The templated text_messages carry the marker so mtmd_tokenize can
+        splice each item in at its place.
+
+        Raises ``UnsupportedInputError`` with the audio-unsupported message for
+        an audio part when *audio_rate* is 0, ``AudioInputError`` for an audio
+        clip that cannot be decoded, and ``VisionInputError`` for an image that
+        cannot be decoded or fetched."""
+        from localm.inference.backends.base import (
+            AUDIO_UNSUPPORTED_MESSAGE, UnsupportedInputError, VisionInputError)
+        from localm.inference.media import decode_audio_clip, decode_image_url
+        from localm.netpolicy import NetworkPolicyError
+
+        from .mtmd import AudioClip
         out: List[Dict] = []
-        images: List = []
+        media: List = []
         for msg in messages:
             content = msg.get("content")
             if not isinstance(content, list):
@@ -2844,15 +2869,33 @@ class LlamaCpp:
                     continue
                 if part.get("type") == "image_url":
                     url = (part.get("image_url") or {}).get("url", "")
-                    pil = decode_image_url(url).convert("RGB")
-                    images.append((pil.width, pil.height, pil.tobytes()))
+                    try:
+                        pil = decode_image_url(url).convert("RGB")
+                    except UnsupportedInputError:
+                        raise
+                    except NetworkPolicyError as e:
+                        raise VisionInputError(
+                            f"The attached image could not be fetched: {e}") from e
+                    except Exception as e:
+                        raise VisionInputError(
+                            f"The attached image could not be read "
+                            f"({type(e).__name__}).") from e
+                    media.append((pil.width, pil.height, pil.tobytes()))
+                    parts.append(marker)
+                elif part.get("type") == "input_audio":
+                    if not audio_rate:
+                        raise UnsupportedInputError(AUDIO_UNSUPPORTED_MESSAGE)
+                    spec = part.get("input_audio") or {}
+                    samples = decode_audio_clip(
+                        spec.get("data", ""), spec.get("format", "wav"), audio_rate)
+                    media.append(AudioClip(samples.tobytes(), len(samples)))
                     parts.append(marker)
                 elif part.get("type") == "text":
                     parts.append(part.get("text", ""))
             new_msg = dict(msg)
             new_msg["content"] = "\n".join(p for p in parts if p)
             out.append(new_msg)
-        return out, images
+        return out, media
 
     def _generate_image(
         self,
@@ -2865,9 +2908,10 @@ class LlamaCpp:
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ) -> Iterator[int]:
-        """Yield generated token ids for a chat whose prompt includes image(s).
+        """Yield generated token ids for a chat whose prompt includes image(s)
+        or audio clip(s).
 
-        The image+text prompt is evaluated into the KV cache by
+        The media+text prompt is evaluated into the KV cache by
         :meth:`_prefill_vision`, which keeps the part of the cache an earlier
         image turn left that still matches; sampling then continues exactly like
         the text loop. Grammar is not applied on the image path. The text path's
@@ -2887,11 +2931,15 @@ class LlamaCpp:
                 raise RuntimeError("vision is not available on this model")
 
             from localm.debuglog import logger
-            # An image turn never speculates: this loop has no draft context, and
-            # upstream's own driver skips vision batches for the same reason - the
-            # draft head reads its hidden state from a batch's embd slot and image
-            # embeddings arrive in that same slot.
-            self.mtp_skipped = ("image" if self._mtp_ctx_ptr is not None and self._mtp_usable
+            # A media turn never speculates: this loop has no draft context, and
+            # upstream's own driver skips media batches for the same reason - the
+            # draft head reads its hidden state from a batch's embd slot and
+            # media embeddings arrive in that same slot.
+            from localm.inference.backends.base import (
+                messages_contain_audio, messages_contain_image)
+            skip_reason = ("audio" if messages_contain_audio(messages)
+                           and not messages_contain_image(messages) else "image")
+            self.mtp_skipped = (skip_reason if self._mtp_ctx_ptr is not None and self._mtp_usable
                                 else "")
             self.mtp_active_this_call = False
             self.mtp_call_status = ""
@@ -2899,7 +2947,7 @@ class LlamaCpp:
             self.mtp_accepted = 0
             self.mtp_steps = 0
             self.mtp_paused_steps = 0
-            self._draft_source().skip_call("image")
+            self._draft_source().skip_call(skip_reason)
             logger.info("gguf generate (vision): prefill starting")
             _t0 = time.monotonic()
             tokens_generated = 0
@@ -2907,7 +2955,8 @@ class LlamaCpp:
             sampler = None
             try:
                 text_messages, images = self._messages_with_markers(
-                    messages, self._mtmd.marker)
+                    messages, self._mtmd.marker,
+                    getattr(self._mtmd, "audio_sample_rate", 0))
                 prompt, fallback_reason = _apply_model_template(self._model_ptr, text_messages)
                 if fallback_reason:
                     self.chat_template_fallback_reason = fallback_reason
@@ -2958,8 +3007,13 @@ class LlamaCpp:
                                 if not self._mtmd.retry_on_cpu():
                                     raise
                                 if on_status:
-                                    from localm.inference.backends.base import VISION_CPU_FALLBACK_STATUS
-                                    on_status(VISION_CPU_FALLBACK_STATUS)
+                                    from localm.inference.backends.base import (
+                                        AUDIO_CPU_FALLBACK_STATUS, VISION_CPU_FALLBACK_STATUS)
+                                    kinds = {c.kind for c in vprompt.chunks
+                                             if c.tokens is None}
+                                    on_status(AUDIO_CPU_FALLBACK_STATUS
+                                              if kinds == {"audio"}
+                                              else VISION_CPU_FALLBACK_STATUS)
                                 vprompt.free()
                                 vprompt = self._mtmd.tokenize(
                                     prompt, images, add_special=add_special)
@@ -2969,11 +3023,12 @@ class LlamaCpp:
                         finally:
                             vprompt.free()
 
+                n_audio = sum(1 for m in images if not isinstance(m, tuple))
                 logger.info(
                     "gguf generate (vision): prefill complete in %.2fs, "
-                    "%d image(s), %d image chunk(s) encoded, %d of %d position(s) "
-                    "reused", time.monotonic() - _t0, len(images),
-                    encoded, reused, pos)
+                    "%d image(s), %d audio clip(s), %d media chunk(s) encoded, "
+                    "%d of %d position(s) reused", time.monotonic() - _t0,
+                    len(images) - n_audio, n_audio, encoded, reused, pos)
                 if on_status:
                     on_status("Generating response...")
 
@@ -3066,8 +3121,9 @@ class LlamaCpp:
         is not encoded again, and the cache then keeps only this prompt's images.
 
         Emits ``"Encoding image (GPU)..."`` or ``"Encoding image (CPU)..."``
-        through *on_status* when an image has to be encoded, else
-        ``"Processing prompt..."``. Raises ``MtmdGpuEncodeFailed`` or
+        through *on_status* when an image has to be encoded,
+        ``"Encoding audio (GPU)..."`` or ``"Encoding audio (CPU)..."`` when only
+        audio has to be, else ``"Processing prompt..."``. Raises ``MtmdGpuEncodeFailed`` or
         ``VisionInputError`` when evaluation fails, leaving ``_vision_kv`` None.
         Caller must hold ``_gen_lock``."""
         from localm.inference.backends.base import VisionInputError
@@ -3100,16 +3156,17 @@ class LlamaCpp:
         self._vision_kv = None
 
         if on_status:
-            encoding = any(
-                chunk.tokens is None and start >= keep
-                and not self._mtmd.has_embedding(chunk.key)
-                for chunk, start in zip(vprompt.chunks, starts))
+            encoding = {
+                chunk.kind for chunk, start in zip(vprompt.chunks, starts)
+                if chunk.tokens is None and start >= keep
+                and not self._mtmd.has_embedding(chunk.key)}
+            noun = "audio" if encoding == {"audio"} else "image"
             if not encoding:
                 on_status("Processing prompt...")
             elif self._mtmd.on_gpu:
-                on_status("Encoding image (GPU)...")
+                on_status(f"Encoding {noun} (GPU)...")
             else:
-                on_status("Encoding image (CPU)...")
+                on_status(f"Encoding {noun} (CPU)...")
 
         n_ctx = api.llama_n_ctx(self._ctx_ptr)
         n_batch = min(n_ctx, 2048) if n_ctx else 512
@@ -4277,9 +4334,14 @@ class LlamaCpp:
         # Otherwise keep add_bos=True so the tokenizer prepends BOS normally.
         bos_markers = ("<bos>", "<s>", "﻿")
         add_bos = not any(prompt.startswith(m) for m in bos_markers)
-        from localm.inference.backends.base import messages_contain_image
+        from localm.inference.backends.base import (
+            AUDIO_UNSUPPORTED_MESSAGE, UnsupportedInputError, messages_contain_audio,
+            messages_contain_image)
+        has_audio = messages_contain_audio(messages)
+        if has_audio and not self.supports_audio:
+            raise UnsupportedInputError(AUDIO_UNSUPPORTED_MESSAGE)
         going_to_vision = (getattr(self, "_mtmd", None) is not None
-                           and messages_contain_image(messages))
+                           and (has_audio or messages_contain_image(messages)))
         if going_to_vision:
             untrusted_ranges = ()
             if any(untrusted_spans_of(m.get("content")) for m in messages):

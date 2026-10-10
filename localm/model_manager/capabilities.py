@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """One capability-signal system for every registered model.
 
-Answers "can this model do X" for the four capabilities routing consumes:
-vision, tool use, reasoning, and context length. Every answer is a TRI-STATE -
+Answers "can this model do X" for the capabilities routing consumes:
+vision, audio input, tool use, reasoning, and context length. Every answer is a TRI-STATE -
 ``True`` / ``False`` / ``None`` for the booleans, an ``int`` / ``None`` for
 context length - where ``None`` means NOT INSPECTED, never "no".
 
@@ -18,6 +18,8 @@ vision           LIVE per call, delegated to registry.model_vision_capability.
                  It depends on a SIBLING FILE (the mmproj projector) that can
                  appear, move or vanish independently of the model, so a stored
                  answer goes stale without the model itself changing.
+audio            LIVE per call, delegated to registry.model_audio_capability,
+                 for the same reason as vision.
 tool_use         PERSISTED on the registry entry at registration, read from the
                  model's own chat template.
 context_length   PERSISTED likewise, from the model's own header.
@@ -45,6 +47,7 @@ from .gguf import chat_template_tool_signal
 logger = logging.getLogger(__name__)
 
 VISION = "vision"
+AUDIO = "audio_input"
 TOOL_USE = "tool_use"
 REASONING = "reasoning"
 
@@ -52,7 +55,7 @@ REASONING = "reasoning"
 # deliberately NOT here: it is an integer whose routing question is "at least how
 # many tokens", not a yes/no, and folding it in would force every caller to
 # special-case one member of its own enumeration.
-BOOLEAN_CAPABILITIES = (VISION, TOOL_USE, REASONING)
+BOOLEAN_CAPABILITIES = (VISION, AUDIO, TOOL_USE, REASONING)
 
 CONTEXT_LENGTH = "context_length"
 
@@ -235,6 +238,9 @@ def model_capability(name: str, capability: str, *, reg: Optional[dict] = None,
     if capability == VISION:
         return _registry.model_vision_capability(name, reg=reg,
                                                  dir_cache=dir_cache)
+    if capability == AUDIO:
+        return _registry.model_audio_capability(name, reg=reg,
+                                                dir_cache=dir_cache)
     if capability == TOOL_USE:
         return model_tool_use_capability(name, reg=reg)
     if capability == REASONING:
@@ -246,7 +252,8 @@ def model_capability(name: str, capability: str, *, reg: Optional[dict] = None,
 def model_capabilities(name: str, *, reg: Optional[dict] = None,
                        dir_cache: Optional[dict] = None) -> dict:
     """Every capability of one registered model, as
-    ``{"vision": ..., "tool_use": ..., "reasoning": ..., "context_length": ...}``.
+    ``{"vision": ..., "audio_input": ..., "tool_use": ..., "reasoning": ...,
+    "context_length": ...}``.
 
     Each value keeps its own tri-state; a key is always present, so a caller
     reads ``None`` explicitly rather than inferring it from a missing key."""
