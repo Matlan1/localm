@@ -20,8 +20,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `--no-rerank`, and the query API reports whether a query was reranked. With no
   reranker installed nothing changes; if the reranker fails, the unreranked order is
   kept and the reason is shown.
-  With bge-reranker-v2-m3 or Qwen3-Reranker-0.6B (the Q8_0
-  files), the reranker's score also decides which excerpts are relevant enough to reach the
+  With the Q8_0 files of bge-reranker-v2-m3 (gpustack) or Qwen3-Reranker-0.6B (ggml-org),
+  the reranker's score also decides which excerpts are relevant enough to reach the
   chat, so a rephrased question finds its answer where the keyword and similarity check used
   to drop it, and unrelated questions still bring in nothing.
 - **Tool calling with any chat model.** `/v1/chat/completions` takes OpenAI `tools`,

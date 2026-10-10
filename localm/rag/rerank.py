@@ -31,33 +31,26 @@ class RerankPlan(NamedTuple):
     min_score: Optional[float] = None
 
 
-#: ``(model family, sha256 of the measured file, minimum relevant score)`` for
-#: the rerankers whose scores have been calibrated. Scores are only comparable
-#: within one model: bge-reranker-v2-m3 emits an unbounded logit, Qwen3-Reranker
-#: the probability of "yes".
-CALIBRATED_MIN_SCORES: tuple[tuple[str, str, float], ...] = (
-    ("bge-reranker-v2-m3",
-     "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3", -1.5),
-    ("qwen3-reranker-0.6b",
-     "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48", 0.5),
-)
+#: Minimum relevant score by the sha256 of the measured reranker file:
+#: bge-reranker-v2-m3-Q8_0.gguf from gpustack/bge-reranker-v2-m3-GGUF (an
+#: unbounded logit) and qwen3-reranker-0.6b-q8_0.gguf from
+#: ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF (the probability of "yes"). Scores
+#: are only comparable within one model.
+CALIBRATED_MIN_SCORES: dict[str, float] = {
+    "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3": -1.5,
+    "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48": 0.5,
+}
 
 
 def calibrated_min_score(name: str) -> Optional[float]:
     """The minimum relevant score for the registered reranker *name*, or None
-    when it is not a calibrated one.
-
-    A reranker is calibrated when its registered file has the sha256 of a
-    measured one, or its registered name carries a measured family together with
-    ``q8_0`` (the quantisation measured)."""
+    when its registered file is not one of the measured files in
+    ``CALIBRATED_MIN_SCORES`` (matched by sha256, whatever it is named)."""
     from localm.config import load_registry
     entry = load_registry().get(name)
-    digest = str(entry.get("sha256") or "").lower() if isinstance(entry, dict) else ""
-    lowered = name.lower()
-    for family, known, min_score in CALIBRATED_MIN_SCORES:
-        if digest == known or (family in lowered and "q8_0" in lowered):
-            return min_score
-    return None
+    if not isinstance(entry, dict):
+        return None
+    return CALIBRATED_MIN_SCORES.get(str(entry.get("sha256") or "").lower())
 
 
 def make_rerank_fn(model: Optional[str] = None) -> tuple[str, RerankFn]:

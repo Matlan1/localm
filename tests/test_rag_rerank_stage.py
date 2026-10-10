@@ -218,6 +218,7 @@ class TestScoreGate:
         hits = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=boom,
                         rerank_candidates=5, rerank_min_score=0.5)
         assert _names(hits) == ["full.txt"]
+        assert all("rerank_score" not in h for h in hits)
         assert "reranking failed (RuntimeError)" in kb.rerank_degrade_reason
 
     def test_the_minimum_score_is_inclusive(self, kb):
