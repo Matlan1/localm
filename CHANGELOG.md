@@ -470,6 +470,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **The Seed help no longer promises an identical reply.** A GGUF model computes only the
+  part of a prompt that differs from the previous one, and that can change the reply, even
+  at temperature 0. The coder's Seed tooltip and the docs said the same seed, model, prompt
+  and settings always give the same output; they now say a reply can also depend on what the
+  model answered just before.
 - **"Delete saved data" now also removes the voices folder.** The named reference voices
   for text-to-speech were left behind. A legacy data folder with no record of what was in it
   before LocaLM keeps a voices folder.

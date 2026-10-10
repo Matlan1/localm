@@ -42,7 +42,7 @@ plus localm request extras:
 | Field | Notes |
 |---|---|
 | `top_k`, `repeat_penalty`, `min_p` | extra sampling controls; `min_p` (0 to 1) drops tokens less likely than `min_p` times the most likely one |
-| `seed` | reproducible generation |
+| `seed` | the sampling seed: the same seed repeats the same random choices (see [Behaviour notes](#behaviour-notes) for why a reply can still differ) |
 | `stop` | A string or a list of up to 16 strings (each up to 1024 characters). The reply is cut before the first match, the generation ends there, and `finish_reason` is `stop`. A stop sequence inside a model's `<think>` block is not applied. Also accepted by `POST /v1/completions`. |
 | `tools`, `tool_choice`, `parallel_tool_calls` | OpenAI function tools; see [Tool calling](#tool-calling). |
 | `grammar`, `grammar_lazy`, `grammar_triggers` | GBNF grammar constraining the output (local models); a lazy grammar stays unconstrained until a trigger pattern appears, and requires `grammar_triggers` |
@@ -1017,6 +1017,14 @@ for chunk in stream:
   decoded alone, even at temperature 0. A turn with an image runs on its own,
   after the replies already running. Other backends answer one request at a
   time per model.
+- **Prompt cache**: a GGUF model keeps the start of the previous prompt in its
+  KV cache and computes only the part of a new prompt that differs. llama.cpp's
+  results depend slightly on how many tokens it computes in one step (it picks
+  different kernels by batch size, and with model layers on the CPU it runs a
+  step of 32 or more tokens on the GPU), so the same request can get a
+  different reply depending on the requests before it, even at temperature 0
+  or with a fixed `seed`. Greedy output changes where the two most likely
+  tokens are close.
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context window section of
   [architecture.md](architecture.md)). Conversations that outgrow the

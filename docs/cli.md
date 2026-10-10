@@ -859,8 +859,9 @@ gfx1030 box with the bundled llama.cpp runtime and Qwen2.5-Coder-7B Q6_K: 5/5 id
 responses at `temperature 0.8` with a seed, 5/5 *different* without one, and identical
 again after a full model reload. That is one hardware and software combination, not a
 guarantee: different GPUs, backends, llama.cpp builds, or concurrent load were not
-measured, and `--anthropic` ignores the flag because the Anthropic API has no seed
-parameter.
+measured, a GGUF reply can also depend on the requests the model answered before it
+(see the prompt cache note in [server-api.md](server-api.md#behaviour-notes)), and
+`--anthropic` ignores the flag because the Anthropic API has no seed parameter.
 
 **Episodic memory.** The agent keeps a per-project log of lessons learned across sessions. Manage it without starting a session:
 
