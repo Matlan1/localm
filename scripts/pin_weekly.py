@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as _dt
+import hashlib
 import importlib.util
 import json
 import os
@@ -73,6 +74,23 @@ def _load(name: str, path: Path):
     spec.loader.exec_module(mod)
     return mod
 
+
+REEXEC_ENV = "LOCALM_PIN_WEEKLY_REEXEC"
+_SELF_SCRIPTS = ("pin_weekly.py", "pin_pipeline.py", "check_pins.py")
+
+
+def script_fingerprint() -> str:
+    """A digest of the scripts a weekly run is made of, as they are on disk now."""
+    digest = hashlib.sha256()
+    for name in _SELF_SCRIPTS:
+        try:
+            digest.update((SCRIPTS / name).read_bytes())
+        except OSError:
+            digest.update(b"missing:" + name.encode())
+    return digest.hexdigest()
+
+
+STARTUP_FINGERPRINT = script_fingerprint()
 
 pp = _load("pin_pipeline", SCRIPTS / "pin_pipeline.py")
 cp = _load("check_pins", SCRIPTS / "check_pins.py")
@@ -829,6 +847,19 @@ def main(argv: list[str] | None = None) -> int:
 
     source = ensure_github_token()
     print(f"GitHub API auth: {source}" + (" (anonymous requests are rate limited)" if source == "none" else ""))
+    try:
+        pp.sync_main_checkout()
+    except pp.InfraError as e:
+        print(f"INCONCLUSIVE (infra, before any runtime was examined): {e}")
+        return 2
+    except pp.PipelineError as e:
+        print(f"FAIL: {e}")
+        return 1
+    if script_fingerprint() != STARTUP_FINGERPRINT and not os.environ.get(REEXEC_ENV):
+        print("the scripts changed while syncing the main checkout; restarting on the new code")
+        os.environ[REEXEC_ENV] = "1"
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, str(SCRIPTS / "pin_weekly.py"), *(argv if argv is not None else sys.argv[1:])])
     try:
         with pp.pipeline_lock():
             pp.sync_main_checkout()
