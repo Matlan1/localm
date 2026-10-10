@@ -243,8 +243,8 @@ def _choose_gpu_layers(model: SpeechModel, n_ctx: int) -> tuple[int, Optional[st
     if isinstance(raw, int) and not isinstance(raw, bool) and raw != 99:
         return int(raw), None
     estimate = _estimate_bytes(model, n_ctx)
+    from localm.discover import GPU_PROBE_OK, vram_capacity
     try:
-        from localm.discover import GPU_PROBE_OK, vram_capacity
         info, status = vram_capacity(return_status=True)
         free = info.get("free") if status == GPU_PROBE_OK else None
     except Exception as e:   # noqa: BLE001 - unmeasurable VRAM keeps the full offload

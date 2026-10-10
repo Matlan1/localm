@@ -27,7 +27,7 @@ import struct
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from localm.debuglog import logger
 
@@ -216,6 +216,21 @@ class GenerationApi:
     function object: the signatures declared here never change, or depend on,
     the library's shared attributes that other bindings set."""
 
+    mtmd_gen_audio_get_info: Any
+    mtmd_gen_inp_default: Any
+    mtmd_gen_audio_process: Any
+    mtmd_support_audio: Any
+    mtmd_get_audio_sample_rate: Any
+    mtmd_bitmap_init_from_audio: Any
+    mtmd_bitmap_free: Any
+    mtmd_helper_gen_audio_init: Any
+    mtmd_helper_gen_audio_free: Any
+    mtmd_helper_gen_audio_reset: Any
+    mtmd_helper_gen_audio_set_input: Any
+    mtmd_helper_gen_audio_step_prompt: Any
+    mtmd_helper_gen_audio_step_gen: Any
+    mtmd_helper_gen_audio_get_output: Any
+
 
 _bind_lock = threading.Lock()
 _bound: dict[int, tuple] = {}
@@ -350,12 +365,12 @@ class SpeechSynthesizer:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
         self.n_ctx = int(n_ctx)
-        self._model = None
-        self._ctx = None
-        self._mtmd = None
-        self._helper = None
-        self._vocab = None
-        self._mem = None
+        self._model: Any = None
+        self._ctx: Any = None
+        self._mtmd: Any = None
+        self._helper: Any = None
+        self._vocab: Any = None
+        self._mem: Any = None
         self._last_gen_seed: Optional[int] = None
         from . import _loader
         binary_dir = _loader.runtime_binary_dir()
@@ -445,7 +460,7 @@ class SpeechSynthesizer:
     def projector_on_gpu(self) -> bool:
         return bool(self._mtmd is not None and self._mtmd.on_gpu)
 
-    def _new_helper(self) -> int:
+    def _new_helper(self) -> Any:
         helper = self._m.mtmd_helper_gen_audio_init(self._ctx, self._mtmd._ctx)
         if not helper:
             raise SpeechUnavailable("could not create the speech generation helper")
@@ -498,7 +513,7 @@ class SpeechSynthesizer:
                 "being spoken. Remove it and try again.")
         return len(plain)
 
-    def _build_chain(self, seed: int) -> int:
+    def _build_chain(self, seed: int) -> Any:
         s = self._sampling
         chain = api.llama_sampler_chain_init(api.llama_sampler_chain_default_params())
         if self._suppress:

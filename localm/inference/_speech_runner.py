@@ -34,7 +34,7 @@ import multiprocessing as mp
 import os
 import queue as _queue
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 _FAULT_ENV = "LOCALM_SPEECH_FAULT_FOR_TEST"
 
@@ -97,7 +97,7 @@ def _runner_main(req_q, resp_q, cancel, crash_trace_path=None) -> None:
         if cmd is None:
             return
         name = cmd[0]
-        payload = cmd[1] if len(cmd) > 1 else None
+        payload: Any = cmd[1] if len(cmd) > 1 else None
 
         fault = os.environ.get(_FAULT_ENV)
         if fault and (name != "speak" or fault.startswith("speak-")):
@@ -206,10 +206,10 @@ class SpeechRunner:
     time: the caller serialises :meth:`speak` calls."""
 
     def __init__(self) -> None:
-        self._proc = None
-        self._req_q = None
-        self._resp_q = None
-        self._cancel = None
+        self._proc: Any = None
+        self._req_q: Any = None
+        self._resp_q: Any = None
+        self._cancel: Any = None
         self._crash_trace_path = None
 
     def is_alive(self) -> bool:
