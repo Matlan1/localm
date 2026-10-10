@@ -939,6 +939,11 @@ def _common_prefix_len(a: list[int], b: list[int]) -> int:
     return n
 
 
+_PENALTIES_UNSUPPORTED_MSG = (
+    "presence_penalty and frequency_penalty cannot be applied: this llama runtime "
+    "has no penalties sampler")
+
+
 def _build_sampler(
     vocab: ctypes.c_void_p,
     temperature: float = 0.8,
@@ -950,16 +955,20 @@ def _build_sampler(
     grammar: Optional[str] = None,
     grammar_lazy: bool = False,
     grammar_triggers: Optional[list[str]] = None,
+    penalty_freq: float = 0.0,
+    penalty_present: float = 0.0,
 ) -> ctypes.c_void_p:
     """
     Construct a sampler chain:
         [grammar] → [penalties] → top_k → top_p → min_p → temperature → dist
 
     The optional grammar sampler sits first so it masks invalid tokens before
-    any scoring or sampling stage sees them.  The repetition-penalty stage is
-    added when ``repeat_penalty != 1.0`` and the DLL exports it - without it
-    models prone to looping repeat the same marker lines until max_tokens.
-    For temperature ≤ 0 greedy sampling replaces the stochastic stages.
+    any scoring or sampling stage sees them.  The penalties stage is added when
+    ``repeat_penalty != 1.0`` or *penalty_freq* / *penalty_present* is non-zero
+    and the DLL exports it - without it models prone to looping repeat the same
+    marker lines until max_tokens. All three penalties look at the last 64
+    sampled tokens. For temperature ≤ 0 greedy sampling replaces the
+    stochastic stages.
 
     Parameters
     ----------
@@ -985,6 +994,7 @@ def _build_sampler(
         GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
         GrammarUnsupportedError,
         InvalidGrammarError,
+        UnsupportedInputError,
     )
 
     chain_params = api.llama_sampler_chain_default_params()
@@ -1051,9 +1061,18 @@ def _build_sampler(
     # Newer builds take the vocabulary size as a leading argument; _api dispatches
     # on the build, but it needs the real n_vocab to pass - a 0 there would
     # under-allocate the sampler's frequency counters.
-    if repeat_penalty and repeat_penalty != 1.0 and api.has_penalties_sampler():
+    repeat_active = bool(repeat_penalty) and repeat_penalty != 1.0
+    openai_active = penalty_freq != 0.0 or penalty_present != 0.0
+    if (repeat_active or openai_active) and not api.has_penalties_sampler():
+        if openai_active:
+            api.llama_sampler_free(chain)
+            raise UnsupportedInputError(_PENALTIES_UNSUPPORTED_MSG)
+    elif repeat_active or openai_active:
         n_vocab = api.llama_vocab_n_tokens(vocab) if vocab else 0
         if not n_vocab and api.penalties_needs_n_vocab():
+            if openai_active:
+                api.llama_sampler_free(chain)
+                raise UnsupportedInputError(_PENALTIES_UNSUPPORTED_MSG)
             from localm.debuglog import logger
             logger.warning(
                 "skipping the repetition-penalty sampler: this llama build "
@@ -1062,7 +1081,8 @@ def _build_sampler(
             api.llama_sampler_chain_add(
                 chain,
                 api.llama_sampler_init_penalties(
-                    64, repeat_penalty, 0.0, 0.0, n_vocab=n_vocab),
+                    64, repeat_penalty if repeat_active else 1.0,
+                    penalty_freq, penalty_present, n_vocab=n_vocab),
             )
 
     if temperature <= 0.0:
@@ -2097,9 +2117,12 @@ class LlamaCpp:
         grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
     ) -> Iterator[int]:
         """
-        Yield generated token ids one at a time.
+        Yield generated token ids one at a time. *sampling* holds extra
+        :func:`_build_sampler` keywords (``min_p``, ``penalty_freq``,
+        ``penalty_present``).
 
         KV cache strategy: when this llama.cpp build exports the
         llama_memory_* API and the request fits in the live context, the
@@ -2187,6 +2210,7 @@ class LlamaCpp:
                     grammar=grammar,
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
+                    **(sampling or {}),
                 )
                 # A draft source never hands its proposals to the request's
                 # sampler: every emitted token, with or without a grammar in that
@@ -2570,6 +2594,7 @@ class LlamaCpp:
         grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
     ) -> Iterator[int]:
         """Yield the token ids an encoder-decoder model (T5) generates for
         *messages*, one at a time.
@@ -2651,6 +2676,7 @@ class LlamaCpp:
                     grammar=grammar,
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
+                    **(sampling or {}),
                 )
                 in_decode = True
                 if on_status:
@@ -2864,13 +2890,17 @@ class LlamaCpp:
         repeat_penalty: float,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
+        grammar: Optional[str] = None,
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[list[str]] = None,
     ) -> Iterator[int]:
         """Yield generated token ids for a chat whose prompt includes image(s).
 
         The image+text prompt is evaluated into the KV cache by
         :meth:`_prefill_vision`, which keeps the part of the cache an earlier
         image turn left that still matches; sampling then continues exactly like
-        the text loop. Grammar is not applied on the image path. The text path's
+        the text loop, with the same grammar handling. The text path's
         KV record (``_cached_tokens``) is left empty, so the next text turn
         prefills from scratch.
 
@@ -2982,7 +3012,10 @@ class LlamaCpp:
                     temperature=temperature, top_k=top_k, top_p=top_p,
                     repeat_penalty=repeat_penalty,
                     seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
-                    grammar=None,
+                    grammar=grammar,
+                    grammar_lazy=grammar_lazy,
+                    grammar_triggers=grammar_triggers,
+                    **(sampling or {}),
                 )
                 in_decode = True
                 logger.info("gguf generate (vision): entering decode loop")
@@ -4229,6 +4262,9 @@ class LlamaCpp:
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
         should_stop: Optional[Callable[[], bool]] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
         **_ignored,
     ):
         """
@@ -4248,8 +4284,22 @@ class LlamaCpp:
         ignored.
 
         A diffusion language model answers through ``_generate_diffusion``,
-        which polls *should_stop* between denoising steps.
+        which polls *should_stop* between denoising steps, and refuses a
+        non-zero *min_p*, *presence_penalty* or *frequency_penalty* with
+        :class:`UnsupportedInputError`.
         """
+        sampling: dict = {}
+        if min_p is not None:
+            sampling["min_p"] = min_p
+        if presence_penalty is not None:
+            sampling["penalty_present"] = presence_penalty
+        if frequency_penalty is not None:
+            sampling["penalty_freq"] = frequency_penalty
+        if self.is_diffusion and any(value != 0 for value in sampling.values()):
+            from localm.inference.backends.base import UnsupportedInputError
+            raise UnsupportedInputError(
+                "min_p, presence_penalty and frequency_penalty cannot be applied "
+                "by a diffusion language model")
         if self.is_encoder_decoder:
             return self._completion_result(self._generate_encoder_decoder(
                 messages,
@@ -4263,6 +4313,7 @@ class LlamaCpp:
                 grammar_triggers=grammar_triggers,
                 seed=seed,
                 on_status=on_status,
+                sampling=sampling,
             ), stream)
 
         # Use the model's embedded chat template when available (Gemma, Llama3,
@@ -4323,6 +4374,10 @@ class LlamaCpp:
                 repeat_penalty=repeat_penalty,
                 seed=seed,
                 on_status=on_status,
+                sampling=sampling,
+                grammar=grammar,
+                grammar_lazy=grammar_lazy,
+                grammar_triggers=grammar_triggers,
             )
         else:
             gen = self._generate(
@@ -4337,6 +4392,7 @@ class LlamaCpp:
                 grammar_triggers=grammar_triggers,
                 seed=seed,
                 on_status=on_status,
+                sampling=sampling,
             )
 
         return self._completion_result(gen, stream)

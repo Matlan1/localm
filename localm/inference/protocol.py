@@ -81,6 +81,12 @@ class Message(BaseModel):
     # behaviour. Request-only, so a response message never carries it.
     origin: Optional[Literal["tool", "client"]] = Field(default=None, exclude=True)
 
+    @field_validator("role", mode="before")
+    @classmethod
+    def _developer_is_system(cls, v):
+        """OpenAI's ``developer`` role is read as ``system``."""
+        return "system" if v == "developer" else v
+
     @field_validator("content", mode="before")
     @classmethod
     def _null_content_is_empty(cls, v):
@@ -146,15 +152,38 @@ class RerankRequest(BaseModel):
     return_documents: bool = False
 
 
-class CompletionRequest(BaseModel):
+class SamplingFields(BaseModel):
+    """OpenAI sampling and output fields shared by chat and text completions.
+
+    Each is either applied or refused with a 400 naming it; none is silently
+    ignored (see ``localm.inference.openai_compat``)."""
+    presence_penalty: Optional[float] = Field(None, ge=-2.0, le=2.0, allow_inf_nan=False)
+    frequency_penalty: Optional[float] = Field(None, ge=-2.0, le=2.0, allow_inf_nan=False)
+    # Drops tokens whose probability is below min_p times the top token's.
+    min_p: Optional[float] = Field(None, ge=0.0, le=1.0, allow_inf_nan=False)
+    # ``{"include_usage": true}`` adds a final chunk with empty ``choices`` and
+    # the usage, before ``[DONE]``.
+    stream_options: Optional[Any] = None
+    # Choices per request: only 1 is served.
+    n: Optional[int] = None
+    logit_bias: Optional[Any] = None
+
+
+class CompletionRequest(SamplingFields):
     """OpenAI /v1/completions (raw text completion) request."""
     # None, not "localm": "localm" is truthy, so a request that OMITS this
     # field would be indistinguishable from one explicitly asking for the
     # "localm" sentinel, and `req.model or engine.display_name` below would
     # never fall through to the model that actually answered.
     model: Optional[str] = None
-    prompt: str
+    # One prompt; a list holding exactly one string is accepted too.
+    prompt: Union[str, list[Any]]
     stream: bool = False
+    # True: the reply starts with the prompt.
+    echo: bool = False
+    best_of: Optional[int] = None
+    logprobs: Optional[int] = None
+    suffix: Optional[str] = None
     # A request-level cap must be >= 1: the engine uses max_tokens <= 0
     # internally as an "unlimited" sentinel, so a 0/negative from a client is
     # rejected rather than turned into an unbounded generation.
@@ -183,7 +212,7 @@ class CompletionRequest(BaseModel):
         return normalize_stop(v)
 
 
-class ChatRequest(BaseModel):
+class ChatRequest(SamplingFields):
     # None, not "localm": "localm" is truthy, so it must not also be the
     # field's own default, or an omitted field is indistinguishable from an
     # explicit "localm" request.
@@ -194,6 +223,22 @@ class ChatRequest(BaseModel):
     # "unlimited" sentinel), and temperature/top_p/penalty must be finite (a
     # non-finite value reaches the native sampler).
     max_tokens: Optional[int] = Field(None, ge=1)
+    # The current OpenAI name for max_tokens.
+    max_completion_tokens: Optional[int] = Field(None, ge=1)
+    # {"type": "text" | "json_object" | "json_schema", ...}: the reply is
+    # constrained to JSON (a schema) by a grammar.
+    response_format: Optional[Any] = None
+    # "none" turns a reasoning model's thinking off; other levels leave the
+    # model's default.
+    reasoning_effort: Optional[str] = None
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = None
+    # Refused with a 400 when set: features localm does not serve.
+    functions: Optional[Any] = None
+    function_call: Optional[Any] = None
+    audio: Optional[Any] = None
+    modalities: Optional[Any] = None
+    web_search_options: Optional[Any] = None
     temperature: Optional[float] = Field(None, allow_inf_nan=False)
     top_p: Optional[float] = Field(None, allow_inf_nan=False)
     top_k: Optional[int] = None
