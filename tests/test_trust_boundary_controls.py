@@ -40,6 +40,7 @@ _REVIEWED_CROSS_ORIGIN_OK = (
     "/v1/embeddings",
     "/v1/rerank",
     "/v1/audio/transcriptions",
+    "/v1/audio/speech",
     "/v1/images/generations",
     "/v1/surfaces/gui",
     "/v1/instances/cooperate-unload",

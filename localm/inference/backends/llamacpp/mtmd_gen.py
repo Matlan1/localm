@@ -27,7 +27,7 @@ import struct
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional
 
 from localm.debuglog import dedup_native_stderr, logger
 
@@ -464,14 +464,14 @@ class SpeechSynthesizer:
         return chain
 
     def synthesize(self, text: str, *, language: Optional[str] = None,
-                   reference: Optional[Sequence[float]] = None,
+                   reference: Optional[bytes] = None,
                    seed: Optional[int] = None,
                    on_progress: Optional[Callable[[int], None]] = None,
                    should_stop: Optional[Callable[[], bool]] = None) -> SpeechResult:
         """Speak *text* and return the WAV.
 
         *language* is a code or name (:func:`resolve_language`); None uses the
-        model default. *reference* is mono float samples at
+        model default. *reference* is mono float32 little-endian samples at
         :attr:`encoder_sample_rate` whose voice the speech imitates. *seed*
         makes the output reproducible; None picks one at random (reported in
         the result). *on_progress* receives the frame count after each frame;
@@ -493,7 +493,7 @@ class SpeechSynthesizer:
                 raise SpeechInputError(
                     "This model has no speaker encoder, so it cannot imitate a "
                     "reference voice.")
-            if len(reference) == 0:
+            if len(reference) < 4 or len(reference) % 4:
                 raise SpeechInputError("The reference voice recording is empty.")
         budget = frame_budget(self.n_ctx, n_tokens, has_reference=reference is not None)
         if seed is None:
@@ -518,7 +518,7 @@ class SpeechSynthesizer:
         self._helper = self._new_helper()
         return True
 
-    def _run(self, text: str, lang: Optional[str], reference: Optional[Sequence[float]],
+    def _run(self, text: str, lang: Optional[str], reference: Optional[bytes],
              seed: int, budget: int, on_progress, should_stop) -> SpeechResult:
         m = self._m
         helper = self._helper
@@ -527,8 +527,9 @@ class SpeechSynthesizer:
         bitmap = None
         try:
             if reference is not None:
-                samples = (ctypes.c_float * len(reference))(*reference)
-                bitmap = m.mtmd_bitmap_init_from_audio(len(reference), samples)
+                n = len(reference) // 4
+                samples = (ctypes.c_float * n).from_buffer_copy(reference)
+                bitmap = m.mtmd_bitmap_init_from_audio(n, samples)
                 if not bitmap:
                     raise SpeechInputError("The reference voice could not be prepared.")
             raw = text.encode("utf-8")
