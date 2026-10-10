@@ -56,6 +56,57 @@ class TestUnloadAll:
         assert calls == []
 
 
+class TestUnloadOne:
+    RERANK_PATH = "Z:/models/rerank.gguf"
+
+    def _resident(self, monkeypatch, *, active=0, clears=True):
+        monkeypatch.setattr("localm.config.load_registry", lambda: {
+            "rr-model": {"path": self.RERANK_PATH},
+            "other": {"path": "Z:/models/other.gguf"}})
+        monkeypatch.setattr(emb, "loaded_path", lambda: None)
+        monkeypatch.setattr(rr, "reranker_info",
+                            lambda: {"path": self.RERANK_PATH, "labels": []})
+        monkeypatch.setattr(rr, "active_requests", lambda: active)
+        resets = []
+        monkeypatch.setattr(rr, "reset_reranker",
+                            lambda force=True: (resets.append(force), clears)[1])
+        return resets
+
+    def test_an_idle_resident_reranker_is_released_by_its_registered_name(self, isolated, monkeypatch):
+        resets = self._resident(monkeypatch)
+        res = asyncio.run(hs.unload_one_model("rr-model"))
+        assert resets == [False]
+        assert res["status"] == "unloaded" and res["model"] == "rr-model"
+
+    def test_a_pin_arriving_after_the_precheck_is_reported_in_use(self, isolated, monkeypatch):
+        resets = self._resident(monkeypatch, active=0, clears=False)
+        res = asyncio.run(hs.unload_one_model("rr-model"))
+        assert resets == [False]
+        assert res["status"] == "in_use"
+
+    def test_a_busy_reranker_is_rejected_before_the_vram_probe(self, isolated, monkeypatch):
+        resets = self._resident(monkeypatch, active=1)
+        probes = []
+        monkeypatch.setattr("localm.vram._vram_free_reading",
+                            lambda: (probes.append(1), (None, True, None))[1])
+        res = asyncio.run(hs.unload_one_model("rr-model"))
+        assert res["status"] == "in_use"
+        assert probes == [] and resets == []
+
+    def test_another_registered_model_leaves_the_reranker_alone(self, isolated, monkeypatch):
+        resets = self._resident(monkeypatch)
+        res = asyncio.run(hs.unload_one_model("other"))
+        assert res["status"] == "already_unloaded"
+        assert resets == []
+
+    def test_nothing_is_released_when_no_reranker_is_resident(self, isolated, monkeypatch):
+        resets = self._resident(monkeypatch)
+        monkeypatch.setattr(rr, "reranker_info", lambda: None)
+        res = asyncio.run(hs.unload_one_model("rr-model"))
+        assert res["status"] == "already_unloaded"
+        assert resets == []
+
+
 def _evict(monkeypatch, *, embedder_loaded, reranker_loaded, embedder_clears=True, reranker_clears=True):
     resets = []
     embedder_mod = SimpleNamespace(
