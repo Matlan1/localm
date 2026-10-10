@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
+  `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
+  same from the command line. A GGUF model whose projector has an audio encoder (for example
+  Qwen3-ASR) transcribes the clip or answers questions about it. WAV is always read and other
+  formats need the voice extra; the clip is converted to the rate the model expects. Audio
+  sent to a model that cannot take it is routed to an installed model that can, or refused
+  with a message saying which model to use, instead of being dropped. Model listings report
+  `audio_input`, and a projector that reads only audio no longer makes a model count as
+  able to see images.
 - **Speech from a text-to-speech model.** A Qwen3-TTS GGUF (`localm pull
   ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf` fetches it with
   its mmproj) is recognised as a speech model. `localm speak "text" -o out.wav` and the

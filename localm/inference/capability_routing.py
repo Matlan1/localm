@@ -50,14 +50,16 @@ _CONTEXT_HEADROOM = 1.25
 _CONTEXT_ROUTING_FLOOR_TOKENS = 2048
 
 # Capabilities a model must have to take the request at all: a model without
-# vision refuses an image. A confirmed context shortfall is the other such need.
-# Every other capability only changes how the request is answered.
-_REQUIRED_TO_ANSWER = (caps.VISION,)
+# vision refuses an image, and one without audio input refuses an audio clip. A
+# confirmed context shortfall is the other such need. Every other capability
+# only changes how the request is answered.
+_REQUIRED_TO_ANSWER = (caps.VISION, caps.AUDIO)
 
 # The ``model_autoswitch`` setting: when an unpinned request may be answered by
 # a model other than the one it names.
 #   off    never; the named or loaded model always answers
-#   image  only for an image the current model cannot read; no other need moves it
+#   image  only for an image or audio clip the current model cannot read; no
+#          other need moves it
 #   ask    never on its own; the decision carries the model it would switch to
 #   loaded only to a model that is already loaded, so nothing is loaded or evicted
 #   auto   to an installed model when the current one is confirmed to lack a need
@@ -290,13 +292,16 @@ def compaction_context_need(messages: Sequence[dict], trained: Optional[int],
 def request_needs(messages: Sequence[dict], *, required: Sequence[str] = (),
                   min_context: Optional[int] = None) -> CapabilityNeeds:
     """What a chat request with *messages* needs: vision when a message carries
-    an image, the context window its size implies, plus *required* capabilities
-    and *min_context*. The same derivation the server applies to
-    ``/v1/chat/completions``."""
-    from localm.inference.backends.base import messages_contain_image
+    an image, audio input when one carries an audio clip, the context window its
+    size implies, plus *required* capabilities and *min_context*. The same
+    derivation the server applies to ``/v1/chat/completions``."""
+    from localm.inference.backends.base import (
+        messages_contain_audio, messages_contain_image)
     wanted = list(required)
     if messages_contain_image(list(messages)) and caps.VISION not in wanted:
         wanted.append(caps.VISION)
+    if messages_contain_audio(list(messages)) and caps.AUDIO not in wanted:
+        wanted.append(caps.AUDIO)
     derived = context_need(messages) if messages else None
     ctx = [c for c in (derived, min_context) if isinstance(c, int) and c > 0]
     return CapabilityNeeds(capabilities=tuple(wanted),
@@ -408,10 +413,10 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
 
     *mode* is the autoswitch mode (``AUTOSWITCH_MODES``; an unrecognised value
     reads as ``auto``) and applies to an unpinned request only.
-    ``image`` drops every need except vision, so only an image the current model
-    cannot read moves the request. For ``off``, ``image``,
+    ``image`` drops every need except vision and audio input, so only an image
+    or audio clip the current model cannot read moves the request. For ``off``, ``image``,
     ``ask``, ``loaded`` and ``auto`` an unknown capability on *current* (other
-    than vision) is not a gap, so only a confirmed absence moves the request;
+    than vision and audio input) is not a gap, so only a confirmed absence moves the request;
     ``eager`` also moves it on an unknown. ``off`` never moves it. ``ask``
     plans as ``auto`` but leaves ``resolved`` as *current* and names the model
     it would have used in ``suggested``. ``loaded`` considers only *resident*
@@ -431,7 +436,7 @@ def plan_route(current: Optional[str], needs: CapabilityNeeds, *,
     pinned has a gap.
 
     When no model meets every need, a model is still chosen when the current
-    one cannot take the request at all (an image it cannot read, a confirmed
+    one cannot take the request at all (an image or audio clip it cannot read, a confirmed
     context shortfall): the candidates are the models that meet those needs, the
     ones meeting more of the rest first, and ``unmet`` names what the chosen one
     lacks.

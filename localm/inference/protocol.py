@@ -9,7 +9,8 @@ from typing import Annotated, Any, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 from localm.inference.backends.base import (
-    LOADING_MODEL_STATUS, VISION_CPU_FALLBACK_STATUS, WAITING_FOR_MODEL_STATUS)
+    AUDIO_CPU_FALLBACK_STATUS, LOADING_MODEL_STATUS, VISION_CPU_FALLBACK_STATUS,
+    WAITING_FOR_MODEL_STATUS)
 from localm.inference.stop_sequences import normalize_stop
 
 
@@ -369,6 +370,9 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
     "Encoding image (GPU)...": "encoding_image_gpu",
     "Encoding image (CPU)...": "encoding_image_cpu",
     VISION_CPU_FALLBACK_STATUS: "vision_cpu_retry",
+    "Encoding audio (GPU)...": "encoding_audio_gpu",
+    "Encoding audio (CPU)...": "encoding_audio_cpu",
+    AUDIO_CPU_FALLBACK_STATUS: "audio_cpu_retry",
     WAITING_FOR_MODEL_STATUS: "waiting",
     COMPACTING_STATUS: "compacting",
     LOADING_MODEL_STATUS: "loading_model",

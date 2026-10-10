@@ -47,6 +47,7 @@ from .gguf import gguf_sd_checkpoint
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
+from .gguf import gguf_mmproj_modalities
 from .gguf import gguf_adapter_incompatibility, gguf_adapter_kind
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
 from .gguf import _gguf_metadata_probe
@@ -969,6 +970,37 @@ def _hf_is_vision(model_dir: Path) -> bool:
 
 
 
+# Lower-cased substrings of a ``feature_extractor_type`` that name an audio
+# feature extractor.
+_HF_AUDIO_EXTRACTOR_TOKENS = ("audio", "whisper", "speech", "wav2vec", "seamless")
+
+
+def _hf_is_audio(model_dir: Path) -> Optional[bool]:
+    """True if a HuggingFace model directory looks able to take audio input,
+    judged from its on-disk metadata: an ``audio_config`` block in config.json,
+    or an audio feature extractor named in preprocessor_config.json. False when
+    neither file says so, None when a file exists but cannot be read or
+    parsed."""
+    try:
+        pre = model_dir / "preprocessor_config.json"
+        if pre.is_file():
+            data = json.loads(pre.read_text(encoding="utf-8", errors="replace"))
+            kind = data.get("feature_extractor_type") if isinstance(data, dict) else None
+            if isinstance(kind, str) and any(
+                    t in kind.lower() for t in _HF_AUDIO_EXTRACTOR_TOKENS):
+                return True
+        cfg = model_dir / "config.json"
+        if cfg.is_file():
+            data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(data, dict) and "audio_config" in data:
+                return True
+    except (OSError, ValueError, RecursionError) as e:
+        logger.debug("audio capability probe could not read %s (%s)",
+                     model_dir, type(e).__name__)
+        return None
+    return False
+
+
 # Filename/repo-id tokens that reliably signal a vision-language GGUF release,
 # curated from real HuggingFace GGUF repo naming conventions (mradermacher,
 # bartowski, ggml-org, unsloth). A NAME heuristic only - unlike gguf_is_mmproj
@@ -1000,6 +1032,22 @@ def _looks_like_vision_gguf_name(repo_id: str, filename: str) -> bool:
 def model_vision_capability(name: str, *, reg: Optional[dict] = None,
                             dir_cache: Optional[dict] = None) -> Optional[bool]:
     """Whether ONE registered model can accept image INPUT - as a TRI-STATE.
+    See :func:`_model_input_capability`."""
+    return _model_input_capability(name, "vision", reg=reg, dir_cache=dir_cache)
+
+
+def model_audio_capability(name: str, *, reg: Optional[dict] = None,
+                           dir_cache: Optional[dict] = None) -> Optional[bool]:
+    """Whether ONE registered model can accept audio INPUT - as a TRI-STATE.
+    See :func:`_model_input_capability`."""
+    return _model_input_capability(name, "audio", reg=reg, dir_cache=dir_cache)
+
+
+def _model_input_capability(name: str, modality: str, *,
+                            reg: Optional[dict] = None,
+                            dir_cache: Optional[dict] = None) -> Optional[bool]:
+    """Whether ONE registered model can accept *modality* (``"vision"`` or
+    ``"audio"``) INPUT - as a TRI-STATE.
 
     ``True``  the loader can genuinely put an image through this model.
     ``False`` we inspected the model's own files and it cannot.
@@ -1014,13 +1062,18 @@ def model_vision_capability(name: str, *, reg: Optional[dict] = None,
     and in particular no NEGATIVE text.
 
     Both qualifying paths are the SAME lookups the actual load path uses, not a
-    static-metadata guess: a HuggingFace-format directory with vision metadata,
-    or a chat model whose mmproj (vision projector) ``get_model_mmproj()``
+    static-metadata guess: a HuggingFace-format directory with vision (or audio)
+    metadata, or a chat model whose mmproj (projector) ``get_model_mmproj()``
     resolves - an explicitly recorded projector, or one auto-detected sitting
     beside the model file. A standalone mmproj or an embedding entry is not
     itself a model to switch to, hence the model_type gate.
 
-    ORDERING IS LOAD-BEARING: a resolved projector returns True BEFORE the
+    A resolved projector answers from its own header
+    (``gguf_mmproj_modalities``): True when it has an encoder for *modality*,
+    False when it has none. A projector whose header cannot be read answers True
+    for vision and None for audio.
+
+    ORDERING IS LOAD-BEARING: a resolved projector answers BEFORE the
     reachability probe, because ``get_model_mmproj`` can succeed from a recorded
     projector alone. That keeps ``vision_capable_models()``'s True set intact -
     ``None`` only ever replaces a possibly-wrong False.
@@ -1055,11 +1108,11 @@ def model_vision_capability(name: str, *, reg: Optional[dict] = None,
             #
             # Traced because "unknown" alone does not say WHY, and a removed USB
             # drive and a permission denial want different user actions.
-            logger.debug("vision capability probe failed for %r (%s): %s",
+            logger.debug("%s capability probe failed for %r (%s): %s", modality,
                          name, type(e).__name__, e)
             st = None
         if st is not None and _stat.S_ISDIR(st.st_mode):
-            return _hf_is_vision(p)
+            return _hf_is_audio(p) if modality == "audio" else _hf_is_vision(p)
         if st is None and not _entry_path(info, "mmproj"):
             # Unreachable AND no projector recorded on the entry. get_model_mmproj
             # cannot answer anything but None in that state: its only two sources
@@ -1068,9 +1121,13 @@ def model_vision_capability(name: str, *, reg: Optional[dict] = None,
             # skips its probes rather than pre-empting its answer, and spares an
             # unreachable row two more multi-second timeouts.
             return None
-        if (_entry_path(info, "model_type") == "llm"
-                and get_model_mmproj(name, reg=reg, dir_cache=dir_cache)):
-            return True
+        mmproj = (get_model_mmproj(name, reg=reg, dir_cache=dir_cache)
+                  if _entry_path(info, "model_type") == "llm" else None)
+        if mmproj:
+            modalities = gguf_mmproj_modalities(Path(mmproj))
+            if modalities is None:
+                return True if modality == "vision" else None
+            return modalities[modality]
         # Everything from here answers NO, and that is only honest if we could
         # actually look. An unmounted drive makes the stat fail (st is None),
         # and a path that is neither a directory nor a REGULAR FILE was never a
@@ -1096,9 +1153,21 @@ def model_vision_capability(name: str, *, reg: Optional[dict] = None,
         # None rather than the False the try block would have reached - False
         # would be a claim about a model this call failed to read. Not silent:
         # the tri-state IS the surfaced signal, and this records the cause.
-        logger.debug("vision capability probe failed for %r (%s): %s",
+        logger.debug("%s capability probe failed for %r (%s): %s", modality,
                      name, type(e).__name__, e)
         return None
+
+
+def audio_capable_models() -> list[str]:
+    """Registered model names that can accept audio INPUT on THIS install,
+    positive membership only, like :func:`vision_capable_models`."""
+    reg = _mm.load_registry()
+    if not isinstance(reg, dict):
+        return []
+    dir_cache: dict = {}
+    return sorted(n for n in reg
+                  if model_audio_capability(n, reg=reg,
+                                            dir_cache=dir_cache) is True)
 
 
 def vision_capable_models() -> list[str]:
@@ -1149,7 +1218,7 @@ def _active_model_missing_mmproj(active_model_path: str) -> Optional[tuple]:
 def persist_cli_mmproj(name: str, mmproj_path: str) -> Optional[str]:
     """Record a CLI ``--mmproj`` override onto *name*'s registry entry, once the
     caller has already confirmed it genuinely loaded for this run (the backend
-    reported ``supports_images=True``).
+    reported ``supports_images`` or ``supports_audio`` True).
 
     This function never checks that itself and must never be called on an
     unconfirmed load: a broken projector recorded as working makes
@@ -1200,7 +1269,8 @@ def persist_cli_mmproj(name: str, mmproj_path: str) -> Optional[str]:
 
 
 def vision_input_guidance(mmproj_failed: bool = False,
-                          active_model_path: Optional[str] = None) -> str:
+                          active_model_path: Optional[str] = None,
+                          audio_only: bool = False) -> str:
     """Capability-aware, install-specific message for when an image is attached
     to a model that cannot see it. Instead of a flat dead-end, point the user at
     a path that EXISTS on THIS install: a vision model already in their library,
@@ -1221,9 +1291,15 @@ def vision_input_guidance(mmproj_failed: bool = False,
     install predating the auto-attach, or interrupted before sync_models_dir's
     backfill has run). Without this check the generic "no vision model is
     registered yet" branch below fires for exactly that user, telling them to
-    pull a model they already have."""
+    pull a model they already have.
+
+    *audio_only* is True when the active model's projector loaded and takes
+    audio but has no vision encoder."""
     import importlib.util
-    if mmproj_failed:
+    if audio_only:
+        head = ("This model cannot accept image input: its projector (mmproj) "
+                "reads audio only, so the attached image would be ignored.")
+    elif mmproj_failed:
         head = ("This model cannot accept image input: a vision projector (mmproj) "
                 "was provided but failed to load - it may be incompatible with this "
                 "model, or the mtmd vision runtime is unavailable (see the server "
@@ -1266,6 +1342,30 @@ def vision_input_guidance(mmproj_failed: bool = False,
             f"vision-capable model (Gemma 3 vision / Qwen2.5-VL) instead.")
 
 
+
+
+def audio_input_guidance(projector_failed: bool = False) -> str:
+    """Install-specific message for when audio is attached to a model that
+    cannot take it: names an audio-capable model already in the library when
+    there is one, otherwise how to get one. *projector_failed* is True when the
+    active GGUF model was given a projector (mmproj) that did not load."""
+    if projector_failed:
+        head = ("This model cannot accept audio input: a projector (mmproj) was "
+                "provided but failed to load (see the server log for the mtmd "
+                "error).")
+    else:
+        head = ("This model cannot accept audio input, so the attached audio "
+                "would be ignored.")
+    capable = audio_capable_models()
+    if capable:
+        return (f"{head} An audio-capable model is already in your library: "
+                f"{', '.join(capable[:3])}. Switch to it (e.g. "
+                f"`localm run {capable[0]} --audio clip.wav`, or pick it in the "
+                f"GUI) and attach the audio again.")
+    return (f"{head} No audio-capable model could be confirmed in your library. "
+            f"Pull a GGUF model whose projector has an audio encoder, for "
+            f"example `localm pull "
+            f"ggml-org/Qwen3-ASR-0.6B-GGUF:Qwen3-ASR-0.6B-Q8_0.gguf`.")
 
 
 def list_models(type_filter: Optional[str] = None) -> None:
