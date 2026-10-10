@@ -274,6 +274,8 @@ class JobStore:
             # cannot silently wipe it.
             raise RuntimeError(
                 f"jobs store unreadable ({self._defs_file}): {e}") from e
+        except UnicodeDecodeError:
+            raise
         except (ValueError, RecursionError) as e:
             # Corrupt JSON: back it up so a subsequent write cannot destroy it,
             # warn, and start empty (distinct from the absent case).

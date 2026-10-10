@@ -130,7 +130,7 @@ for line in sys.stdin:
     if "id" not in msg:
         continue
     sys.stdout.write(("[" * 100000 if sys.argv[1] == "deep" else "9" * 5000) + "\n")
-    sys.stdout.write("[1, 2]\n")
+    sys.stdout.write("[1, 2]\n5\nnull\n")
     result = {"tools": []} if msg["method"] == "tools/list" else {}
     sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\n")
     sys.stdout.flush()

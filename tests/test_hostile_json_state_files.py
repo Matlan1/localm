@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import json
 
+import pytest
 
-from localm import auth, instances
+
+from localm import auth, instances, sessions
 from localm.inference.backends import _hf_fp8
 from localm.media import managed_comfy, managed_comfy_fresh, managed_comfy_update
 from localm.model_manager import pull, unsupported
+from localm import cpu_backend_select
 from localm.rag import collection_lock
 from localm.setup_llama import rocm_cpu, runtime_dir
 from tests._hostile_json import HOSTILE
@@ -148,3 +151,46 @@ def test_hostile_comfy_marker_is_replaced_by_the_update_record(doc, tmp_path):
     managed_comfy_update._update_marker(tmp_path, "abc123", "9.9", "prev", [])
     written = json.loads(marker.read_text(encoding="utf-8"))
     assert written["commit"] == "abc123" and written["stage"] == "S4"
+
+
+@pytest.fixture
+def session_store(tmp_path, monkeypatch):
+    path = tmp_path / "sessions.json"
+    monkeypatch.setattr(sessions, "sessions_file", lambda: path)
+    monkeypatch.setitem(sessions._CACHE, "mtime", None)
+    monkeypatch.setitem(sessions._CACHE, "records", None)
+    return path
+
+
+@HOSTILE
+def test_hostile_session_store_refuses_every_session(doc, session_store):
+    session_store.write_text(doc, encoding="utf-8")
+    assert sessions.lookup("some-session-id") is None
+
+
+@HOSTILE
+def test_hostile_session_store_does_not_break_logout(doc, session_store):
+    session_store.write_text(doc, encoding="utf-8")
+    assert sessions.revoke("some-session-id") is None
+    assert session_store.read_text(encoding="utf-8") == doc
+
+
+@HOSTILE
+def test_hostile_safetensors_shard_header_has_no_size(doc, tmp_path):
+    body = doc.encode("utf-8")
+    (tmp_path / "model.safetensors").write_bytes(
+        len(body).to_bytes(8, "little") + body)
+    assert _hf_fp8.expanded_bf16_bytes(str(tmp_path)) is None
+
+
+@HOSTILE
+def test_hostile_cpu_tier_lock_owner_does_not_stop_selection(
+        doc, tmp_path, monkeypatch):
+    monkeypatch.setattr(cpu_backend_select, "_LOCK_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(cpu_backend_select, "_LOCK_POLL_SECONDS", 0.05)
+    lock = tmp_path / cpu_backend_select._LOCK_NAME
+    lock.mkdir()
+    (lock / cpu_backend_select._LOCK_OWNER_FILE).write_text(doc, encoding="utf-8")
+    with cpu_backend_select._lock(tmp_path) as acquired:
+        assert acquired is False
+    assert lock.is_dir()

@@ -644,6 +644,8 @@ class _ActivityStore:
             except Exception:
                 pass
             return None
+        except UnicodeDecodeError:
+            raise
         except (ValueError, RecursionError) as e:
             self._quarantine(path, raw, e)
             return None

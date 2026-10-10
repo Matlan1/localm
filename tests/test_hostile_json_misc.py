@@ -114,6 +114,23 @@ def test_cpu_tier_probe_with_a_hostile_verdict_scores_none(doc, monkeypatch):
     assert cpu_backend_select._probe_score(Path("cand.so"), Path(".")) is None
 
 
+@pytest.mark.parametrize("verdict", ["[1]", "5", "null"])
+def test_cpu_tier_probe_with_a_wrong_shape_verdict_scores_none(verdict, monkeypatch):
+    monkeypatch.setattr(cpu_backend_select.subprocess, "run",
+                        lambda *a, **k: _completed("@@VERDICT@@" + verdict + "\n"))
+    assert cpu_backend_select._probe_score(Path("cand.so"), Path(".")) is None
+
+
+@pytest.mark.parametrize("vectors", ["[1]", "5", "null"])
+def test_rag_vectors_json_that_is_not_an_object_degrades_to_lexical(
+        vectors, collection):
+    base, n_chunks = collection
+    (base / "kb" / "vectors.json").write_text(vectors, encoding="utf-8")
+    reopened = Collection("kb", base=base)
+    assert reopened.vector_degrade_reason is not None
+    assert reopened.stats()["n_chunks"] == n_chunks
+
+
 @HOSTILE
 def test_cpu_tier_marker_that_is_hostile_is_no_marker(doc, tmp_path):
     cpu_backend_select._marker_path(tmp_path).write_text(doc, encoding="utf-8")

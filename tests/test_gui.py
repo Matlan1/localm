@@ -3175,6 +3175,18 @@ class TestConversationStore:
             data = client.get("/api/conversations").json()
         assert [c["id"] for c in data["conversations"]] == ["ok"]
 
+    @pytest.mark.parametrize("doc", ["[]", "5", "null"])
+    def test_conversation_file_that_is_not_an_object_is_unreadable(
+            self, persist_app, monkeypatch, doc):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, chats = persist_app
+        chats.mkdir(parents=True)
+        (chats / "shape.json").write_text(doc, encoding="utf-8")
+        with TestClient(app) as client:
+            single = client.get("/api/conversations/shape")
+        assert single.status_code == 500
+        assert single.json()["detail"] == "Conversation file is unreadable"
+
     @pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
     def test_hostile_conversation_file_is_unreadable_not_a_crash(
             self, persist_app, monkeypatch, doc):

@@ -213,7 +213,7 @@ def _lock(lib_dir: Path):
             break
         except FileExistsError:
             pid = None
-            with contextlib.suppress(OSError, json.JSONDecodeError, ValueError):
+            with contextlib.suppress(OSError, json.JSONDecodeError, ValueError, RecursionError):
                 pid = json.loads(owner_file.read_text(encoding="utf-8")).get("pid")
             if isinstance(pid, int) and not pid_alive(pid):
                 with contextlib.suppress(OSError):

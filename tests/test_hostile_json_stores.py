@@ -173,3 +173,32 @@ def test_project_map_cache_that_is_hostile_is_a_cache_miss(doc, tmp_path):
     cache = tmp_path / "map.json"
     cache.write_text(doc, encoding="utf-8")
     assert ProjectMap.load_cached_and_reconcile(tmp_path, cache) is None
+
+
+# ------------------------------------------- non-UTF-8 is not "corrupt JSON"
+
+def test_jobs_definitions_that_are_not_utf8_are_left_intact(tmp_path):
+    store = JobStore(tmp_path)
+    raw = b'{"jobs": []}\n\xff\xfe tail'
+    (tmp_path / "jobs.json").write_bytes(raw)
+    with pytest.raises(UnicodeDecodeError):
+        store._read_all()
+    assert (tmp_path / "jobs.json").read_bytes() == raw
+    assert not list(tmp_path.glob("jobs.json.corrupt-*"))
+
+
+# ------------------------------------------- valid JSON of the wrong shape
+
+@pytest.mark.parametrize("line", ["[1]", "5", "null", '"text"'])
+def test_episode_log_skips_a_wrong_shape_line(line, episodes):
+    episodes.path.parent.mkdir(parents=True, exist_ok=True)
+    episodes.path.write_text(
+        line + "\n" + json.dumps(GOOD_EPISODE) + "\n", encoding="utf-8")
+    assert [e.task for e in episodes.all()] == ["t"]
+
+
+def test_episode_vector_sidecar_that_is_a_list_is_recomputed(episodes):
+    sidecar = episodes.path.with_suffix(".vec.json")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("[1]", encoding="utf-8")
+    assert episodes._vectors(["a"], lambda texts: [[2.0]]) == [[2.0]]

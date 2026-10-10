@@ -187,7 +187,7 @@ def expanded_bf16_bytes(model_path: str) -> Optional[int]:
                     continue
                 numel = math.prod(int(d) for d in info["shape"])
                 total += numel * _INT_ITEMSIZE.get(str(info["dtype"]), BF16_BYTES)
-        except (OSError, ValueError, KeyError, TypeError) as e:
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as e:
             logger.debug("hf fp8: could not size %s: %s", path, e)
             return None
     return total
