@@ -66,7 +66,7 @@ class PromptUpsert(BaseModel):
 # ------------------------------------------------------------------ #
 
 _CONV_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_CONV_MAX_BYTES = 16 * 1024 * 1024   # data-URI images make these large
+_CONV_MAX_BYTES = 96 * 1024 * 1024   # data-URI images and base64 audio clips make these large
 
 # Windows reserved device names, matched regardless of extension: a
 # conversation id of "nul" would target <home>/chats/nul.json -> the NUL device

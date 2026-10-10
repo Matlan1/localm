@@ -49,7 +49,7 @@ _DIGEST_NOTE = (
 
 
 def _text_of(message: dict) -> str:
-    """Plain text of a message; multipart images contribute a placeholder."""
+    """Plain text of a message; multipart images and audio clips contribute a placeholder."""
     content = message.get("content", "")
     if isinstance(content, str):
         return content
@@ -60,6 +60,8 @@ def _text_of(message: dict) -> str:
                 parts.append(part.get("text", ""))
             elif part.get("type") == "image_url":
                 parts.append("[image]")
+            elif part.get("type") == "input_audio":
+                parts.append("[audio]")
     return " ".join(parts)
 
 
@@ -67,7 +69,7 @@ def estimate_tokens(
     messages: list[dict],
     count_tokens: Optional[Callable[[str], int]] = None,
 ) -> int:
-    """Token estimate for a message list (images count a flat 750 each)."""
+    """Token estimate for a message list (images and audio clips count a flat 750 each)."""
     total = 0
     for m in messages:
         text = _text_of(m)
@@ -81,7 +83,7 @@ def estimate_tokens(
         if not isinstance(m.get("content"), str):
             total += 750 * sum(
                 1 for p in m.get("content", [])
-                if isinstance(p, dict) and p.get("type") == "image_url"
+                if isinstance(p, dict) and p.get("type") in ("image_url", "input_audio")
             )
     return total
 
