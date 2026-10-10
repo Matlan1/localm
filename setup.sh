@@ -53,7 +53,7 @@ ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes m
   echo "${ans:-$def}"
 }
 uv_manual_hint() {  # the manual uv-install command; used from two call sites below
-  say "      curl -LsSf https://astral.sh/uv/install.sh | sh"
+  say "      install uv with your package manager, or download it from https://github.com/astral-sh/uv/releases"
 }
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.

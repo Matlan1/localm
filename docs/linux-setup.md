@@ -48,7 +48,8 @@ yourself (see the README extras).
 
 Prerequisites:
 - `uv` - `setup.sh` installs it for you if missing; only needed by hand if you
-  skip `setup.sh`: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+  skip `setup.sh`: install it with your package manager or download it from
+  https://github.com/astral-sh/uv/releases
 - For the graphical launcher: Tk - `sudo apt install python3-tk` (Debian/Ubuntu),
   `sudo dnf install python3-tkinter` (Fedora), etc. The web GUI needs only a browser.
 
