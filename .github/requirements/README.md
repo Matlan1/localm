@@ -28,3 +28,11 @@ uv export --quiet --locked --no-emit-project --extra dev --no-hashes --no-header
 printf 'mutmut==3.7.0\n' | uv pip compile - --no-config -c mutmut-constraints.txt --generate-hashes \
   --python-version 3.12 --python-platform x86_64-manylinux_2_28 -o .github/requirements/mutmut.txt
 ```
+
+`scripts/check_ci_requirements.py` runs the two commands above into a temporary
+directory and compares the result with the committed files, and looks up every pinned
+version in the OSV database. The `requirements currency` workflow runs it weekly and
+on pushes to master that touch the sets; a red run means regenerate the set (or move
+the pin past the advisory) with the commands above. Dependabot does not manage these
+files: `torch-cpu.txt` must stay on the CPU index build and `mutmut.txt` must agree
+with `uv.lock`, which an independent bump of a shared package would break.
