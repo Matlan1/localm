@@ -62,6 +62,7 @@ class RecommendedVideoModel:
     width: int
     height: int
     negative_prompt: str
+    start_image: bool = False
 
 
 RECOMMENDED_VIDEO_MODELS: tuple[RecommendedVideoModel, ...] = (
@@ -111,16 +112,20 @@ def _resolve_file(value: str, what: str) -> Path:
     return resolve_model_file(value, f"video {what}")
 
 
-def missing_parts(rec: RecommendedVideoModel) -> list[RecommendedPart]:
-    """The parts of *rec* not yet in the registry."""
-    return [p for p in rec.parts if registered_file(p.filename) is None]
+def missing_parts(rec: RecommendedVideoModel, blk: Optional[dict] = None) -> list[RecommendedPart]:
+    """The parts of *rec* not yet in the registry, leaving out a part whose
+    setting in *blk* (the plugin's ``native`` block) names a file of its own."""
+    blk = blk or {}
+    return [p for p in rec.parts
+            if not (p.role != "model" and (blk.get(p.role) or "").strip())
+            and registered_file(p.filename) is None]
 
 
-def missing_model_message() -> str:
+def missing_model_message(blk: Optional[dict] = None) -> str:
     rec = RECOMMENDED_VIDEO_MODELS[0]
     total = sum(p.size_bytes for p in rec.parts) / 1024 ** 3
     pulls = "; ".join(f"localm pull {p.spec} --type {p.model_type}"
-                      for p in missing_parts(rec) or rec.parts)
+                      for p in missing_parts(rec, blk) or rec.parts)
     return (f"No native video model is set up. The recommended one is {rec.name} "
             f"({total:.1f} GB in {len(rec.parts)} files): {pulls}. Or set 'Native model' "
             "and its text encoder and VAE in Settings > Video.")
@@ -138,19 +143,19 @@ def resolve_models(s: dict) -> dict:
     if model:
         ctx["diffusion_model_path"] = str(_resolve_file(model, "model"))
         label = display_name(model)
-        for key, field in _COMPONENT_FIELDS:
-            value = (blk.get(key) or "").strip()
-            if value:
-                ctx[field] = str(_resolve_file(value, key.replace("_", "-")))
     else:
         rec = RECOMMENDED_VIDEO_MODELS[0]
-        found = {p.role: registered_file(p.filename) for p in rec.parts}
-        if any(v is None for v in found.values()):
-            raise _ModelError(missing_model_message())
-        for role, hit in found.items():
+        if missing_parts(rec, blk):
+            raise _ModelError(missing_model_message(blk))
+        for part in rec.parts:
+            hit = registered_file(part.filename)
             if hit is not None:
-                ctx[_PART_FIELDS[role]] = str(hit[1])
+                ctx[_PART_FIELDS[part.role]] = str(hit[1])
         label = rec.name
+    for key, field in _COMPONENT_FIELDS:
+        value = (blk.get(key) or "").strip()
+        if value:
+            ctx[field] = str(_resolve_file(value, key.replace("_", "-")))
     ctx["diffusion_flash_attn"] = True
     key = tuple(sorted(ctx.items()))
     return {"key": key, "ctx": ctx, "label": label, "recommended": rec}
@@ -228,7 +233,7 @@ def status(s: dict) -> dict:
             "parts": [{"role": p.role, "repo": p.repo, "file": p.file, "spec": p.spec,
                        "filename": p.filename, "size_bytes": p.size_bytes,
                        "sha256": p.sha256, "model_type": p.model_type}
-                      for p in missing_parts(rec)]},
+                      for p in missing_parts(rec, _native_block(s))]},
     }
 
 
@@ -270,11 +275,20 @@ def _check_size(width: int, height: int) -> Optional[str]:
     return None
 
 
+def _start_image_refusal(name: str) -> str:
+    return (f"{name} is a text-to-video model and cannot start from an image. Set an "
+            "image-to-video model (for example a Wan I2V model with its CLIP vision "
+            "encoder) in Settings > Video, or leave the start image out.")
+
+
 def refusal(*, model_overrides=None, placement=None, width=None, height=None,
-            unsupported=()) -> Optional[str]:
+            seconds=None, fps=None, input_image=None, s: Optional[dict] = None,
+            unsupported=(), **_ignored) -> Optional[str]:
     """Why the native backend cannot honour a request with these inputs, or
     None. Checked before any download, VRAM handover or load. *unsupported*
-    names keyword arguments the backend does not take."""
+    names keyword arguments the backend does not take. With *s* (the plugin
+    settings) and an *input_image*, a configured model known not to take a
+    start image is refused here; others are checked once loaded."""
     if unsupported:
         return ("The native video backend does not support: "
                 + ", ".join(sorted(unsupported)) + ".")
@@ -287,7 +301,22 @@ def refusal(*, model_overrides=None, placement=None, width=None, height=None,
     if (width is None) != (height is None):
         return "Give both width and height, or neither."
     if width is not None and height is not None:
-        return _check_size(int(width), int(height))
+        bad = _check_size(int(width), int(height))
+        if bad:
+            return bad
+    if seconds is not None and fps is not None:
+        wanted = max(1, round(float(seconds) * int(fps)))
+        if wanted > MAX_FRAMES:
+            return (f"The native backend makes at most {MAX_FRAMES} frames per clip "
+                    f"({seconds:g} s at {int(fps)} fps is {wanted}); shorten the clip or "
+                    "lower the frame rate.")
+    if input_image and s is not None:
+        try:
+            rec = resolve_models(s)["recommended"]
+        except Exception:  # noqa: BLE001
+            rec = None
+        if rec is not None and not rec.start_image:
+            return _start_image_refusal(rec.name)
     return None
 
 
@@ -409,7 +438,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     own unload did not succeed."""
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, placement=placement,
-                      width=width, height=height, unsupported=tuple(unsupported))
+                      width=width, height=height, seconds=seconds, fps=fps,
+                      input_image=input_image, s=s, unsupported=tuple(unsupported))
     if refused:
         return False, refused
     started = time.monotonic()
@@ -458,6 +488,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 runner.shutdown()
                 return False, (f"{models['label']} ({info.get('version') or 'unknown'}) is not "
                                "a video generation model.")
+            if input_image and "-T2V-" in (info.get("desc") or ""):
+                return False, _start_image_refusal(models["label"])
             init = _load_init_image(Path(input_image), width, height) if input_image else None
             params = {
                 "prompt": prompt, "negative_prompt": negative,

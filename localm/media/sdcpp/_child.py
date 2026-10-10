@@ -27,6 +27,7 @@ from __future__ import annotations
 import ctypes
 import os
 import queue as _queue
+import re
 import sys
 import threading
 import time
@@ -49,6 +50,8 @@ class _State:
     sample_steps = 0
     decoding = False
     redact: tuple = ()
+    paths: tuple = ()
+    model_desc = ""
     last_errors: list = []
     last_progress = 0.0
 
@@ -102,10 +105,19 @@ def _set_rocblas_tensile(extra_dirs) -> None:
             return
 
 
+_MODEL_DESC_RE = re.compile(r"\AWan\d\.[\dx]-[A-Za-z0-9.]+-[A-Za-z0-9.]+\Z")
+
+
 def _redacted(text: str) -> str:
+    """*text* with the prompt replaced by ``<prompt>`` and every loaded model
+    path reduced to its file name."""
     for secret in _State.redact:
         if secret:
             text = text.replace(secret, "<prompt>")
+    for path in _State.paths:
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        for spelling in {path, path.replace("\\", "/"), path.replace("/", "\\")}:
+            text = text.replace(spelling, name)
     return text
 
 
@@ -122,6 +134,9 @@ def _make_callbacks(resp_q):
         low = msg.lower()
         if "decoding" in low and "latent" in low:
             _State.decoding = True
+        head = msg.split(" --- ", 1)[0].strip()
+        if not _State.model_desc and _MODEL_DESC_RE.match(head):
+            _State.model_desc = head
         if level >= b.SD_LOG_WARN:
             msg = _redacted(msg)
             if level >= b.SD_LOG_ERROR:
@@ -227,6 +242,9 @@ def _do_load(payload):
     if ctx_fields.get("n_threads"):
         params.n_threads = int(ctx_fields["n_threads"])
     _State.last_errors = []
+    _State.model_desc = ""
+    _State.paths = tuple(str(v) for k, v in ctx_fields.items()
+                         if k.endswith("_path") and isinstance(v, str) and v)
     ctx = lib.new_sd_ctx(ctypes.byref(params))
     if not ctx:
         raise RuntimeError(_error_with_native("stable-diffusion.cpp could not load the model"))
@@ -235,6 +253,7 @@ def _do_load(payload):
     method = lib.sd_get_default_sample_method(ctx)
     return {
         "version": version,
+        "desc": _State.model_desc,
         "image": bool(lib.sd_ctx_supports_image_generation(ctx)),
         "video": bool(lib.sd_ctx_supports_video_generation(ctx)),
         "default_sample_method": (lib.sd_sample_method_name(method) or b"").decode(),

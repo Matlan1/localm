@@ -28,7 +28,10 @@ With those registered and **Native model** left blank, the native backend uses t
 their recommended settings (832x480, 30 steps, CFG 6, flow shift 3). Any video model
 stable-diffusion.cpp supports can be set instead: **Native model** is the diffusion model,
 **Native T5-XXL text encoder** takes Wan's umt5-xxl, **Native VAE** the VAE, and **Native
-CLIP vision encoder** the clip_vision_h file Wan image-to-video models need.
+CLIP vision encoder** the clip_vision_h file Wan image-to-video models need. These part
+fields also replace the matching part of the recommended set when **Native model** is blank.
+A start image needs an image-to-video model (Wan I2V, FLF2V or TI2V); a text-to-video model
+such as the recommended one refuses it with a reason rather than ignoring it.
 
 Measured on a 16 GB RX 6900 XT with the ROCm runtime: Wan2.1 T2V 1.3B at 832x480, 33
 frames (2 s at 16 fps) and 30 steps took about 9 s per step and 7 minutes in total,
@@ -37,7 +40,8 @@ took about 165 s per step at that size (small clips such as 480x272 run at a few
 per step), so prefer the ROCm or CUDA runtime for video where one is available; **Native
 runtime** `auto` already picks it.
 
-Frame counts are snapped to 4k+1 like the ComfyUI path (at most 241). Width and height must
+Frame counts are snapped to 4k+1 like the ComfyUI path; the native backend makes at most
+241 frames per clip and refuses a longer request with a reason. Width and height must
 be multiples of 16, from 64 to 1920. The clip is written as H.264 MP4 with PyAV (installed
 with the `voice` extra, which the installers include); a model that also returns audio
 (LTX-2) gets an AAC track. Progress shows each sampling step, Stop cancels a running

@@ -164,8 +164,9 @@ def test_status_lists_the_parts_still_to_download_with_their_digests(tmp_path):
 # --------------------------------------------------------------------------- #
 
 class _FakeRunner:
-    def __init__(self, *, video=True, raise_on_generate=None, audio=None):
+    def __init__(self, *, video=True, raise_on_generate=None, audio=None, desc=""):
         self.video = video
+        self.desc = desc
         self.raise_on_generate = raise_on_generate
         self.audio = audio
         self.loaded_key = None
@@ -180,7 +181,7 @@ class _FakeRunner:
         self.loads.append(ctx)
         self.loaded_key = key
         self.alive = True
-        return {"version": "Wan 2.x", "image": False, "video": self.video}
+        return {"version": "Wan 2.x", "desc": self.desc, "image": False, "video": self.video}
 
     def generate_video(self, params, *, on_event=None, cancel_check=None, timeout=None):
         self.generates.append(params)
@@ -318,6 +319,7 @@ def test_generate_never_raises_and_releases_the_worker(fake_video, tmp_path):
 def test_missing_pyav_is_a_clear_error(fake_video, monkeypatch):
     _runner, s = fake_video
     monkeypatch.setitem(sys.modules, "av", None)
+    monkeypatch.setitem(sys.modules, "av.codec", None)
     ok, msg = native.ensure_available(s)
     assert not ok and "PyAV" in msg
 
@@ -595,3 +597,206 @@ def test_video_model_paths_are_owner_only():
     public = {f["key"] for f in media_schema_json("video", {}, {}, is_owner=False)}
     assert "native_model" not in public and "native_clip_vision" not in public
     assert {"backend", "native_flow_shift", "native_runtime"} <= public
+
+
+# --------------------------------------------------------------------------- #
+#  requests the native backend refuses up front                              #
+# --------------------------------------------------------------------------- #
+
+def _register_recommended(tmp_path, roles=("model", "vae", "t5xxl")):
+    rec = native.RECOMMENDED_VIDEO_MODELS[0]
+    for part in rec.parts:
+        if part.role in roles:
+            f = tmp_path / part.filename
+            f.write_bytes(b"x")
+            _register(part.role, f, part.model_type)
+    return rec
+
+
+def test_a_start_image_is_refused_for_the_recommended_text_to_video_model(
+        fake_video, tmp_path):
+    from PIL import Image
+    runner, _s = fake_video
+    _register_recommended(tmp_path)
+    src = tmp_path / "start.png"
+    Image.new("RGB", (64, 64)).save(src)
+    ok, msg = native.generate({"backend": "native", "native": {}}, "p", tmp_path / "x.mp4",
+                              write_sidecar=False, input_image=src)
+    assert not ok and "text-to-video" in msg and "wan2.1-t2v-1.3b" in msg
+    assert runner.loads == [] and runner.generates == []
+
+
+def test_a_start_image_is_refused_once_a_text_to_video_model_is_loaded(fake_video, tmp_path):
+    from PIL import Image
+    runner, s = fake_video
+    runner.desc = "Wan2.1-T2V-14B"
+    src = tmp_path / "start.png"
+    Image.new("RGB", (64, 64)).save(src)
+    out = tmp_path / "y.mp4"
+    ok, msg = native.generate(s, "p", out, write_sidecar=False, input_image=src,
+                              width=64, height=64)
+    assert not ok and "text-to-video" in msg and "dit.gguf" in msg
+    assert runner.generates == [] and not out.exists()
+
+
+def test_a_start_image_reaches_an_image_to_video_model(fake_video, tmp_path):
+    from PIL import Image
+    runner, s = fake_video
+    runner.desc = "Wan2.1-I2V-14B"
+    src = tmp_path / "start.png"
+    Image.new("RGB", (100, 50)).save(src)
+    ok, msg = native.generate(s, "p", tmp_path / "z.mp4", write_sidecar=False,
+                              input_image=src, width=64, height=64, seconds=0.1, fps=8)
+    assert ok, msg
+    init = runner.generates[0]["init_image"]
+    assert (init["width"], init["height"]) == (64, 64)
+
+
+@pytest.mark.parametrize("seconds,fps", [(20, 24), (5, 60), (11, 24)])
+def test_a_clip_longer_than_the_frame_limit_is_refused(fake_video, tmp_path, seconds, fps):
+    runner, s = fake_video
+    ok, msg = native.generate(s, "p", tmp_path / "l.mp4", write_sidecar=False,
+                              seconds=seconds, fps=fps)
+    assert not ok and f"at most {native.MAX_FRAMES} frames" in msg
+    assert runner.loads == []
+
+
+def test_the_longest_allowed_clip_is_generated(fake_video, tmp_path):
+    runner, s = fake_video
+    ok, msg = native.generate(s, "p", tmp_path / "m.mp4", write_sidecar=False,
+                              seconds=10, fps=24, width=64, height=64)
+    assert ok, msg
+    assert runner.generates[0]["video_frames"] == native.MAX_FRAMES
+
+
+def test_part_settings_replace_the_recommended_parts(tmp_path):
+    rec = _register_recommended(tmp_path, roles=("model", "vae"))
+    own_t5 = tmp_path / "own" / "my-umt5.gguf"
+    own_t5.parent.mkdir()
+    own_t5.write_bytes(b"t")
+    own_vae = tmp_path / "own" / "my-vae.safetensors"
+    own_vae.write_bytes(b"v")
+    blk = {"t5xxl": str(own_t5), "vae": str(own_vae)}
+    assert native.missing_parts(rec, blk) == []
+    m = native.resolve_models({"native": blk})
+    assert m["recommended"] is rec
+    assert m["ctx"]["t5xxl_path"] == str(own_t5)
+    assert m["ctx"]["vae_path"] == str(own_vae)
+    with pytest.raises(native._ModelError) as ei:
+        native.resolve_models({"native": {"vae": str(own_vae)}})
+    assert rec.parts[2].spec in str(ei.value) and rec.parts[1].spec not in str(ei.value)
+
+
+def test_a_registered_name_on_a_network_path_is_refused_without_touching_it(monkeypatch):
+    seen = []
+
+    def spy(real):
+        def wrapped(self, *a, **k):
+            if str(self).replace("/", "\\").startswith("\\\\"):
+                seen.append(str(self))
+                return False
+            return real(self, *a, **k)
+        return wrapped
+
+    _register("remote-wan", Path("\\\\192.0.2.1\\share\\wan.safetensors"))
+    monkeypatch.setattr(Path, "exists", spy(Path.exists))
+    monkeypatch.setattr(Path, "is_file", spy(Path.is_file))
+    with pytest.raises(native._ModelError, match="network or device path") as ei:
+        native.resolve_models({"native": {"model": "remote-wan"}})
+    assert "192.0.2.1" not in str(ei.value)
+    assert seen == []
+
+
+def test_a_registered_model_whose_file_is_gone_says_so(tmp_path):
+    _register("gone-wan", tmp_path / "private" / "wan.safetensors")
+    with pytest.raises(native._ModelError) as ei:
+        native.resolve_models({"native": {"model": "gone-wan"}})
+    assert "registered, but its file 'wan.safetensors' is missing" in str(ei.value)
+    assert "private" not in str(ei.value)
+
+
+def test_the_cli_refuses_before_installing_the_runtime(fake_video, cli_runner, tmp_path,
+                                                       monkeypatch):
+    runner, s = fake_video
+    provisions = []
+    monkeypatch.setattr(sd_runtime, "resolve", lambda choice="auto": None)
+    monkeypatch.setattr(sd_runtime, "provision", lambda *a, **k: provisions.append(a))
+    from localm.config import update_config
+    update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault(
+        "video", {}).update({"native": s["native"]}))
+    from localm.cli import main
+    result = cli_runner.invoke(main, ["video", "a fox", "-d", "20", "--fps", "24",
+                                      "-o", str(tmp_path / "x.mp4")])
+    assert result.exit_code == 1, result.output
+    assert "at most" in result.output
+    assert provisions == [] and runner.loads == []
+
+
+def test_the_video_route_refuses_a_start_image_before_any_vram_handover(video_app, tmp_path,
+                                                                         monkeypatch):
+    from fastapi.testclient import TestClient
+    from PIL import Image
+
+    from localm.config import update_config
+    from localm.media import paths as media_paths
+    app, runner = video_app
+    _register_recommended(tmp_path)
+    update_config(lambda cfg: cfg["plugins"]["video"].update({"native": {}}))
+    uploads = media_paths.gallery_dir(media_paths.IMAGE_DIR_NAME)
+    uploads.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 64)).save(uploads / "start.png")
+    unloads = []
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: True)
+    monkeypatch.setattr("localm.vram.unload_chat_for_media",
+                        lambda *a, **k: unloads.append(a) or True)
+    with TestClient(app) as c:
+        r = c.post("/api/video", json={"prompt": "p", "input_image": str(uploads / "start.png")})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "failed"
+    assert any("text-to-video" in ln for ln in _lines(job))
+    assert unloads == [] and runner.loads == []
+
+
+# --------------------------------------------------------------------------- #
+#  the worker's handling of native log lines                                  #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def child_state(monkeypatch):
+    from localm.media.sdcpp import _child
+    monkeypatch.setattr(_child._State, "paths", ())
+    monkeypatch.setattr(_child._State, "redact", ())
+    monkeypatch.setattr(_child._State, "model_desc", "")
+    monkeypatch.setattr(_child._State, "last_errors", [])
+    return _child
+
+
+def test_relayed_native_lines_name_model_files_only(child_state):
+    import queue
+    _child = child_state
+    _child._State.paths = ("D:\\models\\private\\wan.safetensors", "/srv/private/umt5.gguf")
+    q = queue.Queue()
+    log_cb, _progress = _child._make_callbacks(q)
+    log_cb(3, b"loading diffusion model from 'D:\\models\\private\\wan.safetensors' failed"
+              b" --- diffusion_engine.cpp:736", None)
+    log_cb(4, b"failed to open 'D:/models/private/wan.safetensors' --- safetensors_io.cpp:158",
+           None)
+    log_cb(4, b"file /srv/private/umt5.gguf not found --- model_loader.cpp:233", None)
+    lines = [q.get_nowait()[2] for _ in range(3)]
+    assert lines[0].startswith("loading diffusion model from 'wan.safetensors' failed")
+    assert lines[1].startswith("failed to open 'wan.safetensors'")
+    assert lines[2].startswith("file umt5.gguf not found")
+    assert not any("private" in ln for ln in lines + _child._State.last_errors)
+
+
+def test_the_worker_records_the_wan_model_it_loaded(child_state):
+    import queue
+    _child = child_state
+    q = queue.Queue()
+    log_cb, _progress = _child._make_callbacks(q)
+    log_cb(2, b"model manager memory on ROCm0: reported free 10018.88 MB", None)
+    log_cb(2, b"Wan2.1-T2V-1.3B --- wan.hpp:921", None)
+    log_cb(2, b"Wan2.1-I2V-14B --- wan.hpp:917", None)
+    assert _child._State.model_desc == "Wan2.1-T2V-1.3B"
+    assert q.empty()

@@ -202,6 +202,11 @@ def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
     for note in (s.get("warning"), s.get("backend_note")):
         if note:
             say(note)
+    refusal = getattr(media_backend._impl(s), "refusal", None)
+    refused = refusal(s=s, **gen_kwargs) if refusal is not None else None
+    if refused:
+        console.print(f"[red]{escape(str(refused))}[/red]")
+        sys.exit(1)
     ok, message = media_backend.ensure_available(s, on_progress=say)
     if not ok:
         console.print(f"[red]{escape(str(message))}[/red]")

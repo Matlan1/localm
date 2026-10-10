@@ -24,11 +24,12 @@ def resolve_model_file(value: str, what: str) -> Path:
     names the setting in messages (``"image model"``, ``"video vae"``). UNC and
     device paths are refused without touching the filesystem. Raises
     ``ModelFileError``."""
-    from localm.model_manager.registry import get_model_info
+    from localm.model_manager import load_registry
+    from localm.model_manager.registry import _entry_path
     from localm.pathsafe import is_unc_or_device_path
     shown = display_name(value)
-    info = get_model_info(str(value))
-    raw = str(info[0]) if info is not None else str(value)
+    registered = _entry_path(load_registry().get(str(value)))
+    raw = registered or str(value)
     if is_unc_or_device_path(raw):
         raise ModelFileError(f"The native {what} '{shown}' is a network or device path, "
                              "which is not allowed.")
@@ -38,6 +39,9 @@ def resolve_model_file(value: str, what: str) -> Path:
     except OSError as e:
         raise ModelFileError(f"The native {what} '{shown}' cannot be read "
                              f"({type(e).__name__}).") from e
+    if not exists and registered:
+        raise ModelFileError(f"The native {what} '{shown}' is registered, but its file "
+                             f"'{display_name(raw)}' is missing.")
     if not exists:
         raise ModelFileError(f"The native {what} '{shown}' is neither a registered model "
                              "nor a file on this machine.")

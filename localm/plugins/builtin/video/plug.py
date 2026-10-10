@@ -124,7 +124,9 @@ async def video(req: VideoRequest, request: Request):
         if s.get("backend") == "native":
             from .backends import native
             refused = native.refusal(model_overrides=req.model_overrides,
-                                     width=req.width, height=req.height)
+                                     width=req.width, height=req.height,
+                                     seconds=req.seconds, fps=req.fps,
+                                     input_image=input_image, s=s)
             if refused:
                 job.push({"type": "line", "text": refused})
                 return False
