@@ -201,25 +201,77 @@ def _docker_pinned_digest():
     return cp._read_const("docker/Dockerfile", r"^ARG UBUNTU_IMAGE=ubuntu:[\d.]+@(sha256:[0-9a-f]{64})$")
 
 
+def _docker_spec():
+    return next(s for s in cp.build_registry() if s.name == "Docker base image")
+
+
 def test_docker_base_current_when_the_tag_still_points_at_the_pinned_digest(monkeypatch):
-    _router(monkeypatch, {"hub.docker.com": {"digest": _docker_pinned_digest(),
-                                             "tag_last_pushed": _d(3)}})
-    row = next(s for s in cp.build_registry() if s.name == "Docker base image").check(NOW)
+    monkeypatch.setattr(cp, "_registry_digest", lambda repo, tag: _docker_pinned_digest())
+    row = _docker_spec().check(NOW)
     assert row.status == cp.CURRENT
 
 
 @pytest.mark.parametrize("pushed_days_ago,status", [(30, cp.BEHIND), (31, cp.STALE)])
-def test_docker_base_digest_mismatch_ages_from_the_tag_push(monkeypatch, pushed_days_ago, status):
-    _router(monkeypatch, {"hub.docker.com": {"digest": "sha256:" + "0" * 64,
-                                             "tag_last_pushed": _d(pushed_days_ago)}})
-    row = next(s for s in cp.build_registry() if s.name == "Docker base image").check(NOW)
+def test_docker_base_digest_mismatch_ages_from_the_last_republish(monkeypatch, pushed_days_ago, status):
+    monkeypatch.setattr(cp, "_registry_digest", lambda repo, tag: "sha256:" + "0" * 64)
+    _router(monkeypatch, {"official-images/commits": [
+        {"commit": {"committer": {"date": _d(pushed_days_ago)}}}]})
+    row = _docker_spec().check(NOW)
     assert row.status == status and row.days == pushed_days_ago
 
 
-def test_docker_base_mismatch_without_a_push_date_is_unknown_not_current(monkeypatch):
-    _router(monkeypatch, {"hub.docker.com": {"digest": "sha256:" + "0" * 64}})
-    row = next(s for s in cp.build_registry() if s.name == "Docker base image").check(NOW)
-    assert row.status == cp.UNKNOWN
+def test_docker_base_mismatch_without_a_republish_date_is_unknown_not_current(monkeypatch):
+    monkeypatch.setattr(cp, "_registry_digest", lambda repo, tag: "sha256:" + "0" * 64)
+    _router(monkeypatch, {"official-images/commits": []})
+    assert _docker_spec().check(NOW).status == cp.UNKNOWN
+
+
+def test_docker_base_registry_failure_is_unknown_never_current(monkeypatch):
+    def boom(repo, tag):
+        raise cp.FetchError("registry unreachable")
+    monkeypatch.setattr(cp, "_registry_digest", boom)
+    row = _docker_spec().check(NOW)
+    assert row.status == cp.UNKNOWN and "registry unreachable" in row.detail
+
+
+class _FakeResp:
+    def __init__(self, headers):
+        self.headers = headers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_registry_digest_asks_the_registry_with_a_pull_token_and_reads_the_header(monkeypatch):
+    _router(monkeypatch, {"auth.docker.io/token": {"token": "tok-1"}})
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req)
+        return _FakeResp({"Docker-Content-Digest": "sha256:" + "a" * 64})
+    monkeypatch.setattr(cp.urllib.request, "urlopen", fake_urlopen)
+    assert cp._registry_digest("ubuntu", "24.04") == "sha256:" + "a" * 64
+    req = seen[0]
+    assert req.full_url == "https://registry-1.docker.io/v2/library/ubuntu/manifests/24.04"
+    assert req.get_method() == "HEAD" and req.get_header("Authorization") == "Bearer tok-1"
+    assert "application/vnd.oci.image.index.v1+json" in req.get_header("Accept")
+
+
+@pytest.mark.parametrize("headers", [{}, {"Docker-Content-Digest": "not-a-digest"}])
+def test_registry_digest_without_a_valid_header_is_a_fetch_error(monkeypatch, headers):
+    _router(monkeypatch, {"auth.docker.io/token": {"token": "t"}})
+    monkeypatch.setattr(cp.urllib.request, "urlopen", lambda req, timeout=None: _FakeResp(headers))
+    with pytest.raises(cp.FetchError):
+        cp._registry_digest("ubuntu", "24.04")
+
+
+def test_registry_digest_token_failure_is_a_fetch_error(monkeypatch):
+    _router(monkeypatch, {"auth.docker.io/token": OSError("401")})
+    with pytest.raises(cp.FetchError):
+        cp._registry_digest("ubuntu", "24.04")
 
 
 def test_parse_date_ignores_fractional_seconds():

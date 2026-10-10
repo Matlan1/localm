@@ -363,6 +363,47 @@ def _check_rocm_cpu_asset(now):
                group=group, detail="asset present; its tag must track the ROCm build's llama.cpp commit")
 
 
+_MANIFEST_ACCEPT = ", ".join([
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+])
+
+
+def _registry_digest(repo: str, tag: str) -> str:
+    """The digest Docker Hub's registry currently serves for library/<repo>:<tag>
+    (the Docker-Content-Digest of its manifest list). Raises FetchError."""
+    token_url = ("https://auth.docker.io/token?service=registry.docker.io"
+                 f"&scope=repository:library/{repo}:pull")
+    try:
+        token = _get_json(token_url)["token"]
+        req = urllib.request.Request(
+            f"https://registry-1.docker.io/v2/library/{repo}/manifests/{tag}", method="HEAD",
+            headers={"Authorization": f"Bearer {token}", "Accept": _MANIFEST_ACCEPT,
+                     "User-Agent": "localm-check-pins"})
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:  # noqa: S310 - fixed https:// URL
+            digest = r.headers.get("Docker-Content-Digest")
+    except (KeyError, TypeError) as e:
+        raise FetchError(f"{token_url}: unexpected token response ({e})") from e
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        raise FetchError(f"registry-1.docker.io {repo}:{tag}: {e}") from e
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
+        raise FetchError(f"registry-1.docker.io {repo}:{tag}: no Docker-Content-Digest header")
+    return digest
+
+
+def _docker_library_updated(repo: str) -> _dt.datetime | None:
+    """When docker-library/official-images last changed library/<repo>, i.e. when
+    its tags were last republished."""
+    data = _get_json("https://api.github.com/repos/docker-library/official-images/commits"
+                     f"?path=library/{repo}&per_page=1")
+    try:
+        return _parse_date(data[0]["commit"]["committer"]["date"])
+    except (KeyError, IndexError, TypeError) as e:
+        raise FetchError("unexpected official-images commits response shape") from e
+
+
 def _check_docker_base(now):
     name, group, advancer = "Docker base image", "tooling", "none (hand-edited)"
     pinned = ""
@@ -371,17 +412,17 @@ def _check_docker_base(now):
                           r"^ARG UBUNTU_IMAGE=(ubuntu:[\d.]+@sha256:[0-9a-f]{64})$")
         image, _, pinned = ref.partition("@")
         repo, _, tag = image.partition(":")
-        body = _get_json(f"https://hub.docker.com/v2/repositories/library/{repo}/tags/{tag}")
-        current = body["digest"]
-        pushed = _parse_date(body.get("tag_last_pushed") or body.get("last_updated"))
-    except (FetchError, KeyError, TypeError) as e:
+        current = _registry_digest(repo, tag)
+        updated = _docker_library_updated(repo) if current != pinned else None
+    except FetchError as e:
         return _unknown(name, group, advancer, e, pinned[:19])
-    row = Row(name=name, status=CURRENT, pinned=pinned[:19], latest=str(current)[:19], days=0,
+    row = Row(name=name, status=CURRENT, pinned=pinned[:19], latest=current[:19], days=0,
               tolerance=DEFAULT_TOLERANCE_DAYS, advancer=advancer, group=group)
     if current != pinned:
-        if pushed is None:
-            return _unknown(name, group, advancer, FetchError("tag push date unreadable"), pinned[:19])
-        row.days = max((now - pushed).days, 0)
+        if updated is None:
+            return _unknown(name, group, advancer, FetchError("republish date unreadable"),
+                            pinned[:19])
+        row.days = max((now - updated).days, 0)
         row.status = STALE if row.days > DEFAULT_TOLERANCE_DAYS else BEHIND
         row.detail = f"{image} has been republished with a new digest"
     return row

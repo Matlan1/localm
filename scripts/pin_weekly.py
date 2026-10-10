@@ -519,11 +519,7 @@ def _docker_base_candidate() -> tuple[str, str] | None:
                          r"^ARG UBUNTU_IMAGE=(ubuntu:[\d.]+@sha256:[0-9a-f]{64})$")
     image, _, pinned = ref.partition("@")
     repo, _, tag = image.partition(":")
-    body = cp._get_json(f"https://hub.docker.com/v2/repositories/library/{repo}/tags/{tag}")
-    try:
-        current = body["digest"]
-    except (KeyError, TypeError) as e:
-        raise cp.FetchError("unexpected Docker Hub response shape") from e
+    current = cp._registry_digest(repo, tag)
     return None if current == pinned else (pinned, current)
 
 
