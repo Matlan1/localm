@@ -24,6 +24,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `/v1/completions` returns the legacy `logprobs` object. In a chat reply, the tokens of the
   reasoning, of tool calls and of text cut by a stop sequence are left out. A model that
   cannot report them refuses the request with a 400 instead of answering without them.
+- **Log probabilities on `/v1/responses`.** A request with
+  `include: ["message.output_text.logprobs"]` (and `top_logprobs`, 0 to 20) now returns the
+  log probability of each token of the reply's text, with its alternatives, in the `output_text`
+  part and, when streamed, in the `response.output_text.delta` and `.done` events. They were a
+  400 before; a model that cannot report them still refuses the request with a 400.
 - **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
   `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
   same from the command line. A GGUF model whose projector has an audio encoder (for example
