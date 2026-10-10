@@ -267,10 +267,14 @@ def test_text_generation_goes_to_the_slot_scheduler_when_there_is_one():
     llm = _llm()
     llm._slots = _Slots()
     llm._n_ctx_max = None
-    with patch.object(llama_mod, "_build_sampler", return_value=object()):
-        out = list(llm._generate([1, 2, 3], 10, 0.0, 40, 0.9, 1.0))
-    assert out == [5, 6]
+    with patch.object(llama_mod, "_build_sampler", return_value=object()),          patch.object(llama_mod, "api") as api:
+        api.llama_decode.return_value = 1
+        try:
+            out = list(llm._generate([1, 2, 3], 10, 0.0, 40, 0.9, 1.0))
+        except Exception as exc:
+            out = exc
     assert calls == [("submit", [1, 2, 3], 10), "close"]
+    assert out == [5, 6]
     assert llm.last_finish_reason == "length"
 
 

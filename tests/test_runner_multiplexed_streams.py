@@ -297,11 +297,18 @@ class _Worker:
                     return
             time.sleep(0.01)
 
+    def _leave(self):
+        with self._lock:
+            self.running -= 1
+
     def chat_stream(self, on_status=None, **payload):
         self._join()
-        for tok in payload["tokens"]:
-            yield tok
-            time.sleep(0.01)
+        try:
+            for tok in payload["tokens"]:
+                yield tok
+                time.sleep(0.01)
+        finally:
+            self._leave()
 
     def close(self):
         pass
@@ -354,9 +361,12 @@ def test_the_child_cancels_only_the_named_stream(monkeypatch):
     class _Slow(_Worker):
         def chat_stream(self, on_status=None, **payload):
             self._join()
-            for tok in payload["tokens"]:
-                yield tok
-                time.sleep(0.05)
+            try:
+                for tok in payload["tokens"]:
+                    yield tok
+                    time.sleep(0.05)
+            finally:
+                self._leave()
 
     monkeypatch.setattr("localm.inference.backends.llamacpp._worker.GgufWorker", _Slow)
     req_q, resp_q, ctrl_q = queue.Queue(), queue.Queue(), queue.Queue()

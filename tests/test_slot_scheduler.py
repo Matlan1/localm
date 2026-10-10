@@ -328,6 +328,7 @@ def test_growing_the_context_replays_the_running_replies(made):
 
 def test_no_growth_beside_running_replies_when_vram_says_it_does_not_fit(made):
     ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=False)
+    ctx.step_delay = 0.01
     sched = made(ctx, 2)
     first = sched.submit(PROMPTS[0], 150, _Sampler())
     next(first)
@@ -337,6 +338,7 @@ def test_no_growth_beside_running_replies_when_vram_says_it_does_not_fit(made):
         daemon=True)
     waiter.start()
     time.sleep(0.3)
+    assert sched.counts() == (1, 1)
     assert ctx.recreated == []
     _drain(first)
     waiter.join(10)
