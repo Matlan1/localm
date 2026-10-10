@@ -282,3 +282,35 @@ def test_the_engine_passes_logprobs_only_when_asked():
         kw = backend.chat_stream.call_args.kwargs
         assert kw["logprobs"] == 0 and kw["on_logprobs"] == sink.extend
     assert engine.supports_logprobs is True
+
+
+def test_the_vision_path_scores_every_emitted_token_and_closes_its_scorer():
+    from unittest.mock import patch
+
+    from tests.test_generation_boundary_logging import (
+        _VISION_MESSAGES, _bare_llama_vision, _mock_native_api)
+    llm = _bare_llama_vision()
+    calls = []
+    llm._tokenizer.is_eog.side_effect = lambda t: len(calls) >= 4
+
+    class _Scorer:
+        closed = False
+
+        def score(self, ctx, idx, token):
+            calls.append((ctx, idx, token))
+            return ScoredToken(token, -float(len(calls)), ())
+
+        def close(self):
+            self.closed = True
+
+    scorer = _Scorer()
+    llm._logprob_scorer = lambda n: scorer if n is not None else None
+    with patch("localm.inference.backends.llamacpp.llama.api", _mock_native_api()), \
+         patch("localm.inference.backends.llamacpp.llama._build_sampler", return_value=999):
+        tokens = list(llm._generate_image(
+            _VISION_MESSAGES, max_new_tokens=10, temperature=0.8, top_k=40, top_p=0.95,
+            repeat_penalty=1.1, logprobs=2))
+    assert [t.logprob for t in tokens] == [-1.0, -2.0, -3.0, -4.0]
+    assert all(isinstance(t, ScoredToken) for t in tokens)
+    assert all(idx == -1 and ctx is llm._ctx_ptr for ctx, idx, _ in calls)
+    assert scorer.closed
