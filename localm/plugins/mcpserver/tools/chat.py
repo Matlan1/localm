@@ -222,7 +222,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
                     "model":       MODEL_PARAM,
                     "max_tokens":  {"type": "integer", "description": "Max tokens to generate"},
                     "temperature": {"type": "number", "description": "Sampling temperature"},
-                    "seed":        {"type": "integer", "description": "Seed for reproducible output"},
+                    "seed":        {"type": "integer", "description": "Sampling seed"},
                 },
                 "required": ["prompt"],
             },

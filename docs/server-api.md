@@ -1034,14 +1034,14 @@ for chunk in stream:
   decoded alone, even at temperature 0. A turn with an image runs on its own,
   after the replies already running. Other backends answer one request at a
   time per model.
-- **Prompt cache**: a GGUF model keeps the start of the previous prompt in its
-  KV cache and computes only the part of a new prompt that differs. llama.cpp's
-  results depend slightly on how many tokens it computes in one step (it picks
-  different kernels by batch size, and with model layers on the CPU it runs a
-  step of 32 or more tokens on the GPU), so the same request can get a
-  different reply depending on the requests before it, even at temperature 0
-  or with a fixed `seed`. Greedy output changes where the two most likely
-  tokens are close.
+- **Prompt cache**: a GGUF model keeps the tokens of earlier requests in its
+  KV cache and computes only the part of a new prompt that they do not already
+  cover. llama.cpp's results can depend slightly on how many tokens it
+  computes in one step (it picks kernels by batch size, and with model layers
+  on the CPU and a GPU present it can run a large step on the GPU and a small
+  one on the CPU), so the same request can get a different reply depending on
+  the requests before it, even at temperature 0 or with a fixed `seed`.
+  Greedy output changes where the two most likely tokens are close.
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context window section of
   [architecture.md](architecture.md)). Conversations that outgrow the

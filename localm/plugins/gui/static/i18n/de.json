@@ -535,7 +535,7 @@
   "coder.setup.scopeLabel": "Geltungsbereich (optionaler Glob - Datei-Tools sind auf passende Pfade beschränkt)",
   "coder.setup.seedLabel": "Seed (reproduzierbare Läufe)",
   "coder.setup.seedPlaceholder": "zufällig",
-  "coder.setup.seedTitle": "Legt die Zufallsentscheidungen des Samplers fest. Derselbe Seed mit demselben Modell, Prompt und denselben Einstellungen ergibt meist dieselbe Ausgabe, eine Antwort kann aber auch davon abhängen, was das Modell unmittelbar davor beantwortet hat. Leer lassen für einen frischen zufälligen Seed bei jedem Lauf.",
+  "coder.setup.seedTitle": "Legt die Zufallsentscheidungen des Samplers fest. Eine Antwort kann trotzdem davon abhängen, was das Modell zuvor beantwortet hat, daher ergeben derselbe Seed, dasselbe Modell, derselbe Prompt und dieselben Einstellungen nicht immer dieselbe Ausgabe. Leer lassen für einen frischen zufälligen Seed bei jedem Lauf.",
   "coder.setup.startBtn": "Sitzung starten",
   "coder.setup.systemLabel": "Benutzerdefinierte Anweisungen (optional - Konventionen, Stil, Einschränkungen)",
   "coder.setup.systemPlaceholder": "z. B. Vor dem Abschluss immer pytest ausführen. Guard Clauses bevorzugen.",

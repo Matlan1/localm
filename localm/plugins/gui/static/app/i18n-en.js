@@ -690,7 +690,7 @@ export const I18N_EN = {
   "coder.setup.seedLabel": "Seed (reproducible runs)",
   "coder.setup.seedPlaceholder": "random",
   "coder.setup.seedTitle":
-    "Pins the sampler's random choices. The same seed, model, prompt and settings usually give the same output, but a reply can also depend on what the model answered just before. Leave blank for a fresh random seed each run.",
+    "Pins the sampler's random choices. A reply can still depend on what the model answered before, so the same seed, model, prompt and settings do not always give the same output. Leave blank for a fresh random seed each run.",
   "coder.setup.startBtn": "Start session",
   "coder.setup.systemLabel": "Custom instructions (optional - conventions, style, constraints)",
   "coder.setup.systemPlaceholder": "e.g. Always run pytest before finishing. Prefer guard clauses.",

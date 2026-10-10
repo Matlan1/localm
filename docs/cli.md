@@ -858,7 +858,7 @@ regardless of `coder_reviewer`. Ask for a second opinion on demand, at any point
 REPL session and independent of the `coder_review` setting, with `/review`.
 
 **Reproducible runs.** `--seed N` pins the sampler's RNG, so the same seed with the same
-model, prompt and settings reproduces the same output. Measured bit-for-bit on one AMD
+model, prompt and settings repeats the same random choices. Measured bit-for-bit on one AMD
 gfx1030 box with the bundled llama.cpp runtime and Qwen2.5-Coder-7B Q6_K: 5/5 identical
 responses at `temperature 0.8` with a seed, 5/5 *different* without one, and identical
 again after a full model reload. That is one hardware and software combination, not a

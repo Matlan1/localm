@@ -110,12 +110,10 @@ def _complete_model(ctx, param, incomplete):
               help="Max tokens per LLM response [default: 2048, or from .localcoder/config.toml].")
 @click.option("--seed",             default=None,  type=int,
               help="RNG seed for sampling: the same seed, model, prompt and "
-                   "settings reproduce the same output. Measured bit-for-bit on "
-                   "one AMD gfx1030 box with the bundled llama.cpp runtime "
-                   "(including across a model reload); other hardware, "
-                   "backends, llama.cpp builds and concurrent load were not "
-                   "measured, so treat it as repeatable-here, not guaranteed "
-                   "everywhere. Ignored by --anthropic (no such API param).")
+                   "settings repeat the same random choices. A GGUF reply can "
+                   "still depend on what the model answered before (its prompt "
+                   "cache), so the output is not guaranteed to repeat. Ignored "
+                   "by --anthropic (no such API param).")
 @click.option("--verbose",          is_flag=True,
               help="Print full tool outputs.")
 @click.option("--yes", "-y",        is_flag=True,
