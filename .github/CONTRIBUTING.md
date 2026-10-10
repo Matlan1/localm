@@ -52,8 +52,13 @@ Before you push:
 ```bash
 python scripts/check_hygiene.py     # repository hygiene rules, see below
 ruff check .                        # lint
+basedpyright                        # type check against the committed baseline
 npm test                            # only if you changed localm/plugins/gui/static or tests-js
 ```
+
+`basedpyright` fails on a type error that is not in `.github/basedpyright-baseline.json`, and on
+a baseline that still lists errors your change fixed. When it rewrites the baseline, commit
+the updated `.github/basedpyright-baseline.json` with your change.
 
 `python scripts/check_hygiene.py --install-hook` installs it as a pre-commit hook. A warning that
 the release manifest checker is missing is expected in a public clone.

@@ -193,6 +193,7 @@ jobs:
           path: out/
 
       - name: Attest build provenance
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-path: |
@@ -201,8 +202,12 @@ jobs:
             out/*.whl
             out/*.cdx.json
 
-      - name: Attach the sdist, wheel and SBOM to the release
+      - name: Attach the sdist, wheel, SBOM and provenance bundle to the release
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
         run: |
           set -euo pipefail
+          VERSION="${TAG#v}"
+          cp "${BUNDLE_PATH}" "out/localm-${VERSION}.intoto.jsonl"
           gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" --clobber \
-            out/*.tar.gz out/*.whl out/*.cdx.json
+            out/*.tar.gz out/*.whl out/*.cdx.json out/*.intoto.jsonl

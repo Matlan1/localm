@@ -2577,8 +2577,8 @@ def _gguf_header_layout(f) -> _GgufLayout:
         keys.add(key)
         if key == "general.alignment" and vtype == 4:
             (alignment,) = struct.unpack("<I", f.read(4))
-            if not alignment:
-                raise struct.error("general.alignment is 0")
+            if not alignment or alignment & (alignment - 1):
+                raise struct.error(f"general.alignment {alignment} is not a power of 2")
             if alignment > _GGUF_MAX_ALIGNMENT:
                 raise struct.error(f"implausible general.alignment {alignment}")
             continue
