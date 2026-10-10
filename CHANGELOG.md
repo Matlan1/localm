@@ -18,6 +18,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `tool_result` blocks, `thinking` (returned as thinking blocks), streaming with the full
   Messages event sequence, and `/v1/messages/count_tokens`. The `x-api-key` header is accepted
   as well as a bearer token, and errors come back in Anthropic's error shape.
+- **The OpenAI Responses API at `/v1/responses`.** OpenAI SDKs and tools that speak the
+  Responses API can use any localm chat model: input items with text, images and audio,
+  `instructions`, function tools with `function_call` and `function_call_output` items,
+  `text.format` for structured output, reasoning items, and the streaming event sequence.
+  `previous_response_id` continues an earlier response, kept in the server's memory only and
+  only for the key that created it.
 - **Structured output and more OpenAI fields on `/v1/chat/completions`.**
   `response_format` (`json_object`, or `json_schema` with `strict`) constrains the reply,
   token by token, to JSON or to the schema, also alongside `tools`. `presence_penalty`,

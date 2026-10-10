@@ -420,6 +420,37 @@ counted with the model's own tokenizer and chat template, tool descriptions incl
 model that would answer the same `/v1/messages` request (capability routing applies, and a model
 another instance serves is counted there). The model is loaded if it is not already.
 
+### `POST /v1/responses` (OpenAI Responses API)
+
+Scope: any valid key (no specific scope required once auth is enabled).
+
+An OpenAI SDK or agent tool that speaks the Responses API can use localm by pointing its base URL
+at the server (`OPENAI_BASE_URL=http://127.0.0.1:8642/v1`) and naming a localm model. The request
+is answered by the same chat path as `/v1/chat/completions`, so capability routing, compaction,
+tool calling, structured output and the response headers work the same way.
+
+| Request field | Behaviour |
+|---|---|
+| `model` | A localm model name (`localm` or empty: the loaded model). |
+| `input` | A string, or a list of items: messages (`user`, `assistant`, `system`, `developer`; content as a string or `input_text`, `output_text`, `input_image` with an `image_url`, and `input_audio` parts), `function_call` and `function_call_output` items. `reasoning` items are dropped. `input_file`, `item_reference` and other item types are a 400. |
+| `instructions` | A system message for this request only; it is not carried into a continuation. |
+| `tools`, `tool_choice`, `parallel_tool_calls` | Function tools work with any chat model, as in [Tool calling](#tool-calling). `tool_choice` `auto`, `none`, `required` or a function by name. Built-in tools (web search, file search, code interpreter, ...) are a 400. |
+| `text.format` | `text`, `json_object`, or `json_schema` (with `strict`), as `response_format` on chat (see [Structured output](#structured-output)). |
+| `max_output_tokens`, `temperature`, `top_p` | Applied. |
+| `reasoning.effort` | `none` turns thinking off; another value leaves the model's default. A reasoning model's thinking comes back as a `reasoning` item. |
+| `previous_response_id` | Continues a stored response: its input and output are sent ahead of this request's input. Responses are kept in the server's memory only (at most 256 responses or 64 MB, for one hour, oldest dropped first), never on disk, are lost when the server restarts, and are visible only to the key that created them. An unknown, expired or foreign id is a 404. |
+| `store` | `false` keeps the response out of the store. |
+| `stream` | Server-sent events: `response.created`, `response.in_progress`, per output item `response.output_item.added`, `response.content_part.added`, `response.output_text.delta` (or `response.reasoning_text.delta`), `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, function calls as `response.function_call_arguments.delta` and `.done` carrying the whole arguments, then `response.completed` (or `response.incomplete` when the token cap was reached, `response.failed` when generation failed). Every event carries a `sequence_number`. |
+| `include` | `reasoning.encrypted_content` and the built-in tool entries are accepted; a reasoning item carries no encrypted content. `message.output_text.logprobs` is a 400. |
+| `truncation` | `auto` or `disabled`; either way an over-long conversation is compacted as on chat. |
+| `metadata`, `user`, `prompt_cache_key`, `safety_identifier`, `service_tier`, `max_tool_calls` | Accepted; `metadata` is echoed, the rest have no effect. |
+| `background`, `conversation`, `prompt`, `top_logprobs`, `text.verbosity` other than `medium` | A 400 naming the field. |
+
+Only `POST /v1/responses` is served: a stored response cannot be fetched, listed, cancelled or
+deleted through the API. Errors use OpenAI's shape, `{"error": {"message": "...", "type":
+"invalid_request_error", "param": ..., "code": null}}`, with `authentication_error` for a missing
+or wrong key and `not_found_error` for an unknown `previous_response_id`.
+
 ### `POST /v1/embeddings`
 
 Scope: any valid key (no specific scope required once auth is enabled).
