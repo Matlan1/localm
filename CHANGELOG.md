@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Token log probabilities.** For GGUF models, `/v1/chat/completions` returns `logprobs` and
+  up to 20 `top_logprobs` for each token of the reply's content, streamed or not, and
+  `/v1/completions` returns the legacy `logprobs` object. Reasoning, tool-call text and text
+  cut by a stop sequence are left out. A model that cannot report them refuses the request
+  with a 400 instead of answering without them.
 - **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
   `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
   same from the command line. A GGUF model whose projector has an audio encoder (for example

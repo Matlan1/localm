@@ -177,13 +177,52 @@ the CPU, or the draft model did not fit in VRAM beside it). The field is `null` 
 | `stream_options` | `{"include_usage": true}` moves the usage from the finish chunk to a last chunk with empty `choices`, sent just before `data: [DONE]`. Without it the finish chunk carries the usage. |
 | `reasoning_effort` | `"none"` asks a reasoning model to answer without thinking (like `chat_template_kwargs.enable_thinking: false`, which wins when both are sent). Other levels leave the model's default. |
 | `n` | Only `1` (one choice per request); any other value is a 400. |
-| `logprobs`, `top_logprobs` | Not served: `logprobs: true` or a `top_logprobs` above 0 is a 400. |
+| `logprobs`, `top_logprobs` | Returned for a GGUF model: see [Log probabilities](#log-probabilities). `top_logprobs` is 0 to 20 and needs `logprobs: true` when above 0; anything else is a 400. |
 | `logit_bias` | Not served (a non-empty map is a 400): token ids differ between models. |
 | `functions`, `function_call` | The deprecated function-calling fields are a 400; send `tools` and `tool_choice`. |
 | `audio`, `modalities` other than `["text"]`, `web_search_options` | A 400. |
 | `user`, `metadata`, `store`, `service_tier`, `prediction`, `verbosity`, `prompt_cache_key`, `safety_identifier` | Accepted; no effect. |
 
 A message with role `developer` is read as `system`.
+
+#### Log probabilities
+
+`logprobs: true` returns the log probability of each token of the reply's
+content in `choices[0].logprobs.content`; `top_logprobs` adds that many of the
+most likely tokens at each position, most likely first:
+
+```json
+{"token": " blue", "logprob": -0.12, "bytes": [32, 98, 108, 117, 101],
+ "top_logprobs": [{"token": " blue", "logprob": -0.12, "bytes": [32, 98, 108, 117, 101]},
+                  {"token": " red", "logprob": -2.31, "bytes": [32, 114, 101, 100]}]}
+```
+
+A streamed reply carries the entries of each delta's content in that chunk's
+`choices[0].logprobs.content`.
+
+- The values are the model's own distribution at each step, a softmax over its
+  raw logits: before temperature, `top_k`, `top_p`, `min_p`, the penalties or a
+  grammar shape the choice. So the sampled token can rank below others, and a
+  grammar can force a token with a very low value.
+- Only the content's tokens are listed. Tokens of the reasoning
+  (`reasoning_content`), of tool calls and of text cut off by a stop sequence are
+  left out; a token that spells both kept and cut text (the last one before a stop
+  sequence, for example) is listed.
+- `bytes` holds each token's own UTF-8 bytes. A character spread over several
+  tokens appears in each of them, and `token` shows an incomplete character as
+  U+FFFD.
+- A probability too small to represent is reported as `-9999.0`.
+- GGUF models report them, except diffusion language models. A model that
+  cannot (a Hugging Face model, a diffusion model) refuses the request with a
+  400, and so does a streamed request while a plugin rewrites the stream. When a
+  chat plugin rewrites a non-streamed reply, `logprobs` is `null` and the log
+  says why.
+- Each token is scored over the whole vocabulary, which slows generation:
+  on Qwen3-0.6B (a vocabulary of about 152,000 tokens) on a Radeon RX 6900 XT,
+  300-token replies ran at 321 tokens/s without `logprobs`, 222 with them and
+  218 with `top_logprobs: 20`, about 1.4 ms more per token. The added time per
+  token follows the vocabulary size, not the model's, so it weighs most on small,
+  fast models.
 
 #### Structured output
 
@@ -394,9 +433,16 @@ Raw text completion (streaming and non-streaming), same request extras as
 chat. Its usage block is narrower than chat's - see the table above.
 `prompt` is one string, or a list holding exactly one string. `echo: true`
 starts the reply text with the prompt. `presence_penalty`, `frequency_penalty`,
-`min_p` and `stream_options` work as on chat. A batch of prompts, token-id
-prompts, `best_of` above 1, `n` other than 1, `logprobs`, a non-empty
-`logit_bias` and `suffix` are each a 400 naming the field.
+`min_p` and `stream_options` work as on chat. `logprobs` (0 to 20) returns the
+legacy `logprobs` object for a GGUF model: `tokens`, `token_logprobs`,
+`top_logprobs` (each a map of the most likely tokens, always including the
+sampled one) and `text_offset` (where each token starts in `text`); a streamed
+reply carries the entries of each chunk's text. The values are computed as on
+chat ([Log probabilities](#log-probabilities)), for the tokens of the returned
+`text`. `echo` together with
+`logprobs` is a 400 (the prompt's tokens are not scored). A batch of prompts,
+token-id prompts, `best_of` above 1, `n` other than 1, a non-empty `logit_bias`
+and `suffix` are each a 400 naming the field.
 
 ### `POST /v1/messages` (Anthropic Messages API)
 
