@@ -12,6 +12,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Images generate without ComfyUI.** A native image backend runs stable-diffusion.cpp in
+  a separate worker process on CPU, Vulkan, CUDA, ROCm or Metal, installing its runtime on
+  first use. With no model set up, the Images page offers to download the recommended one
+  (SD-Turbo, about 2 GB); any model stable-diffusion.cpp supports can be set instead (SD
+  1.x/2.x, SDXL, SD3, FLUX, Z-Image and more, as GGUF, safetensors or ckpt, with separate
+  text encoders and VAE where the model needs them). The new Image backend setting picks
+  `auto` (ComfyUI when it is set up, otherwise native), `native` or `comfy`, and the Images
+  page, `/api/imagine`, `/v1/images/generations`, `localm image`, the chat
+  `/generate-image` command, the coder agent and the MCP `generate_image` tool all follow it.
+  The Images page and `/api/imagine` take a size, and `localm image` takes `--size`. A GGUF
+  image checkpoint without an architecture tag is now registered as an image model instead
+  of a chat model.
 - **Structured output and more OpenAI fields on `/v1/chat/completions`.**
   `response_format` (`json_object`, or `json_schema` with `strict`) constrains the reply,
   token by token, to JSON or to the schema, also alongside `tools`. `presence_penalty`,

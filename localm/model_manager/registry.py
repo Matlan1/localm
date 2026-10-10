@@ -43,6 +43,7 @@ from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_non_chat_model_type
+from .gguf import gguf_sd_checkpoint
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
@@ -247,6 +248,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
             non_chat = gguf_non_chat_model_type(gguf_metadata.get("architecture"))
             if non_chat:
                 return non_chat, gguf_metadata
+            if gguf_sd_checkpoint(path, meta=meta):
+                return "diffusion-unet", gguf_metadata
             return "llm", gguf_metadata
         if is_hf:
             if (path / "adapter_config.json").exists():

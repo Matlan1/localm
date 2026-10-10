@@ -22,20 +22,28 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 from localm.image_gen import comfy as _comfy
+from localm.media import backend_choice
 from localm.media.managed_comfy import legacy_comfy_value, managed_comfy_active
 from localm.plugins import media_config
 from localm.vram import media_estimate_bytes, resolve_swap_policy
 
 
 def settings(full_config: dict) -> dict:
-    """Resolve the image plugin's effective backend settings."""
+    """Resolve the image plugin's effective backend settings.
+
+    ``backend`` is the backend that will run (``auto`` already resolved);
+    ``backend_choice`` is what is configured and ``backend_note`` says how
+    ``auto`` resolved, or None. ``native`` is the native backend's own block."""
     block, warning = media_config.resolve_config("image", full_config)
     comfy_blk = block.get("comfy") if isinstance(block.get("comfy"), dict) else {}
-    backend_name = block.get("backend", "comfy")
+    native_blk = block.get("native") if isinstance(block.get("native"), dict) else {}
+    backend_choice_value = str(block.get("backend") or "auto").strip().lower() or "auto"
     # When the configured backend cannot be loaded the job falls back to comfy
     # and the returned warning says so.
     warning = media_config.combine_warnings(
-        warning, media_config.backend_unavailable_warning(__package__, backend_name))
+        warning, media_config.backend_unavailable_warning(
+            __package__,
+            "comfy" if backend_choice_value == "auto" else backend_choice_value))
     # When the managed ComfyUI instance is selected ("own"), neither the
     # per-plugin comfy.* fields nor the legacy global comfy_api_url /
     # comfy_launch_cmd / comfy_workdir are honoured here: ensure_comfy()'s
@@ -61,8 +69,13 @@ def settings(full_config: dict) -> dict:
     workdir = "" if own_active else (
         comfy_blk.get("workdir")
         or legacy_comfy_value("comfy_workdir", full_config) or "")
+    backend_name, backend_note = backend_choice.resolve(
+        backend_choice_value, full_config, comfy_blk, api_url, "Image")
     return {
         "backend": backend_name,
+        "backend_choice": backend_choice_value,
+        "backend_note": backend_note,
+        "native": native_blk,
         "api_url": api_url,
         "launch_cmd": launch_cmd,
         "workdir": workdir,
@@ -79,6 +92,59 @@ def settings(full_config: dict) -> dict:
         "vram_estimate_bytes": media_estimate_bytes("image", block),
         "warning": warning,
     }
+
+
+def prepare_for_job(s: dict, full_config: dict) -> dict:
+    """Finish resolving *s* (from ``settings``) for one generation, in the job's
+    own thread: ``auto`` re-checked against a live ComfyUI
+    (``backend_choice.refine_auto``), and a native job's
+    ``vram_estimate_bytes`` taken from its model files unless the plugin sets
+    ``vram_estimate_gb``. Returns *s*, updated in place."""
+    backend_choice.refine_auto(s, "Image")
+    if s.get("backend") == "native":
+        block, _w = media_config.resolve_config("image", full_config)
+        if not isinstance(block.get("vram_estimate_gb"), (int, float)):
+            from .backends import native
+            est = native.vram_estimate_bytes(s)
+            if est:
+                s["vram_estimate_bytes"] = est
+    return s
+
+
+def generate_unless_comfy(prompt: str, out_path: Path, *, on_progress=None,
+                          before_generate=None, config: Optional[dict] = None,
+                          **kwargs) -> Optional[tuple[bool, str]]:
+    """Generate through the configured image backend for a caller that has its
+    own ComfyUI path (the chat REPL, the coder tool, the MCP tool).
+
+    Returns None when the backend is ComfyUI, so the caller runs its own
+    ComfyUI code unchanged; otherwise ``(ok, message)``. Runs
+    ``ensure_available``, then *before_generate* (e.g. unloading a chat model),
+    then ``generate`` with *kwargs*, and always releases the backend's VRAM
+    afterwards. *on_progress* receives every status line."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    s = prepare_for_job(settings(cfg), cfg)
+    if s.get("backend") == "comfy":
+        return None
+
+    def say(text: str) -> None:
+        if on_progress is not None:
+            on_progress(text)
+
+    for note in (s.get("warning"), s.get("backend_note")):
+        if note:
+            say(note)
+    ok, message = ensure_available(s, on_progress=say)
+    if not ok:
+        return False, message
+    say(message)
+    if before_generate is not None:
+        before_generate()
+    try:
+        return generate(s, prompt, out_path, on_progress=say, **kwargs)
+    finally:
+        free_vram(s)
 
 
 # --- ComfyUI reference implementation (the default "comfy" backend, I1) ------

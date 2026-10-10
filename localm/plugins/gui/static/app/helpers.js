@@ -1385,15 +1385,23 @@ function _offerModelDownload(missingModel, log, plugin) {
       dl.onclick = async () => {
         dl.disabled = true; skip.disabled = true; dl.textContent = t("common.modelDownload.starting");
         try {
-          const r = await fetch("/api/models/pull-comfy-source", {
-            method: "POST", headers: authHeaders(),
-            body: JSON.stringify({
-              filename, plugin: plugin || null,
-              class_type: missingModel.class_type || null,
-              input_name: missingModel.input_name || null,
-              repo: source.repo, file: source.file,
-            }),
-          });
+          const r = missingModel.native
+            ? await fetch("/api/models/pull", {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify({
+                spec: source.spec, name: source.name || null,
+                sha256: source.sha256 || null, model_type: source.model_type,
+              }),
+            })
+            : await fetch("/api/models/pull-comfy-source", {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify({
+                filename, plugin: plugin || null,
+                class_type: missingModel.class_type || null,
+                input_name: missingModel.input_name || null,
+                repo: source.repo, file: source.file,
+              }),
+            });
           const data = await r.json();
           if (!r.ok) throw new Error(data.detail || r.statusText);
           if (watch) clearInterval(watch);

@@ -55,7 +55,9 @@ def test_media_admin_only_fields_is_the_single_source_of_truth():
     # comfy_workdir, and with a blank launch_cmd the launcher is auto-discovered
     # inside that folder and run via Popen, so it reaches execution the same way
     # launch_cmd does.
-    assert ss.media_admin_only_fields() == {"launch_cmd", "api_url", "workdir"}
+    assert ss.media_admin_only_fields() == {
+        "launch_cmd", "api_url", "workdir", "native_model", "native_vae",
+        "native_clip_l", "native_clip_g", "native_t5xxl", "native_llm"}
 
 
 def test_media_schema_resolves_block_over_global():

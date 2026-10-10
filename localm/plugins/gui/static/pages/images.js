@@ -108,7 +108,10 @@ const imageGallery = createGallery({
     return [useInput, toChat, copyImg];
   },
 
-  beforeRefresh: () => { refreshLoraPicker(); refreshReloadToggle("image", "img-reload-llm"); },
+  beforeRefresh: () => {
+    refreshImageBackend().then(() => { if (imageBackend.active !== "native") refreshLoraPicker(); });
+    refreshReloadToggle("image", "img-reload-llm");
+  },
 });
 
 export const refreshImageHistory = imageGallery.refresh;
@@ -117,6 +120,45 @@ export const refreshImageHistory = imageGallery.refresh;
 export const showImageDetail = (item) => imageGallery.showDetail(item);
 
 bindReloadToggle("image", "img-reload-llm");
+
+/* Which backend generates (from /api/imagine/backend). The native backend has
+   no ComfyUI workflow, workflow model picks or LoRA picker, so those controls
+   are hidden while it is active; the note under the Generate heading says
+   which backend runs and which model it uses. */
+export const imageBackend = { active: null, choice: null };
+
+export async function refreshImageBackend() {
+  let data;
+  try {
+    const r = await fetch("/api/imagine/backend", { headers: authHeaders() });
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+  imageBackend.active = data.active || null;
+  imageBackend.choice = data.choice || null;
+  const native = imageBackend.active === "native";
+  const note = $("img-backend-note");
+  if (note) {
+    let text = "";
+    if (native) {
+      const n = data.native || {};
+      text = n.model
+        ? t("images.backendNative", { model: n.model, runtime: n.runtime || t("images.backendRuntimeOnFirstUse") })
+        : t("images.backendNativeNoModel", { name: (n.recommended || {}).name || "" });
+    } else if (imageBackend.active === "comfy") {
+      text = t("images.backendComfy");
+    }
+    note.textContent = text;
+    note.hidden = !text;
+  }
+  for (const id of ["img-lora-field", "img-workflow-card"]) {
+    const node = $(id);
+    if (node) node.hidden = native;
+  }
+  for (const node of document.querySelectorAll("#view-images .img-comfy-only")) {
+    node.hidden = native;
+  }
+}
 
 /* LoRA picker - populated from ComfyUI's live-installed LoRA files via
    /api/imagine/comfy-models. Keeps the current selection across a refresh. */
@@ -180,14 +222,16 @@ $("img-generate").onclick = async () => {
     cfg: num("img-cfg"),
     denoise: num("img-denoise"),
     input_image: $("img-input").value.trim() || null,
+    size: $("img-size").value.trim() || null,
   };
-  const loraName = $("img-lora").value;
+  const native = imageBackend.active === "native";
+  const loraName = native ? "" : $("img-lora").value;
   if (loraName) {
     body.lora_name = loraName;
     body.lora_strength_model = num("img-lora-strength-model");
     body.lora_strength_clip = num("img-lora-strength-clip");
   }
-  if (modelOverrides.image && Object.keys(modelOverrides.image).length) {
+  if (!native && modelOverrides.image && Object.keys(modelOverrides.image).length) {
     body.model_overrides = modelOverrides.image;
   }
   $("img-generate").disabled = true;
@@ -197,7 +241,8 @@ $("img-generate").onclick = async () => {
   $("img-result").replaceChildren();
   try {
     await checkModelsBeforeGenerate("image", log,
-      { model_overrides: modelOverrides.image, lora_name: loraName || undefined });
+      { model_overrides: native ? undefined : modelOverrides.image, lora_name: loraName || undefined });
+    if (native) refreshImageBackend();
     const r = await fetch("/api/imagine", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });

@@ -248,7 +248,39 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             cached_comfy_download, curated_comfy_download, search_refusal,
         )
 
+        def _native_image_check():
+            """The preflight answer when the image plugin runs the native
+            backend, or None when it runs ComfyUI."""
+            from localm.config import load_config
+            from localm.plugins.builtin.image import backend as image_backend
+            s = image_backend.settings(load_config())
+            if s.get("backend") != "native":
+                return None
+            from localm.plugins.builtin.image.backends import native
+            st = native.status(s)
+            if not st["missing"]:
+                return {"status": "verified", "missing": [], "warning": None}
+            rec = st["recommended"]
+            if (s.get("native") or {}).get("model"):
+                return {"status": "verified", "missing": [], "warning": st["missing"]}
+            return {"status": "verified", "warning": None, "missing": [{
+                "filename": rec["file"], "native": True, "searchable": False,
+                "source": {"repo": rec["repo"], "file": rec["file"], "spec": rec["spec"],
+                           "sha256": rec["sha256"], "name": rec["name"],
+                           "size_bytes": rec["size_bytes"],
+                           "model_type": rec["model_type"], "origin": "curated"},
+            }]}
+
         def _check():
+            if kind == "image":
+                try:
+                    native_answer = _native_image_check()
+                except Exception as e:
+                    logger.warning("image backend preflight failed: %s", e)
+                    return {"status": "unavailable", "missing": [],
+                            "warning": "Could not check image models before generating."}
+                if native_answer is not None:
+                    return native_answer
             try:
                 workflow = _build_check_workflow(kind, req)
             except Exception as e:
