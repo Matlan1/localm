@@ -795,7 +795,7 @@ def test_the_receipt_exists_and_says_inconclusive_before_any_stage_runs(world):
 
     def runner(stage, payload, workdir, **kw):
         seen[stage] = json.loads(world.receipt.read_text(encoding="utf-8"))["verdict"]
-        raise KeyboardInterrupt
+        raise SystemExit(3)
 
     code, r = world.go("--current", stages=runner)
     assert seen == {"hw": "INCONCLUSIVE"}
