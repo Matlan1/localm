@@ -7,6 +7,7 @@ tests/test_sdcpp_runner.py."""
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import struct
@@ -615,7 +616,6 @@ def test_explicit_comfy_without_comfyui_fails_and_never_runs_native(native_app, 
 
 def test_cli_image_uses_the_native_backend(fake_native, cli_runner, tmp_path, monkeypatch,
                                            no_comfy):
-    import localm.image_gen.comfy as ic
     monkeypatch.setattr(comfy_client, "_comfy_alive", lambda url, timeout=3.0: False)
     runner, s = fake_native
     from localm.config import update_config
@@ -637,3 +637,128 @@ def test_cli_image_rejects_a_bad_size(cli_runner):
     result = cli_runner.invoke(main, ["image", "a fox", "--size", "7x7"])
     assert result.exit_code == 2
     assert "between" in result.output
+
+
+# --------------------------------------------------------------------------- #
+#  GUI preflight on the native backend                                        #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def gui_app(tmp_path, monkeypatch, no_comfy):
+    from fastapi import FastAPI
+
+    from localm.plugins.engine import attach_engine
+    from localm.plugins.gui.web import attach_gui
+    app = FastAPI()
+    attach_engine(app)
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=lambda name: None, active_model=lambda: "model-a")
+    return app
+
+
+def test_preflight_offers_the_recommended_native_model_when_none_is_set_up(gui_app):
+    from fastapi.testclient import TestClient
+    with TestClient(gui_app) as c:
+        r = c.post("/api/media/image/preflight", json={})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    rec = native.RECOMMENDED_MODELS[0]
+    assert data["status"] == "verified"
+    [entry] = data["missing"]
+    assert entry["native"] is True and entry["filename"] == rec.file
+    assert entry["source"]["spec"] == rec.spec
+    assert entry["source"]["sha256"] == rec.sha256
+    assert entry["source"]["model_type"] == "diffusion-unet"
+
+
+def test_preflight_reports_nothing_missing_once_the_native_model_resolves(gui_app, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    model = tmp_path / "ck.gguf"
+    model.write_bytes(b"x")
+    update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault(
+        "image", {}).update({"native": {"model": str(model)}}))
+    with TestClient(gui_app) as c:
+        data = c.post("/api/media/image/preflight", json={}).json()
+    assert data == {"status": "verified", "missing": [], "warning": None}
+
+
+def test_preflight_never_offers_a_download_over_an_explicit_model(gui_app, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault(
+        "image", {}).update({"native": {"model": str(tmp_path / "gone.gguf")}}))
+    with TestClient(gui_app) as c:
+        data = c.post("/api/media/image/preflight", json={}).json()
+    assert data["missing"] == []
+    assert "neither a registered model nor a file" in data["warning"]
+
+
+# --------------------------------------------------------------------------- #
+#  surfaces that have their own ComfyUI path                                  #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def native_configured(fake_native, no_comfy, monkeypatch):
+    monkeypatch.setattr(comfy_client, "_comfy_alive", lambda url, timeout=3.0: False)
+    runner, s = fake_native
+    from localm.config import update_config
+    update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault(
+        "image", {}).update({"native": {"model": s["native"]["model"]}}))
+    return runner
+
+
+def test_comfy_launch_route_always_starts_comfyui(native_app, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import localm.image_gen.comfy as ic
+    app, runner = native_app
+    seen = []
+    monkeypatch.setattr(ic, "ensure_comfy", lambda *a, **k: (seen.append(a), (True, "up"))[1])
+    with TestClient(app) as c:
+        r = c.post("/api/imagine/comfy-launch")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert seen and runner.loads == []
+
+
+def test_coder_tool_generates_with_the_native_backend(native_configured, tmp_path):
+    from localm.plugins.coder.tools.media import tool_generate_image
+    from PIL import Image
+    result = tool_generate_image(tmp_path, "a fox", output_path="art/fox.png")
+    assert result.ok, result.output
+    with Image.open(tmp_path / "art" / "fox.png") as im:
+        assert im.size == (512, 512)
+    assert native_configured.generates[0]["prompt"] == "a fox"
+    assert not native_configured.alive
+
+
+def test_coder_tool_reports_a_native_refusal(native_configured, tmp_path):
+    from localm.plugins.coder.tools.media import tool_generate_image
+    result = tool_generate_image(tmp_path, "a fox", output_path="fox.png",
+                                 lora_name="style.safetensors")
+    assert not result.ok and "LoRA" in result.output
+    assert not (tmp_path / "fox.png").exists()
+
+
+def test_chat_repl_generates_with_the_native_backend(native_configured, tmp_path):
+    from rich.console import Console
+
+    from localm.cli.chat import _cmd_generate_media
+    from localm.media import paths as media_paths
+
+    class _Engine:
+        unloaded = 0
+
+        def unload(self):
+            _Engine.unloaded += 1
+
+    out = io.StringIO()
+    _cmd_generate_media("generate-image", "a fox", _Engine(), Console(file=out, width=200),
+                        tmp_path)
+    files = list((tmp_path / media_paths.IMAGE_DIR_NAME).glob("*.png"))
+    assert len(files) == 1, out.getvalue()
+    assert _Engine.unloaded == 1
+    assert "native stable-diffusion.cpp" in out.getvalue()
+    assert not native_configured.alive
