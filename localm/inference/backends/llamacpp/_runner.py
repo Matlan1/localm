@@ -290,8 +290,8 @@ def _serve_stream(worker, payload: dict, emit: Callable, cancel_event) -> None:
             "mtp_skipped": worker.mtp_skipped,
             "speculation": worker.spec_report,
         }))
-    # Each arm below is raised before any native decode, or by a native call
-    # that returned a status, so the loaded model keeps serving.
+    # Each arm below is a refusal raised before any native decode, or by a
+    # native call that returned a status; the loaded model keeps serving.
     except ContextCapacityExceededError as e:
         emit(("error", str(e), "ContextCapacityExceededError"))
     except PretokenizerUnsafeInputError as e:
@@ -794,8 +794,7 @@ class ModelRunner:
             report = (native, " No native fault trace was captured for this exit.")
         else:
             from localm.debuglog import logger, native_fault_hint
-            # Logged as well as returned: the trace is multi-line and belongs in the
-            # debug log the message points at, not inlined into an HTTP error body.
+            # The full trace goes to the debug log; the report carries its first line.
             logger.error("gguf worker native fault trace:\n%s", trace)
             first = trace.splitlines()[0].strip()
             report = (native, f" Native fault: {first} ({native_fault_hint()}).")
