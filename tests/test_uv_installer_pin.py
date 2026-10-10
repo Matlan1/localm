@@ -251,6 +251,7 @@ def _bat_block(name: str) -> list[str]:
 
 
 _STUB_INSTALLER = (
+    "$ErrorActionPreference = 'Stop'\n"
     "Get-ExecutionPolicy | Out-Null\n"
     "Set-Content -LiteralPath $env:STUB_MARKER -Value 'ran'\n")
 
