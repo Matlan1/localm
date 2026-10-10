@@ -211,7 +211,9 @@ A streamed reply carries the entries of each delta's content in that chunk's
 - `bytes` holds each token's own UTF-8 bytes. A character spread over several
   tokens appears in each of them, and `token` shows an incomplete character as
   U+FFFD.
-- A probability too small to represent is reported as `-9999.0`.
+- A probability too small to represent is reported as `-9999.0`. So is a token
+  whose step produced logits that are not finite numbers (a fault in the model or
+  its runtime); it comes with no alternatives, and the server log gets a warning.
 - GGUF models report them, except diffusion language models. A model that
   cannot (a Hugging Face model, a diffusion model) refuses the request with a
   400, and so does a streamed request while a plugin rewrites the stream. When a
@@ -222,7 +224,9 @@ A streamed reply carries the entries of each delta's content in that chunk's
   300-token replies ran at 321 tokens/s without `logprobs`, 222 with them and
   218 with `top_logprobs: 20`, about 1.4 ms more per token. The added time per
   token follows the vocabulary size, not the model's, so it weighs most on small,
-  fast models.
+  fast models. On a model answering several requests at once, the replies
+  decoding beside one that asked for `logprobs` wait for its scoring at each step
+  too.
 
 #### Structured output
 

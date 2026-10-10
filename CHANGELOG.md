@@ -20,9 +20,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Attach an audio clip in the chat composer.** The attach button and drag-and-drop now take audio files (WAV, and MP3, FLAC, OGG, M4A or AAC with the voice extra) next to images and documents. The clip appears as its own chip with its length, plays back in the conversation, and is sent as an `input_audio` part, so a model that can hear audio, such as Qwen3-ASR, transcribes it. A file over 50 MB or a WAV over 10 minutes is refused before it is sent, and when the server refuses a clip (for example a model that cannot hear audio) its message is shown and the clip is dropped so the chat stays usable.
 - **Token log probabilities.** For GGUF models, `/v1/chat/completions` returns `logprobs` and
   up to 20 `top_logprobs` for each token of the reply's content, streamed or not, and
-  `/v1/completions` returns the legacy `logprobs` object. Reasoning, tool-call text and text
-  cut by a stop sequence are left out. A model that cannot report them refuses the request
-  with a 400 instead of answering without them.
+  `/v1/completions` returns the legacy `logprobs` object. In a chat reply, the tokens of the
+  reasoning, of tool calls and of text cut by a stop sequence are left out. A model that
+  cannot report them refuses the request with a 400 instead of answering without them.
 - **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
   `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
   same from the command line. A GGUF model whose projector has an audio encoder (for example

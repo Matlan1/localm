@@ -73,7 +73,11 @@ class LogprobScorer:
     *api* is the bound llama.cpp module (``_api``), *n_vocab* the model's
     vocabulary size and *n_top* how many alternatives each token reports
     (0 to :data:`MAX_TOP_LOGPROBS`). Holds a native sampler chain: call
-    :meth:`close` when the generation ends. Not thread-safe."""
+    :meth:`close` when the generation ends. Not thread-safe.
+
+    A row holding a NaN or +inf logit has no probabilities; its token is
+    reported at :data:`FLOOR_LOGPROB` with no alternatives, and the first such
+    row of a scorer is logged at WARNING."""
 
     def __init__(self, api: Any, n_vocab: int, n_top: int) -> None:
         if not 0 <= n_top <= MAX_TOP_LOGPROBS:
@@ -84,6 +88,7 @@ class LogprobScorer:
         self._n_vocab = n_vocab
         self._n_top = n_top
         self._k = max(1, n_top)
+        self._warned = False
         self._chain: Optional[Any] = None
         params = api.llama_sampler_chain_default_params()
         params.no_perf = True
@@ -138,9 +143,15 @@ class LogprobScorer:
                        for i in range(size)), key=lambda c: c[0], reverse=True)
         top_logit, top_p, _ = best[0]
         if not (top_p > 0.0 and math.isfinite(top_p) and math.isfinite(top_logit)):
-            raise RuntimeError(
-                f"the logprob sampler chain produced no usable probability "
-                f"(logit {top_logit}, p {top_p})")
+            if not self._warned:
+                self._warned = True
+                from localm.debuglog import logger
+                logger.warning(
+                    "logprobs: output row %d holds a logit that is not a finite number "
+                    "(best logit %r, p %r); its token is reported at %s with no "
+                    "alternatives, as is any later such row of this reply",
+                    idx, top_logit, top_p, FLOOR_LOGPROB)
+            return ScoredToken(int(token), FLOOR_LOGPROB, ())
         lse = top_logit - math.log(top_p)
         logprob = clamp_logprob(float(logits[int(token)]) - lse)
         top = tuple((tid, clamp_logprob(logit - lse))

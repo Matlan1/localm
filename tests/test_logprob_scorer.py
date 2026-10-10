@@ -129,6 +129,38 @@ def test_a_vanishing_probability_reports_the_floor(make_api):
     scorer.close()
 
 
+@pytest.mark.parametrize("make_api", list(_apis()))
+@pytest.mark.parametrize("row", [
+    [0.0, 1.0, 2.0, float("inf")], [float("inf"), 1.0, 2.0, 3.0],
+    [0.0, float("nan"), 2.0, 3.0], [float("nan"), 1.0, 2.0, 3.0]],
+    ids=["inf-last", "inf-first", "nan-mid", "nan-first"])
+def test_a_row_that_is_not_finite_reports_the_floor_and_warns_once(make_api, row, caplog):
+    if make_api is _native_api:
+        require_native_runtime()
+    scorer = LogprobScorer(make_api(_Row(row)), 4, 2)
+    with caplog.at_level("WARNING", logger="localm"):
+        first = scorer.score(None, 1, 2)
+        second = scorer.score(None, 1, 0)
+    scorer.close()
+    assert (first.logprob, first.top) == (FLOOR_LOGPROB, ())
+    assert (second.logprob, second.top) == (FLOOR_LOGPROB, ())
+    assert first == 2 and second == 0
+    assert caplog.text.count("not a finite number") == 1
+
+
+@pytest.mark.parametrize("make_api", list(_apis()))
+def test_a_minus_infinity_logit_is_a_token_that_cannot_occur(make_api):
+    if make_api is _native_api:
+        require_native_runtime()
+    scorer = LogprobScorer(make_api(_Row([0.0, float("-inf"), 2.0, 3.0])), 4, 2)
+    assert scorer.score(None, -1, 1).logprob == FLOOR_LOGPROB
+    got = scorer.score(None, -1, 3)
+    want = reference([0.0, 2.0, 3.0])
+    assert got.logprob == pytest.approx(want[2], abs=1e-5)
+    assert got.top[0][0] == 3
+    scorer.close()
+
+
 def test_a_missing_row_and_a_closed_scorer_raise():
     row = _Row([1.0, 2.0])
     api = _fake_api(row)
