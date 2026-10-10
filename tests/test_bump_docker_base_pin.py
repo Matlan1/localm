@@ -181,6 +181,17 @@ def test_a_digest_the_registry_does_not_serve_is_refused(bump, tree, capsys):
     assert tree.read_bytes() == before
 
 
+def test_a_registry_error_for_the_digest_is_refused(bump, tree, capsys):
+    base = FakeRegistry()
+
+    def failing(url, headers):
+        if url.endswith(NEW):
+            return 503, b""
+        return base(url, headers)
+    assert run(bump, ["--tag", NEW, "--write"], failing) == 1
+    assert f"answered HTTP 503 for library/ubuntu@{NEW}" in capsys.readouterr().out
+
+
 def test_bytes_that_do_not_hash_to_the_digest_are_refused(bump, tree, capsys):
     fake = FakeRegistry(blobs={NEW: index_bytes(salt="forged")})
     assert run(bump, ["--tag", NEW, "--write"], fake) == 1
