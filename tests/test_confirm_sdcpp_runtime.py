@@ -608,6 +608,22 @@ def test_a_child_that_cannot_isolate_reports_why_in_its_result(cf, tmp_path):
     assert set(st.values()) == {"SKIP"}
 
 
+def test_a_child_can_be_limited_to_a_number_of_cpus(cf, tmp_path):
+    env = cf.prepare_environment(tmp_path)
+    spec = {"backend": "cpu", "tag": "master-1-aaaaaaa", "commit": "a" * 40,
+            "override": False, "home": env["LOCALM_HOME"], "model": None,
+            "model_skip": "none", "png": str(tmp_path / "o.png"), "cpu_cores": 2}
+    res = cf.run_child(spec, tmp_path, env, timeout=300)
+    assert res["cpu_cores"] == 2, res
+
+
+def test_the_core_limit_is_part_of_what_each_child_is_told(cf, bump, bound, tmp_path):
+    api = _Api(bump, bound)
+    calls = []
+    _confirm(cf, api, tmp_path, child_runner=_healthy_runner(api, calls=calls), cpu_cores=3)
+    assert calls[0][0]["cpu_cores"] == 3
+
+
 def test_a_child_past_its_timeout_is_killed_with_its_tree(cf, tmp_path):
     env = cf.prepare_environment(tmp_path)
     spec = {"backend": "cpu", "tag": "t", "commit": "c" * 40, "override": False,

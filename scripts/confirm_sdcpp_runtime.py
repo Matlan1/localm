@@ -534,7 +534,18 @@ def _classify_download_error(message: str) -> str:
     return "archive"
 
 
+def limit_cores(count: int) -> int:
+    """Restrict this process, and so the worker it spawns, to the first *count* logical
+    CPUs. Returns the number it is now restricted to."""
+    import psutil
+    cores = list(range(max(1, min(int(count), os.cpu_count() or 1))))
+    psutil.Process().cpu_affinity(cores)
+    return len(cores)
+
+
 def _child_work(spec: dict, res: dict) -> None:
+    if spec.get("cpu_cores"):
+        res["cpu_cores"] = limit_cores(spec["cpu_cores"])
     import localm
     from localm.config import home_dir
     from localm.media.sdcpp import pins, runtime
@@ -866,7 +877,8 @@ def prepare_environment(run_dir: Path, base_env=None) -> dict:
 
 def confirm(tag: str | None, current: bool, workdir: Path, *, keep: bool = False,
             backends=None, cache_dir: Path | None = None, opener=None,
-            child_runner=None, model_provider=None, detector=None) -> dict:
+            child_runner=None, model_provider=None, detector=None,
+            cpu_cores: int | None = None) -> dict:
     """Run every check and return the receipt dict (not yet written).
 
     *opener* serves the GitHub API and header reads, *child_runner* replaces the
@@ -956,7 +968,7 @@ def confirm(tag: str | None, current: bool, workdir: Path, *, keep: bool = False
             spec = {"backend": backend, "tag": cand["tag"], "commit": cand["commit"],
                     "override": override, "home": env["LOCALM_HOME"],
                     "model": model["path"] if model else None, "model_skip": model_skip,
-                    "png": str(run_dir / f"out-{backend}.png")}
+                    "png": str(run_dir / f"out-{backend}.png"), "cpu_cores": cpu_cores}
             res = runner(spec, run_dir, child_env)
             checks.update(checks_for_backend(backend, res, cand["commit"], sizes))
             for name in (f"download_{backend}", f"abi_{backend}", f"device_{backend}",
@@ -1008,6 +1020,8 @@ def main(argv=None) -> int:
                     choices=["cpu", "vulkan", "cuda", "rocm", "metal"],
                     help="repeatable; default: cpu plus the GPU backends of this machine")
     ap.add_argument("--cache-dir", default=None, help="persistent model cache directory")
+    ap.add_argument("--cpu-cores", type=int, default=None,
+                    help="restrict the runtime children to this many logical CPUs")
     args = ap.parse_args(argv)
     if args.tag:
         try:
@@ -1019,7 +1033,8 @@ def main(argv=None) -> int:
     try:
         receipt = confirm(args.tag, args.current, Path(args.workdir), keep=args.keep,
                           backends=args.backend,
-                          cache_dir=Path(args.cache_dir) if args.cache_dir else None)
+                          cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+                          cpu_cores=args.cpu_cores)
     except BaseException as e:  # noqa: BLE001
         receipt = {"schema": SCHEMA, "component": COMPONENT, "tag": args.tag,
                    "current": args.current, "verdict": V_INCONCLUSIVE,
