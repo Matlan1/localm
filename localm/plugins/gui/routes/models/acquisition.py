@@ -249,6 +249,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         )
 
         def _check():
+            if kind == "music":
+                from localm.config import load_config
+                from localm.plugins.builtin.music import backend as music_backend
+                if music_backend.settings(load_config())["backend"] == "native":
+                    return {"status": "verified", "missing": [], "warning": ""}
             try:
                 workflow = _build_check_workflow(kind, req)
             except Exception as e:

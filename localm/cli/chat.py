@@ -997,6 +997,13 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     if not arg:
         console.print(f"[dim]Usage: /{label} <{spec['arg']}>[/dim]")
         return
+    if spec["plugin"] == "music":
+        from ..config import load_config
+        from ..plugins.builtin.music import backend as _music_backend
+        s = _music_backend.settings(load_config())
+        if s["backend"] == "native":
+            _generate_music_native(s, arg, engine, console, home_dir)
+            return
     from ..image_gen.comfy import ensure_comfy, free_comfy_vram
     from .media import _plugin_api_url
     api = _plugin_api_url(spec["plugin"])
@@ -1032,6 +1039,39 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     console.print(escape(message))
     if ok:
         free_comfy_vram(api)
+
+
+def _generate_music_native(s: dict, tags: str, engine, console, home_dir) -> None:
+    """REPL /generate-music on the native backend: install what is missing,
+    unload the chat model, generate one WAV into the music gallery, then stop
+    the music runtime so the chat model can reload."""
+    import time as _t
+    from rich.markup import escape
+    from ..audit import SessionMode, effective_mode
+    from ..media.koboldcpp import server
+    from ..plugins.builtin.music.backends import native
+
+    def say(t: str) -> None:
+        console.print(f"[dim]{escape(t)}[/dim]")
+
+    say(f"Music backend: native ({s.get('backend_reason', '')})")
+    ok, msg = native.ensure_available(s, on_progress=say)
+    if not ok:
+        console.print(f"[yellow]{escape(msg)}[/yellow]")
+        return
+    out_dir = home_dir / _media_paths.MUSIC_DIR_NAME
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{native.OUTPUT_SUFFIX}"
+    console.print("[dim]Freeing VRAM (chat model unloads, "
+                  "reloads on your next message)...[/dim]")
+    engine.unload()
+    is_privacy = effective_mode("chat") == SessionMode.PRIVACY
+    try:
+        ok, message = native.generate(s, tags, out, write_sidecar=not is_privacy,
+                                      on_progress=say)
+    finally:
+        server.stop()
+    console.print(escape(message))
 
 
 def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:

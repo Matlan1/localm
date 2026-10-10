@@ -1842,6 +1842,15 @@ class MediaField:
 
 # Order = display order within each plugin subsection.
 MEDIA_PLUGIN_FIELDS: list = [
+    MediaField("backend", ("backend",), "", Widget.SELECT, "Music backend",
+               "auto = ComfyUI when one is set up, else native; native = ACE-Step "
+               "runs inside localm; comfy = always ComfyUI.",
+               options=["auto", "native", "comfy"], plugins=["music"]),
+    MediaField("native_backend", ("native", "backend"), "", Widget.SELECT,
+               "Native compute backend",
+               "Where native music generation runs. auto picks the best for this "
+               "machine and falls back to vulkan, then cpu.",
+               options=["auto", "cuda", "vulkan", "cpu", "metal"], plugins=["music"]),
     # The per-plugin workdir WINS over the global comfy_workdir (scan.py returns
     # the per-plugin value first; image/backend.py and its music/video twins
     # pass it into ensure_comfy()), so gating only the CORE field would leave

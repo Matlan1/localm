@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Music plugin: ComfyUI ACE-Step music generation + a library for the chat surface.
+"""Music plugin: ACE-Step music generation (native or ComfyUI) + a library for the chat surface.
 
 Routes (mounted by the engine, auto-scoped to the ``music`` capability):
   POST   /api/music                       - generate a track (background job)
@@ -13,9 +13,9 @@ SSE endpoint. The GUI is not required: the job registry is created by
 ``attach_engine``, so a headless ``localm serve`` can generate too.
 It still needs this server's own address for the chat/media VRAM handover (see
 ``resolve_self_url``), and 503s with that specific reason if it cannot be
-determined. The backend is selected per-plugin (default
-ComfyUI ACE-Step) and reads this plugin's own config (see backend.py). Ships
-DISABLED by default.
+determined. The backend is selected per-plugin (``auto``: ComfyUI when one is
+set up, else the native ACE-Step runtime) and reads this plugin's own config
+(see backend.py). Ships DISABLED by default.
 """
 
 from __future__ import annotations
@@ -61,6 +61,10 @@ class MoveFileRequest(BaseModel):
     dest: str                         # destination directory on this machine
 class RenameFileRequest(BaseModel):
     new_name: str                     # new filename (extension kept if omitted)
+
+
+_AUDIO_TYPES = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav",
+                ".ogg": "audio/ogg"}
 
 
 def _music_dir() -> Path:
@@ -118,6 +122,10 @@ async def music(req: MusicRequest, request: Request):
         is_privacy = effective_mode("server") == SessionMode.PRIVACY
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
+        job.push({"type": "line", "text":
+                  f"Music backend: {s['backend']} ({s.get('backend_reason', '')})."})
+        track_path = out_path.with_suffix(
+            getattr(_backend._impl(s), "OUTPUT_SUFFIX", out_path.suffix))
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
         job.push({"type": "line", "text": msg})
@@ -128,8 +136,8 @@ async def music(req: MusicRequest, request: Request):
         from localm.media.comfy_client import resolve_media_placement
         # Per-component GPU placement (opt-in) plus the user-facing notice, in one shared
         # helper (image/music/video share this preamble). placement is applied inside
-        # generate_music; notice is what to tell the user.
-        placement, notice = resolve_media_placement(_cfg, s["api_url"])
+        # generate_music; notice is what to tell the user. ComfyUI only.
+        placement, notice = (None, None) if s["backend"] == "native" else             resolve_media_placement(_cfg, s["api_url"])
         if notice:
             job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
@@ -155,9 +163,14 @@ async def music(req: MusicRequest, request: Request):
             job.push({"type": "line", "text":
                       "Both models fit in VRAM - keeping the chat model loaded "
                       "(no swap)."})
-        job.push({"type": "line", "text":
-                  f"Submitting ACE-Step workflow to the music backend "
-                  f"({req.duration_seconds:.0f}s track)..."})
+        if s["backend"] == "native":
+            job.push({"type": "line", "text":
+                      f"Generating a {req.duration_seconds:.0f}s track with the native "
+                      "ACE-Step runtime..."})
+        else:
+            job.push({"type": "line", "text":
+                      f"Submitting ACE-Step workflow to the music backend "
+                      f"({req.duration_seconds:.0f}s track)..."})
         kwargs = {}
         if req.seed is not None:
             kwargs["seed"] = req.seed
@@ -176,7 +189,7 @@ async def music(req: MusicRequest, request: Request):
         if req.model_overrides:
             kwargs["model_overrides"] = req.model_overrides
         ok, message = _backend.generate(
-            s, req.tags, out_path,
+            s, req.tags, track_path,
             self_url=self_url,
             instance_token=instance_token,
             write_sidecar=not is_privacy,
@@ -193,8 +206,8 @@ async def music(req: MusicRequest, request: Request):
         )
         job.push({"type": "line", "text": message})
         if ok:
-            job.result = out_path.name
-            gallery.stamp_owner("music", out_path.name, owner)
+            job.result = track_path.name
+            gallery.stamp_owner("music", track_path.name, owner)
         # The real deliverable is decided right here - mark it before the VRAM
         # handover below, which is best-effort cleanup that can itself raise
         # (e.g. a non-comfy backend's free_vram()) and must never be able to
@@ -221,8 +234,7 @@ async def music(req: MusicRequest, request: Request):
              dependencies=[Depends(gallery.require_owner("music"))])
 async def music_file(name: str):
     path = _music_path(name)
-    media = "audio/mpeg" if path.suffix.lower() == ".mp3" else "audio/flac"
-    return FileResponse(str(path), media_type=media)
+    return FileResponse(str(path), media_type=_AUDIO_TYPES.get(path.suffix.lower(), "audio/flac"))
 
 
 @_router.delete("/api/music/file/{name}",

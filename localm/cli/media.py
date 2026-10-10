@@ -271,20 +271,23 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
 @click.option("-d", "--duration", default=120.0, show_default=True,
               help="Track length in seconds - arbitrary.")
 @click.option("-o", "--out", default=None,
-              help="Output .flac path [default: ./music_<timestamp>.flac]")
+              help="Output path [default: ./music_<timestamp>.flac, or .wav with the "
+                   "native backend]")
 @click.option("--seed", type=int, default=None, help="Reproducible seed.")
 @click.option("--steps", type=int, default=None, help="Sampler steps (default 50).")
 @click.option("--cfg", type=float, default=None, help="Guidance (default 5.0).")
 def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
-    """Generate a music track with the local ComfyUI ACE-Step workflow.
+    """Generate a music track with ACE-Step, natively or through ComfyUI.
 
     \b
     Examples:
       localm music "synthwave, 80s, 120 bpm, dreamy"
       localm music "folk ballad, acoustic guitar" --lyrics song.txt -d 180
 
-    ComfyUI must be running (or start it via the GUI, which can auto-launch
-    it when comfy_launch_cmd is configured).
+    The music plugin's backend setting decides: native runs ACE-Step 1.5
+    itself (installing the runtime and models on first use), comfy uses
+    ComfyUI, and auto (the default) uses ComfyUI when one is set up, native
+    otherwise.
     """
     import time as _time
     from rich.console import Console
@@ -292,6 +295,17 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     from ..audit import SessionMode, effective_mode
     from ..music_gen import generate_music
     console = Console()
+    lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
+    kwargs = {k: v for k, v in
+              (("seed", seed), ("steps", steps), ("cfg", cfg)) if v is not None}
+    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
+    _write_sidecar = not _is_privacy
+    from ..config import load_config
+    from ..plugins.builtin.music import backend as _music_backend
+    _s = _music_backend.settings(load_config())
+    if _s["backend"] == "native":
+        _music_native(console, _s, tags, lyr, duration, out, kwargs, _write_sidecar)
+        return
 
     # generate_music() calls ensure_comfy() internally: auto-launch from
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
@@ -299,11 +313,6 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     api_url = _plugin_api_url("music")
     out_path = Path(out) if out \
         else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}.flac")
-    lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
-    kwargs = {k: v for k, v in
-              (("seed", seed), ("steps", steps), ("cfg", cfg)) if v is not None}
-    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
-    _write_sidecar = not _is_privacy
 
     def _gen_music():
         return generate_music(
@@ -321,6 +330,40 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     if not ok:
         ok, message = _maybe_apply_func_shim_and_retry(
             message, api_url, lambda: _generate_or_abort(api_url, _gen_music))
+    console.print(f"[{'green' if ok else 'red'}]{escape(str(message))}[/{'green' if ok else 'red'}]")
+    if not ok:
+        sys.exit(1)
+    _offer_open(out_path)
+
+
+def _music_native(console, s: dict, tags: str, lyrics, duration: float, out,
+                  kwargs: dict, write_sidecar: bool) -> None:
+    """``localm music`` on the native backend: install what is missing, generate
+    one WAV, then stop the music runtime. Exits 1 on failure, 2 on an output
+    path that is not a .wav."""
+    import time as _time
+    from rich.markup import escape
+    from ..media.koboldcpp import server
+    from ..plugins.builtin.music.backends import native
+    out_path = Path(out) if out \
+        else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}.wav")
+    if out_path.suffix.lower() != ".wav":
+        console.print("[red]The native music backend writes WAV audio; give an output "
+                      "path ending in .wav.[/red]")
+        sys.exit(2)
+
+    def say(t: str) -> None:
+        console.print(f"  [dim]{escape(t)}[/dim]")
+
+    say(f"Music backend: native ({s.get('backend_reason', '')})")
+    try:
+        ok, message = native.ensure_available(s, on_progress=say)
+        if ok:
+            ok, message = native.generate(
+                s, tags, out_path, write_sidecar=write_sidecar, on_progress=say,
+                lyrics=lyrics, duration_seconds=duration, **kwargs)
+    finally:
+        server.stop()
     console.print(f"[{'green' if ok else 'red'}]{escape(str(message))}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
