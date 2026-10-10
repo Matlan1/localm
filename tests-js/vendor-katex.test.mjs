@@ -51,15 +51,15 @@ const MIN_SAFE = [0, 16, 21];
 
 // Provenance pin. Each hash is sha256, base64, over the file's CRLF-normalised
 // bytes (see the header). Recorded from the npm registry artefact:
-//   npm pack katex@0.18.4  ->  package/dist/{katex.min.js,katex.min.css}
+//   npm pack katex@0.19.0  ->  package/dist/{katex.min.js,katex.min.css}
 //                              package/dist/contrib/auto-render.min.js
 // Bumping KaTeX means updating VENDORED_VERSION and all three hashes together.
 // That churn is the point: it is what makes a half-bump impossible to land
 // quietly.
-const VENDORED_VERSION = "0.18.4";
+const VENDORED_VERSION = "0.19.0";
 const PINNED = {
-  "katex.min.js": "LsWRaUHvQ4PgMU6qvMcSMBsGAB2fto4I11HSuuWieho=",
-  "katex.min.css": "GAwtd9Q019pR1mJcUKlk1P1v29ubyHlqCgFsMMSZMfs=",
+  "katex.min.js": "EDpTdjzAM7uo0XW/Pwull8NQXJtnR90/LHvCpr/Miuc=",
+  "katex.min.css": "1KtbjuFpibBwzbDqJL1q1I/I3xt4fygPKdOuT5WfLAA=",
   "auto-render.min.js": "5TctGZvNrotN5x0PfOunKkuhJ3SifGCm8fd9A7MijuQ=",
 };
 
