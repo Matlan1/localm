@@ -105,6 +105,9 @@ class SdRunner:
               cancel_check: Optional[Callable[[], bool]] = None):
         """The final reply to the command in flight, relaying events to
         *on_event*. Raises :class:`SdCancelled` or :class:`SdWorkerError`."""
+        proc, resp_q, cancel = self._proc, self._resp_q, self._cancel
+        if proc is None or resp_q is None or cancel is None:
+            raise SdWorkerError("The image worker is not running.")
         deadline = time.monotonic() + timeout
         cancel_deadline = None
         while True:
@@ -114,12 +117,12 @@ class SdRunner:
                 except Exception:
                     wanted = False
                 if wanted:
-                    self._cancel.set()
+                    cancel.set()
                     cancel_deadline = time.monotonic() + CANCEL_GRACE
             try:
-                msg = self._resp_q.get(timeout=_POLL_INTERVAL)
+                msg = resp_q.get(timeout=_POLL_INTERVAL)
             except _queue.Empty:
-                if not self._proc.is_alive():
+                if not proc.is_alive():
                     reason = self._exit_reason()
                     detail = self._crash_detail()
                     self._reset()
@@ -148,7 +151,7 @@ class SdRunner:
                         pass
                 continue
             if cancel_deadline is not None:
-                self._cancel.clear()
+                cancel.clear()
                 if kind == "ok":
                     raise SdCancelled("Generation cancelled.")
             if kind == "ok":
@@ -160,7 +163,7 @@ class SdRunner:
             raise SdWorkerError(f"Unexpected reply from the image worker: {msg!r}")
 
     def _request(self, name: str, payload, timeout: float, **kw):
-        if self._req_q is None or not self.is_alive():
+        if self._req_q is None or self._cancel is None or not self.is_alive():
             raise SdWorkerError("The image worker is not running.")
         self._cancel.clear()
         self._req_q.put((name, payload))
@@ -231,7 +234,7 @@ class SdRunner:
         proc = self._proc
         if proc is None:
             return
-        if proc.is_alive() and grace > 0:
+        if proc.is_alive() and grace > 0 and self._req_q is not None:
             try:
                 self._req_q.put(("shutdown", None))
             except Exception:

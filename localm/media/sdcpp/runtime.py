@@ -264,7 +264,7 @@ def install(backend: str, *, force: bool = False,
     load-test (tests only)."""
     say = on_progress or (lambda _m: None)
     plat = platform_key()
-    if (plat, backend) not in pins.ASSETS:
+    if plat is None or (plat, backend) not in pins.ASSETS:
         raise ProvisionError(
             f"stable-diffusion.cpp publishes no '{backend}' build for this platform "
             f"(available: {', '.join(available_backends(plat)) or 'none'}).")

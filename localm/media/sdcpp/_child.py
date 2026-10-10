@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Optional, TextIO
 
 _FAULT_ENV = "LOCALM_SDCPP_FAULT_FOR_TEST"
 
@@ -38,8 +39,9 @@ _HOST_VIS_OPT_OUT = frozenset({"0", "false", "off", "no", ""})
 
 
 class _State:
-    lib = None
-    ctx = None
+    lib: Optional[ctypes.CDLL] = None
+    ctx: Optional[int] = None
+    crash_fh: Optional[TextIO] = None
     generating = False
     sample_steps = 0
     decoding = False
@@ -202,9 +204,8 @@ _CTX_BOOL_FIELDS = ("flash_attn", "diffusion_flash_attn", "enable_mmap", "vae_co
 
 def _do_load(payload):
     from . import _binding as b
-    if _State.lib is None:
-        _State.lib = _load_lib(payload)
-    lib = _State.lib
+    lib = _State.lib or _load_lib(payload)
+    _State.lib = lib
     if _State.ctx is not None:
         lib.free_sd_ctx(_State.ctx)
         _State.ctx = None
@@ -356,16 +357,17 @@ def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
         if fault and name != "shutdown":
             _simulate_fault(fault)
         if name == "shutdown":
-            if _State.lib is not None and _State.ctx is not None:
-                _State.lib.free_sd_ctx(_State.ctx)
+            lib, ctx = _State.lib, _State.ctx
+            if lib is not None and ctx is not None:
+                lib.free_sd_ctx(ctx)
                 _State.ctx = None
             return
         try:
             if name in ("probe", "load") and not callbacks_set:
-                if _State.lib is None:
-                    _State.lib = _load_lib(payload)
-                _State.lib.sd_set_log_callback(log_cb, None)
-                _State.lib.sd_set_progress_callback(progress_cb, None)
+                lib = _State.lib or _load_lib(payload)
+                _State.lib = lib
+                lib.sd_set_log_callback(log_cb, None)
+                lib.sd_set_progress_callback(progress_cb, None)
                 callbacks_set = True
             if name == "probe":
                 resp_q.put(("ok", _do_probe(payload)))
