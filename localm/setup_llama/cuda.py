@@ -286,7 +286,7 @@ def _pypi_wheel_url_and_sha(package: str) -> tuple:
     raises (mirrors _release_assets' contract: a best-effort lookup whose
     caller always has a fallback path, so a network hiccup here must not crash
     setup)."""
-    pinned = _CUDA_RUNTIME_PIN.get(package)
+    pinned = _sl._CUDA_RUNTIME_PIN.get(package)
     if pinned is None:
         return None, None
     version, sha = pinned
