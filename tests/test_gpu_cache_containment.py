@@ -43,6 +43,11 @@ def test_every_gpu_cache_is_pinned_inside_the_data_dir(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("var", list(_PINNED))
+def test_the_pin_marker_name_is_the_variable_under_the_localm_pinned_prefix(var):
+    assert config._gpu_pin_marker(var) == "LOCALM_PINNED_" + var
+
+
+@pytest.mark.parametrize("var", list(_PINNED))
 def test_a_user_set_variable_is_left_exactly_as_set(monkeypatch, tmp_path, var):
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "data"))
     env = config.contained_gpu_cache_env({var: str(tmp_path / "mine")})

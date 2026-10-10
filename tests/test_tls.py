@@ -334,6 +334,14 @@ def test_companion_addresses_picks_lan_and_tailscale(monkeypatch):
     assert addrs == {"lan": "192.168.1.50", "tailscale": "100.101.102.103"}
 
 
+def test_companion_addresses_keeps_the_primary_when_other_private_addresses_follow(monkeypatch):
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "192.168.1.50")
+    monkeypatch.setattr(tls, "_host_ips", lambda: ["10.0.0.7"])
+    monkeypatch.setattr(tls, "_iface_ips", lambda: ["172.16.4.4", "10.0.0.9"])
+    monkeypatch.setattr(tls, "_vpn_adapter_ips", lambda: set())
+    assert tls.companion_addresses()["lan"] == "192.168.1.50"
+
+
 def test_companion_addresses_tailscale_absent_is_empty(monkeypatch):
     monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "10.0.0.7")
     monkeypatch.setattr(tls, "_host_ips", lambda: ["127.0.0.1"])

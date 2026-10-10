@@ -576,6 +576,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_config_validation.py",
     "tests/test_hf_cache_containment.py",
     "tests/test_gpu_cache_containment.py",
+    "tests/test_contained_temp.py",
     "tests/test_tls.py",
     "tests/test_tls_cli.py",
     "tests/test_portmux.py",
