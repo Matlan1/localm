@@ -166,6 +166,7 @@ class HFBackend(BaseBackend):
         # Cached from the child's load response; the real HFWorker lives in the
         # child and cannot be read live.
         self._supports_images = False
+        self._supports_audio = False
         self._processor_error: Optional[str] = None
         self.effective_ctx_max: Optional[int] = None
         self.n_ctx_max: Optional[int] = None
@@ -202,6 +203,13 @@ class HFBackend(BaseBackend):
         never strands a genuinely multimodal model and costs at most one extra
         reload."""
         return bool(self.loaded and self._supports_images)
+
+    @property
+    def supports_audio(self) -> bool:
+        """True once loaded with a processor that takes audio, cached from the
+        child's load response and gated on ``loaded`` like
+        :attr:`supports_images`."""
+        return bool(self.loaded and self._supports_audio)
 
     @property
     def can_embed(self) -> bool:
@@ -306,6 +314,7 @@ class HFBackend(BaseBackend):
         params = {"model_path": self.model_path, "device": self._device}
         meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
         self._supports_images = bool(meta.get("supports_images"))
+        self._supports_audio = bool(meta.get("supports_audio"))
         self._processor_error = meta.get("processor_error")
         self._can_embed = bool(meta.get("can_embed", True))
         self.effective_ctx_max = meta.get("context_capacity")

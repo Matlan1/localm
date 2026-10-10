@@ -698,6 +698,16 @@ _GGUF_NON_CHAT_ARCHITECTURES = {
     "pockettts": "a text-to-speech model",
 }
 
+# Text-to-speech architectures localm synthesizes speech with (registry type
+# 'tts'). Each needs its mmproj, which holds the speech generation stages.
+GGUF_TTS_ARCHITECTURES = frozenset({"qwen3tts"})
+
+
+def gguf_is_tts_architecture(architecture: Optional[str]) -> bool:
+    """True when ``general.architecture`` names a text-to-speech model localm can
+    synthesize speech with."""
+    return architecture in GGUF_TTS_ARCHITECTURES
+
 # llama.cpp architectures with an encoder and a decoder stack. They register as
 # chat models; gguf_kv_bytes_per_token sizes their decoder stack and reads a
 # missing attention.head_count_kv as attention.head_count.
@@ -727,12 +737,15 @@ _GGUF_NON_CHAT_ARCHITECTURES.update(
 def gguf_non_chat_model_type(architecture: Optional[str]) -> Optional[str]:
     """The registry type for a GGUF whose ``general.architecture`` is not a chat
     model (``diffusion-unet`` for image/video checkpoints, the component's type
-    for ACE-Step music components, ``unknown`` for the other non-chat roles), or
-    None when it may be a chat model."""
+    for ACE-Step music components, ``tts`` for the text-to-speech models localm
+    synthesizes with, ``unknown`` for the other non-chat roles), or None when it
+    may be a chat model."""
     if architecture in _GGUF_IMAGE_ARCHITECTURES:
         return "diffusion-unet"
     if architecture in _GGUF_MUSIC_ARCHITECTURES:
         return _GGUF_MUSIC_ARCHITECTURES[architecture]
+    if architecture in GGUF_TTS_ARCHITECTURES:
+        return "tts"
     return "unknown" if architecture in _GGUF_NON_CHAT_ARCHITECTURES else None
 
 
@@ -743,6 +756,9 @@ def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
     what = _GGUF_NON_CHAT_ARCHITECTURES.get(architecture or "")
     if what is None:
         return None
+    if architecture in GGUF_TTS_ARCHITECTURES:
+        return (f"This model's architecture ('{architecture}') is {what}, not a "
+                "chat model: use it with 'localm speak' or POST /v1/audio/speech.")
     return (f"This model's architecture ('{architecture}') is {what}, not a chat "
             "model, so localm cannot chat with it.")
 
@@ -2261,6 +2277,53 @@ def gguf_is_mmproj(path: Path, meta: Optional[dict] = None) -> bool:
     if meta is None:
         meta = _gguf_metadata_probe(path)
     return meta.get("architecture") == _GGUF_MMPROJ_ARCHITECTURE
+
+
+_CLIP_HAS_VISION_KEY = "clip.has_vision_encoder"
+_CLIP_HAS_AUDIO_KEY = "clip.has_audio_encoder"
+
+
+def gguf_mmproj_modalities(path: Path) -> Optional[dict]:
+    """The input modalities the projector (mmproj) GGUF at *path* encodes, as
+    ``{"vision": bool, "audio": bool}``, read from its ``clip.has_vision_encoder``
+    and ``clip.has_audio_encoder`` keys. An absent key reads as False, as the
+    runtime reads it.
+
+    Returns None when *path* cannot be read, is not a clip projector, or its
+    metadata section is malformed or extends past the bounded prefix read
+    (``_GGUF_META_PROBE_BYTES``) before both keys were found. Never raises."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except (OSError, ValueError):
+        return None
+    found: dict[str, Optional[bool]] = {_CLIP_HAS_VISION_KEY: None, _CLIP_HAS_AUDIO_KEY: None}
+    architecture = None
+    try:
+        if buf[:4] != b"GGUF":
+            return None
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if not gguf_version_supported(version):
+            return None
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            if key in found and vtype == _GGUF_TYPE_BOOL:
+                found[key] = struct.unpack_from("<?", buf, off)[0]
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        if architecture != _GGUF_MMPROJ_ARCHITECTURE or None in found.values():
+            return None
+    if architecture != _GGUF_MMPROJ_ARCHITECTURE:
+        return None
+    return {"vision": bool(found[_CLIP_HAS_VISION_KEY]),
+            "audio": bool(found[_CLIP_HAS_AUDIO_KEY])}
 
 
 _GGUF_ADAPTER_GENERAL_TYPE = "adapter"

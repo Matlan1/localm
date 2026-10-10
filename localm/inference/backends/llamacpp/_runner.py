@@ -51,7 +51,9 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
                                              an optional typed-exception tag,
                                              re-raised as that type by the parent.
                                              Recognised: "InvalidGrammarError",
-                                             "UnsupportedInputError",
+                                             "UnsupportedInputError" (and
+                                             its subclasses named in
+                                             _INPUT_ERROR_TYPES),
                                              "GrammarUnsupportedError", and on
                                              a load reply
                                              "PretokenizerUnusableModelError"
@@ -118,10 +120,18 @@ import time
 from typing import Any, Callable, Optional
 
 from localm.inference.backends.base import (
-    AdapterLoadError, ContextCapacityExceededError,
-    GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled, PerThread,
+    AdapterLoadError, AudioDecodeUnavailable, AudioInputError, ContextCapacityExceededError,
+    GrammarUnsupportedError, ImageDecodeUnavailable, InvalidGrammarError, ModelLoadCancelled,
+    PerThread,
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
-    UnsupportedInputError, UnsupportedModelRoleError, stream_stop_requested)
+    UnsupportedInputError, UnsupportedModelRoleError, VisionInputError,
+    stream_stop_requested)
+
+# UnsupportedInputError subclasses carried across the worker boundary by name,
+# so the parent re-raises the same type. Any other subclass travels as
+# "UnsupportedInputError".
+_INPUT_ERROR_TYPES = {cls.__name__: cls for cls in (
+    AudioDecodeUnavailable, AudioInputError, ImageDecodeUnavailable, VisionInputError)}
 
 
 class RunnerBusy(Exception):
@@ -301,7 +311,9 @@ def _serve_stream(worker, payload: dict, emit: Callable, cancel_event) -> None:
     except InvalidGrammarError as e:
         emit(("error", str(e), "InvalidGrammarError"))
     except UnsupportedInputError as e:
-        emit(("error", str(e), "UnsupportedInputError"))
+        tag = type(e).__name__
+        emit(("error", str(e),
+              tag if tag in _INPUT_ERROR_TYPES else "UnsupportedInputError"))
 
 
 def _serve_mux_stream(worker, sid: int, payload: dict, resp_q, cancel_event,
@@ -1186,6 +1198,10 @@ class ModelRunner:
                             # a healthy worker, so it must not evict a loaded
                             # model. UnsupportedInputError is a ValueError.
                             raise UnsupportedInputError(msg)
+                        if tag in _INPUT_ERROR_TYPES:
+                            # A typed per-request refusal: same handling as above,
+                            # keeping the exact subclass.
+                            raise _INPUT_ERROR_TYPES[tag](msg)
                         if tag == "ContextCapacityExceededError":
                             # An oversized prompt exceeding the configured context ceiling.
                             # NOT a RuntimeError, so GgufBackend does not unload

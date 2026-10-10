@@ -211,7 +211,7 @@ class GgufWorker(VramSizingMixin):
 
     def load(self) -> dict:
         """Construct the real native model. Returns a metadata dict on success:
-        ``{"n_layers", "kv_bytes_per_token", "supports_images",
+        ``{"n_layers", "kv_bytes_per_token", "supports_images", "supports_audio",
         "weight_placement", "moe_skip_reason", "mmap", "adapters",
         "encoder_decoder", "encoder_input_limit", "diffusion"}``. ``adapters``
         lists the ``{"path", "scale"}`` of each LoRA adapter applied to the
@@ -310,6 +310,7 @@ class GgufWorker(VramSizingMixin):
             "n_layers": getattr(self._llm, "n_layers", None),
             "kv_bytes_per_token": getattr(self._llm, "kv_bytes_per_token", 0),
             "supports_images": bool(self._llm.supports_images),
+            "supports_audio": bool(getattr(self._llm, "supports_audio", False)),
             "supports_mtp": bool(getattr(self._llm, "supports_mtp", False)),
             "weight_placement": getattr(self._llm, "weight_placement", []),
             "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),

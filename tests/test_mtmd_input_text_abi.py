@@ -367,7 +367,7 @@ def test_runner_dispatch_survives_an_unprocessable_image(monkeypatch):
     req_q.put(("chat_stream", {"messages": [{"role": "user", "content": "hi"}]}))
     envelope = resp_q.get(timeout=5)
     assert envelope[0] == "error", f"expected a clean error envelope, got {envelope!r}"
-    assert envelope[2] == "UnsupportedInputError", (
+    assert envelope[2] == "VisionInputError", (
         f"untagged errors become RuntimeError, which makes GgufBackend unload the "
         f"model; got tag {envelope[2:]!r}")
 

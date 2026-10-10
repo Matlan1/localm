@@ -33,6 +33,8 @@ _CALLER_HANDLES = {
 _NOT_HOSTILE = {
     "plugins/gui/routes/models/acquisition.py::_build_check_workflow":
         "parses the workflow templates shipped with localm",
+    "inference/responses_protocol.py::get":
+        "parses the conversation put() serialized with json.dumps",
 }
 
 

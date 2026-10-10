@@ -15,6 +15,7 @@ localm mcp [opts]                # MCP stdio server (mcp plugin)
 localm doctor                    # check Python, llama.dll, GPU driver, VRAM, packages
 localm info                      # paths + current config
 localm setup-llama [opts]        # provision native llama.cpp binaries
+localm setup-music [opts]        # install native music generation (ACE-Step 1.5 through KoboldCpp)
 localm setup-sdcpp [opts]        # install the native image runtime (stable-diffusion.cpp)
 localm setup-browser [opts]      # download Chromium for the automated browser
 ```
@@ -33,6 +34,7 @@ localm run mymodel --temperature 0.5      # sampling temperature
 localm run mymodel --ctx 8192             # context window (GGUF only)
 localm run mymodel --gpu-layers 99        # GPU layers (GGUF only; 99=all)
 localm run mymodel --image photo.jpg --prompt "Describe this image."
+localm run asr-model --audio clip.wav --prompt "Transcribe this."
 localm run mymodel --debug                # write debug log
 localm run mymodel --mode privacy         # privacy/log/full persistence mode
 localm run mymodel --pin-model            # always answer with mymodel
@@ -271,6 +273,25 @@ localm rerank "what is a panda?" --file documents.txt --top-n 5 --json
 relevant; the scale depends on the model (bge returns an unbounded score, Qwen3-Reranker the
 probability of "yes"). Only the best `--top-n` are shown. The model runs in this process; a
 document longer than the model's window is cut to fit and marked.
+
+### Speech
+
+A text-to-speech GGUF (Qwen3-TTS) registers as type `tts` and needs its mmproj, which
+`localm pull` fetches from the same repository. `localm speak` writes a WAV file:
+
+```bash
+localm pull ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf
+localm speak "Hello there." -o hello.wav
+localm speak --file chapter.txt -o chapter.wav --seed 7 --language en
+localm speak "Hello there." -o hello.wav --voice-file my-voice.wav   # imitate a recording
+localm speak --list-voices
+```
+
+`--model` can be left out when exactly one speech model is registered. A named `--voice`
+is a WAV recording saved as `<name>.wav` in the `voices` folder of the data directory. The
+model runs in this process; a status line shows how much audio has been made, and Ctrl+C
+stops it. The seed is printed so a result can be reproduced. The server's
+`POST /v1/audio/speech` does the same.
 
 ### LoRA adapters
 
@@ -893,6 +914,9 @@ localm setup-llama --backend cuda --cuda-line cuda-12   # Linux: CUDA runtime wi
 localm setup-sdcpp                       # install the native image runtime (stable-diffusion.cpp), auto-picking the build
 localm setup-sdcpp --backend vulkan      # or cpu / cuda (Windows) / rocm / metal
 localm setup-sdcpp --status              # which builds are installed, and their devices
+localm setup-music                       # install native music: the KoboldCpp runtime, the default ACE-Step 1.5 models, a test track
+localm setup-music --backend vulkan      # or cpu / cuda / metal
+localm setup-music --status              # installed builds, which backends worked, the default models
 localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
 localm setup-browser                     # download Chromium for the automated browser (coder tool)
 localm setup-browser --force             # reinstall even if already present

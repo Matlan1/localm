@@ -407,6 +407,43 @@ class TestStore:
         now[0] += 2
         assert store.get(None, "resp_a") is None
 
+    def test_concurrent_use_keeps_the_bounds_and_the_accounting_exact(self):
+        import sys
+        import threading
+        store = R.ResponseStore(max_items=40, max_bytes=8000)
+        errors: list[BaseException] = []
+
+        def worker(principal: str) -> None:
+            try:
+                for i in range(400):
+                    rid = f"resp_{principal}_{i}"
+                    store.put(principal, rid, [{"role": "user", "content": "x" * (i % 97)}])
+                    store.get(principal, rid)
+                    store.get(principal, f"resp_{principal}_{i // 2}")
+            except BaseException as exc:
+                errors.append(exc)
+
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            threads = [threading.Thread(target=worker, args=(f"p{k}",)) for k in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        finally:
+            sys.setswitchinterval(interval)
+        assert errors == []
+        entries = list(store._items.values())
+        assert len(entries) <= 40
+        assert store._bytes == sum(len(e.data) for e in entries) <= 8000
+        usage: dict = {}
+        for e in entries:
+            counts = usage.setdefault(e.principal, [0, 0])
+            counts[0] += 1
+            counts[1] += len(e.data)
+        assert usage == store._usage
+
 
 def test_a_response_too_large_to_keep_says_store_false(home, monkeypatch):
     from localm.inference.routes import responses as routes
