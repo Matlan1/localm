@@ -115,25 +115,26 @@ def resolve_engine(model: Optional[str]) -> Optional[str]:
     Blocking (it reads model files); callers on the event loop run it in an
     executor."""
     name = (model or "").strip()
-    audio = audio_model.audio_model_names()
-    if name and name.lower() not in _served_model_names():
-        if name in audio:
-            return name
-        from localm.config import load_config
-        configured = str(load_config().get("voice_stt_model", "base"))
-        if audio_model.is_registered(name):
-            raise HTTPException(
-                400, f"The model '{name[:80]}' cannot take audio input, so it cannot "
-                     "transcribe. " + _audio_choices(audio))
-        raise HTTPException(
-            404, f"The model '{name[:80]}' does not exist on this server. It "
-                 f"transcribes with the Whisper model '{configured}' (send model "
-                 f"'{OPENAI_MODEL_ALIAS}' or '{configured}')"
-                 + (f" or with an installed audio model: {', '.join(audio)}."
-                    if audio else "."))
-    if _whisper_installed() or not audio:
+    whisper_name = not name or name.lower() in _served_model_names()
+    if whisper_name and _whisper_installed():
         return None
-    return audio_model.preferred(audio)
+    audio = audio_model.audio_model_names()
+    if whisper_name:
+        return audio_model.preferred(audio) if audio else None
+    if name in audio:
+        return name
+    from localm.config import load_config
+    configured = str(load_config().get("voice_stt_model", "base"))
+    if audio_model.is_registered(name):
+        raise HTTPException(
+            400, f"The model '{name[:80]}' cannot take audio input, so it cannot "
+                 "transcribe. " + _audio_choices(audio))
+    raise HTTPException(
+        404, f"The model '{name[:80]}' does not exist on this server. It "
+             f"transcribes with the Whisper model '{configured}' (send model "
+             f"'{OPENAI_MODEL_ALIAS}' or '{configured}')"
+             + (f" or with an installed audio model: {', '.join(audio)}."
+                if audio else "."))
 
 
 def _audio_choices(audio: list[str]) -> str:

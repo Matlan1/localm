@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Transcription without Whisper.** `POST /v1/audio/transcriptions` now answers with an
+  installed GGUF model that hears audio (for example Qwen3-ASR) when faster-whisper is not
+  installed, or when `model` names one. Whisper stays the default when it is installed. This
+  path returns `json` and `text`; `srt`, `vtt` and `verbose_json` need timestamps it does not
+  have and are refused with a message saying so.
 - **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
   `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
   same from the command line. A GGUF model whose projector has an audio encoder (for example

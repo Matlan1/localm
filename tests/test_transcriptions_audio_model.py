@@ -115,9 +115,10 @@ def state(plugin, monkeypatch):
     models hear audio, which are registered at all, and the engine served."""
     import localm.voice as voice
     s = SimpleNamespace(whisper=False, audio=[MODEL], registered={MODEL, "chat-model"},
-                        engine=_Engine(), asked=[], whisper_calls=[])
+                        engine=_Engine(), asked=[], whisper_calls=[], scans=[])
     monkeypatch.setattr(plugin.tr, "_whisper_installed", lambda: s.whisper)
-    monkeypatch.setattr(plugin.audio, "audio_model_names", lambda: list(s.audio))
+    monkeypatch.setattr(plugin.audio, "audio_model_names",
+                        lambda: s.scans.append(1) or list(s.audio))
     monkeypatch.setattr(plugin.audio, "is_registered", lambda n: n in s.registered)
 
     async def get_engine(name, **kw):
@@ -156,6 +157,7 @@ class TestEngineChoice:
         r = _post(client, data={"model": "whisper-1"})
         assert r.status_code == 200 and r.json() == {"text": "whisper words"}
         assert state.engine.calls == [] and state.asked == []
+        assert state.scans == []
 
     def test_whisper_installed_and_no_model_named(self, client, state):
         state.whisper = True
