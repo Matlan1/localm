@@ -33,7 +33,7 @@ class _FakeLib:
 
 class TestAbiGate:
     def test_an_mtmd_without_the_marker_export_is_refused(self):
-        lib = _FakeLib(set(g._SIGNATURES))
+        lib = _FakeLib(set(g._SIGNATURES) - {"mtmd_gen_inp_default"})
         with pytest.raises(g.SpeechUnavailable, match="localm setup-llama"):
             g.bind_generation_api(lib)
 
@@ -185,6 +185,14 @@ class _FakeMtmd:
     def mtmd_bitmap_free(self, bitmap):
         self.calls.append("bitmap_free")
 
+    def mtmd_gen_inp_default(self, ctx):
+        return g._GenInp(seed=0xFFFFFFFF)
+
+    def mtmd_gen_audio_process(self, ctx, inp_ref, out_ref):
+        inp = inp_ref._obj
+        self.calls.append(("reseed", inp.type, inp.seed, bool(inp.embd)))
+        return 0
+
 
 class _FakeProjector:
     def __init__(self, on_gpu):
@@ -227,6 +235,8 @@ def synth(monkeypatch):
     s._mem = 4
     s._vocab = 2
     s._n_vocab = 100
+    s._n_embd = 8
+    s._last_gen_seed = None
     s._suppress = []
     s._pre_type = None
     s.n_ctx = 8192
@@ -259,6 +269,32 @@ class TestSynthesisLoop:
         assert out.frames == 4 and out.sample_rate == 24000 and out.seed == 42
         assert out.wav == synth._m.wav
         assert synth._m.inputs[0]["seed"] == 42 and synth._m.inputs[0]["top_k"] == 40
+
+    def test_a_repeated_seed_resets_the_generator_before_the_request(self, synth):
+        synth.synthesize("hello", seed=42)
+        assert not any(isinstance(c, tuple) and c[0] == "reseed" for c in synth._m.calls)
+        synth._m.calls.clear()
+        synth.synthesize("hello", seed=42)
+        reseeds = [c for c in synth._m.calls if isinstance(c, tuple) and c[0] == "reseed"]
+        assert reseeds == [("reseed", 0, 43, True)]
+        assert synth._m.calls.index(reseeds[0]) < synth._m.calls.index("set_input")
+        synth._m.calls.clear()
+        synth.synthesize("hello", seed=7)
+        assert not any(isinstance(c, tuple) and c[0] == "reseed" for c in synth._m.calls)
+
+    def test_the_gen_structs_match_the_c_layout(self):
+        def offsets(cls):
+            return {n: getattr(cls, n).offset for n, _t in cls._fields_}
+        assert offsets(g._GenInp) == {
+            "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20, "seed": 24,
+            "temp": 28, "codes": 32, "n_codes": 40, "feats": 48, "n_feats": 56,
+            "state_data": 64, "state_size": 72}
+        assert ctypes.sizeof(g._GenInp) == 80
+        assert offsets(g._GenOut) == {
+            "codes": 0, "n_codes": 8, "feats": 16, "n_feats": 24, "embd": 32,
+            "is_eos": 40, "audio": 48, "n_samples": 56, "state_data": 64,
+            "state_size": 72}
+        assert ctypes.sizeof(g._GenOut) == 80
 
     def test_state_is_reset_after_every_request(self, synth):
         synth.synthesize("hello", seed=1)

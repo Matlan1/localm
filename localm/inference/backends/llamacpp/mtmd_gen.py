@@ -145,6 +145,41 @@ class _HelperInput(ctypes.Structure):
                 ("out_type", ctypes.c_int)]
 
 
+class _GenInp(ctypes.Structure):
+    """``mtmd_gen_inp``."""
+    _fields_ = [("type", ctypes.c_int),
+                ("code0", ctypes.c_int32),
+                ("embd", ctypes.POINTER(ctypes.c_float)),
+                ("top_k", ctypes.c_int32),
+                ("top_p", ctypes.c_float),
+                ("seed", ctypes.c_uint32),
+                ("temp", ctypes.c_float),
+                ("codes", ctypes.POINTER(ctypes.c_int32)),
+                ("n_codes", ctypes.c_size_t),
+                ("feats", ctypes.POINTER(ctypes.c_float)),
+                ("n_feats", ctypes.c_size_t),
+                ("state_data", ctypes.c_char_p),
+                ("state_size", ctypes.c_size_t)]
+
+
+class _GenOut(ctypes.Structure):
+    """``mtmd_gen_out``."""
+    _fields_ = [("codes", ctypes.POINTER(ctypes.c_int32)),
+                ("n_codes", ctypes.c_size_t),
+                ("feats", ctypes.POINTER(ctypes.c_float)),
+                ("n_feats", ctypes.c_size_t),
+                ("embd", ctypes.POINTER(ctypes.c_float)),
+                ("is_eos", ctypes.c_bool),
+                ("audio", ctypes.POINTER(ctypes.c_float)),
+                ("n_samples", ctypes.c_size_t),
+                ("state_data", ctypes.c_char_p),
+                ("state_size", ctypes.c_size_t)]
+
+
+# mtmd_gen_process_type: hidden state to codes.
+_GEN_PROCESS_CODE = 0
+
+
 class _LogitBias(ctypes.Structure):
     _fields_ = [("token", ctypes.c_int32), ("bias", ctypes.c_float)]
 
@@ -153,6 +188,9 @@ _FloatPtr = ctypes.POINTER(ctypes.c_float)
 
 _SIGNATURES = {
     "mtmd_gen_audio_get_info": (_GenAudioInfo, [ctypes.c_void_p]),
+    "mtmd_gen_inp_default": (_GenInp, [ctypes.c_void_p]),
+    "mtmd_gen_audio_process": (ctypes.c_int32, [
+        ctypes.c_void_p, ctypes.POINTER(_GenInp), ctypes.POINTER(_GenOut)]),
     "mtmd_support_audio": (ctypes.c_bool, [ctypes.c_void_p]),
     "mtmd_get_audio_sample_rate": (ctypes.c_int, [ctypes.c_void_p]),
     "mtmd_bitmap_init_from_audio": (ctypes.c_void_p, [ctypes.c_size_t, _FloatPtr]),
@@ -317,6 +355,7 @@ class SpeechSynthesizer:
         self._helper = None
         self._vocab = None
         self._mem = None
+        self._last_gen_seed: Optional[int] = None
         self._m = bind_generation_api(_load_lib())
         if not api.has_embeddings_api() or not api.has_memory_api():
             raise SpeechUnavailable(
@@ -369,6 +408,7 @@ class SpeechSynthesizer:
                 int(self._m.mtmd_get_audio_sample_rate(self._mtmd._ctx))
                 if self._m.mtmd_support_audio(self._mtmd._ctx) else 0)
             self._n_vocab = int(api.llama_vocab_n_tokens(self._vocab))
+            self._n_embd = int(api.llama_model_n_embd(self._model))
             self._sampling = sampling_params_from_meta(
                 lambda key: api.llama_model_meta_val_str(self._model, key))
             unapplied = [k for k in _META_UNAPPLIED
@@ -523,9 +563,30 @@ class SpeechSynthesizer:
                     "on the next request.") from None
             return self._run(text, lang, reference, seed, budget, on_progress, should_stop)
 
+    def _reseed_generation_rng(self, seed: int) -> None:
+        """Make the projector's generation RNG start from *seed* on the next
+        generation call. The projector reseeds only when the seed differs from
+        the one its previous call used, so a request that repeats the previous
+        request's seed first runs one code-generation call with another seed."""
+        if self._last_gen_seed != seed:
+            return
+        m = self._m
+        inp = m.mtmd_gen_inp_default(self._mtmd._ctx)
+        inp.type = _GEN_PROCESS_CODE
+        inp.code0 = 0
+        zeros = (ctypes.c_float * self._n_embd)()
+        inp.embd = ctypes.cast(zeros, ctypes.POINTER(ctypes.c_float))
+        inp.seed = (seed ^ 1) & _UINT32_MAX
+        out = _GenOut()
+        self._last_gen_seed = None
+        if m.mtmd_gen_audio_process(self._mtmd._ctx, ctypes.byref(inp), ctypes.byref(out)) != 0:
+            raise SpeechStageFailed("the speech generator could not be reset")
+        self._last_gen_seed = int(inp.seed)
+
     def _retry_projector_on_cpu(self) -> bool:
         self._m.mtmd_helper_gen_audio_free(self._helper)
         self._helper = None
+        self._last_gen_seed = None
         if not self._mtmd.retry_on_cpu():
             return False
         self._helper = self._new_helper()
@@ -536,6 +597,7 @@ class SpeechSynthesizer:
         m = self._m
         helper = self._helper
         api.llama_memory_clear(self._mem, True)
+        self._reseed_generation_rng(seed)
         chain = self._build_chain(seed)
         bitmap = None
         try:
@@ -601,6 +663,7 @@ class SpeechSynthesizer:
             return SpeechResult(wav=wav, sample_rate=int(rate.value),
                                 n_samples=int(n_samples.value), frames=frames, seed=seed)
         finally:
+            self._last_gen_seed = seed
             if bitmap is not None:
                 m.mtmd_bitmap_free(bitmap)
             api.llama_sampler_free(chain)
