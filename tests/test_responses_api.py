@@ -285,6 +285,34 @@ def test_an_unsupported_request_is_an_openai_400(home, extra, needle):
     assert served.calls == []
 
 
+def _chat_endpoint_answering(status, body):
+    from fastapi import Response
+
+    def chat_endpoint(_app, _path):
+        async def endpoint(_req, _request):
+            return Response(content=body, status_code=status,
+                            media_type="application/json")
+        return endpoint
+    return chat_endpoint
+
+
+def test_a_deeply_nested_chat_reply_is_a_502_not_a_500(home, monkeypatch):
+    from localm.inference.routes import responses as routes
+    nested = b"[" * 100_000 + b"]" * 100_000
+    monkeypatch.setattr(routes, "chat_endpoint", _chat_endpoint_answering(200, nested))
+    r = Served().post()
+    assert r.status_code == 502, r.text
+    assert "not JSON" in r.json()["error"]["message"]
+
+
+def test_a_deeply_nested_chat_error_body_keeps_the_chat_status(home, monkeypatch):
+    from localm.inference.routes import responses as routes
+    nested = b"[" * 100_000 + b"]" * 100_000
+    monkeypatch.setattr(routes, "chat_endpoint", _chat_endpoint_answering(429, nested))
+    r = Served().post()
+    assert r.status_code == 429, r.text
+
+
 def test_tool_choice_required_without_tools_is_a_400(home):
     served = Served()
     r = served.post(tool_choice="required")
