@@ -153,6 +153,15 @@ def test_json_write_check_still_flags_a_real_syntax_error(tmp_path):
     assert "JSON syntax error" in _verify_syntax(tmp_path / "x.json", "{not json")
 
 
+@pytest.mark.parametrize("content", [
+    DEEP, "[" * 100_000 + "]" * 99_999, "[" * 100_000 + "}" * 100_000,
+    '{"a": ' + "[" * 100_000 + '"unterminated'],
+    ids=["unclosed", "one-short", "mismatched", "open-string"])
+def test_json_write_check_flags_deep_json_that_is_not_closed(tmp_path, content):
+    warning = _verify_syntax(tmp_path / "x.json", content)
+    assert warning and warning.startswith("JSON syntax error")
+
+
 def test_json_write_check_accepts_extreme_but_well_formed_json(tmp_path):
     assert _verify_syntax(tmp_path / "x.json", DEEP_CLOSED) is None
     assert _verify_syntax(tmp_path / "x.json", BIG_INT_LIST) is None

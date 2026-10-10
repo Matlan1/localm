@@ -80,6 +80,30 @@ def _closest_snippet(text: str, old: str, min_score: float = 0.55) -> str:
     return "\n".join(f"{n + 1:4d}: {text_lines[n]}" for n in range(start, end))
 
 
+def _brackets_balanced(text: str) -> bool:
+    """True when every ``[`` and ``{`` outside a JSON string is closed by its
+    matching bracket and no string is left open. Iterative, so it works on
+    documents nested past the interpreter's recursion limit."""
+    stack: list = []
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            stack.append(ch)
+        elif ch in "]}":
+            if not stack or stack.pop() != ("[" if ch == "]" else "{"):
+                return False
+    return not stack and not in_string
+
+
 def _verify_syntax(path: Path, content: str) -> Optional[str]:
     """
     Quick offline syntax check for common file types.
@@ -100,6 +124,9 @@ def _verify_syntax(path: Path, content: str) -> Optional[str]:
         except json.JSONDecodeError as e:
             return f"JSON syntax error: {e}"
         except (ValueError, RecursionError):
+            if not _brackets_balanced(content):
+                return ("JSON syntax error: unbalanced brackets or an unterminated "
+                        "string (too deeply nested to parse further)")
             return None
     elif suffix == ".toml":
         try:

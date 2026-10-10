@@ -89,7 +89,7 @@ def register(app: FastAPI, ctx) -> None:
                if body_iterator is not None else bytes(inner.body))
         try:
             data = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             return raw.decode("utf-8", "replace")[:500] or "request failed"
         if isinstance(data, dict):
             return str(data.get("detail") or data.get("error") or "request failed")
@@ -123,7 +123,7 @@ def register(app: FastAPI, ctx) -> None:
                if body_iterator is not None else bytes(inner.body))
         try:
             data = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise A.AnthropicError(502, "the chat route returned a reply that is not JSON") from None
         headers = {k: v for k, v in inner.headers.items() if k.lower().startswith("x-localm-")}
         reply = A.message_from_completion(data, model or str(data.get("model") or ""),
