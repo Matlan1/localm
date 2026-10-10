@@ -338,6 +338,9 @@ def test_route_generates_natively_on_a_fresh_home(tmp_path, monkeypatch, no_comf
 def test_route_refuses_workflow_picks_for_native(tmp_path, monkeypatch, no_comfy,
                                                  fake_generate):
     from fastapi.testclient import TestClient
+    prepared = []
+    monkeypatch.setattr(music, "prepare",
+                        lambda *a, **k: prepared.append(1) or ("vulkan", None))
     app = _music_app(tmp_path, monkeypatch)
     h = _key(["music"])
     with TestClient(app) as c:
@@ -348,6 +351,7 @@ def test_route_refuses_workflow_picks_for_native(tmp_path, monkeypatch, no_comfy
         assert end and end["status"] == "failed"
         assert any("Workflow model choices apply to ComfyUI" in ln for ln in lines)
         assert fake_generate == []
+        assert prepared == []
 
 
 def test_route_explicit_native_failure_fails_the_job_without_comfyui(tmp_path, monkeypatch,
@@ -385,19 +389,21 @@ def test_backend_route_reports_native_and_what_it_uses(tmp_path, monkeypatch, no
 def test_preflight_offers_the_default_models_for_native(tmp_path, monkeypatch, no_comfy):
     from fastapi.testclient import TestClient
     import localm.media.comfy_client as cc
-    monkeypatch.setattr(cc, "describe_missing_models", lambda *a, **k: pytest.fail(
-        "the ComfyUI workflow was checked for a native job"))
+    comfy_checked = []
+    monkeypatch.setattr(cc, "describe_missing_models",
+                        lambda *a, **k: comfy_checked.append(1) or [])
     app = _music_app(tmp_path, monkeypatch)
     with TestClient(app) as c:
         r = c.post("/api/media/music/preflight", headers=_key(["models:write", "music"]),
                    json={})
         assert r.status_code == 200
         data = r.json()
-        assert data["status"] == "verified" and data["warning"] is None
         files = [m["filename"] for m in data["missing"]]
         assert files == [models.DEFAULT_FILES[c] for c in ("text_encoder", "dit", "vae", "lm")]
         assert all(m["native"] and m["source"]["spec"].startswith(models.DEFAULT_REPO)
                    for m in data["missing"])
+        assert data["status"] == "verified" and data["warning"] is None
+    assert comfy_checked == []
 
 
 def test_cli_music_runs_through_the_backend_and_stops_the_runtime(tmp_path, monkeypatch,
