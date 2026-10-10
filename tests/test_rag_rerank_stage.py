@@ -2,6 +2,7 @@
 """``Collection.query(rerank_fn=...)`` and the rerank evaluation harness."""
 
 import math
+from pathlib import Path
 
 import pytest
 
@@ -136,6 +137,94 @@ class TestRerankStage:
         fn, calls = _by_text(coll, "doc1.txt")
         assert coll.query("   ", rerank_fn=fn) == []
         assert calls == []
+
+
+class TestScoreGate:
+    @pytest.fixture
+    def kb(self, tmp_path):
+        docs = tmp_path / "d"
+        docs.mkdir()
+        (docs / "full.txt").write_text("alpha beta gamma delta " + _NOISE,
+                                       encoding="utf-8")
+        (docs / "partial.txt").write_text("alpha " + _NOISE, encoding="utf-8")
+        c = Collection("gate", base=tmp_path / "rag").create()
+        c.add_paths([str(docs)])
+        return c
+
+    QUERY = "alpha beta gamma delta"
+
+    def _scores(self, coll, **by_source):
+        by_text = {c["text"]: Path(c["source"]).name for c in coll._chunks}
+        calls = []
+
+        def fn(query, texts):
+            calls.append(list(texts))
+            return [by_source.get(by_text[t], 0.0) for t in texts]
+
+        return fn, calls
+
+    def test_a_hit_the_floor_drops_is_kept_when_the_reranker_scores_it_high(self, kb):
+        fn, _ = self._scores(kb, **{"partial.txt": 0.9, "full.txt": 0.1})
+        floored = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                           rerank_candidates=5)
+        assert _names(floored) == ["full.txt"]
+        gated = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                         rerank_candidates=5, rerank_min_score=0.5)
+        assert _names(gated) == ["partial.txt"]
+        assert gated[0]["rerank_score"] == 0.9
+
+    def test_a_hit_the_floor_keeps_is_dropped_below_the_minimum_score(self, kb):
+        fn, _ = self._scores(kb, **{"full.txt": 0.2, "partial.txt": 0.1})
+        assert _names(kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                               rerank_candidates=5)) == ["full.txt"]
+        assert kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                        rerank_candidates=5, rerank_min_score=0.5) == []
+
+    def test_the_whole_pool_reaches_the_reranker_not_just_the_floor_survivors(self, kb):
+        fn, calls = self._scores(kb, **{"partial.txt": 0.9})
+        kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                 rerank_candidates=5, rerank_min_score=0.5)
+        assert len(calls) == 1 and len(calls[0]) == 2
+
+    def test_a_single_candidate_is_still_scored(self, kb):
+        fn, calls = self._scores(kb, **{"partial.txt": 0.9})
+        hits = kb.query("alpha", k=1, relevant_only=True, rerank_fn=fn,
+                        rerank_candidates=1, rerank_min_score=0.5)
+        assert len(calls) == 1 and len(calls[0]) == 1
+        assert len(hits) == 1
+
+    def test_without_relevant_only_the_minimum_score_is_not_applied(self, kb):
+        fn, _ = self._scores(kb, **{"full.txt": 0.2, "partial.txt": 0.1})
+        hits = kb.query(self.QUERY, k=2, rerank_fn=fn, rerank_candidates=5,
+                        rerank_min_score=0.5)
+        assert len(hits) == 2
+
+    def test_without_a_minimum_score_the_floor_stays_the_gate(self, kb):
+        fn, _ = self._scores(kb, **{"partial.txt": 0.9})
+        hits = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                        rerank_candidates=5, rerank_min_score=None)
+        assert _names(hits) == ["full.txt"]
+
+    def test_a_reference_to_the_conversation_never_passes_on_a_rerank_score(self, kb):
+        fn, _ = self._scores(kb, **{"full.txt": 0.99, "partial.txt": 0.99})
+        hits = kb.query("alpha beta gamma delta, why did that fail", k=2,
+                        relevant_only=True, rerank_fn=fn, rerank_candidates=5,
+                        rerank_min_score=0.5)
+        assert hits == []
+
+    def test_a_failing_reranker_falls_back_to_the_floor(self, kb):
+        def boom(q, t):
+            raise RuntimeError("down")
+        hits = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=boom,
+                        rerank_candidates=5, rerank_min_score=0.5)
+        assert _names(hits) == ["full.txt"]
+        assert "reranking failed (RuntimeError)" in kb.rerank_degrade_reason
+
+    def test_the_minimum_score_is_inclusive(self, kb):
+        fn, _ = self._scores(kb, **{"partial.txt": 0.5, "full.txt": 0.4999})
+        hits = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                        rerank_candidates=5, rerank_min_score=0.5)
+        assert _names(hits) == ["partial.txt"]
 
 
 class TestHarnessMetrics:

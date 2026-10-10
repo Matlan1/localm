@@ -293,8 +293,9 @@ def _patch_query(monkeypatch):
     monkeypatch.setattr(
         store.Collection, "query",
         lambda self, text, k=4, embed_fn=None, relevant_only=False,
-        rerank_fn=None, rerank_candidates=20:
-        captured.update(rerank_fn=rerank_fn, candidates=rerank_candidates) or [])
+        rerank_fn=None, rerank_candidates=20, rerank_min_score=None:
+        captured.update(rerank_fn=rerank_fn, candidates=rerank_candidates,
+                        min_score=rerank_min_score) or [])
     return captured
 
 
@@ -337,3 +338,70 @@ class TestCli:
         r = cli_runner.invoke(main, ["rag", "query", "kb", "hello"])
         assert r.exit_code == 0, r.output
         assert "rerank 0.9" in r.output
+
+
+class TestCalibratedScoreGate:
+    BGE_SHA = "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3"
+
+    def _registry(self, monkeypatch, **entries):
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "load_registry", lambda: dict(entries))
+
+    @pytest.mark.parametrize("name,expected", [
+        ("qwen3-reranker-0.6b-q8_0", 0.5),
+        ("Qwen3-Reranker-0.6B-Q8_0", 0.5),
+        ("bge-reranker-v2-m3-Q8_0", -1.5),
+        ("qwen3-reranker-0.6b-q4_k_m", None),
+        ("qwen3-reranker-4b-q8_0", None),
+        ("bge-reranker-base-q8_0", None),
+        ("bge-reranker", None),
+    ])
+    def test_only_measured_families_in_the_measured_quantisation_are_calibrated(
+            self, monkeypatch, name, expected):
+        self._registry(monkeypatch, **{name: {"model_type": "embedding"}})
+        assert rr.calibrated_min_score(name) == expected
+
+    def test_a_renamed_copy_of_a_measured_file_is_calibrated_by_its_hash(
+            self, monkeypatch):
+        self._registry(monkeypatch, mine={"sha256": self.BGE_SHA.upper()})
+        assert rr.calibrated_min_score("mine") == -1.5
+
+    def test_the_name_rule_needs_no_registry_entry(self, monkeypatch):
+        self._registry(monkeypatch)
+        assert rr.calibrated_min_score("qwen3-reranker-0.6b-q8_0") == 0.5
+        assert rr.calibrated_min_score("ghost") is None
+
+    def test_the_plan_carries_the_minimum_score_of_a_calibrated_reranker(
+            self, home, fake_reranker):
+        fake_reranker.names[:] = ["qwen3-reranker-0.6b-q8_0"]
+        assert rr.rerank_plan().min_score == 0.5
+        fake_reranker.names[:] = ["qwen"]
+        assert rr.rerank_plan().min_score is None
+        _set(home, rag_rerank=False)
+        assert rr.rerank_plan().min_score is None
+
+    def test_the_route_gates_on_the_reranker_score_for_a_calibrated_model(
+            self, rag_app, fake_reranker):
+        from fastapi.testclient import TestClient
+        fake_reranker.names[:] = ["qwen3-reranker-0.6b-q8_0"]
+        with TestClient(rag_app) as c:
+            _index(c)
+            gated = _query(c, relevant_only=True)
+        assert _sources(gated) == ["third.md"]
+
+    def test_the_route_keeps_the_floor_for_an_uncalibrated_model(
+            self, rag_app, fake_reranker):
+        from fastapi.testclient import TestClient
+        with TestClient(rag_app) as c:
+            _index(c)
+            floored = _query(c, relevant_only=True)
+        assert sorted(_sources(floored)) == ["first.md", "third.md"]
+
+    def test_the_cli_passes_the_minimum_score(self, cli_runner, monkeypatch, home,
+                                              fake_reranker):
+        from localm.cli import main
+        fake_reranker.names[:] = ["qwen3-reranker-0.6b-q8_0"]
+        captured = _patch_query(monkeypatch)
+        r = cli_runner.invoke(main, ["rag", "query", "kb", "hello", "--relevant-only"])
+        assert r.exit_code == 0, r.output
+        assert captured["min_score"] == 0.5
