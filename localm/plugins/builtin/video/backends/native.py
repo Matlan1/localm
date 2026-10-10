@@ -170,8 +170,8 @@ def _ensure_runtime(s: dict, say) -> sd_runtime.Runtime:
 
 def _pyav_problem() -> Optional[str]:
     try:
-        import av
-        av.codec.Codec("libx264", "w")
+        from av.codec import Codec
+        Codec("libx264", "w")
     except ImportError:
         return ("Writing the video needs PyAV, which is not installed. Install it with "
                 "'uv pip install \"localm[voice]\"' (the installers include it).")
@@ -349,7 +349,7 @@ def _load_init_image(path: Path, width: int, height: int) -> dict:
 
 
 def _event_relay(say):
-    state = {"phase": None}
+    state: dict = {"phase": None}
 
     def on_event(event) -> None:
         if event[0] == "log":
