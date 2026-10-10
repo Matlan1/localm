@@ -223,8 +223,14 @@ embedder too rather than quietly returning those vectors.
   100) are re-scored by it against the question and the top few are kept, each
   carrying a `rerank_score` next to its `score`. It runs on this machine and
   adds a fraction of a second to a second per question; more candidates find
-  answers that ranked lower and take proportionally longer. The relevance floor
-  is applied to the candidates before the reranker sees them.
+  answers that ranked lower and take proportionally longer. For
+  bge-reranker-v2-m3 and Qwen3-Reranker-0.6B (the Q8_0 files), `relevant_only`
+  asks the reranker instead of the floor: every candidate is scored, and only
+  hits scoring at least -1.5 (bge, a logit) or 0.5 (Qwen3, a probability) are
+  kept, so a paraphrased question the keyword and cosine floor would drop still
+  finds its answer, while an unrelated question still returns nothing. Any other reranker leaves the floor in charge, applied to the
+  candidates before the reranker sees them, as does a question that points back
+  at the conversation or a reranker that fails.
   Install a reranker such as Qwen3-Reranker-0.6B or bge-reranker-v2-m3 with
   `localm pull` (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`).

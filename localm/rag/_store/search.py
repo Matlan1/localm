@@ -126,19 +126,21 @@ class _CollectionSearch:
         order = sorted(range(len(scores)), key=lambda i: scores[i],
                        reverse=True)[:pool]
         order = [i for i in order if scores[i] > 0]
-        score_gate = (relevant_only and rerank_fn is not None
-                      and rerank_min_score is not None
-                      and not refers_to_conversation(text))
-        if relevant_only and not score_gate:
+        gate_min = None
+        if (relevant_only and rerank_fn is not None
+                and not refers_to_conversation(text)):
+            gate_min = rerank_min_score
+        if relevant_only and gate_min is None:
             order = self._relevant(text, order, index, cosines)
         reranked: dict[int, float] = {}
-        if rerank_fn is not None and (len(order) > 1 or (score_gate and order)):
+        if rerank_fn is not None and (len(order) > 1
+                                      or (gate_min is not None and order)):
             reranked = self._rerank_scores(text, order, rerank_fn)
             if reranked:
                 order = sorted(order, key=lambda i: reranked[i], reverse=True)
-                if score_gate:
-                    order = [i for i in order if reranked[i] >= rerank_min_score]
-            elif score_gate:
+                if gate_min is not None:
+                    order = [i for i in order if reranked[i] >= gate_min]
+            elif gate_min is not None:
                 order = self._relevant(text, order, index, cosines)
         order = order[:k]
         return [

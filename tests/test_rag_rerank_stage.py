@@ -261,6 +261,49 @@ class TestHarnessMetrics:
         assert failing["hit@1"] == base["hit@1"]
 
 
+class TestGateHarness:
+    def test_evaluate_gate_counts_recall_and_off_topic_precision(self, coll):
+        on = [{"id": "q", "doc": "doc5.txt", "query": "harbor crane",
+               "gold": ["harbor crane"]}]
+        off = [{"id": "o1", "category": "near", "query": "harbor crane"},
+               {"id": "o2", "category": "unrelated", "query": "zebra xylophone"}]
+        fn, _ = _by_text(coll, "doc5.txt")
+        floor = ev.evaluate_gate(coll, on, off, k=1)
+        assert floor["recall"] == 0.0 and floor["answered"] == 1.0
+        assert floor["precision"] == 0.5 and floor["leaks"] == ["o1"]
+        assert floor["categories"] == {"near": 0.0, "unrelated": 1.0}
+        gated = ev.evaluate_gate(coll, on, off, k=1, rerank_fn=fn,
+                                 min_score=0.5, candidates=5)
+        assert gated["recall"] == 1.0 and gated["precision"] == 0.5
+        strict = ev.evaluate_gate(coll, on, off, k=1, rerank_fn=fn,
+                                  min_score=2.0, candidates=5)
+        assert strict["recall"] == 0.0 and strict["precision"] == 1.0
+        assert strict["leaks"] == []
+
+    def test_the_gate_table_has_one_row_per_gate_and_a_column_per_category(self):
+        res = {"categories": {"near": 0.5, "unrelated": 1.0}, "recall": 0.25,
+               "answered": 0.5, "precision": 0.75, "leaks": []}
+        table = ev.format_gate_table({"floor only": res, "other": res})
+        lines = table.splitlines()
+        assert len(lines) == 3
+        assert "near" in lines[0] and "unrelated" in lines[0]
+        assert lines[1].startswith("floor only") and "0.250" in lines[1]
+
+
+class TestOfftopicLabels:
+    def test_the_off_topic_questions_are_labelled_and_unique(self):
+        queries = ev.load_offtopic()
+        assert len(queries) >= 40
+        assert len({q["id"] for q in queries}) == len(queries)
+        assert {q["category"] for q in queries} == {
+            "unrelated", "near", "conversation", "chitchat"}
+        assert all(q["query"].strip() for q in queries)
+
+    def test_no_off_topic_question_is_also_an_on_topic_one(self):
+        on = {q["query"].lower() for q in ev.load_queries()}
+        assert not on & {q["query"].lower() for q in ev.load_offtopic()}
+
+
 class TestFixtureLabels:
     def test_every_query_has_a_few_relevant_chunks_in_the_corpus(self, tmp_path):
         queries = ev.load_queries()
