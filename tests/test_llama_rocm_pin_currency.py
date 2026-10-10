@@ -102,9 +102,9 @@ def test_currency_reports_a_gap_and_says_how_to_close_it(currency, monkeypatch, 
     assert currency.main([]) == 0
     out = capsys.readouterr().out
     assert "BEHIND by 2 release(s)" in out
-    assert "_ROCM_TAG" in out, (
-        "advancing this pin has no automated confirm step, so the remedy must "
-        "name the constant a maintainer edits by hand")
+    assert "_ROCM_TAG" in out, "the remedy names the constant that moves"
+    assert "scripts/confirm_rocm_runtime.py --tag b99999" in out
+    assert "scripts/bump_rocm_pin.py --tag b99999" in out
 
 
 def test_currency_does_not_call_a_lexically_larger_older_tag_newer(

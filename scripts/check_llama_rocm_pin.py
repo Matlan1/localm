@@ -28,14 +28,12 @@ prerelease. The tag SHAPE is "bNNNN" like _PINNED_TAG rather than ComfyUI's
 math is the same days-between-published_at approach
 scripts/check_llama_pin.py uses.
 
-There is no confirm_llama_runtime.py-style automated confirmation for this
-pin: that script's backend list excludes amd-rocm, because the amd-rocm build
-never resolves from an upstream ggml-org tag at all. Advancing _ROCM_TAG means
-a maintainer running the newer lemonade-sdk build through localm's real loader
-on AMD ROCm hardware, confirming it loads and generates, and then updating
-_ROCM_TAG, DEFAULT_URL, DEFAULT_URL_SHA256 and the affected
-_PINNED_FALLBACK_SHA256 entries in setup_llama/pins.py together - a person's
-decision, not something this script does.
+Advancing _ROCM_TAG is two scripts, neither of which this one runs:
+scripts/confirm_rocm_runtime.py installs the newer lemonade-sdk build through
+localm's own installer and proves it loads and generates on AMD ROCm hardware,
+and scripts/bump_rocm_pin.py then rewrites _ROCM_TAG, _ROCM_CPU_TAG,
+DEFAULT_URL, DEFAULT_URL_SHA256 and the ROCm entries of _PINNED_FALLBACK_SHA256
+in setup_llama/pins.py together from that confirmation's receipt.
 
 Fails soft on the API: unreachable, rate-limited, or a malformed response all
 print a clearly-labelled "could not check" and exit 0 in default mode (2 under
@@ -314,15 +312,12 @@ def main(argv=None) -> int:
         if len(behind) >= _PER_PAGE:
             print(f"(that is the whole {_PER_PAGE}-release page, so the real gap may "
                   "be larger)")
-        print("\nTo advance the pin: run the newer lemonade-sdk build through "
-              "localm's real loader on AMD ROCm hardware and confirm it loads AND "
-              "generates. There is no confirm_llama_runtime.py-style automated "
-              "check for this pin - that script's backend list excludes amd-rocm, "
-              "since this build never resolves from an upstream ggml-org tag. Once "
-              "confirmed, update in localm/setup_llama/pins.py together:")
-        print(f"    _ROCM_TAG = {newest!r}")
-        print("    DEFAULT_URL, DEFAULT_URL_SHA256, and the affected "
-              "_PINNED_FALLBACK_SHA256 entries")
+        print("\nTo advance the pin (_ROCM_TAG in localm/setup_llama/pins.py), on AMD "
+              "ROCm hardware:")
+        print(f"    python scripts/confirm_rocm_runtime.py --tag {newest} "
+              "--workdir <scratch dir> --receipt <receipt.json>")
+        print(f"    python scripts/bump_rocm_pin.py --tag {newest} "
+              "--receipt <receipt.json> --write")
         return 0
 
     if pin_n is None:
@@ -367,10 +362,12 @@ def main(argv=None) -> int:
     days = result["days_behind"]
     print(f"  age: {days} day(s) between the pinned and the newest release "
           f"(tolerance {args.max_age_days})")
-    print("\nTo advance the pin: run the newer lemonade-sdk build through "
-          "localm's real loader on AMD ROCm hardware and confirm it loads AND "
-          "generates. Update _ROCM_TAG, DEFAULT_URL, DEFAULT_URL_SHA256 and the "
-          "affected _PINNED_FALLBACK_SHA256 entries in localm/setup_llama/pins.py together.")
+    print("\nTo advance the pin (_ROCM_TAG in localm/setup_llama/pins.py), on AMD "
+          "ROCm hardware:")
+    print(f"    python scripts/confirm_rocm_runtime.py --tag {newest} "
+          "--workdir <scratch dir> --receipt <receipt.json>")
+    print(f"    python scripts/bump_rocm_pin.py --tag {newest} "
+          "--receipt <receipt.json> --write")
     summary = [f"## llama.cpp ROCm pin currency: {result['status'].upper()}",
                "", "| | |", "|---|---|",
                f"| pinned | `{pin}` ({_date_str(pin_date)}) |",
