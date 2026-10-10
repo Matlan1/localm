@@ -477,7 +477,7 @@ def test_preflight_offers_every_missing_recommended_part(gui_app):
     rec = native.RECOMMENDED_VIDEO_MODELS[0]
     assert data["status"] == "verified"
     assert [m["filename"] for m in data["missing"]] == [p.filename for p in rec.parts]
-    for entry, part in zip(data["missing"], rec.parts):
+    for entry, part in zip(data["missing"], rec.parts, strict=True):
         assert entry["native"] is True
         assert entry["source"]["spec"] == part.spec
         assert entry["source"]["sha256"] == part.sha256
