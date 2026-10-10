@@ -87,6 +87,7 @@ def register(app: FastAPI, ctx) -> None:
         # Tri-state; None omits the key below. Stays None for a pathless entry and
         # for the virtual startup entry, which is absent from ``registry``.
         vision = None
+        audio = None
         # Only stat/walk a real path: Path("") resolves to "." and would walk the
         # server's CWD.
         if path:
@@ -105,15 +106,23 @@ def register(app: FastAPI, ctx) -> None:
                     pass
                 return None
 
-            # Both blocking probes in one executor hop. model_vision_capability
-            # stats the same path, may glob its folder for an mmproj sibling and
-            # may read a small JSON, so it must not run on the loop either.
+            # The blocking probes in one executor hop. The capability probes
+            # stat the same path, may glob its folder for an mmproj sibling and
+            # may read a small JSON or GGUF header, so they must not run on the
+            # loop either.
             def _probe() -> tuple:
-                from localm.model_manager import model_vision_capability
-                return _measure(), model_vision_capability(model_id, reg=registry)
+                from localm.model_manager import (
+                    model_audio_capability, model_vision_capability)
+                dir_cache: dict = {}
+                return (_measure(),
+                        model_vision_capability(model_id, reg=registry,
+                                                dir_cache=dir_cache),
+                        model_audio_capability(model_id, reg=registry,
+                                               dir_cache=dir_cache))
 
             loop = asyncio.get_running_loop()
-            size, vision = await loop.run_in_executor(get_plugin_executor(), _probe)
+            size, vision, audio = await loop.run_in_executor(
+                get_plugin_executor(), _probe)
         aliases = sorted(
             n for n, e in registry.items()
             # Skip a non-dict sibling entry: its .get would AttributeError.
@@ -143,6 +152,8 @@ def register(app: FastAPI, ctx) -> None:
         # inspected, which is not the same claim as false.
         if vision is not None:
             out["vision"] = vision
+        if audio is not None:
+            out["audio_input"] = audio
         resident = _hs._engines.get(model_id)
         applied = getattr(resident, "applied_adapters", None) if resident is not None else None
         if isinstance(applied, list) and applied and out["loaded"]:

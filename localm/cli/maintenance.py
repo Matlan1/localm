@@ -101,6 +101,10 @@ from ..media.sdcpp.cli import main as _setup_sdcpp_main  # noqa: E402
 
 main.add_command(_setup_sdcpp_main, name="setup-sdcpp")
 
+from ..media.koboldcpp.cli import main as _setup_music_main  # noqa: E402
+
+main.add_command(_setup_music_main, name="setup-music")
+
 
 @main.command("setup-embeddings")
 @click.option("--model", "model", default=None,

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""In-process multimodal (vision) for the GGUF backend, via the bundled mtmd.dll
-(llama.cpp ``libmtmd``).
+"""In-process multimodal (vision and audio input) for the GGUF backend, via the
+bundled mtmd.dll (llama.cpp ``libmtmd``).
 
-Loads an mmproj (vision projector) alongside the text model and evaluates an
-image+text prompt straight into the llama KV cache, so the GGUF backend can answer
-about images instead of refusing them.
+Loads an mmproj (projector) alongside the text model and evaluates an image,
+audio and text prompt straight into the llama KV cache, so the GGUF backend can
+answer about images and audio instead of refusing them.
 
 ABI strategy (the bundled runtime ships NO headers and the mtmd C ABI has drifted
 across llama.cpp versions, so this binding avoids version-specific struct layouts):
@@ -24,7 +24,9 @@ across llama.cpp versions, so this binding avoids version-specific struct layout
   be.
 * the image is decoded to raw RGB by the caller and passed to the clean-signature
   ``mtmd_bitmap_init(w, h, rgb)`` - NOT ``mtmd_helper_bitmap_init_from_buf``, whose
-  return type drifted to a by-value wrapper in newer builds.
+  return type drifted to a by-value wrapper in newer builds. Audio is likewise
+  decoded and resampled by the caller to mono float samples at the projector's
+  rate and passed to ``mtmd_bitmap_init_from_audio(n_samples, samples)``.
 * ``mtmd_input_text`` DID drift and cannot be avoided (it is the one struct this
   module must pass by value), so both layouts are bound and the live one is
   detected at load time - see :func:`_detect_input_text_class`.
@@ -44,6 +46,16 @@ from . import _api as api
 
 # mtmd_input_chunk_type: MTMD_INPUT_CHUNK_TYPE_TEXT; every other value is media.
 _CHUNK_TYPE_TEXT = 0
+# mtmd_input_chunk_type: MTMD_INPUT_CHUNK_TYPE_AUDIO.
+_CHUNK_TYPE_AUDIO = 2
+
+# The exports audio input needs; a runtime without all of them takes no audio.
+_AUDIO_FUNCTIONS = ("mtmd_support_audio", "mtmd_get_audio_sample_rate",
+                    "mtmd_bitmap_init_from_audio")
+
+# Fewest samples mtmd_bitmap_init_from_audio may be given: the runtime aborts the
+# process on an audio bitmap of one sample or fewer.
+_AUDIO_MIN_SAMPLES = 2
 
 # Upper bound on the bytes of encoded image embeddings kept between turns.
 _EMBD_CACHE_MAX_BYTES = 512 * 1024 * 1024
@@ -384,6 +396,17 @@ def _load_lib() -> ctypes.CDLL:
     except AttributeError as e:
         raise MtmdUnavailable(
             f"{name} lacks a function the vision path needs ({e})") from e
+    try:
+        m.mtmd_support_audio.restype = ctypes.c_bool
+        m.mtmd_support_audio.argtypes = [ctypes.c_void_p]
+        m.mtmd_get_audio_sample_rate.restype = ctypes.c_int
+        m.mtmd_get_audio_sample_rate.argtypes = [ctypes.c_void_p]
+        m.mtmd_bitmap_init_from_audio.restype = ctypes.c_void_p
+        m.mtmd_bitmap_init_from_audio.argtypes = [ctypes.c_size_t, ctypes.c_char_p]
+    except AttributeError as e:
+        from localm.debuglog import logger
+        logger.info("mtmd: %s lacks the audio input calls (%s); audio input is "
+                    "unavailable with this runtime", name, e)
     _lib = m
     return m
 
@@ -473,9 +496,20 @@ def _detect_input_text_class(m: ctypes.CDLL, ctx: int) -> Optional[type]:
 
 
 @dataclass(frozen=True)
+class AudioClip:
+    """One audio input for :meth:`MtmdContext.tokenize`: *samples* is mono
+    32-bit float PCM in native byte order at the projector's sample rate
+    (:attr:`MtmdContext.audio_sample_rate`), *n_samples* samples long."""
+
+    samples: bytes
+    n_samples: int
+
+
+@dataclass(frozen=True)
 class MtmdChunk:
-    """One chunk of a tokenized image prompt: a run of text tokens, or one media
-    item (an image, or one slice of a tiled image).
+    """One chunk of a tokenized multimodal prompt: a run of text tokens, or one
+    media item (an image, one slice of a tiled image, or one segment of an audio
+    clip).
 
     ``handle`` is the native ``mtmd_input_chunk*``, valid until the owning
     :class:`MtmdPrompt` is freed. ``tokens`` holds a text chunk's token ids and is
@@ -483,18 +517,19 @@ class MtmdChunk:
     ``(content id, ordinal, n_tokens, n_pos)``, where the ordinal counts the earlier
     media chunks of the same prompt with the same content id (the slices of one
     tiled image share an id). ``key`` is None for text, and for media the runtime
-    returned no id for."""
+    returned no id for. ``kind`` is ``"text"``, ``"image"`` or ``"audio"``."""
 
     handle: int
     tokens: Optional[tuple[int, ...]]
     key: Optional[tuple]
     n_tokens: int
     n_pos: int
+    kind: str = "image"
 
 
 class MtmdPrompt:
-    """A prompt tokenized against its images: its chunks in order, plus the native
-    chunk list and bitmaps they reference. :meth:`free` releases those exactly
+    """A prompt tokenized against its images and audio clips: its chunks in
+    order, plus the native chunk list and bitmaps they reference. :meth:`free` releases those exactly
     once; the chunk handles are invalid afterwards."""
 
     def __init__(self, chunks: list[MtmdChunk], release: Callable[[], None]) -> None:
@@ -508,7 +543,13 @@ class MtmdPrompt:
 
     @property
     def n_images(self) -> int:
+        """Media chunks of any kind."""
         return sum(1 for c in self.chunks if c.tokens is None)
+
+    @property
+    def n_audio(self) -> int:
+        """Audio chunks."""
+        return sum(1 for c in self.chunks if c.kind == "audio")
 
     def free(self) -> None:
         release, self._release = self._release, None
@@ -523,13 +564,25 @@ def _image_content_id(w: int, h: int, rgb: bytes) -> str:
     return digest.hexdigest()
 
 
-class MtmdContext:
-    """A loaded mmproj bound to a text model, able to evaluate image prompts into
-    that model's llama context.
+def _audio_content_id(clip: AudioClip) -> str:
+    """A hex digest of an audio clip's length and samples."""
+    digest = hashlib.sha256(b"audio:%d:" % clip.n_samples)
+    digest.update(clip.samples)
+    return digest.hexdigest()
 
-    Encoded image embeddings are kept in memory between calls, keyed by
-    :attr:`MtmdChunk.key`, so an image that is still in the conversation is not
-    encoded again. The cache holds at most :data:`_EMBD_CACHE_MAX_BYTES`, only
+
+def _media_noun(kind: str) -> str:
+    """``"audio"`` for an audio chunk kind, else ``"image"``."""
+    return "audio" if kind == "audio" else "image"
+
+
+class MtmdContext:
+    """A loaded mmproj bound to a text model, able to evaluate image and audio
+    prompts into that model's llama context.
+
+    Encoded media embeddings are kept in memory between calls, keyed by
+    :attr:`MtmdChunk.key`, so an image or audio clip that is still in the
+    conversation is not encoded again. The cache holds at most :data:`_EMBD_CACHE_MAX_BYTES`, only
     the images the caller last passed to :meth:`retain_embeddings`, and is
     emptied by :meth:`clear_embeddings`, :meth:`retry_on_cpu` and :meth:`free`."""
 
@@ -552,6 +605,12 @@ class MtmdContext:
 
     # Number of media chunks this context has run through the projector.
     encode_count: int = 0
+
+    # Whether the projector takes images and audio. __init__ always sets them.
+    supports_vision: bool = True
+    supports_audio: bool = False
+    # Sample rate, in Hz, audio must be given at; 0 when audio is not supported.
+    audio_sample_rate: int = 0
 
     # Encoded embeddings by MtmdChunk.key (created on first store) and their size.
     _embd: Optional[OrderedDict[tuple, ctypes.Array]] = None
@@ -608,6 +667,19 @@ class MtmdContext:
                 f"mtmd_init_from_file returned NULL for {mmproj_path} "
                 "(mmproj incompatible with this model or build)")
         self.supports_vision = bool(self._m.mtmd_support_vision(self._ctx))
+        self.supports_audio = False
+        self.audio_sample_rate = 0
+        if (all(hasattr(self._m, name) for name in _AUDIO_FUNCTIONS)
+                and self._m.mtmd_support_audio(self._ctx)):
+            rate = int(self._m.mtmd_get_audio_sample_rate(self._ctx))
+            if rate > 0:
+                self.supports_audio = True
+                self.audio_sample_rate = rate
+            else:
+                from localm.debuglog import logger
+                logger.warning(
+                    "mtmd: the projector has an audio encoder but reports no "
+                    "sample rate (%d); audio input is disabled for it", rate)
         self.marker = self._m.mtmd_default_marker().decode("utf-8")
 
         # Resolve the mtmd_input_text layout once per process. Needs a live
@@ -703,8 +775,8 @@ class MtmdContext:
             return False
         from localm.debuglog import logger
         logger.warning(
-            "mtmd: the GPU vision encode failed; rebuilding the projector on the "
-            "CPU and retrying. Image replies will be slower until the model is "
+            "mtmd: the GPU projector encode failed; rebuilding the projector on the "
+            "CPU and retrying. Image and audio replies will be slower until the model is "
             "reloaded.")
         try:
             self._m.mtmd_free(self._ctx)
@@ -716,16 +788,20 @@ class MtmdContext:
         self._ctx = self._open(use_gpu=False)
         return bool(self._ctx)
 
-    def tokenize(self, prompt: str, images: list[tuple[int, int, bytes]], *,
+    def tokenize(self, prompt: str, images: list, *,
                  add_special: bool) -> MtmdPrompt:
-        """Tokenize *prompt* (which contains one ``self.marker`` per image, in
-        order) against *images* (each ``(width, height, rgb_bytes)``).
+        """Tokenize *prompt* (which contains one ``self.marker`` per media item, in
+        order) against *images*, the media items: each an image
+        ``(width, height, rgb_bytes)`` or an :class:`AudioClip`.
 
-        Each image's bitmap carries a content id derived from its size and pixels,
-        which becomes the id of its media chunk(s). The returned prompt owns the
-        native chunk list and the bitmaps; the caller frees it exactly once with
-        :meth:`MtmdPrompt.free`. Raises :class:`VisionInputError` when a bitmap
-        cannot be created or mtmd_tokenize fails; nothing is leaked then."""
+        Each bitmap carries a content id derived from its content, which becomes
+        the id of its media chunk(s). The returned prompt owns the native chunk
+        list and the bitmaps; the caller frees it exactly once with
+        :meth:`MtmdPrompt.free`. Raises :class:`VisionInputError` when an item is
+        an image and the projector has no vision encoder, an audio clip and it
+        has no audio encoder, an audio clip of fewer than two samples or with a
+        sample buffer of the wrong size, when a bitmap cannot be created, or when
+        mtmd_tokenize fails; nothing is leaked then."""
         m = self._m
         bitmaps: list = []
         chunks = None
@@ -737,7 +813,26 @@ class MtmdContext:
                 m.mtmd_bitmap_free(bmp)
 
         try:
-            for (w, h, rgb) in images:
+            for item in images:
+                if isinstance(item, AudioClip):
+                    if not self.supports_audio:
+                        raise VisionInputError(
+                            "this model's projector has no audio encoder")
+                    if (item.n_samples < _AUDIO_MIN_SAMPLES
+                            or len(item.samples) != item.n_samples * 4):
+                        raise VisionInputError(
+                            "the audio clip is empty or its sample buffer is malformed")
+                    bmp = m.mtmd_bitmap_init_from_audio(item.n_samples, item.samples)
+                    if not bmp:
+                        raise VisionInputError(
+                            "mtmd_bitmap_init_from_audio failed (bad audio buffer)")
+                    bitmaps.append(bmp)
+                    m.mtmd_bitmap_set_id(bmp, _audio_content_id(item).encode("ascii"))
+                    continue
+                if not self.supports_vision:
+                    raise VisionInputError(
+                        "this model's projector has no vision encoder")
+                (w, h, rgb) = item
                 bmp = m.mtmd_bitmap_init(w, h, rgb)
                 if not bmp:
                     raise VisionInputError("mtmd_bitmap_init failed (bad image buffer)")
@@ -753,8 +848,10 @@ class MtmdContext:
                                  arr, len(bitmaps))
             if rc != 0:
                 from localm.debuglog import native_fault_hint
+                noun = ("audio" if images and all(isinstance(i, AudioClip) for i in images)
+                        else "image")
                 raise VisionInputError(
-                    f"the vision projector could not process this image "
+                    f"the projector could not process this {noun} "
                     f"(mtmd_tokenize rc={rc}); {native_fault_hint()}.")
             return MtmdPrompt(self._describe_chunks(chunks), release)
         except BaseException:
@@ -768,12 +865,15 @@ class MtmdContext:
         seen: dict = {}
         for i in range(int(m.mtmd_input_chunks_size(chunks))):
             handle = m.mtmd_input_chunks_get(chunks, i)
-            if m.mtmd_input_chunk_get_type(handle) == _CHUNK_TYPE_TEXT:
+            chunk_type = m.mtmd_input_chunk_get_type(handle)
+            if chunk_type == _CHUNK_TYPE_TEXT:
                 n = ctypes.c_size_t(0)
                 ptr = m.mtmd_input_chunk_get_tokens_text(handle, ctypes.byref(n))
                 tokens = tuple(ptr[j] for j in range(n.value)) if n.value else ()
-                out.append(MtmdChunk(handle, tokens, None, len(tokens), len(tokens)))
+                out.append(MtmdChunk(handle, tokens, None, len(tokens), len(tokens),
+                                     "text"))
                 continue
+            kind = "audio" if chunk_type == _CHUNK_TYPE_AUDIO else "image"
             n_tokens = int(m.mtmd_input_chunk_get_n_tokens(handle))
             n_pos = int(m.mtmd_input_chunk_get_n_pos(handle))
             raw_id = m.mtmd_input_chunk_get_id(handle)
@@ -783,7 +883,7 @@ class MtmdContext:
                 ordinal = seen.get(content_id, 0)
                 seen[content_id] = ordinal + 1
                 key = (content_id, ordinal, n_tokens, n_pos)
-            out.append(MtmdChunk(handle, None, key, n_tokens, n_pos))
+            out.append(MtmdChunk(handle, None, key, n_tokens, n_pos, kind))
         return out
 
     def has_embedding(self, key: Optional[tuple]) -> bool:
@@ -837,6 +937,7 @@ class MtmdContext:
         ``n_past + chunk.n_pos`` raises :class:`VisionInputError`."""
         m = self._m
         exc = MtmdGpuEncodeFailed if self.on_gpu else VisionInputError
+        noun = _media_noun(chunk.kind)
         embd = None
         if self.has_embedding(chunk.key):
             embd = self._embd[chunk.key]
@@ -845,12 +946,12 @@ class MtmdContext:
             self.encode_count += 1
             rc = m.mtmd_encode_chunk(self._ctx, chunk.handle)
             if rc != 0:
-                raise exc(f"the vision projector could not encode this image "
+                raise exc(f"the projector could not encode this {noun} "
                           f"(mtmd_encode_chunk rc={rc})")
             n_floats = chunk.n_tokens * self._embedding_width()
             out = m.mtmd_get_output_embd(self._ctx)
             if not out or n_floats <= 0:
-                raise exc("the vision projector produced no embeddings for this image")
+                raise exc(f"the projector produced no embeddings for this {noun}")
             embd = (ctypes.c_float * n_floats)()
             ctypes.memmove(embd, out, ctypes.sizeof(embd))
             if chunk.key is not None:
@@ -860,12 +961,12 @@ class MtmdContext:
             self._ctx, llama_ctx, chunk.handle, ctypes.addressof(embd), n_past, 0,
             n_batch, ctypes.byref(new_n_past), None, None)
         if rc != 0:
-            raise exc(f"the vision projector could not evaluate this image "
+            raise exc(f"the projector could not evaluate this {noun} "
                       f"(mtmd_helper_decode_image_chunk rc={rc})")
         pos = int(new_n_past.value)
         if pos != n_past + chunk.n_pos:
             raise VisionInputError(
-                f"mtmd image decode returned an implausible position "
+                f"mtmd {noun} decode returned an implausible position "
                 f"(new_n_past={pos}, expected {n_past + chunk.n_pos}) - refusing "
                 f"to generate from a likely-corrupted KV state")
         return pos

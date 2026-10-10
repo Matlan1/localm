@@ -40,6 +40,7 @@ from localm.inference.backends.base import (
     EmbedBatchTooLargeError,
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
+    AudioDecodeUnavailable,
     InvalidGrammarError,
     ModelLoadCancelled,
     PretokenizerUnsafeInputError,
@@ -1617,9 +1618,11 @@ def plan_capability_route(model_name: str | None, messages: list,
     resident += [n for n in peer_routes if n not in resident]
     known = {}
     cur_engine = dict(live).get(current) if current else None
-    if (cur_engine is not None and getattr(cur_engine, "loaded", False)
-            and getattr(cur_engine, "supports_images", False) is True):
-        known[_caps.VISION] = True
+    if cur_engine is not None and getattr(cur_engine, "loaded", False):
+        if getattr(cur_engine, "supports_images", False) is True:
+            known[_caps.VISION] = True
+        if getattr(cur_engine, "supports_audio", False) is True:
+            known[_caps.AUDIO] = True
 
     def skip_set():
         return {n: s for n, s in _routing_latch.skipped().items()
@@ -6345,6 +6348,7 @@ def _memory_used_header(ctx) -> dict:
 # "Not Implemented" is exactly the permanent, server-side capability gap it is.
 _BACKEND_ERROR_STATUS: tuple = (
     (ImageDecodeUnavailable, 501),
+    (AudioDecodeUnavailable, 501),
     (VisionInputError, 400),
     (UnsupportedInputError, 400),
     (ChatTemplateMissingError, 400),
