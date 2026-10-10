@@ -99,7 +99,7 @@ DATA_DIRS = frozenset({
     "plugins", "rag", "memory", "chats", "coder", "checkpoints", "jobs",
     "activity", "uploads", "share_inbox", "gui_images", "gui_video", "gui_music",
     "gallery_index", "workflows", "mcp-images", "comfyui", "comfyui-models",
-    "skills", "app-window",
+    "skills", "app-window", "runtimes",
 })
 DATA_ENTRIES = frozenset({DATA_MARKER}) | DATA_FILES | DATA_DIRS
 _DATA_PATTERNS = ("comfy-launch-*.log",)
@@ -108,7 +108,7 @@ _DATA_PATTERNS = ("comfy-launch-*.log",)
 _LEGACY_KEPT = frozenset({
     "models", "cache", "logs", "plugins", "workflows", "skills", "memory",
     "comfyui", "run", "jobs", "checkpoints", "uploads", "updates", "tls",
-    "config.json", "registry.json",
+    "runtimes", "config.json", "registry.json",
 })
 
 _ALL_KEYS = ("venv", "lib_dir", "lib_entries", "home_cfg", "data_dir",
