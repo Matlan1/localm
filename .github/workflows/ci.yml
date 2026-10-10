@@ -1016,7 +1016,7 @@ jobs:
       - name: Install the optional stacks
         run: |
           pip install --require-hashes --no-deps -r .github/requirements/torch-cpu.txt
-          uv export --quiet --locked --no-emit-project --prune torch --no-emit-package setuptools --extra dev --extra rag --extra hf --extra monitor --extra audio --extra voice --extra grammar -o "$RUNNER_TEMP/requirements.txt"
+          uv export --quiet --locked --no-emit-project --prune torch --extra dev --extra rag --extra hf --extra monitor --extra audio --extra voice --extra grammar -o "$RUNNER_TEMP/requirements.txt"
           pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
           pip install --no-deps -e .
 
