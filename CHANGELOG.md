@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
+  `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
+  same from the command line. A GGUF model whose projector has an audio encoder (for example
+  Qwen3-ASR) transcribes the clip or answers questions about it. WAV is always read and other
+  formats need the voice extra; the clip is converted to the rate the model expects. Audio
+  sent to a model that cannot take it is routed to an installed model that can, or refused
+  with a message saying which model to use, instead of being dropped. Model listings report
+  `audio_input`, and a projector that reads only audio no longer makes a model count as
+  able to see images.
 - **Speech from a text-to-speech model.** A Qwen3-TTS GGUF (`localm pull
   ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf` fetches it with
   its mmproj) is recognised as a speech model. `localm speak "text" -o out.wav` and the
@@ -77,6 +86,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   requests). The requests share the model's context window: one that does not fit beside
   the running ones waits for them and shows a waiting status. A reply generated beside
   others can differ slightly from the same request run alone, even at temperature 0.
+- **`localm setup-music` installs native music generation.** It downloads the KoboldCpp
+  build that runs ACE-Step 1.5 on this machine (CUDA, Vulkan, CPU or Metal) from a pinned
+  release through the network policy, checks its size and checksum before running it, pulls
+  the default ACE-Step 1.5 models, and generates a short test track, falling back to Vulkan
+  and then CPU (CPU on Apple Silicon) when the preferred backend does not start. `--backend`
+  picks one, `--status` shows what is installed, and `--no-models` / `--no-test` skip those
+  steps.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the

@@ -2279,6 +2279,53 @@ def gguf_is_mmproj(path: Path, meta: Optional[dict] = None) -> bool:
     return meta.get("architecture") == _GGUF_MMPROJ_ARCHITECTURE
 
 
+_CLIP_HAS_VISION_KEY = "clip.has_vision_encoder"
+_CLIP_HAS_AUDIO_KEY = "clip.has_audio_encoder"
+
+
+def gguf_mmproj_modalities(path: Path) -> Optional[dict]:
+    """The input modalities the projector (mmproj) GGUF at *path* encodes, as
+    ``{"vision": bool, "audio": bool}``, read from its ``clip.has_vision_encoder``
+    and ``clip.has_audio_encoder`` keys. An absent key reads as False, as the
+    runtime reads it.
+
+    Returns None when *path* cannot be read, is not a clip projector, or its
+    metadata section is malformed or extends past the bounded prefix read
+    (``_GGUF_META_PROBE_BYTES``) before both keys were found. Never raises."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except (OSError, ValueError):
+        return None
+    found: dict[str, Optional[bool]] = {_CLIP_HAS_VISION_KEY: None, _CLIP_HAS_AUDIO_KEY: None}
+    architecture = None
+    try:
+        if buf[:4] != b"GGUF":
+            return None
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if not gguf_version_supported(version):
+            return None
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            if key in found and vtype == _GGUF_TYPE_BOOL:
+                found[key] = struct.unpack_from("<?", buf, off)[0]
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        if architecture != _GGUF_MMPROJ_ARCHITECTURE or None in found.values():
+            return None
+    if architecture != _GGUF_MMPROJ_ARCHITECTURE:
+        return None
+    return {"vision": bool(found[_CLIP_HAS_VISION_KEY]),
+            "audio": bool(found[_CLIP_HAS_AUDIO_KEY])}
+
+
 _GGUF_ADAPTER_GENERAL_TYPE = "adapter"
 GGUF_LORA_ADAPTER_KIND = "lora"
 

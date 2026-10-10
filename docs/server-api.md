@@ -53,7 +53,8 @@ chunks whose `delta` carries `status` (English text) and `status_code` (a
 stable id): `waiting` (another request is running on this model), `compacting`
 (older messages are being summarised to fit the context window), `processing`,
 `encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
-`vision_cpu_retry` and `generating`. A streaming request that is compacted
+`vision_cpu_retry`, `encoding_audio_gpu`, `encoding_audio_cpu`,
+`audio_cpu_retry` and `generating`. A streaming request that is compacted
 carries `X-Localm-Context-Compacted: 1`; if the conversation still does not fit
 after compaction, the refusal arrives in the stream as the reply text with
 `finish_reason: "error"` instead of an HTTP 413.
@@ -134,7 +135,8 @@ Chat completions on a GGUF model with Multi-Token Prediction enabled
 than generating one token at a time and was paused for at least as many steps
 as it ran), `stopped` (it stopped partway, or turned MTP off for the model;
 `reason` says why), `off` (this reply could not draft at all: `reason` is
-`image` for a turn with an image), `idle` (it drafted nothing, for
+`image` for a turn with an image, `audio` for a turn with audio and no
+image), `idle` (it drafted nothing, for
 example on a very short reply) or `unavailable` (this model cannot speculate;
 `reason` says why). `drafted` and `accepted` count the
 draft tokens sent to verification and kept; `paused_steps` counts the steps
@@ -293,7 +295,7 @@ Three localm extensions on the request body steer this:
 | Field | Meaning |
 |---|---|
 | `pin_model` | `false`: `model` is only the preferred model, which routing may replace. `true`: whatever answers is never replaced, named or not. Unset: a named model is pinned, an unnamed one is not. |
-| `required_capabilities` | Capabilities the answering model must have, any of `vision`, `tool_use`, `reasoning`. Vision and context length never need listing: an image part and the prompt's size already say so. |
+| `required_capabilities` | Capabilities the answering model must have, any of `vision`, `audio_input`, `tool_use`, `reasoning`. Vision, audio input and context length never need listing: an image part, an audio part and the prompt's size already say so. |
 | `min_context` | Tokens the answering model's trained context window must hold. The larger of this and what the prompt's own size implies applies. |
 
 Only installed chat models whose file is present are candidates (never an
@@ -306,7 +308,7 @@ next one is tried, then the model the request would otherwise use.
 
 When no installed model has everything a request needs, what the request
 cannot be answered without decides: an image goes to a model that can read
-it, and a conversation too long for the model goes to one that can hold it,
+it, an audio clip to one that can take audio, and a conversation too long for the model goes to one that can hold it,
 even if that model lacks a listed capability such as `tool_use`. `unmet` in
 the routing header below names what it lacks. A request that only lists a
 capability no installed model has stays with the model it would otherwise use.
@@ -344,6 +346,21 @@ model that can see and answers with that one instead (see routing above).
 Only when no such model is installed, or the request pinned the loaded
 text-only model by name, does it reject the attached image with a clear
 error.
+
+Audio input uses the OpenAI `input_audio` part
+(`{"type": "input_audio", "input_audio": {"data": "<base64>", "format": "wav"}}`)
+and needs a GGUF model whose projector (mmproj) has an audio encoder, such as
+Qwen3-ASR, or a HuggingFace-format model with an audio processor. The model
+then transcribes or answers questions about the clip; it never replies with
+speech. On a GGUF model, WAV (8, 16, 24 or 32-bit PCM, or 32/64-bit float, any
+channel count) is always read and other formats (`mp3`, `flac`, `ogg`, ...)
+need the voice extra; the clip is converted to mono at the rate the projector
+expects, must be at least 0.1 seconds and at most 10 minutes long and 50 MB
+encoded, and anything else, or audio that cannot be decoded, is a `400`
+saying why. Audio sent to a model that cannot
+take it is routed or refused exactly like an image.
+`GET /v1/models/{id}` carries `audio_input` (true or false) next to `vision` when its
+files could be inspected.
 
 ### Using a model another instance has loaded
 

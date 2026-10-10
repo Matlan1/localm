@@ -128,6 +128,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             # Keyed by NAME, not by path: two aliases can share one path, but
             # model_vision_capability() is looked up per registered name.
             vision: dict = {}
+            audio: dict = {}
             # Trained context window and tool-call support per NAME, as the
             # routing capability readers report them (None = not inspected).
             context_len: dict = {}
@@ -153,6 +154,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 # recorded, present projector answers True even when the model file
                 # itself is unreachable.
                 vision[_n] = _mvc(_n, reg=registry, dir_cache=vision_dirs)
+                audio[_n] = _caps.model_capability(_n, _caps.AUDIO, reg=registry,
+                                                   dir_cache=vision_dirs)
                 context_len[_n] = _caps.model_context_length(_n, reg=registry)
                 tool_use[_n] = _caps.model_tool_use_capability(_n, reg=registry)
                 # ONE stat() for both size and mtime. mtime is recorded for a
@@ -173,10 +176,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 except (OSError, ValueError):
                     resolved[ep] = None
             return (sizes, mtimes, missing, resolved, resident_resolved, vision,
-                    context_len, tool_use)
+                    context_len, tool_use, audio)
 
         (sizes, mtimes, missing_flags, resolved_paths, resident_resolved, vision_caps,
-         context_lens, tool_caps) = await loop.run_in_executor(
+         context_lens, tool_caps, audio_caps) = await loop.run_in_executor(
             get_plugin_executor(), _probe_rows)
 
         adapter_info, attached_to, resident = await loop.run_in_executor(
@@ -219,6 +222,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             _vis = vision_caps.get(name)
             if _vis is not None:
                 row_out["vision"] = _vis
+            # Audio input capability in the same true / false / KEY ABSENT shape.
+            if audio_caps.get(name) is not None:
+                row_out["audio_input"] = audio_caps[name]
             # Same true / false / KEY ABSENT shape for the other two routing
             # capabilities: the trained context window and tool-call support.
             if context_lens.get(name) is not None:

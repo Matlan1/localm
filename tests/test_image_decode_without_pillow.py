@@ -92,7 +92,14 @@ def test_decoding_an_image_does_not_require_numpy(monkeypatch):
     """
     import importlib
 
+    import localm.inference
+    import localm.inference.media
+
     monkeypatch.setitem(sys.modules, "numpy", None)
+    # Restores the package attribute along with the sys.modules entry, so
+    # `from localm.inference import media` and `import localm.inference.media`
+    # name the same module after this test.
+    monkeypatch.setattr(localm.inference, "media", localm.inference.media)
     monkeypatch.delitem(sys.modules, "localm.inference.media", raising=False)
 
     media = importlib.import_module("localm.inference.media")
