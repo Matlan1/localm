@@ -613,6 +613,7 @@ def _stream_error(result: tuple) -> Exception:
         "UnsupportedInputError": UnsupportedInputError,
         "ContextCapacityExceededError": ContextCapacityExceededError,
         "PretokenizerUnsafeInputError": PretokenizerUnsafeInputError,
+        **_INPUT_ERROR_TYPES,
     }.get(tag)
     return typed(msg) if typed is not None else RuntimeError(msg)
 

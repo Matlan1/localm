@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Transcription without Whisper.** `POST /v1/audio/transcriptions` now answers with an
+  installed GGUF model that hears audio (for example Qwen3-ASR) when faster-whisper is not
+  installed, or when `model` names one. Whisper stays the default when it is installed. This
+  path returns `json` and `text`; `srt`, `vtt` and `verbose_json` need timestamps it does not
+  have and are refused with a message saying so.
 - **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
   `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
   same from the command line. A GGUF model whose projector has an audio encoder (for example
@@ -474,6 +479,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A bad audio clip or image no longer unloads a GGUF model.** An unreadable clip or picture is refused with a
+  `400` and the model stays loaded. Before, the model was dropped and the request got a server error.
 - **"Delete saved data" now also removes the voices folder.** The named reference voices
   for text-to-speech were left behind. A legacy data folder with no record of what was in it
   before LocaLM keeps a voices folder.
@@ -1677,11 +1684,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
-- **`setup.sh` and `setup-gui.sh` install a fixed uv release and check it before running it.**
+- **`setup.sh`, `setup-gui.sh`, `setup.bat` and `setup-gui.bat` install a fixed uv release and check it before running it.**
   They used to run whatever Astral's installer URL returned. They now download the installer
   of one pinned uv release and run it only when its checksum matches; a failed download, a
-  checksum mismatch, or a machine with no `sha256sum`, `shasum` or `openssl` stops the uv
-  install with the reason instead of running unchecked code.
+  checksum mismatch, or (on Linux and macOS) a machine with no `sha256sum`, `shasum` or
+  `openssl` stops the uv install with the reason instead of running unchecked code. On
+  Windows, installing uv from a PowerShell 7 window no longer fails.
 - **Hugging Face models no longer download and run code from the Hugging Face kernel
   hub unless the network policy allows it.** transformers could fetch a compiled kernel
   package from the Hub while a model was loading or replying and import it, even with
