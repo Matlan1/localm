@@ -293,8 +293,9 @@ def _patch_query(monkeypatch):
     monkeypatch.setattr(
         store.Collection, "query",
         lambda self, text, k=4, embed_fn=None, relevant_only=False,
-        rerank_fn=None, rerank_candidates=20:
-        captured.update(rerank_fn=rerank_fn, candidates=rerank_candidates) or [])
+        rerank_fn=None, rerank_candidates=20, rerank_min_score=None:
+        captured.update(rerank_fn=rerank_fn, candidates=rerank_candidates,
+                        min_score=rerank_min_score) or [])
     return captured
 
 
@@ -337,3 +338,87 @@ class TestCli:
         r = cli_runner.invoke(main, ["rag", "query", "kb", "hello"])
         assert r.exit_code == 0, r.output
         assert "rerank 0.9" in r.output
+
+
+class TestCalibratedScoreGate:
+    BGE_SHA = "a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3"
+    QWEN_SHA = "22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48"
+
+    def _registry(self, monkeypatch, **entries):
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "load_registry", lambda: dict(entries))
+
+    def _qwen(self, monkeypatch, fake_reranker, name="qwen3-reranker-0.6b-q8_0"):
+        fake_reranker.names[:] = [name]
+        self._registry(monkeypatch, **{name: {"sha256": self.QWEN_SHA}})
+
+    @pytest.mark.parametrize("sha,expected", [
+        ("22c9979ce4fbcdc5acdc310c6641c32797eff1aa980b8f7a2db8a8ea23429a48", 0.5),
+        ("A43C7C9B11A4C1517E5BF95151960E1621D1B72F7A493364B01E386CF1AAA1D3", -1.5),
+        ("0" * 64, None),
+        ("", None),
+        (None, None),
+    ])
+    def test_only_the_measured_files_are_calibrated_whatever_they_are_named(
+            self, monkeypatch, sha, expected):
+        self._registry(monkeypatch, mine={"sha256": sha})
+        assert rr.calibrated_min_score("mine") == expected
+
+    @pytest.mark.parametrize("name", [
+        "qwen3-reranker-0.6b-q8_0", "bge-reranker-v2-m3-Q8_0", "bge-reranker"])
+    def test_a_measured_looking_name_without_the_measured_hash_is_not_calibrated(
+            self, monkeypatch, name):
+        self._registry(monkeypatch, **{name: {"model_type": "embedding"}})
+        assert rr.calibrated_min_score(name) is None
+
+    def test_an_unregistered_name_is_not_calibrated(self, monkeypatch):
+        self._registry(monkeypatch)
+        assert rr.calibrated_min_score("ghost") is None
+
+    def test_the_plan_carries_the_minimum_score_of_a_calibrated_reranker(
+            self, home, fake_reranker, monkeypatch):
+        self._qwen(monkeypatch, fake_reranker)
+        assert rr.rerank_plan().min_score == 0.5
+        fake_reranker.names[:] = ["qwen"]
+        assert rr.rerank_plan().min_score is None
+        self._qwen(monkeypatch, fake_reranker)
+        _set(home, rag_rerank=False)
+        assert rr.rerank_plan().min_score is None
+
+    def test_the_route_gates_on_the_reranker_score_for_a_calibrated_model(
+            self, rag_app, fake_reranker, monkeypatch):
+        from fastapi.testclient import TestClient
+        self._qwen(monkeypatch, fake_reranker)
+        with TestClient(rag_app) as c:
+            _index(c)
+            gated = _query(c, relevant_only=True)
+        assert _sources(gated) == ["third.md"]
+
+    def test_the_route_keeps_the_floor_for_an_uncalibrated_model(
+            self, rag_app, fake_reranker):
+        from fastapi.testclient import TestClient
+        with TestClient(rag_app) as c:
+            _index(c)
+            floored = _query(c, relevant_only=True)
+        assert sorted(_sources(floored)) == ["first.md", "third.md"]
+
+    def test_the_cli_passes_the_minimum_score(self, cli_runner, monkeypatch, home,
+                                              fake_reranker):
+        from localm.cli import main
+        self._qwen(monkeypatch, fake_reranker)
+        captured = _patch_query(monkeypatch)
+        r = cli_runner.invoke(main, ["rag", "query", "kb", "hello", "--relevant-only"])
+        assert r.exit_code == 0, r.output
+        assert captured["min_score"] == 0.5
+
+    def test_a_failing_calibrated_reranker_falls_back_to_the_floor_on_the_route(
+            self, rag_app, fake_reranker, monkeypatch):
+        from fastapi.testclient import TestClient
+        self._qwen(monkeypatch, fake_reranker)
+        fake_reranker.fail = RuntimeError("worker died")
+        with TestClient(rag_app) as c:
+            _index(c)
+            body = _query(c, relevant_only=True)
+        assert _sources(body)[0] == "first.md"
+        assert all("rerank_score" not in h for h in body["hits"])
+        assert "reranking failed (RuntimeError)" in body["rerank_note"]

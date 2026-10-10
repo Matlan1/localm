@@ -20,6 +20,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `--no-rerank`, and the query API reports whether a query was reranked. With no
   reranker installed nothing changes; if the reranker fails, the unreranked order is
   kept and the reason is shown.
+  With the Q8_0 files of bge-reranker-v2-m3 (gpustack) or Qwen3-Reranker-0.6B (ggml-org),
+  the reranker's score also decides which excerpts are relevant enough to reach the
+  chat, so a rephrased question finds its answer where the keyword and similarity check used
+  to drop it, and unrelated questions still bring in nothing.
 - **A loaded reranker can be unloaded from the Models page.** A reranker that is in
   memory now shows as loaded there, and its Unload button (or `localm unload <name>`)
   frees it unless a rerank is running.
