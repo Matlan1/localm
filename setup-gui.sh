@@ -13,6 +13,33 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# The uv release this setup installs; its installer script runs only when its
+# sha256 matches UV_INSTALLER_SHA256.
+UV_INSTALLER_VERSION="0.13.0"
+UV_INSTALLER_SHA256="283cbef4bdaca819bd896b0dacb8a085c4c05dbc880642aa5001d97bc4db74ba"
+file_sha256() {  # file_sha256 FILE  ->  prints the hex sha256, or nothing when no hashing tool exists
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+    elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed 's/^.*= *//'
+    fi
+}
+fetch_uv_installer() {  # fetch_uv_installer DEST  ->  0 only when DEST holds the checksum-verified installer
+    local dest="$1" got
+    if ! curl -fsSL -o "$dest" "https://github.com/astral-sh/uv/releases/download/${UV_INSTALLER_VERSION}/uv-installer.sh"; then
+        echo "  [!] Could not download the uv ${UV_INSTALLER_VERSION} installer."
+        return 1
+    fi
+    got="$(file_sha256 "$dest")"
+    if [ -z "$got" ]; then
+        echo "  [!] No sha256 tool (sha256sum, shasum or openssl) was found, so the uv installer cannot be verified and was not run."
+        return 1
+    fi
+    if [ "$got" != "$UV_INSTALLER_SHA256" ]; then
+        echo "  [!] The downloaded uv installer did not match its expected checksum and was not run."
+        return 1
+    fi
+}
+
 echo
 echo "  LocaLM graphical setup"
 echo
@@ -42,12 +69,15 @@ if [ -z "$UVEXE" ]; then
     # files or writing an install receipt under ~/.config/uv.
     export UV_INSTALL_DIR="$PWD/.uv"
     export UV_UNMANAGED_INSTALL="$PWD/.uv"
-    if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    UVTMP="$(mktemp -d 2>/dev/null)" || { UVTMP="$(pwd)/.uv-installer-tmp"; mkdir -p "$UVTMP"; }
+    if ! { fetch_uv_installer "$UVTMP/uv-installer.sh" && sh "$UVTMP/uv-installer.sh"; }; then
+        rm -rf "$UVTMP"
         echo
         echo "  [!] Could not download or run Astral's uv installer."
         echo "      Use the console installer instead:  ./setup.sh"
         exit 1
     fi
+    rm -rf "$UVTMP"
     # The installer updates the shell profile, which this already running shell
     # does not see. Prepend every directory it may have used, in setup.sh's own
     # order, so the uv just installed is callable right now.
