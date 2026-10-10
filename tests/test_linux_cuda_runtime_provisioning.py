@@ -44,25 +44,23 @@ def _make_wheel_zip(path: Path, so_names: tuple, extra_names: tuple = ()) -> Non
 
 _REAL_SHAPED_PYPI_RESPONSE = {
     "info": {"version": "12.9.79"},
-    "releases": {
-        "12.9.79": [
-            {
-                "filename": "nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
-                "url": "https://files.pythonhosted.org/packages/aa/aarch64.whl",
-                "digests": {"sha256": "aaaa"},
-            },
-            {
-                "filename": "nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
-                "url": "https://files.pythonhosted.org/packages/bb/x86_64.whl",
-                "digests": {"sha256": "bbbb"},
-            },
-            {
-                "filename": "nvidia_cuda_runtime_cu12-12.9.79.tar.gz",
-                "url": "https://files.pythonhosted.org/packages/cc/sdist.tar.gz",
-                "digests": {"sha256": "cccc"},
-            },
-        ]
-    },
+    "urls": [
+        {
+            "filename": "nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
+            "url": "https://files.pythonhosted.org/packages/aa/aarch64.whl",
+            "digests": {"sha256": "aaaa"},
+        },
+        {
+            "filename": "nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/bb/x86_64.whl",
+            "digests": {"sha256": "bbbb"},
+        },
+        {
+            "filename": "nvidia_cuda_runtime_cu12-12.9.79.tar.gz",
+            "url": "https://files.pythonhosted.org/packages/cc/sdist.tar.gz",
+            "digests": {"sha256": "cccc"},
+        },
+    ],
 }
 
 
@@ -85,14 +83,20 @@ class _FakeResponse:
 
 def test_pypi_wheel_url_and_sha_picks_linux_x86_64_wheel(monkeypatch):
     """Against the real PyPI JSON shape: picks the x86_64 linux .whl, never the
-    aarch64 wheel or the sdist tarball that also satisfy a looser match."""
+    aarch64 wheel or the sdist tarball that also satisfy a looser match, and
+    returns the PIN's digest rather than the one PyPI reports."""
     import json as _json
-    monkeypatch.setattr(sl, "verified_urlopen",
-                        lambda req, timeout=10: _FakeResponse(
-                            _json.dumps(_REAL_SHAPED_PYPI_RESPONSE).encode()))
+    requested = []
+
+    def fake_urlopen(req, timeout=10):
+        requested.append(req.full_url)
+        return _FakeResponse(_json.dumps(_REAL_SHAPED_PYPI_RESPONSE).encode())
+    monkeypatch.setattr(sl, "verified_urlopen", fake_urlopen)
     url, sha = sl._pypi_wheel_url_and_sha("nvidia-cuda-runtime-cu12")
+    version, pin_sha = sl._CUDA_RUNTIME_PIN["nvidia-cuda-runtime-cu12"]
     assert url == "https://files.pythonhosted.org/packages/bb/x86_64.whl"
-    assert sha == "bbbb"
+    assert sha == pin_sha != "bbbb"
+    assert requested == [f"https://pypi.org/pypi/nvidia-cuda-runtime-cu12/{version}/json"]
 
 
 def test_pypi_wheel_url_and_sha_never_raises_on_network_error(monkeypatch):
@@ -104,13 +108,33 @@ def test_pypi_wheel_url_and_sha_never_raises_on_network_error(monkeypatch):
 
 def test_pypi_wheel_url_and_sha_none_when_no_linux_wheel(monkeypatch):
     import json as _json
-    payload = {"info": {"version": "1.0"}, "releases": {"1.0": [
+    payload = {"info": {"version": "1.0"}, "urls": [
         {"filename": "pkg-1.0-py3-none-win_amd64.whl",
          "url": "https://x/win.whl", "digests": {"sha256": "x"}},
-    ]}}
+    ]}
     monkeypatch.setattr(sl, "verified_urlopen",
                         lambda req, timeout=10: _FakeResponse(_json.dumps(payload).encode()))
     assert sl._pypi_wheel_url_and_sha("nvidia-cublas-cu12") == (None, None)
+
+
+def test_pypi_wheel_url_and_sha_refuses_an_unpinned_package_without_any_request(monkeypatch):
+    requested = []
+
+    def record(req, timeout=10):
+        requested.append(req.full_url)
+        raise OSError("unreachable")
+    monkeypatch.setattr(sl, "verified_urlopen", record)
+    assert sl._pypi_wheel_url_and_sha("nvidia-some-other-package") == (None, None)
+    assert requested == []
+
+
+def test_every_cuda_runtime_package_is_pinned_to_a_version_and_a_sha256():
+    import re
+    packages = {p for pkgs in sl._CUDA_RUNTIME_PYPI_PACKAGES.values() for p in pkgs}
+    assert packages == set(sl._CUDA_RUNTIME_PIN)
+    for package, (version, sha) in sl._CUDA_RUNTIME_PIN.items():
+        assert re.fullmatch(r"\d+(\.\d+)+", version), (package, version)
+        assert re.fullmatch(r"[0-9a-f]{64}", sha), (package, sha)
 
 
 # ------------------------- _fetch_pypi_runtime_lib -------------------------- #

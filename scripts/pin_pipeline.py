@@ -465,7 +465,7 @@ _ISSUES_INTRO_RE = re.compile(r"an entry lives\nin exactly one\..*?\n\n", re.S)
 
 
 def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
-                      issues_path: Path = ISSUES_PATH, *, pin: str = "llama",
+                      issues_path: Path | None = None, *, pin: str = "llama",
                       summary: str | None = None, kind: str = "CONFIRM-FAILED") -> bool:
     """Append a new OPEN entry to issues/issues.txt for a genuine FAIL (never
     for an ordinary INCONCLUSIVE - that is not evidence of anything; a
@@ -477,7 +477,8 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
     already present. Returns False, printing a warning, if issues_path
     exists but the intro anchor no longer matches (NOT the same as
     issues_path simply not existing, which is the expected, silent case on
-    CI or a fresh clone).
+    CI or a fresh clone). *issues_path* defaults to the module's ISSUES_PATH
+    as it is at call time.
 
     *pin* names the title prefix (upper-cased; a dotted candidate like a
     ComfyUI tag is dash-safed for the title only - issue ids use dashes,
@@ -493,6 +494,7 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
     the default reproduces the exact original text so the llama call site
     needs no change; a different pin passes its own multi-line description
     ending in ": {reason}{receipt_note}." to match the same shape."""
+    issues_path = issues_path or ISSUES_PATH
     if not issues_path.exists():
         return False
     text = issues_path.read_text(encoding="utf-8")

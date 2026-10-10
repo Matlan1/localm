@@ -393,6 +393,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **Linux CUDA setup installs fixed NVIDIA runtime libraries.** `localm setup-llama` on Linux now fetches a pinned, checksum-verified version of the CUDA runtime and cuBLAS libraries instead of whichever version PyPI lists as newest.
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
   layers auto-sized (the default), such a model now keeps the experts of as few
   layers as needed in system RAM and every layer on the GPU, instead of moving

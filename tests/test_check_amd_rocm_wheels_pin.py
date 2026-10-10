@@ -14,7 +14,8 @@ digit-count change, (c) the win_amd64/cp312 filter actually discriminates
 py3-none-only package reports no python-ABI ceiling rather than a false one,
 (e) an unreachable index is reported as "could not check" and never as
 "current", one package's failure never hides another's result, and (f) the
-script always exits 0 regardless of outcome (report-only, no --gate).
+script always exits 0 regardless of outcome without --gate, and --gate exits 0/1/2
+for current/stale/could-not-check.
 """
 
 from __future__ import annotations
@@ -358,8 +359,8 @@ def test_main_reports_could_not_check_on_unreachable_index_never_current(monkeyp
 
 
 def test_main_always_exits_zero_report_only(monkeypatch, capsys):
-    """No --gate exists at all: the script is a maintenance signal, never a
-    build gate, regardless of what it finds."""
+    """Without --gate the script is a maintenance signal, never a build gate,
+    regardless of what it finds."""
     real_torch_html = (
         '<a href="../torch-99.0.0-cp312-cp312-win_amd64.whl">x</a>'  # deliberately far ahead
     )
@@ -388,3 +389,52 @@ def test_main_one_package_failing_does_not_hide_the_others(monkeypatch, capsys):
     # torchvision (also a _TORCH_STACK member) must still be reported, since
     # only torch's own fetch failed.
     assert "torchvision:" in out
+
+
+# --------------------------------------------------------------------------- #
+#  --gate                                                                     #
+# --------------------------------------------------------------------------- #
+
+def _index_for(monkeypatch, *, torch_version=None, fail=()):
+    """A fake AMD index where every package is exactly at its real pin, except
+    torch (served at *torch_version*) and the packages named in *fail*."""
+    def wheel(pkg, version, tag):
+        return f'<a href="../{pkg.replace("-", "_")}-{version}-{tag}-win_amd64.whl">x</a>'
+
+    def opener(pkg):
+        if pkg in fail:
+            raise urllib.error.URLError(f"simulated failure for {pkg}")
+        if pkg in checker._TORCH_STACK:
+            pinned = checker._pinned_torch_stack_version(pkg)
+            version = torch_version if (pkg == "torch" and torch_version) else pinned
+            return wheel(pkg, version, "cp312-cp312")
+        return wheel(pkg, checker._pinned_rocm_sdk_version(pkg), "py3-none")
+    monkeypatch.setattr(checker, "_fetch_index_http", opener)
+
+
+def test_gate_exits_zero_when_every_package_is_at_the_newest_published(monkeypatch, capsys):
+    _index_for(monkeypatch)
+    assert checker.main(["--gate"]) == 0
+    assert "STALE" not in capsys.readouterr().out
+
+
+def test_gate_exits_one_when_a_package_is_behind(monkeypatch, capsys):
+    _index_for(monkeypatch, torch_version="99.0.0+rocm9.9.9")
+    assert checker.main(["--gate"]) == 1
+    assert "torch: STALE" in capsys.readouterr().out
+
+
+def test_gate_exits_two_when_a_package_cannot_be_checked_and_none_is_stale(monkeypatch, capsys):
+    _index_for(monkeypatch, fail=("torch",))
+    assert checker.main(["--gate"]) == 2
+    assert "could not check" in capsys.readouterr().out
+
+
+def test_gate_stale_outranks_could_not_check(monkeypatch):
+    _index_for(monkeypatch, torch_version="99.0.0+rocm9.9.9", fail=("rocm-sdk-core",))
+    assert checker.main(["--gate"]) == 1
+
+
+def test_without_gate_a_stale_or_unreachable_index_still_exits_zero(monkeypatch):
+    _index_for(monkeypatch, torch_version="99.0.0+rocm9.9.9", fail=("rocm-sdk-core",))
+    assert checker.main([]) == 0

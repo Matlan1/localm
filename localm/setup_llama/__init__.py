@@ -127,6 +127,7 @@ from localm.setup_llama.assets import (
 from localm.setup_llama.cuda import (
     _CUDA_LINE, _BLACKWELL_MIN_CAP, _MIN_DRIVER_CUDA, _ver_tuple, _ver_at_least,
     NvidiaInfo, _nvidia_smi, nvidia_preflight, _CUDA_RUNTIME_PYPI_PACKAGES,
+    _CUDA_RUNTIME_PIN,
     _pypi_wheel_url_and_sha, _fetch_pypi_runtime_lib, _fetch_cuda_runtime_libs,
     _cuda_setup_dialogue, STAGED_NOTE, IMAGE_TAG_FOR_LINE, CUDA_CHECK_FAILED,
     record_staged_cuda, staged_cuda_line, check_staged_cuda_runtime, cuda_container_check,
@@ -164,7 +165,7 @@ __all__ = [
     "staged_cuda_line", "check_staged_cuda_runtime", "cuda_container_check",
     "_copy_binaries", "_copy_blas_library_dirs", "_copy_license_files", "CPU_OVERLAY_MARKER",
     "_CUDA_LINE",
-    "_CUDA_LINUX_REPO", "_CUDA_RUNTIME_PYPI_PACKAGES", "_cuda_setup_dialogue",
+    "_CUDA_LINUX_REPO", "_CUDA_RUNTIME_PYPI_PACKAGES", "_CUDA_RUNTIME_PIN", "_cuda_setup_dialogue",
     "DEFAULT_URL", "DEFAULT_URL_SHA256", "_diagnose_bad_artifact", "_download",
     "_DOWNLOAD_STALL_TIMEOUT", "_DownloadResult", "_ensure_importable",
     "_EXC_HEADER_RE", "_exit_provisioning_busy", "_exit_runtime_in_use",

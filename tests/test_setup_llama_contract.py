@@ -800,7 +800,7 @@ def test_windows_cuda_pairs_the_build_with_its_cudart_bundle(world, cap, cuda, l
     assert world.marker() == f"cuda {PIN}\n"
 
 
-def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world):
+def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world, monkeypatch):
     world.platform("linux")
     world.vendors = ["nvidia"]
     world.nvidia = ("555.42", "12.5", "NVIDIA RTX A4000", "8.6")
@@ -810,20 +810,23 @@ def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world):
         (build, _targz({"b/libllama.so": b"libllama", "b/libggml-cuda.so": b"ggml-cuda"}, 4), "ok"),
     ])
     wheels = {}
+    pins = {}
     for pkg, libs in (("nvidia-cuda-runtime-cu12", {"nvidia/cuda_runtime/lib/libcudart.so.12": b"rt"}),
                       ("nvidia-cublas-cu12", {"nvidia/cublas/lib/libcublas.so.12": b"b",
                                               "nvidia/cublas/lib/libcublasLt.so.12": b"lt"})):
         body = _zip({**libs, "nvidia/METADATA": b"meta"}, len(pkg))
         wurl = world.serve(f"https://files.pythonhosted.org/packages/{pkg}.whl", body)
         wheels[pkg] = wurl
-        world.serve_json(f"https://pypi.org/pypi/{pkg}/json", {
+        pins[pkg] = ("12.9.79", _sha(body))
+        world.serve_json(f"https://pypi.org/pypi/{pkg}/12.9.79/json", {
             "info": {"version": "12.9.79"},
-            "releases": {"12.9.79": [
+            "urls": [
                 {"filename": f"{pkg}-12.9.79-py3-none-manylinux_2_27_aarch64.whl",
                  "url": "https://files.pythonhosted.org/aarch64.whl", "digests": {"sha256": "0"}},
                 {"filename": f"{pkg}-12.9.79-py3-none-manylinux_2_27_x86_64.whl",
-                 "url": wurl, "digests": {"sha256": _sha(body)}},
-            ]}})
+                 "url": wurl, "digests": {"sha256": "not-the-pin"}},
+            ]})
+    monkeypatch.setattr(sl, "_CUDA_RUNTIME_PIN", {**sl._CUDA_RUNTIME_PIN, **pins})
     r = world.invoke("--backend", "cuda", "--yes")
     assert r.exit_code == 0, r.output
     _in_order(r.text, "Compute capability 8.6 -> cuda-12 line",
@@ -835,8 +838,8 @@ def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world):
               "OK - cuda runtime loads on this machine.")
     assert world.requests == [
         f"{API}/{HYBRID}/releases/tags/{PIN}", urls[build],
-        "https://pypi.org/pypi/nvidia-cuda-runtime-cu12/json", wheels["nvidia-cuda-runtime-cu12"],
-        "https://pypi.org/pypi/nvidia-cublas-cu12/json", wheels["nvidia-cublas-cu12"]]
+        "https://pypi.org/pypi/nvidia-cuda-runtime-cu12/12.9.79/json", wheels["nvidia-cuda-runtime-cu12"],
+        "https://pypi.org/pypi/nvidia-cublas-cu12/12.9.79/json", wheels["nvidia-cublas-cu12"]]
     assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libcublas.so.12",
                              "libcublasLt.so.12", "libcudart.so.12", "libggml-cuda.so",
                              "libllama.so"]
