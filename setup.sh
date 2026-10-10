@@ -55,6 +55,32 @@ ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes m
 uv_manual_hint() {  # the manual uv-install command; used from two call sites below
   say "      curl -LsSf https://astral.sh/uv/install.sh | sh"
 }
+# The uv release this setup installs; its installer script runs only when its
+# sha256 matches UV_INSTALLER_SHA256.
+UV_INSTALLER_VERSION="0.13.0"
+UV_INSTALLER_SHA256="283cbef4bdaca819bd896b0dacb8a085c4c05dbc880642aa5001d97bc4db74ba"
+file_sha256() {  # file_sha256 FILE  ->  prints the hex sha256, or nothing when no hashing tool exists
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed 's/^.*= *//'
+  fi
+}
+fetch_uv_installer() {  # fetch_uv_installer DEST  ->  0 only when DEST holds the checksum-verified installer
+  local dest="$1" got
+  if ! curl -fsSL -o "$dest" "https://github.com/astral-sh/uv/releases/download/${UV_INSTALLER_VERSION}/uv-installer.sh"; then
+    say "  [!] Could not download the uv ${UV_INSTALLER_VERSION} installer."
+    return 1
+  fi
+  got="$(file_sha256 "$dest")"
+  if [ -z "$got" ]; then
+    say "  [!] No sha256 tool (sha256sum, shasum or openssl) was found, so the uv installer cannot be verified and was not run."
+    return 1
+  fi
+  if [ "$got" != "$UV_INSTALLER_SHA256" ]; then
+    say "  [!] The downloaded uv installer did not match its expected checksum and was not run."
+    return 1
+  fi
+}
 # heartbeat_start SECS "MESSAGE" / heartbeat_stop - print MESSAGE every SECS
 # seconds while a following long, quiet command is still running (a uv
 # download, a venv build, a torch install), so it never looks identical to a
@@ -470,9 +496,13 @@ if [ "$uv_present" != 1 ]; then
   else
     UVSHARED="--uv-shared-installed"
   fi
-  # || true so a curl/install failure does not trip set -e before our own check;
-  # the re-check below decides honestly whether the bootstrap actually worked.
-  curl -LsSf https://astral.sh/uv/install.sh | sh || true
+  # A failed fetch, checksum mismatch or installer failure leaves uv missing;
+  # the re-check below reports it.
+  UVTMP="$(mktemp -d 2>/dev/null)" || { UVTMP="$(pwd)/.uv-installer-tmp"; mkdir -p "$UVTMP"; }
+  if fetch_uv_installer "$UVTMP/uv-installer.sh"; then
+    sh "$UVTMP/uv-installer.sh" || true
+  fi
+  rm -rf "$UVTMP"
   # uv lands in ~/.local/bin (older builds used ~/.cargo/bin) unless UV_INSTALL_DIR
   # was set above; the installer edits a shell profile, not this running shell, so
   # add it (when set) plus both defaults to PATH for the rest of setup. Guarded so
