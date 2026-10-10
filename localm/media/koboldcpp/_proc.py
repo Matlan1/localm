@@ -144,7 +144,9 @@ def start(argv: list, *, cwd: str, env: dict) -> ManagedProcess:
 
 def kill(mp: ManagedProcess, *, grace: float = 5.0) -> None:
     """Stop the process localm started and everything it started, then reap it.
-    Never raises."""
+    Never raises and never blocks on the output pipe: a reader of ``proc.stdout``
+    ends at end of file once every process holding the pipe has exited. See
+    test_stop_kills_what_the_server_started."""
     proc = mp.proc
     if sys.platform == "win32":
         if mp._job is not None:
@@ -203,8 +205,3 @@ def kill(mp: ManagedProcess, *, grace: float = 5.0) -> None:
             except OSError:
                 pass
         mp._watcher = None
-    if proc.stdout is not None:
-        try:
-            proc.stdout.close()
-        except OSError:
-            pass

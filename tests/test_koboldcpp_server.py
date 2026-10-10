@@ -235,11 +235,20 @@ def test_stop_kills_what_the_server_started(fake_kcpp, tmp_path, monkeypatch):
                request=REQUEST, timeout=60)
     gc = [e["pid"] for e in _events(fake_kcpp) if e["event"] == "grandchild"]
     assert len(gc) == 1 and _pid_alive(gc[0])
-    server.stop()
-    deadline = time.monotonic() + 10
-    while _pid_alive(gc[0]) and time.monotonic() < deadline:
-        time.sleep(0.2)
-    assert not _pid_alive(gc[0])
+    try:
+        t0 = time.monotonic()
+        server.stop()
+        assert time.monotonic() - t0 < 30
+        deadline = time.monotonic() + 10
+        while _pid_alive(gc[0]) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert not _pid_alive(gc[0])
+    finally:
+        import psutil
+        try:
+            psutil.Process(gc[0]).kill()
+        except psutil.NoSuchProcess:
+            pass
 
 
 def test_cancel_during_generation_kills_the_server(fake_kcpp, tmp_path, monkeypatch):
