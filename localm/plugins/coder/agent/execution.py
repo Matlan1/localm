@@ -12,7 +12,7 @@ import re
 import shlex
 import time
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
@@ -28,7 +28,7 @@ from .. import shell_guard
 from ..parser import ToolCall
 from ..tools import ToolResult
 from ..tools.base import RESTRICTED_UNWRITABLE_MESSAGE, restricted_unwritable
-from ..audit import SessionMode
+from ..audit import AuditLogT, SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
@@ -86,6 +86,14 @@ def _call_key(call) -> str:
 
 
 class _ExecutionMixin:
+    if TYPE_CHECKING:
+        # Set by Agent (core.py), which this class is mixed into.
+        cwd: Path
+        restricted: bool
+        _audit: AuditLogT
+
+        def _emit(self, event_type: str, **data) -> None: ...
+
     def _scope_rel(self, value: str) -> Optional[str]:
         """
         Resolve a path/glob arg to a cwd-relative POSIX string for scope
@@ -658,11 +666,11 @@ class _ExecutionMixin:
                 or call.name in _PROJECT_MAP_TOOLS \
                 or call.name in _BROWSER_TOOLS:
             args["_session"] = self
-        # search_replace finds its own targets, so a restricted session hands it
-        # the RESTRICTED_UNWRITABLE_DIRS filter. Injected after the copy, so a
-        # model-supplied "_restricted" cannot win.
-        if call.name == "search_replace" and self.restricted:
-            args["_restricted"] = True
+        # search_replace finds its own targets, so it is told whether this session
+        # is restricted (the RESTRICTED_UNWRITABLE_DIRS filter). Injected after the
+        # copy, so a model-supplied "_restricted" cannot win.
+        if call.name == "search_replace":
+            args["_restricted"] = self.restricted
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True
