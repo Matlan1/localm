@@ -360,3 +360,34 @@ def test_a_failed_stream_leaves_a_newer_runner_alone(tmp_path):
         list(b.chat_stream([{"role": "user", "content": "hi"}]))
     assert b._runner is new and b._loaded
     assert shut == ["old"]
+
+
+class _NeverSubmit:
+    def submit(self, *a, **kw):
+        raise AssertionError("nothing may reach the scheduler")
+
+
+def test_an_empty_prompt_yields_nothing_on_the_slot_path():
+    llm = _llm()
+    llm._slots = _NeverSubmit()
+    assert list(llm._generate_slots([], 10, 0.0, 40, 0.9, 1.0)) == []
+
+
+def test_an_oversized_prompt_is_refused_before_the_scheduler():
+    from localm.inference.backends.base import ContextCapacityExceededError
+    llm = _llm()
+    llm._slots = _NeverSubmit()
+    llm._n_ctx_max = 100
+    with pytest.raises(ContextCapacityExceededError):
+        list(llm._generate_slots(list(range(90)), 10, 0.0, 40, 0.9, 1.0))
+
+
+def test_a_malformed_grammar_is_refused_before_the_scheduler():
+    from localm.inference.backends.base import InvalidGrammarError
+    llm = _llm()
+    llm._slots = _NeverSubmit()
+    llm._n_ctx_max = None
+    with patch.object(llama_mod, "_build_sampler",
+                      side_effect=InvalidGrammarError("bad grammar")):
+        with pytest.raises(InvalidGrammarError):
+            list(llm._generate_slots([1, 2, 3], 10, 0.0, 40, 0.9, 1.0, grammar="nope"))

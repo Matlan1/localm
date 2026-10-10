@@ -604,3 +604,27 @@ def test_queued_requests_hear_they_wait_while_an_exclusive_section_drains(made, 
     queued.close()
     _drain(running)
     assert after > before, "a queued request heard nothing while the exclusive section waited"
+
+
+def test_a_failed_context_recreate_ends_the_running_and_the_waiting_reply(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256)
+    ctx.step_delay = 0.005
+    sched = made(ctx, 2)
+
+    real_recreate = ctx.recreate
+
+    def refuse_once(target, offload_kqv):
+        ctx.recreate = real_recreate
+        ctx.cap = 0
+        ctx.cells = {}
+        raise RuntimeError("Not enough memory to create a context")
+
+    ctx.recreate = refuse_once
+    running = sched.submit(PROMPTS[0], 150, _Sampler())
+    next(running)
+    growing = sched.submit(PROMPTS[1], 150, _Sampler())
+    for stream in (running, growing):
+        with pytest.raises(RuntimeError, match="Not enough memory"):
+            _drain(stream)
+    rec = _collect(sched, PROMPTS[2], 5)
+    assert rec["out"] == _reference(PROMPTS[2], 5)[0]
