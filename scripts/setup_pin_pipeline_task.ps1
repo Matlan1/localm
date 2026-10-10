@@ -72,8 +72,10 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 # A direct exe+args action cannot redirect its own output, so this wraps the
 # real invocation in one layer of powershell.exe to append stdout+stderr to a
-# log file - the only record of an unattended run nobody is watching live.
-$innerCommand = "& '$PythonExe' '$PipelineScript'$PipelineArgs *>> '$LogFile'"
+# log file - the only record of an unattended run nobody is watching live. Python
+# runs unbuffered and in UTF-8 mode, the wrapper reads its output as UTF-8, the log is written as UTF-8, and the wrapper
+# exits with Python's own exit code so the 0/1/2 contract reaches Task Scheduler.
+$innerCommand = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; & '$PythonExe' -u -X utf8 '$PipelineScript'$PipelineArgs 2>&1 | Out-File -FilePath '$LogFile' -Append -Encoding utf8; exit `$LASTEXITCODE"
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$innerCommand`"" `
     -WorkingDirectory $RepoRoot

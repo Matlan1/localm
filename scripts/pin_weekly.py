@@ -80,6 +80,18 @@ REEXEC_ENV = "LOCALM_PIN_WEEKLY_REEXEC"
 _SELF_SCRIPTS = ("pin_weekly.py", "pin_pipeline.py", "check_pins.py")
 
 
+def _reexec(args: list[str], *, windows: bool | None = None) -> int | None:
+    """Restart this script on the new code. POSIX replaces the process (never returns);
+    Windows cannot, so the child runs to completion and its exit code is returned."""
+    command = [sys.executable, str(SCRIPTS / "pin_weekly.py"), *args]
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        return subprocess.run(command).returncode
+    os.execv(sys.executable, command)
+    return None
+
+
 def script_fingerprint() -> str:
     """A digest of the scripts a weekly run is made of, as they are on disk now."""
     digest = hashlib.sha256()
@@ -909,7 +921,9 @@ def main(argv: list[str] | None = None) -> int:
         print("the scripts changed while syncing the main checkout; restarting on the new code")
         os.environ[REEXEC_ENV] = "1"
         sys.stdout.flush()
-        os.execv(sys.executable, [sys.executable, str(SCRIPTS / "pin_weekly.py"), *(argv if argv is not None else sys.argv[1:])])
+        rc = _reexec(list(argv if argv is not None else sys.argv[1:]))
+        if rc is not None:
+            return rc
     try:
         with pp.pipeline_lock():
             pp.sync_main_checkout()

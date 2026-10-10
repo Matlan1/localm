@@ -86,6 +86,16 @@ CI_POLL_INTERVAL_SECONDS = 20
 
 REQUIRE_BACKENDS = ("cpu", "vulkan")
 
+# Upper bounds for every external command, so a hung confirm, git or gh call cannot hold
+# the GPU lease and the pipeline lock until the scheduled task's own limit.
+GIT_TIMEOUT_SECONDS = 600
+GH_TIMEOUT_SECONDS = 300
+TOOL_TIMEOUT_SECONDS = 3 * 3600
+SHORT_TOOL_TIMEOUT_SECONDS = 1800
+
+# Consecutive polls that must show the same completed set of checks before CI reads GREEN.
+CI_STABLE_POLLS = 2
+
 # gpu_lease.py's own EX_TEMPFAIL - the card was busy and the wait elapsed.
 # This is NOT the confirm script's own verdict: it means confirm never ran at
 # all, so the candidate must not be recorded as tried.
@@ -245,12 +255,18 @@ def should_skip(state: dict, candidate: str, *, now: _dt.datetime | None = None)
 #  dir, never writes a tracked file, so it never needs the dedicated worktree)#
 # --------------------------------------------------------------------------- #
 
-def run_under_gpu_lease(cmd: list[str], *, purpose: str, cwd: Path) -> int:
+def run_under_gpu_lease(cmd: list[str], *, purpose: str, cwd: Path,
+                        timeout: float = TOOL_TIMEOUT_SECONDS) -> int:
     """Run *cmd* holding the shared GPU lease for its whole duration. Returns
     the WRAPPED command's own exit code on success; LEASE_BUSY_EXIT if the
-    lease itself could not be acquired (the command never ran)."""
+    lease itself could not be acquired (the command never ran); 2 (INCONCLUSIVE)
+    when *timeout* elapses."""
     lease_cmd = [sys.executable, str(gpu_lease_script()), "run", "--purpose", purpose, "--", *cmd]
-    return subprocess.run(lease_cmd, cwd=cwd).returncode
+    try:
+        return subprocess.run(lease_cmd, cwd=cwd, timeout=timeout).returncode
+    except subprocess.TimeoutExpired:
+        print(f"INCONCLUSIVE: {purpose} did not finish within {int(timeout)}s and was stopped")
+        return 2
 
 
 def run_confirm(candidate: str, receipt_path: Path) -> int:
@@ -299,7 +315,11 @@ def run_comfyui_confirm(tag: str, commit: str, receipt_path: Path) -> int:
               "--workdir", str(workdir), "--receipt", str(receipt_path), "--phase", phase]
         if require_gpu:
             cmd.append("--require-gpu")
-        proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
+                                  timeout=TOOL_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            return 2, f"{phase} did not finish within {TOOL_TIMEOUT_SECONDS}s and was stopped"
         return proc.returncode, proc.stdout + proc.stderr
 
     teardown_rc, teardown_out = _run_phase("teardown")
@@ -348,8 +368,16 @@ def run_bump(worktree: Path, candidate: str, receipt_path: Path, *, write: bool)
            "--tag", candidate, "--receipt", str(receipt_path)]
     if write:
         cmd.append("--write")
-    proc = subprocess.run(cmd, cwd=worktree, env=_worktree_env(worktree),
-                          capture_output=True, text=True)
+    return _run_short(cmd, worktree)
+
+
+def _run_short(cmd: list[str], worktree: Path) -> tuple[int, str]:
+    """Run *cmd* in the pipeline worktree with PYTHONPATH pointed at it; (124, note) on timeout."""
+    try:
+        proc = subprocess.run(cmd, cwd=worktree, env=_worktree_env(worktree), capture_output=True,
+                              text=True, timeout=SHORT_TOOL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {SHORT_TOOL_TIMEOUT_SECONDS}s"
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -367,9 +395,8 @@ def run_targeted_tests(worktree: Path) -> tuple[bool, str]:
         "tests/test_check_llama_abi.py",
     ]
     cmd = [sys.executable, "-m", "pytest", *test_files, "-m", "not integration", "-q"]
-    proc = subprocess.run(cmd, cwd=worktree, env=_worktree_env(worktree),
-                          capture_output=True, text=True)
-    return proc.returncode == 0, proc.stdout + proc.stderr
+    rc, out = _run_short(cmd, worktree)
+    return rc == 0, out
 
 
 def run_comfyui_bump(worktree: Path, tag: str, commit: str, receipt_path: Path,
@@ -381,9 +408,7 @@ def run_comfyui_bump(worktree: Path, tag: str, commit: str, receipt_path: Path,
            "--tag", tag, "--commit", commit, "--receipt", str(receipt_path)]
     if write:
         cmd.append("--write")
-    proc = subprocess.run(cmd, cwd=worktree, env=_worktree_env(worktree),
-                          capture_output=True, text=True)
-    return proc.returncode, proc.stdout + proc.stderr
+    return _run_short(cmd, worktree)
 
 
 def run_comfyui_targeted_tests(worktree: Path) -> tuple[bool, str]:
@@ -402,9 +427,8 @@ def run_comfyui_targeted_tests(worktree: Path) -> tuple[bool, str]:
         "tests/test_comfy_cli_outcome_honesty.py",
     ]
     cmd = [sys.executable, "-m", "pytest", *test_files, "-m", "not integration", "-q"]
-    proc = subprocess.run(cmd, cwd=worktree, env=_worktree_env(worktree),
-                          capture_output=True, text=True)
-    return proc.returncode == 0, proc.stdout + proc.stderr
+    rc, out = _run_short(cmd, worktree)
+    return rc == 0, out
 
 
 # --------------------------------------------------------------------------- #
@@ -580,8 +604,32 @@ def _record_inconclusive(candidate: str, receipt_path: Path | None, *, pin: str 
 #  Git / PR / merge - always from this script's OWN dedicated worktree       #
 # --------------------------------------------------------------------------- #
 
+def _noninteractive_env() -> dict:
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    return env
+
+
+def _timed_out(cmd: list[str], seconds: float) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=f"timed out after {int(seconds)}s")
+
+
 def _run_git(args: list[str], cwd: Path, **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, **kwargs)
+    kwargs.setdefault("timeout", GIT_TIMEOUT_SECONDS)
+    kwargs.setdefault("env", _noninteractive_env())
+    try:
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, **kwargs)
+    except subprocess.TimeoutExpired:
+        return _timed_out(["git", *args], kwargs["timeout"])
+
+
+def _run_gh(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True,
+                              timeout=GH_TIMEOUT_SECONDS, env=_noninteractive_env())
+    except subprocess.TimeoutExpired:
+        return _timed_out(["gh", *args], GH_TIMEOUT_SECONDS)
 
 
 def _verify_main_checkout(repo: Path) -> None:
@@ -641,9 +689,7 @@ def close_stale_pr(branch: str, worktree: Path) -> None:
     a fresh infra failure instead of the resumable situation this actually
     is. The caller must already have the worktree detached from *branch*
     before this runs. See test_prepare_bump_branch_closes_a_stale_pr_left_by_a_prior_run."""
-    result = subprocess.run(
-        ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number"],
-        cwd=worktree, capture_output=True, text=True)
+    result = _run_gh(["pr", "list", "--head", branch, "--state", "open", "--json", "number"], worktree)
     if result.returncode != 0:
         raise InfraError(f"gh pr list failed: {result.stderr}")
     try:
@@ -651,8 +697,7 @@ def close_stale_pr(branch: str, worktree: Path) -> None:
     except ValueError:
         raise InfraError(f"could not parse gh pr list output: {result.stdout!r}") from None
     for pr in prs:
-        result = subprocess.run(
-            ["gh", "pr", "close", str(pr["number"])], cwd=worktree, capture_output=True, text=True)
+        result = _run_gh(["pr", "close", str(pr["number"])], worktree)
         if result.returncode != 0:
             raise InfraError(f"could not close stale PR #{pr['number']}: {result.stderr}")
     result = _run_git(["ls-remote", "--exit-code", "--heads", "origin", branch], cwd=worktree)
@@ -740,9 +785,7 @@ def open_pr(worktree: Path, branch: str, candidate: str, old_tag: str,
         "scripts/confirm_llama_runtime.py and scripts/bump_llama_pin.py for what was "
         "checked. The bundled-runtime CHANGELOG bullet is included in this diff.\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
-    result = subprocess.run(
-        ["gh", "pr", "create", "--title", title, "--body", body, "--head", branch],
-        cwd=worktree, capture_output=True, text=True)
+    result = _run_gh(["pr", "create", "--title", title, "--body", body, "--head", branch], worktree)
     if result.returncode != 0:
         raise InfraError(f"gh pr create failed: {result.stderr}")
     m = re.search(r"/pull/(\d+)", result.stdout)
@@ -751,30 +794,53 @@ def open_pr(worktree: Path, branch: str, candidate: str, old_tag: str,
     return int(m.group(1))
 
 
+def _check_runs(head_sha: str, worktree: Path) -> list | None:
+    """Every check-run of *head_sha* (all pages), or None when the query failed."""
+    result = _run_gh(["api", "--paginate", f"repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs?per_page=100"],
+                     worktree)
+    if result.returncode != 0:
+        return None
+    decoder = json.JSONDecoder()
+    text, pos, runs = result.stdout, 0, []
+    try:
+        while pos < len(text):
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if pos >= len(text):
+                break
+            page, pos = decoder.raw_decode(text, pos)
+            runs.extend(page.get("check_runs", []) if isinstance(page, dict) else [])
+    except ValueError:
+        return None
+    return runs
+
+
 def wait_for_ci(worktree: Path) -> str:
     """Poll per-check conclusions for the worktree's current HEAD (never
-    mergeable/mergeStateStatus). Returns "GREEN", "RED", or "PENDING" (checks
-    still running when the deadline passes; the caller leaves the PR open
-    rather than force-merging)."""
+    mergeable/mergeStateStatus), over every page of check-runs. Returns "GREEN"
+    only after CI_STABLE_POLLS consecutive polls show the same set of runs, all of them
+    completed and none failed (a set still registering is never GREEN), "RED" on any
+    failure, or "PENDING" (checks still running when the deadline passes; the caller
+    leaves the PR open rather than force-merging)."""
     deadline = time.monotonic() + CI_WAIT_TIMEOUT_SECONDS
     head_sha = _run_git(["rev-parse", "HEAD"], cwd=worktree).stdout.strip()
+    stable, last_ids = 0, None
     while time.monotonic() < deadline:
-        result = subprocess.run(
-            ["gh", "api", f"repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs"],
-            cwd=worktree, capture_output=True, text=True)
-        if result.returncode == 0:
-            try:
-                runs = json.loads(result.stdout).get("check_runs", [])
-            except ValueError:
-                runs = []
-            if runs:
-                non_skipped = [r for r in runs if r.get("conclusion") != "skipped"]
-                if any(r.get("conclusion") == "failure" for r in runs):
+        runs = _check_runs(head_sha, worktree)
+        if runs:
+            if any(r.get("conclusion") == "failure" for r in runs):
+                return "RED"
+            non_skipped = [r for r in runs if r.get("conclusion") != "skipped"]
+            ids = frozenset(str(r.get("name") or i) for i, r in enumerate(runs))
+            if non_skipped and all(r.get("status") == "completed" for r in non_skipped):
+                if not all(r.get("conclusion") == "success" for r in non_skipped):
                     return "RED"
-                if non_skipped and all(r.get("status") == "completed" for r in non_skipped):
-                    if all(r.get("conclusion") == "success" for r in non_skipped):
-                        return "GREEN"
-                    return "RED"
+                stable = stable + 1 if ids == last_ids else 1
+                last_ids = ids
+                if stable >= CI_STABLE_POLLS:
+                    return "GREEN"
+            else:
+                stable, last_ids = 0, None
         time.sleep(CI_POLL_INTERVAL_SECONDS)
     return "PENDING"
 
@@ -795,9 +861,9 @@ def merge_pr(pr_number: int, worktree: Path, branch: str, candidate: str, old_ta
         f"Automated: confirmed llama.cpp {candidate} loads and generates on cpu and "
         f"vulkan (real hardware) before advancing the pin from {old_tag}.\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
-    result = subprocess.run(
-        ["gh", "pr", "merge", str(pr_number), "--squash", "-t", title, "-b", body],
-        cwd=worktree, capture_output=True, text=True)
+    head_sha = _run_git(["rev-parse", "HEAD"], cwd=worktree).stdout.strip()
+    result = _run_gh(["pr", "merge", str(pr_number), "--squash", "--match-head-commit", head_sha,
+                      "-t", title, "-b", body], worktree)
     if result.returncode != 0:
         raise InfraError(f"gh pr merge failed: {result.stderr}")
     _run_git(["switch", "--detach"], cwd=worktree)

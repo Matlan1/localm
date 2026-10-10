@@ -588,6 +588,133 @@ def test_wait_for_ci_ignores_skipped_checks_for_the_green_verdict(monkeypatch, t
     assert pipeline.wait_for_ci(tmp_path) == "GREEN"
 
 
+def _poll_script(monkeypatch, pages):
+    """Make wait_for_ci see successive gh outputs; the last one repeats."""
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout="deadbeef\n"))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    seen = []
+
+    def fake(cmd, **k):
+        seen.append(cmd)
+        return pages[min(len(seen) - 1, len(pages) - 1)]
+    monkeypatch.setattr(pipeline.subprocess, "run", fake)
+    return seen
+
+
+def _named(*items):
+    return _checks_response([{"name": n, "status": s, "conclusion": c} for n, s, c in items])
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "action_required", "neutral", "stale"])
+def test_wait_for_ci_is_red_for_a_completed_check_that_did_not_succeed(monkeypatch, tmp_path, conclusion):
+    _poll_script(monkeypatch, [_named(("a", "completed", "success"), ("b", "completed", conclusion))])
+    assert pipeline.wait_for_ci(tmp_path) == "RED"
+
+
+def test_wait_for_ci_asks_for_every_page_of_check_runs(monkeypatch, tmp_path):
+    seen = _poll_script(monkeypatch, [_named(("a", "completed", "success"))])
+    assert pipeline.wait_for_ci(tmp_path) == "GREEN"
+    cmd = seen[0]
+    assert "--paginate" in cmd and any("per_page=100" in part for part in cmd)
+
+
+def test_wait_for_ci_reads_checks_spread_over_several_pages(monkeypatch, tmp_path):
+    page1 = json.dumps({"check_runs": [{"name": "a", "status": "completed", "conclusion": "success"}]})
+    page2 = json.dumps({"check_runs": [{"name": "b", "status": "completed", "conclusion": "failure"}]})
+    _poll_script(monkeypatch, [_FakeCompleted(stdout=page1 + page2)])
+    assert pipeline.wait_for_ci(tmp_path) == "RED"
+
+
+def test_wait_for_ci_is_not_green_while_the_set_of_checks_is_still_growing(monkeypatch, tmp_path):
+    seen = _poll_script(monkeypatch, [
+        _named(("a", "completed", "success")),
+        _named(("a", "completed", "success"), ("b", "completed", "success")),
+        _named(("a", "completed", "success"), ("b", "completed", "success"))])
+    assert pipeline.wait_for_ci(tmp_path) == "GREEN"
+    assert len(seen) == 3
+
+
+def test_wait_for_ci_needs_the_stable_set_for_consecutive_polls(monkeypatch, tmp_path):
+    seen = _poll_script(monkeypatch, [_named(("a", "completed", "success"))])
+    assert pipeline.wait_for_ci(tmp_path) == "GREEN"
+    assert len(seen) == pipeline.CI_STABLE_POLLS
+
+
+def test_wait_for_ci_resets_the_stable_count_when_a_check_starts_running(monkeypatch, tmp_path):
+    seen = _poll_script(monkeypatch, [
+        _named(("a", "completed", "success")),
+        _named(("a", "completed", "success"), ("b", "in_progress", None)),
+        _named(("a", "completed", "success"), ("b", "completed", "success")),
+        _named(("a", "completed", "success"), ("b", "completed", "success"))])
+    assert pipeline.wait_for_ci(tmp_path) == "GREEN"
+    assert len(seen) == 4
+
+
+def test_wait_for_ci_treats_an_unreadable_listing_as_pending_not_green(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout="deadbeef\n"))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda cmd, **k: _FakeCompleted(stdout="not json"))
+    calls = {"n": 0}
+    start = pipeline.time.monotonic()
+
+    def fake_monotonic():
+        calls["n"] += 1
+        return start + (pipeline.CI_WAIT_TIMEOUT_SECONDS + 1 if calls["n"] > 2 else 0)
+    monkeypatch.setattr(pipeline.time, "monotonic", fake_monotonic)
+    assert pipeline.wait_for_ci(tmp_path) == "PENDING"
+
+
+def test_merge_pr_pins_the_head_commit_it_waited_on(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout="cafe123\n"))
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda cmd, **k: seen.append(cmd) or _FakeCompleted())
+    pipeline.merge_pr(7, tmp_path, "b", "c", "o", title="t", body="b")
+    merge = next(c for c in seen if c[:3] == ["gh", "pr", "merge"])
+    assert merge[merge.index("--match-head-commit") + 1] == "cafe123"
+
+
+def test_a_git_command_that_hangs_is_stopped_and_reported_as_a_failure(monkeypatch, tmp_path):
+    def hang(cmd, **k):
+        assert k["timeout"] == pipeline.GIT_TIMEOUT_SECONDS
+        assert k["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        raise subprocess.TimeoutExpired(cmd, k["timeout"])
+    monkeypatch.setattr(pipeline.subprocess, "run", hang)
+    result = pipeline._run_git(["fetch", "origin"], cwd=tmp_path)
+    assert result.returncode == 124 and "timed out" in result.stderr
+
+
+def test_a_gh_command_that_hangs_surfaces_as_an_infra_error(monkeypatch, tmp_path):
+    def hang(cmd, **k):
+        assert k["timeout"] == pipeline.GH_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(cmd, k["timeout"])
+    monkeypatch.setattr(pipeline.subprocess, "run", hang)
+    with pytest.raises(pipeline.InfraError, match="gh pr list failed"):
+        pipeline.close_stale_pr("claude/x", tmp_path)
+
+
+def test_a_confirm_under_the_gpu_lease_that_hangs_is_stopped_as_inconclusive(monkeypatch, tmp_path):
+    lease = tmp_path / "gpu_lease.py"
+    lease.write_text("# fake\n", encoding="utf-8")
+    monkeypatch.setenv(pipeline._GPU_LEASE_ENV, str(lease))
+
+    def hang(cmd, cwd=None, timeout=None, **k):
+        assert timeout == 5
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    monkeypatch.setattr(pipeline.subprocess, "run", hang)
+    assert pipeline.run_under_gpu_lease(["x"], purpose="p", cwd=tmp_path, timeout=5) == 2
+
+
+def test_the_bump_and_test_helpers_time_out_instead_of_hanging(monkeypatch, tmp_path):
+    def hang(cmd, **k):
+        assert k["timeout"] == pipeline.SHORT_TOOL_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(cmd, k["timeout"])
+    monkeypatch.setattr(pipeline.subprocess, "run", hang)
+    rc, out = pipeline.run_bump(tmp_path, "b1", tmp_path / "r.json", write=False)
+    assert rc == 124 and "timed out" in out
+    ok, out = pipeline.run_targeted_tests(tmp_path)
+    assert ok is False and "timed out" in out
+
+
 def test_wait_for_ci_pending_on_timeout_never_green_never_red(monkeypatch, tmp_path):
     """An empty/still-running check list must never be misread as GREEN -
     same class of bug documented for wait_for_checks.py in this repo."""
