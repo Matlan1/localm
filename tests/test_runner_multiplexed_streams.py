@@ -487,3 +487,29 @@ def test_closing_the_model_ends_running_streams_without_a_crash(monkeypatch):
     assert exits == []
     errors = [env for _kind, _sid, env in rest if env[0] == "error"]
     assert errors and "unloaded" in errors[0][1]
+
+
+def test_token_counts_at_the_same_time_both_get_the_real_answer():
+    r = _mux_runner()
+
+    class _SlowChild(_Child):
+        def _loop(self):
+            while not self._stop.is_set():
+                try:
+                    cmd = self.r._req_q.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if cmd is None or cmd[0] == "shutdown":
+                    return
+                if cmd[0] != "chat_stream_mux":
+                    time.sleep(0.2)
+                    self.r._resp_q.put(("ok", self.answer))
+
+    child = _SlowChild(r, answer=11)
+    out = {}
+    threads = [_start(lambda k=k: out.__setitem__(k, r.count_tokens("x"))) for k in range(2)]
+    for t in threads:
+        t.join(10)
+    assert out == {0: 11, 1: 11}
+    child.stop()
+    r.shutdown(grace=0)

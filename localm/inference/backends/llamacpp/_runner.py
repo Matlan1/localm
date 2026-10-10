@@ -567,6 +567,10 @@ _CANCEL_DRAIN_TIMEOUT = 5.0
 # send its last envelope.
 _SHUTDOWN_STREAM_JOIN_S = 2.0
 
+# Parent side, multiplexed runner: how long a try_lock simple request waits for
+# another simple request before it declines with RunnerBusy.
+_MUX_SIMPLE_WAIT = 2.0
+
 # Bounded wait for a simple request/response command (count_tokens, etc.).
 # These never touch a slow native path, so it is short.
 _SIMPLE_CMD_TIMEOUT = 30.0
@@ -1451,12 +1455,15 @@ class ModelRunner:
         that genuinely need the real answer (e.g. check_grammar).
 
         On a multiplexed runner streams do not hold the queue: the request takes
-        ``_simple_lock`` instead (so *try_lock* only declines behind another
-        simple request) and reads its reply from the demux thread's queue."""
+        ``_simple_lock`` instead, waiting up to ``_MUX_SIMPLE_WAIT`` seconds for
+        another simple request with *try_lock*, and reads its reply from the
+        demux thread's queue."""
         mux = self._mux
         lock = self._simple_lock if mux else self._q_lock
         if try_lock:
-            if not lock.acquire(blocking=False):
+            acquired = (lock.acquire(timeout=_MUX_SIMPLE_WAIT) if mux
+                        else lock.acquire(blocking=False))
+            if not acquired:
                 raise RunnerBusy(name)
         else:
             lock.acquire()
