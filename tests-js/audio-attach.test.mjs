@@ -49,7 +49,10 @@ function setup({ rejectWith = null } = {}) {
 }
 
 const evalIn = (window, expr) => {
-  runScript(window, `window.__out = (${expr});`);
+  window.__err = null;
+  runScript(window,
+    `try { window.__out = (${expr}); } catch (e) { window.__out = undefined; window.__err = String(e); }`);
+  if (window.__err) throw new Error(`${expr}: ${window.__err}`);
   return window.__out;
 };
 
