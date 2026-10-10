@@ -4,8 +4,7 @@ localm answers the Ollama HTTP API on the same server and port as its
 OpenAI-compatible API, so a tool that speaks Ollama can use a localm model
 without an adapter. The routes are checked against the official `ollama`
 Python client; other clients (Open WebUI, Home Assistant, Continue, Zed) use
-the same wire format, but one that depends on tool calling will not work yet
-(see the end of this page).
+the same wire format. Tool calling is supported on `/api/chat`.
 
 ```bash
 localm serve <model> --port 11434     # Ollama's default port, for clients that assume it

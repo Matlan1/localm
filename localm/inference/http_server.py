@@ -32,6 +32,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
 
+from localm import __version__ as _LOCALM_VERSION
 from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.inference.backends.base import (
@@ -4709,7 +4710,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # 2. The app, with the lifespan that runs the background services.
     app = FastAPI(
         title="localm inference server",
-        version="0.2.0",
+        version=_LOCALM_VERSION,
         lifespan=_make_lifespan(),
         **diagnostics.fastapi_telemetry_off(),
     )

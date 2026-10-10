@@ -240,8 +240,10 @@ def print_info(msg: str) -> None:
     console.print(_sanitized_text(msg, style="dim"))
 
 
-def print_warning(msg: str) -> None:
-    console.print(_sanitized_text(msg, style="yellow"))
+def print_warning(msg: str, *, to_stderr: bool = False) -> None:
+    """Print *msg* as a yellow warning, on stderr when *to_stderr* is set so a
+    machine-readable stdout stays a lone document."""
+    (err_console if to_stderr else console).print(_sanitized_text(msg, style="yellow"))
 
 
 def print_error(msg: str) -> None:

@@ -727,7 +727,7 @@ def _guard_unauthenticated_bind(console, plan: _BindPlan, *, insecure: bool) -> 
         console.print(f"[bold red]{bind_warning}[/bold red]")
         console.print(
             "[bold red]Refusing to start: binding past loopback without auth. "
-            "Set $env:LOCALM_API_KEY first, or pass --insecure to override.[/bold red]")
+            "Run 'localm key generate' first, or pass --insecure to override.[/bold red]")
         sys.exit(2)
     elif bind_warning:
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")

@@ -283,8 +283,9 @@ call after a matched stop sequence is dropped. `tools` cannot be combined with
 `grammar` (400). On a model whose backend cannot apply grammars, `auto` still
 works, with calls read from the reply without a constraint, and `required` or
 a named function is a 400. A llama.cpp runtime too old to apply lazy grammars
-refuses `auto` at generation time with a 400 that says so; `localm setup-llama`
-installs a current one. A malformed `tools` or `tool_choice` is a 400.
+refuses `auto` at generation time: a non-streaming request gets a 400 that says
+so, and a streaming one an in-band `[inference error: ...]` with `finish_reason`
+`"error"`. `localm setup-llama` installs a current runtime. A malformed `tools` or `tool_choice` is a 400.
 
 #### How a generation failure is reported
 

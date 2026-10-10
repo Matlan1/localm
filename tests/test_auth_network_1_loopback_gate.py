@@ -40,6 +40,14 @@ def test_real_network_bind_still_warns(monkeypatch):
     assert _exposed_bind_warning("192.168.1.4") is not None
 
 
+def test_keyless_network_bind_points_at_key_generate_not_a_shell_variable(monkeypatch):
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr("localm.auth.any_key_configured", lambda: False)
+    warning = _exposed_bind_warning("0.0.0.0")
+    assert "localm key generate" in warning
+    assert "$env:" not in warning
+
+
 def test_non_canonical_loopback_bind_stays_plain_http():
     # A loopback bind resolves to (None, None): plain HTTP, no TLS cert minted.
     assert _resolve_tls("127.0.0.2", no_tls=False, tls_cert=None, tls_key=None) == (None, None)

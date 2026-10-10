@@ -284,14 +284,6 @@ def _declared_version() -> str:
 _VERSION_SITES = [
     ("localm/__init__.py", r'__version__ = "([^"]+)"',
      "localm.__version__"),
-    ("localm/cli/_core.py", r'return "(\d[^"]*)"\s*$',
-     "the `localm --version` fallback when the VERSION file is unreadable"),
-    ("localm/inference/http_server.py", r'\n    app = FastAPI\((?:.|\n)*?version="([^"]+)"',
-     "the FastAPI app version (published in the OpenAPI document)"),
-    ("localm/plugins/coder/mcp.py", r'"clientInfo": \{"name": "localcoder", "version": "([^"]+)"\}',
-     "the clientInfo localm sends to an MCP server"),
-    ("localm/plugins/mcpserver/server.py", r'SERVER_VERSION = "([^"]+)"',
-     "the version localm's own MCP server reports to clients"),
 ]
 
 
@@ -304,6 +296,59 @@ def test_hardcoded_version_matches_version_file(rel, pattern, what):
     assert m.group(1) == _declared_version(), (
         f"{rel} declares {m.group(1)!r} but VERSION says {_declared_version()!r}. "
         f"This literal feeds {what}; bump it with the release.")
+
+
+def test_fastapi_app_version_is_package_version(monkeypatch):
+    import localm
+    from localm.inference import http_server
+    monkeypatch.setattr(http_server, "_LOCALM_VERSION", "9.8.7")
+    assert http_server.create_app(None).version == "9.8.7"
+    monkeypatch.undo()
+    assert http_server.create_app(None).version == localm.__version__
+
+
+def test_cli_version_fallback_is_package_version(monkeypatch):
+    import localm
+    import localm._version as _version
+    from localm.cli import _core
+
+    def _unreadable():
+        raise OSError("VERSION unreadable")
+
+    monkeypatch.setattr(_version, "read_version", _unreadable)
+    assert _core._read_version_for_cli() == localm.__version__
+
+
+def test_mcp_server_reports_package_version():
+    import localm
+    from localm.plugins.mcpserver import server
+    assert server.SERVER_VERSION == localm.__version__
+
+
+def test_mcp_client_sends_package_version(tmp_path):
+    import localm
+    from localm.plugins.coder.mcp import MCPServer
+    seen = tmp_path / "client_info.txt"
+    script = tmp_path / "fake_mcp.py"
+    script.write_text(
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    msg = json.loads(line)\n"
+        "    if 'id' not in msg:\n"
+        "        continue\n"
+        "    if msg['method'] == 'initialize':\n"
+        "        open(sys.argv[1], 'w').write(msg['params']['clientInfo']['version'])\n"
+        "        result = {}\n"
+        "    else:\n"
+        "        result = {'tools': []}\n"
+        "    print(json.dumps({'jsonrpc': '2.0', 'id': msg['id'], 'result': result}), flush=True)\n",
+        encoding="utf-8")
+    server = MCPServer("fake", sys.executable, [str(script), str(seen)])
+    try:
+        server.start()
+    finally:
+        server.stop()
+    assert seen.read_text(encoding="utf-8") == localm.__version__
 
 
 def test_pyproject_and_lock_match_version_file():

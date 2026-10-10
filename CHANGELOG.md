@@ -495,6 +495,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
+  loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
+  without a key points at `localm key generate` instead of a PowerShell-only command. The coder's
+  "Unattended one-shot" warning goes to stderr, so the JSON on stdout stays a lone document. The server,
+  its MCP server and the coder's MCP client report the installed localm version.
+- **A cut-off transcript reports the tokens actually generated.** The `502` for a transcript that hit the
+  reply limit no longer quotes the requested budget when the backend used a lower one.
+- **A Hugging Face model whose chat templates have no `default` is refused with a clear `400`.** Before, it
+  failed later with a generic worker error.
+- **A llama.cpp runtime without lazy grammar support says to run `localm setup-llama`.** Tool calling with
+  `tool_choice` `auto` used to tell a GGUF user to use a GGUF-format model.
 - **A native image job now says GPU placement is ComfyUI-only.** With per-component GPU placement turned on
   and the native image backend in use, the job log now says the setting applies to ComfyUI only and that each
   model loads on one GPU. Before, the setting was silently ignored.
