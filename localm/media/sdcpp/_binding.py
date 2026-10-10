@@ -452,6 +452,13 @@ def _close(a: float, b: float) -> bool:
     return math.isclose(a, b, rel_tol=0, abs_tol=1e-4)
 
 
+def _raw_ptr(struct, name: str) -> int:
+    """The address stored in pointer field *name* of *struct*, read without
+    dereferencing it (a layout mismatch can leave garbage there)."""
+    offset = getattr(type(struct), name).offset
+    return c_void_p.from_address(ctypes.addressof(struct) + offset).value or 0
+
+
 def _init_struct(lib, init_name: str, struct_type):
     """A *struct_type* filled by the library's ``init_name``, as a view over a
     buffer padded by ``_INIT_PAD`` bytes. Passing the view by reference hands the
@@ -478,7 +485,7 @@ def _sample_defaults_ok(sp: sd_sample_params_t) -> list[str]:
         bad.append(f"sample_params.sample_method={sp.sample_method}")
     if not math.isinf(sp.eta) or not math.isinf(sp.flow_shift):
         bad.append("sample_params.eta/flow_shift")
-    if sp.extra_sample_args is not None:
+    if _raw_ptr(sp, "extra_sample_args"):
         bad.append("sample_params.extra_sample_args")
     return bad
 
@@ -535,7 +542,7 @@ def check_layouts(lib) -> list[str]:
         bad.append("ctx.auto_fit")
     if cp.n_threads <= 0:
         bad.append(f"ctx.n_threads={cp.n_threads}")
-    if cp.model_path is not None or cp.tokenizer is not None:
+    if _raw_ptr(cp, "model_path") or _raw_ptr(cp, "tokenizer"):
         bad.append("ctx string pointers not null")
 
     ip = _init_struct(lib, "sd_img_gen_params_init", sd_img_gen_params_t)
@@ -547,13 +554,13 @@ def check_layouts(lib) -> list[str]:
                        ("ip_adapter_strength", 1.0)):
         if not _close(getattr(ip, name), want):
             bad.append(f"img.{name}={getattr(ip, name)}")
-    if ip.ref_image_args is None:
+    if not _raw_ptr(ip, "ref_image_args"):
         bad.append("img.ref_image_args is null")
     if not _close(ip.pm_params.style_strength, 20.0) or not _close(ip.pulid_params.id_weight, 1.0):
         bad.append("img.pm_params/pulid_params")
     if not _close(ip.vae_tiling_params.target_overlap, 0.5):
         bad.append(f"img.vae_tiling_params.target_overlap={ip.vae_tiling_params.target_overlap}")
-    if ip.circular_x or ip.circular_y or ip.image_preprocess.rules is not None:
+    if ip.circular_x or ip.circular_y or _raw_ptr(ip.image_preprocess, "rules"):
         bad.append("img.circular/image_preprocess")
     bad += [f"img.{b}" for b in _sample_defaults_ok(ip.sample_params)]
     if ip.sample_params.sample_steps != 20:

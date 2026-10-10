@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import os
-from ctypes import Structure, c_int
+from ctypes import Structure, c_int, c_int64
 from pathlib import Path
 
 import pytest
@@ -78,10 +78,13 @@ def _fill_ctx(s):
 
 
 def _with_extra_int_before(struct_type, field_name):
+    """*struct_type* with an 8-byte field inserted before *field_name*, so every
+    later field moves (a 4-byte one can land in alignment padding and move
+    nothing)."""
     fields = []
     for f in struct_type._fields_:
         if f[0] == field_name:
-            fields.append(("_inserted", c_int))
+            fields.append(("_inserted", c_int64))
         fields.append(f)
     return type(f"Shifted_{struct_type.__name__}", (Structure,), {"_fields_": fields})
 
