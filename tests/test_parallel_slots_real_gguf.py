@@ -241,3 +241,81 @@ def test_a_hybrid_recurrent_model_decodes_replies_together(hybrid_path):
         assert again.strip()
     finally:
         be.unload()
+
+
+def test_a_grammar_check_during_a_reply_is_answered(slots4):
+    from localm.inference.backends.base import InvalidGrammarError
+    gen = _ask(slots4, LONG[0], max_tokens=200)
+    next(gen)
+    try:
+        slots4.validate_grammar('root ::= "yes" | "no"')
+        with pytest.raises(InvalidGrammarError):
+            slots4.validate_grammar("root ::= (")
+    finally:
+        gen.close()
+
+
+_VLM_REPO = "ggml-org/SmolVLM-256M-Instruct-GGUF"
+_VLM_FILE = "SmolVLM-256M-Instruct-Q8_0.gguf"
+_VLM_MMPROJ = "mmproj-SmolVLM-256M-Instruct-Q8_0.gguf"
+
+
+def _red_png_data_url():
+    import base64
+    import io
+
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (220, 20, 20)).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def test_an_image_turn_waits_for_the_text_reply_in_flight():
+    require_native_runtime()
+    model = fetch_gguf(_VLM_REPO, _VLM_FILE)
+    mmproj = fetch_gguf(_VLM_REPO, _VLM_MMPROJ)
+    from localm.inference.backends.gguf import GgufBackend
+    be = GgufBackend(model, mmproj_path=mmproj, n_ctx=4096, parallel_slots=2)
+    be.load()
+    try:
+        assert be.parallel_slots == 2 and be.supports_images
+        out = {}
+        text_started = threading.Event()
+
+        def text():
+            pieces = []
+            last = None
+            for piece in _ask(be, LONG[0], max_tokens=64):
+                text_started.set()
+                last = time.perf_counter()
+                pieces.append(piece)
+            out["text"] = {"text": "".join(pieces), "last": last}
+
+        def image():
+            text_started.wait(30)
+            t0 = time.perf_counter()
+            pieces = []
+            stamps = []
+            for piece in be.chat_stream(
+                    [{"role": "user", "content": [
+                        {"type": "text", "text": "What color is this image?"},
+                        {"type": "image_url", "image_url": {"url": _red_png_data_url()}}]}],
+                    max_tokens=24, temperature=0.0, seed=1):
+                stamps.append(time.perf_counter())
+                pieces.append(piece)
+            out["image"] = {"text": "".join(pieces), "first": stamps[0] if stamps else None,
+                            "start": t0}
+
+        t_text = threading.Thread(target=text, daemon=True)
+        t_text.start()
+        t_image = threading.Thread(target=image, daemon=True)
+        t_image.start()
+        t_text.join(120)
+        t_image.join(120)
+        assert out["text"]["text"] and out["image"]["text"].strip()
+        assert out["image"]["first"] >= out["text"]["last"], \
+            "the image turn decoded while the text reply was still running"
+        after = "".join(_ask(be, "Say hello.", max_tokens=12))
+        assert after.strip()
+    finally:
+        be.unload()
