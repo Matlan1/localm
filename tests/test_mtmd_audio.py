@@ -222,8 +222,10 @@ class TestMessagesWithMarkers:
         assert "bm90IGFuIGltYWdl" not in str(info.value)
 
     def test_a_refused_image_fetch_keeps_the_policy_reason(self, monkeypatch):
-        from localm.inference import media as media_mod
+        import importlib
+
         from localm.netpolicy import NetworkPolicyError
+        media_mod = importlib.import_module("localm.inference.media")
 
         def refuse(url):
             raise NetworkPolicyError("private addresses are blocked")
