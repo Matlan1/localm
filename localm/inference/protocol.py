@@ -386,6 +386,9 @@ class StreamChoice(BaseModel):
     index: int = 0
     delta: ChoiceDelta
     finish_reason: Optional[str] = None
+    # localm extension on the finish chunk: the stop sequence that ended the
+    # reply, when one did.
+    stop_sequence: Optional[str] = None
 
 
 class MtpUsage(BaseModel):
@@ -471,12 +474,14 @@ class ChatChunk(BaseModel):
         ts: int,
         usage: Optional[UsageInfo] = None,
         finish_reason: str = "stop",
+        stop_sequence: Optional[str] = None,
     ) -> ChatChunk:
         return cls(
             id=chunk_id,
             created=ts,
             model=model,
-            choices=[StreamChoice(delta=ChoiceDelta(), finish_reason=finish_reason)],
+            choices=[StreamChoice(delta=ChoiceDelta(), finish_reason=finish_reason,
+                                  stop_sequence=stop_sequence)],
             usage=usage,
         )
 
@@ -485,6 +490,8 @@ class FullChoice(BaseModel):
     index: int = 0
     message: Message
     finish_reason: str = "stop"
+    # localm extension: the stop sequence that ended the reply, when one did.
+    stop_sequence: Optional[str] = None
 
 
 class ChatResponse(BaseModel):

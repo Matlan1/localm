@@ -43,14 +43,16 @@ class StopFilter:
 
     ``feed`` returns the text that is safe to emit: everything before a stop
     sequence, and everything except a tail that could still become one.
-    ``hit`` turns true once a stop sequence has been seen; nothing is emitted
-    after that. ``flush`` releases the held tail when the stream ends without
-    a hit."""
+    ``hit`` turns true once a stop sequence has been seen, and ``matched`` holds
+    that sequence (the earliest in the text; the first listed on a tie);
+    nothing is emitted after that. ``flush`` releases the held tail when the
+    stream ends without a hit."""
 
     def __init__(self, stops: Iterable[str]) -> None:
         self._stops = [s for s in stops if s]
         self._buf = ""
         self.hit = False
+        self.matched: str | None = None
 
     def feed(self, text: str) -> str:
         if self.hit:
@@ -58,9 +60,10 @@ class StopFilter:
         if not self._stops:
             return text
         self._buf += text
-        cut = min((i for i in (self._buf.find(s) for s in self._stops) if i >= 0),
-                  default=-1)
-        if cut >= 0:
+        found = [(i, n) for n, i in enumerate(self._buf.find(s) for s in self._stops) if i >= 0]
+        if found:
+            cut, which = min(found)
+            self.matched = self._stops[which]
             out, self._buf, self.hit = self._buf[:cut], "", True
             return out
         hold = 0
@@ -80,8 +83,15 @@ class StopFilter:
 
 def apply_stop(text: str, stops: Iterable[str]) -> tuple[str, bool]:
     """*text* cut at the first stop sequence, and whether one was found."""
+    out, matched = apply_stop_matched(text, stops)
+    return out, matched is not None
+
+
+def apply_stop_matched(text: str, stops: Iterable[str]) -> tuple[str, str | None]:
+    """*text* cut at the first stop sequence, and that sequence (``None`` when
+    none was found)."""
     flt = StopFilter(stops)
     out = flt.feed(text)
     if flt.hit:
-        return out, True
-    return out + flt.flush(), False
+        return out, flt.matched
+    return out + flt.flush(), None

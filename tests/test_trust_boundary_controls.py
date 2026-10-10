@@ -41,6 +41,8 @@ _REVIEWED_CROSS_ORIGIN_OK = (
     "/v1/rerank",
     "/v1/audio/transcriptions",
     "/v1/images/generations",
+    "/v1/messages",
+    "/v1/messages/count_tokens",
     "/v1/surfaces/gui",
     "/v1/instances/cooperate-unload",
     "/v1/instances/vouch",

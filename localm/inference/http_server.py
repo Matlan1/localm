@@ -50,7 +50,7 @@ from localm.inference.backends.base import (
 from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
 from localm.inference.routing_latch import RoutingLatch
-from localm.inference.stop_sequences import StopFilter, apply_stop
+from localm.inference.stop_sequences import StopFilter, apply_stop_matched
 from localm.inference.tool_calling import ToolCallStream
 from localm.inference.protocol import (
     COMPACTING_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
@@ -3117,10 +3117,11 @@ def _bearer_token(request) -> Optional[str]:
 
 def _request_token(request) -> tuple[Optional[str], str]:
     """Resolve the presented key and where it came from. The Authorization
-    header wins (programmatic clients); otherwise the HttpOnly ``localm_session``
-    cookie (the browser GUI). Returns ``(token, source)`` with *source* one of
+    header wins (programmatic clients), then the ``x-api-key`` header (what
+    Anthropic clients send); otherwise the HttpOnly ``localm_session`` cookie
+    (the browser GUI). Returns ``(token, source)`` with *source* one of
     ``"header"`` / ``"cookie"`` / ``"none"``."""
-    header = _bearer_token(request)
+    header = _bearer_token(request) or (request.headers.get("x-api-key") or "").strip()
     if header:
         return header, "header"
     cookie = (request.cookies.get(SESSION_COOKIE) or "").strip()
@@ -5483,17 +5484,21 @@ async def _stream_sse_body(
     )
     meter.record(usage.prompt_tokens, usage.completion_tokens,
                  usage.ttft_ms, usage.tokens_per_sec)
-    for data in _final_chunks(model_id, chunk_id, ts, finish_reason, usage, include_usage):
+    for data in _final_chunks(model_id, chunk_id, ts, finish_reason, usage, include_usage,
+                              stop_sequence=router.stop_sequence):
         yield data
 
 
 def _final_chunks(model_id: str, chunk_id: str, ts: int, finish_reason: str,
-                  usage: UsageInfo, include_usage: bool) -> list:
-    """The SSE lines that end a chat stream: the finish chunk, then with
+                  usage: UsageInfo, include_usage: bool,
+                  stop_sequence: Optional[str] = None) -> list:
+    """The SSE lines that end a chat stream: the finish chunk (carrying the
+    *stop_sequence* that ended the reply, when one did), then with
     *include_usage* a chunk with empty ``choices`` carrying *usage* (otherwise
     the finish chunk carries it), then ``[DONE]``."""
     done = ChatChunk.done(model_id, chunk_id, ts, finish_reason=finish_reason,
-                          usage=None if include_usage else usage)
+                          usage=None if include_usage else usage,
+                          stop_sequence=stop_sequence)
     lines = [f"data: {done.model_dump_json()}\n\n"]
     if include_usage:
         tail = ChatChunk(id=chunk_id, created=ts, model=model_id, choices=[], usage=usage)
@@ -5930,6 +5935,11 @@ class _ReplyRouter:
             return True
         return self._stop is not None and self._stop.hit
 
+    @property
+    def stop_sequence(self) -> Optional[str]:
+        """The stop sequence that ended the reply, or ``None``."""
+        return self._stop.matched if self._stop is not None else None
+
     def feed(self, token: str) -> list:
         content, reasoning = self._think.feed(token)
         return self._route(content, reasoning, final=False)
@@ -6352,12 +6362,14 @@ async def _complete(
     stop = gen_kwargs.get("stop")
     tool_names = gen_kwargs.get("tool_names")
     stopped = False
+    stop_sequence: Optional[str] = None
     has_calls = False
     if tool_names and gen_error is None:
         routed = _ReplyRouter(stop, tool_names, gen_kwargs)
         routed.feed(text)
         routed.flush()
         stopped = routed.stopped
+        stop_sequence = routed.stop_sequence
         has_calls = bool(routed.calls)
         if stopped:
             reasoning_text = "".join(routed.reasoning)
@@ -6368,7 +6380,8 @@ async def _complete(
         from localm.textnorm import split_think
         visible, reasoning_text = split_think(text, exit_marker=think_exit_marker(
             gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
-        visible, stopped = apply_stop(visible, stop)
+        visible, stop_sequence = apply_stop_matched(visible, stop)
+        stopped = stop_sequence is not None
         if stopped:
             text = (f"<think>{reasoning_text}</think>" if reasoning_text else "") + visible
 
@@ -6437,6 +6450,7 @@ async def _complete(
                                 reasoning_content=reasoning or None,
                                 tool_calls=tool_calls),
                 finish_reason=finish_reason,
+                stop_sequence=stop_sequence,
             )
         ],
         usage=usage,
