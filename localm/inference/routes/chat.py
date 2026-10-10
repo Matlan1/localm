@@ -39,8 +39,7 @@ from localm.inference.openai_compat import (
 )
 from localm.inference.pretokenizer_guard import count_tokens_or_estimate
 from localm.inference.response_format import (
-    ResponseFormat, ResponseFormatError, after_think, combine, format_grammar,
-    parse_response_format,
+    ResponseFormatError, after_think, combine, format_grammar, parse_response_format,
 )
 from localm.inference.stop_sequences import apply_stop
 from localm.inference.tool_calling import (
@@ -84,14 +83,19 @@ def register(app: FastAPI, ctx) -> None:
     _SAMPLING_FIELDS = ("min_p", "presence_penalty", "frequency_penalty")
 
     def _sampling_kwargs(req) -> dict:
-        """The sampling options *req* sets, by name."""
-        return {k: getattr(req, k) for k in _SAMPLING_FIELDS if getattr(req, k) is not None}
+        """The sampling options *req* sets, by name. A penalty of 0 applies nothing
+        and is left out."""
+        out = {k: getattr(req, k) for k in _SAMPLING_FIELDS if getattr(req, k) is not None}
+        for key in ("presence_penalty", "frequency_penalty"):
+            if out.get(key) == 0:
+                del out[key]
+        return out
 
     def _check_sampling(engine, sampling: dict) -> None:
         """400 naming the options in *sampling* the engine cannot apply."""
         if not sampling:
             return
-        refused = engine.unsupported_sampling(list(sampling))
+        refused = engine.unsupported_sampling(sampling)
         if refused:
             pronoun = "it" if len(refused) == 1 else "them"
             raise HTTPException(
@@ -101,14 +105,14 @@ def register(app: FastAPI, ctx) -> None:
     async def _prepare_chat(req: ChatRequest, request: Request, messages: list,
                             route, say, tools=(),
                             choice: Optional[ToolChoice] = None,
-                            fmt: Optional[ResponseFormat] = None) -> SimpleNamespace:
+                            fmt: Optional[str] = None) -> SimpleNamespace:
         """Resolve (loading if needed) the engine that answers *req*, run the
         inlet hooks and every pre-generation check. Returns the prepared request,
         which holds an engine pin the caller must release; raises HTTPException
         for a refused request, holding no pin. ``say(text)`` is called with the
         status of each phase as it starts, on the event loop thread. *tools* and
-        *choice* are the request's validated tools and tool_choice, *fmt* its
-        parsed response_format."""
+        *choice* are the request's validated tools and tool_choice, *fmt* the
+        grammar its response_format compiles to."""
         choice = choice or ToolChoice("none")
         say(LOADING_MODEL_STATUS)
         engine = None
@@ -240,13 +244,7 @@ def register(app: FastAPI, ctx) -> None:
             thinking = thinking_of(req)
             from_format = fmt is not None and (not from_tools or choice.kind == "auto")
             if from_format and fmt is not None:
-                try:
-                    format_text, dropped = format_grammar(fmt)
-                except ResponseFormatError as e:
-                    raise HTTPException(400, str(e)) from e
-                if dropped:
-                    from localm.debuglog import logger as _dbg
-                    _dbg.info("response_format: not enforced: %s", ", ".join(dropped))
+                format_text = fmt
                 if from_tools and grammar:
                     format_text = combine(grammar, format_text)
                     grammar_lazy, grammar_triggers = False, None
@@ -519,9 +517,13 @@ def register(app: FastAPI, ctx) -> None:
         if tools and choice.kind != "none" and req.grammar:
             raise HTTPException(400, "tools cannot be combined with a grammar")
         try:
-            fmt = parse_response_format(req.response_format)
+            parsed = parse_response_format(req.response_format)
+            fmt, dropped = format_grammar(parsed) if parsed is not None else (None, [])
         except ResponseFormatError as e:
             raise HTTPException(400, str(e)) from e
+        if dropped:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("response_format: not enforced: %s", ", ".join(dropped))
         if fmt is not None and req.grammar:
             raise HTTPException(400, "response_format cannot be combined with a grammar")
 
@@ -950,7 +952,8 @@ def register(app: FastAPI, ctx) -> None:
                 "model": reported_model,
                 # "error", not "stop", when generation failed, matching the terminal
                 # frame the streaming twin emits.
-                "choices": [{"text": (prompt + text) if req.echo else text, "index": 0,
+                "choices": [{"text": (prompt + text) if req.echo and gen_error is None else text,
+                             "index": 0,
                              "finish_reason": "error" if gen_error is not None else "stop"}],
                 "usage": {
                     "prompt_tokens": prompt_tokens,

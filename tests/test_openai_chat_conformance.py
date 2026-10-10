@@ -445,3 +445,93 @@ def test_an_unknown_keyword_in_a_strict_schema_names_it():
     with pytest.raises(ResponseFormatError, match="patternProperties"):
         format_grammar(ResponseFormat("json_schema", "x", {
             "type": "object", "patternProperties": {"^a": {"type": "string"}}}, True))
+
+
+# ------------------------------------------------------------------ review fixes
+
+
+def test_a_shape_keyword_next_to_anyof_is_refused_not_dropped(home):
+    schema = {"type": "object",
+              "properties": {"a": {"type": "integer"}, "b": {"type": "string"}},
+              "required": ["a"], "anyOf": [{"required": ["a"]}, {"required": ["b"]}]}
+    served = Served()
+    r = served.chat(response_format=json_schema(schema, strict=False))
+    assert r.status_code == 400, r.text
+    assert "anyOf" in r.json()["detail"]
+    assert served.calls == []
+
+
+def test_loosening_never_drops_a_shape_keyword():
+    from localm.inference.json_schema_grammar import STRUCTURAL_KEYWORDS, loosen_schema
+    schema = {"type": "object", "properties": {"a": {"type": "string", "pattern": "^x"}},
+              "required": ["a"], "anyOf": [{"required": ["a"]}]}
+    loosened, dropped, error = loosen_schema(schema)
+    assert loosened is None
+    assert not set(dropped) & STRUCTURAL_KEYWORDS
+    assert error is not None and error.keyword in STRUCTURAL_KEYWORDS
+
+
+@pytest.mark.parametrize("ref", ["0", "4"])
+def test_an_all_digit_rule_name_leaves_repeat_counts_alone(ref):
+    from localm.inference.gbnf import check_grammar_structure
+    schema = {"type": "object", "properties": {"a": {"$ref": f"#/$defs/{ref}"}},
+              "required": ["a"], "$defs": {ref: {"type": "string"}}}
+    grammar, _ = format_grammar(ResponseFormat("json_schema", "x", schema, True))
+    assert f"\n{ref} ::= " in grammar
+    for out in (after_think(grammar), combine(grammar, grammar)):
+        assert "{fmt-" not in out and "{alt" not in out
+        assert "{0,20}" in out and "{4}" in out
+        check_grammar_structure(out)
+        assert f"\nfmt-{ref} ::= " in out or f"\nalt1-{ref} ::= " in out
+
+
+def test_a_deep_non_strict_schema_is_a_400_naming_the_depth():
+    inner: dict = {"type": "string"}
+    for _ in range(1400):
+        inner = {"type": "array", "items": inner}
+    schema = {"type": "object", "properties": {"a": inner, "b": {"type": "string",
+                                                                 "pattern": "^x"}}}
+    with pytest.raises(ResponseFormatError, match="levels deep"):
+        format_grammar(ResponseFormat("json_schema", "x", schema, False))
+
+
+def test_a_bad_schema_is_refused_before_the_model_is_resolved(home, monkeypatch):
+    import localm.inference.http_server as hs
+    served = Served()
+    seen = []
+    real = hs.get_engine
+
+    async def counting(*a, **kw):
+        seen.append(a)
+        return await real(*a, **kw)
+    monkeypatch.setattr(hs, "get_engine", counting)
+    schema = {"type": "object", "properties": {"c": {"type": "string", "pattern": "^A"}}}
+    assert served.chat(response_format=json_schema(schema, strict=True)).status_code == 400
+    assert seen == []
+    assert served.chat().status_code == 200 and seen
+
+
+def test_a_zero_penalty_is_not_sent_or_checked(home):
+    served = Served(refused=("presence_penalty", "frequency_penalty"))
+    r = served.chat(presence_penalty=0, frequency_penalty=0.0)
+    assert r.status_code == 200, r.text
+    assert not {"presence_penalty", "frequency_penalty"} & set(served.kwargs)
+    assert served.complete(presence_penalty=0).status_code == 200
+
+
+@pytest.mark.parametrize("extra", [{"function_call": "none"}, {"functions": []}])
+def test_no_op_function_fields_are_accepted(home, extra):
+    assert Served().chat(**extra).status_code == 200
+
+
+def test_echo_is_not_added_to_a_failed_completion(home):
+    served = Served()
+
+    def broken(messages, **kwargs):
+        raise RuntimeError("out of memory")
+        yield ""
+    served.engine.chat_stream.side_effect = broken
+    r = served.complete(echo=True)
+    choice = r.json()["choices"][0]
+    assert choice["finish_reason"] == "error"
+    assert not choice["text"].startswith("Once")

@@ -991,14 +991,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     def supports_grammar(self) -> bool:
         """llama.cpp applies a GBNF grammar natively in the sampler, so True for
         every model except a diffusion language model, which writes its reply
-        all at once."""
-        return not self.is_diffusion
+        all at once, and a model whose grammar sampler faulted earlier in this
+        process."""
+        return not self.is_diffusion and not getattr(self, "_grammar_unsupported", False)
 
-    def unsupported_sampling(self, names) -> list:
-        """Every name in *names* for a diffusion language model, none otherwise:
-        llama.cpp's sampler chain applies min_p and the presence and frequency
-        penalties."""
-        return list(names) if self.is_diffusion else []
+    def unsupported_sampling(self, options: dict) -> list:
+        """For a diffusion language model, every option in *options* whose value
+        is not 0 (its sampler has no min_p or penalties stage, which is what 0
+        asks for); none otherwise: llama.cpp's sampler chain applies min_p and the
+        presence and frequency penalties."""
+        if not self.is_diffusion:
+            return []
+        return [name for name, value in options.items() if value != 0]
 
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
@@ -1026,10 +1030,14 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         grammar.
 
         A diffusion language model refuses any grammar with
-        :class:`GrammarUnsupportedError`, loaded or not."""
+        :class:`GrammarUnsupportedError`, loaded or not, and so does a model whose
+        grammar sampler faulted earlier in this process."""
         if grammar and self.is_diffusion:
             from .base import GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
             raise GrammarUnsupportedError(GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE)
+        if grammar and getattr(self, "_grammar_unsupported", False):
+            from .base import GRAMMAR_FAULTED_MESSAGE, GrammarUnsupportedError
+            raise GrammarUnsupportedError(GRAMMAR_FAULTED_MESSAGE)
         if grammar and self.loaded and self._runner is not None:   # the loaded property, not the raw flag
             try:
                 self._runner.check_grammar(grammar)

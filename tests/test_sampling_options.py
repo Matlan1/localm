@@ -142,6 +142,9 @@ def test_a_diffusion_model_refuses_the_options(monkeypatch):
     with pytest.raises(UnsupportedInputError, match="diffusion"):
         llm.create_chat_completion([{"role": "user", "content": "hi"}], min_p=0.1)
     assert seen == {}
+    llm.create_chat_completion([{"role": "user", "content": "hi"}], min_p=0.0,
+                               presence_penalty=0.0)
+    assert "sampling" not in seen
 
 
 def test_the_image_sampler_is_built_with_the_grammar(monkeypatch):
@@ -175,20 +178,22 @@ def test_gguf_backend_refuses_options_only_for_a_diffusion_model():
     from localm.inference.backends.gguf import GgufBackend
     backend = GgufBackend.__new__(GgufBackend)
     with patch.object(GgufBackend, "is_diffusion", property(lambda self: False)):
-        assert backend.unsupported_sampling(["min_p", "presence_penalty"]) == []
+        assert backend.unsupported_sampling({"min_p": 0.1, "presence_penalty": 1.0}) == []
     with patch.object(GgufBackend, "is_diffusion", property(lambda self: True)):
-        assert backend.unsupported_sampling(["min_p"]) == ["min_p"]
+        assert backend.unsupported_sampling({"min_p": 0.1}) == ["min_p"]
+        assert backend.unsupported_sampling({"min_p": 0.0, "presence_penalty": 0,
+                                             "frequency_penalty": 0.5}) == ["frequency_penalty"]
 
 
 def test_a_backend_that_declares_nothing_refuses_everything():
     from localm.inference.backends.base import BaseBackend
-    assert BaseBackend.unsupported_sampling(MagicMock(), ["min_p", "frequency_penalty"]) == [
-        "min_p", "frequency_penalty"]
+    assert BaseBackend.unsupported_sampling(
+        MagicMock(), {"min_p": 0.1, "frequency_penalty": 0.2}) == ["min_p", "frequency_penalty"]
 
 
 def test_hf_backend_applies_every_option():
     from localm.inference.backends.hf import HFBackend
-    assert HFBackend.unsupported_sampling(MagicMock(), ["min_p", "presence_penalty"]) == []
+    assert HFBackend.unsupported_sampling(MagicMock(), {"min_p": 0.1, "presence_penalty": 1}) == []
 
 
 def test_the_gguf_worker_passes_set_options_to_the_model():
@@ -239,7 +244,8 @@ def test_engine_passes_only_the_options_that_were_set(_cfg):
 def test_engine_reports_the_backends_refusals():
     backend = _backend()
     backend.unsupported_sampling.return_value = ["min_p"]
-    assert _engine(backend).unsupported_sampling(["min_p"]) == ["min_p"]
+    assert _engine(backend).unsupported_sampling({"min_p": 0.2}) == ["min_p"]
+    backend.unsupported_sampling.assert_called_once_with({"min_p": 0.2})
 
 
 # ------------------------------------------------------------------ HF penalty processor
@@ -272,3 +278,32 @@ def test_no_hf_penalty_means_no_processor():
     from localm.inference.backends._hf_worker import _penalty_processor
     assert _penalty_processor(5, None, None) is None
     assert _penalty_processor(5, 0.0, 0.0) is None
+
+
+def test_the_hf_penalty_window_starts_after_the_decoder_start_token():
+    from types import SimpleNamespace
+
+    from localm.inference.backends._hf_worker import _penalty_offset
+    seq2seq = SimpleNamespace(config=SimpleNamespace(is_encoder_decoder=True))
+    causal = SimpleNamespace(config=SimpleNamespace(is_encoder_decoder=False))
+    assert _penalty_offset(seq2seq, 57) == 1
+    assert _penalty_offset(causal, 57) == 57
+    assert _penalty_offset(SimpleNamespace(), 9) == 9
+
+
+def test_a_gguf_model_whose_grammar_faulted_refuses_grammar():
+    from localm.inference.backends.base import GRAMMAR_FAULTED_MESSAGE, GrammarUnsupportedError
+    from localm.inference.backends.gguf import GgufBackend
+    backend = GgufBackend.__new__(GgufBackend)
+    backend._runner = None
+    backend._loaded = False
+    with patch.object(GgufBackend, "is_diffusion", property(lambda self: False)):
+        backend._grammar_unsupported = False
+        assert backend.supports_grammar is True
+        backend.validate_grammar('root ::= "x"')
+        backend._grammar_unsupported = True
+        assert backend.supports_grammar is False
+        with pytest.raises(GrammarUnsupportedError) as exc:
+            backend.validate_grammar('root ::= "x"')
+        assert str(exc.value) == GRAMMAR_FAULTED_MESSAGE
+        backend.validate_grammar(None)

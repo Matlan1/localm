@@ -41,7 +41,7 @@ def check_chat_request(req: ChatRequest) -> None:
     """Raise :class:`UnsupportedFieldError` when *req* sets a field localm does
     not serve."""
     _check_common(req)
-    if req.functions is not None or req.function_call is not None:
+    if req.functions or req.function_call not in (None, "none"):
         raise UnsupportedFieldError(
             "functions and function_call are not supported: send tools and "
             "tool_choice instead")

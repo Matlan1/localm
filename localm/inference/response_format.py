@@ -26,7 +26,8 @@ _TOKENS = re.compile(
     r'"(?:\\.|[^"\\])*"'          # string literal
     r"|\[(?:\\.|[^\]\\])*\]"      # character class
     r"|#[^\n]*"                   # comment
-    r"|[A-Za-z0-9-]+"             # rule name, or digits of a repeat count
+    r"|\{[0-9,\s]*\}"             # repeat count
+    r"|[A-Za-z0-9-]+"             # rule name
     r"|.",
     re.DOTALL)
 
@@ -89,8 +90,8 @@ def parse_response_format(value: Any) -> Optional[ResponseFormat]:
 def format_grammar(fmt: ResponseFormat) -> tuple[str, list[str]]:
     """``(grammar, dropped)``: the grammar (entry rule ``root``) that makes a reply
     satisfy *fmt*, and the schema keywords left out of it (only when *fmt* is not
-    strict). Raises :class:`ResponseFormatError` when the schema cannot be
-    enforced."""
+    strict; a keyword that gives the schema its shape is never left out).
+    Raises :class:`ResponseFormatError` when the schema cannot be enforced."""
     if fmt.kind == "json_object" or fmt.schema is None:
         return schema_to_grammar({"type": "object"}), []
     if fmt.strict:
@@ -99,21 +100,18 @@ def format_grammar(fmt: ResponseFormat) -> tuple[str, list[str]]:
         except SchemaGrammarError as exc:
             raise ResponseFormatError(
                 f"response_format.json_schema.schema: {exc}") from None
-    loosened, dropped = loosen_schema(fmt.schema)
+    loosened, dropped, error = loosen_schema(fmt.schema)
     if loosened is None:
-        try:
-            schema_to_grammar(fmt.schema)
-        except SchemaGrammarError as exc:
-            raise ResponseFormatError(
-                f"response_format.json_schema.schema: {exc}") from None
-        raise ResponseFormatError("response_format.json_schema.schema cannot be compiled")
+        raise ResponseFormatError(
+            f"response_format.json_schema.schema: {error or 'cannot be compiled'}")
     return schema_to_grammar(loosened), dropped
 
 
 def prefix_rules(grammar: str, prefix: str) -> str:
     """*grammar* with every rule it defines renamed to ``prefix + name``, at its
-    definition and at every reference. String literals, character classes and
-    repeat counts are left as they are."""
+    definition and at every reference. String literals, character classes,
+    comments and repeat counts are left as they are, also when a rule name is
+    all digits."""
     defined = set(_RULE_DEF.findall(grammar))
     return "".join(
         prefix + tok if tok in defined else tok for tok in _TOKENS.findall(grammar))

@@ -307,7 +307,7 @@ def _calls_schema(tools: list[Tool], generic: bool, notes: list[str]) -> dict[st
         if generic:
             notes.append(f"{t.name}: arguments are not constrained to its schema")
         else:
-            loosened, dropped = loosen_schema(t.parameters)
+            loosened, dropped, _error = loosen_schema(t.parameters)
             if loosened is None:
                 notes.append(f"{t.name}: its schema cannot be compiled; arguments are not "
                              f"constrained to it")

@@ -218,7 +218,7 @@ class HFBackend(BaseBackend):
         confirmed HF embedder to the dedicated on-device embedder."""
         return self._can_embed
 
-    def unsupported_sampling(self, names) -> list:
+    def unsupported_sampling(self, options: dict) -> list:
         """None: transformers applies min_p, and the worker adds a logits
         processor for the presence and frequency penalties."""
         return []

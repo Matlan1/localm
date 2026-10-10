@@ -22,7 +22,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a prompt list of one. A field localm does not serve (`n` above 1, `logprobs`,
   `logit_bias`, the deprecated `functions`, audio output) is now a 400 naming it instead of
   being silently ignored. A grammar, tool choice or response format on an image request to
-  a GGUF vision model is now applied instead of dropped.
+  a GGUF vision model is now applied instead of dropped, and a GGUF model whose grammar
+  sampler faulted earlier refuses grammar requests until localm restarts instead of
+  answering without the constraint.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the

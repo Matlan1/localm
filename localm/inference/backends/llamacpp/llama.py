@@ -4284,8 +4284,8 @@ class LlamaCpp:
         ignored.
 
         A diffusion language model answers through ``_generate_diffusion``,
-        which polls *should_stop* between denoising steps, and refuses
-        *min_p*, *presence_penalty* and *frequency_penalty* with
+        which polls *should_stop* between denoising steps, and refuses a
+        non-zero *min_p*, *presence_penalty* or *frequency_penalty* with
         :class:`UnsupportedInputError`.
         """
         sampling: dict = {}
@@ -4295,7 +4295,7 @@ class LlamaCpp:
             sampling["penalty_present"] = presence_penalty
         if frequency_penalty is not None:
             sampling["penalty_freq"] = frequency_penalty
-        if sampling and self.is_diffusion:
+        if self.is_diffusion and any(value != 0 for value in sampling.values()):
             from localm.inference.backends.base import UnsupportedInputError
             raise UnsupportedInputError(
                 "min_p, presence_penalty and frequency_penalty cannot be applied "

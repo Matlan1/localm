@@ -169,7 +169,7 @@ the CPU, or the draft model did not fit in VRAM beside it). The field is `null` 
 |---|---|
 | `max_tokens`, `max_completion_tokens` | The reply cap; either name works. Both with different values is a 400. |
 | `temperature`, `top_p`, `seed`, `stop` | Applied. |
-| `presence_penalty`, `frequency_penalty` | Applied (-2 to 2): a token's logit drops by `presence_penalty` once it has appeared, and by `frequency_penalty` times the number of times it appeared. On a GGUF model the window is the last 64 tokens, as in llama.cpp. A diffusion language model cannot apply them or `min_p` (400). |
+| `presence_penalty`, `frequency_penalty` | Applied (-2 to 2): a token's logit drops by `presence_penalty` once it has appeared, and by `frequency_penalty` times the number of times it appeared. On a GGUF model the window is the last 64 tokens, as in llama.cpp. A penalty of 0 applies nothing. A diffusion language model cannot apply a non-zero value of them or of `min_p` (400). |
 | `response_format` | See [Structured output](#structured-output). |
 | `tools`, `tool_choice`, `parallel_tool_calls` | See [Tool calling](#tool-calling). |
 | `stream_options` | `{"include_usage": true}` moves the usage from the finish chunk to a last chunk with empty `choices`, sent just before `data: [DONE]`. Without it the finish chunk carries the usage. |
@@ -191,7 +191,7 @@ A message with role `developer` is read as `system`.
 |---|---|
 | `{"type": "text"}` (or no field) | Unconstrained. |
 | `{"type": "json_object"}` | One JSON object. |
-| `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}, "strict": true}}` | JSON matching the schema (the keywords listed for `format` in [ollama-api.md](ollama-api.md)). With `strict: true` a keyword that cannot be enforced (such as `pattern`) is a 400 naming it; otherwise that keyword is left out, the rest of the schema is still enforced, and the omission is written to the debug log. Without `schema` the reply is any JSON object. |
+| `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}, "strict": true}}` | JSON matching the schema (the keywords listed for `format` in [ollama-api.md](ollama-api.md)). With `strict: true` a keyword that cannot be enforced (such as `pattern`) is a 400 naming it; otherwise that keyword is left out, the rest of the schema is still enforced, and the omission is written to the debug log. A keyword that gives the schema its shape (`type`, `properties`, `required`, `items`, `anyOf`, ...) is never left out: if it cannot be compiled where it is (for example `type` next to `anyOf`), the request is a 400 in either mode. Without `schema` the reply is any JSON object. |
 
 A reasoning model answers without thinking when a format is set, unless the
 request sends `chat_template_kwargs: {"enable_thinking": true}`; then the reply
@@ -200,7 +200,9 @@ may start with a `<think>` block of up to 1900 characters (returned in
 reply is either tool calls or the formatted JSON; with `required` or a named
 function it is calls only and the format does not apply. `response_format`
 cannot be combined with `grammar`, and a model whose backend cannot apply
-grammars refuses it with a 400. A malformed `response_format` is a 400.
+grammars refuses it with a 400, as does a GGUF model whose grammar sampler
+faulted earlier in this server's life (until localm restarts). A malformed
+`response_format` is a 400, sent before any model is loaded.
 
 #### Tool calling
 

@@ -665,10 +665,11 @@ class Engine:
         grammar. See ``BaseBackend.supports_grammar`` for why the default denies."""
         return getattr(self._backend, "supports_grammar", False)
 
-    def unsupported_sampling(self, names) -> list:
-        """The sampling options in *names* (``min_p``, ``presence_penalty``,
-        ``frequency_penalty``) the active backend cannot apply."""
-        return self._backend.unsupported_sampling(names)
+    def unsupported_sampling(self, options: dict) -> list:
+        """The names of the sampling *options* (``{name: value}`` for ``min_p``,
+        ``presence_penalty``, ``frequency_penalty``) the active backend cannot
+        apply."""
+        return self._backend.unsupported_sampling(options)
 
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Up-front grammar validation, delegated to the backend.

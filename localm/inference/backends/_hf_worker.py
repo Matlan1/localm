@@ -659,12 +659,23 @@ class _FinishReasonObserver:
         return torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
 
 
+def _penalty_offset(model, prompt_len: int) -> int:
+    """How many leading ids of what transformers hands a logits processor are
+    not generated text: the *prompt_len* prompt ids for a decoder-only model,
+    the one decoder start token for an encoder-decoder model."""
+    if getattr(getattr(model, "config", None), "is_encoder_decoder", False):
+        return 1
+    return prompt_len
+
+
 def _penalty_processor(prompt_len: int, presence: Optional[float],
                        frequency: Optional[float]):
     """A logits processor applying OpenAI's presence and frequency penalties to
-    the tokens generated after the first *prompt_len*, or ``None`` when both
-    are unset or zero: each token's logit drops by *frequency* times its count
-    so far plus *presence* once it has appeared."""
+    the tokens generated after the first *prompt_len* ids the processor sees
+    (the prompt for a decoder-only model; 1, the decoder start token, for an
+    encoder-decoder model), or ``None`` when both are unset or zero: each
+    token's logit drops by *frequency* times its count so far plus *presence*
+    once it has appeared."""
     presence = presence or 0.0
     frequency = frequency or 0.0
     if presence == 0.0 and frequency == 0.0:
@@ -1808,7 +1819,8 @@ class HFWorker:
         # unconstrained generation if xgrammar is absent or the grammar is bad.
         lp = _grammar_processor(grammar, tokenizer, model)
         penalty = _penalty_processor(
-            inputs["input_ids"].shape[-1], presence_penalty, frequency_penalty)
+            _penalty_offset(model, inputs["input_ids"].shape[-1]),
+            presence_penalty, frequency_penalty)
         if penalty is not None:
             from transformers import LogitsProcessorList
             lp = LogitsProcessorList([penalty, *(lp or [])])
