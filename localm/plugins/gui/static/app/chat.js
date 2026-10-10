@@ -2308,6 +2308,20 @@ export function formatClipTime(seconds) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** Whether *blob* starts with a RIFF/WAVE header. */
+export function hasWavHeader(blob) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(false);
+    reader.onload = () => {
+      const b = new Uint8Array(reader.result);
+      const at = (o, s) => [...s].every((ch, i) => b[o + i] === ch.charCodeAt(0));
+      resolve(b.length >= 12 && at(0, "RIFF") && at(8, "WAVE"));
+    };
+    reader.readAsArrayBuffer(blob.slice(0, 12));
+  });
+}
+
 /** The duration in seconds of a RIFF/WAVE file, read from its header (the first
  *  MiB is enough to reach the fmt and data chunks), or 0 when *blob* is not a
  *  WAV file it can read. */
@@ -2372,6 +2386,10 @@ export async function attachAudio(file) {
       name: file.name, size: (file.size / 1e6).toFixed(1),
       max: String(AUDIO_MAX_BYTES / 1e6) }));
   }
+  const format = audioFormat(file);
+  if (format === "wav" && !(await hasWavHeader(file))) {
+    throw new Error(t("chat.audio.notWav", { name: file.name }));
+  }
   const uri = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
@@ -2380,7 +2398,7 @@ export async function attachAudio(file) {
   });
   const data = uri.split(",", 2)[1] || "";
   if (!data) throw new Error(t("chat.audio.readError", { name: file.name }));
-  const clip = { name: file.name, data, format: audioFormat(file), size: file.size, seconds: 0 };
+  const clip = { name: file.name, data, format, size: file.size, seconds: 0 };
   chat.clips.push(clip);
   renderAttachChips();
   const seconds = (await wavSeconds(file)) || (await probeAudioSeconds(file));

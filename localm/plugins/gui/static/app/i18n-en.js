@@ -128,6 +128,7 @@ export const I18N_EN = {
   "chat.advanced": "Advanced",
   "chat.advanced.hint": "sampling, seed, grammar",
   "chat.attach": "Attach images, audio or documents (pdf, docx, txt, md, …)",
+  "chat.audio.notWav": "{name} is not a valid WAV file.",
   "chat.audio.readError": "Could not read {name}.",
   "chat.audio.rejected": "The audio clip was not accepted ({detail}) and was removed from the chat. You can keep chatting (text only).",
   "chat.audio.tooLarge": "{name} is {size} MB; an audio clip can be at most {max} MB.",

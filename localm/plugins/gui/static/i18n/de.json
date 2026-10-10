@@ -30,6 +30,7 @@
   "chat.advanced": "Erweitert",
   "chat.advanced.hint": "Sampling, Seed, Grammatik",
   "chat.attach": "Bilder, Audio oder Dokumente anhängen (pdf, docx, txt, md, …)",
+  "chat.audio.notWav": "{name} ist keine gültige WAV-Datei.",
   "chat.audio.readError": "{name} konnte nicht gelesen werden.",
   "chat.audio.rejected": "Der Audioclip wurde nicht akzeptiert ({detail}) und aus dem Chat entfernt. Sie können weiterchatten (nur Text).",
   "chat.audio.tooLarge": "{name} ist {size} MB groß; ein Audioclip darf höchstens {max} MB haben.",

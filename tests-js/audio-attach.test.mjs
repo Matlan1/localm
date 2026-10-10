@@ -216,6 +216,21 @@ test("a short WAV shows its length from the header", async () => {
   assert.match(window.document.querySelector("#attach-chips .chip").textContent, /mid\.wav \(1:15\)/);
 });
 
+test("a file named .wav that is not a WAV file is refused before it is read in full", async () => {
+  const { window } = setup();
+  window.addAttachedFiles([new window.File(["this is not audio at all"], "bad.wav", { type: "audio/wav" })]);
+  await waitFor(() => /not a valid WAV/.test(toastText(window)), "the refusal toast");
+  assert.match(toastText(window), /bad\.wav is not a valid WAV file/);
+  assert.equal(clipCount(window), 0);
+});
+
+test("an MP3 is attached without a WAV header check", async () => {
+  const { window } = setup();
+  window.addAttachedFiles([new window.File(["ID3 not checked"], "song.mp3", { type: "audio/mpeg" })]);
+  await waitFor(() => clipCount(window) === 1, "the clip");
+  assert.equal(evalIn(window, "chat.clips[0].format"), "mp3");
+});
+
 test("a clip whose length the browser cannot read stays attached for the server to judge", async () => {
   const { window } = setup();
   window.probeAudioSeconds = async () => 0;
@@ -325,7 +340,7 @@ test("the catalogs carry every audio string in both languages with the same plac
   const enSrc = readFileSync(new URL("app/i18n-en.js", dir), "utf-8");
   const ph = (s) => (s.match(/\{\w+\}/g) || []).sort().join();
   for (const key of ["chat.audio.readError", "chat.audio.rejected", "chat.audio.tooLarge",
-                     "chat.audio.tooLong", "chat.status.encodingAudio"]) {
+                     "chat.audio.tooLong", "chat.audio.notWav", "chat.status.encodingAudio"]) {
     const m = enSrc.match(new RegExp(`"${key.replaceAll(".", "\\.")}":\\s*"([^"]*)"`));
     assert.ok(m, `${key} is in the English catalog`);
     assert.ok(de[key], `${key} is in the German catalog`);
