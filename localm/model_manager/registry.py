@@ -968,10 +968,12 @@ def _hf_is_vision(model_dir: Path) -> bool:
 _HF_AUDIO_EXTRACTOR_TOKENS = ("audio", "whisper", "speech", "wav2vec", "seamless")
 
 
-def _hf_is_audio(model_dir: Path) -> bool:
+def _hf_is_audio(model_dir: Path) -> Optional[bool]:
     """True if a HuggingFace model directory looks able to take audio input,
     judged from its on-disk metadata: an ``audio_config`` block in config.json,
-    or an audio feature extractor named in preprocessor_config.json."""
+    or an audio feature extractor named in preprocessor_config.json. False when
+    neither file says so, None when a file exists but cannot be read or
+    parsed."""
     try:
         pre = model_dir / "preprocessor_config.json"
         if pre.is_file():
@@ -985,8 +987,10 @@ def _hf_is_audio(model_dir: Path) -> bool:
             data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
             if isinstance(data, dict) and "audio_config" in data:
                 return True
-    except (OSError, ValueError, RecursionError):
-        pass
+    except (OSError, ValueError, RecursionError) as e:
+        logger.debug("audio capability probe could not read %s (%s)",
+                     model_dir, type(e).__name__)
+        return None
     return False
 
 
@@ -1353,7 +1357,8 @@ def audio_input_guidance(projector_failed: bool = False) -> str:
                 f"GUI) and attach the audio again.")
     return (f"{head} No audio-capable model could be confirmed in your library. "
             f"Pull a GGUF model whose projector has an audio encoder, for "
-            f"example `localm pull ggml-org/Qwen3-ASR-0.6B-GGUF`.")
+            f"example `localm pull "
+            f"ggml-org/Qwen3-ASR-0.6B-GGUF:Qwen3-ASR-0.6B-Q8_0.gguf`.")
 
 
 def list_models(type_filter: Optional[str] = None) -> None:

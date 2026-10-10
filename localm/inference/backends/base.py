@@ -43,6 +43,13 @@ class AudioInputError(UnsupportedInputError):
     data. Reported per request; the GGUF worker keeps serving."""
 
 
+class AudioDecodeUnavailable(AudioInputError):
+    """Raised when an attached audio clip is in a format no installed decoder
+    reads (anything but WAV without the voice extra): the clip may be fine, the
+    build has no decoder for it. Reported per request; the GGUF worker keeps
+    serving."""
+
+
 class ImageDecodeUnavailable(UnsupportedInputError):
     """Raised when an image cannot be decoded because Pillow is not installed,
     as opposed to the image or the model being at fault.

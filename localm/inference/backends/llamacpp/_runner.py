@@ -49,7 +49,9 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
                                              an optional typed-exception tag,
                                              re-raised as that type by the parent.
                                              Recognised: "InvalidGrammarError",
-                                             "UnsupportedInputError",
+                                             "UnsupportedInputError" (and
+                                             its subclasses named in
+                                             _INPUT_ERROR_TYPES),
                                              "GrammarUnsupportedError", and on
                                              a load reply
                                              "PretokenizerUnusableModelError"
@@ -104,10 +106,17 @@ import time
 from typing import Callable, Optional
 
 from localm.inference.backends.base import (
-    AdapterLoadError, ContextCapacityExceededError,
-    GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled,
+    AdapterLoadError, AudioDecodeUnavailable, AudioInputError, ContextCapacityExceededError,
+    GrammarUnsupportedError, ImageDecodeUnavailable, InvalidGrammarError, ModelLoadCancelled,
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
-    UnsupportedInputError, UnsupportedModelRoleError, stream_stop_requested)
+    UnsupportedInputError, UnsupportedModelRoleError, VisionInputError,
+    stream_stop_requested)
+
+# UnsupportedInputError subclasses carried across the worker boundary by name,
+# so the parent re-raises the same type. Any other subclass travels as
+# "UnsupportedInputError".
+_INPUT_ERROR_TYPES = {cls.__name__: cls for cls in (
+    AudioDecodeUnavailable, AudioInputError, ImageDecodeUnavailable, VisionInputError)}
 
 
 class RunnerBusy(Exception):
@@ -401,7 +410,9 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 # _cached_tokens empty and no image-path record of the cache,
                 # which llama.py's next prefill detects and wipes, so no extra
                 # cleanup is owed here.
-                resp_q.put(("error", str(e), "UnsupportedInputError"))
+                tag = type(e).__name__
+                resp_q.put(("error", str(e),
+                            tag if tag in _INPUT_ERROR_TYPES else "UnsupportedInputError"))
             # Any OTHER uncaught fault from the generator (a non-grammar native
             # fault, re-raised by GgufWorker.chat_stream) propagates OUT of this
             # whole function, uncaught: the model is left in an unknown state,
@@ -1044,6 +1055,10 @@ class ModelRunner:
                             # a healthy worker, so it must not evict a loaded
                             # model. UnsupportedInputError is a ValueError.
                             raise UnsupportedInputError(msg)
+                        if tag in _INPUT_ERROR_TYPES:
+                            # A typed per-request refusal: same handling as above,
+                            # keeping the exact subclass.
+                            raise _INPUT_ERROR_TYPES[tag](msg)
                         if tag == "ContextCapacityExceededError":
                             # An oversized prompt exceeding the configured context ceiling.
                             # NOT a RuntimeError, so GgufBackend does not unload

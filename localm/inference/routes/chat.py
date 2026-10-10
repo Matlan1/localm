@@ -184,9 +184,10 @@ def register(app: FastAPI, ctx) -> None:
                     # that cause rather than "text-only".
                     from localm.model_manager import vision_input_guidance
                     backend = getattr(engine, "_backend", None)
-                    audio_only = getattr(engine, "supports_audio", False) is True
-                    mmproj_failed = (bool(getattr(backend, "mmproj_path", None))
-                                     and not audio_only)
+                    has_projector = bool(getattr(backend, "mmproj_path", None))
+                    hears = getattr(engine, "supports_audio", False) is True
+                    audio_only = hears and has_projector
+                    mmproj_failed = has_projector and not hears
                     active_model_path = getattr(backend, "model_path", None)
                     detail = vision_input_guidance(
                         mmproj_failed=mmproj_failed,

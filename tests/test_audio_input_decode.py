@@ -215,6 +215,33 @@ class TestRefusals:
         with pytest.raises(AudioInputError, match="larger than"):
             decode_audio_clip(_b64(_wav(_pcm16([1] * 16000))), "wav", 16000)
 
+    def test_an_unexpected_parse_error_stays_a_per_request_error(self, monkeypatch):
+        def boom(raw):
+            raise struct.error("unpack requires a buffer of 4 bytes")
+        monkeypatch.setattr(media, "_wav_frames", boom)
+        with pytest.raises(AudioInputError, match="malformed"):
+            decode_audio_clip(_b64(_wav(_pcm16([1] * 4000))), "wav", 16000)
+
+    def test_a_resampler_failure_stays_a_per_request_error(self, monkeypatch):
+        def boom(samples, rate, target):
+            raise RuntimeError("swr_init failed")
+        monkeypatch.setattr(media, "_resample_with_av", boom)
+        with pytest.raises(AudioInputError, match="could not be resampled from 32000 Hz"):
+            decode_audio_clip(_b64(_wav(_pcm16([1] * 32000), rate=32000)), "wav", 16000)
+
+    def test_a_missing_decoder_is_its_own_type(self, monkeypatch):
+        from localm.inference.backends.base import AudioDecodeUnavailable
+        real_import = builtins.__import__
+
+        def no_av(name, *args, **kwargs):
+            if name == "av":
+                raise ImportError("no av")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", no_av)
+        with pytest.raises(AudioDecodeUnavailable):
+            decode_audio_clip(_b64(b"ID3" + b"\x00" * 64), "mp3", 16000)
+
     def test_no_refusal_message_carries_the_payload(self):
         secret = b"SECRET-AUDIO-CONTENT-" * 8
         cases = [

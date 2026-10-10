@@ -146,6 +146,11 @@ class TestRegistryTriState:
         assert model_audio_capability("whisper", reg=reg) is True
         assert model_audio_capability("clipvlm", reg=reg) is False
         assert model_audio_capability("omni", reg=reg) is True
+        broken = tmp_path / "broken"
+        broken.mkdir()
+        (broken / "config.json").write_text("{not json")
+        reg["broken"] = {"path": str(broken), "source": "local", "model_type": "llm"}
+        assert model_audio_capability("broken", reg=reg) is None
 
 
 def _audio_message():

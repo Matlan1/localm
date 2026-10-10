@@ -252,7 +252,8 @@ def _decode_with_av(raw: bytes, target: int, max_seconds: float):
     try:
         import av
     except ImportError as e:
-        raise _audio_error(
+        from localm.inference.backends.base import AudioDecodeUnavailable
+        raise AudioDecodeUnavailable(
             "The attached audio is not a WAV file, and reading other audio "
             "formats needs the voice extra (pip install 'localm[voice]'). Send "
             "the clip as WAV, or install the extra.") from e
@@ -333,7 +334,16 @@ def decode_audio_clip(b64: str, fmt: str, target_rate: int):
         except (struct.error, ValueError, IndexError) as e:
             raise _audio_error(
                 f"The attached WAV file is malformed ({type(e).__name__}).") from e
-        samples = _resample(samples, rate, target_rate)
+        except MemoryError as e:
+            raise _audio_error("The attached audio is too large to decode.") from e
+        try:
+            samples = _resample(samples, rate, target_rate)
+        except MemoryError as e:
+            raise _audio_error("The attached audio is too large to resample.") from e
+        except Exception as e:  # noqa: BLE001 - any resampler failure is this request's
+            raise _audio_error(
+                f"The attached audio could not be resampled from {rate} Hz to "
+                f"{target_rate} Hz ({type(e).__name__}).") from e
     else:
         samples = _decode_with_av(raw, target_rate, AUDIO_MAX_SECONDS)
     if len(samples) < AUDIO_MIN_SECONDS * target_rate:

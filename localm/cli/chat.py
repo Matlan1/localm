@@ -563,7 +563,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 if transcript:
                     transcript.exchange(prompt, response)
             else:
-                _interactive(engine, system, gen_opts,
+                _interactive(engine, system, gen_opts, images=list(images),
+                             audios=list(audios),
                              audit=audit, transcript=transcript, router=router)
     finally:
         router.close()
@@ -641,17 +642,17 @@ def _input_refusal_text(engine, messages: list, exc: Exception) -> str:
     has_projector = bool(getattr(backend, "mmproj_path", None))
     sees = getattr(engine, "supports_images", False) is True
     hears = getattr(engine, "supports_audio", False) is True
-    if isinstance(exc, AudioInputError):
+    has_audio = messages_contain_audio(messages)
+    has_image = messages_contain_image(messages)
+    if isinstance(exc, AudioInputError) or (
+            (hears or not has_audio) and (sees or not has_image)):
         return str(exc)
-    if messages_contain_audio(messages):
-        if hears and not messages_contain_image(messages):
-            return str(exc)
-        if not hears and (sees or not messages_contain_image(messages)):
-            return audio_input_guidance(projector_failed=has_projector and not sees)
+    if has_audio and not hears:
+        return audio_input_guidance(projector_failed=has_projector and not sees)
     return vision_input_guidance(
         mmproj_failed=has_projector and not hears,
         active_model_path=getattr(backend, "model_path", None),
-        audio_only=hears and not sees)
+        audio_only=hears and has_projector)
 
 
 
@@ -833,7 +834,9 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
 
 
 def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
-                 audit=None, transcript=None, router=None) -> None:  # noqa: C901
+                 audit=None, transcript=None, router=None,
+                 images: Optional[list] = None,
+                 audios: Optional[list] = None) -> None:  # noqa: C901
     from rich.markup import escape
     from localm.inference.backends.base import (ImageDecodeUnavailable,
                                                 UnsupportedInputError)
@@ -850,7 +853,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
     ))
 
     messages: list = []
-    pending_images: list = []   # image paths queued for the next user message
+    pending_images: list = list(images or ())   # image paths queued for the next user message
+    pending_audio: list = list(audios or ())     # audio paths queued for the next user message
 
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -858,6 +862,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 
     while True:
         img_hint = f" [dim][{len(pending_images)} image(s) queued][/dim]" if pending_images else ""
+        if pending_audio:
+            img_hint += f" [dim][{len(pending_audio)} audio clip(s) queued][/dim]"
         try:
             user_input = console.input(f"\n[bold green]You[/bold green]{img_hint}: ").strip()
         except (KeyboardInterrupt, EOFError):
@@ -879,8 +885,9 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                 break
             continue
 
-        msg = _build_user_message(user_input, pending_images)
+        msg = _build_user_message(user_input, pending_images, pending_audio)
         pending_images.clear()
+        pending_audio.clear()
         messages.append(msg)
         if audit:
             audit.user(user_input)

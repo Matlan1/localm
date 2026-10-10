@@ -40,6 +40,7 @@ from localm.inference.backends.base import (
     EmbedBatchTooLargeError,
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
+    AudioDecodeUnavailable,
     InvalidGrammarError,
     ModelLoadCancelled,
     PretokenizerUnsafeInputError,
@@ -6110,6 +6111,7 @@ def _memory_used_header(ctx) -> dict:
 # "Not Implemented" is exactly the permanent, server-side capability gap it is.
 _BACKEND_ERROR_STATUS: tuple = (
     (ImageDecodeUnavailable, 501),
+    (AudioDecodeUnavailable, 501),
     (VisionInputError, 400),
     (UnsupportedInputError, 400),
     (ChatTemplateMissingError, 400),

@@ -109,6 +109,56 @@ def _mock_engine(*, images=False, audio=False, can_be_multimodal=False, loaded=T
     return engine
 
 
+class TestWorkerKeepsTheErrorType:
+    @pytest.mark.parametrize("name", ["AudioInputError", "AudioDecodeUnavailable",
+                                      "VisionInputError", "ImageDecodeUnavailable"])
+    def test_typed_input_errors_cross_the_worker_boundary(self, name):
+        from localm.inference.backends import base
+        from localm.inference.backends.llamacpp import _runner
+        cls = getattr(base, name)
+        assert _runner._INPUT_ERROR_TYPES[name] is cls
+        assert issubclass(cls, UnsupportedInputError)
+
+    def test_the_child_tags_the_subclass_and_keeps_serving(self, monkeypatch):
+        import queue
+
+        from localm.inference.backends.base import AudioDecodeUnavailable
+        from localm.inference.backends.llamacpp import _runner
+        for name in ("install_parent_death_watchdog", "ignore_interrupt_signals",
+                     "suppress_native_error_dialogs"):
+            monkeypatch.setattr(f"localm._mp_spawn.{name}", lambda: None)
+        monkeypatch.setattr("localm.debuglog.attach_child_logging", lambda: None)
+
+        class _Worker:
+            def __init__(self, cancel_event=None, **payload):
+                self.stream_cancel = None
+
+            def load(self):
+                return {}
+
+            def chat_stream(self, on_status=None, **payload):
+                raise AudioDecodeUnavailable("needs the voice extra")
+
+            def count_tokens(self, text):
+                return 7
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("localm.inference.backends.llamacpp._worker.GgufWorker", _Worker)
+        req_q, resp_q, ctrl_q = queue.Queue(), queue.Queue(), queue.Queue()
+        req_q.put(("load", {}))
+        req_q.put(("chat_stream", {"messages": []}))
+        req_q.put(("count_tokens", "x"))
+        req_q.put(None)
+        _runner._runner_main(req_q, resp_q, ctrl_q)
+        ctrl_q.put(None)
+        assert resp_q.get_nowait()[0] == "ok"
+        assert resp_q.get_nowait() == ("error", "needs the voice extra",
+                                       "AudioDecodeUnavailable")
+        assert resp_q.get_nowait() == ("ok", 7)
+
+
 class TestRoute(unittest.TestCase):
     def _post(self, engine, messages):
         with TestClient(create_app(engine)) as client:
@@ -148,6 +198,19 @@ class TestRoute(unittest.TestCase):
         part = [p for p in sent[-1]["content"] if p["type"] == "input_audio"][0]
         self.assertEqual(part["input_audio"]["format"], "wav")
         self.assertEqual(part["input_audio"]["data"], _wav_b64())
+
+    def test_a_missing_audio_decoder_is_501(self):
+        from localm.inference.backends.base import AudioDecodeUnavailable
+        engine = _mock_engine(audio=True, can_be_multimodal=True)
+
+        def _chat_stream(messages, **kwargs):
+            raise AudioDecodeUnavailable("needs the voice extra")
+            yield  # pragma: no cover
+
+        engine.chat_stream.side_effect = _chat_stream
+        r = self._post(engine, _AUDIO_MSG)
+        self.assertEqual(r.status_code, 501)
+        self.assertIn("voice extra", r.json()["detail"])
 
     def test_an_image_to_an_audio_only_model_says_so(self):
         engine = _mock_engine(audio=True, can_be_multimodal=True, mmproj_path="p.gguf")
@@ -213,26 +276,67 @@ class TestCli:
         assert parts[0]["type"] == "input_audio"
         assert parts[0]["input_audio"]["data"] == _wav_b64()
 
+    _IMAGE = {"type": "image_url", "image_url": {"url": "x"}}
+
     @pytest.mark.parametrize("engine_flags,messages,exc,expect", [
         ({}, _AUDIO_MSG, UnsupportedInputError("x"), "cannot accept audio"),
         ({"supports_audio": True}, _AUDIO_MSG, VisionInputError("the projector could "
                                                                 "not process this audio"),
          "could not process this audio"),
         ({"supports_audio": True}, _AUDIO_MSG, AudioInputError("too short"), "too short"),
-        ({"supports_audio": True}, [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": "x"}}]}],
+        ({"supports_audio": True, "mmproj": "p.gguf"},
+         [{"role": "user", "content": [_IMAGE]}],
          UnsupportedInputError("x"), "reads audio only"),
-        ({}, [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": "x"}}]}],
+        ({"supports_audio": True},
+         [{"role": "user", "content": [_IMAGE]}],
          UnsupportedInputError("x"), "cannot accept image"),
+        ({}, [{"role": "user", "content": [_IMAGE]}],
+         UnsupportedInputError("x"), "cannot accept image"),
+        ({"supports_audio": True, "supports_images": True, "mmproj": "p.gguf"},
+         [{"role": "user", "content": [_IMAGE] + _AUDIO_MSG[0]["content"]}],
+         UnsupportedInputError("The attached WAV file has no format or data section."),
+         "no format or data section"),
+        ({"supports_images": True, "mmproj": "p.gguf"},
+         [{"role": "user", "content": [_IMAGE] + _AUDIO_MSG[0]["content"]}],
+         UnsupportedInputError("x"), "cannot accept audio"),
     ])
     def test_refusal_text(self, engine_flags, messages, exc, expect):
         from localm.cli.chat import _input_refusal_text
         engine = MagicMock()
         engine.supports_images = engine_flags.get("supports_images", False)
         engine.supports_audio = engine_flags.get("supports_audio", False)
-        engine._backend = MagicMock(mmproj_path=None, model_path=None)
+        engine._backend = MagicMock(mmproj_path=engine_flags.get("mmproj"), model_path=None)
         assert expect in _input_refusal_text(engine, messages, exc)
+
+    def test_interactive_attaches_audio_given_without_a_prompt(self, tmp_path, monkeypatch):
+        from localm.cli import chat as chat_mod
+        clip = tmp_path / "c.wav"
+        clip.write_bytes(base64.b64decode(_wav_b64()))
+        seen = []
+        engine = MagicMock()
+
+        def _chat_stream(messages, **kwargs):
+            seen.append([dict(m) for m in messages])
+            yield "ok"
+
+        engine.chat_stream.side_effect = _chat_stream
+        engine.display_name = "asr"
+        engine.count_tokens.return_value = 1
+        engine.count_messages_tokens.return_value = 3
+        engine.context_capacity.return_value = 4096
+        inputs = iter(["first", "second"])
+
+        def _fake_input(*a, **kw):
+            try:
+                return next(inputs)
+            except StopIteration as e:
+                raise EOFError() from e
+
+        monkeypatch.setattr(chat_mod.console, "input", _fake_input)
+        chat_mod._interactive(engine, None, {}, audios=[str(clip)])
+        first, second = seen[0][-1]["content"], seen[1][-1]["content"]
+        assert first[0]["type"] == "input_audio" and first[-1]["text"] == "first"
+        assert second == "second"
 
     def test_projector_known_reads_the_header(self, tmp_path):
         from localm.cli.chat import _projector_known
