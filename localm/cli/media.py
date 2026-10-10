@@ -342,6 +342,50 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
 
 
 
+def _music_via_backend(music_backend, s: dict, tags: str, out, *, lyrics, duration: float,
+                       write_sidecar: bool, **kwargs) -> None:
+    """``localm music`` through the music plugin's backend facade (any backend
+    other than the inline ComfyUI path): availability, generation with progress
+    lines, Ctrl-C stops the runtime, then the backend's VRAM is released. Exits
+    1 on failure and 2 when *out* does not end in the backend's file suffix."""
+    import time as _time
+
+    from rich.markup import escape
+
+    suffix = getattr(music_backend._impl(s), "OUTPUT_SUFFIX", ".flac")
+    out_path = Path(out) if out else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}{suffix}")
+    if out_path.suffix.lower() != suffix:
+        console.print(f"[red]The {escape(str(s.get('backend')))} music backend writes "
+                      f"{suffix} files; give an output path ending in {suffix}.[/red]")
+        sys.exit(2)
+
+    def say(text: str) -> None:
+        console.print(f"[dim]{escape(str(text))}[/dim]")
+
+    for note in (s.get("warning"), s.get("backend_note")):
+        if note:
+            say(note)
+    ok, message = music_backend.ensure_available(s, on_progress=say)
+    if not ok:
+        console.print(f"[red]{escape(str(message))}[/red]")
+        sys.exit(1)
+    say(message)
+    try:
+        ok, message = music_backend.generate(
+            s, tags, out_path, write_sidecar=write_sidecar, on_progress=say,
+            lyrics=lyrics, duration_seconds=duration, **kwargs)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted - stopping the music runtime...[/yellow]")
+        music_backend.free_vram(s)
+        raise
+    color = "green" if ok else "red"
+    console.print(f"[{color}]{escape(str(message))}[/{color}]")
+    music_backend.free_vram(s)
+    if not ok:
+        sys.exit(1)
+    _offer_open(out_path)
+
+
 @main.command("music")
 @click.argument("tags")
 @click.option("--lyrics", type=click.Path(exists=True), default=None,
@@ -350,27 +394,44 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
 @click.option("-d", "--duration", default=120.0, show_default=True,
               help="Track length in seconds - arbitrary.")
 @click.option("-o", "--out", default=None,
-              help="Output .flac path [default: ./music_<timestamp>.flac]")
+              help="Output path [default: ./music_<timestamp>.wav with the native backend, "
+                   ".flac with ComfyUI]")
 @click.option("--seed", type=int, default=None, help="Reproducible seed.")
-@click.option("--steps", type=int, default=None, help="Sampler steps (default 50).")
-@click.option("--cfg", type=float, default=None, help="Guidance (default 5.0).")
+@click.option("--steps", type=int, default=None,
+              help="Sampler steps (default 50 with ComfyUI, 8 natively).")
+@click.option("--cfg", type=float, default=None, help="Guidance (default 5.0 with ComfyUI).")
 def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
-    """Generate a music track with the local ComfyUI ACE-Step workflow.
+    """Generate a music track with ACE-Step, through the music plugin's backend:
+    the built-in native one (ACE-Step 1.5 on KoboldCpp) or ComfyUI, as set in
+    the music settings ('auto' uses ComfyUI when it is set up, else native).
 
     \b
     Examples:
       localm music "synthwave, 80s, 120 bpm, dreamy"
       localm music "folk ballad, acoustic guitar" --lyrics song.txt -d 180
 
-    ComfyUI must be running (or start it via the GUI, which can auto-launch
-    it when comfy_launch_cmd is configured).
+    With ComfyUI, ComfyUI must be running (or start it via the GUI, which can
+    auto-launch it when comfy_launch_cmd is configured).
     """
     import time as _time
     from rich.console import Console
     from rich.markup import escape
     from ..audit import SessionMode, effective_mode
+    from ..config import load_config
     from ..music_gen import generate_music
+    from ..plugins.builtin.music import backend as music_backend
     console = Console()
+    lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
+    kwargs = {k: v for k, v in
+              (("seed", seed), ("steps", steps), ("cfg", cfg)) if v is not None}
+    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
+    _write_sidecar = not _is_privacy
+    _cfg = load_config()
+    _s = music_backend.prepare_for_job(music_backend.settings(_cfg), _cfg)
+    if _s.get("backend") != "comfy":
+        _music_via_backend(music_backend, _s, tags, out, lyrics=lyr, duration=duration,
+                           write_sidecar=_write_sidecar, **kwargs)
+        return
 
     # generate_music() calls ensure_comfy() internally: auto-launch from
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
@@ -378,11 +439,6 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     api_url = _plugin_api_url("music")
     out_path = Path(out) if out \
         else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}.flac")
-    lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
-    kwargs = {k: v for k, v in
-              (("seed", seed), ("steps", steps), ("cfg", cfg)) if v is not None}
-    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
-    _write_sidecar = not _is_privacy
 
     def _gen_music():
         return generate_music(

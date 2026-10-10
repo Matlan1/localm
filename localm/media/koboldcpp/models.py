@@ -33,12 +33,28 @@ DEFAULT_FILES = {
     "vae": "vae-BF16.gguf",
 }
 
+# component -> size in bytes of its default file.
+DEFAULT_SIZES = {
+    "lm": 709846656,
+    "text_encoder": 784144960,
+    "dit": 2549528000,
+    "vae": 337420928,
+}
+
 # component -> the general.architecture its GGUF must carry.
 ARCHITECTURES = {
     "lm": "acestep-lm",
     "text_encoder": "acestep-text-enc",
     "dit": "acestep-dit",
     "vae": "acestep-vae",
+}
+
+# component -> the localm registry type its GGUF registers as.
+REGISTRY_TYPES = {
+    "lm": "unknown",
+    "text_encoder": "text-encoder",
+    "dit": "diffusion-unet",
+    "vae": "vae",
 }
 
 DISTINCT_PREFIX = "ace-step-"

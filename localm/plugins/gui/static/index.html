@@ -560,12 +560,13 @@
     <section id="view-music" class="view">
       <div class="page">
         <h2 data-i18n="music.title">Music generation</h2>
-        <div class="sub" data-i18n="music.intro">Runs the ACE-Step workflow on your local ComfyUI (same VRAM
-        handover as image generation). Track length is arbitrary; longer tracks just
-        take longer.</div>
+        <div class="sub" data-i18n="music.intro">Generates music on this machine with ACE-Step, on the built-in
+        native runtime or on your ComfyUI (Settings, Music). The chat model unloads when the music
+        models need the VRAM and reloads afterwards.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="music"></span>
             <div class="card-head-text"><h3 data-i18n="mediaGallery.generate">Generate</h3></div></div>
+          <div class="sub" id="music-backend-note" hidden></div>
           <label data-i18n="music.styleTagsLabel">Style tags - genre, mood, instruments, BPM, vocal type</label>
           <textarea id="music-tags" rows="2" placeholder="synthwave, 80s, female vocals, 120 bpm, dreamy" data-i18n-placeholder="music.styleTagsPlaceholder"></textarea>
           <label data-i18n="music.lyricsLabel">Lyrics (optional - empty generates an instrumental; [verse] / [chorus] markers supported)</label>
@@ -601,7 +602,7 @@
           <div id="music-bulk" class="media-bulk" style="display:none"></div>
           <div id="music-history" class="media-grid"></div>
         </div>
-        <div class="card">
+        <div class="card" id="music-workflow-card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
             <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
           <div class="sub" data-i18n="workflow.intro">The ComfyUI workflow this page uses. Upload one (in

@@ -41,16 +41,16 @@ def comfy_is_set_up(full_config: dict, comfy_blk: dict, api_url: str) -> bool:
 
 
 def resolve(choice: str, full_config: dict, comfy_blk: dict, api_url: str,
-            kind: str) -> tuple[str, Optional[str]]:
+            kind: str, native_name: str = "stable-diffusion.cpp") -> tuple[str, Optional[str]]:
     """``(backend, note)`` for the configured *choice*. ``auto`` becomes
     ``comfy`` when ComfyUI is set up and ``native`` otherwise, with a note that
-    names *kind* ("Image", "Video") and why; any other choice is returned
-    unchanged with no note."""
+    names *kind* ("Image", "Video", "Music"), the native runtime *native_name*
+    and why; any other choice is returned unchanged with no note."""
     if choice != "auto":
         return choice, None
     if comfy_is_set_up(full_config, comfy_blk, api_url):
         return "comfy", f"{kind} backend: ComfyUI (auto: ComfyUI is set up)."
-    return "native", (f"{kind} backend: native stable-diffusion.cpp (auto: no ComfyUI is "
+    return "native", (f"{kind} backend: native {native_name} (auto: no ComfyUI is "
                       "set up).")
 
 

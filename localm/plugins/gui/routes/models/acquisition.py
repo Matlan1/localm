@@ -272,14 +272,39 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                            "model_type": rec["model_type"], "origin": "curated"},
             }]}
 
+        def _native_music_check():
+            """The preflight answer when the music plugin runs the native
+            backend (each default model not downloaded yet, offered for
+            download), or None when it runs ComfyUI."""
+            from localm.config import load_config
+            from localm.media import backend_choice
+            from localm.plugins.builtin.music import backend as music_backend
+            s = backend_choice.refine_auto(music_backend.settings(load_config()), "Music")
+            if s.get("backend") != "native":
+                return None
+            from localm.plugins.builtin.music.backends import native
+            st = native.status(s)
+            configured = s.get("native") or {}
+            unresolved = [c.replace("_", " ") for c, v in st["models"].items()
+                          if v is None and configured.get(c)]
+            warning = (f"Configured music models not found: {', '.join(unresolved)}."
+                       if unresolved else None)
+            return {"status": "verified", "warning": warning, "missing": [{
+                "filename": m["file"], "native": True, "searchable": False,
+                "source": {"repo": m["repo"], "file": m["file"], "spec": m["spec"],
+                           "sha256": None, "name": m["name"], "size_bytes": m["size_bytes"],
+                           "model_type": m["model_type"], "origin": "curated"},
+            } for m in st["missing"]]}
+
         def _check():
-            if kind == "image":
+            if kind in ("image", "music"):
                 try:
-                    native_answer = _native_image_check()
+                    native_answer = (_native_image_check() if kind == "image"
+                                     else _native_music_check())
                 except Exception as e:
-                    logger.warning("image backend preflight failed: %s", e)
+                    logger.warning("%s backend preflight failed: %s", kind, e)
                     return {"status": "unavailable", "missing": [],
-                            "warning": "Could not check image models before generating."}
+                            "warning": f"Could not check {kind} models before generating."}
                 if native_answer is not None:
                     return native_answer
             try:

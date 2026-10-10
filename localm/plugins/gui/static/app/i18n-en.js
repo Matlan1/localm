@@ -2358,8 +2358,13 @@ export const I18N_EN = {
   "music.generationStatus": "Generation {status}",
   "music.historyHint":
     "Tick a card to select it for bulk actions; click one for details, metadata, and per-track actions.",
+  "music.backendComfy": "Backend: ComfyUI.",
+  "music.backendNative": "Backend: native ACE-Step 1.5 (KoboldCpp), runtime {runtime}.",
+  "music.backendNativeMissing":
+    "Backend: native ACE-Step 1.5. The default models ({size}) download when you first generate.",
+  "music.backendRuntimeOnFirstUse": "installed on first use",
   "music.intro":
-    "Runs the ACE-Step workflow on your local ComfyUI (same VRAM handover as image generation). Track length is arbitrary; longer tracks just take longer.",
+    "Generates music on this machine with ACE-Step, on the built-in native runtime or on your ComfyUI (Settings, Music). The chat model unloads when the music models need the VRAM and reloads afterwards.",
   "music.item.one": "track",
   "music.item.other": "tracks",
   "music.lyricsLabel": "Lyrics (optional - empty generates an instrumental; [verse] / [chorus] markers supported)",
