@@ -121,13 +121,13 @@ async def transcribe(request: Request, model: str, data: bytes, label: str, *,
             prompt_tokens = await loop.run_in_executor(
                 None, engine.count_messages_tokens, messages)
         except _hs._BACKEND_ERROR_TYPES as e:
-            raise HTTPException(_hs.backend_error_status(e), str(e)) from e
+            raise HTTPException(_hs.backend_error_status(e) or 500, str(e)) from e
         capacity = engine.context_capacity()
-        usable = isinstance(capacity, int) and capacity > 0 and isinstance(prompt_tokens, int)
-        if usable and prompt_tokens >= capacity:
-            raise HTTPException(413, _hs.context_overflow_detail(prompt_tokens, capacity))
-        budget = REPLY_TOKEN_CEILING if not usable else min(
-            REPLY_TOKEN_CEILING, capacity - prompt_tokens)
+        budget = REPLY_TOKEN_CEILING
+        if isinstance(capacity, int) and capacity > 0 and isinstance(prompt_tokens, int):
+            if prompt_tokens >= capacity:
+                raise HTTPException(413, _hs.context_overflow_detail(prompt_tokens, capacity))
+            budget = min(REPLY_TOKEN_CEILING, capacity - prompt_tokens)
 
         sem = _hs._inference_sems.setdefault(engine.display_name, InferenceGate())
         _hs._admit_generation(sem, engine)
@@ -139,7 +139,7 @@ async def transcribe(request: Request, model: str, data: bytes, label: str, *,
                     temperature=0.0 if temperature is None else temperature,
                     repeat_penalty=1.0)
         except _hs._BACKEND_ERROR_TYPES as e:
-            raise HTTPException(_hs.backend_error_status(e), str(e)) from e
+            raise HTTPException(_hs.backend_error_status(e) or 500, str(e)) from e
         if (timing.get("outcome") or {}).get("finish_reason") == "length":
             raise HTTPException(
                 502, f"The transcript from '{engine.display_name}' was cut off at "
