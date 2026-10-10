@@ -626,7 +626,7 @@ def _load_owner_kdf() -> list:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return []
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         logger.warning("owner key KDF file %s is unreadable or corrupt (%s); "
                        "minting a fresh derivation record. Sessions and jobs "
                        "owned by the owner key are re-linked automatically on "
@@ -895,7 +895,7 @@ def _load_keystore() -> list:
     refuses rather than silently emptying the store."""
     try:
         data = json.loads(keystore_file().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return []
     return data if isinstance(data, list) else []
 
@@ -1201,7 +1201,7 @@ def _keystore_configured() -> bool:
         return True                        # exists but unreadable -> fail closed
     try:
         data = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return True                        # exists but corrupt -> fail closed
     return bool(data) if isinstance(data, list) else True
 

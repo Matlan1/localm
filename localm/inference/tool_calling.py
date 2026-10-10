@@ -176,7 +176,7 @@ def _call_text(call: dict[str, Any]) -> str:
     if isinstance(args, str):
         try:
             args = json.loads(args) if args.strip() else {}
-        except ValueError:
+        except (ValueError, RecursionError):
             args = {"input": args}
     return OPEN_TAG + "\n" + json.dumps(
         {"name": name, "arguments": args}, ensure_ascii=False) + "\n" + CLOSE_TAG
@@ -393,7 +393,7 @@ def _as_call(obj: Any, names: Optional[set[str]]) -> Optional[ParsedCall]:
     if isinstance(args, str):
         try:
             args = json.loads(args) if args.strip() else {}
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
     if not isinstance(name, str) or not isinstance(args, dict):
         return None
@@ -599,13 +599,13 @@ class ToolCallStream:
     def _parse_body(self, body: str) -> Optional[ParsedCall]:
         try:
             return _as_call(json.loads(body.strip()), self.names)
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
 
     def _parse_bare(self, text: str) -> list[ParsedCall]:
         try:
             data = json.loads(text.strip())
-        except ValueError:
+        except (ValueError, RecursionError):
             return []
         items = data if isinstance(data, list) else [data]
         calls = [_as_call(item, self.names) for item in items]

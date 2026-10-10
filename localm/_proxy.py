@@ -69,6 +69,6 @@ def request(base: str, path: str, *, method: str = "GET", token: Optional[str] =
         return {}
     try:
         return _json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise LocalmError("the localm proxy returned a non-JSON response",
                           reason=text[:200]) from None

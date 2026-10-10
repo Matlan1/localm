@@ -422,12 +422,12 @@ def server_call(url, headers, method: str, path: str, *, timeout: float = 30.0,
         detail = ""
         try:
             detail = (r.json() or {}).get("detail", "")
-        except ValueError:
+        except (ValueError, AttributeError, RecursionError):
             detail = (r.text or "")[:200]
         return "http", (r.status_code, detail)
     try:
         return "ok", r.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         # A 200 whose body is not JSON means something other than localm
         # answered on that port, not an empty/negative result.
         return "http", (r.status_code, "the reply was not JSON")

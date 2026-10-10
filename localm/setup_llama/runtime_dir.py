@@ -416,7 +416,7 @@ def _provision_lock_holder_pid(lock: Path) -> Optional[int]:
         data = json.loads((lock / _PROVISION_LOCK_OWNER).read_text(encoding="utf-8"))
         pid = data.get("pid") if isinstance(data, dict) else None
         return pid if isinstance(pid, int) else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
 
 

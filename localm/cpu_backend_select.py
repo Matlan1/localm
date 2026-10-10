@@ -153,7 +153,7 @@ def _read_marker(lib_dir: Path) -> Optional[dict]:
         return None
     try:
         data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict) or data.get("schema") != _MARKER_SCHEMA:
         return None
@@ -213,7 +213,7 @@ def _lock(lib_dir: Path):
             break
         except FileExistsError:
             pid = None
-            with contextlib.suppress(OSError, json.JSONDecodeError, ValueError):
+            with contextlib.suppress(OSError, json.JSONDecodeError, ValueError, RecursionError):
                 pid = json.loads(owner_file.read_text(encoding="utf-8")).get("pid")
             if isinstance(pid, int) and not pid_alive(pid):
                 with contextlib.suppress(OSError):
@@ -262,7 +262,9 @@ def _probe_score(candidate: Path, lib_dir: Path) -> Optional[int]:
         if line.startswith("@@VERDICT@@"):
             try:
                 verdict = json.loads(line[len("@@VERDICT@@"):])
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                break
+            if not isinstance(verdict, dict):
                 break
             if verdict.get("error"):
                 logger.debug("CPU-tier probe of %s: %s", candidate, verdict["error"])
