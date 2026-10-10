@@ -521,15 +521,27 @@ def _unversioned(name, rel, why):
 # --------------------------------------------------------------------------- #
 
 _LEGACY = (
-    ("llama.cpp", "llama", "scripts/check_llama_pin.py",
-     "pin_pipeline.py --pin llama"),
-    ("ROCm llama (lemonade)", "rocm", "scripts/check_llama_rocm_pin.py", "none (hand-edited)"),
-    ("ComfyUI", "comfyui", "scripts/check_comfyui_pin.py", "pin_pipeline.py --pin comfyui"),
-    ("AMD ROCm wheels", "rocm", "scripts/check_amd_rocm_wheels_pin.py", "none (hand-edited)"),
+    ("llama.cpp", "llama", "scripts/check_llama_pin.py", "pin_weekly.py (llama)",
+     r"localm pins llama\.cpp (\S+)", r"upstream newest with assets: (\S+)"),
+    ("ROCm llama (lemonade)", "rocm", "scripts/check_llama_rocm_pin.py", "pin_weekly.py (rocm)",
+     r"localm pins the lemonade-sdk ROCm build at (\S+)", r"upstream newest with assets: (\S+)"),
+    ("ComfyUI", "comfyui", "scripts/check_comfyui_pin.py", "pin_weekly.py (comfyui)",
+     r"ComfyUI bundled pin: (\S+)", r"upstream latest: (\S+)"),
+    ("AMD ROCm wheels", "rocm", "scripts/check_amd_rocm_wheels_pin.py", "pin_weekly.py (review PR)",
+     None, None),
 )
 
+_VERDICT_LINE_RE = re.compile(r"^(OK:|STALE|BEHIND|COULD NOT|within the|.*: STALE|.*: current)")
 
-def _legacy_check(name, group, script, advancer):
+
+def _first_group(pattern, text) -> str:
+    if not pattern:
+        return ""
+    m = re.search(pattern, text, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
+def _legacy_check(name, group, script, advancer, pinned_re=None, latest_re=None):
     def check(now):
         cmd = [sys.executable, str(REPO / script), "--gate"]
         try:
@@ -537,12 +549,15 @@ def _legacy_check(name, group, script, advancer):
                                   env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         except (OSError, subprocess.TimeoutExpired) as e:
             return _unknown(name, group, advancer, e)
-        tail = " | ".join(line.strip() for line in proc.stdout.splitlines() if line.strip())[-300:]
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        verdict_lines = [line for line in lines if _VERDICT_LINE_RE.match(line)]
+        tail = " | ".join(verdict_lines or lines[-3:])[:300]
         status = {0: CURRENT, 1: STALE, 2: UNKNOWN}.get(proc.returncode, UNKNOWN)
         if proc.returncode == 0 and re.search(r"\bBEHIND\b", proc.stdout):
             status = BEHIND
         return Row(name=name, status=status, advancer=advancer, group=group,
-                   detail=tail if status != CURRENT else (tail[-160:] if tail else ""))
+                   pinned=_first_group(pinned_re, proc.stdout),
+                   latest=_first_group(latest_re, proc.stdout), detail=tail)
     return check
 
 
@@ -552,8 +567,9 @@ def _legacy_check(name, group, script, advancer):
 
 def build_registry() -> list[PinSpec]:
     specs: list[PinSpec] = []
-    for name, group, script, advancer in _LEGACY:
-        specs.append(PinSpec(name, group, advancer, _legacy_check(name, group, script, advancer),
+    for name, group, script, advancer, pinned_re, latest_re in _LEGACY:
+        specs.append(PinSpec(name, group, advancer,
+                             _legacy_check(name, group, script, advancer, pinned_re, latest_re),
                              legacy=True))
     specs += [
         PinSpec("koboldcpp", "media", "none (no pipeline)", _check_github_tag_pin(

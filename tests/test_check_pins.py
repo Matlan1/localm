@@ -357,8 +357,19 @@ def test_legacy_gate_that_cannot_launch_is_unknown(monkeypatch):
     assert cp._legacy_check("n", "g", "scripts/check_llama_pin.py", "a")(NOW).status == cp.UNKNOWN
 
 
+def test_legacy_rows_extract_pinned_and_newest_and_a_readable_detail(monkeypatch):
+    out = ("localm pins llama.cpp b11118\n  pinned release date: 2026-09-23\n"
+           "upstream newest with assets: b11541 (released 2026-10-10)\n"
+           "BEHIND: 423 builds\nwithin the 21-day tolerance.\n")
+    monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: _fake_proc(0, out))
+    spec = next(s for s in cp.build_registry() if s.name == "llama.cpp")
+    row = spec.check(NOW)
+    assert (row.pinned, row.latest, row.status) == ("b11118", "b11541", cp.BEHIND)
+    assert row.detail.startswith("BEHIND: 423 builds") and "pinned release date" not in row.detail
+
+
 def test_every_legacy_script_exists_and_accepts_gate():
-    for _name, _group, script, _adv in cp._LEGACY:
+    for _name, _group, script, _adv, _p, _l in cp._LEGACY:
         text = (cp.REPO / script).read_text(encoding="utf-8")
         assert '"--gate"' in text, script
 

@@ -219,7 +219,7 @@ def _receipt_summary(receipt: Path) -> str:
         return str(data.get("why", "")) if isinstance(data, dict) else ""
     parts = []
     for name, c in checks.items():
-        status = c.get("status") if isinstance(c, dict) else c
+        status = (c.get("status") or c.get("verdict")) if isinstance(c, dict) else c
         parts.append(f"{name}={status}")
     return ", ".join(parts)
 
@@ -431,25 +431,46 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
 
 
 def advance_delegated(adv: Advancer, *, dry_run: bool) -> Outcome:
-    """llama.cpp and ComfyUI: pin_pipeline.py owns the whole flow and its state."""
+    """llama.cpp and ComfyUI: pin_pipeline.py owns the whole flow and its state. The
+    candidate is looked up here first so the report names it, a pin with nothing newer is
+    never handed to the pipeline, and an outcome is read from state only when the pipeline
+    wrote it during THIS run."""
     out = Outcome(adv.key, adv.title, "advance", NONE_NEWER)
+    started = _dt.datetime.now(_dt.UTC).replace(microsecond=0)
+    try:
+        found = adv.candidate()
+    except (pp.PipelineError, cp.FetchError, OSError, ValueError) as e:
+        out.verdict, out.detail = INCONCLUSIVE, f"could not determine a candidate: {e}"
+        return out
+    if found is None:
+        return out
+    out.pinned, out.candidate = found
+    skip = pp.should_skip(pp.load_state(pin=adv.key), out.candidate)
+    if skip:
+        out.verdict, out.detail = SKIPPED, skip
+        return out
     try:
         rc = adv.delegate(dry_run)
     except pp.PipelineError as e:
         out.verdict, out.detail = FAIL, str(e)
         return out
     state = pp.load_state(pin=adv.key)
-    out.candidate = str(state.get("last_tag_tried", ""))
-    out.receipt = str(state.get("receipt_path", ""))
+    stamped = pp._parse_iso(state.get("timestamp", ""))
+    fresh = state.get("last_tag_tried") == out.candidate and stamped is not None and stamped >= started
+    out.receipt = str(state.get("receipt_path", "")) if fresh else ""
     if rc == 1:
-        out.verdict, out.detail = FAIL, str(state.get("reason", "see the pipeline output"))
+        out.verdict, out.detail = FAIL, str(state.get("reason", "see the pipeline output")) if fresh else "see the pipeline output"
     elif rc == 2:
-        out.verdict, out.detail = INCONCLUSIVE, str(state.get("reason", "could not reach a verdict"))
-    elif state.get("merged_pr") and state.get("verdict") == "PASS":
-        out.verdict = MERGED
-        out.pr = state.get("merged_pr")
-    elif dry_run and state.get("verdict") == "PASS":
-        out.verdict = DRY_PASS
+        out.verdict = INCONCLUSIVE
+        out.detail = str(state.get("reason", "could not reach a verdict")) if fresh else "could not reach a verdict"
+    elif dry_run:
+        out.verdict, out.detail = DRY_PASS, "the pipeline confirmed the candidate and stopped before the bump"
+    elif fresh and state.get("verdict") == "PASS" and state.get("merged_pr"):
+        out.verdict, out.pr = MERGED, state.get("merged_pr")
+        out.detail = f"PR #{out.pr}: {out.pinned} -> {out.candidate}"
+    else:
+        out.verdict = SKIPPED
+        out.detail = "the pipeline exited 0 without recording a result for this candidate"
     return out
 
 
@@ -623,6 +644,11 @@ def _same_major_only(old: str, new: str) -> bool:
     return _semver_major(old) is not None and _semver_major(old) == _semver_major(new)
 
 
+def _comfyui_candidate() -> tuple[str, str] | None:
+    found = pp.newest_comfyui_candidate()
+    return None if found is None else (found[0], found[1])
+
+
 def _llama_delegate(dry_run: bool) -> int:
     return pp.run_llama_pipeline(dry_run=dry_run)
 
@@ -656,10 +682,10 @@ def _bullet(what: str, how: str) -> Callable[[str, str], str]:
 def build_advancers() -> list[Advancer]:
     return [
         Advancer("llama", "llama.cpp", "scripts/confirm_llama_runtime.py",
-                 "scripts/bump_llama_pin.py", candidate=lambda: None,
+                 "scripts/bump_llama_pin.py", candidate=pp.newest_candidate,
                  delegate=_llama_delegate, verify_current_cmd=_llama_verify_cmd),
         Advancer("comfyui", "ComfyUI", "scripts/confirm_comfyui_runtime.py",
-                 "scripts/bump_comfyui_pin.py", candidate=lambda: None,
+                 "scripts/bump_comfyui_pin.py", candidate=_comfyui_candidate,
                  delegate=_comfyui_delegate, verify_current_cmd=_comfyui_verify_cmd),
         Advancer("rocm", "AMD ROCm llama.cpp build", "scripts/confirm_rocm_runtime.py",
                  "scripts/bump_rocm_pin.py", candidate=_rocm_candidate,
