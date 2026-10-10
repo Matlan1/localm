@@ -1615,6 +1615,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tools or skills, and refuses to create or change anything inside a `.localcoder`
   directory at any depth; a `search_replace` sweep leaves those files alone and
   lists them. Owner sessions are unchanged.
+- **`setup.sh` and `setup-gui.sh` install a fixed uv release and check it before running it.**
+  They used to run whatever Astral's installer URL returned. They now download the installer
+  of one pinned uv release and run it only when its checksum matches; a failed download, a
+  checksum mismatch, or a machine with no `sha256sum`, `shasum` or `openssl` stops the uv
+  install with the reason instead of running unchecked code.
 - **Hugging Face models no longer download and run code from the Hugging Face kernel
   hub unless the network policy allows it.** transformers could fetch a compiled kernel
   package from the Hub while a model was loading or replying and import it, even with

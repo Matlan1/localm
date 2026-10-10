@@ -59,10 +59,8 @@ def test_sh_sets_uv_install_dir_before_the_installer_when_contained():
     text = _sh()
     contained_set_idx = text.index('export UV_INSTALL_DIR="$(pwd)/.uv"')
     # Match the real invocation, not the install-it-yourself messages carrying
-    # the identical command as plain text: the `|| true` suffix is carried only
-    # by the real invocation.
-    installer_idx = text.index(
-        "curl -LsSf https://astral.sh/uv/install.sh | sh || true")
+    # the manual command as plain text.
+    installer_idx = text.index('sh "$UVTMP/uv-installer.sh" || true')
     assert contained_set_idx < installer_idx, (
         "UV_INSTALL_DIR must be exported before invoking Astral's installer, or "
         "a Portable pick has no effect on where uv itself lands")

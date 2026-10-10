@@ -520,10 +520,8 @@ def test_confirm_llama_runtime_install_steps_provide_psutil():
 
         install = [s for s in steps if s.get("name") == "Install"]
         assert len(install) == 1, f"{job_name}: expected exactly one Install step"
-        extras = re.findall(r'pip install -e "\.\[([^\]"]+)\]"', install[0]["run"])
-        assert extras, f"{job_name}: Install step must install an extra, not the bare package"
-
-        names = {n.strip() for group in extras for n in group.split(",")}
+        names = set(re.findall(r"--extra ([A-Za-z0-9_-]+)", install[0]["run"]))
+        assert names, f"{job_name}: Install step must install an extra, not the bare package"
         provides_psutil = any(
             packaging_requirements.Requirement(dep).name == "psutil"
             for name in names
