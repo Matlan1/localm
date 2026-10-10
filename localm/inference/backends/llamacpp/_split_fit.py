@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 # Bytes per logit: llama.cpp's logits tensor is f32.
 _LOGIT_BYTES = 4
@@ -30,7 +30,7 @@ def _f32(x: float) -> float:
 
 
 def layer_devices(shares: Sequence[float], n_layer_all: int,
-                  n_gpu_layers: int) -> "tuple[list, Optional[int]]":
+                  n_gpu_layers: int) -> tuple[list, Optional[int]]:
     """``(per-layer positions, output-layer position)`` for a layer split over
     devices weighted by *shares*, or ``None`` for a layer left on the CPU.
 
@@ -46,7 +46,7 @@ def layer_devices(shares: Sequence[float], n_layer_all: int,
     if n_gpu_layers < 0:
         n_gpu_layers = n_layer_all + 1
     n = len(shares)
-    cum: List[float] = []
+    cum: list[float] = []
     total = _f32(0.0)
     for s in shares:
         total = _f32(total + _f32(float(s)))
@@ -104,10 +104,10 @@ class SplitFitPlan:
     indices left out. ``default`` is the charge of every device under the
     default split; ``chosen`` the charge under ``tensor_split`` (empty when
     ``tensor_split`` is ``None``)."""
-    tensor_split: Optional[Dict[int, float]]
-    excluded: List[int]
-    default: List[DeviceCharge]
-    chosen: List[DeviceCharge] = field(default_factory=list)
+    tensor_split: Optional[dict[int, float]]
+    excluded: list[int]
+    default: list[DeviceCharge]
+    chosen: list[DeviceCharge] = field(default_factory=list)
 
     @property
     def default_fits(self) -> bool:
@@ -118,7 +118,7 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
                    layer_bytes: Sequence[int], output_bytes: int,
                    layer_kv_bytes: Sequence[int], n_gpu_layers: int,
                    logits_bytes: int, reserve_bytes: int,
-                   spread_bytes: int = 0) -> List[DeviceCharge]:
+                   spread_bytes: int = 0) -> list[DeviceCharge]:
     """Charge each device in *devices* (``{"index", "free"}``, in split order)
     for what a layer split weighted by *shares* places on it: its layers'
     weights and KV cache, the output layer's weights and the logits buffer on
@@ -132,7 +132,7 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
     positions, out_pos = layer_devices(shares, n_layer_all, n_gpu_layers)
     charges = [DeviceCharge(index=int(d["index"]), free=int(d["free"]),
                             share=float(s))
-               for d, s in zip(devices, shares)]
+               for d, s in zip(devices, shares, strict=False)]
     for il, pos in enumerate(positions):
         if pos is None:
             continue
@@ -178,7 +178,7 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
     ``{index: 1.0}``) if it holds the whole charge. When no plan fits,
     ``tensor_split`` is ``None`` and only ``default`` reports the shortfall.
     *spread_bytes* is charged as in :func:`charge_devices`."""
-    kw: Dict[str, Any] = dict(layer_bytes=layer_bytes, output_bytes=output_bytes,
+    kw: dict[str, Any] = dict(layer_bytes=layer_bytes, output_bytes=output_bytes,
                               n_gpu_layers=n_gpu_layers, layer_kv_bytes=layer_kv_bytes,
                               logits_bytes=logits_bytes, reserve_bytes=reserve_bytes,
                               spread_bytes=spread_bytes)
@@ -186,7 +186,7 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
     default = charge_devices(devices, frees, **kw)
     if all(c.fits for c in default):
         return SplitFitPlan(tensor_split=None, excluded=[], default=default)
-    shares: List[float] = [float(f) for f in frees]
+    shares: list[float] = [float(f) for f in frees]
     charges = default
     while True:
         over = [pos for pos, c in enumerate(charges) if not c.fits]
@@ -202,7 +202,7 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
         charges = charge_devices(devices, shares, **kw)
         if remaining == 1 and not all(c.fits for c in charges):
             return SplitFitPlan(tensor_split=None, excluded=[], default=default)
-    kept = {int(d["index"]): s for d, s in zip(devices, shares) if s > 0}
-    excluded = [int(d["index"]) for d, s in zip(devices, shares) if s <= 0]
+    kept = {int(d["index"]): s for d, s in zip(devices, shares, strict=False) if s > 0}
+    excluded = [int(d["index"]) for d, s in zip(devices, shares, strict=False) if s <= 0]
     return SplitFitPlan(tensor_split=kept, excluded=excluded, default=default,
                         chosen=charges)
