@@ -532,8 +532,9 @@ def test_resolve_amd_rocm_asset_falls_back_to_the_detected_familys_own_pin(monke
     url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
 
     assert url != sl.DEFAULT_URL
-    assert url.endswith("llama-b1307-windows-rocm-gfx110X-x64.zip")
-    assert sha == sl._PINNED_FALLBACK_SHA256["llama-b1307-windows-rocm-gfx110X-x64.zip"]
+    asset = f"llama-{sl._ROCM_TAG}-windows-rocm-gfx110X-x64.zip"
+    assert url.endswith(asset)
+    assert sha == sl._PINNED_FALLBACK_SHA256[asset]
 
 
 def test_provision_backend_verifies_default_sha256(monkeypatch):
