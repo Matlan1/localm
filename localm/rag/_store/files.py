@@ -124,7 +124,7 @@ class _CollectionFiles:
             if not isinstance(meta, dict):
                 raise ValueError("meta.json is not an object")
             self._meta = meta
-        except (json.JSONDecodeError, ValueError, OSError):
+        except (json.JSONDecodeError, ValueError, OSError, RecursionError):
             self.corrupt = True
             self._meta = {"name": self.name, "docs": {}}
             return True
@@ -144,7 +144,7 @@ class _CollectionFiles:
                     continue
                 try:
                     obj = json.loads(line)
-                except json.JSONDecodeError:
+                except (ValueError, RecursionError):
                     bad_lines += 1
                     continue
                 # A chunk MUST be a dict carrying a str "text". A
@@ -182,8 +182,10 @@ class _CollectionFiles:
             # collapsed into "simply absent".
             try:
                 data = json.loads(vec_file.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("vectors.json is not an object")
                 vectors = data.get("vectors", [])
-            except (json.JSONDecodeError, OSError) as e:
+            except (ValueError, OSError, RecursionError) as e:
                 data, vectors = None, None
                 self._note_vector_degrade(
                     f"vectors.json is unreadable ({type(e).__name__}); "

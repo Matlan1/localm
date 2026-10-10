@@ -35,7 +35,7 @@ def defaults() -> dict:
     """
     try:
         data = json.loads(_TEMPLATE.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         logger.warning("tts: could not read the shipped template %s (%s); "
                        "falling back to the frontend's built-in defaults",
                        _TEMPLATE.name, e)
@@ -61,7 +61,7 @@ def voices() -> list:
     """
     try:
         data = json.loads(_VOICES.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         logger.warning("tts: could not read the vendored voice list %s (%s); "
                        "the voice setting falls back to a shape check",
                        _VOICES.name, e)

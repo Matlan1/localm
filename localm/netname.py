@@ -158,7 +158,7 @@ def _run_tailscale_status() -> Optional[dict]:
         return None
     try:
         data = json.loads(proc.stdout)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         logger.debug("netname: tailscale status returned non-JSON")
         return None
     return data if isinstance(data, dict) else None

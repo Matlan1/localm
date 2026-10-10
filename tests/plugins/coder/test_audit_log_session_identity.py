@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -155,3 +156,25 @@ def test_http_api_reproduction_two_sessions_created_close_together(
     assert len(sessions1) == 1, "session 1's log must not mix in another session's records"
     assert len(sessions2) == 1, "session 2's log must not mix in another session's records"
     assert sessions1 != sessions2
+
+
+@pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+def test_session_log_skips_a_hostile_line_and_keeps_the_rest(
+        doc, tmp_path, monkeypatch):
+    proj = tmp_path / "p"
+    proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch)
+    owner = {"Authorization": "Bearer ownersecret"}
+
+    with TestClient(app) as client:
+        created = client.post("/api/coder/sessions", headers=owner,
+                              json={"cwd": str(proj), "mode": "log"})
+        assert created.status_code == 200, created.text
+        sid = created.json()["id"]
+        before = client.get(f"/api/coder/sessions/{sid}/log", headers=owner).json()
+        with open(before["path"], "a", encoding="utf-8") as fh:
+            fh.write(doc + "\n")
+        after = client.get(f"/api/coder/sessions/{sid}/log", headers=owner)
+
+    assert after.status_code == 200, after.text
+    assert after.json()["entries"] == before["entries"]

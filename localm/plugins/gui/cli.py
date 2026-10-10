@@ -322,7 +322,7 @@ def _mount_remote_gui(entry: dict) -> str | None:
         return f"it refused this process's attach token (HTTP {r.status_code})"
     try:
         body = r.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         body = None
     detail = body.get("detail") if isinstance(body, dict) else None
     return f"HTTP {r.status_code}: {detail}" if detail else f"HTTP {r.status_code}"

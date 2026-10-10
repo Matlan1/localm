@@ -66,7 +66,7 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None,
         return "http", r.status_code
     try:
         return "ok", r.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         # A 200 whose body is not JSON is reported as "http", not as an empty
         # activity list.
         return "http", r.status_code
@@ -123,7 +123,7 @@ def read_model_file_hold(scheme: str, port, model: str,
         # reported as "unsupported", the branch that refuses.
         try:
             detail = str((r.json() or {}).get("detail", ""))
-        except ValueError:
+        except (ValueError, AttributeError, RecursionError):
             detail = ""
         if detail.startswith("Model not registered"):
             return "absent", r.status_code
@@ -132,7 +132,7 @@ def read_model_file_hold(scheme: str, port, model: str,
         return "http", r.status_code
     try:
         body = r.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         # A 200 whose body is not JSON is reported as "http", not as "nothing
         # holds it".
         return "http", r.status_code

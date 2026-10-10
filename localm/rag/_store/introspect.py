@@ -134,7 +134,7 @@ class _CollectionIntrospection:
             return None
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
+        except (ValueError, OSError, RecursionError):
             return None
         if not isinstance(meta, dict):
             return None

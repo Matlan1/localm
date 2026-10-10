@@ -118,7 +118,7 @@ def _prune_orphaned_compat_copies(out_dir) -> None:
             meta_path.unlink()
             logger.info("mmproj compat: removed the copy of %s, which no longer "
                         "exists", source)
-        except (OSError, ValueError, AttributeError) as exc:
+        except (OSError, ValueError, AttributeError, RecursionError) as exc:
             logger.warning("mmproj compat: could not check or remove %s (%s)",
                            meta_path, exc)
 
@@ -167,7 +167,7 @@ def compatible_mmproj_path(mmproj_path: str) -> str:
         try:
             if dst.is_file() and json.loads(meta_path.read_text(encoding="utf-8")) == meta:
                 return str(dst)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             pass
         out_dir.mkdir(parents=True, exist_ok=True)
         free = shutil.disk_usage(out_dir).free
@@ -190,7 +190,7 @@ def compatible_mmproj_path(mmproj_path: str) -> str:
             src.name, projector_type, dst)
         _prune_orphaned_compat_copies(out_dir)
         return str(dst)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         logger.warning(
             "mmproj %s records no projector type and the runtime refuses it; "
             "writing a compatible copy failed (%s), so it is loaded as-is",

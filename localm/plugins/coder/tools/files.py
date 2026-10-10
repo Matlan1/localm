@@ -99,6 +99,8 @@ def _verify_syntax(path: Path, content: str) -> Optional[str]:
             json.loads(content)
         except json.JSONDecodeError as e:
             return f"JSON syntax error: {e}"
+        except (ValueError, RecursionError):
+            return None
     elif suffix == ".toml":
         try:
             import tomllib  # type: ignore[import]

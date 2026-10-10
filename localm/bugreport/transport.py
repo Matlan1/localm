@@ -237,5 +237,5 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                   f"likely a temporary server-side issue, not your connection."))
     try:
         return _json.loads(raw) if raw.strip() else {}
-    except ValueError:
+    except (ValueError, RecursionError):
         return {"raw": raw[:300]}
