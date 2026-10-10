@@ -5544,7 +5544,8 @@ async def _stream_sse_body(
             from localm.debuglog import logger as _dbg
             _dbg.exception("generation thread failed")
             loop.call_soon_threadsafe(
-                token_queue.put_nowait, RuntimeError(str(e)))
+                token_queue.put_nowait,
+                e if backend_error_status(e) is not None else RuntimeError(str(e)))
         finally:
             # Close the generator chain from THIS thread (it is suspended at its
             # yield right now, so close() is safe here - closing it from the
