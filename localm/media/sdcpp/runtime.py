@@ -153,8 +153,19 @@ def extra_dirs_for(backend: str) -> list[Path]:
     return rocm_library_dirs() if backend == "rocm" else []
 
 
+def _has_backend_device(backend: str, devices: list) -> bool:
+    """Whether *devices* (``[name, description]`` pairs) include one the
+    *backend* runs on: any device for ``cpu``, a device other than the CPU for
+    a GPU backend."""
+    if backend == "cpu":
+        return bool(devices)
+    return any(isinstance(d, (list, tuple)) and d and str(d[0]).strip().upper() != "CPU"
+               for d in devices)
+
+
 def installed(backend: str) -> Optional[Runtime]:
-    """The installed, load-tested runtime for *backend* at the pinned tag, or None."""
+    """The installed, load-tested runtime for *backend* at the pinned tag, or
+    None. A GPU runtime whose load test found only the CPU is not installed."""
     d = runtime_dir(backend)
     meta = _read_json(d / MARKER)
     if not meta or meta.get("tag") != pins.TAG or meta.get("backend") != backend:
@@ -165,8 +176,11 @@ def installed(backend: str) -> Optional[Runtime]:
             return None
     except OSError:
         return None
+    devices = list(meta.get("devices") or [])
+    if not _has_backend_device(backend, devices):
+        return None
     return Runtime(backend=backend, path=d, extra_dirs=extra_dirs_for(backend),
-                   devices=list(meta.get("devices") or []))
+                   devices=devices)
 
 
 def load_test_failed(backend: str) -> Optional[str]:
@@ -321,6 +335,12 @@ def install(backend: str, *, force: bool = False,
             {"tag": pins.TAG, "backend": backend, "reason": "no compute device"}),
             encoding="utf-8")
         raise ProvisionError(f"the {backend} runtime loaded but found no compute device")
+    if not _has_backend_device(backend, devices):
+        (dest / FAILED_MARKER).write_text(json.dumps(
+            {"tag": pins.TAG, "backend": backend, "reason": f"no {backend} device"}),
+            encoding="utf-8")
+        raise ProvisionError(f"the {backend} runtime loaded but found no {backend} device, "
+                             "only the CPU")
     try:
         (dest / FAILED_MARKER).unlink()
     except OSError:
