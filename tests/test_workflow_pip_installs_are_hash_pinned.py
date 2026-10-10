@@ -133,6 +133,7 @@ def test_the_optional_stacks_job_installs_the_torch_cpu_set_with_hashes():
     runs = _runs("optional-stacks")
     assert "pip install --require-hashes --no-deps -r .github/requirements/torch-cpu.txt" in runs
     assert "--prune torch" in runs
+    assert "--no-emit-package setuptools" in runs
 
 
 @pytest.mark.parametrize("job", ["mutation-run", "mutation-test"])

@@ -8,8 +8,10 @@ The workflows install Python packages only with `pip install --require-hashes`.
   regenerate; Dependabot's `uv` updates keep `uv.lock` current.
 - Two sets are committed because `uv.lock` does not hold them:
   - `torch-cpu.txt`: the optional-stacks job needs the CPU build of torch, while `uv.lock`
-    resolves the CUDA wheels, so that job exports with `--prune torch` and installs this
-    file first. Dependabot ignores `torch`, so it changes only by hand.
+    resolves the CUDA wheels, so that job exports with `--prune torch` and
+    `--no-emit-package setuptools` (torch requires `setuptools<82`, which this file
+    carries) and installs this file first. Dependabot ignores `torch`, so it changes
+    only by hand.
   - `mutmut.txt`: mutmut and its dependencies, resolved against the versions `uv.lock`
     gives the dev extra so the shared packages agree. The mutation jobs install it after
     the dev set. Adding mutmut to `uv.lock` would make every test file count as affected
@@ -18,7 +20,7 @@ The workflows install Python packages only with `pip install --require-hashes`.
 Regenerate from the repository root (delete `mutmut-constraints.txt` afterwards):
 
 ```bash
-printf 'torch==2.11.0+cpu\n' | uv pip compile - --generate-hashes --emit-index-url \
+printf 'torch==2.11.0+cpu\n' | uv pip compile - --no-config --generate-hashes --emit-index-url \
   --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
   --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple \
   --index-strategy unsafe-best-match -o .github/requirements/torch-cpu.txt
