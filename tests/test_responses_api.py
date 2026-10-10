@@ -203,6 +203,7 @@ def test_the_event_stream(home):
     assert json.loads(done["arguments"]) == {"city": "Oslo"}
     final = evs[-1]["response"]
     assert [i["type"] for i in final["output"]] == ["reasoning", "message", "function_call"]
+    assert final["usage"]["input_tokens"] == 9 and final["usage"]["output_tokens"] > 0
     assert final["output"][1]["content"][0]["text"] == "Hello"
 
 
@@ -270,6 +271,7 @@ def test_another_key_cannot_continue_a_stored_response(home, monkeypatch):
     ({"top_logprobs": 2}, "top_logprobs"),
     ({"tool_choice": {"type": "allowed_tools"}}, "tool_choice"),
     ({"include": ["message.output_text.logprobs"]}, "logprobs"),
+    ({"include": ["something.new"]}, "something.new"),
     ({"text": {"verbosity": "low"}}, "verbosity"),
     ({"truncation": "middle"}, "truncation"),
     ({"input": [{"role": "tool", "content": "x"}]}, "role"),
@@ -334,46 +336,155 @@ def test_a_cross_origin_page_reaches_the_route(home):
 
 
 class TestStore:
-    RESP = {"id": "resp_a", "output": []}
+    CONV = [{"role": "user", "content": "x"}]
 
     def test_a_principal_sees_only_its_own_responses(self):
         store = R.ResponseStore()
-        store.put("p1", dict(self.RESP), [{"role": "user", "content": "x"}])
-        assert store.get("p1", "resp_a") is not None
+        assert store.put("p1", "resp_a", self.CONV) is True
+        assert store.get("p1", "resp_a") == self.CONV
         assert store.get("p2", "resp_a") is None
         assert store.get(None, "resp_a") is None
 
     def test_the_oldest_is_dropped_past_the_count_bound(self):
         store = R.ResponseStore(max_items=2)
         for i in range(3):
-            store.put(None, {"id": f"resp_{i}", "output": []}, [])
+            store.put(None, f"resp_{i}", [])
         assert store.get(None, "resp_0") is None
-        assert store.get(None, "resp_1") is not None and store.get(None, "resp_2") is not None
+        assert store.get(None, "resp_1") == [] and store.get(None, "resp_2") == []
 
     def test_the_oldest_is_dropped_past_the_byte_bound(self):
         big = [{"role": "user", "content": "x" * 400}]
         store = R.ResponseStore(max_bytes=1000)
-        store.put(None, {"id": "resp_0", "output": []}, big)
-        store.put(None, {"id": "resp_1", "output": []}, big)
-        store.put(None, {"id": "resp_2", "output": []}, big)
-        assert store.get(None, "resp_0") is None and store.get(None, "resp_2") is not None
+        for i in range(3):
+            store.put(None, f"resp_{i}", big)
+        assert store.get(None, "resp_0") is None and store.get(None, "resp_2") == big
+
+    def test_the_byte_bound_counts_utf8_bytes(self):
+        store = R.ResponseStore(max_bytes=1000)
+        store.put(None, "resp_small", [])
+        assert store.put(None, "resp_cjk", [{"role": "user", "content": "\u4e2d" * 340}]) is False
+        assert store.get(None, "resp_small") == []
 
     def test_a_response_larger_than_the_bound_is_not_kept_and_evicts_nothing(self):
         store = R.ResponseStore(max_bytes=200)
-        store.put(None, {"id": "resp_small", "output": []}, [])
-        store.put(None, {"id": "resp_big", "output": []}, [{"role": "user", "content": "x" * 300}])
+        store.put(None, "resp_small", [])
+        assert store.put(None, "resp_big", [{"role": "user", "content": "x" * 300}]) is False
         assert store.get(None, "resp_big") is None
-        assert store.get(None, "resp_small") is not None
+        assert store.get(None, "resp_small") == []
+
+    def test_a_flooding_principal_evicts_its_own_entries_first(self):
+        store = R.ResponseStore(max_items=4)
+        store.put("quiet", "resp_q", self.CONV)
+        for i in range(10):
+            store.put("loud", f"resp_l{i}", self.CONV)
+        assert store.get("quiet", "resp_q") == self.CONV
+        assert store.get("loud", "resp_l9") == self.CONV
+        assert store.get("loud", "resp_l0") is None
+
+    def test_a_large_entry_evicts_its_owner_not_the_others(self):
+        store = R.ResponseStore(max_bytes=1000)
+        small = [{"role": "user", "content": "s" * 100}]
+        store.put("quiet", "resp_q", small)
+        store.put("loud", "resp_l0", [{"role": "user", "content": "x" * 500}])
+        kept = store.put("loud", "resp_l1", [{"role": "user", "content": "y" * 500}])
+        assert kept is True and store.get("quiet", "resp_q") == small
+        assert store.get("loud", "resp_l0") is None
+
+    def test_put_reports_an_entry_dropped_to_make_room(self):
+        store = R.ResponseStore(max_bytes=1000)
+        store.put("owner", "resp_a", [{"role": "user", "content": "a" * 200}])
+        store.put("owner", "resp_b", [{"role": "user", "content": "b" * 200}])
+        assert store.put("other", "resp_c", [{"role": "user", "content": "c" * 600}]) is False
+        assert store.get("owner", "resp_a") is not None
 
     def test_an_expired_response_is_gone(self, monkeypatch):
         now = [1000.0]
         monkeypatch.setattr(R.time, "monotonic", lambda: now[0])
         store = R.ResponseStore(ttl=10)
-        store.put(None, dict(self.RESP), [])
+        store.put(None, "resp_a", self.CONV)
         now[0] += 9
-        assert store.get(None, "resp_a") is not None
+        assert store.get(None, "resp_a") == self.CONV
         now[0] += 2
         assert store.get(None, "resp_a") is None
+
+
+def test_a_response_too_large_to_keep_says_store_false(home, monkeypatch):
+    from localm.inference.routes import responses as routes
+    routes.STORE = R.ResponseStore(max_bytes=50)
+    served = Served(["A reply that is long enough to pass the tiny bound."])
+    body = served.post(input="hello there").json()
+    assert body["status"] == "completed" and body["store"] is False
+    assert served.post(previous_response_id=body["id"]).status_code == 404
+
+
+def test_a_conversation_with_an_image_is_continued(home):
+    served = Served(["A red square."], ["Yes."])
+    url = "data:image/png;base64,iVBORw0KGgo="
+    first = served.post(input=[{"role": "user", "content": [
+        {"type": "input_text", "text": "what is this"},
+        {"type": "input_image", "image_url": url}]}]).json()
+    served.post(input="Is it red?", previous_response_id=first["id"])
+    user = [m for m in served.messages if m["role"] == "user"]
+    assert {"type": "image_url", "image_url": {"url": url}} in user[0]["content"]
+    assert user[-1]["content"] == "Is it red?"
+
+
+def test_images_in_a_function_output_reach_the_model(home):
+    served = Served(["It shows a cat."])
+    url = "data:image/png;base64,iVBORw0KGgo="
+    r = served.post(tools=[WEATHER], input=[
+        {"role": "user", "content": "take a photo"},
+        {"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": [
+            {"type": "input_text", "text": "here: "},
+            {"type": "input_image", "image_url": url},
+            {"type": "input_text", "text": "done"}]}])
+    assert r.status_code == 200, r.text
+    tool_at = next(i for i, m in enumerate(served.messages) if m.get("origin") == "tool")
+    assert "here: done" in served.messages[tool_at]["content"]
+    assert served.messages[tool_at + 1]["role"] == "user"
+    assert served.messages[tool_at + 1]["content"] == [{"type": "image_url",
+                                                         "image_url": {"url": url}}]
+
+
+def test_a_file_in_a_function_output_is_a_400(home):
+    served = Served()
+    r = served.post(input=[
+        {"type": "function_call", "call_id": "c1", "name": "get_weather", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": [
+            {"type": "input_file", "file_id": "f"}]}])
+    assert r.status_code == 400 and "input_file" in r.json()["error"]["message"]
+    assert served.calls == []
+
+
+def test_localm_chat_fields_reach_the_model(home):
+    served = Served()
+    r = served.post(seed=7, stop=["zz"], top_k=5, min_p=0.1, repeat_penalty=1.2)
+    assert r.status_code == 200, r.text
+    kw = served.kwargs
+    assert (kw["seed"], kw["top_k"], kw["repeat_penalty"]) == (7, 5, 1.2)
+    assert kw["min_p"] == 0.1
+
+
+def test_unknown_fields_are_named_in_the_debug_log(home, monkeypatch):
+    import localm.debuglog as debuglog
+    seen = []
+    monkeypatch.setattr(debuglog.logger, "debug",
+                        lambda msg, *a, **k: seen.append(str(msg) % a if a else str(msg)))
+    served = Served()
+    assert served.post(seed=1, frobnicate=2, prompt_cache_key="k").status_code == 200
+    assert any("frobnicate" in m and "prompt_cache_key" in m and "seed" not in m for m in seen)
+    assert R.ignored_fields(R.ResponsesRequest(input="x", seed=1, top_k=2, zz=3)) == ["zz"]
+
+
+def test_a_capped_reply_closes_its_message_as_incomplete(home):
+    served = Served(["abc"], ["abc"], finish="length")
+    body = served.post().json()
+    assert body["output"][0]["status"] == "incomplete"
+    evs = events(served.post(stream=True))
+    [done] = [e for e in evs if e["type"] == "response.output_item.done"]
+    assert done["item"]["status"] == "incomplete"
+    assert evs[-1]["type"] == "response.incomplete"
 
 
 def test_auth_is_required_when_a_key_exists(home, monkeypatch):

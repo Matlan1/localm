@@ -5,7 +5,8 @@ The request is translated to a chat body and the registered
 ``/v1/chat/completions`` endpoint is called with a derived request, so
 capability routing, peer routing, compaction, tool calling, structured output
 and audit behave as on that route. A stored response (``store`` not false) is
-kept in this process's memory for ``previous_response_id``. Errors, including
+kept in this process's memory for ``previous_response_id``; a response the
+store cannot keep is returned with ``store`` false. Errors, including
 auth and validation failures, are rendered as OpenAI error bodies. The wire
 translation and the store live in ``localm.inference.responses_protocol``."""
 
@@ -87,7 +88,11 @@ def register(app: FastAPI, ctx) -> None:
                 raise R.ResponsesError(
                     404, f"Previous response with id '{req.previous_response_id}' not found.",
                     "previous_response_id")
-            history = list(stored.conversation)
+            history = stored
+        ignored = R.ignored_fields(req)
+        if ignored:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("responses request keys ignored: %s", ", ".join(ignored))
         body, conversation = R.plan_chat(req, history)
         try:
             chat_req = ChatRequest(**body)
@@ -107,7 +112,10 @@ def register(app: FastAPI, ctx) -> None:
         def remember(final: dict[str, Any]) -> None:
             if req.store is False or final.get("status") == "failed":
                 return
-            STORE.put(principal, final, conversation + R.output_messages(final["output"]))
+            kept = STORE.put(principal, final["id"],
+                             conversation + R.output_messages(final["output"]))
+            if not kept:
+                final["store"] = False
 
         headers = {k: v for k, v in inner.headers.items() if k.lower().startswith("x-localm-")}
         body_iterator = getattr(inner, "body_iterator", None)

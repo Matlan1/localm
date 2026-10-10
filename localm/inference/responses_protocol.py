@@ -27,6 +27,21 @@ _ERROR_TEXT_PREFIX = "[inference error"
 # Routes a cross-origin page may call (matched exactly, like the inference API).
 CROSS_ORIGIN_OK_PATHS = frozenset({"/v1/responses"})
 
+# ``include`` values accepted with no effect.
+INCLUDE_ACCEPTED = frozenset({
+    "reasoning.encrypted_content", "file_search_call.results", "web_search_call.results",
+    "web_search_call.action.sources", "message.input_image.image_url",
+    "computer_call_output.output.image_url", "code_interpreter_call.outputs",
+})
+
+# localm chat fields a Responses request may carry (for example through an SDK's
+# ``extra_body``); they are passed to the chat route unchanged.
+CHAT_EXTRAS = (
+    "top_k", "min_p", "repeat_penalty", "presence_penalty", "frequency_penalty", "seed",
+    "stop", "grammar", "grammar_lazy", "grammar_triggers", "required_capabilities",
+    "pin_model", "min_context", "chat_template_kwargs",
+)
+
 
 class ResponsesError(Exception):
     """A request the Responses layer refuses, rendered as an OpenAI error body."""
@@ -111,20 +126,22 @@ def _content_parts(content: Any, role: str, where: str) -> Union[str, list[dict[
             parts.append({"type": "image_url", "image_url": {"url": url}})
         else:
             raise ResponsesError(400, f"{at}: a {kind!r} part is not supported", at)
-    if all(p["type"] == "text" for p in parts):
-        return "".join(p["text"] for p in parts)
+    if len(parts) == 1 and parts[0]["type"] == "text":
+        return parts[0]["text"]
     return parts
 
 
 def input_to_messages(items: Union[str, list[dict[str, Any]], None]) -> list[dict[str, Any]]:
     """Responses ``input`` as OpenAI chat messages: function calls become an
-    assistant message's ``tool_calls``, their outputs ``tool`` messages, and
+    assistant message's ``tool_calls``, their outputs ``tool`` messages (images
+    in an output go into one user message after the run of tool messages), and
     reasoning items are dropped."""
     if items is None:
         return []
     if isinstance(items, str):
         return [{"role": "user", "content": items}]
     out: list[dict[str, Any]] = []
+    pending_images: list[dict[str, Any]] = []
     for i, item in enumerate(items):
         where = f"input[{i}]"
         if not isinstance(item, dict):
@@ -156,15 +173,47 @@ def input_to_messages(items: Union[str, list[dict[str, Any]], None]) -> list[dic
             call_id = item.get("call_id")
             if not isinstance(call_id, str) or not call_id:
                 raise ResponsesError(400, f"{where}: a function_call_output needs call_id", where)
-            output = item.get("output")
-            if isinstance(output, list):
-                output = "".join(str(p.get("text") or "") for p in output if isinstance(p, dict))
-            out.append({"role": "tool", "tool_call_id": call_id, "content": str(output or "")})
+            text, images = _call_output(item.get("output"), where)
+            out.append({"role": "tool", "tool_call_id": call_id, "content": text})
+            pending_images.extend(images)
+            continue
         elif kind == "reasoning":
             continue
         else:
             raise ResponsesError(400, f"{where}: a {kind!r} item is not supported", where)
+        if pending_images:
+            out.insert(len(out) - 1, {"role": "user", "content": pending_images})
+            pending_images = []
+    if pending_images:
+        out.append({"role": "user", "content": pending_images})
     return out
+
+
+def _call_output(output: Any, where: str) -> tuple[str, list[dict[str, Any]]]:
+    """A ``function_call_output``'s ``output`` as the tool message text and the
+    image parts it carries. A string is the text; a list joins its text parts
+    and returns its ``input_image`` parts; any other part is a 400."""
+    if output is None or isinstance(output, str):
+        return output or "", []
+    if not isinstance(output, list):
+        raise ResponsesError(400, f"{where}.output must be a string or a list", f"{where}.output")
+    texts: list[str] = []
+    images: list[dict[str, Any]] = []
+    for j, part in enumerate(output):
+        kind = part.get("type") if isinstance(part, dict) else None
+        at = f"{where}.output[{j}]"
+        if kind in ("input_text", "output_text", "text"):
+            texts.append(str(part.get("text") or ""))
+        elif kind == "input_image":
+            url = part.get("image_url")
+            if not isinstance(url, str) or not url:
+                raise ResponsesError(
+                    400, f"{at}: an input_image needs image_url (a data URL or http URL); "
+                         "file_id is not supported", at)
+            images.append({"type": "image_url", "image_url": {"url": url}})
+        else:
+            raise ResponsesError(400, f"{at}: a {kind!r} part is not supported", at)
+    return "".join(texts), images
 
 
 def tools_to_chat(tools: Optional[list[dict[str, Any]]]) -> Optional[list[dict[str, Any]]]:
@@ -215,23 +264,29 @@ def text_format_to_chat(text: Optional[dict[str, Any]]) -> Optional[dict[str, An
 def refuse_unserved(req: ResponsesRequest) -> None:
     """Raise :class:`ResponsesError` (400) for a field whose meaning localm cannot
     honour: ``background``, ``conversation``, ``prompt``, ``top_logprobs``, an
-    ``include`` asking for logprobs, ``text.verbosity`` other than ``medium``,
-    and a ``truncation`` other than ``auto`` or ``disabled``."""
+    ``include`` value outside :data:`INCLUDE_ACCEPTED`, ``text.verbosity`` other
+    than ``medium``, and a ``truncation`` other than ``auto`` or ``disabled``."""
     for name, value in (("background", req.background), ("conversation", req.conversation),
                         ("prompt", req.prompt)):
         if value:
             raise ResponsesError(400, f"{name} is not supported", name)
     if req.top_logprobs:
         raise ResponsesError(400, "top_logprobs is not supported", "top_logprobs")
-    if "message.output_text.logprobs" in (req.include or []):
-        raise ResponsesError(400, "include 'message.output_text.logprobs' is not supported",
-                             "include")
+    for value in req.include or []:
+        if value not in INCLUDE_ACCEPTED:
+            raise ResponsesError(400, f"include {value!r} is not supported", "include")
     if req.truncation not in (None, "disabled", "auto"):
         raise ResponsesError(400, "truncation must be 'auto' or 'disabled'", "truncation")
     text = req.text if isinstance(req.text, dict) else {}
     if text.get("verbosity") not in (None, "medium"):
         raise ResponsesError(400, f"text.verbosity {text.get('verbosity')!r} is not supported",
                              "text.verbosity")
+
+
+def ignored_fields(req: ResponsesRequest) -> list[str]:
+    """The names of the request's fields that are neither Responses fields nor
+    :data:`CHAT_EXTRAS`; they have no effect."""
+    return sorted(k for k in (req.model_extra or {}) if k not in CHAT_EXTRAS)
 
 
 def plan_chat(req: ResponsesRequest, history: list[dict[str, Any]]
@@ -254,6 +309,10 @@ def plan_chat(req: ResponsesRequest, history: list[dict[str, Any]]
         value = getattr(req, src)
         if value is not None:
             body[dst] = value
+    extra = req.model_extra or {}
+    for key in CHAT_EXTRAS:
+        if extra.get(key) is not None:
+            body[key] = extra[key]
     tools = tools_to_chat(req.tools)
     if tools:
         body["tools"] = tools
@@ -346,7 +405,7 @@ def response_from_completion(shell: Shell, data: dict[str, Any]) -> dict[str, An
     if message.get("reasoning_content"):
         output.append(reasoning_item(message["reasoning_content"]))
     if text:
-        output.append(message_item(text))
+        output.append(message_item(text, status="incomplete" if finish == "length" else "completed"))
     for call in message.get("tool_calls") or []:
         if isinstance(call, dict):
             output.append(call_item(call))
@@ -384,7 +443,7 @@ async def response_stream(shell: Shell, events: AsyncIterator[dict[str, Any]],
         return [ev("response.created", response=created),
                 ev("response.in_progress", response=created)]
 
-    def close_current() -> list[bytes]:
+    def close_current(status: str = "completed") -> list[bytes]:
         nonlocal cur
         if cur is None:
             return []
@@ -392,7 +451,7 @@ async def response_stream(shell: Shell, events: AsyncIterator[dict[str, Any]],
         item, idx = cur["item"], cur["index"]
         if item["type"] == "message":
             text = cur["text"]
-            item = message_item(text, item["id"])
+            item = message_item(text, item["id"], status)
             out.append(ev("response.output_text.done", item_id=item["id"], output_index=idx,
                           content_index=0, text=text, logprobs=[]))
             out.append(ev("response.content_part.done", item_id=item["id"], output_index=idx,
@@ -496,7 +555,7 @@ async def response_stream(shell: Shell, events: AsyncIterator[dict[str, Any]],
             yield line
     if failure is not None or finish == "error":
         message = failure or (held or "").strip() or "generation failed"
-        for line in close_current():
+        for line in close_current("incomplete"):
             yield line
         final = shell.response(model=model, status="failed", output=output, usage=usage,
                                error={"code": "server_error", "message": message})
@@ -505,9 +564,9 @@ async def response_stream(shell: Shell, events: AsyncIterator[dict[str, Any]],
     if held is not None:
         for line in text_delta("message", held):
             yield line
-    for line in close_current():
-        yield line
     incomplete = finish == "length"
+    for line in close_current("incomplete" if incomplete else "completed"):
+        yield line
     final = shell.response(model=model, status="incomplete" if incomplete else "completed",
                            output=output, usage=usage,
                            incomplete="max_output_tokens" if incomplete else None)
@@ -542,52 +601,75 @@ def output_messages(output: list[dict[str, Any]]) -> list[dict[str, Any]]:
 @dataclass
 class _Stored:
     principal: Optional[str]
-    response: dict[str, Any]
-    conversation: list[dict[str, Any]]
-    size: int
+    data: bytes
     expires: float
 
 
 class ResponseStore:
-    """Responses kept in this process's memory for ``previous_response_id``: at
-    most ``STORE_MAX_RESPONSES`` and ``STORE_MAX_BYTES``, each for
-    ``STORE_TTL_SECONDS``, oldest dropped first, and visible only to the
-    principal that created it. A response larger than ``STORE_MAX_BYTES`` is not
-    kept. Never written to disk. Thread-safe."""
+    """The conversations of stored responses, kept in this process's memory as
+    UTF-8 JSON for ``previous_response_id``: at most ``STORE_MAX_RESPONSES``
+    entries and ``STORE_MAX_BYTES`` of JSON, each until ``STORE_TTL_SECONDS``
+    after it was stored (an expired entry is removed at the next :meth:`put` or
+    :meth:`get`), and visible only to the principal that stored it. Past a bound,
+    the oldest entry of the principal holding the most entries (count bound) or
+    the most bytes (byte bound) is dropped. Never written to disk. Thread-safe."""
 
     def __init__(self, max_items: int = STORE_MAX_RESPONSES,
                  max_bytes: int = STORE_MAX_BYTES, ttl: float = STORE_TTL_SECONDS) -> None:
         self._items: OrderedDict[str, _Stored] = OrderedDict()
+        self._usage: dict[Optional[str], list[int]] = {}
         self._bytes = 0
         self._lock = threading.Lock()
         self._max_items = max_items
         self._max_bytes = max_bytes
         self._ttl = ttl
 
+    def _drop(self, key: str) -> None:
+        entry = self._items.pop(key)
+        usage = self._usage[entry.principal]
+        usage[0] -= 1
+        usage[1] -= len(entry.data)
+        if usage[0] == 0:
+            del self._usage[entry.principal]
+        self._bytes -= len(entry.data)
+
     def _expire(self, now: float) -> None:
         for key in [k for k, v in self._items.items() if v.expires <= now]:
-            self._bytes -= self._items.pop(key).size
+            self._drop(key)
 
-    def put(self, principal: Optional[str], response: dict[str, Any],
-            conversation: list[dict[str, Any]]) -> None:
-        size = len(json.dumps([response, conversation], ensure_ascii=False))
-        if size > self._max_bytes:
-            return
+    def _evict(self) -> None:
+        while len(self._items) > self._max_items or self._bytes > self._max_bytes:
+            slot = 0 if len(self._items) > self._max_items else 1
+            victim = max(self._usage, key=lambda p: self._usage[p][slot])
+            self._drop(next(k for k, v in self._items.items() if v.principal == victim))
+
+    def put(self, principal: Optional[str], response_id: str,
+            conversation: list[dict[str, Any]]) -> bool:
+        """Store *conversation* under *response_id* for *principal*. Returns
+        whether it is kept: False when its JSON is larger than the byte bound, or
+        when making room dropped it."""
+        data = json.dumps(conversation, ensure_ascii=False).encode("utf-8")
+        if len(data) > self._max_bytes:
+            return False
         now = time.monotonic()
         with self._lock:
             self._expire(now)
-            self._items[response["id"]] = _Stored(principal, response, conversation, size,
-                                                  now + self._ttl)
-            self._bytes += size
-            while self._items and (len(self._items) > self._max_items
-                                   or self._bytes > self._max_bytes):
-                _, old = self._items.popitem(last=False)
-                self._bytes -= old.size
+            if response_id in self._items:
+                self._drop(response_id)
+            self._items[response_id] = _Stored(principal, data, now + self._ttl)
+            usage = self._usage.setdefault(principal, [0, 0])
+            usage[0] += 1
+            usage[1] += len(data)
+            self._bytes += len(data)
+            self._evict()
+            return response_id in self._items
 
-    def get(self, principal: Optional[str], response_id: str) -> Optional[_Stored]:
+    def get(self, principal: Optional[str], response_id: str) -> Optional[list[dict[str, Any]]]:
+        """The conversation stored under *response_id* for *principal*, or None
+        when there is none (unknown, expired, dropped, or another principal's)."""
         with self._lock:
             self._expire(time.monotonic())
             entry = self._items.get(response_id)
         if entry is None or entry.principal != principal:
             return None
-        return entry
+        return json.loads(entry.data)
