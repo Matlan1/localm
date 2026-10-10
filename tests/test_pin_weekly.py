@@ -643,12 +643,85 @@ def test_github_candidate_unparseable_pin_raises(monkeypatch):
         find()
 
 
+class _FakeAmd:
+    _TORCH_STACK = ("torch", "torchvision")
+    _PACKAGES = ("torch", "torchvision", "rocm-sdk-core")
+
+    def __init__(self, published, pinned):
+        self.published, self.pinned = published, pinned
+
+    def _fetch_index(self, pkg):
+        return None if self.published.get(pkg) == "down" else [pkg]
+
+    def _parse_wheel(self, href):
+        return {"pkg": href}
+
+    def _pinned_torch_stack_version(self, pkg):
+        return self.pinned[pkg]
+
+    def _pinned_rocm_sdk_version(self, pkg):
+        return self.pinned[pkg]
+
+    def newest_win_amd64_version(self, wheels, pytag=None):
+        raw = self.published[wheels[0]["pkg"]]
+        return raw, tuple(int(p) for p in raw.split("+")[0].split("."))
+
+    def _base_version_tuple(self, version):
+        return tuple(int(p) for p in version.split("+")[0].split("."))
+
+
+_AMD_PINNED = {"torch": "2.11.0+rocm7.13.0", "torchvision": "0.26.0+rocm7.13.0",
+               "rocm-sdk-core": "7.13.0"}
+
+
+def test_amd_wheels_candidate_is_none_when_nothing_is_newer():
+    assert pw._amd_wheels_candidate(_FakeAmd(dict(_AMD_PINNED), _AMD_PINNED)) is None
+
+
+def test_amd_wheels_candidate_lists_all_packages_with_only_the_moved_ones_changed():
+    published = {**_AMD_PINNED, "torch": "2.12.0+rocm7.14.0"}
+    old, new = pw._amd_wheels_candidate(_FakeAmd(published, _AMD_PINNED))
+    assert old == "torch==2.11.0+rocm7.13.0,torchvision==0.26.0+rocm7.13.0,rocm-sdk-core==7.13.0"
+    assert new == "torch==2.12.0+rocm7.14.0,torchvision==0.26.0+rocm7.13.0,rocm-sdk-core==7.13.0"
+
+
+def test_amd_wheels_candidate_keeps_the_pinned_string_for_a_package_that_did_not_move():
+    published = {**_AMD_PINNED, "torch": "2.12.0+rocm7.14.0", "torchvision": "0.26.0+rocm7.12.0"}
+    _, new = pw._amd_wheels_candidate(_FakeAmd(published, _AMD_PINNED))
+    assert "torchvision==0.26.0+rocm7.13.0" in new and "rocm7.12.0" not in new
+
+
+def test_amd_wheels_candidate_raises_when_the_index_is_unreachable():
+    published = {**_AMD_PINNED, "torchvision": "down"}
+    with pytest.raises(cp.FetchError):
+        pw._amd_wheels_candidate(_FakeAmd(published, _AMD_PINNED))
+
+
+def test_amd_wheels_candidate_raises_when_a_pin_cannot_be_read():
+    with pytest.raises(cp.FetchError):
+        pw._amd_wheels_candidate(_FakeAmd(dict(_AMD_PINNED), {**_AMD_PINNED, "torch": None}))
+
+
+def test_a_bump_refusal_that_names_a_code_update_is_reported_once(env, monkeypatch):
+    (env.worktree / "scripts" / "bump_fake_pin.py").write_text(
+        "import sys\nprint('REFUSED: this release needs a code update to choose a file')\nsys.exit(1)\n",
+        encoding="utf-8")
+    out = pw.advance(_review_adv(), dry_run=False)
+    assert out.verdict == pw.NEEDS_UPDATE
+    text = env.issues.read_text(encoding="utf-8")
+    assert text.count("NEEDS-CODE-UPDATE [OPEN") == 1 and "CONFIRM-FAILED" not in text
+    again = pw.advance(_review_adv(candidate=lambda: ("v1", "v3")), dry_run=False)
+    assert again.verdict == pw.NEEDS_UPDATE
+    assert env.issues.read_text(encoding="utf-8").count("NEEDS-CODE-UPDATE [OPEN") == 1
+    assert "push" not in [c[0] for c in env.calls]
+
+
 def test_shipped_advancers_cover_every_runtime_with_a_pipeline_or_a_named_gap():
     advs = pw.build_advancers()
     assert [a.key for a in advs] == [
         "llama", "comfyui", "rocm", "koboldcpp", "sdcpp", "uv", "vendored-marked",
         "vendored-dompurify", "vendored-highlightjs", "vendored-katex", "cuda-runtime",
-        "gguf-node", "docker-base"]
+        "amd-wheels", "gguf-node", "docker-base"]
     assert all(a.auto_merge("1.0.0", "1.0.1") is False for a in advs if a.confirm_script is None)
     assert len({a.key for a in advs}) == len(advs)
     for a in advs:

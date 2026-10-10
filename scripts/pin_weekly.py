@@ -311,6 +311,16 @@ def _bump_with_error_handling(adv: Advancer, out: Outcome, old: str, new: str,
         pp._record_inconclusive(new, receipt, pin=adv.key, reason=str(e))
         out.verdict, out.detail = INCONCLUSIVE, f"infra: {e}"
     except pp.PipelineError as e:
+        if CODE_UPDATE_MARKER in str(e):
+            reason = f"{new} needs a change to localm's own code before the pin can move"
+            pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
+                           "receipt_path": str(receipt or ""), "reason": reason}, pin=adv.key)
+            pp.append_fail_issue(
+                "binding", reason, receipt, pin=adv.key, kind="NEEDS-CODE-UPDATE",
+                summary=f"{adv.title} releases newer than the pin need a code change in localm\n"
+                        f"    scripts/pin_weekly.py tried to bump to {new}: {str(e)[-400:]}")
+            out.verdict, out.detail = NEEDS_UPDATE, f"{reason}: {str(e)[-300:]}"
+            return out
         pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
                        "receipt_path": str(receipt or ""), "reason": str(e)}, pin=adv.key)
         pp.append_fail_issue(new, str(e), receipt, pin=adv.key)
@@ -563,6 +573,33 @@ def _docker_base_candidate() -> tuple[str, str] | None:
     return None if current == pinned else (pinned, current)
 
 
+def _amd_wheels_candidate(mod=None) -> tuple[str, str] | None:
+    """The four AMD ROCm wheel pins as ``pkg==version`` lists: (pinned, newest published)
+    when any package has a newer wheel on AMD's index, else None."""
+    mod = mod or _load("check_amd_rocm_wheels_pin", SCRIPTS / "check_amd_rocm_wheels_pin.py")
+    old, new, moved = [], [], False
+    for pkg in mod._PACKAGES:
+        hrefs = mod._fetch_index(pkg)
+        if hrefs is None:
+            raise cp.FetchError(f"the AMD wheel index is unreachable for {pkg}")
+        wheels = [w for w in (mod._parse_wheel(h) for h in hrefs) if w is not None]
+        pinned = (mod._pinned_torch_stack_version(pkg) if pkg in mod._TORCH_STACK
+                  else mod._pinned_rocm_sdk_version(pkg))
+        newest = mod.newest_win_amd64_version(
+            wheels, pytag="cp312" if pkg in mod._TORCH_STACK else None)
+        pinned_tuple = mod._base_version_tuple(pinned) if pinned else None
+        if pinned is None or newest is None or pinned_tuple is None:
+            raise cp.FetchError(f"cannot compare the pinned and published {pkg} versions")
+        newest_raw, newest_tuple = newest
+        old.append(f"{pkg}=={pinned}")
+        if newest_tuple > pinned_tuple:
+            moved = True
+            new.append(f"{pkg}=={newest_raw}")
+        else:
+            new.append(f"{pkg}=={pinned}")
+    return (",".join(old), ",".join(new)) if moved else None
+
+
 def _rocm_candidate() -> tuple[str, str] | None:
     mod = _load("check_llama_rocm_pin", SCRIPTS / "check_llama_rocm_pin.py")
     pin = mod.pinned_tag()
@@ -668,6 +705,8 @@ def _review_only_advancers() -> list[Advancer]:
         *vendored,
         Advancer("cuda-runtime", "Linux CUDA runtime wheels", None,
                  "scripts/bump_cuda_runtime_pin.py", candidate=_cuda_runtime_candidate, gpu=False),
+        Advancer("amd-wheels", "AMD ROCm torch and SDK wheels", None,
+                 "scripts/bump_amd_wheels_pin.py", candidate=_amd_wheels_candidate, gpu=False),
         Advancer("gguf-node", "ComfyUI-GGUF node", None, "scripts/bump_gguf_node_pin.py",
                  candidate=_gguf_node_candidate, gpu=False),
         Advancer("docker-base", "Docker base image", None, "scripts/bump_docker_base_pin.py",
