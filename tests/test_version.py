@@ -316,18 +316,23 @@ def test_cli_version_fallback_is_package_version(monkeypatch):
         raise OSError("VERSION unreadable")
 
     monkeypatch.setattr(_version, "read_version", _unreadable)
-    assert _core._read_version_for_cli() == localm.__version__
+    monkeypatch.setattr(localm, "__version__", "9.8.7")
+    assert _core._read_version_for_cli() == "9.8.7"
 
 
 def test_mcp_server_reports_package_version():
-    import localm
-    from localm.plugins.mcpserver import server
-    assert server.SERVER_VERSION == localm.__version__
+    import subprocess
+    code = ("import localm; localm.__version__ = '9.8.7'; "
+            "from localm.plugins.mcpserver import server; print(server.SERVER_VERSION)")
+    out = subprocess.run([sys.executable, "-c", code], cwd=str(_REPO), check=True,
+                         capture_output=True, text=True, timeout=120)
+    assert out.stdout.strip().splitlines()[-1] == "9.8.7"
 
 
-def test_mcp_client_sends_package_version(tmp_path):
-    import localm
+def test_mcp_client_sends_package_version(tmp_path, monkeypatch):
+    from localm.plugins.coder import mcp
     from localm.plugins.coder.mcp import MCPServer
+    monkeypatch.setattr(mcp, "_LOCALM_VERSION", "9.8.7")
     seen = tmp_path / "client_info.txt"
     script = tmp_path / "fake_mcp.py"
     script.write_text(
@@ -348,7 +353,7 @@ def test_mcp_client_sends_package_version(tmp_path):
         server.start()
     finally:
         server.stop()
-    assert seen.read_text(encoding="utf-8") == localm.__version__
+    assert seen.read_text(encoding="utf-8") == "9.8.7"
 
 
 def test_pyproject_and_lock_match_version_file():
