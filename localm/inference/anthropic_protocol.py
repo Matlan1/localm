@@ -64,6 +64,7 @@ class _Base(BaseModel):
     tools: Optional[list[dict[str, Any]]] = None
     tool_choice: Optional[dict[str, Any]] = None
     thinking: Optional[dict[str, Any]] = None
+    output_config: Optional[dict[str, Any]] = None
     mcp_servers: Optional[Any] = None
 
 
@@ -85,17 +86,36 @@ class CountTokensRequest(_Base):
 
 
 def thinking_enabled(thinking: Optional[dict[str, Any]]) -> bool:
-    """Whether a ``thinking`` value asks for reasoning (``enabled`` or
-    ``adaptive``); absent and ``disabled`` do not. Raises a 400 for anything
-    else."""
+    """Whether a ``thinking`` value asks for reasoning (``enabled``,
+    ``adaptive`` or ``between_tools``); absent and ``disabled`` do not. Raises a
+    400 for anything else."""
     if thinking is None:
         return False
     kind = thinking.get("type") if isinstance(thinking, dict) else None
-    if kind in ("enabled", "adaptive"):
+    if kind in ("enabled", "adaptive", "between_tools"):
         return True
     if kind == "disabled":
         return False
-    raise AnthropicError(400, "thinking.type must be 'enabled', 'adaptive' or 'disabled'")
+    raise AnthropicError(
+        400, "thinking.type must be 'enabled', 'adaptive', 'between_tools' or 'disabled'")
+
+
+def output_format(output_config: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """``output_config.format`` as an OpenAI ``response_format`` (a strict JSON
+    schema), or ``None`` when no format is set. Raises a 400 for a malformed
+    one."""
+    if output_config is None:
+        return None
+    if not isinstance(output_config, dict):
+        raise AnthropicError(400, "output_config must be an object")
+    fmt = output_config.get("format")
+    if fmt is None:
+        return None
+    if not isinstance(fmt, dict) or fmt.get("type") != "json_schema"             or not isinstance(fmt.get("schema"), dict):
+        raise AnthropicError(
+            400, "output_config.format must be {\"type\": \"json_schema\", \"schema\": {...}}")
+    return {"type": "json_schema",
+            "json_schema": {"name": "output", "schema": fmt["schema"], "strict": True}}
 
 
 def _system_text(system: Any) -> str:
@@ -277,6 +297,9 @@ def _common(req: _Base) -> dict[str, Any]:
     if parallel is not None and tools:
         body["parallel_tool_calls"] = parallel
     body["chat_template_kwargs"] = {"enable_thinking": thinking_enabled(req.thinking)}
+    fmt = output_format(req.output_config)
+    if fmt is not None:
+        body["response_format"] = fmt
     return body
 
 

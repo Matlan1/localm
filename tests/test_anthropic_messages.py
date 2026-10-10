@@ -425,3 +425,28 @@ def test_x_api_key_works_on_the_openai_routes_too(home, monkeypatch):
     assert served.client.post("/v1/chat/completions", json=body).status_code == 401
     assert served.client.post("/v1/chat/completions", json=body,
                               headers={"x-api-key": KEY}).status_code == 200
+
+
+def test_output_config_format_constrains_the_reply_to_the_schema(home):
+    schema = {"type": "object", "properties": {"city": {"type": "string"}},
+              "required": ["city"], "additionalProperties": False}
+    served = Served(['{"city": "Oslo"}'])
+    r = served.post(output_config={"format": {"type": "json_schema", "schema": schema},
+                                   "effort": "low"})
+    assert r.status_code == 200, r.text
+    assert json.loads(r.json()["content"][0]["text"]) == {"city": "Oslo"}
+    assert '"\\"city\\""' in served.kwargs["grammar"]
+    assert served.kwargs["thinking"] is False
+
+
+@pytest.mark.parametrize("config", [
+    {"format": {"type": "json_object"}}, {"format": {"type": "json_schema"}}, "json"])
+def test_a_malformed_output_config_is_a_400(home, config):
+    r = Served().post(output_config=config)
+    assert r.status_code == 400 and "output_config" in r.json()["error"]["message"]
+
+
+def test_between_tools_thinking_turns_thinking_on(home):
+    served = Served()
+    served.post(thinking={"type": "between_tools"})
+    assert served.kwargs["thinking"] is True

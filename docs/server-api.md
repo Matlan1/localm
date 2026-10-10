@@ -400,9 +400,10 @@ compaction, tool calling and the response headers work the same way.
 | `system` | A string or a list of text blocks. |
 | `stop_sequences`, `temperature`, `top_p`, `top_k` | Applied. |
 | `tools`, `tool_choice` | Custom tools (`name`, `description`, `input_schema`) work with any chat model, as in [Tool calling](#tool-calling). `tool_choice` `auto`, `any`, `tool` (by name) and `none`; `disable_parallel_tool_use` allows one call. Server tools (web search, code execution, ...) and `mcp_servers` are a 400. |
-| `thinking` | `{"type": "enabled"}` (or `adaptive`) lets a reasoning model think and returns its reasoning as a `thinking` block; without it, or with `disabled`, the model answers without thinking. `budget_tokens` is not applied. |
+| `thinking` | `{"type": "enabled"}` (or `adaptive`, `between_tools`) lets a reasoning model think and returns its reasoning as a `thinking` block; without it, or with `disabled`, the model answers without thinking. `budget_tokens` is not applied. |
+| `output_config` | `format: {"type": "json_schema", "schema": {...}}` constrains the reply to the schema, as a strict `response_format` does on chat (see [Structured output](#structured-output)). `effort` is accepted and not applied. |
 | `stream` | Server-sent events in Anthropic's order: `message_start`, `ping`, per block `content_block_start` / `content_block_delta` (`text_delta`, `thinking_delta` then `signature_delta`, `input_json_delta` carrying a tool call's whole input) / `content_block_stop`, then `message_delta` with `stop_reason` and `usage`, then `message_stop`. `message_start` reports 0 input tokens; `message_delta` carries the real `input_tokens` and `output_tokens`. A generation that fails partway ends with an `error` event. |
-| `metadata`, `service_tier` | Accepted; no effect. |
+| `metadata`, `service_tier`, `cache_control`, `inference_geo` | Accepted; no effect. |
 
 `stop_reason` is `end_turn`, `max_tokens`, `stop_sequence` (with `stop_sequence` naming the match)
 or `tool_use`. A thinking block carries an empty `signature`. Errors use Anthropic's shape,
