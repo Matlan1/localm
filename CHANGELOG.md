@@ -62,6 +62,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   requests). The requests share the model's context window: one that does not fit beside
   the running ones waits for them and shows a waiting status. A reply generated beside
   others can differ slightly from the same request run alone, even at temperature 0.
+- **`localm setup-music` installs native music generation.** It downloads the KoboldCpp
+  build that runs ACE-Step 1.5 on this machine (CUDA, Vulkan, CPU or Metal) from a pinned
+  release through the network policy, checks its size and checksum before running it, pulls
+  the default ACE-Step 1.5 models, and generates a short test track, falling back to Vulkan
+  and then CPU (CPU on Apple Silicon) when the preferred backend does not start. `--backend`
+  picks one, `--status` shows what is installed, and `--no-models` / `--no-test` skip those
+  steps.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the
@@ -440,6 +447,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **ACE-Step music model files are no longer listed as chat models.** A pulled ACE-Step
+  diffusion model, VAE or text encoder is registered as that kind of model and the planner
+  as a non-chat model, and choosing any of them for chat says it is a music generation
+  model component.
 - **Malformed files and requests are refused with a clear error instead of crashing.** The MCP server no longer exits when a client sends a `tools/call` with the wrong parameter shape, a 4300-digit
   number or deeply nested JSON; a grammar with an enormous repeat count is rejected as an invalid grammar; a plugin
   with a non-UTF-8, over-nested or wrong-typed `plugin.toml` is reported as broken without hiding the other plugins;
