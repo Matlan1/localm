@@ -114,6 +114,17 @@ def rocm_library_dirs() -> list[Path]:
     return found
 
 
+_detection_cache: list = []
+
+
+def _detected():
+    """``hwdetect.detect()``, run once per process."""
+    if not _detection_cache:
+        from localm import hwdetect
+        _detection_cache.append(hwdetect.detect())
+    return _detection_cache[0]
+
+
 def recommended_backend(det=None) -> str:
     """The backend ``auto`` installs on this machine: metal on Apple Silicon,
     cuda for NVIDIA where upstream ships a CUDA build, rocm for AMD when hipBLAS
@@ -121,8 +132,7 @@ def recommended_backend(det=None) -> str:
     plat = platform_key()
     if plat == "macos-arm64":
         return "metal"
-    from localm import hwdetect
-    d = det if det is not None else hwdetect.detect()
+    d = det if det is not None else _detected()
     if d.gpu_state == "none":
         return "cpu"
     if "nvidia" in d.vendors and (plat, "cuda") in pins.ASSETS:
@@ -135,7 +145,7 @@ def recommended_backend(det=None) -> str:
 def _read_json(path: Path) -> Optional[dict]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
 
 

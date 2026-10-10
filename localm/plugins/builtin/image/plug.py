@@ -64,6 +64,7 @@ class ImagineRequest(BaseModel):
     lora_name: str | None = None              # from the live LoRA picker, or None
     lora_strength_model: float | None = Field(None, allow_inf_nan=False)  # None keeps generate_image()'s default (1.0)
     lora_strength_clip: float | None = Field(None, allow_inf_nan=False)   # None keeps generate_image()'s default (0.5)
+    size: str | None = None                   # WIDTHxHEIGHT, or None for the backend's default
 
 
 class MoveFileRequest(BaseModel):
@@ -108,9 +109,18 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
         from localm.config import load_config
         # Resolved here, in the job's own worker thread, not the route above.
         _cfg = load_config()
-        s = _backend.settings(_cfg)
+        s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
+        if s.get("backend_note"):
+            job.push({"type": "line", "text": s["backend_note"]})
+        if s.get("backend") == "native":
+            from .backends import native
+            refused = native.refusal(model_overrides=req.model_overrides,
+                                     lora_name=lora_name, width=width, height=height)
+            if refused:
+                job.push({"type": "line", "text": refused})
+                return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
         job.push({"type": "line", "text": msg})
@@ -118,13 +128,15 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             return False
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
                                  unload_chat_for_media)
-        from localm.media.comfy_client import resolve_media_placement
-        # Per-component GPU placement (opt-in) plus the user-facing notice, in one shared
-        # helper (image/music/video share this preamble). placement is applied inside
-        # generate_image; notice is what to tell the user.
-        placement, notice = resolve_media_placement(_cfg, s["api_url"])
-        if notice:
-            job.push({"type": "line", "text": notice})
+        placement = None
+        if s.get("backend") == "comfy":
+            from localm.media.comfy_client import resolve_media_placement
+            # Per-component GPU placement (opt-in) plus the user-facing notice, in one
+            # shared helper (image/music/video share this preamble). placement is
+            # applied inside generate_image; notice is what to tell the user.
+            placement, notice = resolve_media_placement(_cfg, s["api_url"])
+            if notice:
+                job.push({"type": "line", "text": notice})
         swap = decide_media_swap(s)
         # The gate above reads COMBINED free VRAM across a configured GPU split,
         # but each media model component loads WHOLE onto ONE card (localm ORDERS the
@@ -150,7 +162,8 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             job.push({"type": "line", "text":
                       "Both models fit in VRAM - keeping the chat model loaded "
                       "(no swap)."})
-        job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
+        if s.get("backend") == "comfy":
+            job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
         is_privacy = effective_mode("server") == SessionMode.PRIVACY
         # privacy mode forces deletion of ComfyUI's own output copy: no traces
         # left anywhere, regardless of the configured delete_outputs preference.
@@ -210,6 +223,7 @@ async def imagine(req: ImagineRequest, request: Request):
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)
     lora_name = _validate_lora_name(req.lora_name) if req.lora_name else None
+    width, height = parse_image_size(req.size) or (None, None)
 
     # Any app built through attach_engine has a background-job registry, so
     # reaching this branch means the router was mounted on an app that never ran
@@ -241,9 +255,37 @@ async def imagine(req: ImagineRequest, request: Request):
         "imagine",
         _make_generate(req, input_image=input_image, lora_name=lora_name,
                        out_path=out_path, owner=owner, self_url=self_url,
-                       instance_token=instance_token),
+                       instance_token=instance_token, width=width, height=height),
         result_path=out_path.name, owner=owner)
     return {"job_id": job.id}
+
+
+@_router.get("/api/imagine/backend")
+async def imagine_backend():
+    """Which image backend generation will use: ``choice`` (configured),
+    ``active`` (``auto`` resolved as a job resolves it, with one short probe of
+    the configured ComfyUI address) and
+    ``note``; for the native backend also ``native`` (see
+    ``backends.native.status``). Reads config, the registry and the runtime
+    directory, off the event loop."""
+    from localm.config import load_config
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+
+    def _read():
+        from localm.media import backend_choice
+        s = backend_choice.refine_auto(_backend.settings(load_config()), "Image")
+        out = {"choice": s.get("backend_choice"), "active": s.get("backend"),
+               "note": s.get("backend_note"), "warning": s.get("warning")}
+        if s.get("backend") == "native":
+            from .backends import native
+            out["native"] = native.status(s)
+        return out
+    try:
+        return await run_in_threadpool_bounded(_read, timeout=20.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading the image backend settings timed out: {e}") from e
 
 
 MAX_IMAGES_PER_REQUEST = 4
@@ -634,7 +676,7 @@ async def imagine_comfy_launch():
     try:
         s = await run_in_threadpool_bounded(_backend.settings, cfg, timeout=20.0)
         ok, message = await run_in_threadpool_bounded(
-            _backend.ensure_available, s, timeout=budget)
+            _backend._COMFY_REF.ensure_available, s, timeout=budget)
     except ThreadCallTimeout as e:
         raise HTTPException(504, f"Launching ComfyUI timed out: {e}") from e
     return {"ok": ok, "message": message, "api_url": s["api_url"]}

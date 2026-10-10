@@ -997,6 +997,28 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     if not arg:
         console.print(f"[dim]Usage: /{label} <{spec['arg']}>[/dim]")
         return
+    if spec["plugin"] == "image":
+        import time as _t
+
+        from ..audit import SessionMode, effective_mode
+        from ..plugins.builtin.image import backend as image_backend
+        out_dir = home_dir / spec["subdir"]
+        out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
+
+        def _unload_chat() -> None:
+            console.print("[dim]Freeing VRAM (chat model unloads, "
+                          "reloads on your next message)...[/dim]")
+            engine.unload()
+
+        is_privacy = effective_mode("chat") == SessionMode.PRIVACY
+        out_dir.mkdir(parents=True, exist_ok=True)
+        result = image_backend.generate_unless_comfy(
+            arg, out, before_generate=_unload_chat,
+            on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
+            write_sidecar=not is_privacy, delete_outputs=is_privacy)
+        if result is not None:
+            console.print(escape(result[1]))
+            return
     from ..image_gen.comfy import ensure_comfy, free_comfy_vram
     from .media import _plugin_api_url
     api = _plugin_api_url(spec["plugin"])

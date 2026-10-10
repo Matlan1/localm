@@ -441,3 +441,38 @@ def test_a_remote_that_has_no_section_says_what_it_observed(env, monkeypatch):
     assert "reports no settings" in res.output
     assert "No such plugin" not in res.output
     assert "not enabled" not in res.output
+
+
+# --------------------------------------------------------------------------- #
+#  A reply holding over-nested or over-long-integer JSON                       #
+# --------------------------------------------------------------------------- #
+
+_HOSTILE_DOCS = pytest.mark.parametrize(
+    "doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+
+
+@_HOSTILE_DOCS
+def test_a_hostile_field_listing_is_reported_as_not_json(env, monkeypatch, doc):
+    from tests._hostile_json import serve
+    _install_widget(env, enable=True)
+    with serve({"/v1/plugins/settings": doc}) as base:
+        monkeypatch.setenv("LOCALM_URL", base)
+        res = _run("widget")
+    assert res.exit_code == 1
+    assert "not valid JSON" in res.output
+
+
+@_HOSTILE_DOCS
+def test_a_hostile_write_reply_says_the_outcome_is_unknown(env, monkeypatch, doc):
+    from tests._hostile_json import serve
+    _install_widget(env, enable=True)
+    fields = [{"key": "greeting", "widget": "text", "label": "Greeting",
+               "value": "hi", "default": "hi", "is_override": False}]
+    listing = json.dumps({"plugins": [{"plugin": "widget", "label": "Widget",
+                                       "fields": fields}]})
+    with serve({"/v1/plugins/settings": listing,
+                "/v1/plugins/widget/settings": doc}) as base:
+        monkeypatch.setenv("LOCALM_URL", base)
+        res = _run("widget", "greeting", "yo")
+    assert res.exit_code == 1
+    assert "not valid JSON" in res.output

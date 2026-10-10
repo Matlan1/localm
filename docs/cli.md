@@ -308,13 +308,19 @@ localm unload [MODEL]           # free VRAM on the running server: all models, o
 
 ## Media generation
 
-These are core CLI commands (they need only a running ComfyUI, not a plugin install). The GUI Media pages and the `/generate-*` chat commands belong to the media plugins. See [docs/flux-setup.md](flux-setup.md) and [docs/video.md](video.md) for model setup.
+These are core CLI commands, not plugin installs. The GUI Media pages and the `/generate-*` chat commands belong to the media plugins. See [docs/flux-setup.md](flux-setup.md) and [docs/video.md](video.md) for ComfyUI model setup.
 
 ```bash
 localm image "A cat on a sunny beach"
+localm image "a lighthouse at dusk" --size 768x512
 localm music "lofi, jazzy, mellow" --lyrics song.txt -d 180
 localm video "a fox runs through snow" --duration 5
 ```
+
+`localm image` needs no ComfyUI: with nothing set up it uses the built-in native
+backend (stable-diffusion.cpp), which installs its runtime on first use. Music
+and video still need ComfyUI. `localm setup-sdcpp` (under Setup and diagnostics)
+installs the runtime ahead of time. Full guide: [docs/native-image.md](native-image.md).
 
 ### localm's own ComfyUI (optional)
 

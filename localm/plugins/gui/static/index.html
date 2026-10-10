@@ -498,17 +498,18 @@
     <section id="view-images" class="view">
       <div class="page">
         <h2 data-i18n="images.title">Image generation</h2>
-        <div class="sub" data-i18n="images.intro">Runs your local ComfyUI FLUX pipeline. The LLM unloads automatically
-        to free VRAM for the image model, and reloads on the next chat request. Needs a GPU to be practical - CPU
-        generation is far too slow for this workflow.</div>
+        <div class="sub" data-i18n="images.intro">Generates images on this machine with the built-in
+        stable-diffusion.cpp backend, or with your ComfyUI (Settings, Images). The chat model unloads when the
+        image model needs the VRAM and reloads afterwards.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="image"></span>
             <div class="card-head-text"><h3 data-i18n="mediaGallery.generate">Generate</h3></div></div>
+          <div class="sub" id="img-backend-note" hidden></div>
           <label data-i18n="images.promptLabel">Prompt</label>
           <textarea id="img-prompt" rows="3" placeholder="a watercolor fox in a snowy forest" data-i18n-placeholder="images.promptPlaceholder"></textarea>
           <div class="grid2">
             <div><label data-i18n="images.negativePromptLabel">Negative prompt</label><input type="text" id="img-negative" placeholder="optional" data-i18n-placeholder="mediaGallery.optionalPlaceholder"></div>
-            <div><label data-i18n="images.loraLabel">LoRA</label><select id="img-lora"><option value="" data-i18n="images.loraNone">None</option></select></div>
+            <div id="img-lora-field"><label data-i18n="images.loraLabel">LoRA</label><select id="img-lora"><option value="" data-i18n="images.loraNone">None</option></select></div>
           </div>
           <label data-i18n="images.inputImageLabel">Input image path (optional, img2img)</label>
           <input type="text" id="img-input" placeholder="path to a base image" spellcheck="false" data-i18n-placeholder="images.inputImagePlaceholder">
@@ -516,14 +517,15 @@
                the tuned default". "reuse settings" on a history item writes into
                them, so it calls revealFilledAdvanced and this opens itself. -->
           <details class="adv-fold" id="img-advanced">
-            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="images.advancedHint">seed, guidance, denoise, CFG, LoRA strength</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <summary data-i18n="chat.advanced">Advanced <span class="adv-fold-hint" data-i18n="images.advancedHint">size, seed, guidance, denoise, CFG, LoRA strength</span><span class="job-state adv-fold-count" hidden></span></summary>
             <div class="adv-fold-body grid2">
+              <div><label data-i18n="images.sizeLabel">Size</label><input type="text" id="img-size" placeholder="model default, e.g. 768x512" spellcheck="false" data-i18n-placeholder="images.sizePlaceholder"></div>
               <div><label data-i18n="chat.seed">Seed</label><input type="number" id="img-seed" placeholder="random" data-i18n-placeholder="mediaGallery.randomPlaceholder"></div>
               <div><label data-i18n="images.guidanceLabel">Guidance</label><input type="number" id="img-guidance" step="0.1" placeholder="default (~3.5)" data-i18n-placeholder="images.guidancePlaceholder"></div>
               <div><label data-i18n="images.denoiseLabel">Denoise (img2img)</label><input type="number" id="img-denoise" step="0.05" min="0" max="1" placeholder="default" data-i18n-placeholder="mediaGallery.defaultPlaceholder"></div>
               <div><label data-i18n="mediaGallery.cfgLabel">CFG</label><input type="number" id="img-cfg" step="0.5" placeholder="default 3.5, only with negative prompt" data-i18n-placeholder="images.cfgPlaceholder"></div>
-              <div><label data-i18n="images.loraStrengthModelLabel">LoRA strength (model)</label><input type="number" id="img-lora-strength-model" step="0.05" placeholder="default (1.0)" data-i18n-placeholder="images.loraStrengthModelPlaceholder"></div>
-              <div><label data-i18n="images.loraStrengthClipLabel">LoRA strength (CLIP)</label><input type="number" id="img-lora-strength-clip" step="0.05" placeholder="default (0.5)" data-i18n-placeholder="images.loraStrengthClipPlaceholder"></div>
+              <div class="img-comfy-only"><label data-i18n="images.loraStrengthModelLabel">LoRA strength (model)</label><input type="number" id="img-lora-strength-model" step="0.05" placeholder="default (1.0)" data-i18n-placeholder="images.loraStrengthModelPlaceholder"></div>
+              <div class="img-comfy-only"><label data-i18n="images.loraStrengthClipLabel">LoRA strength (CLIP)</label><input type="number" id="img-lora-strength-clip" step="0.05" placeholder="default (0.5)" data-i18n-placeholder="images.loraStrengthClipPlaceholder"></div>
             </div>
           </details>
           <div class="actions">
@@ -544,7 +546,7 @@
           <div id="img-bulk" class="media-bulk" style="display:none"></div>
           <div id="img-history" class="media-grid"></div>
         </div>
-        <div class="card">
+        <div class="card" id="img-workflow-card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
             <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
           <div class="sub" data-i18n="workflow.intro">The ComfyUI workflow this page uses. Upload one (in

@@ -571,3 +571,43 @@ def test_the_translator_drops_a_stop_sequence_on_a_tool_use_reply():
     delta = [json.loads(x.decode().split("data: ", 1)[1]) for x in lines
              if b"message_delta" in x][0]["delta"]
     assert delta == {"stop_reason": "tool_use", "stop_sequence": None}
+
+
+_HOSTILE_DOCS = pytest.mark.parametrize(
+    "doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+
+
+@_HOSTILE_DOCS
+def test_a_hostile_tool_call_argument_string_becomes_an_empty_input(doc):
+    block = A._tool_use_block({"id": "c", "function": {"name": "f", "arguments": doc}})
+    assert block["input"] == {} and block["name"] == "f"
+
+
+@_HOSTILE_DOCS
+def test_a_hostile_chat_reply_is_a_502_not_a_crash(home, monkeypatch, doc):
+    from fastapi.responses import Response
+
+    from localm.inference.routes import anthropic as routes
+
+    async def inner(*args, **kwargs):
+        return Response(content=doc.encode(), media_type="application/json")
+
+    monkeypatch.setattr(routes, "chat_endpoint", lambda app, path: inner)
+    r = Served().post()
+    assert r.status_code == 502
+    assert r.json()["error"]["message"] == "the chat route returned a reply that is not JSON"
+
+
+@_HOSTILE_DOCS
+def test_a_hostile_chat_error_body_is_passed_on_as_text(home, monkeypatch, doc):
+    from fastapi.responses import Response
+
+    from localm.inference.routes import anthropic as routes
+
+    async def inner(*args, **kwargs):
+        return Response(content=doc.encode(), status_code=500, media_type="application/json")
+
+    monkeypatch.setattr(routes, "chat_endpoint", lambda app, path: inner)
+    r = Served().post()
+    assert r.status_code == 500
+    assert r.json()["error"]["message"] == doc[:500]

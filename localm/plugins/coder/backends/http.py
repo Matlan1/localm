@@ -367,7 +367,8 @@ class HTTPBackend(BaseLLMBackend):
                                  allow_redirects=False)
         _raise_on_redirect(resp, url)
         _raise_for_status(resp)
-        body = resp.json()
+        from localm.jsonreply import response_json
+        body = response_json(resp)
         return body if isinstance(body, dict) else {}
 
     @property
@@ -664,7 +665,8 @@ class HTTPBackend(BaseLLMBackend):
         )
         _raise_for_status(resp)
         self._note_routing(getattr(resp, "headers", None))
-        data = resp.json()
+        from localm.jsonreply import response_json
+        data = response_json(resp)
         if self.anthropic:
             return self._parse_anthropic_response(data)
         if data.get("usage"):

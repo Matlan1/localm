@@ -17,7 +17,8 @@ e.g.::
 
 Share-config ("use config from"): a media plugin may point ``use_config_from`` at
 ANOTHER media plugin to reuse its backend settings LIVE - edit the source once and
-the sharer follows. The sharer's own block is never mutated, so toggling sharing
+the sharer follows. The ``backend`` choice and the ``native`` model settings are
+never shared: each plugin keeps its own. The sharer's own block is never mutated, so toggling sharing
 off restores its own values untouched. Sharing is cycle-prevented (no image<-video
 while video<-image) and falls back to the sharer's own block (with a warning) when
 the source is missing/disabled. Applies only to the three media plugins.
@@ -118,6 +119,11 @@ def resolve_config(name: str, cfg: dict,
 
     resolved = _own_block(src, cfg)
     resolved["use_config_from"] = src      # keep the marker so the UI can show it
+    for key in ("backend", "native"):
+        if key in own:
+            resolved[key] = own[key]
+        else:
+            resolved.pop(key, None)
     return resolved, None
 
 
