@@ -12,23 +12,46 @@ import pytest
 from localm.inference.backends.llamacpp import mtmd_gen as g
 
 
+class _Fn:
+    def __init__(self, argtypes=None):
+        self.restype = None
+        self.argtypes = argtypes
+
+
+class _FakeLib:
+    """A CDLL stand-in: ``lib[name]`` returns a fresh function object for every
+    exported *name*, as ctypes does; attributes are the shared, cached ones."""
+
+    def __init__(self, exports):
+        self._exports = set(exports)
+
+    def __getitem__(self, name):
+        if name not in self._exports:
+            raise AttributeError(f"function '{name}' not found")
+        return _Fn()
+
+
 class TestAbiGate:
     def test_an_mtmd_without_the_marker_export_is_refused(self):
-        class OldMtmd:
-            mtmd_helper_gen_audio_init = object()
+        lib = _FakeLib(set(g._SIGNATURES))
         with pytest.raises(g.SpeechUnavailable, match="localm setup-llama"):
-            g.bind_generation_api(OldMtmd())
+            g.bind_generation_api(lib)
 
     def test_an_mtmd_missing_a_helper_function_is_refused(self):
-        class Fn:
-            restype = None
-            argtypes = None
-
-        class Partial:
-            mtmd_gen_inp_default = Fn()
-            mtmd_gen_audio_get_info = Fn()
+        lib = _FakeLib({"mtmd_gen_inp_default", "mtmd_gen_audio_get_info"})
         with pytest.raises(g.SpeechUnavailable, match="lacks a speech generation function"):
-            g.bind_generation_api(Partial())
+            g.bind_generation_api(lib)
+
+    def test_binding_leaves_the_shared_attributes_of_the_library_alone(self):
+        lib = _FakeLib({"mtmd_gen_inp_default", *g._SIGNATURES})
+        shared = _Fn(argtypes=[ctypes.c_char_p])
+        lib.mtmd_bitmap_init_from_audio = shared
+        ns = g.bind_generation_api(lib)
+        assert lib.mtmd_bitmap_init_from_audio is shared
+        assert shared.argtypes == [ctypes.c_char_p]
+        assert ns.mtmd_bitmap_init_from_audio.argtypes == [
+            ctypes.c_size_t, ctypes.POINTER(ctypes.c_float)]
+        assert g.bind_generation_api(lib) is ns
 
     def test_the_helper_input_matches_the_c_layout(self):
         assert ctypes.sizeof(ctypes.c_void_p) == 8

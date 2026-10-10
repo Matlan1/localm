@@ -151,58 +151,68 @@ class _LogitBias(ctypes.Structure):
 
 _FloatPtr = ctypes.POINTER(ctypes.c_float)
 
+_SIGNATURES = {
+    "mtmd_gen_audio_get_info": (_GenAudioInfo, [ctypes.c_void_p]),
+    "mtmd_support_audio": (ctypes.c_bool, [ctypes.c_void_p]),
+    "mtmd_get_audio_sample_rate": (ctypes.c_int, [ctypes.c_void_p]),
+    "mtmd_bitmap_init_from_audio": (ctypes.c_void_p, [ctypes.c_size_t, _FloatPtr]),
+    "mtmd_bitmap_free": (None, [ctypes.c_void_p]),
+    "mtmd_helper_gen_audio_init": (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p]),
+    "mtmd_helper_gen_audio_free": (None, [ctypes.c_void_p]),
+    "mtmd_helper_gen_audio_reset": (None, [ctypes.c_void_p]),
+    "mtmd_helper_gen_audio_set_input": (ctypes.c_int32,
+                                        [ctypes.c_void_p, ctypes.POINTER(_HelperInput)]),
+    "mtmd_helper_gen_audio_step_prompt": (ctypes.c_int32, [ctypes.c_void_p, ctypes.c_int32]),
+    "mtmd_helper_gen_audio_step_gen": (ctypes.c_int32, [
+        ctypes.c_void_p, ctypes.c_int32, _FloatPtr,
+        ctypes.POINTER(_FloatPtr), ctypes.POINTER(ctypes.c_bool)]),
+    "mtmd_helper_gen_audio_get_output": (ctypes.c_int32, [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_int64)]),
+}
+
+
+class GenerationApi:
+    """The speech generation functions of one loaded mtmd library, each its own
+    function object: the signatures declared here never change, or depend on,
+    the library's shared attributes that other bindings set."""
+
+
 _bind_lock = threading.Lock()
-_bound: set[int] = set()
+_bound: dict[int, tuple] = {}
 
 
-def bind_generation_api(m: ctypes.CDLL) -> None:
-    """Declare the audio-generation signatures on the loaded mtmd library *m*.
+def bind_generation_api(m) -> GenerationApi:
+    """The speech generation functions of the loaded mtmd library *m*.
 
     Raises :class:`SpeechUnavailable` when *m* lacks a required function or
     predates the supported helper layout (no ``mtmd_gen_inp_default``)."""
     with _bind_lock:
-        if id(m) in _bound:
-            return
-        if not hasattr(m, "mtmd_gen_inp_default"):
+        cached = _bound.get(id(m))
+        if cached is not None and cached[0] is m:
+            return cached[1]
+        try:
+            m["mtmd_gen_inp_default"]
+        except (AttributeError, KeyError) as e:
             raise SpeechUnavailable(
                 "The installed llama.cpp runtime predates the speech generation "
                 "interface localm supports. Install the runtime localm pins with "
-                "'localm setup-llama'.")
+                "'localm setup-llama'.") from e
+        ns = GenerationApi()
         try:
-            m.mtmd_gen_audio_get_info.restype = _GenAudioInfo
-            m.mtmd_gen_audio_get_info.argtypes = [ctypes.c_void_p]
-            m.mtmd_support_audio.restype = ctypes.c_bool
-            m.mtmd_support_audio.argtypes = [ctypes.c_void_p]
-            m.mtmd_get_audio_sample_rate.restype = ctypes.c_int
-            m.mtmd_get_audio_sample_rate.argtypes = [ctypes.c_void_p]
-            m.mtmd_bitmap_init_from_audio.restype = ctypes.c_void_p
-            m.mtmd_bitmap_init_from_audio.argtypes = [ctypes.c_size_t, _FloatPtr]
-            m.mtmd_helper_gen_audio_init.restype = ctypes.c_void_p
-            m.mtmd_helper_gen_audio_init.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-            m.mtmd_helper_gen_audio_free.restype = None
-            m.mtmd_helper_gen_audio_free.argtypes = [ctypes.c_void_p]
-            m.mtmd_helper_gen_audio_reset.restype = None
-            m.mtmd_helper_gen_audio_reset.argtypes = [ctypes.c_void_p]
-            m.mtmd_helper_gen_audio_set_input.restype = ctypes.c_int32
-            m.mtmd_helper_gen_audio_set_input.argtypes = [
-                ctypes.c_void_p, ctypes.POINTER(_HelperInput)]
-            m.mtmd_helper_gen_audio_step_prompt.restype = ctypes.c_int32
-            m.mtmd_helper_gen_audio_step_prompt.argtypes = [ctypes.c_void_p, ctypes.c_int32]
-            m.mtmd_helper_gen_audio_step_gen.restype = ctypes.c_int32
-            m.mtmd_helper_gen_audio_step_gen.argtypes = [
-                ctypes.c_void_p, ctypes.c_int32, _FloatPtr,
-                ctypes.POINTER(_FloatPtr), ctypes.POINTER(ctypes.c_bool)]
-            m.mtmd_helper_gen_audio_get_output.restype = ctypes.c_int32
-            m.mtmd_helper_gen_audio_get_output.argtypes = [
-                ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32),
-                ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t),
-                ctypes.POINTER(ctypes.c_int64)]
-        except AttributeError as e:
+            for name, (restype, argtypes) in _SIGNATURES.items():
+                fn = m[name]
+                fn.restype = restype
+                fn.argtypes = argtypes
+                setattr(ns, name, fn)
+        except (AttributeError, KeyError) as e:
             raise SpeechUnavailable(
                 f"The installed llama.cpp runtime lacks a speech generation "
                 f"function ({e}). Install the runtime localm pins with "
                 "'localm setup-llama'.") from e
-        _bound.add(id(m))
+        _bound[id(m)] = (m, ns)
+        return ns
 
 
 @dataclass(frozen=True)
@@ -307,8 +317,7 @@ class SpeechSynthesizer:
         self._helper = None
         self._vocab = None
         self._mem = None
-        self._m = _load_lib()
-        bind_generation_api(self._m)
+        self._m = bind_generation_api(_load_lib())
         if not api.has_embeddings_api() or not api.has_memory_api():
             raise SpeechUnavailable(
                 "The installed llama.cpp runtime lacks the embeddings or memory "
