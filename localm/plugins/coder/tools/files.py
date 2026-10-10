@@ -16,7 +16,10 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from .base import _MAX_OUTPUT, ToolResult, _confine, _truncate
+from .base import (
+    _MAX_OUTPUT, RESTRICTED_UNWRITABLE_MESSAGE, ToolResult, _confine, _truncate,
+    unwritable_component,
+)
 # The indexer's skip and file-type tables, shared so grep and the project map
 # classify files the same way.
 from ..indexer import _SKIP_DIRS, _SYMBOL_LANGS, _TEXT_EXTS
@@ -1171,6 +1174,7 @@ def tool_search_replace(
     replacement: str,
     glob: str = "**/*",
     dry_run: bool = False,
+    _restricted: bool = False,
 ) -> ToolResult:
     """
     Search for *pattern* across files and replace all matches.
@@ -1185,6 +1189,10 @@ def tool_search_replace(
         File filter applied relative to *cwd* (default: all files).
     dry_run:
         When True, report what would change without modifying anything.
+    _restricted:
+        Set by the dispatcher for a restricted session. A matching file inside a
+        ``RESTRICTED_UNWRITABLE_DIRS`` directory is left unchanged and listed in
+        the output; when every match is in one, the call is an error.
     """
     try:
         rx = _compile_model_pattern(pattern, _model_regex_flags())
@@ -1207,6 +1215,7 @@ def tool_search_replace(
     )
     changes: list[tuple[Path, Path, str, int, bytes]] = []  # (abs, rel, new_text, count, old_bytes)
     unreadable: list[str] = []  # files we could not read; a replacement may be left partial
+    locked: list[str] = []      # matching files a restricted session may not change
 
     oversized: list[str] = []   # skipped by the size cap, reported not silenced
     for fp in candidates:
@@ -1247,6 +1256,12 @@ def tool_search_replace(
             rel = fp.relative_to(cwd)
         except ValueError:
             rel = fp
+        if _restricted and (
+                unwritable_component(rel.parts) is not None
+                or unwritable_component(
+                    fp.resolve().relative_to(cwd_resolved).parts) is not None):
+            locked.append(str(rel))
+            continue
         changes.append((fp, rel, new_text, len(matches), old_bytes))
 
     # Warn about unreadable files: matches in them were skipped, not applied, so the
@@ -1261,7 +1276,20 @@ def tool_search_replace(
             f"skipped; any matches there were NOT replaced: {shown}]"
         )
 
+    locked_note = ""
+    if locked:
+        shown = ", ".join(locked[:20])
+        if len(locked) > 20:
+            shown += f", ... (+{len(locked) - 20} more)"
+        locked_note = (
+            f"\n[NOT replaced in {len(locked)} matching file(s): "
+            f"{RESTRICTED_UNWRITABLE_MESSAGE}: {shown}]"
+        )
+
     if not changes:
+        if locked:
+            return ToolResult.error(
+                f"search_replace changed nothing.{locked_note}{unreadable_note}")
         return ToolResult.success(
             f"No matches for pattern '{pattern}'.{unreadable_note}",
             summary="search_replace - 0 matches",
@@ -1279,7 +1307,7 @@ def tool_search_replace(
         # from the same matching pass, so a dry run reports the same file set an apply
         # would write.
         return ToolResult.success(
-            f"[dry-run] Would replace {total} match(es) in {len(changes)} file(s):\n{report}{unreadable_note}",
+            f"[dry-run] Would replace {total} match(es) in {len(changes)} file(s):\n{report}{locked_note}{unreadable_note}",
             summary=f"[dry-run] {total} replacement(s) in {len(changes)} file(s)",
             changes=[(str(rel), old_bytes, new_text)
                     for _, rel, new_text, _, old_bytes in changes],
@@ -1308,7 +1336,7 @@ def tool_search_replace(
         applied.append((str(rel), old_bytes, new_text))
 
     return ToolResult.success(
-        f"Replaced {total} match(es) in {len(changes)} file(s):\n{report}{unreadable_note}",
+        f"Replaced {total} match(es) in {len(changes)} file(s):\n{report}{locked_note}{unreadable_note}",
         summary=f"search_replace: {total} replacement(s) in {len(changes)} file(s)",
         changes=applied,
     )

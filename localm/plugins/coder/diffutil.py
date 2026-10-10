@@ -118,7 +118,8 @@ def compute_multifile_diff(cwd: Path, edits: object) -> Optional[str]:
 
 
 def compute_search_replace_diff(cwd: Path, pattern: str, replacement: str,
-                                glob_pattern: str = "**/*") -> Optional[str]:
+                                glob_pattern: str = "**/*",
+                                restricted: bool = False) -> Optional[str]:
     """
     Unified diff a ``search_replace`` call would produce, concatenated over
     every file it would touch, or None when nothing would change or the
@@ -129,10 +130,13 @@ def compute_search_replace_diff(cwd: Path, pattern: str, replacement: str,
     args, so there is no single old_content to diff against ahead of time. This
     calls the real tool with its own ``dry_run=True``, which is the SAME
     matching pass a real apply runs (see ToolResult.changes), rather than
-    re-implementing the sweep here.
+    re-implementing the sweep here. *restricted* applies the same filter a
+    restricted session's real apply does, so the diff never covers a file
+    inside a ``.localcoder`` directory.
     """
     from .tools.files import tool_search_replace
-    result = tool_search_replace(cwd, pattern, replacement, glob_pattern, dry_run=True)
+    result = tool_search_replace(cwd, pattern, replacement, glob_pattern,
+                                 dry_run=True, _restricted=restricted)
     if not result.ok or not result.changes:
         return None
     chunks = []

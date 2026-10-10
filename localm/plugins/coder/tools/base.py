@@ -138,6 +138,59 @@ def _confine(cwd: Path, path: str) -> Path:
         ) from e
 
 
+# Directory names a restricted (scoped-key) coder session may not create, or
+# create or change anything inside, at any depth of the project.
+RESTRICTED_UNWRITABLE_DIRS: frozenset[str] = frozenset({".localcoder"})
+
+RESTRICTED_UNWRITABLE_MESSAGE = (
+    "a .localcoder directory holds this project's coder configuration, and a "
+    "restricted session cannot create or change anything inside it")
+
+
+def unwritable_component(parts) -> Optional[str]:
+    """The first of *parts* naming a ``RESTRICTED_UNWRITABLE_DIRS`` entry, or None.
+
+    Matches case-insensitively and ignoring trailing dots and spaces, the
+    spellings Windows folds onto the same directory name."""
+    for part in parts:
+        if str(part).rstrip(" .").casefold() in RESTRICTED_UNWRITABLE_DIRS:
+            return str(part)
+    return None
+
+
+def restricted_unwritable(cwd: Path, path: str) -> bool:
+    """Whether a restricted session must refuse to write the model-named *path*.
+
+    Checked twice: on *path*'s own components relative to *cwd* (so
+    ``a/../.localcoder/x`` and a backslash-separated spelling are caught before
+    anything collapses them), and on the location :func:`_confine` resolves it
+    to (so a file link whose target is inside such a directory is caught). A
+    path ``_confine`` refuses is not reported here: the write tool refuses it on
+    its own.
+    """
+    raw = Path(str(path).replace("\\", "/"))
+    lexical: tuple = raw.parts
+    if raw.is_absolute():
+        lexical = ()
+        for anchor in (cwd, cwd.resolve()):
+            try:
+                lexical = raw.relative_to(anchor).parts
+                break
+            except ValueError:
+                continue
+    if unwritable_component(lexical) is not None:
+        return True
+    try:
+        resolved = _confine(cwd, str(path))
+    except PermissionError:
+        return False
+    try:
+        rel = resolved.relative_to(cwd.resolve()).parts
+    except ValueError:
+        return False
+    return unwritable_component(rel) is not None
+
+
 @dataclass
 class SubprocessResult:
     """Outcome of one :func:`run_subprocess` call.

@@ -27,11 +27,13 @@ from ..confirm import invoke_confirm
 from .. import shell_guard
 from ..parser import ToolCall
 from ..tools import ToolResult
+from ..tools.base import RESTRICTED_UNWRITABLE_MESSAGE, restricted_unwritable
 from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
-    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PROJECT_MAP_TOOLS, _SCOPE_PATH_ARGS,
+    _BROWSER_TOOLS, _PATCH_MODE_ELIGIBLE_TOOLS, _PROJECT_MAP_TOOLS,
+    _RESTRICTED_PATH_WRITE_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
     _SHELL_EXEC_TOOLS, _SHELL_GUARDED_TOOLS, _SKILL_STATE_TOOLS,
     _CANCELLABLE_SUBPROCESS_TOOLS,
@@ -392,6 +394,24 @@ class _ExecutionMixin:
                 print_progress_tool_call(call.name, call.args)
         self._emit("tool_call", tool=call.name, args=call.args)
 
+        # A restricted session cannot create or change anything inside a
+        # RESTRICTED_UNWRITABLE_DIRS directory. Checked ahead of the patch-mode
+        # intercept, so such a write is not captured as a diff either.
+        if self.restricted and call.name in _RESTRICTED_PATH_WRITE_TOOLS:
+            for value in _call_target_paths(call.name, call.args):
+                if restricted_unwritable(self.cwd, value):
+                    result = ToolResult.error(
+                        f"'{value}' was not written: "
+                        f"{RESTRICTED_UNWRITABLE_MESSAGE}.")
+                    self._audit.notice("restricted_config_write_refused",
+                                       result.output)
+                    if interactive:
+                        print_tool_error(call.name, result.output)
+                    # No duration_s: never reached tool_def.fn.
+                    self._emit("tool_result", tool=call.name, ok=False,
+                               summary="refused: inside .localcoder")
+                    return result
+
         # Patch-mode: intercept write tools, accumulate diffs, do not touch disk.
         # A write tool the interceptor cannot express as a diff must NOT fall
         # through to a real disk write. search_replace is eligible too
@@ -638,6 +658,11 @@ class _ExecutionMixin:
                 or call.name in _PROJECT_MAP_TOOLS \
                 or call.name in _BROWSER_TOOLS:
             args["_session"] = self
+        # search_replace finds its own targets, so a restricted session hands it
+        # the RESTRICTED_UNWRITABLE_DIRS filter. Injected after the copy, so a
+        # model-supplied "_restricted" cannot win.
+        if call.name == "search_replace" and self.restricted:
+            args["_restricted"] = True
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True
@@ -799,6 +824,7 @@ class _ExecutionMixin:
                 self.cwd, call.args.get("pattern", ""),
                 call.args.get("replacement", ""),
                 call.args.get("glob", "**/*"),
+                restricted=self.restricted,
             )
         path_arg = call.args.get("path", "")
         old_text = read_old_content(self.cwd, path_arg)

@@ -309,6 +309,37 @@ class TestRestrictedWritesCannotReachLocalcoder:
         assert (project / ".localcoder" / "config.toml").read_text(
             encoding="utf-8") == _CONFIG
 
+    @staticmethod
+    def _file_link(project):
+        link = project / "config.toml"
+        try:
+            os.symlink(project / ".localcoder" / "config.toml", link)
+        except (OSError, NotImplementedError) as e:
+            pytest.skip(f"cannot create a file symlink here: {e}")
+        return link
+
+    @pytest.mark.parametrize("call", [
+        _call("write_file", path="config.toml", content='mode = "normal"\n'),
+        _call("edit_file", path="config.toml", old="privacy", new="normal"),
+    ], ids=lambda c: c.name)
+    def test_a_file_link_that_resolves_inside_it_is_refused(self, project, call):
+        self._file_link(project)
+        agent = _agent(project, restricted=True)
+        result = agent._execute_tool(call, interactive=False)
+        assert _refused(result), result.output
+        assert (project / ".localcoder" / "config.toml").read_text(
+            encoding="utf-8") == _CONFIG
+
+    def test_a_sweep_does_not_write_through_a_file_link(self, project):
+        self._file_link(project)
+        agent = _agent(project, restricted=True)
+        result = agent._execute_tool(
+            _call("search_replace", pattern="privacy", replacement="normal",
+                  glob="*.toml"), interactive=False)
+        assert _refused(result), result.output
+        assert (project / ".localcoder" / "config.toml").read_text(
+            encoding="utf-8") == _CONFIG
+
     def test_ordinary_files_and_lookalike_names_are_still_writable(self, project):
         agent = _agent(project, restricted=True)
         for path in ("src/b.py", ".localcoder-notes.md", "localcoder/x.txt",
@@ -390,6 +421,34 @@ class TestRestrictedPatchModeLeavesLocalcoderAlone:
         patch_text = agent.current_patch()
         assert "a.txt" in patch_text
         assert ".localcoder" not in patch_text
+
+
+class TestRestrictedUnwritableHelper:
+    @pytest.mark.parametrize("path", [
+        ".localcoder/a:b",
+        ".localcoder\\config.toml",
+        "x/../.Localcoder. /y",
+    ])
+    def test_its_own_spelling_is_enough(self, tmp_path, path):
+        """Each is caught on the path's own components, before resolution."""
+        from localm.plugins.coder.tools.base import restricted_unwritable
+        assert restricted_unwritable(tmp_path, path) is True
+
+    @pytest.mark.parametrize("path", [
+        "src/x.py", ".localcoder-notes.md", "localcoder/x", "a/.localcoderx/y", ".",
+    ])
+    def test_other_paths_pass(self, tmp_path, path):
+        from localm.plugins.coder.tools.base import restricted_unwritable
+        assert restricted_unwritable(tmp_path, path) is False
+
+    def test_a_project_inside_a_localcoder_dir_is_not_locked_whole(self, tmp_path):
+        """Only components below the project root count."""
+        from localm.plugins.coder.tools.base import restricted_unwritable
+        root = tmp_path / ".localcoder" / "proj"
+        root.mkdir(parents=True)
+        assert restricted_unwritable(root, "src/x.py") is False
+        assert restricted_unwritable(root, str(root / "src" / "x.py")) is False
+        assert restricted_unwritable(root, ".localcoder/config.toml") is True
 
 
 def test_every_restricted_write_tool_is_covered_by_the_lockout():
