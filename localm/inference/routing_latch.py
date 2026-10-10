@@ -29,7 +29,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from localm.inference.capability_routing import SkippedCandidate
 
@@ -144,7 +144,7 @@ class RoutingLatch:
         self._clock = clock
         self._fingerprint = fingerprint
         self._lock = threading.Lock()
-        self._records: Dict[str, LoadFailure] = {}
+        self._records: dict[str, LoadFailure] = {}
 
     def fingerprint(self, name: str) -> str:
         """The current load fingerprint of *name*."""
@@ -194,7 +194,7 @@ class RoutingLatch:
             return self._records.get(name)
 
     def skipped(self, names: Optional[Iterable[str]] = None
-                ) -> Dict[str, SkippedCandidate]:
+                ) -> dict[str, SkippedCandidate]:
         """The models routing must leave out right now, keyed by name: recorded
         failures still inside their backoff whose recorded fingerprint matches
         the current one. A record whose fingerprint changed is dropped. With
@@ -208,7 +208,7 @@ class RoutingLatch:
             pending = [r for r in self._records.values()
                        if wanted is None or r.model in wanted]
         now = self._clock()
-        out: Dict[str, SkippedCandidate] = {}
+        out: dict[str, SkippedCandidate] = {}
         stale = []
         for rec in pending:
             if self._fingerprint(rec.model) != rec.fingerprint:

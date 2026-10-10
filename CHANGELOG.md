@@ -27,6 +27,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `--no-rerank`, and the query API reports whether a query was reranked. With no
   reranker installed nothing changes; if the reranker fails, the unreranked order is
   kept and the reason is shown.
+- **A loaded reranker can be unloaded from the Models page.** A reranker that is in
+  memory now shows as loaded there, and its Unload button (or `localm unload <name>`)
+  frees it unless a rerank is running.
 - **Tool calling with any chat model.** `/v1/chat/completions` takes OpenAI `tools`,
   `tool_choice` and `parallel_tool_calls`, and the Ollama API takes `tools` and
   `tool_calls`. The model's calls come back in `message.tool_calls` (a streamed call arrives

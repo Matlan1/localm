@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import weakref
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Optional
 
 from ._drafting import SPEC_DRAFT, CountedSource
 from ._stepcosts import UNBOUNDED_REPLY_TOKENS, expected_tokens
@@ -154,7 +154,7 @@ class DraftModelSource(CountedSource):
         self._ctx_capacity = 0
         self._ctx_batch = 0
         self._sampler = None
-        self._tokens: List[int] = []
+        self._tokens: list[int] = []
         self._valid = 0
         self._catch_up = 0
 
@@ -282,7 +282,7 @@ class DraftModelSource(CountedSource):
         if self._ctx is not None:
             api.llama_memory_clear(api.llama_get_memory(self._ctx), True)
 
-    def _decode(self, tokens: List[int], start: int) -> int:
+    def _decode(self, tokens: list[int], start: int) -> int:
         """Decode *tokens* on the draft context from position *start* in
         batches of at most its batch size; the first nonzero llama_decode
         result, -1 without a context, else 0."""
@@ -302,7 +302,7 @@ class DraftModelSource(CountedSource):
                 return ret
         return 0
 
-    def propose(self, token: int, pos: int, n_max: int) -> List[int]:
+    def propose(self, token: int, pos: int, n_max: int) -> list[int]:
         from .llama import api
         llm = self._llm
         cached = llm._cached_tokens
@@ -338,7 +338,7 @@ class DraftModelSource(CountedSource):
             self._tokens.extend(pending)
             self._valid = len(cached)
             is_eog = llm._tokenizer.is_eog
-            drafts: List[int] = []
+            drafts: list[int] = []
             while True:
                 d = api.llama_sampler_sample(sampler, ctx, -1)
                 if is_eog(d):

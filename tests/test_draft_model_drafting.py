@@ -138,7 +138,7 @@ class DraftFake(FakeNative):
         last = max(self.draft_cache, default=-1)
         if positions[0] != last + 1:
             return -1
-        for p, t in zip(positions, tokens):
+        for p, t in zip(positions, tokens, strict=False):
             self.draft_cache[p] = (t, None)
         self._last[id(ctx)] = (positions, tokens, logits, None)
         self.draft_decodes.append((positions, tokens, None, logits))

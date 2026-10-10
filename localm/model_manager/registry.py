@@ -20,7 +20,6 @@ from pathlib import PurePosixPath
 from pathlib import PureWindowsPath
 from typing import Any
 from typing import Callable
-from typing import List
 from typing import NamedTuple
 from typing import Optional
 from typing import Sequence
@@ -588,7 +587,7 @@ def _told_apart(a: _GgufFit, b: _GgufFit) -> bool:
                 or (a.width and b.width and a.width != b.width))
 
 
-def _pick_mmproj_candidate(model_name: str, names: List[str], *,
+def _pick_mmproj_candidate(model_name: str, names: list[str], *,
                            others: Sequence[str] = (),
                            fit: Optional[Callable[[str], _GgufFit]] = None,
                            ) -> Optional[str]:
@@ -647,8 +646,8 @@ class _FolderGgufs(NamedTuple):
     """One listing of a folder's GGUF files: the mmproj-named ``projectors``,
     the other ``models``, and ``fits``, the :class:`_GgufFit` read so far per
     file path."""
-    projectors: List[Path]
-    models: List[Path]
+    projectors: list[Path]
+    models: list[Path]
     fits: dict
 
 
@@ -879,7 +878,7 @@ def detach_adapter(adapter: str) -> bool:
     return changed
 
 
-def list_adapters(*, reg: Optional[dict] = None) -> List[dict]:
+def list_adapters(*, reg: Optional[dict] = None) -> list[dict]:
     """Every registered GGUF LoRA adapter as ``{"name", "path", "base",
     "scale"}``, sorted by name. ``base`` is None for an adapter attached to
     nothing; ``scale`` is the stored value or None when it is absent or
@@ -901,7 +900,7 @@ def list_adapters(*, reg: Optional[dict] = None) -> List[dict]:
     return out
 
 
-def get_model_adapters(base: str, *, reg: Optional[dict] = None) -> List[tuple]:
+def get_model_adapters(base: str, *, reg: Optional[dict] = None) -> list[tuple]:
     """The ``(path, scale)`` of every adapter attached to the registered model
     *base*, in adapter-name order, for the backend to apply when it loads.
     An adapter attached to any registered name of the same model file as *base*
@@ -1099,7 +1098,7 @@ def model_vision_capability(name: str, *, reg: Optional[dict] = None,
         return None
 
 
-def vision_capable_models() -> List[str]:
+def vision_capable_models() -> list[str]:
     """Registered model names that can accept image INPUT on THIS install.
 
     A name listed here is one the loader can genuinely put an image through.
@@ -1474,7 +1473,7 @@ def set_model_type(name: str, new_type: str) -> bool:
 
 
 
-def _prompt_predownload_dup(dup_names: List[str], model_name: str) -> str:
+def _prompt_predownload_dup(dup_names: list[str], model_name: str) -> str:
     """
     The exact file about to be downloaded already exists locally.
     Returns "alias", "download", or "skip". No TTY → "skip".
@@ -1534,11 +1533,11 @@ def names_same_model(a: str, b: str, reg: Optional[dict] = None) -> bool:
         return False
 
 
-def find_aliases_by_path(path: Path, reg: Optional[dict] = None) -> List[str]:
+def find_aliases_by_path(path: Path, reg: Optional[dict] = None) -> list[str]:
     """Registered names whose path resolves to the same file/dir as *path*."""
     reg = reg if reg is not None else _mm.load_registry()
     target = str(Path(path).resolve())
-    out: List[str] = []
+    out: list[str] = []
     for name, info in reg.items():
         epath = _entry_path(info)   # skip a malformed sibling entry, never crash
         if epath is None:
@@ -1553,7 +1552,7 @@ def find_aliases_by_path(path: Path, reg: Optional[dict] = None) -> List[str]:
 
 
 
-def find_by_sha256(digest: str, reg: Optional[dict] = None) -> List[str]:
+def find_by_sha256(digest: str, reg: Optional[dict] = None) -> list[str]:
     """Registered names whose stored sha256 matches *digest* (case-insensitive)."""
     if not digest:
         return []
@@ -1569,7 +1568,7 @@ def find_by_sha256(digest: str, reg: Optional[dict] = None) -> List[str]:
 
 
 
-def find_by_size(size: int, reg: Optional[dict] = None) -> List[str]:
+def find_by_size(size: int, reg: Optional[dict] = None) -> list[str]:
     """Registered names whose on-disk file is exactly *size* bytes.
 
     A cheap (stat-only) content heuristic used by ``--fast`` imports: it skips
@@ -1650,7 +1649,7 @@ def rename_model(old_name: str, new_name: str) -> bool:
     return renamed
 
 
-def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[str]]":
+def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, list[str]]":
     """
     Rename a registered model from *old_name* to *new_name*: MOVES the
     registry entry to a new key (unlike alias_model, which copies - *old_name*
@@ -1729,7 +1728,7 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[s
     return True, notes
 
 
-def _migrate_model_references(old_name: str, new_name: str) -> List[str]:
+def _migrate_model_references(old_name: str, new_name: str) -> list[str]:
     """Best-effort: rewrite every *old_name* reference this process can reach
     inside <data dir>, after rename_model has already moved the registry
     entry. Never raises - the registry rename has already succeeded and must
@@ -1737,7 +1736,7 @@ def _migrate_model_references(old_name: str, new_name: str) -> List[str]:
     that fails to migrate is reported as a note, not raised as a crash. Returns
     human-readable notes: what changed, and what could not be reached at all.
     """
-    notes: List[str] = []
+    notes: list[str] = []
 
     try:
         def _apply_cfg(cfg: dict) -> None:
@@ -1796,7 +1795,7 @@ def _migrate_model_references(old_name: str, new_name: str) -> List[str]:
 
 
 
-def _prompt_duplicate_action(existing_names: List[str], reason: str) -> str:
+def _prompt_duplicate_action(existing_names: list[str], reason: str) -> str:
     """
     Ask the user what to do about a duplicate model.
 
@@ -2409,7 +2408,7 @@ def _name_token(stem: str) -> str:
     return stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
 
 
-def _projector_relation(model: Path, proj: Path, others: List[Path], width) -> Optional[bool]:
+def _projector_relation(model: Path, proj: Path, others: list[Path], width) -> Optional[bool]:
     """Whether the mmproj file *proj* can be *model*'s vision projector.
 
     Returns False when it cannot: both embedding widths are known and differ,
@@ -2439,7 +2438,7 @@ def _projector_relation(model: Path, proj: Path, others: List[Path], width) -> O
     return None
 
 
-def _plan_projectors(path: Path, parts: List[str], action: str,
+def _plan_projectors(path: Path, parts: list[str], action: str,
                      attached_only: bool) -> tuple:
     """The mmproj files that travel with the GGUF model *path* (whose split
     parts are *parts*, all in ``path.parent``) on a copy or move into
@@ -2457,7 +2456,7 @@ def _plan_projectors(path: Path, parts: List[str], action: str,
     copied instead, and that model is named in ``shared_with``.
     """
     attached = find_sibling_mmproj(path)
-    transfers: List[_ProjectorTransfer] = []
+    transfers: list[_ProjectorTransfer] = []
     if attached is not None:
         transfers.append(_ProjectorTransfer(attached, action))
     folder = path.parent
@@ -2466,7 +2465,7 @@ def _plan_projectors(path: Path, parts: List[str], action: str,
         return transfers, attached
 
     own = set(parts)
-    projectors: List[Path] = []
+    projectors: list[Path] = []
     models: dict = {}
     for f in sorted(folder.glob("*.gguf")):
         if f.name in own:
@@ -2502,7 +2501,7 @@ def _plan_projectors(path: Path, parts: List[str], action: str,
     return transfers, attached
 
 
-def _projector_sharers(proj: Path, model: Path, others: List[Path], width) -> tuple:
+def _projector_sharers(proj: Path, model: Path, others: list[Path], width) -> tuple:
     """Names of the models in *others* that *proj* could also belong to
     (:func:`_projector_relation` is not False), each judged against every
     other model in the folder including *model*."""
@@ -2564,7 +2563,7 @@ def _repoint_projector_references(moved: dict) -> None:
     """
     from rich.markup import escape
 
-    repointed: List[str] = []
+    repointed: list[str] = []
 
     def _repoint(reg: dict) -> None:
         repointed.clear()
@@ -2667,13 +2666,13 @@ def _store_with_projector(path: Path, action: str, *,
     # Single GGUF: every split part, plus the projector files _plan_projectors
     # picks.
     parts = split_gguf_parts(path.name) or [path.name]
-    transfers: List[_ProjectorTransfer] = []
+    transfers: list[_ProjectorTransfer] = []
     attached: Optional[Path] = None
     if path.suffix.lower() == ".gguf":
         transfers, attached = _plan_projectors(path, parts, action, attached_projector_only)
 
     # (src, dest, mode, note printed after the transfer)
-    items: List[tuple] = []
+    items: list[tuple] = []
     for part in parts:
         src = path.parent / part
         dest = _mm.MODELS_DIR / part
@@ -2684,7 +2683,7 @@ def _store_with_projector(path: Path, action: str, *,
     taken = {part.lower() for part in parts}
     placed: dict = {}          # projector src -> its path under MODELS_DIR
     arrived: set = set()       # projector srcs now present at their placed path
-    reused: List[Path] = []
+    reused: list[Path] = []
     for t in transfers:
         dest, reuse = _projector_dest(t.src, taken)
         taken.add(dest.name.lower())
@@ -3557,7 +3556,7 @@ def _store_standalone_projector(src: Path, action: str) -> Path:
     return dest
 
 
-def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[Path]]:
+def _store_loose_gguf_dir(first_parts: list[Path], store: str) -> Optional[list[Path]]:
     """Bring every model in a directory-of-loose-ggufs import into MODELS_DIR
     before ``_add_local_gguf_dir`` registers them (mirrors its per-file loop).
 
@@ -3621,7 +3620,7 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
             console.print(f"[red]Cannot {store}: {escape(conflict)} already exists[/red]")
             return None
 
-    new_parts: List[Optional[Path]] = [None] * len(first_parts)
+    new_parts: list[Optional[Path]] = [None] * len(first_parts)
     owner_result: dict = {}   # owner's resolved path -> its StoredModel
 
     for i, gguf in enumerate(first_parts):
@@ -3658,13 +3657,13 @@ def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[
 
 
 
-def _skip_unusable_ggufs(first_parts: List[Path]) -> List[Path]:
+def _skip_unusable_ggufs(first_parts: list[Path]) -> list[Path]:
     """*first_parts* without the GGUF files that cannot be registered
     (unsupported version, byte-swapped, importance matrix); each skipped file is
     reported with its reason."""
     from rich.markup import escape
 
-    usable: List[Path] = []
+    usable: list[Path] = []
     for gguf in first_parts:
         reason = gguf_unusable_reason(gguf)
         if reason is None:
@@ -3675,7 +3674,7 @@ def _skip_unusable_ggufs(first_parts: List[Path]) -> List[Path]:
 
 
 def _add_local_gguf_dir(
-    first_parts: List[Path],
+    first_parts: list[Path],
     name: Optional[str],
     on_duplicate: str,
     no_hash: bool,
@@ -3756,7 +3755,7 @@ _EXTRACT_CHUNK_BYTES = 1 << 20
 _EXTRACT_EMIT_INTERVAL_S = 0.7
 
 
-def _llamafile_ggufs(path: Path) -> List[str]:
+def _llamafile_ggufs(path: Path) -> list[str]:
     """Names of the ``.gguf`` members of *path* when it is a llamafile (a file
     named ``*.llamafile`` / ``*.exe`` / without extension that is also a ZIP
     archive); an empty list for any other file, including an unreadable one."""
@@ -4065,8 +4064,8 @@ def _scan_ollama_root(root: Path):
 
     manifests = root / "manifests"
     blobs = root / "blobs"
-    models: List[_OllamaModel] = []
-    problems: List[str] = []
+    models: list[_OllamaModel] = []
+    problems: list[str] = []
     try:
         tag_files = sorted(f for f in manifests.rglob("*") if f.is_file())
     except OSError:

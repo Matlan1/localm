@@ -8,7 +8,7 @@ tokens in the cache plus that token.
 from __future__ import annotations
 
 import weakref
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Optional, Sequence
 
 from ._drafting import SPEC_NGRAM, CountedSource
 from ._stepcosts import DRAFT_GAIN_MARGIN
@@ -75,8 +75,8 @@ class NgramIndex:
             raise ValueError("need 1 <= n_min <= n_max, got %d, %d" % (n_min, n_max))
         self.n_min = n_min
         self.n_max = n_max
-        self.tokens: List[int] = []
-        self._ends: Dict[Tuple[int, ...], List[int]] = {}
+        self.tokens: list[int] = []
+        self._ends: dict[tuple[int, ...], list[int]] = {}
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -124,13 +124,13 @@ class NgramIndex:
         if len(self.tokens) < len(tokens):
             self.extend(tokens[len(self.tokens):])
 
-    def lookup(self, token: int, n_draft: int) -> List[int]:
+    def lookup(self, token: int, n_draft: int) -> list[int]:
         """Up to *n_draft* tokens that followed the most recent earlier
         occurrence of the longest trailing n-gram of ``tokens + [token]``;
         [] when no n-gram of n_min or more tokens occurred before."""
         return self.match(token, n_draft)[0]
 
-    def match(self, token: int, n_draft: int) -> Tuple[List[int], int]:
+    def match(self, token: int, n_draft: int) -> tuple[list[int], int]:
         """``(lookup, end)``: the drafts and the position of the occurrence's
         last token, the drafts being what followed it at end + 1 onward;
         ``([], -1)`` when nothing matched or *n_draft* is 0 or less."""
@@ -188,15 +188,15 @@ class CandidateRuns:
 
     def __init__(self, size: int) -> None:
         self.size = size
-        self._kinds: Dict[Tuple[str, str], Tuple[_Counts, _Counts]] = {}
+        self._kinds: dict[tuple[str, str], tuple[_Counts, _Counts]] = {}
 
-    def _counts(self, kind: Tuple[str, str]) -> Tuple[_Counts, _Counts]:
+    def _counts(self, kind: tuple[str, str]) -> tuple[_Counts, _Counts]:
         counts = self._kinds.get(kind)
         if counts is None:
             counts = self._kinds[kind] = (_Counts(self.size), _Counts(self.size))
         return counts
 
-    def miss(self, kind: Tuple[str, str], j: int) -> float:
+    def miss(self, kind: tuple[str, str], j: int) -> float:
         """Estimated chance that token *j* of a candidate of *kind* is wrong
         when the tokens before it are right."""
         life, reply = self._counts(kind)
@@ -206,7 +206,7 @@ class CandidateRuns:
         return ((reply.wrong[j] + life_miss * NGRAM_REPLY_PRIOR_WEIGHT)
                 / (reply.checked[j] + NGRAM_REPLY_PRIOR_WEIGHT))
 
-    def expected_tokens(self, kind: Tuple[str, str], k: int) -> List[float]:
+    def expected_tokens(self, kind: tuple[str, str], k: int) -> list[float]:
         """Element i for i in 0..*k*: the tokens a step drafting the first i
         tokens of a candidate of *kind* is expected to make available, the
         step's own token plus each draft's chance that it and every draft
@@ -218,13 +218,13 @@ class CandidateRuns:
             out.append(out[-1] + right)
         return out
 
-    def new_candidate(self, kind: Tuple[str, str]) -> None:
+    def new_candidate(self, kind: tuple[str, str]) -> None:
         """Age *kind*'s counts for a new candidate of that kind."""
         life, reply = self._counts(kind)
         life.scale(NGRAM_LIFE_DECAY)
         reply.scale(NGRAM_REPLY_DECAY)
 
-    def check(self, kind: Tuple[str, str], j: int, wrong: bool) -> None:
+    def check(self, kind: tuple[str, str], j: int, wrong: bool) -> None:
         """Count token *j* (1..size) of a candidate of *kind* as checked,
         and as wrong when *wrong*."""
         for counts in self._counts(kind):
@@ -234,7 +234,7 @@ class CandidateRuns:
         for _life, reply in self._kinds.values():
             reply.scale(0.0)
 
-    def report(self) -> Dict[str, float]:
+    def report(self) -> dict[str, float]:
         """Per kind seen, keyed "place/source": the tokens a step drafting a
         full-length candidate of it is expected to make available."""
         return {"%s/%s" % kind: round(self.expected_tokens(kind, self.size)[-1], 2)
@@ -277,7 +277,7 @@ class NgramSource(CountedSource):
         self._is_eog = is_eog
         self.runs = CandidateRuns(self.draft_max)
         # Open candidates: [position, tokens, tokens checked right, kind, match end].
-        self._open: List[list] = []
+        self._open: list[list] = []
         # The copy position (a source position) and the reply position it is
         # aligned with.
         self._last_right: Optional[int] = None
@@ -321,7 +321,7 @@ class NgramSource(CountedSource):
         """``runs``: ``CandidateRuns.report``."""
         return {"runs": self.runs.report()}
 
-    def propose(self, token: int, pos: int, n_max: int) -> List[int]:
+    def propose(self, token: int, pos: int, n_max: int) -> list[int]:
         cached = self._llm._cached_tokens
         if len(self.index) != len(cached):
             if len(self.index) < len(cached):
@@ -345,7 +345,7 @@ class NgramSource(CountedSource):
             self.held_steps += 1
         return drafts[:k]
 
-    def _candidate(self, token: int, n: int) -> Tuple[List[int], int]:
+    def _candidate(self, token: int, n: int) -> tuple[list[int], int]:
         """``NgramIndex.match`` cut before the first end-of-generation token."""
         drafts, end = self.index.match(token, n)
         is_eog = self._is_eog or self._llm._tokenizer.is_eog
@@ -354,7 +354,7 @@ class NgramSource(CountedSource):
                 return drafts[:i], end
         return drafts, end
 
-    def _check_open(self, cached: List[int], token: int) -> None:
+    def _check_open(self, cached: list[int], token: int) -> None:
         """Check the open candidates against ``cached`` followed by *token*,
         closing each at its first wrong token or when all are checked, then
         carry the copy position forward to the latest reply token it can."""
@@ -378,7 +378,7 @@ class NgramSource(CountedSource):
         self._open = still
         self._follow(cached, token)
 
-    def _follow(self, cached: List[int], token: int) -> None:
+    def _follow(self, cached: list[int], token: int) -> None:
         """Move the copy position on while the reply token after it, in
         ``cached`` followed by *token*, equals the source token after it."""
         if self._last_right is None:
@@ -392,7 +392,7 @@ class NgramSource(CountedSource):
             right += 1
         self._last_right, self._last_right_at = right - 1, at - 1
 
-    def _kind(self, end: int) -> Tuple[str, str]:
+    def _kind(self, end: int) -> tuple[str, str]:
         """The kind of a candidate whose match ends at *end*."""
         gap = None if self._last_right is None else end - self._last_right
         if gap == 0:
@@ -403,7 +403,7 @@ class NgramSource(CountedSource):
             place = PLACE_START
         return place, SOURCE_CONTEXT if end < self._reply_start else SOURCE_REPLY
 
-    def _length(self, kind: Tuple[str, str], n: int) -> int:
+    def _length(self, kind: tuple[str, str], n: int) -> int:
         """The draft length in 0..*n* with the most expected tokens per second
         for a candidate of *kind*; 0 unless one beats a plain step by
         ``DRAFT_GAIN_MARGIN``."""

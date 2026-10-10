@@ -437,30 +437,6 @@ ignore = ["E741", "E701", "E702", "E402"]
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["fastapi.Depends"]
 
-# Files an open pull request still changes; each entry is removed once that
-# pull request has merged and the rule's autofix has been applied to the file.
-[tool.ruff.lint.per-file-ignores]
-"localm/cli/models.py" = ["B007", "B904", "B905"]
-"localm/config.py" = ["B904"]
-"localm/inference/backends/gguf.py" = ["UP006"]
-"localm/inference/backends/llamacpp/_api.py" = ["B009", "UP037"]
-"localm/inference/backends/llamacpp/_draftmodel.py" = ["UP006"]
-"localm/inference/backends/llamacpp/_drafting.py" = ["UP006"]
-"localm/inference/backends/llamacpp/_ngram.py" = ["UP006"]
-"localm/inference/backends/llamacpp/_sizing.py" = ["UP037"]
-"localm/inference/backends/llamacpp/_stepcosts.py" = ["B905", "UP006"]
-"localm/inference/backends/llamacpp/_split_fit.py" = ["B905", "UP006", "UP037"]
-"localm/inference/backends/llamacpp/_worker.py" = ["UP006"]
-"localm/inference/backends/llamacpp/llama.py" = ["B905", "UP006", "UP015", "UP037"]
-"localm/inference/engine.py" = ["UP006", "UP037"]
-"localm/inference/protocol.py" = ["UP006", "UP037"]
-"localm/inference/routing_latch.py" = ["UP006"]
-"localm/model_manager/gguf.py" = ["B904", "UP006", "UP037"]
-"localm/model_manager/registry.py" = ["UP006"]
-"localm/settings_schema.py" = ["B904", "UP037"]
-"tests/test_draft_model_drafting.py" = ["B905"]
-"tests/test_model_rename_rekey.py" = ["B008"]
-
 # Type checking: basedpyright, ratcheted against .github/basedpyright-baseline.json.
 # Run `basedpyright` (no arguments) to fail on errors absent from the baseline.
 [tool.basedpyright]

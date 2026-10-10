@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Iterator, Optional, Sequence
 
 from localm.console import console
 
@@ -117,7 +117,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     """
 
     # GGUF LoRA adapters to apply to the model: (path, scale) pairs, in order.
-    adapters: Sequence[Tuple[str, float]] = ()
+    adapters: Sequence[tuple[str, float]] = ()
     # The {"path", "scale"} of each adapter the last load applied.
     applied_adapters: Sequence[dict] = ()
 
@@ -1060,7 +1060,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # RPC failure (worker crash or timeout) propagates instead.
         return max(1, len(text) // 4)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """Return exact token count of the structured messages formatted with
         the model's embedded chat template (an RPC to the isolated worker,
         which alone holds the native model pointer the template needs)."""
@@ -1122,7 +1122,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     # embed capability that would always raise, without loading a model first.
     can_embed: bool = False
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         if not self._loaded:
             raise RuntimeError("Model not loaded - call load() first")
         # The worker never exposes create_embedding, so there is no RPC to make.
@@ -1138,7 +1138,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,

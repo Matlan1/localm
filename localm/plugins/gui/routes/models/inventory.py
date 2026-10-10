@@ -91,6 +91,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.inference import embedder as _embedder_mod
         loop = asyncio.get_running_loop()
         emb_path = await loop.run_in_executor(get_plugin_executor(), _embedder_mod.loaded_path)
+        # The resident reranker is read the same way: reranker_info() takes the
+        # reranker lock, which a load holds for its whole duration.
+        from localm.inference import reranker as _reranker_mod
+        rer_info = await loop.run_in_executor(get_plugin_executor(), _reranker_mod.reranker_info)
+        resident_paths = [p for p in (emb_path, rer_info["path"] if rer_info else None) if p]
         rows = []
         for name, entry in sorted(registry.items()):
             epath = _entry_path(entry)
@@ -107,8 +112,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
         # Stat and resolve every row's registry-supplied path in ONE executor hop,
         # off the event loop, then build the response on the loop from its results.
-        # The embedder's own path is resolved in the same hop for the identity
-        # comparison below.
+        # The embedder's and the reranker's own paths are resolved in the same hop
+        # for the identity comparison below.
         def _probe_rows() -> tuple:
             sizes: dict = {}
             mtimes: dict = {}
@@ -128,14 +133,15 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             # to this call, so a projector added to a folder shows up on the next
             # refresh.
             vision_dirs: dict = {}
-            # The per-row resolve() has exactly one consumer, the embedder identity
-            # comparison below, so it is skipped entirely when no embedder is loaded.
-            emb_resolved = None
-            if emb_path is not None:
+            # The per-row resolve() has exactly one consumer, the resident-model
+            # identity comparison below, so it is skipped entirely when neither an
+            # embedder nor a reranker is loaded.
+            resident_resolved: set = set()
+            for resident_path in resident_paths:
                 try:
-                    emb_resolved = Path(emb_path).resolve()
+                    resident_resolved.add(Path(resident_path).resolve())
                 except (OSError, ValueError):
-                    emb_resolved = None
+                    pass
             for _n, _e, _m, ep in rows:
                 p = Path(ep)
                 # In THIS hop, never on the loop: model_vision_capability() stats the
@@ -157,16 +163,16 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     sizes[ep] = None
                     mtimes[ep] = None
                     missing[ep] = True
-                if emb_resolved is None:
+                if not resident_resolved:
                     continue
                 try:
                     resolved[ep] = p.resolve()
                 except (OSError, ValueError):
                     resolved[ep] = None
-            return (sizes, mtimes, missing, resolved, emb_resolved, vision,
+            return (sizes, mtimes, missing, resolved, resident_resolved, vision,
                     context_len, tool_use)
 
-        (sizes, mtimes, missing_flags, resolved_paths, emb_resolved, vision_caps,
+        (sizes, mtimes, missing_flags, resolved_paths, resident_resolved, vision_caps,
          context_lens, tool_caps) = await loop.run_in_executor(
             get_plugin_executor(), _probe_rows)
 
@@ -180,13 +186,13 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             mtime = mtimes.get(epath)
             engine = _hs._engines.get(name)
             loaded = engine.loaded if engine is not None else False
-            # A registered model can also be the shared EMBEDDING model, loaded via
-            # get_embedder() - a lifecycle separate from _engines, so it never shows
-            # up above. Recognised by resolved PATH, so this row's loaded status and
-            # its per-row Unload control reflect a resident embedder.
-            if not loaded and emb_resolved is not None:
+            # A registered model can also be the shared EMBEDDING model (get_embedder())
+            # or the resident RERANKER (get_reranker()) - lifecycles separate from
+            # _engines, so they never show up above. Recognised by resolved PATH, so
+            # this row's loaded status and its per-row Unload control reflect them.
+            if not loaded and resident_resolved:
                 row_resolved = resolved_paths.get(epath)
-                loaded = row_resolved is not None and emb_resolved == row_resolved
+                loaded = row_resolved is not None and row_resolved in resident_resolved
             row_out = {
                 "name": name,
                 "source": str(entry.get("source", "")),

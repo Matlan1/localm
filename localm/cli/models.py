@@ -81,7 +81,7 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
             start = _time.perf_counter()
             first_at = None
             generated = 0
-            for token in engine.chat_stream(
+            for _token in engine.chat_stream(
                 [{"role": "user", "content": prompt}],
                 max_tokens=gen_tokens, temperature=0.0,
             ):
@@ -385,7 +385,7 @@ def _run_spec_bench(model, label, arm, rounds, kinds=None):
     else:
         console.print(f"[yellow]No draft tokens were verified in the {label} "
                       "runs.[/yellow]")
-    same = sum(1 for a, b in zip(texts_off, texts_on) if a == b)
+    same = sum(1 for a, b in zip(texts_off, texts_on, strict=False) if a == b)
     pairs = min(len(texts_off), len(texts_on))
     if pairs:
         if same == pairs:
@@ -400,7 +400,7 @@ def _run_spec_bench(model, label, arm, rounds, kinds=None):
                 "draft tokens this happens more often.")
     greedy_pairs = min(len(greedy_off), len(greedy_on))
     if greedy_pairs:
-        greedy_same = sum(1 for a, b in zip(greedy_off, greedy_on) if a == b)
+        greedy_same = sum(1 for a, b in zip(greedy_off, greedy_on, strict=False) if a == b)
         console.print(f"Greedy replies matched: {greedy_same} of {greedy_pairs}.")
 
     # 3% either way is inside the run-to-run spread seen on an idle machine, so
@@ -1587,21 +1587,21 @@ def config_cmd(key, value):
         try:
             set_credentials({key: value})
         except (ValueError, ConfigUnreadable) as e:
-            raise click.ClickException(str(e))
+            raise click.ClickException(str(e)) from e
         action = "cleared" if not value.strip() else "updated"
         console.print(f"[green]✓[/green] {escape(str(key))} {action}")
         return
     try:
         validated = validate_update({key: value})
     except ValueError as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
     # update_config() is the atomic read-modify-write helper; a bare
     # load_config()/save_config() pair has an unlocked window where a
     # concurrent config write can be silently lost.
     try:
         update_config(lambda cfg: cfg.update(validated))
     except ConfigUnreadable as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
     # `key` only reaches here after validate_update() proved it is one of
     # DEFAULT_CONFIG's own keys, and is escaped anyway; `value` (a free-text
     # setting like mdns_name) has no such guarantee.
