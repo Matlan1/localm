@@ -12,6 +12,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Structured output and more OpenAI fields on `/v1/chat/completions`.**
+  `response_format` (`json_object`, or `json_schema` with `strict`) constrains the reply,
+  token by token, to JSON or to the schema, also alongside `tools`. `presence_penalty`,
+  `frequency_penalty` and `min_p` are applied by the sampler (GGUF and HuggingFace models),
+  `max_completion_tokens` is read as the reply cap, `stream_options.include_usage` sends the
+  usage in a last chunk, `reasoning_effort: "none"` turns thinking off, and a `developer`
+  message is read as `system`. `/v1/completions` takes the same sampling fields, `echo`, and
+  a prompt list of one. A field localm does not serve (`n` above 1, `logprobs`,
+  `logit_bias`, the deprecated `functions`, audio output) is now a 400 naming it instead of
+  being silently ignored. A grammar, tool choice or response format on an image request to
+  a GGUF vision model is now applied instead of dropped.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the

@@ -20,7 +20,7 @@ import asyncio
 import functools
 import time
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -255,7 +255,7 @@ def register(app: FastAPI, ctx) -> None:
                 elif thinking:
                     format_text = after_think(format_text)
                 grammar = format_text
-            gen_kwargs = dict(
+            gen_kwargs: dict[str, Any] = dict(
                 max_tokens=max_tokens_of(req),
                 temperature=req.temperature,
                 top_p=req.top_p,

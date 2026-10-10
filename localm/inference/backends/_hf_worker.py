@@ -670,9 +670,8 @@ def _penalty_processor(prompt_len: int, presence: Optional[float],
     if presence == 0.0 and frequency == 0.0:
         return None
     import torch
-    from transformers import LogitsProcessor
 
-    class _PresenceFrequencyPenalty(LogitsProcessor):
+    class _PresenceFrequencyPenalty:
         def __call__(self, input_ids, scores):
             generated = input_ids[:, prompt_len:]
             if generated.shape[-1] == 0:
