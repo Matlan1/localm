@@ -564,6 +564,31 @@ class TestProposeBaseline:
 # --------------------------------------------------------------------------- #
 
 class TestMain:
+    @pytest.fixture(autouse=True)
+    def _mutmut_matches_the_baseline(self, monkeypatch):
+        monkeypatch.setattr(cmf, "installed_mutmut_version", lambda: "3.7.0")
+
+    def test_a_different_installed_mutmut_exits_one_and_names_both_versions(
+            self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(cmf, "installed_mutmut_version", lambda: "3.8.0")
+        argv = self._setup(tmp_path, {M1: 1}, _baseline({M1: "killed"}))
+        assert cmf.main(argv) == 1
+        err = capsys.readouterr().err
+        assert "mutmut 3.8.0" in err and "records mutmut 3.7.0" in err
+
+    def test_mutmut_not_installed_exits_one(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(cmf, "installed_mutmut_version", lambda: None)
+        argv = self._setup(tmp_path, {M1: 1}, _baseline({M1: "killed"}))
+        assert cmf.main(argv) == 1
+        assert "(not installed)" in capsys.readouterr().err
+
+    def test_a_baseline_recording_no_version_is_not_compared(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cmf, "installed_mutmut_version", lambda: "9.9.9")
+        base = _baseline({M1: "killed"})
+        base["mutmut"] = ""
+        argv = self._setup(tmp_path, {M1: 1}, base)
+        assert cmf.main(argv) == 0
+
     def _setup(self, tmp_path, exit_codes, baseline):
         mutants = tmp_path / "mutants"
         _write_meta(mutants, MOD, exit_codes)
@@ -782,13 +807,15 @@ class TestCommittedBaseline:
         assert scope_step["env"]["MUTATION_TEST_LABEL"] == "${{ %s }}" % label_clause
         assert "${{" not in scope_step["run"]
 
-    def test_every_sec01_control_class_is_pinned_to_a_killed_mutant(self, baseline):
-        """The baseline's controls are exactly the controls of the six control
+    def test_every_control_class_is_pinned_to_a_killed_mutant(self, baseline):
+        """The baseline's controls are exactly the controls of the control
         mutant classes that live inside the only_mutate modules, each pinned to
         a killed mutant: a weakened scope check, a deny-to-allow fallback, a
         skipped SSRF redirect re-validation, a widened net_mode=off exemption, a
-        path-confinement bypass, and a loopback classifier that accepts an
-        unparseable host. The two classes that live in
+        path-confinement bypass, a loopback classifier that accepts an
+        unparseable host, an empty, unknown or expired API key accepted, a
+        skipped cache containment, disabled or inverted TLS verification and a
+        certificate-holding server that serves plain HTTP. The two classes that live in
         localm/inference/http_server.py (an unsafe route exempted from the origin
         gate, bind_host replaced by the peer address) are not mutmut mutants and
         are not pinned here."""
@@ -800,6 +827,11 @@ class TestCommittedBaseline:
             "off-floor-downloads-default-true",
             "path-confinement-bypassed", "path-traversal-check-inverted",
             "bind-host-loopback-classifier-fallback",
+            "auth-empty-credential-accepted", "auth-unknown-key-accepted",
+            "auth-expired-key-accepted",
+            "hf-cache-containment-skipped", "gpu-cache-containment-skipped",
+            "tls-external-verification-disabled", "tls-loopback-test-inverted",
+            "tls-downgrade-when-certificate-given",
         }
         controls = baseline["controls"]
         assert set(controls) == expected, (

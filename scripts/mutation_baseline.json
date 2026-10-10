@@ -665,10 +665,14 @@
         "localm.netpolicy.x_safe_fetch__mutmut_20": "survived",
         "localm.netpolicy.x_safe_fetch__mutmut_21": "killed",
         "localm.netpolicy.x_safe_fetch__mutmut_22": "killed",
-        "localm.netpolicy.x_safe_fetch__mutmut_23": "survived",
+        "localm.netpolicy.x_safe_fetch__mutmut_23": {
+          "equivalent": "bytes.decode with no encoding argument decodes as utf-8, the same encoding the original names"
+        },
         "localm.netpolicy.x_safe_fetch__mutmut_24": "survived",
         "localm.netpolicy.x_safe_fetch__mutmut_25": "killed",
-        "localm.netpolicy.x_safe_fetch__mutmut_26": "survived",
+        "localm.netpolicy.x_safe_fetch__mutmut_26": {
+          "equivalent": "the codec name UTF-8 is an alias of utf-8, so decoding is identical"
+        },
         "localm.netpolicy.x_safe_fetch__mutmut_27": "survived",
         "localm.netpolicy.x_safe_fetch__mutmut_28": "survived",
         "localm.netpolicy.x_safe_fetch__mutmut_3": "killed",
@@ -745,10 +749,14 @@
         "localm.netpolicy.x_safe_fetch_bytes__mutmut_66": "killed",
         "localm.netpolicy.x_safe_fetch_bytes__mutmut_67": "killed",
         "localm.netpolicy.x_safe_fetch_bytes__mutmut_68": "killed",
-        "localm.netpolicy.x_safe_fetch_bytes__mutmut_69": "survived",
+        "localm.netpolicy.x_safe_fetch_bytes__mutmut_69": {
+          "equivalent": "a redirect response whose Location header is absent yields None instead of an empty string, and both are falsy, so the same NetworkPolicyError is raised"
+        },
         "localm.netpolicy.x_safe_fetch_bytes__mutmut_7": "killed",
         "localm.netpolicy.x_safe_fetch_bytes__mutmut_70": "killed",
-        "localm.netpolicy.x_safe_fetch_bytes__mutmut_71": "survived",
+        "localm.netpolicy.x_safe_fetch_bytes__mutmut_71": {
+          "equivalent": "dict.get with no default returns None, which is falsy exactly like the empty string, so the missing-Location refusal is identical"
+        },
         "localm.netpolicy.x_safe_fetch_bytes__mutmut_72": "killed",
         "localm.netpolicy.x_safe_fetch_bytes__mutmut_73": "survived",
         "localm.netpolicy.x_safe_fetch_bytes__mutmut_74": "survived",
@@ -3536,6 +3544,46 @@
       "module": "localm/bindhost.py",
       "mutant": "localm.bindhost.x_is_loopback_host__mutmut_8",
       "describes": "bindhost.is_loopback_host(): the `except ValueError: return False` flipped to True - an unparseable host is classified loopback"
+    },
+    "auth-empty-credential-accepted": {
+      "module": "localm/auth.py",
+      "mutant": "localm.auth.x_ct_equal__mutmut_4",
+      "describes": "auth.ct_equal(): the falsy-operand `return False` flipped to True - an empty presented key or an unset secret compares equal"
+    },
+    "auth-unknown-key-accepted": {
+      "module": "localm/auth.py",
+      "mutant": "localm.auth.x_verify__mutmut_15",
+      "describes": "auth.verify(): `rec is None` flipped to `is not None` - a token matching no stored key is granted that record's scopes and a real key is refused"
+    },
+    "auth-expired-key-accepted": {
+      "module": "localm/auth.py",
+      "mutant": "localm.auth.x_verify__mutmut_21",
+      "describes": "auth.verify(): `exp is not None` flipped to `is None` - an expired key keeps working"
+    },
+    "hf-cache-containment-skipped": {
+      "module": "localm/config.py",
+      "mutant": "localm.config.x_contained_hf_env__mutmut_20",
+      "describes": "config.contained_hf_env(): HF_HOME set to None - a child process keeps the user's own Hugging Face cache instead of the contained one"
+    },
+    "gpu-cache-containment-skipped": {
+      "module": "localm/config.py",
+      "mutant": "localm.config.x_contained_gpu_cache_env__mutmut_13",
+      "describes": "config.contained_gpu_cache_env(): the cache variable set to None - a child process writes shader and kernel caches outside the data directory"
+    },
+    "tls-external-verification-disabled": {
+      "module": "localm/tls.py",
+      "mutant": "localm.tls.x_requests_verify__mutmut_20",
+      "describes": "tls.requests_verify(): a non-loopback HTTPS host returns False - certificate verification is switched off for a real external endpoint"
+    },
+    "tls-loopback-test-inverted": {
+      "module": "localm/tls.py",
+      "mutant": "localm.tls.x_requests_verify__mutmut_15",
+      "describes": "tls.requests_verify(): `host not in loopback` flipped to `in` - loopback gets default verification and an external host is handed the local CA path"
+    },
+    "tls-downgrade-when-certificate-given": {
+      "module": "localm/portmux.py",
+      "mutant": "localm.portmux.x__serve__mutmut_1",
+      "describes": "portmux._serve(): `if not ssl_certfile` flipped to `if ssl_certfile` - a server given a certificate serves plain HTTP and one without a certificate attempts TLS"
     }
   }
 }
