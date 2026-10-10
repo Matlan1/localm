@@ -880,6 +880,127 @@ def test_the_post_bump_commands_do_not_see_the_github_token(env, monkeypatch, tm
     assert seen.read_text(encoding="utf-8") == "(None, None)"
 
 
+def _confirm_adv_with_receipt(env, monkeypatch, *, rc, receipt_json=None, write=True):
+    """A confirm script that exits *rc* and writes *receipt_json* (or nothing)."""
+    script = env.repo / "scripts" / "confirm_fake_runtime.py"
+    body = ["import sys, json"]
+    if write:
+        body.append("receipt = sys.argv[sys.argv.index('--receipt') + 1]")
+        body.append(f"open(receipt, 'w').write({receipt_json!r})")
+    body.append(f"sys.exit({rc})")
+    script.write_text("\n".join(body) + "\n", encoding="utf-8")
+    env.state.mkdir(parents=True, exist_ok=True)
+    return _adv(), env.state / "r.json"
+
+
+@pytest.mark.parametrize("rc,receipt,expected", [
+    (1, None, pw.INCONCLUSIVE), (0, None, pw.INCONCLUSIVE),
+    (1, "not json", pw.INCONCLUSIVE), (0, '{"verdict": "FAIL"}', pw.INCONCLUSIVE),
+    (1, '{"verdict": "PASS"}', pw.INCONCLUSIVE), (1, '[1]', pw.INCONCLUSIVE),
+    (1, '{"verdict": "FAIL"}', pw.FAIL), (0, '{"verdict": "PASS"}', pw.PASS)])
+def test_a_confirm_exit_code_needs_a_receipt_that_agrees_with_it(env, monkeypatch, rc, receipt, expected):
+    adv, path = _confirm_adv_with_receipt(env, monkeypatch, rc=rc, receipt_json=receipt, write=receipt is not None)
+    verdict, detail = pw.run_confirm(adv, ["--tag", "v2"], path)
+    assert verdict == expected
+    if expected == pw.INCONCLUSIVE:
+        assert "exited" in detail
+
+
+def test_a_crashing_confirm_is_not_filed_as_a_build_failure(env, monkeypatch):
+    adv, _ = _confirm_adv_with_receipt(env, monkeypatch, rc=1, write=False)
+    out = pw.advance(adv, dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE
+    assert "CONFIRM-FAILED" not in env.issues.read_text(encoding="utf-8")
+
+
+def test_the_report_lists_what_is_not_measured_by_design(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    _, path = pw.run_weekly([_adv(candidate=lambda: None)], dry_run=False)
+    text = path.read_text(encoding="utf-8")
+    assert "## Not measured on this machine (by design)" in text
+    assert all(what in text for what, _ in pw.NOT_MEASURED_BY_DESIGN)
+
+
+def _fake_check_module(releases, err="", pin="b1"):
+    class Mod:
+        def pinned_tag(self):
+            return pin
+
+        def upstream_releases(self):
+            return releases, err
+    return Mod()
+
+
+def test_llama_candidate_raises_when_upstream_is_unreadable(monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _fake_check_module([], err="rate limited"))
+    with pytest.raises(cp.FetchError, match="rate limited"):
+        pw._llama_candidate()
+
+
+def test_llama_candidate_raises_on_an_empty_listing(monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _fake_check_module([]))
+    with pytest.raises(cp.FetchError, match="empty"):
+        pw._llama_candidate()
+
+
+def test_llama_candidate_delegates_when_upstream_is_readable(monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _fake_check_module([{"tag": "b2"}]))
+    monkeypatch.setattr(pp, "newest_candidate", lambda: ("b1", "b2"))
+    assert pw._llama_candidate() == ("b1", "b2")
+
+
+class _FakeComfy:
+    def __init__(self, releases, status, pin="v0.31.1"):
+        self.releases, self.status, self.pin = releases, status, pin
+
+    def _pinned_version(self):
+        if self.pin is None:
+            raise SystemExit("renamed")
+        return self.pin
+
+    def _fetch_releases(self):
+        return self.releases
+
+    def _compare(self, pin, releases):
+        return {"status": self.status}
+
+
+@pytest.mark.parametrize("fake,message", [
+    (_FakeComfy(None, "stale"), "unreadable"), (_FakeComfy([{}], "no_data"), "unusable"),
+    (_FakeComfy([{}], "unparseable_pin"), "unusable"), (_FakeComfy([{}], "stale", pin=None), "cannot read")])
+def test_comfyui_candidate_raises_instead_of_reporting_nothing_newer(monkeypatch, fake, message):
+    monkeypatch.setattr(pw, "_load", lambda name, path: fake)
+    with pytest.raises(cp.FetchError, match=message):
+        pw._comfyui_candidate()
+
+
+def test_comfyui_candidate_current_is_none_and_an_unresolved_commit_raises(monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _FakeComfy([{}], "current"))
+    assert pw._comfyui_candidate() is None
+    monkeypatch.setattr(pw, "_load", lambda name, path: _FakeComfy([{}], "stale"))
+    monkeypatch.setattr(pp, "newest_comfyui_candidate", lambda: None)
+    with pytest.raises(cp.FetchError, match="commit"):
+        pw._comfyui_candidate()
+    monkeypatch.setattr(pp, "newest_comfyui_candidate", lambda: ("v0.31.1", "v0.39.0", "a" * 40))
+    assert pw._comfyui_candidate() == ("v0.31.1", "v0.39.0")
+
+
+def test_an_unreadable_llama_upstream_is_inconclusive_not_nothing_newer(env, monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _fake_check_module([], err="403"))
+    adv = next(a for a in pw.build_advancers() if a.key == "llama")
+    out = pw.advance_delegated(adv, dry_run=True)
+    assert out.verdict == pw.INCONCLUSIVE and "unreadable" in out.detail
+
+
+@pytest.mark.parametrize("pin,newer,expected", [
+    ((12, 0, 2, 0), [((18, 1, 0, 0), "18.1.0"), ((12, 1, 0, 0), "12.1.0"), ((12, 0, 3, 0), "12.0.3")], "12.1.0"),
+    ((12, 0, 2, 0), [((18, 1, 0, 0), "18.1.0"), ((13, 0, 0, 0), "13.0.0")], "18.1.0"),
+    ((0, 18, 4, 0), [((0, 19, 0, 0), "0.19.0"), ((0, 18, 6, 0), "0.18.6")], "0.18.6"),
+    ((0, 18, 4, 0), [((0, 19, 0, 0), "0.19.0")], "0.19.0")])
+def test_the_newest_release_inside_the_pinned_major_is_preferred(pin, newer, expected):
+    assert pw._prefer_current_major(pin, newer) == expected
+
+
 def test_main_rejects_an_unknown_only_name(capsys):
     assert pw.main(["--only", "nope"]) == 2
     assert "no runtime matches" in capsys.readouterr().err

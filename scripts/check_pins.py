@@ -13,8 +13,9 @@ its tolerance. It reads upstream only (GitHub API, PyPI, npm): no clone, no
 download of a build.
 
 Exit codes with --gate: 0 nothing stale, 1 at least one row STALE or INCONSISTENT,
-2 nothing stale but at least one row could not be checked. Without --gate the
-report is printed and the exit code is always 0.
+2 nothing stale but at least one row could not be checked. 3 (with or without --gate)
+means the command line named no known pin. Without --gate the report is otherwise
+printed and the exit code is 0.
 
 Usage:
     python scripts/check_pins.py
@@ -48,10 +49,12 @@ STALE = "STALE"
 INCONSISTENT = "INCONSISTENT"
 UNKNOWN = "UNKNOWN"
 UNVERSIONED = "UNVERSIONED"
+BLOCKED = "BLOCKED"
 
 EXIT_OK = 0
 EXIT_STALE = 1
 EXIT_UNKNOWN = 2
+EXIT_USAGE = 3
 
 DEFAULT_TOLERANCE_DAYS = 30
 SECURITY_TOLERANCE_DAYS = 60
@@ -61,7 +64,16 @@ _TIMEOUT = 20
 
 
 class FetchError(Exception):
-    """An upstream lookup failed; the row reads UNKNOWN, never CURRENT."""
+    """An upstream lookup failed; the row reads UNKNOWN, never CURRENT. *status* is the
+    HTTP status of a failed request, when there was one."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+class LocalReadError(FetchError):
+    """A pin constant in this repository could not be read; the row reads INCONSISTENT."""
 
 
 @dataclass
@@ -131,7 +143,7 @@ def _get_json(url: str):
     try:
         return json.loads(_urlopen_retry(req, read=True).decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
-        raise FetchError(f"{url}: {e}") from e
+        raise FetchError(f"{url}: {e}", status=getattr(e, "code", None)) from e
 
 
 def _parse_date(value) -> _dt.datetime | None:
@@ -149,11 +161,12 @@ def _parse_date(value) -> _dt.datetime | None:
 #  Version handling                                                           #
 # --------------------------------------------------------------------------- #
 
-_SEMVER_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+_SEMVER_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 
 
 def _semver_key(tag) -> tuple[int, ...] | None:
-    """'v1.122.1' / '3.4.13' / '1.22.0-dev.2025' -> (1, 122, 1); anything else None."""
+    """'v1.122.1' / '3.4.13' / '12.9.2.10' / '1.22.0-dev.2025' -> a 4-tuple padded with
+    zeros, e.g. (1, 122, 1, 0); anything else None."""
     if not isinstance(tag, str):
         return None
     m = _SEMVER_RE.search(tag.strip())
@@ -182,10 +195,10 @@ def _read_const(rel: str, pattern: str) -> str:
     try:
         text = _read_text(rel)
     except OSError as e:
-        raise FetchError(f"cannot read {rel}: {e}") from e
+        raise LocalReadError(f"cannot read {rel}: {e}") from e
     m = re.search(pattern, text, re.MULTILINE)
     if not m:
-        raise FetchError(f"{rel}: pattern {pattern!r} not found (renamed or reformatted?)")
+        raise LocalReadError(f"{rel}: pattern {pattern!r} not found (renamed or reformatted?)")
     return m.group(1)
 
 
@@ -271,6 +284,11 @@ def _assess_releases(name: str, group: str, advancer: str, pinned: str,
 
 
 def _unknown(name: str, group: str, advancer: str, err: Exception, pinned: str = "") -> Row:
+    """The row for a failed lookup. A pin this repository cannot read is INCONSISTENT (a
+    renamed constant is a defect to fix); an upstream lookup that failed is UNKNOWN."""
+    if isinstance(err, LocalReadError):
+        return Row(name=name, status=INCONSISTENT, pinned=pinned, advancer=advancer, group=group,
+                   detail=f"cannot read the pin: {err}")
     return Row(name=name, status=UNKNOWN, pinned=pinned, detail=str(err), advancer=advancer,
                group=group)
 
@@ -293,7 +311,7 @@ def _check_github_tag_pin(name, group, advancer, repo, pin_file, pin_pattern, ke
 
 
 def _check_gguf_node(now):
-    name, group, advancer = "ComfyUI-GGUF node", "comfyui", "none (no pipeline)"
+    name, group, advancer = "ComfyUI-GGUF node", "comfyui", "pin_weekly.py (review PR)"
     pinned = ""
     try:
         pinned = _read_const("localm/media/managed_comfy_fresh.py",
@@ -326,7 +344,7 @@ _UV_SITES = (
 
 
 def _check_uv(now):
-    name, group, advancer = "uv (installers + Docker)", "tooling", "none (hand-edited)"
+    name, group, advancer = "uv (installers + Docker)", "tooling", "pin_weekly.py"
     try:
         found = {rel: _read_const(rel, pat) for rel, pat in _UV_SITES}
         releases = _github_releases("astral-sh/uv")
@@ -352,7 +370,7 @@ def _check_cuda_linux_source(now):
         repo = _read_const("localm/setup_llama/pins.py", r'^_CUDA_LINUX_REPO = "([^"]+)"')
         rel = _get_json(f"https://api.github.com/repos/{repo}/releases/tags/{pinned}")
     except FetchError as e:
-        if "404" in str(e):
+        if e.status == 404 and not isinstance(e, LocalReadError):
             return Row(name=name, status=STALE, pinned=pinned, advancer=advancer, group=group,
                        detail="the CUDA build source has no release for the pinned llama.cpp tag; "
                               "Linux CUDA users silently fall back to vulkan")
@@ -375,7 +393,7 @@ def _check_rocm_cpu_asset(now):
         repo = _read_const("localm/setup_llama/pins.py", r'^_UPSTREAM_REPO = "([^"]+)"')
         rel = _get_json(f"https://api.github.com/repos/{repo}/releases/tags/{pinned}")
     except FetchError as e:
-        if "404" in str(e):
+        if e.status == 404 and not isinstance(e, LocalReadError):
             return Row(name=name, status=STALE, pinned=pinned, advancer=advancer, group=group,
                        detail="upstream no longer has a release for the pinned CPU tag")
         return _unknown(name, group, advancer, e, pinned)
@@ -429,7 +447,7 @@ def _docker_library_updated(repo: str) -> _dt.datetime | None:
 
 
 def _check_docker_base(now):
-    name, group, advancer = "Docker base image", "tooling", "none (hand-edited)"
+    name, group, advancer = "Docker base image", "tooling", "pin_weekly.py (review PR)"
     pinned = ""
     try:
         ref = _read_const("docker/Dockerfile",
@@ -457,7 +475,7 @@ _CUDA_RUNTIME_RE = re.compile(r'^_CUDA_RUNTIME_PIN = \{(.*?)^\}', re.MULTILINE |
 
 def _check_cuda_runtime_wheels(now):
     name, group = "Linux CUDA runtime wheels", "cuda"
-    advancer = "none (hand-edited)"
+    advancer = "pin_weekly.py (review PR)"
     try:
         text = _read_text("localm/setup_llama/cuda.py")
     except OSError as e:
@@ -481,7 +499,8 @@ def _check_cuda_runtime_wheels(now):
               latest=", ".join(f"{p}=={latest}" for p, _, latest, _ in rows), days=0,
               tolerance=DEFAULT_TOLERANCE_DAYS, advancer=advancer, group=group)
     if behind:
-        stamps = [s for *_, s in rows if s]
+        behind_names = {p for p, _, _ in behind}
+        stamps = [s for p, _, _, s in rows if p in behind_names and s]
         row.days = max((now - min(stamps)).days, 0) if stamps else None
         row.status = BEHIND if (row.days or 0) <= DEFAULT_TOLERANCE_DAYS else STALE
         row.detail = "newer: " + ", ".join(f"{p} {latest}" for p, _, latest in behind)
@@ -515,6 +534,14 @@ _UNVERSIONED_VENDORED = (
 )
 
 
+_AUTO_VENDORED = ("marked", "DOMPurify", "highlight.js", "KaTeX")
+
+
+def _vendored_advancer(name: str) -> str:
+    return ("pin_weekly.py (GUI tests; review for a major)" if name in _AUTO_VENDORED
+            else "none (the TTS bundle is rebuilt by hand)")
+
+
 def _check_vendored(spec):
     name, rel, pattern, (source, ref), tolerance = spec
     label = f"vendored {name}"
@@ -525,9 +552,17 @@ def _check_vendored(spec):
             pinned = _read_const(rel, pattern)
             releases = _github_releases(ref) if source == "gh" else _npm_releases(ref)
         except FetchError as e:
-            return _unknown(label, "vendored", "none (hand-maintained)", e, pinned)
-        return _assess_releases(label, "vendored", "none (hand-maintained)", pinned, releases,
+            return _unknown(label, "vendored", _vendored_advancer(name), e, pinned)
+        return _assess_releases(label, "vendored", _vendored_advancer(name), pinned, releases,
                                 _semver_key, tolerance, now)
+    return check
+
+
+def _not_checkable(name, rel, why):
+    def check(now):
+        exists = (REPO / rel).is_file()
+        return Row(name=name, status=UNVERSIONED if exists else INCONSISTENT, group="unchecked",
+                   advancer="none", detail=why if exists else f"{rel} is missing; update this list")
     return check
 
 
@@ -585,6 +620,54 @@ def _legacy_check(name, group, script, advancer, pinned_re=None, latest_re=None)
     return check
 
 
+# A pin that is stale for a known reason no automation can fix is reported as BLOCKED, with
+# the reason, until the expiry date; after it the row reads STALE again and has to be
+# decided afresh. name -> (expiry ISO date, reason).
+ACCEPTED_BLOCKERS: dict[str, tuple[str, str]] = {
+    "vendored marked": ("2026-12-31", "marked 16 and later no longer ships the file the page "
+                        "loads, so moving past 15.x needs a code change in the GUI"),
+    "vendored transformers.js": ("2026-12-31", "part of the TTS bundle, which has to be rebuilt "
+                                 "with a bundler; no automation rebuilds it"),
+    "vendored onnxruntime-web": ("2026-12-31", "part of the TTS bundle, which has to be rebuilt "
+                                 "with a bundler; no automation rebuilds it"),
+}
+
+
+def apply_blockers(rows: list[Row], now: _dt.datetime,
+                   blockers: dict[str, tuple[str, str]] | None = None) -> list[Row]:
+    """Turn a STALE or BEHIND row with an unexpired accepted blocker into BLOCKED."""
+    blockers = ACCEPTED_BLOCKERS if blockers is None else blockers
+    for row in rows:
+        entry = blockers.get(row.name)
+        if entry is None or row.status not in (STALE, BEHIND):
+            continue
+        expiry, reason = entry
+        try:
+            expires = _dt.datetime.strptime(expiry, "%Y-%m-%d").replace(tzinfo=_dt.UTC)
+        except ValueError:
+            continue
+        if now <= expires:
+            row.status = BLOCKED
+            row.detail = f"accepted until {expiry}: {reason}. {row.detail}".strip()
+    return rows
+
+
+# Sources the registry cannot compare with upstream, each reported on every run with the
+# reason: (name, file that must still exist, why it is not checked).
+_NOT_CHECKABLE = (
+    ("torch wheel indexes (cpu, cu126, cu130, xpu, rocm6.2)", "localm/hwdetect.py",
+     "floating package indexes; the torch version itself comes from uv.lock"),
+    ("libgomp package for the Linux bundle", "localm/setup_llama/native_deps.py",
+     "pinned by sha256 against an immutable snapshot URL"),
+    ("native image and video model files", "localm/plugins/builtin/image/backends/native.py",
+     "pinned by sha256 and size on Hugging Face; the files are model weights, not runtimes"),
+    ("default embedding models", "localm/inference/embedder.py",
+     "Hugging Face model repositories chosen by name; no version to compare"),
+    ("managed Python 3.12", "pyproject.toml",
+     "uv installs the newest 3.12 patch; the floor is requires-python"),
+)
+
+
 # --------------------------------------------------------------------------- #
 #  Registry                                                                   #
 # --------------------------------------------------------------------------- #
@@ -596,25 +679,27 @@ def build_registry() -> list[PinSpec]:
                              _legacy_check(name, group, script, advancer, pinned_re, latest_re),
                              legacy=True))
     specs += [
-        PinSpec("koboldcpp", "media", "none (no pipeline)", _check_github_tag_pin(
-            "koboldcpp", "media", "none (no pipeline)", "LostRuins/koboldcpp",
+        PinSpec("koboldcpp", "media", "pin_weekly.py", _check_github_tag_pin(
+            "koboldcpp", "media", "pin_weekly.py", "LostRuins/koboldcpp",
             "localm/media/koboldcpp/pins.py", r'^TAG = "([^"]+)"', _semver_key)),
-        PinSpec("stable-diffusion.cpp", "media", "none (no pipeline)", _check_github_tag_pin(
-            "stable-diffusion.cpp", "media", "none (no pipeline)", "leejet/stable-diffusion.cpp",
+        PinSpec("stable-diffusion.cpp", "media", "pin_weekly.py", _check_github_tag_pin(
+            "stable-diffusion.cpp", "media", "pin_weekly.py", "leejet/stable-diffusion.cpp",
             "localm/media/sdcpp/pins.py", r'^TAG = "([^"]+)"', _sdcpp_key)),
-        PinSpec("ComfyUI-GGUF node", "comfyui", "none (no pipeline)", _check_gguf_node),
-        PinSpec("uv (installers + Docker)", "tooling", "none (hand-edited)", _check_uv),
-        PinSpec("Docker base image", "tooling", "none (hand-edited)", _check_docker_base),
+        PinSpec("ComfyUI-GGUF node", "comfyui", "pin_weekly.py (review PR)", _check_gguf_node),
+        PinSpec("uv (installers + Docker)", "tooling", "pin_weekly.py", _check_uv),
+        PinSpec("Docker base image", "tooling", "pin_weekly.py (review PR)", _check_docker_base),
         PinSpec("Linux CUDA build source", "cuda", "rides the llama.cpp pin", _check_cuda_linux_source),
         PinSpec("ROCm CPU archive", "rocm", "rides the ROCm pin", _check_rocm_cpu_asset),
-        PinSpec("Linux CUDA runtime wheels", "cuda", "none (hand-edited)", _check_cuda_runtime_wheels),
+        PinSpec("Linux CUDA runtime wheels", "cuda", "pin_weekly.py (review PR)", _check_cuda_runtime_wheels),
     ]
     for spec in _VENDORED:
-        specs.append(PinSpec(f"vendored {spec[0]}", "vendored", "none (hand-maintained)",
+        specs.append(PinSpec(f"vendored {spec[0]}", "vendored", _vendored_advancer(spec[0]),
                              _check_vendored(spec)))
     for name, rel, why in _UNVERSIONED_VENDORED:
-        specs.append(PinSpec(f"vendored {name}", "vendored", "none (hand-maintained)",
+        specs.append(PinSpec(f"vendored {name}", "vendored", "pin_weekly.py (GUI tests; review for a major)",
                              _unversioned(name, rel, why)))
+    for name, rel, why in _NOT_CHECKABLE:
+        specs.append(PinSpec(name, "unchecked", "none", _not_checkable(name, rel, why)))
     return specs
 
 
@@ -634,7 +719,7 @@ def run_checks(specs: list[PinSpec], now: _dt.datetime | None = None) -> list[Ro
         row.group = row.group or spec.group
         row.advancer = row.advancer or spec.advancer
         rows.append(row)
-    return rows
+    return apply_blockers(rows, now)
 
 
 def exit_code(rows: list[Row]) -> int:
@@ -693,14 +778,14 @@ def main(argv: list[str] | None = None) -> int:
         known = {s.name.lower() for s in specs}
         if skipped - known:
             print(f"--exclude names no known pin: {sorted(skipped - known)}", file=sys.stderr)
-            return EXIT_UNKNOWN if args.gate else EXIT_OK
+            return EXIT_USAGE
         specs = [s for s in specs if s.name.lower() not in skipped]
     if args.only:
         wanted = {w.strip().lower() for w in args.only.split(",") if w.strip()}
         specs = [s for s in specs if s.name.lower() in wanted]
         if not specs:
             print(f"no pin matches --only {args.only!r}", file=sys.stderr)
-            return EXIT_UNKNOWN if args.gate else EXIT_OK
+            return EXIT_USAGE
 
     rows = run_checks(specs)
     table = format_table(rows)
@@ -713,7 +798,7 @@ def main(argv: list[str] | None = None) -> int:
     for r in rows:
         if r.status in (STALE, INCONSISTENT):
             _annotate("error", f"{r.name}: {r.status} ({r.pinned} -> {r.latest}); {r.detail}")
-        elif r.status in (BEHIND, UNKNOWN, UNVERSIONED):
+        elif r.status in (BEHIND, UNKNOWN, UNVERSIONED, BLOCKED):
             _annotate("warning", f"{r.name}: {r.status}; {r.detail}")
     _write_summary("## Pin currency (all runtimes)\n\n" + table)
 

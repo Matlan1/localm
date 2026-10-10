@@ -232,13 +232,31 @@ def run_confirm(adv: Advancer, args: list[str], receipt: Path) -> tuple[str, str
     rc, out = run_cmd(cmd, cwd=REPO, timeout=CONFIRM_TIMEOUT_SECONDS)
     if rc == LEASE_BUSY_EXIT:
         return NOT_RUN, "GPU busy this run (lease wait elapsed)"
-    return _verdict_from_rc(rc), out[-1500:]
+    verdict = _verdict_from_rc(rc)
+    if verdict in (PASS, FAIL):
+        problem = receipt_problem(receipt, verdict)
+        if problem:
+            return INCONCLUSIVE, f"{adv.confirm_script} exited {rc} but {problem}; {out[-300:]}"
+    return verdict, out[-1500:]
 
 
 def _receipt_path(key: str, tag: str) -> Path:
     path = pp.STATE_DIR / "receipts" / f"{key}-{tag}-{int(time.time())}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def receipt_problem(receipt: Path, verdict: str) -> str:
+    """Why *receipt* does not back a *verdict* exit code, or "" when it does."""
+    try:
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+    except OSError:
+        return "wrote no receipt"
+    except ValueError:
+        return "wrote a receipt that is not JSON"
+    if not isinstance(data, dict) or data.get("verdict") != verdict:
+        return f"its receipt says {data.get('verdict') if isinstance(data, dict) else 'nothing'}"
+    return ""
 
 
 def receipt_needs_code_update(receipt: Path) -> bool:
@@ -590,6 +608,13 @@ def _report_current_failure(out: Outcome) -> None:
 #  Candidate detection                                                        #
 # --------------------------------------------------------------------------- #
 
+def _prefer_current_major(pin_key: tuple, keyed: list) -> str:
+    """The newest release inside the pin's own major line when there is one (so a blocked
+    newest major cannot hold back a safe bump), else the newest release overall."""
+    inside = [(k, t) for k, t in keyed if k[0] == pin_key[0] and (pin_key[0] != 0 or k[1] == pin_key[1])]
+    return max(inside or keyed)[1]
+
+
 def _github_candidate(repo: str, pin_file: str, pin_pattern: str, key) -> Callable[[], tuple[str, str] | None]:
     def find():
         pinned = cp._read_const(pin_file, pin_pattern)
@@ -600,7 +625,7 @@ def _github_candidate(repo: str, pin_file: str, pin_pattern: str, key) -> Callab
         keyed = [(k, t) for k, t in keyed if k is not None and k > pin_key]
         if not keyed:
             return None
-        return pinned, max(keyed)[1]
+        return pinned, _prefer_current_major(pin_key, keyed)
     return find
 
 
@@ -616,7 +641,7 @@ def _vendored_candidate(name: str) -> Callable[[], tuple[str, str] | None]:
         newer = [(k, t) for k, t in newer if k is not None and k > pin_key]
         if not newer:
             return None
-        return pinned, re.sub(r"^v", "", max(newer)[1])
+        return pinned, re.sub(r"^v", "", _prefer_current_major(pin_key, newer))
     return find
 
 
@@ -712,9 +737,36 @@ def _no_major_boundary(old: str, new: str) -> bool:
     return a[0] == b[0]
 
 
+def _llama_candidate() -> tuple[str, str] | None:
+    """(pinned, newest) for llama.cpp; raises FetchError when upstream cannot be read, so an
+    outage is never reported as "nothing newer"."""
+    mod = _load("check_llama_pin", SCRIPTS / "check_llama_pin.py")
+    releases, err = mod.upstream_releases()
+    if err or not releases:
+        raise cp.FetchError(f"llama.cpp releases unreadable: {err or 'empty'}")
+    return pp.newest_candidate()
+
+
 def _comfyui_candidate() -> tuple[str, str] | None:
+    """(pinned, newest) for ComfyUI; raises FetchError when upstream or the tag's commit
+    cannot be read."""
+    mod = _load("check_comfyui_pin", SCRIPTS / "check_comfyui_pin.py")
+    try:
+        pin = mod._pinned_version()
+    except SystemExit as e:
+        raise cp.FetchError(f"cannot read the ComfyUI pin: {e}") from e
+    releases = mod._fetch_releases()
+    if releases is None:
+        raise cp.FetchError("ComfyUI releases unreadable")
+    status = mod._compare(pin, releases)["status"]
+    if status in ("no_data", "unparseable_pin"):
+        raise cp.FetchError(f"ComfyUI release data unusable ({status})")
+    if status == "current":
+        return None
     found = pp.newest_comfyui_candidate()
-    return None if found is None else (found[0], found[1])
+    if found is None:
+        raise cp.FetchError("could not resolve the newest ComfyUI tag to a commit")
+    return found[0], found[1]
 
 
 def _llama_delegate(dry_run: bool) -> int:
@@ -750,7 +802,7 @@ def _bullet(what: str, how: str) -> Callable[[str, str], str]:
 def build_advancers() -> list[Advancer]:
     return [
         Advancer("llama", "llama.cpp", "scripts/confirm_llama_runtime.py",
-                 "scripts/bump_llama_pin.py", candidate=pp.newest_candidate,
+                 "scripts/bump_llama_pin.py", candidate=_llama_candidate,
                  delegate=_llama_delegate, verify_current_cmd=_llama_verify_cmd),
         Advancer("comfyui", "ComfyUI", "scripts/confirm_comfyui_runtime.py",
                  "scripts/bump_comfyui_pin.py", candidate=_comfyui_candidate,
@@ -813,6 +865,18 @@ def _review_only_advancers() -> list[Advancer]:
 #  Report                                                                     #
 # --------------------------------------------------------------------------- #
 
+NOT_MEASURED_BY_DESIGN = (
+    ("llama.cpp CUDA, HIP, SYCL, Metal, OpenVINO and Android builds",
+     "no such hardware here; they share one llama library with the measured cpu and vulkan builds"),
+    ("koboldcpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
+    ("stable-diffusion.cpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
+    ("AMD ROCm builds for gfx110X, gfx120X and other families", "only this machine's gfx103X family can be run"),
+    ("Linux CUDA runtime wheels, the Docker image, the ComfyUI-GGUF node under load",
+     "loaded or built only on other machines; a pull request is opened and CI runs"),
+    ("vendored browser libraries", "no runtime check beyond the GUI test suite and CI"),
+)
+
+
 def severity(outcomes: list[Outcome]) -> int:
     if any(o.verdict == FAIL for o in outcomes):
         return 1
@@ -832,6 +896,8 @@ def render_report(rows: list, outcomes: list[Outcome], started: _dt.datetime, dr
               "| runtime | result | detail |", "|---|---|---|"]
     for o in (x for x in outcomes if x.kind == "verify-current"):
         lines.append(f"| {o.title} | {o.verdict} | {(o.detail or '-').replace('|', '/')[:240]} |")
+    lines += ["", "## Not measured on this machine (by design)", "", "| what | why |", "|---|---|"]
+    lines += [f"| {what} | {why} |" for what, why in NOT_MEASURED_BY_DESIGN]
     lines += ["", "## Currency of every pin", "", cp.format_table(rows)]
     return "\n".join(lines) + "\n"
 
