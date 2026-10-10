@@ -153,7 +153,8 @@ def _make_self_embed(self_url: str, active_model):
             except Exception:
                 detail = (r.text or "").strip()
             raise RuntimeError(detail or f"embeddings endpoint returned HTTP {r.status_code}")
-        return [d["embedding"] for d in r.json()["data"]]
+        from localm.jsonreply import response_json
+        return [d["embedding"] for d in response_json(r)["data"]]
     return _self_embed
 
 
@@ -249,7 +250,8 @@ def _make_self_describe_image(self_url: str, active_model):
                          },
                          timeout=_DESCRIBE_TIMEOUT_S, base_url=self_url)
         if r.ok:
-            body = r.json()["choices"][0]
+            from localm.jsonreply import response_json
+            body = response_json(r)["choices"][0]
             if body.get("finish_reason") == "error":
                 # The backend caught a generation crash (e.g. the vision worker
                 # died on undecodable image bytes) and rendered it as a normal
