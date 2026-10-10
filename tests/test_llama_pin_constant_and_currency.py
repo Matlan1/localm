@@ -414,6 +414,11 @@ def test_the_currency_workflow_runs_the_gate_where_a_red_reaches_someone():
         assert f"{script} --gate" in runs, job_name
         assert 'if [ "$rc" = "2" ]' in runs, f"{job_name}: could-not-check must not turn the job red"
         assert 'exit "$rc"' in runs, f"{job_name}: and stale must"
+        gate_steps = [s for s in gate["steps"] if f"{script} --gate" in s.get("run", "")]
+        assert len(gate_steps) == 1, job_name
+        assert gate_steps[0].get("env", {}).get("GITHUB_TOKEN") == "${{ github.token }}", (
+            f"{job_name}: an unauthenticated call is rate-limited on shared runners "
+            "and reads as could-not-check")
 
     preflight = wf["jobs"]["candidate-preflight"]
     assert "workflow_dispatch" in preflight["if"] and "candidate_tag" in preflight["if"]

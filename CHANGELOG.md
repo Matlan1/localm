@@ -473,6 +473,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   off for the reply (it does not run on image turns), the chat API reports it
   as `usage.mtp`, and `localm bench-mtp` prints the acceptance rate and whether
   the replies matched MTP off.
+- **The bundled AMD (ROCm) llama.cpp runtime moves to build b1342**, from b1307:
+  two months of upstream llama.cpp and a newer ROCm runtime. Run
+  `localm setup-llama --force` to pick it up; an existing installation keeps
+  working untouched until you do.
 
 ### Fixed
 - **A bad audio clip or image no longer unloads a GGUF model.** An unreadable clip or picture is refused with a

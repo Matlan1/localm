@@ -631,3 +631,31 @@ class _FakeHTTP:
 
     def __exit__(self, *a):
         return False
+
+
+def test_every_api_call_sends_github_token_when_set(monkeypatch):
+    """All four request sites (release listing, release by tag, tag ref, tag
+    object) send GITHUB_TOKEN as a bearer token when it is set, and no
+    Authorization header when it is not."""
+    captured = []
+
+    def capture(req, timeout=None):
+        captured.append(req)
+        return _FakeHTTP({})
+    monkeypatch.setattr("urllib.request.urlopen", capture)
+
+    def call_all():
+        pincheck._fetch_releases_http("owner/repo")
+        pincheck._fetch_release_by_tag_http("owner/repo", "v1.2.3")
+        pincheck._fetch_tag_ref_http("owner/repo", "v1.2.3")
+        pincheck._fetch_tag_object_http("owner/repo", "a" * 40)
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    call_all()
+    assert [r.get_header("Authorization") for r in captured] == [None] * 4
+
+    captured.clear()
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
+    call_all()
+    assert [r.get_header("Authorization") for r in captured] == ["Bearer tok-123"] * 4
+    assert all(r.get_header("Accept") == "application/vnd.github+json" for r in captured)
