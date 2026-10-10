@@ -475,6 +475,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **A bad audio clip or image no longer unloads a GGUF model.** An unreadable clip or picture is refused with a
+  `400` and the model stays loaded. Before, the model was dropped and the request got a server error.
 - **"Delete saved data" now also removes the voices folder.** The named reference voices
   for text-to-speech were left behind. A legacy data folder with no record of what was in it
   before LocaLM keeps a voices folder.
