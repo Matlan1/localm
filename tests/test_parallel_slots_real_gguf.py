@@ -286,8 +286,8 @@ def test_an_image_turn_waits_for_the_text_reply_in_flight():
         def text():
             pieces = []
             last = None
-            for piece in _ask(be, LONG[0], max_tokens=300,
-                              grammar="root ::= [a-z ]{2000,}"):
+            for piece in _ask(be, LONG[0], max_tokens=200,
+                              grammar="root ::= [a-z ]{1900,}"):
                 text_started.set()
                 last = time.perf_counter()
                 pieces.append(piece)
