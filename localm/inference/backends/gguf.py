@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 
 from localm.console import console
 
@@ -32,6 +32,9 @@ from .base import (AdapterLoadError, BaseBackend, ModelLoadCancelled, PerThread,
                    PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
                    UnsupportedModelRoleError)
 from .llamacpp._runner import RunnerBusy
+
+if TYPE_CHECKING:
+    from localm.inference.parallel_setting import ParallelSetting
 from .llamacpp._sizing import VramSizingMixin
 
 # Process-wide latch: the count_messages_tokens RPC warning prints once per process.
@@ -136,7 +139,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     # Parallel slots: the setting ("auto" or a count), the count the last load
     # asked the worker for, and what it reported back.
-    parallel_slots_setting: object = 1
+    parallel_slots_setting: ParallelSetting = 1
     parallel_copies = 1
     parallel_slots = 1
     parallel_note = ""
@@ -160,7 +163,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         spec_draft_model: Optional[str] = None,
         use_mmap: str = "auto",
         adapters: Optional[list] = None,
-        parallel_slots: object = 1,
+        parallel_slots: ParallelSetting = 1,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -595,12 +598,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         leaves free (one when the model does not fully fit, or VRAM cannot be
         measured); a CPU-only load counts as fitting."""
         from localm.inference.parallel_setting import (
-            PARALLEL_AUTO, PARALLEL_AUTO_SLOTS)
+            PARALLEL_AUTO_SLOTS)
         if getattr(self, "spec_source", "off") not in (None, "off") or self.is_diffusion:
             return 1
         setting = self.parallel_slots_setting
-        if setting != PARALLEL_AUTO:
-            return max(1, int(setting))
+        if isinstance(setting, int):
+            return max(1, setting)
         self._set_parallel_copies(1)
         per_copy = self._recurrent_state_vram_bytes()
         if per_copy <= 0 or self.n_gpu_layers == 0:

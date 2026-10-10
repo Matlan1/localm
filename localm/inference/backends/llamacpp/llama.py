@@ -3307,6 +3307,9 @@ class LlamaCpp:
         scheduler. Caller holds ``_gen_lock``. Raises RuntimeError when the new
         context cannot be created; the model then has no context until the next
         recreate."""
+        model = self._model_ptr
+        if not model:
+            raise RuntimeError("Model not loaded")
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
@@ -3322,7 +3325,7 @@ class LlamaCpp:
             cp.n_threads_batch = self._n_threads
         _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
         with _ctx():
-            self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+            self._ctx_ptr = api.llama_init_from_model(model, cp)
             if self._ctx_ptr:
                 try:
                     self._apply_adapters(self._ctx_ptr)
@@ -3338,7 +3341,6 @@ class LlamaCpp:
                 f"Start a new chat, lower n_ctx_max, or free some memory.")
         self._ctx_capacity = target
         self._offload_kqv = offload_kqv
-        self._tokenizer._ctx = self._ctx_ptr
 
     def _generate_slots(
         self,
@@ -3360,7 +3362,8 @@ class LlamaCpp:
         typed errors and ``last_finish_reason`` values as ``_generate``. A stop
         published with ``stream_stop_check`` on this thread cancels the reply
         while it waits or decodes."""
-        if not self._model_ptr:
+        slots = self._slots
+        if not self._model_ptr or slots is None:
             raise RuntimeError("Model not loaded")
         n_prompt = len(prompt_tokens)
         if n_prompt == 0:
@@ -3369,7 +3372,7 @@ class LlamaCpp:
             on_status("Processing prompt...")
         max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
         sampler = _build_sampler(
-            vocab=self._tokenizer._vocab,
+            vocab=self._loaded_tokenizer()._vocab,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
@@ -3384,7 +3387,7 @@ class LlamaCpp:
         from localm.inference.backends.base import stream_stop_requested
         self.last_finish_reason = "stop"
         try:
-            stream = self._slots.submit(prompt_tokens, max_new_tokens, sampler,
+            stream = slots.submit(prompt_tokens, max_new_tokens, sampler,
                                         on_status=on_status,
                                         stop_requested=stream_stop_requested)
         except BaseException:

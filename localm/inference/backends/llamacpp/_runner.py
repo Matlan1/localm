@@ -115,7 +115,7 @@ import queue as _queue
 import re
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from localm.inference.backends.base import (
     AdapterLoadError, ContextCapacityExceededError,
@@ -410,7 +410,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
         if cmd is None:
             return
         name = cmd[0]
-        payload = cmd[1] if len(cmd) > 1 else None
+        payload: Any = cmd[1] if len(cmd) > 1 else None
 
         fault = os.environ.get(_FAULT_ENV)
         if fault:
@@ -1411,10 +1411,11 @@ class ModelRunner:
         """Ask the child to stop stream *sid* and consume its envelopes until its
         "done" or "error", for at most *timeout* seconds; past that the child is
         killed, ending every stream on it."""
-        if not self.is_alive():
+        ctrl_q = self._ctrl_q
+        if not self.is_alive() or ctrl_q is None:
             return
         try:
-            self._ctrl_q.put(("cancel_stream", sid))
+            ctrl_q.put(("cancel_stream", sid))
         except Exception:
             self.shutdown(grace=0)
             return
