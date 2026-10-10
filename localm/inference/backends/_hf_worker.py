@@ -1818,9 +1818,11 @@ class HFWorker:
         # then picks only from the still-legal tokens. Soft-degrades to
         # unconstrained generation if xgrammar is absent or the grammar is bad.
         lp = _grammar_processor(grammar, tokenizer, model)
-        penalty = _penalty_processor(
-            _penalty_offset(model, inputs["input_ids"].shape[-1]),
-            presence_penalty, frequency_penalty)
+        penalty = None
+        if presence_penalty or frequency_penalty:
+            penalty = _penalty_processor(
+                _penalty_offset(model, inputs["input_ids"].shape[-1]),
+                presence_penalty, frequency_penalty)
         if penalty is not None:
             from transformers import LogitsProcessorList
             lp = LogitsProcessorList([penalty, *(lp or [])])

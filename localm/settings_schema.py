@@ -266,6 +266,12 @@ CORE_FIELDS: list = [
                  "vocabulary, by name or GGUF path. `localm spec-drafts <model>` "
                  "lists the ones you have.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+    SettingField("parallel_slots", Widget.SELECT, "Parallel requests",
+                 "How many chat requests one GGUF model answers at the same "
+                 "time; they share its context window. auto uses 4 (1 while "
+                 "speculative drafting is on). 1 answers one at a time.",
+                 group="Engine", applies=Applies.NEXT_LOAD,
+                 options=["auto"] + [str(n) for n in range(1, 17)]),
     SettingField("diffusion_steps", Widget.NUMBER, "Diffusion steps",
                  "Denoising steps per reply for diffusion language models "
                  "(Dream, LLaDA, RND1). More steps: better text, slower reply. "

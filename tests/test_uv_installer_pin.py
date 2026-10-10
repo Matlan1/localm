@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -88,18 +89,41 @@ printf 'stub installer bytes' > "$out"
 _STUB_BYTES_SHA256 = hashlib.sha256(b"stub installer bytes").hexdigest()
 
 
+_HASH_PROGRAM = (
+    "import hashlib, sys; "
+    "print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())")
+
+# What each hashing tool the helper may reach for prints, as macOS and older
+# openssl builds print it; each stub hashes the file with Python.
+_HASH_STUBS = {
+    "shasum": ('[ "$1" = "-a" ] && [ "$2" = "256" ] || exit 2\n'
+               'printf "%s  %s\\n" "$("{py}" -c "{prog}" "$3")" "$3"\n'),
+    "openssl-new": ('[ "$1" = "dgst" ] && [ "$2" = "-sha256" ] || exit 2\n'
+                    'printf "SHA2-256(%s)= %s\\n" "$3" "$("{py}" -c "{prog}" "$3")"\n'),
+    "openssl-old": ('[ "$1" = "dgst" ] && [ "$2" = "-sha256" ] || exit 2\n'
+                    'printf "SHA256(%s)= %s\\n" "$3" "$("{py}" -c "{prog}" "$3")"\n'),
+}
+
+
 def _run_fetch(tmp_path: Path, name: str, *, expected_sha: str | None = None,
-               curl_fails: bool = False, hash_tools: bool = True):
+               curl_fails: bool = False, hash_tool: str = "sha256sum"):
     bash = shutil.which("bash")
     stubs = tmp_path / "bin"
-    stubs.mkdir()
+    stubs.mkdir(parents=True)
     curl = stubs / "curl"
     curl.write_bytes(_CURL_STUB.encode("utf-8"))
     curl.chmod(0o755)
-    for tool in ("cut", "sed") + (("sha256sum", "shasum", "openssl") if hash_tools else ()):
+    real_tools = ("cut", "sed") + (("sha256sum",) if hash_tool == "sha256sum" else ())
+    for tool in real_tools:
         found = shutil.which(tool)
         if found:
             (stubs / tool).symlink_to(found)
+    if hash_tool in _HASH_STUBS:
+        program = _HASH_PROGRAM.replace('"', '\\"')
+        body = _HASH_STUBS[hash_tool].format(py=sys.executable, prog=program)
+        stub = stubs / hash_tool.split("-")[0]
+        stub.write_text("#!/bin/sh\n" + body, encoding="utf-8", newline="\n")
+        stub.chmod(0o755)
     helpers = tmp_path / "helpers.sh"
     helpers.write_text(_helpers(name), encoding="utf-8", newline="\n")
     override = f'UV_INSTALLER_SHA256="{expected_sha}"\n' if expected_sha else ""
@@ -138,6 +162,18 @@ def test_a_failed_download_is_refused(tmp_path, name):
 @_needs_bash
 @pytest.mark.parametrize("name", SCRIPTS)
 def test_no_hashing_tool_means_refusal_not_a_skipped_check(tmp_path, name):
-    r, _ = _run_fetch(tmp_path, name, expected_sha=_STUB_BYTES_SHA256, hash_tools=False)
+    r, _ = _run_fetch(tmp_path, name, expected_sha=_STUB_BYTES_SHA256, hash_tool="none")
     assert r.returncode == 1
     assert "cannot be verified and was not run" in r.stdout
+
+
+@_needs_bash
+@pytest.mark.parametrize("name", SCRIPTS)
+@pytest.mark.parametrize("tool", ["shasum", "openssl-new", "openssl-old"])
+def test_each_fallback_hashing_tool_verifies_the_installer(tmp_path, name, tool):
+    ok, dest = _run_fetch(tmp_path / "ok", name, expected_sha=_STUB_BYTES_SHA256, hash_tool=tool)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert dest.read_bytes() == b"stub installer bytes"
+    bad, _ = _run_fetch(tmp_path / "bad", name, hash_tool=tool)
+    assert bad.returncode == 1
+    assert "did not match its expected checksum" in bad.stdout

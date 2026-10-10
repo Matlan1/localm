@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The Anthropic Messages API at `/v1/messages`.** Claude Code, the Anthropic SDKs and other
+  tools that speak the Messages API can point their base URL at localm and use any chat model:
+  text and image blocks, a system prompt, `stop_sequences`, tool use with `tool_use` and
+  `tool_result` blocks, `thinking` (returned as thinking blocks), streaming with the full
+  Messages event sequence, and `/v1/messages/count_tokens`. The `x-api-key` header is accepted
+  as well as a bearer token, and errors come back in Anthropic's error shape.
 - **Structured output and more OpenAI fields on `/v1/chat/completions`.**
   `response_format` (`json_object`, or `json_schema` with `strict`) constrains the reply,
   token by token, to JSON or to the schema, also alongside `tools`. `presence_penalty`,
@@ -31,6 +37,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   checksum, and checks that it loads and finds a compute device, falling back to Vulkan and
   then CPU when the preferred build does not load. `--backend` picks a build and `--status`
   shows what is installed.
+- **One GGUF model answers several requests at once.** Concurrent chat requests to the
+  same model are decoded together instead of waiting for each other, so two or four
+  clients share the GPU's throughput rather than queueing (`parallel_slots`, default
+  `auto`: 4, or 1 while speculative drafting is on; Settings > Engine > Parallel
+  requests). The requests share the model's context window: one that does not fit beside
+  the running ones waits for them and shows a waiting status. A reply generated beside
+  others can differ slightly from the same request run alone, even at temperature 0.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the
