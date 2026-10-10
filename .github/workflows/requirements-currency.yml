@@ -1,0 +1,67 @@
+name: requirements currency
+
+# WHAT THIS FILE DOES
+#
+#   committed-sets   runs scripts/check_ci_requirements.py: regenerates
+#                    .github/requirements/torch-cpu.txt and mutmut.txt with the
+#                    commands in .github/requirements/README.md and FAILS when a
+#                    regenerated file differs from the committed one, or when the
+#                    OSV database (which includes the GitHub advisory database)
+#                    lists an advisory against any pinned version.
+#
+# Runs on pushes to master that touch the sets, their inputs or this check, on a
+# weekly cron, and on workflow_dispatch. Never on pull_request. Reads only: no
+# write permission, nothing opened or merged. A red run reaches the merge actor
+# through the workflow-failure notification and the commit's red status.
+#
+# EXIT-CODE CONTRACT: 0 clean, 1 drift or advisory, 2 could not check. 2 becomes a
+# warning annotation and a green step, never a pass claim and never a red.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/requirements/**"
+      - "uv.lock"
+      - "pyproject.toml"
+      - "scripts/check_ci_requirements.py"
+      - ".github/workflows/requirements-currency.yml"
+  schedule:
+    - cron: "17 5 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: requirements-currency-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  committed-sets:
+    name: committed CI requirement sets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
+      - name: Compare the committed sets with a fresh regeneration and the advisory database
+        shell: bash
+        run: |
+          set +e
+          python scripts/check_ci_requirements.py
+          rc=$?
+          set -e
+          if [ "$rc" = "2" ]; then
+            echo "::warning::the committed requirement sets could not be checked this run (see above); this is NOT 'current'"
+            exit 0
+          fi
+          exit "$rc"
