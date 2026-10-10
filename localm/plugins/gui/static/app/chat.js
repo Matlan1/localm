@@ -1518,7 +1518,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     const player = document.createElement("audio");
     player.controls = true;
     player.style.width = "100%";
-    player.src = audioDataUri(clip);
+    player.src = audioBlobUrl(clip);
     wrap.appendChild(player);
     body.appendChild(wrap);
   }
@@ -2276,8 +2276,30 @@ export function audioMime(format) {
   return "audio/" + (f || "wav");
 }
 
-export function audioDataUri(clip) {
-  return `data:${audioMime(clip.format)};base64,${clip.data}`;
+const _clipUrls = new Map();
+const CLIP_URL_CAP = 8;
+
+/** A blob: URL playing *clip*. The page CSP allows media only from 'self' and
+ *  blob:, so a data: URL is refused by the browser. The newest CLIP_URL_CAP
+ *  URLs are kept; older ones are revoked and re-created on demand. */
+export function audioBlobUrl(clip) {
+  let url = _clipUrls.get(clip.data);
+  if (url) {
+    _clipUrls.delete(clip.data);
+    _clipUrls.set(clip.data, url);
+    return url;
+  }
+  const bin = atob(clip.data);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  url = URL.createObjectURL(new Blob([bytes], { type: audioMime(clip.format) }));
+  _clipUrls.set(clip.data, url);
+  while (_clipUrls.size > CLIP_URL_CAP) {
+    const oldest = _clipUrls.keys().next().value;
+    URL.revokeObjectURL(_clipUrls.get(oldest));
+    _clipUrls.delete(oldest);
+  }
+  return url;
 }
 
 /** *seconds* as m:ss. */
@@ -2286,17 +2308,23 @@ export function formatClipTime(seconds) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-/** The duration in seconds of the audio at *dataUri* as the browser reports
- *  it, or 0 when the browser cannot read it (the server then decides). */
-export function probeAudioSeconds(dataUri) {
+/** The duration in seconds of the audio *blob* as the browser reports it, or 0
+ *  when the browser cannot read it (the server then decides). */
+export function probeAudioSeconds(blob) {
   return new Promise((resolve) => {
     const a = document.createElement("audio");
-    const done = (v) => { clearTimeout(timer); a.removeAttribute("src"); resolve(v); };
+    const url = URL.createObjectURL(blob);
+    const done = (v) => {
+      clearTimeout(timer);
+      a.removeAttribute("src");
+      URL.revokeObjectURL(url);
+      resolve(v);
+    };
     const timer = setTimeout(() => done(0), 5000);
     a.preload = "metadata";
     a.onloadedmetadata = () => done(Number.isFinite(a.duration) ? a.duration : 0);
     a.onerror = () => done(0);
-    a.src = dataUri;
+    a.src = url;
   });
 }
 
@@ -2321,7 +2349,7 @@ export async function attachAudio(file) {
   const clip = { name: file.name, data, format: audioFormat(file), size: file.size, seconds: 0 };
   chat.clips.push(clip);
   renderAttachChips();
-  const seconds = await probeAudioSeconds(uri);
+  const seconds = await probeAudioSeconds(file);
   if (seconds > AUDIO_MAX_SECONDS) {
     const at = chat.clips.indexOf(clip);
     if (at !== -1) chat.clips.splice(at, 1);

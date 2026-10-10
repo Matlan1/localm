@@ -38,6 +38,9 @@ function setup({ rejectWith = null } = {}) {
   const { window } = loadApp({ fetchImpl: impl });
   window.maybeCompactConversation = async () => {};
   window.probeAudioSeconds = async () => 4;
+  window.__blobs = [];
+  window.URL.createObjectURL = (blob) => { window.__blobs.push(blob); return `blob:test/${window.__blobs.length}`; };
+  window.URL.revokeObjectURL = () => {};
   window.readSSE = async (_r, onData) => {
     onData(JSON.stringify({ choices: [{ delta: { content: "a transcript" } }] }));
     onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
@@ -193,7 +196,10 @@ test("sending sends exactly an input_audio part, shows a player, and clears the 
 
   const player = window.document.querySelector("#chat-messages .msg-row.user audio");
   assert.ok(player, "the sent clip is playable in the transcript");
-  assert.equal(player.getAttribute("src"), `data:audio/wav;base64,${WAV_B64}`);
+  assert.match(player.getAttribute("src"), /^blob:/, "the page CSP refuses data: media");
+  assert.equal(window.__blobs.length, 1);
+  assert.equal(window.__blobs[0].type, "audio/wav");
+  assert.equal(window.__blobs[0].size, WAV_BYTES.length, "the blob holds the decoded bytes");
   assert.match(window.document.querySelector("#chat-messages .msg-clip-name").textContent, /hello\.wav/);
   assert.ok(conv.messages.some((m) => m.role === "assistant" && m.content === "a transcript"));
 });
