@@ -507,6 +507,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   failed later with a generic worker error.
 - **A llama.cpp runtime without lazy grammar support says to run `localm setup-llama`.** Tool calling with
   `tool_choice` `auto` used to tell a GGUF user to use a GGUF-format model.
+- **A GGUF file with a bad `general.alignment` is refused.** When localm rewrites a model file's
+  metadata, an alignment that is not a power of two is now refused up front, as the GGUF loader
+  already refuses it, instead of producing a file the loader would reject.
 - **A deeply nested JSON body no longer causes a server error on speech and Responses.** `POST /v1/audio/speech` answers a body nested thousands of levels deep with a 400 saying it is not valid JSON, and `POST /v1/responses` answers a nested reply from the chat route with a 502 instead of a 500. The TLS certificate and key settings also report a path too long for the operating system as a missing file instead of failing the save.
 - **A native image job now says GPU placement is ComfyUI-only.** With per-component GPU placement turned on
   and the native image backend in use, the job log now says the setting applies to ComfyUI only and that each

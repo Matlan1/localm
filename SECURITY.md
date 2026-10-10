@@ -421,6 +421,10 @@ files are covered:
   The same command verifies the sdist, the wheel and the SBOM. A file that was
   modified after the build, or built by any other workflow or repository, fails.
 
+  The release also carries `localm-<version>.intoto.jsonl`, the Sigstore bundle of
+  those attestations, so the provenance can be checked offline with
+  `gh attestation verify --bundle`.
+
 - **PyPI files.** The PyPI publish workflow uses Trusted Publishing, which uploads
   PEP 740 attestations next to each file. Verify what `pip` would install with:
 
