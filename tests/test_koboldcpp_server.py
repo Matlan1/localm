@@ -37,6 +37,12 @@ FAKE = textwrap.dedent(r'''
         f.write(json.dumps({"event": "start", "argv": args, "pid": os.getpid(),
                             "host": opt("--host")}) + "\n")
     print("Loading Music Gen LLM Model", flush=True)
+    if os.environ.get("FAKE_GRANDCHILD") == "1":
+        import subprocess
+        gc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        with open(record, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"event": "grandchild", "pid": gc.pid}) + "
+")
     if mode == "crash":
         print("FATAL: failed to load DiT model", flush=True)
         sys.exit(3)
@@ -102,7 +108,8 @@ def fake_kcpp(tmp_path, monkeypatch):
 
     def build(key, port, password):
         argv = real_build(key, port, password)
-        return [sys.executable, str(script), *argv[1:]]
+        return [getattr(sys, "_base_executable", None) or sys.executable, str(script),
+                *argv[1:]]
 
     monkeypatch.setattr(server, "build_argv", build)
     monkeypatch.setattr(server, "HEARTBEAT_SECONDS", 0.5)
@@ -221,6 +228,19 @@ def test_stop_kills_exactly_the_started_process(fake_kcpp, tmp_path):
     assert not _pid_alive(script_pid)
     assert server.running_pid() is None
     assert server.stop() is False
+
+
+def test_stop_kills_what_the_server_started(fake_kcpp, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_GRANDCHILD", "1")
+    server.run(_rt(tmp_path), "vulkan", MODELS, tmp_path / "w", prepare=False,
+               request=REQUEST, timeout=60)
+    gc = [e["pid"] for e in _events(fake_kcpp) if e["event"] == "grandchild"]
+    assert len(gc) == 1 and _pid_alive(gc[0])
+    server.stop()
+    deadline = time.monotonic() + 10
+    while _pid_alive(gc[0]) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _pid_alive(gc[0])
 
 
 def test_cancel_during_generation_kills_the_server(fake_kcpp, tmp_path, monkeypatch):
