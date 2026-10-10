@@ -229,6 +229,11 @@ macOS; no llama-cpp-python). Key behaviour:
 - **KV prefix reuse**: between calls the common token prefix with the
   previous request stays in the KV cache (llama_memory_* API, probed at
   runtime); only the new suffix is prefilled.
+- **Parallel slots (continuous batching)**: with `parallel_slots` above 1 the
+  context holds that many sequences in one unified KV cache and a scheduler
+  thread in the worker decodes every running reply in one batch per step, each
+  sampled with its own sampler (so a grammar binds only its own reply) and each
+  keeping its own cached prefix. See [llamacpp-binding.md](llamacpp-binding.md).
 - **Sampler chain**: grammar (GBNF), repetition penalty, top-k, top-p,
   min-p, temperature, dist; greedy when temperature is 0.
 - **Multi-Token Prediction (MTP) speculative decoding**: a model trained
@@ -298,9 +303,10 @@ transport middleware, the route groups and, last, the plugin engine. The
 middleware order is load-bearing and pinned by
 `tests/test_create_app_characterization.py` and `tests/test_app_assembly.py`.
 The synchronous `engine.chat_stream()` runs in a thread; tokens cross into
-the event loop via `call_soon_threadsafe` and stream out as SSE. Inference is serialised per loaded model (an asyncio
-semaphore per display name), not globally - two concurrently loaded models
-can generate at once. Endpoints are documented in
+the event loop via `call_soon_threadsafe` and stream out as SSE. Admission is per loaded model (an `InferenceGate` per
+display name), not global - two concurrently loaded models can generate at
+once, and one GGUF model generates up to its `parallel_slots` replies at once
+while loads and unloads of it wait for them and run alone. Endpoints are documented in
 [server-api.md](server-api.md).
 
 `inference/capability_routing.py` decides, for a chat request that is not

@@ -168,7 +168,7 @@ the CPU, or the draft model did not fit in VRAM beside it). The field is `null` 
 | Field | Behaviour |
 |---|---|
 | `max_tokens`, `max_completion_tokens` | The reply cap; either name works. Both with different values is a 400. |
-| `temperature`, `top_p`, `seed`, `stop` | Applied. |
+| `temperature`, `top_p`, `seed`, `stop` | Applied. The finish chunk, or the non-streaming choice, carries `stop_sequence` (a localm extension): the stop sequence that ended the reply, or `null`. |
 | `presence_penalty`, `frequency_penalty` | Applied (-2 to 2): a token's logit drops by `presence_penalty` once it has appeared, and by `frequency_penalty` times the number of times it appeared. On a GGUF model the window is the last 64 tokens, as in llama.cpp. A penalty of 0 applies nothing. A diffusion language model cannot apply a non-zero value of them or of `min_p` (400). |
 | `response_format` | See [Structured output](#structured-output). |
 | `tools`, `tool_choice`, `parallel_tool_calls` | See [Tool calling](#tool-calling). |
@@ -381,6 +381,45 @@ starts the reply text with the prompt. `presence_penalty`, `frequency_penalty`,
 prompts, `best_of` above 1, `n` other than 1, `logprobs`, a non-empty
 `logit_bias` and `suffix` are each a 400 naming the field.
 
+### `POST /v1/messages` (Anthropic Messages API)
+
+Scope: any valid key (no specific scope required once auth is enabled). Anthropic clients
+authenticate with `x-api-key`, which the API routes accept as well as `Authorization: Bearer`
+(the bearer token wins when both are sent; the GUI login takes only the bearer form); the
+`anthropic-version` and `anthropic-beta` headers are accepted and not needed.
+
+An Anthropic SDK or an agent tool that speaks the Messages API can use localm by pointing its
+base URL at the server (`ANTHROPIC_BASE_URL=http://127.0.0.1:8642`) and naming a localm model.
+The request is answered by the same chat path as `/v1/chat/completions`, so capability routing,
+compaction, tool calling and the response headers work the same way.
+
+| Request field | Behaviour |
+|---|---|
+| `model` | A localm model name (`localm` or empty: the loaded model). Another name is a 404 `not_found_error`. |
+| `max_tokens` | Required, the reply cap. |
+| `messages` | `user` and `assistant` turns; `content` is a string or blocks: `text`, `image` (`base64` or `url` source), `tool_use` (assistant), `tool_result` (user; text or image content, `is_error` marks a failed call). `thinking` blocks from earlier turns are dropped. Other block types (documents, server tool results) are a 400. |
+| `system` | A string or a list of text blocks. |
+| `stop_sequences`, `temperature`, `top_p`, `top_k` | Applied. |
+| `tools`, `tool_choice` | Custom tools (`name`, `description`, `input_schema`) work with any chat model, as in [Tool calling](#tool-calling). `tool_choice` `auto`, `any`, `tool` (by name) and `none`; `disable_parallel_tool_use` allows one call. Server tools (web search, code execution, ...) and `mcp_servers` are a 400. |
+| `thinking` | `{"type": "enabled"}` (or `adaptive`, `between_tools`) lets a reasoning model think and returns its reasoning as a `thinking` block; without it, or with `disabled`, the model answers without thinking. `budget_tokens` is not applied. |
+| `output_config` | `format: {"type": "json_schema", "schema": {...}}` constrains the reply to the schema, as a strict `response_format` does on chat (see [Structured output](#structured-output)). `effort` is accepted and not applied. |
+| `stream` | Server-sent events in Anthropic's order: `message_start`, `ping`, per block `content_block_start` / `content_block_delta` (`text_delta`, `thinking_delta` then `signature_delta`, `input_json_delta` carrying a tool call's whole input) / `content_block_stop`, then `message_delta` with `stop_reason` and `usage`, then `message_stop`. `message_start` reports 0 input tokens; `message_delta` carries the real `input_tokens` and `output_tokens`. A generation that fails partway ends with an `error` event. |
+| `metadata`, `service_tier`, `cache_control`, `inference_geo` | Accepted; no effect. |
+
+`stop_reason` is `end_turn`, `max_tokens`, `stop_sequence` (with `stop_sequence` naming the match;
+otherwise `stop_sequence` is `null`) or `tool_use`. Consecutive turns of the same role are joined,
+and a turn's text blocks stay separate blocks, as the Messages API treats them. A thinking block carries an empty `signature`. Errors use Anthropic's shape,
+`{"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}`, with
+`authentication_error` for a missing or wrong key, `not_found_error`, `request_too_large` and
+`overloaded_error` mapped from the matching status.
+
+### `POST /v1/messages/count_tokens`
+
+Same request fields as `/v1/messages` (without `max_tokens`); returns `{"input_tokens": N}`,
+counted with the model's own tokenizer and chat template, tool descriptions included, by the
+model that would answer the same `/v1/messages` request (capability routing applies, and a model
+another instance serves is counted there). The model is loaded if it is not already.
+
 ### `POST /v1/embeddings`
 
 Scope: any valid key (no specific scope required once auth is enabled).
@@ -540,7 +579,8 @@ completed). A model too large to fully fit VRAM still loads deliberately,
 offloading as many layers as fit and running the rest on CPU rather than
 refusing outright; `degraded` is true whenever fewer than the full layer
 count landed on the GPU, so a caller can tell that apart from a full GPU
-load.
+load. `parallel_slots` appears when the loaded model answers more than one
+request at once, and says how many.
 
 `POST /v1/models/unload` returns `status` (`"unloaded"`, `"in_use"` when
 every loaded model was mid-request and none could be freed, or
@@ -888,9 +928,15 @@ for chunk in stream:
 
 ## Behaviour notes
 
-- **Concurrency**: inference is serialised through a semaphore; concurrent
-  requests queue in order. GPU memory is shared and the KV cache is not
-  concurrency-safe, so this is deliberate.
+- **Concurrency**: a GGUF model answers up to `parallel_slots` requests at
+  the same time (default `auto`: 4, or 1 while speculative drafting is on),
+  decoding them together in one batch per step; further requests queue in order
+  and stream a `waiting` status meanwhile. All of them share the model's one
+  context window: a request that does not fit beside the running ones waits for
+  them. A reply decoded beside others is not bit-identical to the same request
+  decoded alone, even at temperature 0. A turn with an image runs on its own,
+  after the replies already running. Other backends answer one request at a
+  time per model.
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context window section of
   [architecture.md](architecture.md)). Conversations that outgrow the
