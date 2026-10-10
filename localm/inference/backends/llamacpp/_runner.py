@@ -36,7 +36,8 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
               vram_overhead_bytes, gpu_split_ratios, n_cpu_moe, use_mmap,
               main_gpu?, adapters?})
     ("chat_stream", {messages, max_tokens, temperature, top_p, top_k,
-                      repeat_penalty, grammar, grammar_lazy, grammar_triggers, seed})
+                      repeat_penalty, grammar, grammar_lazy, grammar_triggers, seed,
+                      thinking?, min_p?, presence_penalty?, frequency_penalty?})
     ("count_tokens", text)
     ("count_messages_tokens", messages)
     ("check_grammar", grammar)

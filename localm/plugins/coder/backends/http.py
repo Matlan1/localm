@@ -408,7 +408,7 @@ class HTTPBackend(BaseLLMBackend):
         if isinstance(raw, str) and raw:
             try:
                 data = _json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 data = None
             if isinstance(data, dict) and not data.get("routed") \
                     and not data.get("pinned"):

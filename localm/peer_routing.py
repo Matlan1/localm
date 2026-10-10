@@ -318,7 +318,7 @@ def forward_body(route: PeerRoute, raw: bytes) -> bytes:
     returned unchanged."""
     try:
         data = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return raw
     if not isinstance(data, dict):
         return raw
@@ -362,7 +362,7 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
                         timeout=timeout, verify=verify)
     try:
         state = resp.json() if resp.status_code == 200 else None
-    except ValueError:
+    except (ValueError, RecursionError):
         state = None
     if isinstance(state, dict) and "authed" in state and "required" in state:
         if state["required"] and not state["authed"]:

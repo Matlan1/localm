@@ -57,7 +57,8 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
     ("load", {model_path, device})
     ("chat_stream", {messages, max_tokens, temperature, top_p, top_k,
                       repeat_penalty, grammar, grammar_lazy,
-                      grammar_triggers, seed}, seq)
+                      grammar_triggers, seed, thinking?, min_p?,
+                      presence_penalty?, frequency_penalty?}, seq)
     ("count_tokens", text)
     ("count_messages_tokens", messages)
     ("embed", texts)

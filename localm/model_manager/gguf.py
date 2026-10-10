@@ -13,10 +13,8 @@ import time
 from pathlib import Path
 from typing import Callable
 from typing import Collection
-from typing import List
 from typing import NamedTuple
 from typing import Optional
-from typing import Tuple
 from rich.progress import BarColumn
 from rich.progress import DownloadColumn
 from rich.progress import Progress
@@ -41,7 +39,7 @@ _SPLIT_GGUF_RE = re.compile(
 
 
 
-def split_gguf_parts(filename: str) -> Optional[List[str]]:
+def split_gguf_parts(filename: str) -> Optional[list[str]]:
     """
     If *filename* follows the llama.cpp split convention
     (``model-00001-of-00003.gguf``), return the full ordered list of part
@@ -68,7 +66,7 @@ def first_split_part(filename: str) -> str:
 
 
 
-def missing_split_parts(first_part: Path) -> List[Path]:
+def missing_split_parts(first_part: Path) -> list[Path]:
     """
     Given the path of any part of a split GGUF, return sibling part paths
     that are missing on disk. Empty list means all parts present (or the
@@ -115,7 +113,7 @@ def _iter_file_blocks(path: Path):
                 yield block
         return
 
-    q: "queue.Queue" = queue.Queue(maxsize=_mm._HASH_READAHEAD_BLOCKS)
+    q: queue.Queue = queue.Queue(maxsize=_mm._HASH_READAHEAD_BLOCKS)
     eof = object()
 
     def _reader() -> None:
@@ -144,7 +142,7 @@ def _iter_file_blocks(path: Path):
                     raise RuntimeError(
                         f"the reader thread for '{path.name}' exited without "
                         "delivering data or an error; the digest would be "
-                        "incomplete, so it is not returned")
+                        "incomplete, so it is not returned") from None
                 continue
             if item is eof:
                 return
@@ -464,7 +462,7 @@ def _is_hf_model_dir(folder: Path) -> bool:
 
 def _find_model_units(d: Path, max_depth: int = 3, *,
                       skip_hidden: bool = False,
-                      skip_dirs: Collection[str] = ()) -> Tuple[List[Path], List[Path]]:
+                      skip_dirs: Collection[str] = ()) -> tuple[list[Path], list[Path]]:
     """``(gguf_first_parts, hf_model_dirs)`` found inside *d*, up to *max_depth*
     folder levels (*d* itself is level 1, so a model sitting directly in *d* or
     a subfolder two levels down - LM Studio's ``<publisher>/<repo>/<file>`` -
@@ -485,13 +483,13 @@ def _find_model_units(d: Path, max_depth: int = 3, *,
     Breadth-first, and never opens a folder past *max_depth*, so an unrelated
     deep or wide subtree is never traversed. An unreadable folder is skipped.
     Both lists are sorted."""
-    ggufs: List[Path] = []
-    hf_dirs: List[Path] = []
-    frontier: List[Path] = [d]
+    ggufs: list[Path] = []
+    hf_dirs: list[Path] = []
+    frontier: list[Path] = [d]
     level = 0
     while frontier and level < max_depth:
         level += 1
-        next_frontier: List[Path] = []
+        next_frontier: list[Path] = []
         for folder in frontier:
             try:
                 if (folder / "model_index.json").is_file():
@@ -532,7 +530,7 @@ class HubCacheScan(NamedTuple):
     """Result of :func:`scan_hub_cache`: the repositories with downloaded files
     and the count of repository folders that hold none."""
 
-    units: List[HubCacheUnit]
+    units: list[HubCacheUnit]
     empty_repos: int
 
 
@@ -649,7 +647,7 @@ def scan_hub_cache(d: Path) -> Optional[HubCacheScan]:
                      if c.is_dir() and _is_hub_repo_dir(c)]
         except OSError:
             return None
-    units: List[HubCacheUnit] = []
+    units: list[HubCacheUnit] = []
     empty = 0
     for repo in sorted(repos, key=lambda r: r.name):
         snapshot = _hub_revision(repo)

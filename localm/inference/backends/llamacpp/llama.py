@@ -24,8 +24,8 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import (Any, Callable, Dict, Generator, Iterable, Iterator, List, Optional,
-                    Sequence, Tuple)
+from typing import (Any, Callable, Generator, Iterable, Iterator, Optional,
+                    Sequence)
 
 from localm.inference import pretokenizer_guard
 from localm.textguard import (
@@ -144,7 +144,7 @@ class _CapturedStderr:
 
     def _read(self) -> str:
         try:
-            with open(self._path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(self._path, encoding="utf-8", errors="replace") as fh:
                 return fh.read()
         except OSError:
             return ""
@@ -265,7 +265,7 @@ class _CapturedStdio:
 
     def _read(self, path: str) -> str:
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 return fh.read()
         except OSError:
             return ""
@@ -365,7 +365,7 @@ class _Tokenizer:
                 "pre-tokenizer regex %s. Such input will be refused rather "
                 "than tokenised.", self._pre_type, hazard)
 
-    def encode(self, text: str, add_bos: bool = True, untrusted_ranges=()) -> List[int]:
+    def encode(self, text: str, add_bos: bool = True, untrusted_ranges=()) -> list[int]:
         """Tokenise *text*, parsing control tokens everywhere except untrusted ranges.
 
         *untrusted_ranges* are ``(start, end)`` character offsets into *text*
@@ -384,7 +384,7 @@ class _Tokenizer:
         if not untrusted_ranges:
             return self._encode_segment(text, add_bos, True)
 
-        tokens: List[int] = []
+        tokens: list[int] = []
         want_bos = add_bos
         for segment, is_untrusted in split_by_trust(text, untrusted_ranges):
             if not segment:
@@ -395,7 +395,7 @@ class _Tokenizer:
             return self._encode_segment(text, add_bos, True)
         return tokens
 
-    def _encode_segment(self, text: str, add_special: bool, parse_special: bool) -> List[int]:
+    def _encode_segment(self, text: str, add_special: bool, parse_special: bool) -> list[int]:
         raw = text.encode("utf-8", errors="replace")
         # First call: find required size (returns negative if buffer too small)
         n_max = len(raw) + 128
@@ -474,7 +474,7 @@ def _extract_text(content) -> str:
     return str(content)
 
 
-def _format_chatml(messages: List[Dict]) -> str:
+def _format_chatml(messages: list[dict]) -> str:
     """Render messages as a ChatML-formatted prompt string (fallback)."""
     parts = []
     for msg in messages:
@@ -488,13 +488,13 @@ def _format_chatml(messages: List[Dict]) -> str:
 _ENCODER_ROLE_LABELS = {"user": "User", "assistant": "Assistant", "tool": "Tool"}
 
 
-def _encoder_message_text(message: Dict) -> str:
+def _encoder_message_text(message: dict) -> str:
     """The text an encoder-decoder prompt takes from one message: its text
     parts (``_extract_text``), "" for absent or None content."""
     return _extract_text(message.get("content") or "")
 
 
-def _flatten_for_encoder(messages: List[Dict]) -> str:
+def _flatten_for_encoder(messages: list[dict]) -> str:
     """The single text an encoder-decoder model (T5) reads for *messages*.
 
     Such a model has no chat template. Each message becomes one line, in
@@ -525,7 +525,7 @@ def _flatten_for_encoder(messages: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-def _encoder_untrusted_ranges(messages: List[Dict], prompt: str) -> Tuple[Tuple[int, int], ...]:
+def _encoder_untrusted_ranges(messages: list[dict], prompt: str) -> tuple[tuple[int, int], ...]:
     """Untrusted character ranges of *prompt*, the ``_flatten_for_encoder``
     text of *messages*, in prompt coordinates. Empty when no message carries
     an annotation, and when the contents cannot be located exactly (logged)."""
@@ -536,7 +536,7 @@ def _encoder_untrusted_ranges(messages: List[Dict], prompt: str) -> Tuple[Tuple[
 
     def render(sentinels):
         return _flatten_for_encoder(
-            [dict(m, content=s) for m, s in zip(messages, sentinels)])
+            [dict(m, content=s) for m, s in zip(messages, sentinels, strict=False)])
 
     spans = content_spans_via_sentinels(contents, render, prompt)
     if spans is None:
@@ -570,7 +570,7 @@ def _warn_chatml_fallback(reason: str) -> None:
         "understand; chat and vision output quality may be degraded", reason)
 
 
-def _apply_model_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Optional[str]]:
+def _apply_model_template(model_ptr: int, messages: list[dict]) -> tuple[str, Optional[str]]:
     """
     Format *messages* using the model's own embedded Jinja chat template.
 
@@ -593,7 +593,7 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Op
     return prompt, reason
 
 
-def _render_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Optional[str]]:
+def _render_template(model_ptr: int, messages: list[dict]) -> tuple[str, Optional[str]]:
     """Render *messages* exactly as :func:`_apply_model_template` does, without logging.
 
     Returns ``(prompt, fallback_reason)``. Split out so the untrusted-span probe
@@ -639,10 +639,10 @@ def _render_template(model_ptr: int, messages: List[Dict]) -> Tuple[str, Optiona
 
 def _content_spans_in_prompt(
     model_ptr: int,
-    messages: List[Dict],
+    messages: list[dict],
     prompt: str,
     fallback_reason: Optional[str],
-) -> Optional[List[Tuple[int, int, int]]]:
+) -> Optional[list[tuple[int, int, int]]]:
     """Character ranges in *prompt* holding each message's content, or ``None``.
 
     Renders *messages* a second time with every content replaced by a unique
@@ -658,7 +658,7 @@ def _content_spans_in_prompt(
     contents = [_extract_text(m.get("content", "")) for m in messages]
 
     def render(sentinels):
-        probe = [dict(m, content=s) for m, s in zip(messages, sentinels)]
+        probe = [dict(m, content=s) for m, s in zip(messages, sentinels, strict=False)]
         skeleton, probe_reason = _render_template(model_ptr, probe)
         if probe_reason != fallback_reason:
             return None
@@ -669,10 +669,10 @@ def _content_spans_in_prompt(
 
 def _untrusted_prompt_ranges(
     model_ptr: int,
-    messages: List[Dict],
+    messages: list[dict],
     prompt: str,
     fallback_reason: Optional[str],
-) -> Tuple[Tuple[int, int], ...]:
+) -> tuple[tuple[int, int], ...]:
     """Untrusted character ranges of *prompt*, in prompt coordinates.
 
     Empty when no message carries an annotation (the common case, which costs no
@@ -930,13 +930,18 @@ def _address(ptr) -> Optional[int]:
     return ctypes.cast(ptr, ctypes.c_void_p).value or None
 
 
-def _common_prefix_len(a: List[int], b: List[int]) -> int:
+def _common_prefix_len(a: list[int], b: list[int]) -> int:
     """Length of the longest common prefix of two token lists."""
     n = min(len(a), len(b))
     for i in range(n):
         if a[i] != b[i]:
             return i
     return n
+
+
+_PENALTIES_UNSUPPORTED_MSG = (
+    "presence_penalty and frequency_penalty cannot be applied: this llama runtime "
+    "has no penalties sampler")
 
 
 def _build_sampler(
@@ -949,17 +954,21 @@ def _build_sampler(
     seed: int = _DEFAULT_SEED,
     grammar: Optional[str] = None,
     grammar_lazy: bool = False,
-    grammar_triggers: Optional[List[str]] = None,
+    grammar_triggers: Optional[list[str]] = None,
+    penalty_freq: float = 0.0,
+    penalty_present: float = 0.0,
 ) -> ctypes.c_void_p:
     """
     Construct a sampler chain:
         [grammar] → [penalties] → top_k → top_p → min_p → temperature → dist
 
     The optional grammar sampler sits first so it masks invalid tokens before
-    any scoring or sampling stage sees them.  The repetition-penalty stage is
-    added when ``repeat_penalty != 1.0`` and the DLL exports it - without it
-    models prone to looping repeat the same marker lines until max_tokens.
-    For temperature ≤ 0 greedy sampling replaces the stochastic stages.
+    any scoring or sampling stage sees them.  The penalties stage is added when
+    ``repeat_penalty != 1.0`` or *penalty_freq* / *penalty_present* is non-zero
+    and the DLL exports it - without it models prone to looping repeat the same
+    marker lines until max_tokens. All three penalties look at the last 64
+    sampled tokens. For temperature ≤ 0 greedy sampling replaces the
+    stochastic stages.
 
     Parameters
     ----------
@@ -985,6 +994,7 @@ def _build_sampler(
         GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
         GrammarUnsupportedError,
         InvalidGrammarError,
+        UnsupportedInputError,
     )
 
     chain_params = api.llama_sampler_chain_default_params()
@@ -1051,9 +1061,18 @@ def _build_sampler(
     # Newer builds take the vocabulary size as a leading argument; _api dispatches
     # on the build, but it needs the real n_vocab to pass - a 0 there would
     # under-allocate the sampler's frequency counters.
-    if repeat_penalty and repeat_penalty != 1.0 and api.has_penalties_sampler():
+    repeat_active = bool(repeat_penalty) and repeat_penalty != 1.0
+    openai_active = penalty_freq != 0.0 or penalty_present != 0.0
+    if (repeat_active or openai_active) and not api.has_penalties_sampler():
+        if openai_active:
+            api.llama_sampler_free(chain)
+            raise UnsupportedInputError(_PENALTIES_UNSUPPORTED_MSG)
+    elif repeat_active or openai_active:
         n_vocab = api.llama_vocab_n_tokens(vocab) if vocab else 0
         if not n_vocab and api.penalties_needs_n_vocab():
+            if openai_active:
+                api.llama_sampler_free(chain)
+                raise UnsupportedInputError(_PENALTIES_UNSUPPORTED_MSG)
             from localm.debuglog import logger
             logger.warning(
                 "skipping the repetition-penalty sampler: this llama build "
@@ -1062,7 +1081,8 @@ def _build_sampler(
             api.llama_sampler_chain_add(
                 chain,
                 api.llama_sampler_init_penalties(
-                    64, repeat_penalty, 0.0, 0.0, n_vocab=n_vocab),
+                    64, repeat_penalty if repeat_active else 1.0,
+                    penalty_freq, penalty_present, n_vocab=n_vocab),
             )
 
     if temperature <= 0.0:
@@ -1195,7 +1215,7 @@ class LlamaCpp:
     mtp_steps = 0                # verification batches THIS generation decoded
     mtp_paused_steps = 0         # steps THIS generation ran plain because drafting was slower
     mtp_skipped = ""             # why THIS generation could not draft at all: "image" or ""
-    _adapter_specs: Sequence[Tuple[str, float]] = ()   # (path, scale) of each LoRA adapter this model loads
+    _adapter_specs: Sequence[tuple[str, float]] = ()   # (path, scale) of each LoRA adapter this model loads
     _adapter_handles: Sequence[Any] = ()   # native handles of the loaded adapters, in the same order
     applied_adapters: Sequence[dict] = ()  # {"path", "scale"} of each adapter applied to the context
     is_encoder_decoder = False   # the model runs llama_encode before decoding (T5)
@@ -1206,7 +1226,7 @@ class LlamaCpp:
     _spec_draft_max = 0          # draft tokens per step of an ngram or draft source, else 0
     _clock = staticmethod(time.perf_counter)
     _draft_pos = 0               # the draft cache holds positions [0, _draft_pos)
-    _queued_tokens: Tuple[int, ...] = ()  # tokens at _draft_pos.. not yet in the draft cache
+    _queued_tokens: tuple[int, ...] = ()  # tokens at _draft_pos.. not yet in the draft cache
     _queued_h = None             # their hidden-state rows, one per queued token
     _n_threads = None
     _pending_h = None            # the hidden state the next draft will read
@@ -1217,7 +1237,7 @@ class LlamaCpp:
     # (key, n_pos) pair per unit: a text token id with n_pos 1, or a media
     # chunk's key with its n_pos. The reply decoded after it is not recorded.
     # None when the KV cache does not start with such a prompt.
-    _vision_kv: Optional[List[Tuple[object, int]]] = None
+    _vision_kv: Optional[list[tuple[object, int]]] = None
     # Diffusion language model state, set by _detect_diffusion() at load.
     is_diffusion = False
     architecture: Optional[str] = None
@@ -1228,14 +1248,14 @@ class LlamaCpp:
     _diffusion_max_tokens: Optional[int] = None
 
     @property
-    def _cached_tokens(self) -> List[int]:
+    def _cached_tokens(self) -> list[int]:
         """Tokens the text path holds in the KV cache.
 
         Assigning it also drops the image path's record (``_vision_kv``)."""
         return self._text_kv_tokens
 
     @_cached_tokens.setter
-    def _cached_tokens(self, tokens: List[int]) -> None:
+    def _cached_tokens(self, tokens: list[int]) -> None:
         self._text_kv_tokens = tokens
         self._vision_kv = None
 
@@ -1250,7 +1270,7 @@ class LlamaCpp:
         n_ctx_max: Optional[int] = None,
         n_ctx_grow: int = 4096,
         mmproj_path: Optional[str] = None,
-        cancel_event: Optional["threading.Event"] = None,
+        cancel_event: Optional[threading.Event] = None,
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
@@ -1262,7 +1282,7 @@ class LlamaCpp:
         spec_draft_model: Optional[str] = None,
         spec_draft_gpu: bool = True,
         use_mmap: Optional[bool] = None,
-        adapters: Optional[List[Tuple[str, float]]] = None,
+        adapters: Optional[list[tuple[str, float]]] = None,
         diffusion_steps: Optional[int] = None,
         diffusion_max_tokens: Optional[int] = None,
         **_ignored,
@@ -1328,7 +1348,7 @@ class LlamaCpp:
         self._stop        = threading.Event()
         self._inference_lock = threading.Lock()
         # Persistent KV cache bookkeeping (prefix reuse across calls)
-        self._cached_tokens: List[int] = []   # tokens currently in the KV cache
+        self._cached_tokens: list[int] = []   # tokens currently in the KV cache
         self._ctx_capacity  = n_ctx           # n_ctx of the live context
         # Where the live context's KV cache actually lives: True = VRAM (offload_kqv),
         # False = system RAM (a prior grow found VRAM too tight). The initial context
@@ -2040,7 +2060,7 @@ class LlamaCpp:
 
     # Tokenisation (public helpers used by tests / introspection)
 
-    def tokenize(self, text: str, add_bos: bool = True) -> List[int]:
+    def tokenize(self, text: str, add_bos: bool = True) -> list[int]:
         return self._tokenizer.encode(text, add_bos=add_bos)
 
     def detokenize(self, tokens: Iterable[int]) -> str:
@@ -2071,7 +2091,7 @@ class LlamaCpp:
             raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
         api.llama_sampler_free(sampler)
 
-    def _create_batch(self, tokens: List[int], start_pos: int, logits_at_last_only: bool = True) -> LlamaBatch:
+    def _create_batch(self, tokens: list[int], start_pos: int, logits_at_last_only: bool = True) -> LlamaBatch:
         n = len(tokens)
         batch = api.llama_batch_init(n, 0, 1)
         batch.n_tokens = n
@@ -2098,7 +2118,7 @@ class LlamaCpp:
 
     def _generate(
         self,
-        prompt_tokens: List[int],
+        prompt_tokens: list[int],
         max_new_tokens: int,
         temperature: float,
         top_k: int,
@@ -2106,12 +2126,15 @@ class LlamaCpp:
         repeat_penalty: float,
         grammar: Optional[str] = None,
         grammar_lazy: bool = False,
-        grammar_triggers: Optional[List[str]] = None,
+        grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
     ) -> Iterator[int]:
         """
-        Yield generated token ids one at a time.
+        Yield generated token ids one at a time. *sampling* holds extra
+        :func:`_build_sampler` keywords (``min_p``, ``penalty_freq``,
+        ``penalty_present``).
 
         KV cache strategy: when this llama.cpp build exports the
         llama_memory_* API and the request fits in the live context, the
@@ -2199,6 +2222,7 @@ class LlamaCpp:
                     grammar=grammar,
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
+                    **(sampling or {}),
                 )
                 # A draft source never hands its proposals to the request's
                 # sampler: every emitted token, with or without a grammar in that
@@ -2332,8 +2356,8 @@ class LlamaCpp:
                             break
 
                         # --- Speculative drafting (while the source drafts) ---
-                        drafts: List[int] = []
-                        accepted: List[int] = []
+                        drafts: list[int] = []
+                        accepted: list[int] = []
                         timed = speculate = verify_ok = observed = grew = False
                         if source.drafting():
                             observed = source.observes_steps
@@ -2512,7 +2536,7 @@ class LlamaCpp:
                 if source is not None:
                     source.end_call()
 
-    def encoder_tokens(self, messages: List[Dict]) -> List[int]:
+    def encoder_tokens(self, messages: list[dict]) -> list[int]:
         """The encoder input of an encoder-decoder model for *messages*.
 
         The ``_flatten_for_encoder`` text, tokenized with control tokens parsed
@@ -2571,7 +2595,7 @@ class LlamaCpp:
 
     def _generate_encoder_decoder(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         max_new_tokens: int,
         temperature: float,
         top_k: int,
@@ -2579,9 +2603,10 @@ class LlamaCpp:
         repeat_penalty: float,
         grammar: Optional[str] = None,
         grammar_lazy: bool = False,
-        grammar_triggers: Optional[List[str]] = None,
+        grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
     ) -> Iterator[int]:
         """Yield the token ids an encoder-decoder model (T5) generates for
         *messages*, one at a time.
@@ -2663,6 +2688,7 @@ class LlamaCpp:
                     grammar=grammar,
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
+                    **(sampling or {}),
                 )
                 in_decode = True
                 if on_status:
@@ -2723,7 +2749,7 @@ class LlamaCpp:
 
     def _generate_diffusion(
         self,
-        prompt_tokens: List[int],
+        prompt_tokens: list[int],
         max_new_tokens: int,
         temperature: float,
         top_k: int,
@@ -2783,7 +2809,7 @@ class LlamaCpp:
 
             last_tenth = [-1]
 
-            def _on_step(step: int, _total: int, _canvas: List[int]) -> bool:
+            def _on_step(step: int, _total: int, _canvas: list[int]) -> bool:
                 if self._stop.is_set() or (should_stop is not None and should_stop()):
                     return False
                 if on_status is not None:
@@ -2837,7 +2863,7 @@ class LlamaCpp:
         yield from reply
 
     @staticmethod
-    def _messages_with_markers(messages: List[Dict], marker: str,
+    def _messages_with_markers(messages: list[dict], marker: str,
                                audio_rate: int = 0):
         """Return (text_messages, media): a copy of *messages* where each image
         and audio content part is replaced by *marker* in the text, plus the
@@ -2856,14 +2882,14 @@ class LlamaCpp:
         from localm.netpolicy import NetworkPolicyError
 
         from .mtmd import AudioClip
-        out: List[Dict] = []
-        media: List = []
+        out: list[dict] = []
+        media: list = []
         for msg in messages:
             content = msg.get("content")
             if not isinstance(content, list):
                 out.append(msg)
                 continue
-            parts: List[str] = []
+            parts: list[str] = []
             for part in content:
                 if not isinstance(part, dict):
                     continue
@@ -2899,7 +2925,7 @@ class LlamaCpp:
 
     def _generate_image(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         max_new_tokens: int,
         temperature: float,
         top_k: int,
@@ -2907,6 +2933,10 @@ class LlamaCpp:
         repeat_penalty: float,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
+        grammar: Optional[str] = None,
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[list[str]] = None,
     ) -> Iterator[int]:
         """Yield generated token ids for a chat whose prompt includes image(s)
         or audio clip(s).
@@ -2914,7 +2944,7 @@ class LlamaCpp:
         The media+text prompt is evaluated into the KV cache by
         :meth:`_prefill_vision`, which keeps the part of the cache an earlier
         image turn left that still matches; sampling then continues exactly like
-        the text loop. Grammar is not applied on the image path. The text path's
+        the text loop, with the same grammar handling. The text path's
         KV record (``_cached_tokens``) is left empty, so the next text turn
         prefills from scratch.
 
@@ -3037,7 +3067,10 @@ class LlamaCpp:
                     temperature=temperature, top_k=top_k, top_p=top_p,
                     repeat_penalty=repeat_penalty,
                     seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
-                    grammar=None,
+                    grammar=grammar,
+                    grammar_lazy=grammar_lazy,
+                    grammar_triggers=grammar_triggers,
+                    **(sampling or {}),
                 )
                 in_decode = True
                 logger.info("gguf generate (vision): entering decode loop")
@@ -3107,7 +3140,7 @@ class LlamaCpp:
                     api.llama_sampler_free(sampler)
 
     def _prefill_vision(self, vprompt, needed: int,
-                        on_status: Optional[Callable[[str], None]] = None) -> Tuple[int, int]:
+                        on_status: Optional[Callable[[str], None]] = None) -> tuple[int, int]:
         """Evaluate the tokenized image prompt *vprompt* (an ``MtmdPrompt``) into
         the KV cache and return ``(n_past, reused)``.
 
@@ -3128,8 +3161,8 @@ class LlamaCpp:
         Caller must hold ``_gen_lock``."""
         from localm.inference.backends.base import VisionInputError
 
-        units: List[Tuple[object, int]] = []
-        starts: List[int] = []
+        units: list[tuple[object, int]] = []
+        starts: list[int] = []
         for chunk in vprompt.chunks:
             starts.append(len(units))
             if chunk.tokens is not None:
@@ -3157,7 +3190,7 @@ class LlamaCpp:
 
         if on_status:
             encoding = {
-                chunk.kind for chunk, start in zip(vprompt.chunks, starts)
+                chunk.kind for chunk, start in zip(vprompt.chunks, starts, strict=True)
                 if chunk.tokens is None and start >= keep
                 and not self._mtmd.has_embedding(chunk.key)}
             noun = "audio" if encoding == {"audio"} else "image"
@@ -3172,7 +3205,7 @@ class LlamaCpp:
         n_batch = min(n_ctx, 2048) if n_ctx else 512
         reused = sum(n_pos for _, n_pos in units[:keep])
         pos = reused
-        for chunk, start in zip(vprompt.chunks, starts):
+        for chunk, start in zip(vprompt.chunks, starts, strict=True):
             if chunk.tokens is not None:
                 rest = chunk.tokens[min(max(keep - start, 0), len(chunk.tokens)):]
                 if rest:
@@ -3323,12 +3356,12 @@ class LlamaCpp:
             return None
         return _address(self._pending_h)
 
-    def _main_h_rows(self, n: int) -> List[Optional[int]]:
+    def _main_h_rows(self, n: int) -> list[Optional[int]]:
         """Addresses of the main context's next-n rows 0..n-1 of the last batch."""
         return api.llama_get_embeddings_nextn_rows(self._ctx_ptr, 0, n)
 
-    def _decode_draft(self, tokens: List[int], pos0: int,
-                      h_rows: List[Optional[int]], output_last: bool = True) -> int:
+    def _decode_draft(self, tokens: list[int], pos0: int,
+                      h_rows: list[Optional[int]], output_last: bool = True) -> int:
         """Decode *tokens* at positions pos0.. into the draft context.
 
         Row i carries the hidden state at address ``h_rows[i]``, or zeros for
@@ -3371,13 +3404,13 @@ class LlamaCpp:
         return (self._mtp_ctx_ptr is not None and self._mtp_usable
                 and self._mtp_wants_h and not self._mtp_draft_stale)
 
-    def _queued_row_addrs(self) -> List[int]:
+    def _queued_row_addrs(self) -> list[int]:
         """Addresses of the queued hidden-state rows, in queue order."""
         row = self._n_embd * ctypes.sizeof(ctypes.c_float)
         base = ctypes.addressof(self._queued_h) if self._queued_h is not None else 0
         return [base + i * row for i in range(len(self._queued_tokens))]
 
-    def _queue_draft_rows(self, tokens: List[int], h_rows: List[Optional[int]]) -> bool:
+    def _queue_draft_rows(self, tokens: list[int], h_rows: list[Optional[int]]) -> bool:
         """Queue *tokens*, the positions right after what the draft cache holds,
         with their hidden-state rows for the next draft decode.
 
@@ -3393,7 +3426,7 @@ class LlamaCpp:
         queued = list(self._queued_tokens)
         row = self._n_embd * ctypes.sizeof(ctypes.c_float)
         base = ctypes.addressof(self._queued_h)
-        for token, src in zip(tokens, h_rows):
+        for token, src in zip(tokens, h_rows, strict=False):
             dst = base + len(queued) * row
             if src:
                 ctypes.memmove(dst, src, row)
@@ -3458,7 +3491,7 @@ class LlamaCpp:
                 self._stop_drafting_this_call("draft-out-of-step")
         self._capture_h(0, pos)
 
-    def _after_verify(self, accepted: List[int], pos: int) -> None:
+    def _after_verify(self, accepted: list[int], pos: int) -> None:
         """Record a verification batch decoded at *pos* of which the drafts in
         *accepted* were kept.
 
@@ -3567,16 +3600,16 @@ class LlamaCpp:
         logger.info("%s: status=%s draft_max=%d", source.label,
                     source.status, self._spec_draft_max)
 
-    def _time_decode(self, ctx, prefix: List[int], tokens: List[int],
+    def _time_decode(self, ctx, prefix: list[int], tokens: list[int],
                      all_logits: bool, warm: int, reps: int) -> float:
         """Median seconds of decoding *tokens* after *prefix* on *ctx*, over
         *reps* timed decodes after *warm* untimed ones. Each decode is waited
         for by reading its last logits row and then removed from the cache.
         Leaves the cache empty. Raises RuntimeError when a decode fails."""
         mem = api.llama_get_memory(ctx)
-        times: List[float] = []
+        times: list[float] = []
 
-        def decode(toks: List[int], start: int, every_row: bool) -> None:
+        def decode(toks: list[int], start: int, every_row: bool) -> None:
             batch = self._create_batch(toks, start, logits_at_last_only=not every_row)
             try:
                 if api.llama_decode(ctx, batch) != 0:
@@ -3624,7 +3657,7 @@ class LlamaCpp:
             if n_vocab < 256:
                 return None
 
-            def spread(n: int, offset: int) -> List[int]:
+            def spread(n: int, offset: int) -> list[int]:
                 return [16 + (offset + 7919 * i) % (n_vocab - 32) for i in range(n)]
 
             prefix = spread(32, 1)
@@ -3780,7 +3813,7 @@ class LlamaCpp:
         all rejected can still be rolled back."""
         return mtp_rs_seq(getattr(cp, "n_rs_seq", 0), self._mtp_draft_max)
 
-    def _propose_drafts(self, token: int, pos: int, n_max: int, draft_sampler) -> List[int]:
+    def _propose_drafts(self, token: int, pos: int, n_max: int, draft_sampler) -> list[int]:
         """Propose up to *n_max* tokens to follow *token* at *pos*.
 
         One draft decode carries the queued rows and *token* paired with the
@@ -3801,7 +3834,7 @@ class LlamaCpp:
             return []
         self._draft_pos = pos + 1
         self._queued_tokens = []
-        drafts: List[int] = []
+        drafts: list[int] = []
         row = len(tokens) - 1
         extended = False
         while True:
@@ -3950,8 +3983,8 @@ class LlamaCpp:
         from localm.debuglog import logger as _dbg
         _dbg.info("MTP: speculation disabled - %s", detail)
 
-    def _prefill_mtp(self, tokens: List[int], base_pos: int,
-                     h_rows: Optional[List[Optional[int]]] = None,
+    def _prefill_mtp(self, tokens: list[int], base_pos: int,
+                     h_rows: Optional[list[Optional[int]]] = None,
                      mid_reply: bool = False) -> None:
         """Mirror prefilled *tokens*, at base_pos.., into the MTP draft cache.
 
@@ -4000,7 +4033,7 @@ class LlamaCpp:
                 return
             self._draft_pos = base_pos + i + len(piece)
 
-    def _after_prefill_chunk(self, chunk: List[int], base: int) -> None:
+    def _after_prefill_chunk(self, chunk: list[int], base: int) -> None:
         """Pair a main prefill chunk just decoded at *base* with its hidden states.
 
         Mirrors the chunk into the draft cache, each token paired with the
@@ -4015,7 +4048,7 @@ class LlamaCpp:
             self._prefill_mtp(chunk, base, rows)
         self._capture_h(n - 1, base + n - 1)
 
-    def _sync_draft_cache(self, prefix: int, tokens: List[int]) -> None:
+    def _sync_draft_cache(self, prefix: int, tokens: list[int]) -> None:
         """Make the draft cache hold exactly tokens[:prefix] before a suffix
         prefill.
 
@@ -4075,7 +4108,7 @@ class LlamaCpp:
             return False
         return True
 
-    def _prefill_with_reuse(self, prompt_tokens: List[int]) -> None:
+    def _prefill_with_reuse(self, prompt_tokens: list[int]) -> None:
         """
         Prefill keeping the common prefix with the previous call in the KV
         cache: remove diverging cached tokens, decode only the new suffix.
@@ -4143,7 +4176,7 @@ class LlamaCpp:
 
         self._cached_tokens = list(prompt_tokens)
 
-    def _prefill_fresh_context(self, prompt_tokens: List[int], needed: int) -> None:
+    def _prefill_fresh_context(self, prompt_tokens: list[int], needed: int) -> None:
         """Recreate the context (empty KV cache) and prefill the full prompt.
 
         Consults ``self._vram_check`` (when set) with the target n_ctx BEFORE
@@ -4272,7 +4305,7 @@ class LlamaCpp:
 
     def create_chat_completion(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         max_tokens: int = 1024,
         temperature: float = 0.8,
         top_p: float = 0.95,
@@ -4281,11 +4314,14 @@ class LlamaCpp:
         stream: bool = False,
         grammar: Optional[str] = None,
         grammar_lazy: bool = False,
-        grammar_triggers: Optional[List[str]] = None,
+        grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
         should_stop: Optional[Callable[[], bool]] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
         **_ignored,
     ):
         """
@@ -4305,8 +4341,22 @@ class LlamaCpp:
         ignored.
 
         A diffusion language model answers through ``_generate_diffusion``,
-        which polls *should_stop* between denoising steps.
+        which polls *should_stop* between denoising steps, and refuses a
+        non-zero *min_p*, *presence_penalty* or *frequency_penalty* with
+        :class:`UnsupportedInputError`.
         """
+        sampling: dict = {}
+        if min_p is not None:
+            sampling["min_p"] = min_p
+        if presence_penalty is not None:
+            sampling["penalty_present"] = presence_penalty
+        if frequency_penalty is not None:
+            sampling["penalty_freq"] = frequency_penalty
+        if self.is_diffusion and any(value != 0 for value in sampling.values()):
+            from localm.inference.backends.base import UnsupportedInputError
+            raise UnsupportedInputError(
+                "min_p, presence_penalty and frequency_penalty cannot be applied "
+                "by a diffusion language model")
         if self.is_encoder_decoder:
             return self._completion_result(self._generate_encoder_decoder(
                 messages,
@@ -4320,6 +4370,7 @@ class LlamaCpp:
                 grammar_triggers=grammar_triggers,
                 seed=seed,
                 on_status=on_status,
+                sampling=sampling,
             ), stream)
 
         # Use the model's embedded chat template when available (Gemma, Llama3,
@@ -4385,6 +4436,10 @@ class LlamaCpp:
                 repeat_penalty=repeat_penalty,
                 seed=seed,
                 on_status=on_status,
+                sampling=sampling,
+                grammar=grammar,
+                grammar_lazy=grammar_lazy,
+                grammar_triggers=grammar_triggers,
             )
         else:
             gen = self._generate(
@@ -4399,6 +4454,7 @@ class LlamaCpp:
                 grammar_triggers=grammar_triggers,
                 seed=seed,
                 on_status=on_status,
+                sampling=sampling,
             )
 
         return self._completion_result(gen, stream)

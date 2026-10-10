@@ -380,6 +380,17 @@ class TestCorruptFiles:
         assert m.snapshot() == []
         assert "corrupt" in caplog.text.lower(), caplog.text
 
+    @pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+    def test_a_hostile_file_is_quarantined_not_fatal(self, store_root, caplog, doc):
+        store_root.mkdir(parents=True, exist_ok=True)
+        bad = store_root / f"{DEAD_PID}-abcabcabcabc.json"
+        bad.write_text(doc, encoding="utf-8")
+        with caplog.at_level("WARNING", logger="localm"):
+            m = J.JobManager()
+        copies = list(store_root.glob("*.json.corrupt-*"))
+        assert len(copies) == 1, [c.name for c in copies]
+        assert m.snapshot() == []
+
     def test_the_quarantine_copy_does_not_carry_the_owner_digest(self, store_root):
         """The copy is made from a file that failed to parse, so the redaction has
         to work on raw text. The replacement is a non-null SENTINEL: job_owner_ok

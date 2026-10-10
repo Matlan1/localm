@@ -16,7 +16,7 @@ abort only ever kills this process, never the server."""
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 from ._sizing import VramSizingMixin
 
@@ -262,7 +262,7 @@ class GgufWorker(VramSizingMixin):
 
         from localm.inference.backends.llamacpp import LlamaCpp
 
-        optional: Dict[str, Any] = {
+        optional: dict[str, Any] = {
             name: value for name, value in (
                 ("mtp_draft_tokens", self.mtp_draft_tokens),
                 ("spec_source", self.spec_source),
@@ -334,7 +334,7 @@ class GgufWorker(VramSizingMixin):
     def count_tokens(self, text: str) -> int:
         return len(self._llm.tokenize(text, add_bos=False))
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """Exact token count of the structured messages formatted with the
         model's embedded chat template, or, for an encoder-decoder model, of
         its encoder input (``LlamaCpp.encoder_tokens``). Raises on failure: the
@@ -375,7 +375,7 @@ class GgufWorker(VramSizingMixin):
 
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,
@@ -388,6 +388,9 @@ class GgufWorker(VramSizingMixin):
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ):
         """Yield text tokens one at a time. The caller (the runner's dispatch
         loop) already filtered out an image the model cannot see and already
@@ -425,6 +428,10 @@ class GgufWorker(VramSizingMixin):
                 kw["seed"] = seed
             if thinking is not None:
                 kw["thinking"] = thinking
+            for key, value in (("min_p", min_p), ("presence_penalty", presence_penalty),
+                               ("frequency_penalty", frequency_penalty)):
+                if value is not None:
+                    kw[key] = value
             if self.stream_cancel is not None:
                 kw["should_stop"] = self.stream_cancel.is_set
             return kw

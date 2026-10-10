@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -47,7 +47,7 @@ ContentPart = Annotated[
     Field(discriminator="type"),
 ]
 
-MessageContent = Union[str, List[ContentPart]]
+MessageContent = Union[str, list[ContentPart]]
 
 
 class Message(BaseModel):
@@ -60,7 +60,7 @@ class Message(BaseModel):
     # Function calls the assistant made, as OpenAI ``tool_calls`` entries
     # (``id``, ``type``, ``function.name``, ``function.arguments``). On a request
     # message they are earlier calls; on a response they are the model's calls.
-    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
     # Character ranges of ``content`` that came from an untrusted source, as
     # ``[[start, end], ...]``. The backend tokenises those ranges with
     # special-token parsing off. Optional and additive: a client that omits it
@@ -70,7 +70,7 @@ class Message(BaseModel):
     # own prompt, never enable it, so a wrong or hostile value degrades that
     # request's own output and cannot weaken anyone else's. Values are clamped
     # to the content length when applied.
-    untrusted_spans: Optional[List[List[int]]] = None
+    untrusted_spans: Optional[list[list[int]]] = None
     # Set when the client, not the user, wrote this message. "tool": a web tool
     # event (a search result, a page read, a control note) the GUI sends as
     # user-role text only so strict chat templates keep user/assistant
@@ -81,6 +81,12 @@ class Message(BaseModel):
     # Optional and additive: a client that omits it gets exactly the previous
     # behaviour. Request-only, so a response message never carries it.
     origin: Optional[Literal["tool", "client"]] = Field(default=None, exclude=True)
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _developer_is_system(cls, v):
+        """OpenAI's ``developer`` role is read as ``system``."""
+        return "system" if v == "developer" else v
 
     @field_validator("content", mode="before")
     @classmethod
@@ -127,7 +133,7 @@ class EmbeddingRequest(BaseModel):
     # field's own default, or an omitted field is indistinguishable from an
     # explicit "localm" request.
     model: Optional[str] = None
-    input: Union[str, List[str]]      # single text or batch
+    input: Union[str, list[str]]      # single text or batch
     encoding_format: str = "float"    # "float" (JSON array) or "base64"
                                       # (base64 little-endian float32 buffer)
 
@@ -142,20 +148,43 @@ class RerankRequest(BaseModel):
     # None when the request names no model.
     model: Optional[str] = None
     query: str
-    documents: List[Union[str, RerankDocument]] = Field(min_length=1)
+    documents: list[Union[str, RerankDocument]] = Field(min_length=1)
     top_n: Optional[int] = Field(None, ge=1)
     return_documents: bool = False
 
 
-class CompletionRequest(BaseModel):
+class SamplingFields(BaseModel):
+    """OpenAI sampling and output fields shared by chat and text completions.
+
+    Each is either applied or refused with a 400 naming it; none is silently
+    ignored (see ``localm.inference.openai_compat``)."""
+    presence_penalty: Optional[float] = Field(None, ge=-2.0, le=2.0, allow_inf_nan=False)
+    frequency_penalty: Optional[float] = Field(None, ge=-2.0, le=2.0, allow_inf_nan=False)
+    # Drops tokens whose probability is below min_p times the top token's.
+    min_p: Optional[float] = Field(None, ge=0.0, le=1.0, allow_inf_nan=False)
+    # ``{"include_usage": true}`` adds a final chunk with empty ``choices`` and
+    # the usage, before ``[DONE]``.
+    stream_options: Optional[Any] = None
+    # Choices per request: only 1 is served.
+    n: Optional[int] = None
+    logit_bias: Optional[Any] = None
+
+
+class CompletionRequest(SamplingFields):
     """OpenAI /v1/completions (raw text completion) request."""
     # None, not "localm": "localm" is truthy, so a request that OMITS this
     # field would be indistinguishable from one explicitly asking for the
     # "localm" sentinel, and `req.model or engine.display_name` below would
     # never fall through to the model that actually answered.
     model: Optional[str] = None
-    prompt: str
+    # One prompt; a list holding exactly one string is accepted too.
+    prompt: Union[str, list[Any]]
     stream: bool = False
+    # True: the reply starts with the prompt.
+    echo: bool = False
+    best_of: Optional[int] = None
+    logprobs: Optional[int] = None
+    suffix: Optional[str] = None
     # A request-level cap must be >= 1: the engine uses max_tokens <= 0
     # internally as an "unlimited" sentinel, so a 0/negative from a client is
     # rejected rather than turned into an unbounded generation.
@@ -171,11 +200,11 @@ class CompletionRequest(BaseModel):
     # Lazy grammar: unconstrained until the output matches a trigger pattern,
     # then the grammar enforces (text-or-tool). Requires grammar_triggers.
     grammar_lazy: bool = False
-    grammar_triggers: Optional[List[str]] = None
+    grammar_triggers: Optional[list[str]] = None
     seed: Optional[int] = None
     # Text that ends the reply when generated: one string or a list. The reply
     # is cut before the first match and finish_reason is "stop".
-    stop: Optional[List[str]] = None
+    stop: Optional[list[str]] = None
 
     @field_validator("stop", mode="before")
     @classmethod
@@ -184,17 +213,33 @@ class CompletionRequest(BaseModel):
         return normalize_stop(v)
 
 
-class ChatRequest(BaseModel):
+class ChatRequest(SamplingFields):
     # None, not "localm": "localm" is truthy, so it must not also be the
     # field's own default, or an omitted field is indistinguishable from an
     # explicit "localm" request.
     model: Optional[str] = None
-    messages: List[Message]
+    messages: list[Message]
     stream: bool = False
     # A request cap must be >= 1 (0/negative collides with the internal
     # "unlimited" sentinel), and temperature/top_p/penalty must be finite (a
     # non-finite value reaches the native sampler).
     max_tokens: Optional[int] = Field(None, ge=1)
+    # The current OpenAI name for max_tokens.
+    max_completion_tokens: Optional[int] = Field(None, ge=1)
+    # {"type": "text" | "json_object" | "json_schema", ...}: the reply is
+    # constrained to JSON (a schema) by a grammar.
+    response_format: Optional[Any] = None
+    # "none" turns a reasoning model's thinking off; other levels leave the
+    # model's default.
+    reasoning_effort: Optional[str] = None
+    logprobs: Optional[bool] = None
+    top_logprobs: Optional[int] = None
+    # Refused with a 400 when set: features localm does not serve.
+    functions: Optional[Any] = None
+    function_call: Optional[Any] = None
+    audio: Optional[Any] = None
+    modalities: Optional[Any] = None
+    web_search_options: Optional[Any] = None
     temperature: Optional[float] = Field(None, allow_inf_nan=False)
     top_p: Optional[float] = Field(None, allow_inf_nan=False)
     top_k: Optional[int] = None
@@ -203,11 +248,11 @@ class ChatRequest(BaseModel):
     # Lazy grammar: unconstrained until the output matches a trigger pattern,
     # then the grammar enforces (text-or-tool). Requires grammar_triggers.
     grammar_lazy: bool = False
-    grammar_triggers: Optional[List[str]] = None
+    grammar_triggers: Optional[list[str]] = None
     seed: Optional[int] = None     # RNG seed for reproducible generation
     # Text that ends the reply when generated: one string or a list. The reply
     # is cut before the first match and finish_reason is "stop".
-    stop: Optional[List[str]] = None
+    stop: Optional[list[str]] = None
     # OpenAI function tools and how the model may use them: "auto" (default when
     # tools are given), "none", "required", or {"type": "function", "function":
     # {"name": ...}}. Calls come back in message.tool_calls (delta.tool_calls
@@ -221,7 +266,7 @@ class ChatRequest(BaseModel):
     # and the pinned model still answers. Vision and context length need no
     # entry here - both are derived from the request itself (an image part, the
     # prompt's size).
-    required_capabilities: Optional[List[str]] = None
+    required_capabilities: Optional[list[str]] = None
     # Whether `model` is a pin. Unset: a named model is pinned and an absent,
     # empty or "localm" one is not. False: `model` names the preferred model,
     # which routing may replace when it lacks something this request needs.
@@ -233,7 +278,7 @@ class ChatRequest(BaseModel):
     # Chat-template switches. Only ``enable_thinking`` is applied: false asks a
     # reasoning model to answer without its reasoning channel. Other keys are
     # accepted and ignored.
-    chat_template_kwargs: Optional[Dict[str, Any]] = None
+    chat_template_kwargs: Optional[dict[str, Any]] = None
 
     @field_validator("stop", mode="before")
     @classmethod
@@ -282,7 +327,7 @@ class ChoiceDelta(BaseModel):
     # or the other; clients that do not know the field ignore it.
     reasoning_content: Optional[str] = None
     # Complete calls, each with its ``index`` in the reply (see Message.tool_calls).
-    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
     status: Optional[str] = None
     # Stable id for `status` (see STATUS_CODE_BY_TEXT), for a client that
     # localizes the status text instead of displaying it verbatim. None when
@@ -400,11 +445,11 @@ class ChatChunk(BaseModel):
     object: str = "chat.completion.chunk"
     created: int
     model: str
-    choices: List[StreamChoice]
+    choices: list[StreamChoice]
     usage: Optional[UsageInfo] = None
 
     @classmethod
-    def token(cls, token: str, model: str, chunk_id: str, ts: int) -> "ChatChunk":
+    def token(cls, token: str, model: str, chunk_id: str, ts: int) -> ChatChunk:
         return cls(
             id=chunk_id,
             created=ts,
@@ -413,7 +458,7 @@ class ChatChunk(BaseModel):
         )
 
     @classmethod
-    def status_chunk(cls, text: str, model: str, chunk_id: str, ts: int) -> "ChatChunk":
+    def status_chunk(cls, text: str, model: str, chunk_id: str, ts: int) -> ChatChunk:
         return cls(
             id=chunk_id,
             created=ts,
@@ -428,9 +473,9 @@ class ChatChunk(BaseModel):
         model: str,
         chunk_id: str,
         ts: int,
-        usage: Optional["UsageInfo"] = None,
+        usage: Optional[UsageInfo] = None,
         finish_reason: str = "stop",
-    ) -> "ChatChunk":
+    ) -> ChatChunk:
         return cls(
             id=chunk_id,
             created=ts,
@@ -451,7 +496,7 @@ class ChatResponse(BaseModel):
     object: str = "chat.completion"
     created: int
     model: str
-    choices: List[FullChoice]
+    choices: list[FullChoice]
     usage: Optional[UsageInfo] = None
 
 

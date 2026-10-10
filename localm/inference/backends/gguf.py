@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Iterator, Optional, Sequence
 
 from localm.console import console
 
@@ -117,7 +117,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     """
 
     # GGUF LoRA adapters to apply to the model: (path, scale) pairs, in order.
-    adapters: Sequence[Tuple[str, float]] = ()
+    adapters: Sequence[tuple[str, float]] = ()
     # The {"path", "scale"} of each adapter the last load applied.
     applied_adapters: Sequence[dict] = ()
 
@@ -999,8 +999,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     def supports_grammar(self) -> bool:
         """llama.cpp applies a GBNF grammar natively in the sampler, so True for
         every model except a diffusion language model, which writes its reply
-        all at once."""
-        return not self.is_diffusion
+        all at once, and a model whose grammar sampler faulted earlier in this
+        process."""
+        return not self.is_diffusion and not getattr(self, "_grammar_unsupported", False)
+
+    def unsupported_sampling(self, options: dict) -> list:
+        """For a diffusion language model, every option in *options* whose value
+        is not 0 (its sampler has no min_p or penalties stage, which is what 0
+        asks for); none otherwise: llama.cpp's sampler chain applies min_p and the
+        presence and frequency penalties."""
+        if not self.is_diffusion:
+            return []
+        return [name for name, value in options.items() if value != 0]
 
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
@@ -1028,10 +1038,14 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         grammar.
 
         A diffusion language model refuses any grammar with
-        :class:`GrammarUnsupportedError`, loaded or not."""
+        :class:`GrammarUnsupportedError`, loaded or not, and so does a model whose
+        grammar sampler faulted earlier in this process."""
         if grammar and self.is_diffusion:
             from .base import GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
             raise GrammarUnsupportedError(GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE)
+        if grammar and getattr(self, "_grammar_unsupported", False):
+            from .base import GRAMMAR_FAULTED_MESSAGE, GrammarUnsupportedError
+            raise GrammarUnsupportedError(GRAMMAR_FAULTED_MESSAGE)
         if grammar and self.loaded and self._runner is not None:   # the loaded property, not the raw flag
             try:
                 self._runner.check_grammar(grammar)
@@ -1068,7 +1082,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # RPC failure (worker crash or timeout) propagates instead.
         return max(1, len(text) // 4)
 
-    def count_messages_tokens(self, messages: List[dict]) -> int:
+    def count_messages_tokens(self, messages: list[dict]) -> int:
         """Return exact token count of the structured messages formatted with
         the model's embedded chat template (an RPC to the isolated worker,
         which alone holds the native model pointer the template needs)."""
@@ -1130,7 +1144,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     # embed capability that would always raise, without loading a model first.
     can_embed: bool = False
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: list[str]) -> list[list[float]]:
         if not self._loaded:
             raise RuntimeError("Model not loaded - call load() first")
         # The worker never exposes create_embedding, so there is no RPC to make.
@@ -1146,7 +1160,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     def chat_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         *,
         max_tokens: int = 1024,
         temperature: float = 0.8,
@@ -1159,6 +1173,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Iterator[str]:
         # Image and audio input: with an mmproj loaded they flow through to
         # create_chat_completion's media path. A model without the encoder
@@ -1170,6 +1187,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
         if messages_contain_audio(messages) and not self.supports_audio:
             raise UnsupportedInputError(AUDIO_UNSUPPORTED_MESSAGE)
+        sampling = {k: v for k, v in (("min_p", min_p), ("presence_penalty", presence_penalty),
+                                      ("frequency_penalty", frequency_penalty))
+                    if v is not None}
+        refused = self.unsupported_sampling(sampling)
+        if refused:
+            raise UnsupportedInputError(
+                f"{', '.join(refused)} cannot be applied by a diffusion language model")
 
         # Once a native grammar fault has been seen, skip grammar up-front and
         # generate unconstrained, so a grammar request never breaks chat.
@@ -1195,6 +1219,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             kwargs["seed"] = seed
         if thinking is not None:
             kwargs["thinking"] = thinking
+        kwargs.update(sampling)
 
         # The grammar-fault retry-without-grammar logic runs inside the isolated
         # worker (GgufWorker.chat_stream). This method relays the resulting stream

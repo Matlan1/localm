@@ -2146,6 +2146,57 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
+async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
+    """If *name* is a registered model whose path matches the resident reranker,
+    release it and report the freed VRAM - the reranker counterpart to
+    ``_unload_embedder_if_matches``. Matched by resolved PATH. Returns None when
+    *name* is not the resident reranker; ``{"status": "in_use"}`` while a rerank
+    request is in flight.
+
+    Every reranker reader runs in an executor: each takes the reranker lock,
+    which a load holds for its whole duration. ``active_requests()`` is checked
+    before the VRAM probe, and ``reset_reranker(force=False)`` re-checks it
+    atomically with the release."""
+    from localm.inference import reranker as _reranker_mod
+    info = await loop.run_in_executor(None, _reranker_mod.reranker_info)
+    if info is None:
+        return None
+    from pathlib import Path
+    from localm.config import load_registry
+    from localm.model_manager import _entry_path
+    entry_path = _entry_path(load_registry().get(name))
+    if entry_path is None:
+        return None
+    try:
+        if Path(entry_path).resolve() != Path(info["path"]).resolve():
+            return None
+    except OSError:
+        return None
+
+    if await loop.run_in_executor(None, _reranker_mod.active_requests) > 0:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
+
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
+
+    _free = _live_free_vram_bytes
+
+    before, before_fresh, before_scope = _vram_free_reading()
+    cleared = await loop.run_in_executor(
+        None, functools.partial(_reranker_mod.reset_reranker, force=False))
+    if not cleared:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
+    if before is not None:
+        released, after = await loop.run_in_executor(
+            None, lambda: wait_for_vram_release(_free, before_bytes=before))
+    else:
+        released, after = 0, before
+    result = {"status": "unloaded", "model": name, "was_active": False}
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh, before_scope=before_scope)
+    return result
+
+
 async def unload_one_model(name: str, *, force: bool = False) -> dict:
     """Release ONE currently-loaded model from GPU/CPU memory, leaving any
     other loaded models untouched - the targeted counterpart to
@@ -2179,6 +2230,9 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
         embedder_result = await _unload_embedder_if_matches(name, loop)
         if embedder_result is not None:
             return embedder_result
+        reranker_result = await _unload_reranker_if_matches(name, loop)
+        if reranker_result is not None:
+            return reranker_result
         return {"status": "already_unloaded", "model": name}
     # Honor the in-flight-request pin: an engine a request is
     # generating on must not be unloaded out from under it (it would reload it
@@ -5151,12 +5205,15 @@ async def _stream_sse_body(
     chunk_id: Optional[str] = None,
     role_sent: bool = False,
     meter: Optional[_GenerationMeter] = None,
+    include_usage: bool = False,
     **gen_kwargs,
 ) -> AsyncGenerator[str, None]:
     """Stream the reply to *messages* as SSE ``data:`` lines.
 
     *chunk_id* reuses the id of a stream the caller already opened, and
-    *role_sent* skips the role chunk that caller already sent.
+    *role_sent* skips the role chunk that caller already sent. With
+    *include_usage* the usage moves from the finish chunk to a last chunk with
+    empty ``choices``, as OpenAI's ``stream_options.include_usage`` asks.
 
     With *compact* (or, when *prompt_tokens* is not given, when the prompt
     nearly fills the context), the conversation is compacted after the role
@@ -5222,12 +5279,12 @@ async def _stream_sse_body(
                 ctx.outcome = "error"
             err_chunk = ChatChunk.token(refusal, model_id, chunk_id, ts)
             yield f"data: {err_chunk.model_dump_json()}\n\n"
-            done = ChatChunk.done(model_id, chunk_id, ts, finish_reason="error",
-                                  usage=UsageInfo(prompt_tokens=prompt_tokens or 0,
-                                                  total_tokens=prompt_tokens or 0,
-                                                  context_capacity=capacity))
-            yield f"data: {done.model_dump_json()}\n\n"
-            yield "data: [DONE]\n\n"
+            for data in _final_chunks(model_id, chunk_id, ts, "error",
+                                      UsageInfo(prompt_tokens=prompt_tokens or 0,
+                                                total_tokens=prompt_tokens or 0,
+                                                context_capacity=capacity),
+                                      include_usage):
+                yield data
             return
 
     if sem.locked():
@@ -5429,10 +5486,23 @@ async def _stream_sse_body(
     )
     meter.record(usage.prompt_tokens, usage.completion_tokens,
                  usage.ttft_ms, usage.tokens_per_sec)
-    done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
-                          finish_reason=finish_reason)
-    yield f"data: {done.model_dump_json()}\n\n"
-    yield "data: [DONE]\n\n"
+    for data in _final_chunks(model_id, chunk_id, ts, finish_reason, usage, include_usage):
+        yield data
+
+
+def _final_chunks(model_id: str, chunk_id: str, ts: int, finish_reason: str,
+                  usage: UsageInfo, include_usage: bool) -> list:
+    """The SSE lines that end a chat stream: the finish chunk, then with
+    *include_usage* a chunk with empty ``choices`` carrying *usage* (otherwise
+    the finish chunk carries it), then ``[DONE]``."""
+    done = ChatChunk.done(model_id, chunk_id, ts, finish_reason=finish_reason,
+                          usage=None if include_usage else usage)
+    lines = [f"data: {done.model_dump_json()}\n\n"]
+    if include_usage:
+        tail = ChatChunk(id=chunk_id, created=ts, model=model_id, choices=[], usage=usage)
+        lines.append(f"data: {tail.model_dump_json()}\n\n")
+    lines.append("data: [DONE]\n\n")
+    return lines
 
 
 def _stream_sse_completion(*args, **kwargs) -> AsyncIterator[str]:
@@ -5454,8 +5524,13 @@ async def _stream_sse_completion_body(
     ctx=None,
     prompt_tokens: Optional[int] = None,
     meter: Optional[_GenerationMeter] = None,
+    include_usage: bool = False,
+    echo: Optional[str] = None,
     **gen_kwargs,
 ) -> AsyncGenerator[str, None]:
+    """Stream a text completion as SSE ``data:`` lines. *echo*, when given, is
+    sent as the first text. With *include_usage* the usage moves from the finish
+    chunk to a last chunk with empty ``choices``."""
     meter = meter or _GenerationMeter()
     chunk_id = make_chunk_id()
     ts = int(time.time())
@@ -5526,6 +5601,14 @@ async def _stream_sse_completion_body(
                 loop.call_soon_threadsafe(token_queue.put_nowait, None)
             except RuntimeError:
                 pass
+
+    if echo:
+        echoed = {
+            "id": chunk_id, "object": "text_completion.chunk",
+            "created": ts, "model": model_id,
+            "choices": [{"text": echo, "index": 0, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(echoed)}\n\n"
 
     async with sem:
         gen_start = time.perf_counter()
@@ -5646,7 +5729,13 @@ async def _stream_sse_completion_body(
     }
     meter.record(prompt_tokens, completion_tokens,
                  done["usage"]["ttft_ms"], done["usage"]["tokens_per_sec"])
+    usage_only = None
+    if include_usage:
+        usage_only = {"id": chunk_id, "object": "text_completion.chunk", "created": ts,
+                      "model": model_id, "choices": [], "usage": done.pop("usage")}
     yield f"data: {json.dumps(done)}\n\n"
+    if usage_only is not None:
+        yield f"data: {json.dumps(usage_only)}\n\n"
     yield "data: [DONE]\n\n"
 
 

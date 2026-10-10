@@ -375,7 +375,7 @@ def _read_record(lockpath: Path):
         return None, mtime
     try:
         rec = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None, mtime
     return (rec if isinstance(rec, dict) else None), mtime
 

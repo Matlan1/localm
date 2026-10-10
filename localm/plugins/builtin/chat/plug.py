@@ -175,8 +175,10 @@ async def conversation_get(conv_id: str):
         raise HTTPException(404, "No such conversation")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         raise HTTPException(500, "Conversation file is unreadable") from e
+    if not isinstance(data, dict):
+        raise HTTPException(500, "Conversation file is unreadable")
     data["id"] = conv_id
     return data
 
@@ -252,7 +254,7 @@ def _load_prompts() -> dict:
         return {}                       # genuinely absent: an empty library
     try:
         data = json.loads(prompts_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         raise _PromptsUnreadable(str(e)) from e
     if not isinstance(data, dict):
         # Well-formed JSON that is not an object (a list, a bare string) parses

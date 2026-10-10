@@ -364,17 +364,17 @@ class _UnresolvableEngine:
     """A loaded engine whose path will not resolve - a UNC share that is
     momentarily unreachable, a permission error, an embedded NUL."""
 
-    def __init__(self, name, exc=OSError("network path not found")):
+    def __init__(self, name, exc=None):
         self.display_name = name
         self.loaded = True
-        self._exc = exc
+        self._exc = exc if exc is not None else OSError("network path not found")
 
     @property
     def model_path(self):
         return "//unreachable-share/models/m.gguf"
 
 
-def _raise_on_resolve(monkeypatch, bad: str, exc=OSError("unreachable")):
+def _raise_on_resolve(monkeypatch, bad: str, exc=None):
     """Make Path.resolve() raise for one specific path and behave normally for
     every other, so the test does not have to disable resolution process-wide
     (which would take the target side down with the engine side).
@@ -386,6 +386,8 @@ def _raise_on_resolve(monkeypatch, bad: str, exc=OSError("unreachable")):
     """
     import os as _os
     from pathlib import Path as _P
+    if exc is None:
+        exc = OSError("unreachable")
     real = _P.resolve
     want = _os.path.normcase(str(_P(bad)))
 

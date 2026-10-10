@@ -1313,9 +1313,9 @@ def _to_number(key: str, val, *, want_int: bool, lo, hi):
         # TypeError nor a ValueError - without this an inf into an int field
         # would leak an uncaught OverflowError out of validate_update.
         num = int(val) if want_int else float(val)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, OverflowError) as e:
         kind = "an integer" if want_int else "a number"
-        raise ValueError(f"{key}: expected {kind}, got {val!r}")
+        raise ValueError(f"{key}: expected {kind}, got {val!r}") from e
     # NaN/inf pass every < / > bounds check below (NaN compares False to all, inf
     # only trips a finite upper bound), so a non-finite float would otherwise be
     # persisted and then 500 every GET/PATCH /v1/config (FastAPI renders with
@@ -1442,7 +1442,7 @@ def _validate_user_name(key: str, val) -> str:
 _NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens", "diffusion_steps"})
 
 
-def _validate_one(key: str, val, field: "SettingField", default):
+def _validate_one(key: str, val, field: SettingField, default):
     nullable = default is None
     widget = field.widget
 
@@ -1494,7 +1494,7 @@ def _validate_one(key: str, val, field: "SettingField", default):
             try:
                 rp = str(confine_index_path(item))
             except ValueError as e:
-                raise ValueError(f"{key}: {e}")
+                raise ValueError(f"{key}: {e}") from e
             if rp not in seen:
                 seen.add(rp)
                 out.append(rp)
@@ -1970,7 +1970,7 @@ def media_schema_json(name: str, block: Optional[dict], full_config: dict, *,
     return out
 
 
-def _coerce_media_value(f: "MediaField", val):
+def _coerce_media_value(f: MediaField, val):
     """Coerce one media-field value to its widget type (mirrors validate_update)."""
     if f.widget == Widget.TOGGLE:
         return _to_bool(f.key, val)
@@ -2157,7 +2157,7 @@ def tts_admin_only_fields() -> set:
     return {f.key for f in TTS_FIELDS if f.admin_only}
 
 
-def _tts_options(f: "TtsField") -> Optional[list]:
+def _tts_options(f: TtsField) -> Optional[list]:
     """The choices for *f*: static, except voice's, which come from the shipped
     voice list (empty list -> None, so the validator falls back to a shape
     check rather than rejecting every voice)."""
@@ -2252,7 +2252,7 @@ def _tts_relative_asset(key: str, value: str) -> str:
     return value
 
 
-def _coerce_tts_value(f: "TtsField", val):
+def _coerce_tts_value(f: TtsField, val):
     """Coerce + check one tts field value. Blank/None clears the override (the
     plugin falls back to the shipped template default)."""
     if val is None:
@@ -2262,8 +2262,8 @@ def _coerce_tts_value(f: "TtsField", val):
             return None
         try:
             num = float(val)
-        except (TypeError, ValueError):
-            raise ValueError(f"{f.key}: {val!r} is not a number")
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{f.key}: {val!r} is not a number") from e
         if f.min is not None and num < f.min:
             raise ValueError(f"{f.key}: must be at least {f.min}, got {num}")
         if f.max is not None and num > f.max:

@@ -117,14 +117,14 @@ def _parse_json_object(raw: str) -> dict:
     try:
         obj = json.loads(text)
         return obj if isinstance(obj, dict) else {}
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         pass
     i, j = text.find("{"), text.rfind("}")
     if i != -1 and j > i:
         try:
             obj = json.loads(text[i: j + 1])
             return obj if isinstance(obj, dict) else {}
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             pass
     # First-{-to-last-} failed (prose containing extra braces around the JSON).
     # Fall back to each balanced top-level {...} span, newest last: models put
@@ -134,7 +134,7 @@ def _parse_json_object(raw: str) -> dict:
             obj = json.loads(cand)
             if isinstance(obj, dict):
                 return obj
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
     return {}
 
