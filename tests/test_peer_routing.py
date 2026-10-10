@@ -510,6 +510,32 @@ class TestChatCompletionsForwarding:
         # Never created/loaded a local engine for the routed name.
         assert "routed-model" not in hs._engines
 
+    def test_a_logprobs_request_is_forwarded_with_its_logprobs_fields(self, monkeypatch):
+        import json
+        sent = []
+
+        def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
+            sent.append((url, json.loads(data)))
+            return _FakePeerResponse(chunks=(b'{"choices": [{"text": "ok"}]}',))
+
+        monkeypatch.setattr("requests.post", fake_post)
+        hs._engines.clear()
+        peer_routing.set_route(peer_routing.PeerRoute(
+            model="routed-lp", instance_id="peer-lp", host="127.0.0.1",
+            port=8197, scheme="http", api_key="peer-key-lp"))
+
+        client = self._client()
+        r = client.post("/v1/chat/completions", json={
+            "model": "routed-lp", "messages": [{"role": "user", "content": "hi"}],
+            "logprobs": True, "top_logprobs": 4})
+        assert r.status_code == 200, r.text
+        r = client.post("/v1/completions", json={
+            "model": "routed-lp", "prompt": "hello", "logprobs": 2})
+        assert r.status_code == 200, r.text
+        assert [(u.rsplit("/v1", 1)[1], b.get("logprobs"), b.get("top_logprobs"))
+                for u, b in sent] == [("/chat/completions", True, 4), ("/completions", 2, None)]
+        assert "routed-lp" not in hs._engines
+
     def test_completions_route_also_forwards(self, monkeypatch):
         def fake_post(url, data=None, headers=None, stream=None, timeout=None, verify=None):
             assert url.endswith("/v1/completions")
