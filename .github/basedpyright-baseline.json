@@ -4876,14 +4876,6 @@
                     "endColumn": 50,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportAssignmentType",
-                "range": {
-                    "startColumn": 34,
-                    "endColumn": 80,
-                    "lineCount": 1
-                }
             }
         ],
         "./localm/music_gen/comfy.py": [
