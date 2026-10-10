@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -98,13 +99,35 @@ def _headers() -> dict:
     return headers
 
 
+_RETRY_DELAYS = (2.0, 6.0)
+
+
+def _is_transient(error: BaseException) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code >= 500 or error.code == 429
+    return isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError))
+
+
+def _urlopen_retry(req, *, read: bool = False):
+    """urlopen *req* and return the response body bytes when *read*, else the response
+    headers. A server error or a dropped connection is retried after a short delay."""
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:  # noqa: S310 - fixed https:// URLs
+                return r.read() if read else r.headers
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if attempt >= len(_RETRY_DELAYS) or not _is_transient(e):
+                raise
+            time.sleep(_RETRY_DELAYS[attempt])
+    raise AssertionError("unreachable")
+
+
 def _get_json(url: str):
     """GET *url* as JSON. Raises FetchError on any failure, including a body that
     is not JSON. Tests replace this function; nothing else opens a socket."""
     req = urllib.request.Request(url, headers=_headers())
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:  # noqa: S310 - fixed https:// URLs
-            return json.loads(r.read().decode("utf-8"))
+        return json.loads(_urlopen_retry(req, read=True).decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
         raise FetchError(f"{url}: {e}") from e
 
@@ -382,8 +405,7 @@ def _registry_digest(repo: str, tag: str) -> str:
             f"https://registry-1.docker.io/v2/library/{repo}/manifests/{tag}", method="HEAD",
             headers={"Authorization": f"Bearer {token}", "Accept": _MANIFEST_ACCEPT,
                      "User-Agent": "localm-check-pins"})
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:  # noqa: S310 - fixed https:// URL
-            digest = r.headers.get("Docker-Content-Digest")
+        digest = _urlopen_retry(req).get("Docker-Content-Digest")
     except (KeyError, TypeError) as e:
         raise FetchError(f"{token_url}: unexpected token response ({e})") from e
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:

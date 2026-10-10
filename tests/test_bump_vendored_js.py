@@ -43,6 +43,38 @@ def bump():
     return _load()
 
 
+def _real_versions() -> dict:
+    mod = _load()
+    return {key: mod.read_state(lib, _ROOT)[3] for key, lib in mod.LIBS.items()}
+
+
+def _parts(version: str) -> list:
+    return [int(p) for p in version.split(".")]
+
+
+def _boundary_up(version: str) -> str:
+    """The next release that crosses a MAJOR boundary (a 0.x minor counts)."""
+    major, minor, _ = _parts(version)
+    return f"0.{minor + 1}.0" if major == 0 else f"{major + 1}.0.0"
+
+
+def _patch_up(version: str) -> str:
+    major, minor, patch = _parts(version)
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def _patch_down(version: str) -> str:
+    major, minor, patch = _parts(version)
+    assert patch > 0, "this helper needs a vendored version with a non-zero patch"
+    return f"{major}.{minor}.{patch - 1}"
+
+
+_REAL = _real_versions()
+MARKED, DOMPURIFY, HLJS, KATEX = (_REAL["marked"], _REAL["DOMPurify"], _REAL["highlight.js"],
+                                  _REAL["KaTeX"])
+NEW_MARKED, NEW_HLJS, NEW_KATEX = _boundary_up(MARKED), _boundary_up(HLJS), _boundary_up(KATEX)
+
+
 # --------------------------------------------------------------------------- #
 #  A copy of the real tree and a fake registry                                #
 # --------------------------------------------------------------------------- #
@@ -200,7 +232,7 @@ def test_the_real_tree_is_in_the_shape_the_script_edits(bump, key):
 def test_the_dompurify_guard_has_no_version_pin_to_edit(bump):
     lib = bump.LIBS["DOMPurify"]
     _, test_text, _, _ = bump.read_state(lib, _ROOT)
-    assert bump.rewrite_test(lib, test_text, "3.4.13", "3.4.14", {}, "a" * 40) == test_text
+    assert bump.rewrite_test(lib, test_text, DOMPURIFY, _patch_up(DOMPURIFY), {}, "a" * 40) == test_text
 
 
 # --------------------------------------------------------------------------- #
@@ -243,9 +275,9 @@ def reg_files(reg) -> dict:
 def test_a_crlf_only_difference_is_not_a_change(bump, tree):
     css = tree / bump.VENDOR_REL / "github-dark.min.css"
     css.write_bytes(css.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
-    files = release_files(tree, bump, "highlight.js", "11.13.0")
+    files = release_files(tree, bump, "highlight.js", NEW_HLJS)
     assert b"\n" in files["package/styles/github-dark.min.css"]
-    plan = bump.build_plan(bump.LIBS["highlight.js"], "11.13.0", files, {}, "a" * 40)
+    plan = bump.build_plan(bump.LIBS["highlight.js"], NEW_HLJS, files, {}, "a" * 40)
     assert not [c for c in plan["changes"] if c.rel.endswith("github-dark.min.css")]
 
 
@@ -256,18 +288,18 @@ def test_a_crlf_only_difference_is_not_a_change(bump, tree):
 def test_marked_bump_moves_every_pin_and_only_the_pins(bump, tree, capsys):
     test_path = tree / bump.TESTS_REL / "vendor-marked.test.mjs"
     old_text = test_path.read_bytes().decode("utf-8")
-    reg = registry_for(bump, tree, "marked", "13.0.0")
-    assert run(bump, ["--lib", "marked", "--tag", "13.0.0", "--write"], reg) == 0
+    reg = registry_for(bump, tree, "marked", NEW_MARKED)
+    assert run(bump, ["--lib", "marked", "--tag", NEW_MARKED, "--write"], reg) == 0
     out = capsys.readouterr().out
-    assert "MAJOR BOUNDARY: marked 12.0.2 -> 13.0.0" in out
+    assert f"MAJOR BOUNDARY: marked {MARKED} -> {NEW_MARKED}" in out
 
     new_text = test_path.read_bytes().decode("utf-8")
     new_file = reg_files(reg)["package/marked.min.js"]
-    assert 'const VENDORED_VERSION = "13.0.0";' in new_text
+    assert f'const VENDORED_VERSION = "{NEW_MARKED}";' in new_text
     assert f'const PINNED_HASH = "{n64(new_file)}";' in new_text
-    assert "npm pack marked@13.0.0  ->  package/marked.min.js" in new_text
+    assert f"npm pack marked@{NEW_MARKED}  ->  package/marked.min.js" in new_text
     assert f"dist.shasum ({reg.body['dist']['shasum']})" in new_text
-    assert 'test("the banner comment says 13.0.0"' in new_text
+    assert f'test("the banner comment says {NEW_MARKED}"' in new_text
     old_lines, new_lines = old_text.splitlines(), new_text.splitlines()
     assert len(old_lines) == len(new_lines)
     differing = [i for i, (a, b) in enumerate(zip(old_lines, new_lines, strict=True)) if a != b]
@@ -280,8 +312,8 @@ def test_the_test_file_keeps_its_own_line_endings(bump, tree):
     for newline in (b"\n", b"\r\n"):
         text = test_path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", newline)
         test_path.write_bytes(text)
-        plan = bump.build_plan(bump.LIBS["marked"], "12.0.3",
-                               release_files(tree, bump, "marked", "12.0.3"), {}, "b" * 40)
+        plan = bump.build_plan(bump.LIBS["marked"], _patch_up(MARKED),
+                               release_files(tree, bump, "marked", _patch_up(MARKED)), {}, "b" * 40)
         change = [c for c in plan["changes"] if c.text][0]
         bump._write_change(change)
         data = test_path.read_bytes()
@@ -292,34 +324,34 @@ def test_the_test_file_keeps_its_own_line_endings(bump, tree):
 
 def test_highlightjs_bump_pins_the_new_hash_and_leaves_an_identical_theme_alone(
         bump, tree, capsys):
-    reg = registry_for(bump, tree, "highlight.js", "11.13.0")
-    assert run(bump, ["--lib", "highlight.js", "--tag", "11.13.0", "--write"], reg) == 0
+    reg = registry_for(bump, tree, "highlight.js", NEW_HLJS)
+    assert run(bump, ["--lib", "highlight.js", "--tag", NEW_HLJS, "--write"], reg) == 0
     out = capsys.readouterr().out
     assert "replace localm/plugins/gui/static/vendor/github-dark.min.css" not in out
     text = (tree / bump.TESTS_REL / "vendor-highlightjs.test.mjs").read_bytes().decode("utf-8")
     new_file = reg_files(reg)["package/highlight.min.js"]
-    assert 'const VENDORED_VERSION = "11.13.0";' in text
+    assert f'const VENDORED_VERSION = "{NEW_HLJS}";' in text
     assert f'const PINNED_HASH = "{n64(new_file)}";' in text
-    assert "npm pack @highlightjs/cdn-assets@11.13.0" in text
-    assert "and both say 11.13.0" in text
-    assert "(11.12.0)" in text, "the MIN_SAFE floor wording is not a pin"
-    assert reg.json_urls == ["https://registry.npmjs.org/@highlightjs%2Fcdn-assets/11.13.0"]
+    assert f"npm pack @highlightjs/cdn-assets@{NEW_HLJS}" in text
+    assert f"and both say {NEW_HLJS}" in text
+    assert f"({HLJS})" in text, "the MIN_SAFE floor wording is not a pin"
+    assert reg.json_urls == [f"https://registry.npmjs.org/@highlightjs%2Fcdn-assets/{NEW_HLJS}"]
 
 
 def test_highlightjs_theme_that_differs_is_replaced_too(bump, tree):
-    files = release_files(tree, bump, "highlight.js", "11.13.0")
+    files = release_files(tree, bump, "highlight.js", NEW_HLJS)
     files["package/styles/github-dark.min.css"] += b".hljs-new{color:red}\n"
-    reg = Registry(bump, "@highlightjs/cdn-assets", "11.13.0", make_tarball(files))
-    assert run(bump, ["--lib", "highlight.js", "--tag", "11.13.0", "--write"], reg) == 0
+    reg = Registry(bump, "@highlightjs/cdn-assets", NEW_HLJS, make_tarball(files))
+    assert run(bump, ["--lib", "highlight.js", "--tag", NEW_HLJS, "--write"], reg) == 0
     assert (tree / bump.VENDOR_REL / "github-dark.min.css").read_bytes().endswith(
         b".hljs-new{color:red}\n")
 
 
 def test_a_theme_missing_from_the_release_is_not_an_error(bump, tree):
-    files = release_files(tree, bump, "highlight.js", "11.13.0")
+    files = release_files(tree, bump, "highlight.js", NEW_HLJS)
     del files["package/styles/github-dark.min.css"]
-    reg = Registry(bump, "@highlightjs/cdn-assets", "11.13.0", make_tarball(files))
-    assert run(bump, ["--lib", "highlight.js", "--tag", "11.13.0"], reg) == 0
+    reg = Registry(bump, "@highlightjs/cdn-assets", NEW_HLJS, make_tarball(files))
+    assert run(bump, ["--lib", "highlight.js", "--tag", NEW_HLJS], reg) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -329,52 +361,52 @@ def test_a_theme_missing_from_the_release_is_not_an_error(bump, tree):
 def test_katex_bump_moves_the_set_pins_and_fonts_together(bump, tree, capsys):
     fonts = tree / bump.VENDOR_REL / "fonts"
     changed_font = b"new font bytes"
-    reg = registry_for(bump, tree, "KaTeX", "0.19.0", css_changed=True, font_changes={
+    reg = registry_for(bump, tree, "KaTeX", NEW_KATEX, css_changed=True, font_changes={
         "KaTeX_Main-Regular.woff2": changed_font,
         "KaTeX_Zzz-Regular.woff2": b"added font",
         "KaTeX_AMS-Regular.woff2": None})
     css_refs = reg_files(reg)["package/dist/katex.min.css"].decode()
     assert "KaTeX_AMS-Regular.woff2" in css_refs, "the fake release still references the removed font"
-    assert run(bump, ["--lib", "KaTeX", "--tag", "0.19.0", "--write"], reg) == 1
+    assert run(bump, ["--lib", "KaTeX", "--tag", NEW_KATEX, "--write"], reg) == 1
     assert "references woff2 font(s) the release does not ship: KaTeX_AMS-Regular.woff2" \
         in capsys.readouterr().out
     assert (fonts / "KaTeX_AMS-Regular.woff2").exists(), "a refusal edits nothing"
 
-    reg = registry_for(bump, tree, "KaTeX", "0.19.0", css_changed=True, font_changes={
+    reg = registry_for(bump, tree, "KaTeX", NEW_KATEX, css_changed=True, font_changes={
         "KaTeX_Main-Regular.woff2": changed_font, "KaTeX_Zzz-Regular.woff2": b"added font"})
     capsys.readouterr()
-    assert run(bump, ["--lib", "KaTeX", "--tag", "0.19.0", "--write"], reg) == 0
+    assert run(bump, ["--lib", "KaTeX", "--tag", NEW_KATEX, "--write"], reg) == 0
     out = capsys.readouterr().out
-    assert "MAJOR BOUNDARY: KaTeX 0.18.4 -> 0.19.0" in out
+    assert f"MAJOR BOUNDARY: KaTeX {KATEX} -> {NEW_KATEX}" in out
     assert "fonts: 19 unchanged, 1 replaced, 1 added, 0 removed" in out
     assert (fonts / "KaTeX_Main-Regular.woff2").read_bytes() == changed_font
     assert (fonts / "KaTeX_Zzz-Regular.woff2").read_bytes() == b"added font"
 
     files = reg_files(reg)
     text = (tree / bump.TESTS_REL / "vendor-katex.test.mjs").read_bytes().decode("utf-8")
-    assert 'const VENDORED_VERSION = "0.19.0";' in text
+    assert f'const VENDORED_VERSION = "{NEW_KATEX}";' in text
     for member, name in (("package/dist/katex.min.js", "katex.min.js"),
                          ("package/dist/katex.min.css", "katex.min.css"),
                          ("package/dist/contrib/auto-render.min.js", "auto-render.min.js")):
         assert f'"{name}": "{n64(files[member])}",' in text
         assert (tree / bump.VENDOR_REL / name).read_bytes() == files[member]
-    assert "npm pack katex@0.19.0" in text
+    assert f"npm pack katex@{NEW_KATEX}" in text
 
 
 def test_a_katex_release_with_a_removed_font_the_css_no_longer_uses_deletes_it(bump, tree, capsys):
     css = vendored(tree, bump, "katex.min.css")
     css = css.replace(b"url(fonts/KaTeX_AMS-Regular.woff2)", b"url(fonts/KaTeX_AMS-Regular.woff)")
-    files = release_files(tree, bump, "KaTeX", "0.19.0", font_changes={"KaTeX_AMS-Regular.woff2": None})
+    files = release_files(tree, bump, "KaTeX", NEW_KATEX, font_changes={"KaTeX_AMS-Regular.woff2": None})
     files["package/dist/katex.min.css"] = css
-    reg = Registry(bump, "katex", "0.19.0", make_tarball(files))
-    assert run(bump, ["--lib", "KaTeX", "--tag", "0.19.0", "--write"], reg) == 0
+    reg = Registry(bump, "katex", NEW_KATEX, make_tarball(files))
+    assert run(bump, ["--lib", "KaTeX", "--tag", NEW_KATEX, "--write"], reg) == 0
     assert "0 added, 1 removed" in capsys.readouterr().out
     assert not (tree / bump.VENDOR_REL / "fonts" / "KaTeX_AMS-Regular.woff2").exists()
 
 
 def test_a_katex_patch_release_is_not_a_major_boundary(bump, tree, capsys):
-    reg = registry_for(bump, tree, "KaTeX", "0.18.5")
-    assert run(bump, ["--lib", "KaTeX", "--tag", "0.18.5"], reg) == 0
+    reg = registry_for(bump, tree, "KaTeX", _patch_up(KATEX))
+    assert run(bump, ["--lib", "KaTeX", "--tag", _patch_up(KATEX)], reg) == 0
     assert "MAJOR BOUNDARY" not in capsys.readouterr().out
 
 
@@ -383,17 +415,17 @@ def test_a_katex_patch_release_is_not_a_major_boundary(bump, tree, capsys):
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("tag, fragment", [
-    ("3.4.13", "not newer than the vendored 3.4.13"),
-    ("3.4.12", "not newer than the vendored 3.4.13"),
-    ("2.9.9", "not newer than the vendored 3.4.13"),
-    ("3.4.13-rc.1", "not a plain MAJOR.MINOR.PATCH"),
-    ("v3.4.14", "not a plain MAJOR.MINOR.PATCH"),
+    (DOMPURIFY, f"not newer than the vendored {DOMPURIFY}"),
+    (_patch_down(DOMPURIFY), f"not newer than the vendored {DOMPURIFY}"),
+    ("2.9.9", f"not newer than the vendored {DOMPURIFY}"),
+    (f"{DOMPURIFY}-rc.1", "not a plain MAJOR.MINOR.PATCH"),
+    (f"v{_patch_up(DOMPURIFY)}", "not a plain MAJOR.MINOR.PATCH"),
     ("latest", "not a plain MAJOR.MINOR.PATCH"),
 ])
 def test_a_same_older_or_malformed_version_is_refused_before_any_request(
         bump, tree, capsys, tag, fragment):
     before = snapshot(tree)
-    reg = Registry(bump, "dompurify", "3.4.14", b"unused")
+    reg = Registry(bump, "dompurify", _patch_up(DOMPURIFY), b"unused")
     assert run(bump, ["--lib", "DOMPurify", "--tag", tag, "--write"], reg) == 1
     assert fragment in capsys.readouterr().out
     assert reg.json_urls == [] and reg.byte_urls == []
@@ -458,8 +490,8 @@ def test_a_tarball_that_is_not_a_tarball_is_refused(bump, tree, capsys):
 
 def test_a_missing_member_names_what_the_tarball_does_carry(bump, tree, capsys):
     files = {"package/lib/marked.umd.js": b"umd", "package/README.md": b"x"}
-    reg = Registry(bump, "marked", "13.0.0", make_tarball(files))
-    assert run(bump, ["--lib", "marked", "--tag", "13.0.0", "--write"], reg) == 1
+    reg = Registry(bump, "marked", NEW_MARKED, make_tarball(files))
+    assert run(bump, ["--lib", "marked", "--tag", NEW_MARKED, "--write"], reg) == 1
     out = capsys.readouterr().out
     assert "no package/marked.min.js" in out and "package/lib/marked.umd.js" in out
 
@@ -483,10 +515,10 @@ def test_a_link_in_place_of_a_file_is_refused(bump, tree, capsys):
 
 
 def test_a_font_name_with_a_path_in_it_is_refused(bump, tree, capsys):
-    files = release_files(tree, bump, "KaTeX", "0.19.0")
+    files = release_files(tree, bump, "KaTeX", NEW_KATEX)
     files["package/dist/fonts/../../evil.woff2"] = b"x"
-    reg = Registry(bump, "katex", "0.19.0", make_tarball(files))
-    assert run(bump, ["--lib", "KaTeX", "--tag", "0.19.0", "--write"], reg) == 1
+    reg = Registry(bump, "katex", NEW_KATEX, make_tarball(files))
+    assert run(bump, ["--lib", "KaTeX", "--tag", NEW_KATEX, "--write"], reg) == 1
     assert "unexpected font member" in capsys.readouterr().out
 
 
@@ -502,20 +534,20 @@ def test_an_oversized_member_is_refused(bump, tree, capsys, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_a_pin_that_disagrees_with_the_banner_is_refused(bump, tree, capsys):
-    reg = registry_for(bump, tree, "marked", "13.0.0")
+    reg = registry_for(bump, tree, "marked", NEW_MARKED)
     path = tree / bump.TESTS_REL / "vendor-marked.test.mjs"
-    path.write_bytes(path.read_bytes().replace(b'VENDORED_VERSION = "12.0.2"',
-                                               b'VENDORED_VERSION = "12.0.1"'))
-    assert run(bump, ["--lib", "marked", "--tag", "13.0.0", "--write"], reg) == 1
+    path.write_bytes(path.read_bytes().replace(f'VENDORED_VERSION = "{MARKED}"'.encode(),
+                                               f'VENDORED_VERSION = "{_patch_down(MARKED)}"'.encode()))
+    assert run(bump, ["--lib", "marked", "--tag", NEW_MARKED, "--write"], reg) == 1
     assert "the tree is inconsistent" in capsys.readouterr().out
 
 
 def test_vendored_bytes_that_no_longer_match_their_pin_are_refused(bump, tree, capsys):
     before = snapshot(tree)
-    reg = registry_for(bump, tree, "marked", "13.0.0")
+    reg = registry_for(bump, tree, "marked", NEW_MARKED)
     path = tree / bump.VENDOR_REL / "marked.min.js"
     path.write_bytes(path.read_bytes() + b"// hand edit\n")
-    assert run(bump, ["--lib", "marked", "--tag", "13.0.0", "--write"], reg) == 1
+    assert run(bump, ["--lib", "marked", "--tag", NEW_MARKED, "--write"], reg) == 1
     assert "does not match the hash recorded" in capsys.readouterr().out
     assert snapshot(tree)[f"{bump.TESTS_REL}/vendor-marked.test.mjs"] == \
         before[f"{bump.TESTS_REL}/vendor-marked.test.mjs"]
@@ -531,7 +563,7 @@ def test_vendored_bytes_that_no_longer_match_their_pin_are_refused(bump, tree, c
 def test_a_region_found_twice_or_not_at_all_refuses_the_edit(bump, tree, capsys, lib, test, needle):
     path = tree / bump.TESTS_REL / test
     original = path.read_bytes()
-    new = {"marked": "13.0.0", "highlight.js": "11.13.0", "KaTeX": "0.19.0"}[lib]
+    new = {"marked": NEW_MARKED, "highlight.js": NEW_HLJS, "KaTeX": NEW_KATEX}[lib]
     for mutated in (original.replace(needle, b"// gone " + needle[:12] + b"x ", 1),
                     original + b"\n" + next(
                         line for line in original.split(b"\n") if needle in line) + b"\n"):
@@ -548,10 +580,10 @@ def test_a_region_found_twice_or_not_at_all_refuses_the_edit(bump, tree, capsys,
 # --------------------------------------------------------------------------- #
 
 def test_the_checklist_lists_prose_that_still_names_the_old_version(bump, tree, capsys):
-    reg = registry_for(bump, tree, "marked", "13.0.0")
-    assert run(bump, ["--lib", "marked", "--tag", "13.0.0"], reg) == 0
+    reg = registry_for(bump, tree, "marked", NEW_MARKED)
+    assert run(bump, ["--lib", "marked", "--tag", NEW_MARKED], reg) == 0
     out = capsys.readouterr().out
-    assert "lines still naming 12.0.2" in out
+    assert f"lines still naming {MARKED}" in out
     assert "vendor/README.md" in out
     assert "npm ci && npm test" in out
     assert "MAJOR BOUNDARY" in out
