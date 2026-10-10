@@ -14,10 +14,11 @@ def _patch_query(monkeypatch):
     monkeypatch.setattr(
         store.Collection, "query",
         lambda self, text, k=4, embed_fn=None, relevant_only=False,
-        rerank_fn=None, rerank_candidates=20:
+        rerank_fn=None, rerank_candidates=20, rerank_min_score=None:
         captured.update(embed_fn=embed_fn, relevant_only=relevant_only,
                         rerank_fn=rerank_fn,
-                        rerank_candidates=rerank_candidates) or [])
+                        rerank_candidates=rerank_candidates,
+                        rerank_min_score=rerank_min_score) or [])
     return captured
 
 

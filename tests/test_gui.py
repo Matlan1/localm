@@ -2983,6 +2983,40 @@ class TestJobs:
         assert "Unknown spec" in text        # treated as a (bad) model spec
 
     @pytest.mark.anyio
+    async def test_cli_job_survives_hostile_progress_frames(self, tmp_path):
+        """A child that prints progress frames holding over-nested JSON, an
+        over-long integer and a non-object: the job skips them, forwards the
+        frame after them, and still ends."""
+        from localm.model_manager._shared import PROGRESS_SENTINEL
+        from localm.plugins.gui.jobs import JobManager
+        (tmp_path / "sitecustomize.py").write_text(
+            "import sys\n"
+            f"S = {PROGRESS_SENTINEL!r}\n"
+            "for payload in ('[' * 100000, '9' * 5000, '[1, 2]',\n"
+            "                '{\"type\": \"progress\", \"marker\": 7}'):\n"
+            "    sys.stdout.write(S + payload + '\\n')\n"
+            "sys.stdout.flush()\n", encoding="utf-8")
+        pythonpath = os.pathsep.join(
+            p for p in (str(tmp_path), os.environ.get("PYTHONPATH", "")) if p)
+        mgr = JobManager()
+        job = mgr.start_cli("pull", ["--help"], extra_env={"PYTHONPATH": pythonpath})
+        q = job.subscribe()
+        events = []
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=0.5)
+            except TimeoutError:
+                continue
+            events.append(ev)
+            if ev["type"] == "end":
+                break
+        job.unsubscribe(q)
+        assert events[-1]["type"] == "end" and events[-1]["status"] == "done"
+        progress = [e for e in events if e["type"] == "progress"]
+        assert [e.get("marker") for e in progress] == [7]
+
+    @pytest.mark.anyio
     async def test_fn_job_success_and_failure(self):
         from localm.plugins.gui.jobs import JobManager
         mgr = JobManager()
@@ -3140,6 +3174,33 @@ class TestConversationStore:
                        json={"title": "ok", "updated_at": 1, "messages": []})
             data = client.get("/api/conversations").json()
         assert [c["id"] for c in data["conversations"]] == ["ok"]
+
+    @pytest.mark.parametrize("doc", ["[]", "5", "null"])
+    def test_conversation_file_that_is_not_an_object_is_unreadable(
+            self, persist_app, monkeypatch, doc):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, chats = persist_app
+        chats.mkdir(parents=True)
+        (chats / "shape.json").write_text(doc, encoding="utf-8")
+        with TestClient(app) as client:
+            single = client.get("/api/conversations/shape")
+        assert single.status_code == 500
+        assert single.json()["detail"] == "Conversation file is unreadable"
+
+    @pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+    def test_hostile_conversation_file_is_unreadable_not_a_crash(
+            self, persist_app, monkeypatch, doc):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, chats = persist_app
+        chats.mkdir(parents=True)
+        (chats / "hostile.json").write_text(doc, encoding="utf-8")
+        with TestClient(app) as client:
+            single = client.get("/api/conversations/hostile")
+            listing = client.get("/api/conversations")
+        assert single.status_code == 500
+        assert single.json()["detail"] == "Conversation file is unreadable"
+        assert listing.status_code == 200
+        assert listing.json()["conversations"] == []
 
 
 # ------------------------------------------------------------------ #
@@ -4017,6 +4078,19 @@ class TestPromptLibraryUnreadable:
             assert client.get("/api/prompts").status_code == 500
             assert client.delete("/api/prompts/Editor").status_code == 500
 
+    @pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+    def test_hostile_library_is_refused_and_left_untouched(
+            self, persist_app, tmp_path, doc):
+        app, _ = persist_app
+        pf = tmp_path / ".localm" / "prompts.json"
+        pf.parent.mkdir(parents=True, exist_ok=True)
+        pf.write_text(doc, encoding="utf-8")
+        with TestClient(app) as client:
+            assert client.get("/api/prompts").status_code == 500
+            r = client.put("/api/prompts/Newbie", json={"system": "hi"})
+        assert r.status_code == 500
+        assert pf.read_text(encoding="utf-8") == doc
+
     def test_transient_read_error_does_not_destroy_intact_personas(
             self, persist_app, tmp_path, monkeypatch):
         """The sharp case: the file is INTACT and only the READ failed (an AV or
@@ -4318,6 +4392,20 @@ class TestCoderHistory:
             assert [l["name"] for l in data["logs"]] == [log.name]
             parsed = client.get(f"/api/coder/history/{log.name}").json()
         assert parsed["entries"] == [entry]     # malformed line skipped
+
+    @pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+    def test_history_skips_a_hostile_line(self, coder_app, tmp_path, monkeypatch, doc):
+        import localm.audit as audit_mod
+        sessions_dir = tmp_path / "sessions"
+        log, entry = self._fake_log(sessions_dir)
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(doc + "\n")
+        monkeypatch.setattr(audit_mod, "_SESSIONS_DIR", sessions_dir)
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, _ = coder_app
+        with TestClient(app) as client:
+            parsed = client.get(f"/api/coder/history/{log.name}").json()
+        assert parsed["entries"] == [entry]
 
     def test_history_enabled_false_in_privacy(self, coder_app, tmp_path, monkeypatch):
         import localm.audit as audit_mod

@@ -217,7 +217,7 @@ def _lenient_json(body: str) -> Optional[dict]:
                 obj = json.loads(fix(cand), strict=False)
                 if isinstance(obj, dict):
                     return obj
-            except (json.JSONDecodeError, ValueError, re.error):
+            except (ValueError, re.error, RecursionError):
                 continue
     return None
 
@@ -251,7 +251,7 @@ def _exact_call_object(body: str) -> Optional[tuple[str, dict]]:
     See test_json_fence_needing_a_repair_is_lenient."""
     try:
         obj = json.loads(body.strip(), strict=False)
-    except (json.JSONDecodeError, ValueError):
+    except (ValueError, RecursionError):
         return None
     if not isinstance(obj, dict) or frozenset(obj) not in _EXACT_CALL_KEY_SETS:
         return None

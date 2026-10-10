@@ -81,6 +81,11 @@ IMAGE_ARCHITECTURES = [
     "lumina2",
 ]
 
+MUSIC_ARCHITECTURES = [
+    ("acestep-dit", "diffusion-unet"), ("acestep-vae", "vae"),
+    ("acestep-text-enc", "text-encoder"), ("acestep-lm", "unknown"),
+]
+
 
 class TestArchitectureRoles:
     @pytest.mark.parametrize("arch", CHAT_ARCHITECTURES)
@@ -110,6 +115,13 @@ class TestArchitectureRoles:
         f = _gguf(tmp_path / "m.gguf", arch)
         assert _type_of(f) == "diffusion-unet"
         assert gguf_chat_refusal(arch) is not None
+
+    @pytest.mark.parametrize("arch,mtype", MUSIC_ARCHITECTURES)
+    def test_acestep_components_take_their_component_type(self, tmp_path, arch, mtype):
+        f = _gguf(tmp_path / "m.gguf", arch)
+        mtype_seen, meta = _detect_local_model_type(f, is_gguf=True, is_hf=False)
+        assert mtype_seen == mtype
+        assert meta["architecture"] == arch
 
     def test_pooling_type_key_marks_a_decoder_architecture_as_embedding(self, tmp_path):
         f = _gguf(tmp_path / "m.gguf", "qwen3", [("qwen3.pooling_type", _kv_uint32(3))])
@@ -161,6 +173,8 @@ class TestChatRefusal:
         ("eagle3", "draft head"), ("dflash", "draft head"), ("gemma4-assistant", "draft head"),
         ("wavtokenizer-dec", "audio codec"),
         ("qwen3tts", "text-to-speech"), ("flux", "image or video generation"),
+        ("acestep-dit", "music generation"), ("acestep-lm", "music generation"),
+        ("acestep-vae", "music generation"), ("acestep-text-enc", "music generation"),
     ])
     def test_message_names_the_architecture_and_what_it_is(self, arch, what):
         msg = gguf_chat_refusal(arch)
@@ -177,7 +191,8 @@ class TestChatRefusal:
 
 
 class TestBackendRefusesBeforeLoading:
-    @pytest.mark.parametrize("arch", ["eagle3", "wavtokenizer-dec", "flux", "qwen3tts"])
+    @pytest.mark.parametrize("arch", ["eagle3", "wavtokenizer-dec", "flux", "acestep-lm",
+                                      "qwen3tts"])
     def test_load_raises_before_any_vram_probe_or_worker(self, tmp_path, monkeypatch, arch):
         f = _gguf(tmp_path / "m.gguf", arch)
         backend = GgufBackend(str(f))

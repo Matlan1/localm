@@ -564,7 +564,7 @@ class ProjectMap:
         job on None is the same as if caching did not exist: call build()."""
         try:
             raw = json.loads(cache_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return None
         cached_at = raw.get("cached_at") if isinstance(raw, dict) else None
         if not isinstance(cached_at, (int, float)):

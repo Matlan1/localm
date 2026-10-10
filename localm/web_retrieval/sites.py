@@ -112,7 +112,7 @@ def _decode_github_readme(body: str) -> Optional[str]:
     ``content``), or None when the body is not that shape."""
     try:
         payload = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(payload, dict) or payload.get("encoding") != "base64":
         return None
@@ -220,7 +220,7 @@ def _items(body: Optional[str]) -> list:
         return []
     try:
         payload = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         return []
     items = payload.get("items") if isinstance(payload, dict) else None
     return items if isinstance(items, list) else []

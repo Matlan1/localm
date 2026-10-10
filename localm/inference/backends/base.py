@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import threading
 from abc import ABC, abstractmethod
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 
 class UnsupportedInputError(ValueError):
@@ -186,6 +187,50 @@ _STREAM_STOP: contextvars.ContextVar[Optional[Callable[[], bool]]] = (
     contextvars.ContextVar("localm_stream_stop", default=None))
 
 
+class PerThread:
+    """An instance attribute each thread sees separately while *when(instance)*
+    is true (always, without *when*): a thread reads the value it last set on
+    that instance; a thread that never set one reads the value last set by any
+    thread, or *default* when none was set. While *when(instance)* is false it
+    is one shared value: the last one set by any thread.
+
+    For per-reply results (a finish reason, drafting figures) on a backend
+    that answers several requests at once, each on its own thread."""
+
+    def __init__(self, default: Any = None,
+                 when: Optional[Callable[[Any], bool]] = None) -> None:
+        self.default = default
+        self.when = when
+        self.name = ""
+
+    def _separate(self, obj: Any) -> bool:
+        return self.when is None or bool(self.when(obj))
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    @staticmethod
+    def _state(obj: Any) -> threading.local:
+        state = obj.__dict__.get("_per_thread")
+        if state is None:
+            state = obj.__dict__.setdefault("_per_thread", threading.local())
+        return state
+
+    def __get__(self, obj: Any, owner: Optional[type] = None) -> Any:
+        if obj is None:
+            return self
+        if self._separate(obj):
+            state = self._state(obj)
+            if hasattr(state, self.name):
+                return getattr(state, self.name)
+        return obj.__dict__.get("_per_thread_latest", {}).get(self.name, self.default)
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        if self._separate(obj):
+            setattr(self._state(obj), self.name, value)
+        obj.__dict__.setdefault("_per_thread_latest", {})[self.name] = value
+
+
 @contextlib.contextmanager
 def stream_stop_check(check: Callable[[], bool]):
     """Publish *check* for the stream the caller iterates inside this block, in
@@ -288,6 +333,10 @@ VISION_CPU_FALLBACK_STATUS = (
 # before it can answer.
 LOADING_MODEL_STATUS = "Loading model..."
 
+# Emitted while a request waits for the model to finish other requests before
+# it starts on this one.
+WAITING_FOR_MODEL_STATUS = "Waiting for another request to finish..."
+
 
 # Shown when a grammar is requested of a backend that cannot apply one. Names
 # both routes out: a GGUF model has native grammar support, an HF model needs the
@@ -314,6 +363,12 @@ GRAMMAR_LOAD_FAILED_MESSAGE = (
 # Shown when any grammar, lazy or forced, is requested of a diffusion language
 # model. Contains "would be ignored", which the GUI's web-tool retry matches
 # on. See test_grammar_refusals_carry_the_retry_phrase.
+GRAMMAR_FAULTED_MESSAGE = (
+    "This model's llama.cpp runtime faulted while applying a grammar earlier, so "
+    "grammar-constrained sampling is off for it until localm restarts, and the "
+    "reply would not match the requested grammar. Restart localm, or update the "
+    "runtime with `localm setup-llama`.")
+
 GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE = (
     "This model is a diffusion language model: it fills in its whole reply at "
     "once instead of token by token, so the requested grammar would be ignored "
@@ -423,6 +478,13 @@ class BaseBackend(ABC):
         loaded for speculative drafting. Default False."""
         return False
 
+    def unsupported_sampling(self, options: dict) -> list:
+        """The names of the sampling *options* (``{name: value}`` for ``min_p``,
+        ``presence_penalty``, ``frequency_penalty``) this backend cannot apply, in
+        order. Default: all of them, so a backend that never declared support
+        refuses them rather than generating as if they were not set."""
+        return list(options)
+
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Check *grammar* against this backend before generation starts.
 
@@ -503,6 +565,9 @@ class BaseBackend(ABC):
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Iterator[str]:
         """
         Yield text tokens one at a time.
@@ -534,6 +599,12 @@ class BaseBackend(ABC):
             channel (see :func:`no_think_prompt`); ``None`` and ``True`` leave
             the model's default.  A model with no ``<think>`` convention is
             unaffected.
+        min_p, presence_penalty, frequency_penalty:
+            OpenAI sampling options, passed only when the caller set them and
+            only to a backend whose :meth:`unsupported_sampling` does not list
+            them.  ``presence_penalty`` subtracts a fixed amount from the logit
+            of every token already generated, ``frequency_penalty`` that amount
+            times how often it was generated.
         """
 
     @property

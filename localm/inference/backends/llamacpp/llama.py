@@ -28,6 +28,7 @@ from typing import (Any, Callable, Generator, Iterable, Iterator, Optional,
                     Sequence)
 
 from localm.inference import pretokenizer_guard
+from localm.inference.backends.base import PerThread
 from localm.textguard import (
     content_spans_via_sentinels, map_untrusted_ranges, split_by_trust,
     untrusted_spans_of,
@@ -939,6 +940,11 @@ def _common_prefix_len(a: list[int], b: list[int]) -> int:
     return n
 
 
+_PENALTIES_UNSUPPORTED_MSG = (
+    "presence_penalty and frequency_penalty cannot be applied: this llama runtime "
+    "has no penalties sampler")
+
+
 def _build_sampler(
     vocab: ctypes.c_void_p,
     temperature: float = 0.8,
@@ -950,16 +956,20 @@ def _build_sampler(
     grammar: Optional[str] = None,
     grammar_lazy: bool = False,
     grammar_triggers: Optional[list[str]] = None,
+    penalty_freq: float = 0.0,
+    penalty_present: float = 0.0,
 ) -> ctypes.c_void_p:
     """
     Construct a sampler chain:
         [grammar] → [penalties] → top_k → top_p → min_p → temperature → dist
 
     The optional grammar sampler sits first so it masks invalid tokens before
-    any scoring or sampling stage sees them.  The repetition-penalty stage is
-    added when ``repeat_penalty != 1.0`` and the DLL exports it - without it
-    models prone to looping repeat the same marker lines until max_tokens.
-    For temperature ≤ 0 greedy sampling replaces the stochastic stages.
+    any scoring or sampling stage sees them.  The penalties stage is added when
+    ``repeat_penalty != 1.0`` or *penalty_freq* / *penalty_present* is non-zero
+    and the DLL exports it - without it models prone to looping repeat the same
+    marker lines until max_tokens. All three penalties look at the last 64
+    sampled tokens. For temperature ≤ 0 greedy sampling replaces the
+    stochastic stages.
 
     Parameters
     ----------
@@ -985,6 +995,7 @@ def _build_sampler(
         GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
         GrammarUnsupportedError,
         InvalidGrammarError,
+        UnsupportedInputError,
     )
 
     chain_params = api.llama_sampler_chain_default_params()
@@ -1051,9 +1062,18 @@ def _build_sampler(
     # Newer builds take the vocabulary size as a leading argument; _api dispatches
     # on the build, but it needs the real n_vocab to pass - a 0 there would
     # under-allocate the sampler's frequency counters.
-    if repeat_penalty and repeat_penalty != 1.0 and api.has_penalties_sampler():
+    repeat_active = bool(repeat_penalty) and repeat_penalty != 1.0
+    openai_active = penalty_freq != 0.0 or penalty_present != 0.0
+    if (repeat_active or openai_active) and not api.has_penalties_sampler():
+        if openai_active:
+            api.llama_sampler_free(chain)
+            raise UnsupportedInputError(_PENALTIES_UNSUPPORTED_MSG)
+    elif repeat_active or openai_active:
         n_vocab = api.llama_vocab_n_tokens(vocab) if vocab else 0
         if not n_vocab and api.penalties_needs_n_vocab():
+            if openai_active:
+                api.llama_sampler_free(chain)
+                raise UnsupportedInputError(_PENALTIES_UNSUPPORTED_MSG)
             from localm.debuglog import logger
             logger.warning(
                 "skipping the repetition-penalty sampler: this llama build "
@@ -1062,7 +1082,8 @@ def _build_sampler(
             api.llama_sampler_chain_add(
                 chain,
                 api.llama_sampler_init_penalties(
-                    64, repeat_penalty, 0.0, 0.0, n_vocab=n_vocab),
+                    64, repeat_penalty if repeat_active else 1.0,
+                    penalty_freq, penalty_present, n_vocab=n_vocab),
             )
 
     if temperature <= 0.0:
@@ -1226,6 +1247,15 @@ class LlamaCpp:
     _diffusion_capacity = 0
     _diffusion_steps: Optional[int] = None
     _diffusion_max_tokens: Optional[int] = None
+    # Parallel slots: the SlotScheduler decoding text replies together, or None
+    # when the model runs one reply at a time (n_parallel 1).
+    _slots = None
+    n_parallel = 1               # sequences the context holds
+    parallel_note = ""           # why fewer slots than requested, "" when none
+
+    # Why the last generation ended: "stop", "length" or "error". With parallel
+    # slots, the one that last ran on the calling thread.
+    last_finish_reason = PerThread("stop", when=lambda llm: llm._slots is not None)
 
     @property
     def _cached_tokens(self) -> list[int]:
@@ -1265,6 +1295,7 @@ class LlamaCpp:
         adapters: Optional[list[tuple[str, float]]] = None,
         diffusion_steps: Optional[int] = None,
         diffusion_max_tokens: Optional[int] = None,
+        n_parallel: int = 1,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -1322,7 +1353,8 @@ class LlamaCpp:
         # free that crashes the GPU driver. The decode loop holds _gen_lock
         # around each native step; close()/_free_native take it too, after
         # setting _stop so an in-flight generation bails at its next step.
-        # Lock order: _gen_lock before the module-level _stderr_lock.
+        # Lock order: _gen_lock before the module-level _stderr_lock, and
+        # before the slot scheduler's _cond (_slots.SlotScheduler).
         # _gen_lock is held around native calls, never across a yield.
         self._gen_lock    = threading.RLock()
         self._stop        = threading.Event()
@@ -1574,12 +1606,15 @@ class LlamaCpp:
                 "offloading all %d (the extra has no effect)",
                 n_gpu_layers, self.n_layers, self.n_layers)
 
+        self.n_parallel, self.parallel_note = self._resolve_parallel(n_parallel, n_ctx)
+
         # --- create context ---
         cp = api.llama_context_default_params()
         cp.n_ctx             = n_ctx
         cp.n_batch           = min(n_ctx, 2048)
         cp.n_ubatch          = cp.n_batch   # match micro-batch to batch
         cp.offload_kqv       = True
+        self._apply_parallel_params(cp)
         # Speculation writes a draft token into the cache and takes it back out
         # when the target rejects it. A recurrent cache cannot be truncated at
         # all UNLESS it is keeping per-token state snapshots, and it keeps none
@@ -1662,6 +1697,12 @@ class LlamaCpp:
             self._set_up_spec_source(spec_draft_model, n_threads, verbose, spec_draft_gpu)
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
+        if self.n_parallel > 1:
+            from ._slots import LlamaSlotOps, SlotScheduler
+            self._draft_source()
+            self._slots = SlotScheduler(LlamaSlotOps(self), self.n_parallel)
+        _mtp_log.info("parallel slots: %d%s", self.n_parallel,
+                      " (%s)" % self.parallel_note if self.parallel_note else "")
 
         # Optional in-process vision (C1): load the mmproj via mtmd so image
         # messages can be answered. Best-effort - any failure (no mtmd.dll, an
@@ -1977,8 +2018,13 @@ class LlamaCpp:
 
         Signals any in-flight generation to stop, then frees under _gen_lock
         so the free can never land between a generator's stop-check and its
-        next native call (which would be a use-after-free GPU crash)."""
+        next native call (which would be a use-after-free GPU crash). With
+        parallel slots, the slot scheduler is closed first (its replies end with
+        a RuntimeError and it frees their samplers), outside _gen_lock."""
         self._stop.set()
+        slots = self._slots
+        if slots is not None:
+            slots.close()
         with self._gen_lock:
             self._cached_tokens = []
             if not (self._ctx_ptr or self._model_ptr):
@@ -2097,9 +2143,12 @@ class LlamaCpp:
         grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
     ) -> Iterator[int]:
         """
-        Yield generated token ids one at a time.
+        Yield generated token ids one at a time. *sampling* holds extra
+        :func:`_build_sampler` keywords (``min_p``, ``penalty_freq``,
+        ``penalty_present``).
 
         KV cache strategy: when this llama.cpp build exports the
         llama_memory_* API and the request fits in the live context, the
@@ -2107,7 +2156,16 @@ class LlamaCpp:
         cache and only the new suffix is prefilled (fast follow-up turns in
         a chat).  Otherwise the context is recreated from scratch - the
         behaviour of older builds without KV-management functions.
+
+        A model with parallel slots generates through ``_generate_slots``.
         """
+        if self._slots is not None:
+            yield from self._generate_slots(
+                prompt_tokens, max_new_tokens, temperature, top_k, top_p,
+                repeat_penalty, grammar=grammar, grammar_lazy=grammar_lazy,
+                grammar_triggers=grammar_triggers, seed=seed, on_status=on_status,
+                sampling=sampling)
+            return
         with self._inference_lock:
             if not self._model_ptr:
                 raise RuntimeError("Model not loaded")
@@ -2187,6 +2245,7 @@ class LlamaCpp:
                     grammar=grammar,
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
+                    **(sampling or {}),
                 )
                 # A draft source never hands its proposals to the request's
                 # sampler: every emitted token, with or without a grammar in that
@@ -2570,6 +2629,7 @@ class LlamaCpp:
         grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
     ) -> Iterator[int]:
         """Yield the token ids an encoder-decoder model (T5) generates for
         *messages*, one at a time.
@@ -2651,6 +2711,7 @@ class LlamaCpp:
                     grammar=grammar,
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
+                    **(sampling or {}),
                 )
                 in_decode = True
                 if on_status:
@@ -2864,13 +2925,17 @@ class LlamaCpp:
         repeat_penalty: float,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
+        grammar: Optional[str] = None,
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[list[str]] = None,
     ) -> Iterator[int]:
         """Yield generated token ids for a chat whose prompt includes image(s).
 
         The image+text prompt is evaluated into the KV cache by
         :meth:`_prefill_vision`, which keeps the part of the cache an earlier
         image turn left that still matches; sampling then continues exactly like
-        the text loop. Grammar is not applied on the image path. The text path's
+        the text loop, with the same grammar handling. The text path's
         KV record (``_cached_tokens``) is left empty, so the next text turn
         prefills from scratch.
 
@@ -2881,8 +2946,18 @@ class LlamaCpp:
 
         Structural note: unlike _generate's single contiguous scope, this
         method's _ctx()/dedup_native_stderr usage is re-entered per native call
-        - see the comment at that call site before restructuring it."""
-        with self._inference_lock:
+        - see the comment at that call site before restructuring it.
+
+        A model with parallel slots runs this inside the slot scheduler's
+        exclusive section: it starts once the text replies in flight have
+        ended, and no new one starts until it is done."""
+        if self._slots is not None:
+            from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
+            exclusive = self._slots.exclusive(
+                on_wait=(lambda: on_status(WAITING_FOR_MODEL_STATUS)) if on_status else None)
+        else:
+            exclusive = contextlib.nullcontext()
+        with exclusive, self._inference_lock:
             if not self._model_ptr or getattr(self, "_mtmd", None) is None:
                 raise RuntimeError("vision is not available on this model")
 
@@ -2982,7 +3057,10 @@ class LlamaCpp:
                     temperature=temperature, top_k=top_k, top_p=top_p,
                     repeat_penalty=repeat_penalty,
                     seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
-                    grammar=None,
+                    grammar=grammar,
+                    grammar_lazy=grammar_lazy,
+                    grammar_triggers=grammar_triggers,
+                    **(sampling or {}),
                 )
                 in_decode = True
                 logger.info("gguf generate (vision): entering decode loop")
@@ -3187,6 +3265,156 @@ class LlamaCpp:
             # _fit_generation_budget guarantees needed <= n_ctx_max here
             target = min(target, self._n_ctx_max)
         return target
+
+    def _resolve_parallel(self, requested: int, n_ctx: int) -> tuple[int, str]:
+        """The sequences this model's context holds for *requested* slots, and
+        why it holds fewer ("" when it does not).
+
+        One slot for an encoder-decoder or diffusion model, a model with a draft
+        source, or a runtime without the llama_memory_* API. Otherwise at most
+        *requested*, lowered until it divides the context's ``n_ubatch``."""
+        try:
+            want = int(requested)
+        except (TypeError, ValueError):
+            want = 1
+        if want <= 1:
+            return 1, ""
+        if self.is_encoder_decoder:
+            return 1, "encoder-decoder models answer one request at a time"
+        if self.is_diffusion:
+            return 1, "diffusion models answer one request at a time"
+        if self._spec_source_name != SPEC_OFF:
+            return 1, "speculative drafting is on"
+        if not self._memory_api_available():
+            return 1, "this llama.cpp runtime cannot manage separate sequences"
+        n_ubatch = min(n_ctx, 2048)
+        slots = want
+        while slots > 1 and n_ubatch % slots:
+            slots -= 1
+        if slots < want:
+            return slots, "the batch size %d is not a multiple of %d" % (n_ubatch, want)
+        return slots, ""
+
+    def _apply_parallel_params(self, cp) -> None:
+        """Give context params *cp* one unified KV cache shared by
+        ``n_parallel`` sequences. Leaves *cp* untouched for one slot."""
+        if self.n_parallel > 1:
+            cp.n_seq_max = self.n_parallel
+            cp.kv_unified = True
+
+    def _recreate_slots_context(self, target: int, offload_kqv: bool) -> None:
+        """Replace the context with an empty one of *target* cells for the slot
+        scheduler. Caller holds ``_gen_lock``. Raises RuntimeError when the new
+        context cannot be created; the model then has no context until the next
+        recreate."""
+        model = self._model_ptr
+        if not model:
+            raise RuntimeError("Model not loaded")
+        if self._ctx_ptr:
+            api.llama_free(self._ctx_ptr)
+            self._ctx_ptr = None
+        self._cached_tokens = []
+        cp = api.llama_context_default_params()
+        cp.n_ctx = target
+        cp.n_batch = min(target, 2048)
+        cp.n_ubatch = cp.n_batch
+        cp.offload_kqv = offload_kqv
+        self._apply_parallel_params(cp)
+        if self._n_threads is not None:
+            cp.n_threads = self._n_threads
+            cp.n_threads_batch = self._n_threads
+        _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+        with _ctx():
+            self._ctx_ptr = api.llama_init_from_model(model, cp)
+            if self._ctx_ptr:
+                try:
+                    self._apply_adapters(self._ctx_ptr)
+                except Exception:
+                    api.llama_free(self._ctx_ptr)
+                    self._ctx_ptr = None
+                    raise
+        if not self._ctx_ptr:
+            where = ("with the KV cache in VRAM" if offload_kqv
+                     else "even with the KV cache in system RAM")
+            raise RuntimeError(
+                f"Not enough memory to create a {target:,}-token context, {where}. "
+                f"Start a new chat, lower n_ctx_max, or free some memory.")
+        self._ctx_capacity = target
+        self._offload_kqv = offload_kqv
+
+    def _generate_slots(
+        self,
+        prompt_tokens: list[int],
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        repeat_penalty: float,
+        grammar: Optional[str] = None,
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[list[str]] = None,
+        seed: Optional[int] = None,
+        on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
+    ) -> Iterator[int]:
+        """``_generate`` for a model with parallel slots: the reply decodes on
+        the slot scheduler beside other replies. Same statuses, budget clamp,
+        typed errors and ``last_finish_reason`` values as ``_generate``. A stop
+        published with ``stream_stop_check`` on this thread cancels the reply
+        while it waits or decodes."""
+        slots = self._slots
+        if not self._model_ptr or slots is None:
+            raise RuntimeError("Model not loaded")
+        n_prompt = len(prompt_tokens)
+        if n_prompt == 0:
+            return
+        if on_status:
+            on_status("Processing prompt...")
+        max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
+        sampler = _build_sampler(
+            vocab=self._loaded_tokenizer()._vocab,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repeat_penalty=repeat_penalty,
+            seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
+            grammar=grammar,
+            grammar_lazy=grammar_lazy,
+            grammar_triggers=grammar_triggers,
+            **(sampling or {}),
+        )
+        from localm.debuglog import logger
+        from localm.inference.backends.base import stream_stop_requested
+        self.last_finish_reason = "stop"
+        try:
+            stream = slots.submit(prompt_tokens, max_new_tokens, sampler,
+                                        on_status=on_status,
+                                        stop_requested=stream_stop_requested)
+        except BaseException:
+            api.llama_sampler_free(sampler)
+            raise
+        logger.info("gguf generate (slots): queued, %d prompt token(s)", n_prompt)
+        tokens_generated = 0
+        _t0 = time.monotonic()
+        try:
+            for token in stream:
+                yield token
+                tokens_generated += 1
+            self.last_finish_reason = stream.finish_reason
+            logger.info("gguf generate (slots): complete, %d token(s) in %.2fs, "
+                        "finish_reason=%s", tokens_generated, time.monotonic() - _t0,
+                        stream.finish_reason)
+        except GeneratorExit:
+            logger.info("gguf generate (slots): aborted (cancelled), %d token(s) "
+                        "generated", tokens_generated)
+            raise
+        except Exception:
+            self.last_finish_reason = "error"
+            logger.info("gguf generate (slots): aborted (exception), %d token(s) "
+                        "generated", tokens_generated)
+            raise
+        finally:
+            stream.close()
 
     def _memory_api_available(self) -> bool:
         """Probe once for the llama_memory_* function family."""
@@ -4131,6 +4359,7 @@ class LlamaCpp:
         cp.n_batch     = min(cp.n_ctx, 2048)
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = offload_kqv  # False -> KV cache in system RAM (VRAM was tight)
+        self._apply_parallel_params(cp)
         # The grown context must keep the rollback snapshots too, or speculation
         # stops working the moment a conversation outgrows its first context.
         if self._spec_rollback_wanted() and hasattr(cp, "n_rs_seq"):
@@ -4229,6 +4458,9 @@ class LlamaCpp:
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
         should_stop: Optional[Callable[[], bool]] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
         **_ignored,
     ):
         """
@@ -4248,8 +4480,22 @@ class LlamaCpp:
         ignored.
 
         A diffusion language model answers through ``_generate_diffusion``,
-        which polls *should_stop* between denoising steps.
+        which polls *should_stop* between denoising steps, and refuses a
+        non-zero *min_p*, *presence_penalty* or *frequency_penalty* with
+        :class:`UnsupportedInputError`.
         """
+        sampling: dict = {}
+        if min_p is not None:
+            sampling["min_p"] = min_p
+        if presence_penalty is not None:
+            sampling["penalty_present"] = presence_penalty
+        if frequency_penalty is not None:
+            sampling["penalty_freq"] = frequency_penalty
+        if self.is_diffusion and any(value != 0 for value in sampling.values()):
+            from localm.inference.backends.base import UnsupportedInputError
+            raise UnsupportedInputError(
+                "min_p, presence_penalty and frequency_penalty cannot be applied "
+                "by a diffusion language model")
         if self.is_encoder_decoder:
             return self._completion_result(self._generate_encoder_decoder(
                 messages,
@@ -4263,6 +4509,7 @@ class LlamaCpp:
                 grammar_triggers=grammar_triggers,
                 seed=seed,
                 on_status=on_status,
+                sampling=sampling,
             ), stream)
 
         # Use the model's embedded chat template when available (Gemma, Llama3,
@@ -4323,6 +4570,10 @@ class LlamaCpp:
                 repeat_penalty=repeat_penalty,
                 seed=seed,
                 on_status=on_status,
+                sampling=sampling,
+                grammar=grammar,
+                grammar_lazy=grammar_lazy,
+                grammar_triggers=grammar_triggers,
             )
         else:
             gen = self._generate(
@@ -4337,6 +4588,7 @@ class LlamaCpp:
                 grammar_triggers=grammar_triggers,
                 seed=seed,
                 on_status=on_status,
+                sampling=sampling,
             )
 
         return self._completion_result(gen, stream)

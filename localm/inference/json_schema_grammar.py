@@ -579,3 +579,82 @@ def schema_to_grammar(schema: Any) -> str:
     if root == "root":
         raise SchemaGrammarError("the schema is only a reference to itself")
     return comp.render(root)
+
+
+_SUBSCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
+_SUBSCHEMA_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
+_SUBSCHEMA_ONE = ("items", "additionalProperties", "not", "contains", "if", "then", "else",
+                  "propertyNames")
+_MAX_LOOSEN_STEPS = 32
+MAX_LOOSEN_DEPTH = 128
+# Keywords that give a schema its shape. Loosening never removes them: a schema
+# whose shape cannot be compiled is refused instead of turned into "any value".
+STRUCTURAL_KEYWORDS = frozenset({
+    "type", "properties", "required", "additionalProperties", "items", "prefixItems",
+    "enum", "const", "anyOf", "oneOf", "allOf", "$ref",
+})
+
+
+def _nesting(node: Any) -> int:
+    """How many dict/list levels deep *node* goes, counted without recursion."""
+    deepest = 0
+    stack = [(node, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if depth > deepest:
+            deepest = depth
+        if isinstance(current, dict):
+            stack.extend((v, depth + 1) for v in current.values())
+        elif isinstance(current, list):
+            stack.extend((v, depth + 1) for v in current)
+    return deepest
+
+
+def _without_keyword(node: Any, keyword: str) -> Any:
+    """Copy of the schema *node* with *keyword* removed wherever a schema (not a
+    property name) carries it."""
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == keyword:
+            continue
+        if key in _SUBSCHEMA_MAPS and isinstance(value, dict):
+            out[key] = {name: _without_keyword(sub, keyword) for name, sub in value.items()}
+        elif key in _SUBSCHEMA_LISTS and isinstance(value, list):
+            out[key] = [_without_keyword(sub, keyword) for sub in value]
+        elif key in _SUBSCHEMA_ONE:
+            out[key] = _without_keyword(value, keyword)
+        else:
+            out[key] = value
+    return out
+
+
+def loosen_schema(schema: dict[str, Any]
+                  ) -> tuple[dict[str, Any] | None, list[str], SchemaGrammarError | None]:
+    """``(schema, dropped, error)``: *schema* with the keywords the compiler
+    cannot enforce removed one by one until it compiles, and the keywords
+    removed. A keyword in ``STRUCTURAL_KEYWORDS`` is never removed. When the
+    schema still does not compile, the first element is ``None`` and *error* is
+    the compiler's last refusal (a schema nested deeper than
+    ``MAX_LOOSEN_DEPTH`` levels is refused without loosening)."""
+    if _nesting(schema) > MAX_LOOSEN_DEPTH:
+        return None, [], SchemaGrammarError(
+            f"the schema nests more than {MAX_LOOSEN_DEPTH} levels deep")
+    dropped: list[str] = []
+    current = schema
+    error: SchemaGrammarError | None = None
+    for _ in range(_MAX_LOOSEN_STEPS):
+        try:
+            schema_to_grammar(current)
+            return current, dropped, None
+        except SchemaGrammarError as exc:
+            error = exc
+            if not exc.keyword or exc.keyword in STRUCTURAL_KEYWORDS:
+                return None, dropped, exc
+            stripped = _without_keyword(current, exc.keyword)
+            if stripped == current:
+                return None, dropped, exc
+            current = stripped
+            dropped.append(exc.keyword)
+    return None, dropped, error

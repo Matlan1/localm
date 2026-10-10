@@ -918,7 +918,7 @@ async def session_log(session_id: str, request: Request):
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         try:
             entries.append(json.loads(line))
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
     return {"path": str(path), "entries": entries}
 
@@ -1420,7 +1420,7 @@ async def coder_history_entries(name: str, request: Request):
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             entries.append(json.loads(line))
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
     return {"path": str(path), "entries": entries}
 

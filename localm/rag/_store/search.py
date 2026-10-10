@@ -74,7 +74,8 @@ class _CollectionSearch:
               embed_fn: Optional[EmbedFn] = None, *,
               relevant_only: bool = False,
               rerank_fn: Optional[RerankFn] = None,
-              rerank_candidates: int = DEFAULT_RERANK_CANDIDATES) -> list[dict]:
+              rerank_candidates: int = DEFAULT_RERANK_CANDIDATES,
+              rerank_min_score: Optional[float] = None) -> list[dict]:
         """Top-*k* chunks for *text*: max-normalised BM25, blended 50/50 with
         max-normalised cosine similarity when vectors cover the corpus and the
         query can be embedded. ``score`` is that blend, relative to the best
@@ -95,7 +96,16 @@ class _CollectionSearch:
         ``rerank_score`` next to the blended ``score``. A *rerank_fn* that raises
         or returns the wrong number of scores, or a non-finite one, leaves the
         blended order in place and records why in ``rerank_degrade_reason``
-        (None after a query that reranked or was not asked to)."""
+        (None after a query that reranked or was not asked to).
+
+        With *relevant_only*, *rerank_fn* and *rerank_min_score* together, the
+        reranker's score replaces the floor above as the relevance gate: the
+        whole candidate pool is reranked and only hits scoring at least
+        *rerank_min_score* are returned, so a paraphrased question the floor
+        would drop is kept when the reranker ranks its answer highly. The scale
+        of *rerank_min_score* is the reranker's own. A query that
+        ``refers_to_conversation`` keeps the floor above, and so does a query
+        whose reranking degraded."""
         self.rerank_degrade_reason = None
         if not text.strip() or not self._chunks:
             return []
@@ -116,13 +126,22 @@ class _CollectionSearch:
         order = sorted(range(len(scores)), key=lambda i: scores[i],
                        reverse=True)[:pool]
         order = [i for i in order if scores[i] > 0]
-        if relevant_only:
+        gate_min = None
+        if (relevant_only and rerank_fn is not None
+                and not refers_to_conversation(text)):
+            gate_min = rerank_min_score
+        if relevant_only and gate_min is None:
             order = self._relevant(text, order, index, cosines)
         reranked: dict[int, float] = {}
-        if rerank_fn is not None and len(order) > 1:
+        if rerank_fn is not None and (len(order) > 1
+                                      or (gate_min is not None and order)):
             reranked = self._rerank_scores(text, order, rerank_fn)
             if reranked:
                 order = sorted(order, key=lambda i: reranked[i], reverse=True)
+                if gate_min is not None:
+                    order = [i for i in order if reranked[i] >= gate_min]
+            elif gate_min is not None:
+                order = self._relevant(text, order, index, cosines)
         order = order[:k]
         return [
             {**self._chunks[i], "score": round(scores[i], 4),

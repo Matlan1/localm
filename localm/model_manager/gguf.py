@@ -722,14 +722,28 @@ _GGUF_IMAGE_ARCHITECTURES = frozenset({
 _GGUF_NON_CHAT_ARCHITECTURES.update(
     {arch: "an image or video generation model" for arch in _GGUF_IMAGE_ARCHITECTURES})
 
+# general.architecture values of the ACE-Step music generation components
+# (acestep.cpp's converter), each with its registry type.
+_GGUF_MUSIC_ARCHITECTURES = {
+    "acestep-dit": "diffusion-unet",
+    "acestep-vae": "vae",
+    "acestep-text-enc": "text-encoder",
+    "acestep-lm": "unknown",
+}
+_GGUF_NON_CHAT_ARCHITECTURES.update(
+    {arch: "a music generation model component" for arch in _GGUF_MUSIC_ARCHITECTURES})
+
 
 def gguf_non_chat_model_type(architecture: Optional[str]) -> Optional[str]:
     """The registry type for a GGUF whose ``general.architecture`` is not a chat
-    model (``diffusion-unet`` for image/video checkpoints, ``tts`` for the
-    text-to-speech models localm synthesizes with, ``unknown`` for the other
-    non-chat roles), or None when it may be a chat model."""
+    model (``diffusion-unet`` for image/video checkpoints, the component's type
+    for ACE-Step music components, ``tts`` for the text-to-speech models localm
+    synthesizes with, ``unknown`` for the other non-chat roles), or None when it
+    may be a chat model."""
     if architecture in _GGUF_IMAGE_ARCHITECTURES:
         return "diffusion-unet"
+    if architecture in _GGUF_MUSIC_ARCHITECTURES:
+        return _GGUF_MUSIC_ARCHITECTURES[architecture]
     if architecture in GGUF_TTS_ARCHITECTURES:
         return "tts"
     return "unknown" if architecture in _GGUF_NON_CHAT_ARCHITECTURES else None

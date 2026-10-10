@@ -87,10 +87,16 @@ def fake_agent(monkeypatch):
     FakeAgent.seen_cwds = []
     FakeAgent.behaviour = {}
     import localm.plugins.coder.agent as agent_mod
+    import localm.plugins.coder.runner  # noqa: F401  (binds the real Agent before the patch)
     monkeypatch.setattr(agent_mod, "Agent", FakeAgent)
     yield FakeAgent
     FakeAgent.seen_cwds = []
     FakeAgent.behaviour = {}
+
+
+def test_modules_that_name_agent_keep_the_real_one(fake_agent):
+    import localm.plugins.coder.runner as runner
+    assert runner.Agent is not FakeAgent
 
 
 class DummyParent:

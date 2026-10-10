@@ -660,7 +660,7 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
         for line in reversed(raw.splitlines()):
             try:
                 rec = json.loads(line)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, RecursionError):
                 continue
             if not isinstance(rec, dict) or rec.get("type") not in ("user", "llm"):
                 continue
@@ -761,7 +761,7 @@ def _read_episodic_watermark(store) -> float:
     try:
         data = json.loads(_episodic_watermark_path(store).read_text(encoding="utf-8"))
         return float(data.get("last_mtime", 0.0))
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
         return 0.0                               # absent/corrupt -> process from scratch
 
 
@@ -777,7 +777,7 @@ def _read_episodic_stems(store) -> set:
         data = json.loads(_episodic_watermark_path(store).read_text(encoding="utf-8"))
         stems = data.get("stems", [])
         return set(stems) if isinstance(stems, list) else set()
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
         return set()
 
 
@@ -809,7 +809,7 @@ def _session_text(path: Path, max_chars: int = 6000) -> str:
     for line in reversed(raw.splitlines()):        # newest-first, so the cap keeps recent
         try:
             rec = json.loads(line)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             continue
         if not isinstance(rec, dict) or rec.get("type") not in ("user", "llm"):
             continue

@@ -17,6 +17,7 @@ from localm.console import console
 from localm.debuglog import logger
 from localm.inference.backends.base import LOADING_MODEL_STATUS, BaseBackend
 from localm.inference.mmap_setting import describe_mmap, resolve_use_mmap
+from localm.inference.parallel_setting import resolve_parallel_slots
 from localm.textnorm import scrub_stream
 
 
@@ -223,6 +224,7 @@ def create_backend(
                               if source == "draft" else None),
             mtp_draft_tokens=_resolve_mtp_draft_tokens(cfg, mtp_draft_tokens),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
+            parallel_slots=resolve_parallel_slots(cfg),
         )
 
     raise ValueError(
@@ -516,8 +518,16 @@ class Engine:
     def last_finish_reason(self) -> str:
         """Why the most recent generation ended: "stop" (model finished) or
         "length" (the max_tokens budget ran out). Backends that cannot tell
-        report "stop"."""
+        report "stop". A GGUF backend answers for the generation that last ran
+        on the calling thread."""
         return getattr(self._backend, "last_finish_reason", "stop")
+
+    @property
+    def parallel_slots(self) -> int:
+        """How many requests the loaded model answers at the same time (the
+        last load's figure while unloaded); 1 for a backend without slots."""
+        slots = getattr(self._backend, "parallel_slots", 1)
+        return slots if isinstance(slots, int) and not isinstance(slots, bool) and slots > 0 else 1
 
     @property
     def supports_images(self) -> bool:
@@ -665,6 +675,12 @@ class Engine:
         grammar. See ``BaseBackend.supports_grammar`` for why the default denies."""
         return getattr(self._backend, "supports_grammar", False)
 
+    def unsupported_sampling(self, options: dict) -> list:
+        """The names of the sampling *options* (``{name: value}`` for ``min_p``,
+        ``presence_penalty``, ``frequency_penalty``) the active backend cannot
+        apply."""
+        return self._backend.unsupported_sampling(options)
+
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Up-front grammar validation, delegated to the backend.
 
@@ -698,10 +714,15 @@ class Engine:
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Iterator[str]:
         """Stream the reply to *messages*. ``thinking=False`` asks a reasoning
         model to answer without its reasoning channel; ``None`` leaves the
-        model's default. The other parameters default to the config values."""
+        model's default. *min_p*, *presence_penalty* and *frequency_penalty* are
+        passed to the backend only when set; check :meth:`unsupported_sampling`
+        first. The other parameters default to the config values."""
         # Auto-reload if the model was unloaded. Holds the process-global load
         # lock so a reload cannot race another load onto the GPU, and
         # double-checks inside the lock so a model another thread just brought
@@ -718,7 +739,11 @@ class Engine:
                     self._backend.load()
 
         cfg = load_config()
-        extra = {"thinking": thinking} if thinking is not None else {}
+        extra: dict = {"thinking": thinking} if thinking is not None else {}
+        for key, value in (("min_p", min_p), ("presence_penalty", presence_penalty),
+                           ("frequency_penalty", frequency_penalty)):
+            if value is not None:
+                extra[key] = value
         # Normalise model-internal control markers (harmony and Gemma channel
         # tags, and similar) once here, so every backend inherits it. The GGUF
         # backend also scrubs internally and scrub_stream is idempotent; the HF

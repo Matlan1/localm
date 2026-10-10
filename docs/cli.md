@@ -15,6 +15,7 @@ localm mcp [opts]                # MCP stdio server (mcp plugin)
 localm doctor                    # check Python, llama.dll, GPU driver, VRAM, packages
 localm info                      # paths + current config
 localm setup-llama [opts]        # provision native llama.cpp binaries
+localm setup-sdcpp [opts]        # install the native image runtime (stable-diffusion.cpp)
 localm setup-browser [opts]      # download Chromium for the automated browser
 ```
 
@@ -898,6 +899,9 @@ localm setup-llama --backend vulkan      # any GPU (AMD/NVIDIA/Intel), no vendor
 localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  /  --backend cpu
 localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 localm setup-llama --backend cuda --cuda-line cuda-12   # Linux: CUDA runtime without a GPU, for building images
+localm setup-sdcpp                       # install the native image runtime (stable-diffusion.cpp), auto-picking the build
+localm setup-sdcpp --backend vulkan      # or cpu / cuda (Windows) / rocm / metal
+localm setup-sdcpp --status              # which builds are installed, and their devices
 localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
 localm setup-browser                     # download Chromium for the automated browser (coder tool)
 localm setup-browser --force             # reinstall even if already present

@@ -73,7 +73,7 @@ def _read_partial_owner(partial: Path) -> "dict | None":
     """The owner record of *partial*, or None when absent or unreadable."""
     try:
         rec = json.loads(_partial_owner_path(partial).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return rec if isinstance(rec, dict) else None
 
@@ -2040,7 +2040,7 @@ def _read_lock_record(d: Path):
     """The owner record in directory *d*, or None when it cannot be read."""
     try:
         rec = json.loads((d / "owner.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return rec if isinstance(rec, dict) else None
 
@@ -2808,7 +2808,7 @@ def _part_is_resumable(part_file: Path, identity: dict) -> bool:
         return False
     try:
         rec = json.loads(_part_record_path(part_file).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return False
     return rec == identity
 

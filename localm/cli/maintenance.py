@@ -97,6 +97,11 @@ from ..setup_llama import main as _setup_llama_main
 main.add_command(_setup_llama_main, name="setup-llama")
 
 
+from ..media.sdcpp.cli import main as _setup_sdcpp_main  # noqa: E402
+
+main.add_command(_setup_sdcpp_main, name="setup-sdcpp")
+
+
 @main.command("setup-embeddings")
 @click.option("--model", "model", default=None,
               help="Embedding model to install (a known key, a registered model "

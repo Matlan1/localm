@@ -846,7 +846,7 @@ def rollback_last(*, installed=None) -> dict:
                 loaded = json.loads(manifest.read_text(encoding="utf-8"))
                 if isinstance(loaded, list) and all(isinstance(x, str) for x in loaded):
                     names = loaded
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 names = None
             if names is None:
                 # The manifest EXISTS but is unreadable or malformed (NOT the benign

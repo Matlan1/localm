@@ -35,12 +35,13 @@ on the same port; see [ollama-api.md](ollama-api.md).
 
 Scope: any valid key (no specific scope required once auth is enabled).
 
-Streaming and non-streaming chat. Standard OpenAI request body, plus localm
-request extras:
+Streaming and non-streaming chat. Standard OpenAI request body (see
+[OpenAI request fields](#openai-request-fields) for what each field does here),
+plus localm request extras:
 
 | Field | Notes |
 |---|---|
-| `top_k`, `repeat_penalty` | extra sampling controls |
+| `top_k`, `repeat_penalty`, `min_p` | extra sampling controls; `min_p` (0 to 1) drops tokens less likely than `min_p` times the most likely one |
 | `seed` | reproducible generation |
 | `stop` | A string or a list of up to 16 strings (each up to 1024 characters). The reply is cut before the first match, the generation ends there, and `finish_reason` is `stop`. A stop sequence inside a model's `<think>` block is not applied. Also accepted by `POST /v1/completions`. |
 | `tools`, `tool_choice`, `parallel_tool_calls` | OpenAI function tools; see [Tool calling](#tool-calling). |
@@ -161,6 +162,47 @@ model), `draft-load-failed`, `draft-vocab-mismatch`, `draft-context-refused` and
 when a draft decode failed partway through the reply. An `on` reply carries
 `reason` `draft-on-cpu` when the draft model runs on the CPU (the model runs on
 the CPU, or the draft model did not fit in VRAM beside it). The field is `null` when no draft source is on.
+
+#### OpenAI request fields
+
+| Field | Behaviour |
+|---|---|
+| `max_tokens`, `max_completion_tokens` | The reply cap; either name works. Both with different values is a 400. |
+| `temperature`, `top_p`, `seed`, `stop` | Applied. |
+| `presence_penalty`, `frequency_penalty` | Applied (-2 to 2): a token's logit drops by `presence_penalty` once it has appeared, and by `frequency_penalty` times the number of times it appeared. On a GGUF model the window is the last 64 tokens, as in llama.cpp. A penalty of 0 applies nothing. A diffusion language model cannot apply a non-zero value of them or of `min_p` (400). |
+| `response_format` | See [Structured output](#structured-output). |
+| `tools`, `tool_choice`, `parallel_tool_calls` | See [Tool calling](#tool-calling). |
+| `stream_options` | `{"include_usage": true}` moves the usage from the finish chunk to a last chunk with empty `choices`, sent just before `data: [DONE]`. Without it the finish chunk carries the usage. |
+| `reasoning_effort` | `"none"` asks a reasoning model to answer without thinking (like `chat_template_kwargs.enable_thinking: false`, which wins when both are sent). Other levels leave the model's default. |
+| `n` | Only `1` (one choice per request); any other value is a 400. |
+| `logprobs`, `top_logprobs` | Not served: `logprobs: true` or a `top_logprobs` above 0 is a 400. |
+| `logit_bias` | Not served (a non-empty map is a 400): token ids differ between models. |
+| `functions`, `function_call` | The deprecated function-calling fields are a 400; send `tools` and `tool_choice`. |
+| `audio`, `modalities` other than `["text"]`, `web_search_options` | A 400. |
+| `user`, `metadata`, `store`, `service_tier`, `prediction`, `verbosity`, `prompt_cache_key`, `safety_identifier` | Accepted; no effect. |
+
+A message with role `developer` is read as `system`.
+
+#### Structured output
+
+`response_format` constrains the reply, token by token, with a grammar:
+
+| Value | Reply |
+|---|---|
+| `{"type": "text"}` (or no field) | Unconstrained. |
+| `{"type": "json_object"}` | One JSON object. |
+| `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}, "strict": true}}` | JSON matching the schema (the keywords listed for `format` in [ollama-api.md](ollama-api.md)). With `strict: true` a keyword that cannot be enforced (such as `pattern`) is a 400 naming it; otherwise that keyword is left out, the rest of the schema is still enforced, and the omission is written to the debug log. A keyword that gives the schema its shape (`type`, `properties`, `required`, `items`, `anyOf`, ...) is never left out: if it cannot be compiled where it is (for example `type` next to `anyOf`), the request is a 400 in either mode. Without `schema` the reply is any JSON object. |
+
+A reasoning model answers without thinking when a format is set, unless the
+request sends `chat_template_kwargs: {"enable_thinking": true}`; then the reply
+may start with a `<think>` block of up to 1900 characters (returned in
+`reasoning_content`) before the JSON. With `tools` and `tool_choice: "auto"` the
+reply is either tool calls or the formatted JSON; with `required` or a named
+function it is calls only and the format does not apply. `response_format`
+cannot be combined with `grammar`, and a model whose backend cannot apply
+grammars refuses it with a 400, as does a GGUF model whose grammar sampler
+faulted earlier in this server's life (until localm restarts). A malformed
+`response_format` is a 400, sent before any model is loaded.
 
 #### Tool calling
 
@@ -333,6 +375,11 @@ Scope: any valid key (no specific scope required once auth is enabled).
 
 Raw text completion (streaming and non-streaming), same request extras as
 chat. Its usage block is narrower than chat's - see the table above.
+`prompt` is one string, or a list holding exactly one string. `echo: true`
+starts the reply text with the prompt. `presence_penalty`, `frequency_penalty`,
+`min_p` and `stream_options` work as on chat. A batch of prompts, token-id
+prompts, `best_of` above 1, `n` other than 1, `logprobs`, a non-empty
+`logit_bias` and `suffix` are each a 400 naming the field.
 
 ### `POST /v1/embeddings`
 
@@ -524,7 +571,8 @@ completed). A model too large to fully fit VRAM still loads deliberately,
 offloading as many layers as fit and running the rest on CPU rather than
 refusing outright; `degraded` is true whenever fewer than the full layer
 count landed on the GPU, so a caller can tell that apart from a full GPU
-load.
+load. `parallel_slots` appears when the loaded model answers more than one
+request at once, and says how many.
 
 `POST /v1/models/unload` returns `status` (`"unloaded"`, `"in_use"` when
 every loaded model was mid-request and none could be freed, or
@@ -872,9 +920,15 @@ for chunk in stream:
 
 ## Behaviour notes
 
-- **Concurrency**: inference is serialised through a semaphore; concurrent
-  requests queue in order. GPU memory is shared and the KV cache is not
-  concurrency-safe, so this is deliberate.
+- **Concurrency**: a GGUF model answers up to `parallel_slots` requests at
+  the same time (default `auto`: 4, or 1 while speculative drafting is on),
+  decoding them together in one batch per step; further requests queue in order
+  and stream a `waiting` status meanwhile. All of them share the model's one
+  context window: a request that does not fit beside the running ones waits for
+  them. A reply decoded beside others is not bit-identical to the same request
+  decoded alone, even at temperature 0. A turn with an image runs on its own,
+  after the replies already running. Other backends answer one request at a
+  time per model.
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context window section of
   [architecture.md](architecture.md)). Conversations that outgrow the

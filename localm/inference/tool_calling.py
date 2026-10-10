@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from localm.inference.gbnf import TOOL_CALL_TRIGGER, check_grammar_structure
 from localm.inference.json_schema_grammar import (
-    SchemaGrammarError, literal, schema_to_grammar,
+    SchemaGrammarError, literal, loosen_schema, schema_to_grammar,
 )
 from localm.textguard import compose, untrusted_span
 
@@ -176,7 +176,7 @@ def _call_text(call: dict[str, Any]) -> str:
     if isinstance(args, str):
         try:
             args = json.loads(args) if args.strip() else {}
-        except ValueError:
+        except (ValueError, RecursionError):
             args = {"input": args}
     return OPEN_TAG + "\n" + json.dumps(
         {"name": name, "arguments": args}, ensure_ascii=False) + "\n" + CLOSE_TAG
@@ -282,54 +282,6 @@ def _log_info(message: str, *args: Any) -> None:
     logger.info(message, *args)
 
 
-_SUBSCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
-_SUBSCHEMA_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
-_SUBSCHEMA_ONE = ("items", "additionalProperties", "not", "contains", "if", "then", "else",
-                  "propertyNames")
-_MAX_LOOSEN_STEPS = 32
-
-
-def _without_keyword(node: Any, keyword: str) -> Any:
-    """Copy of the schema *node* with *keyword* removed wherever a schema (not a
-    property name) carries it."""
-    if not isinstance(node, dict):
-        return node
-    out: dict[str, Any] = {}
-    for key, value in node.items():
-        if key == keyword:
-            continue
-        if key in _SUBSCHEMA_MAPS and isinstance(value, dict):
-            out[key] = {name: _without_keyword(sub, keyword) for name, sub in value.items()}
-        elif key in _SUBSCHEMA_LISTS and isinstance(value, list):
-            out[key] = [_without_keyword(sub, keyword) for sub in value]
-        elif key in _SUBSCHEMA_ONE:
-            out[key] = _without_keyword(value, keyword)
-        else:
-            out[key] = value
-    return out
-
-
-def _loosen(schema: dict[str, Any]) -> tuple[Optional[dict[str, Any]], list[str]]:
-    """``(schema, dropped)``: *schema* with the keywords the compiler cannot
-    enforce removed one by one until it compiles, and the keywords removed;
-    ``None`` when it still does not compile."""
-    dropped: list[str] = []
-    current = schema
-    for _ in range(_MAX_LOOSEN_STEPS):
-        try:
-            schema_to_grammar(current)
-            return current, dropped
-        except SchemaGrammarError as exc:
-            if not exc.keyword:
-                return None, dropped
-            stripped = _without_keyword(current, exc.keyword)
-            if stripped == current:
-                return None, dropped
-            current = stripped
-            dropped.append(exc.keyword)
-    return None, dropped
-
-
 def _rebase_refs(node: Any, base: str) -> Any:
     """Copy of *node* with each local ``$ref`` pointing at where the schema now sits."""
     if isinstance(node, list):
@@ -355,7 +307,7 @@ def _calls_schema(tools: list[Tool], generic: bool, notes: list[str]) -> dict[st
         if generic:
             notes.append(f"{t.name}: arguments are not constrained to its schema")
         else:
-            loosened, dropped = _loosen(t.parameters)
+            loosened, dropped, _error = loosen_schema(t.parameters)
             if loosened is None:
                 notes.append(f"{t.name}: its schema cannot be compiled; arguments are not "
                              f"constrained to it")
@@ -393,7 +345,7 @@ def _as_call(obj: Any, names: Optional[set[str]]) -> Optional[ParsedCall]:
     if isinstance(args, str):
         try:
             args = json.loads(args) if args.strip() else {}
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
     if not isinstance(name, str) or not isinstance(args, dict):
         return None
@@ -599,13 +551,13 @@ class ToolCallStream:
     def _parse_body(self, body: str) -> Optional[ParsedCall]:
         try:
             return _as_call(json.loads(body.strip()), self.names)
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
 
     def _parse_bare(self, text: str) -> list[ParsedCall]:
         try:
             data = json.loads(text.strip())
-        except ValueError:
+        except (ValueError, RecursionError):
             return []
         items = data if isinstance(data, list) else [data]
         calls = [_as_call(item, self.names) for item in items]
