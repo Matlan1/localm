@@ -168,7 +168,7 @@ class VramSizingMixin:
         return float(discover._GPU_PROBE_DEADLINE)
 
     @staticmethod
-    def _free_total_vram_bytes() -> "tuple[Optional[int], Optional[int]]":
+    def _free_total_vram_bytes() -> tuple[Optional[int], Optional[int]]:
         """(free, total) bytes on the device a load's single-device readings
         come from (``discover.resolve_load_gpu_index``: the one device a 1-entry
         gpu_split_indices names, else main_gpu_index, device 0 when unset), or
@@ -277,7 +277,7 @@ class VramSizingMixin:
         return result["value"]
 
     @staticmethod
-    def _torch_free_total_uncapped() -> "tuple[Optional[int], Optional[int]]":
+    def _torch_free_total_uncapped() -> tuple[Optional[int], Optional[int]]:
         """The actual torch read, with NO bound - call
         :meth:`_free_total_vram_bytes`, not this."""
         try:
@@ -421,7 +421,7 @@ class VramSizingMixin:
         return int(mem[1]) if mem is not None else None
 
     @classmethod
-    def _split_free_total_bytes(cls) -> "tuple[Optional[int], Optional[int], int]":
+    def _split_free_total_bytes(cls) -> tuple[Optional[int], Optional[int], int]:
         """``(free, total, devices)`` summed across the 2+ devices this load
         will actually spread over, or ``(None, None, 0)`` when no combined
         budget applies and the caller must fall back to the single-device
@@ -693,7 +693,7 @@ class VramSizingMixin:
             return None
 
     def _split_fitting_n_cpu_moe(self, free: int, kv: int,
-                                 overhead: int) -> "tuple[bool, Optional[int]]":
+                                 overhead: int) -> tuple[bool, Optional[int]]:
         """For a load llama.cpp's implicit split spreads over 2+ GPUs: ``(True,
         n)`` with the smallest n_cpu_moe, 0 included, whose per-device fit
         (:meth:`_implicit_split_plan`, every layer on a GPU) fits every device
@@ -1069,7 +1069,7 @@ class VramSizingMixin:
             return int(effective)
         return int(getattr(self, "n_cpu_moe", 0) or 0)
 
-    def _block_bytes(self) -> "dict[int, tuple[int, int]]":
+    def _block_bytes(self) -> dict[int, tuple[int, int]]:
         """``gguf_block_bytes`` for this model (``{block: (all bytes, routed
         expert bytes)}``), read at most once per instance. ``{}`` on a probe
         failure, which charges every expert byte to VRAM."""
@@ -1094,7 +1094,7 @@ class VramSizingMixin:
         self._block_bytes_cache = blocks
         return blocks
 
-    def _moe_expert_bytes_by_layer(self) -> "dict[int, int]":
+    def _moe_expert_bytes_by_layer(self) -> dict[int, int]:
         """Routed-expert bytes of each block that has any (``_block_bytes``).
         ``{}`` for a dense model and on a probe failure."""
         return {layer: experts for layer, (_total, experts) in self._block_bytes().items()
@@ -1355,7 +1355,7 @@ class VramSizingMixin:
     _FIT_HINT_MIN_CTX = 1024
 
     def _vram_fit_options(self, budget: int, need: int, kv_cache: int,
-                          overhead: int, gpu_layers: int) -> "list[tuple[str, str]]":
+                          overhead: int, gpu_layers: int) -> list[tuple[str, str]]:
         """``(label, command)`` suggestions for a load needing *need* bytes of
         a *budget* it exceeds, given its *kv_cache* and *overhead* charges:
 
@@ -1489,7 +1489,7 @@ class VramSizingMixin:
     _AUTO_CTX_FALLBACK = 16384   # no GPU visibility - match common practice
 
     def _auto_ctx_max(self, capped: bool = True,
-                      split_budget: "Optional[tuple[int, int]]" = None) -> int:
+                      split_budget: Optional[tuple[int, int]] = None) -> int:
         """
         Derive a context ceiling from available resources.
 
@@ -1542,7 +1542,7 @@ class VramSizingMixin:
         hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
         return int(max(self._AUTO_CTX_MIN, hi))
 
-    def _effective_ctx_max(self, split_budget: "Optional[tuple[int, int]]" = None
+    def _effective_ctx_max(self, split_budget: Optional[tuple[int, int]] = None
                            ) -> Optional[int]:
         """The context ceiling to use for this load (auto or configured).
 
@@ -1581,7 +1581,7 @@ class VramSizingMixin:
         from localm.model_meta import cached_n_layers
         return cached_n_layers(self.model_path)
 
-    def _full_offload_parts(self, split_devices: int) -> "tuple[int, int, int]":
+    def _full_offload_parts(self, split_devices: int) -> tuple[int, int, int]:
         """``(model, kv, overhead)`` bytes a full GPU offload of this load
         charges: the VRAM-resident weights with the CONFIGURED n_cpu_moe
         (``_vram_model_bytes``; never an automatic choice of an earlier
@@ -1717,7 +1717,7 @@ class VramSizingMixin:
         budget = self._auto_gpu_layers_budget()
         return budget.layers if budget is not None else None
 
-    def _auto_gpu_layers_cause(self, budget: _AutoLayerBudget) -> "tuple[str, bool]":
+    def _auto_gpu_layers_cause(self, budget: _AutoLayerBudget) -> tuple[str, bool]:
         """One-line explanation for why ``_effective_gpu_layers()`` sized a
         PARTIAL offload (``0 <= budget.layers < 99``), and whether the
         free-VRAM-blind caveat applies to it. Checked in priority order:

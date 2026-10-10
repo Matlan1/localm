@@ -26,7 +26,7 @@ begin_call. ``report`` describes the model's state and the last reply.
 from __future__ import annotations
 
 import weakref
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 from ._stepcosts import (
     ACCEPTANCE_DECAY, ACCEPTANCE_PRIOR_ACCEPTED, ACCEPTANCE_PRIOR_REJECTED,
@@ -81,10 +81,10 @@ class DraftSource:
     def budget(self, pos: int, tokens_left: Optional[int]) -> int:
         return 0
 
-    def propose(self, token: int, pos: int, n_max: int) -> List[int]:
+    def propose(self, token: int, pos: int, n_max: int) -> list[int]:
         return []
 
-    def after_verify(self, accepted: List[int], pos: int) -> None:
+    def after_verify(self, accepted: list[int], pos: int) -> None:
         pass
 
     def after_single_token(self, token: int, pos: int) -> None:
@@ -177,11 +177,11 @@ class CountedSource(DraftSource):
         self.paused_steps = 0
         self.held_steps = 0
         self.costs: Optional[StepCosts] = None
-        self._observed: Dict[int, float] = {}
+        self._observed: dict[int, float] = {}
         self._step_over_s = 0.0
-        self._drafting_fit: Optional[Tuple[float, float]] = None
+        self._drafting_fit: Optional[tuple[float, float]] = None
         # Decayed [accepted drafts, rejections], keyed by "after a full accept".
-        self._evidence: Dict[bool, List[float]] = {False: [0.0, 0.0], True: [0.0, 0.0]}
+        self._evidence: dict[bool, list[float]] = {False: [0.0, 0.0], True: [0.0, 0.0]}
         self._hot = False
         self._chosen_hot = False
         self._since_probe = ACCEPTANCE_PROBE_EVERY
@@ -297,7 +297,7 @@ class CountedSource(DraftSource):
         accepted, rejected = self._evidence[True]
         return (accepted + weight * p) / (accepted + rejected + weight)
 
-    def drafting_overhead(self) -> Tuple[float, float]:
+    def drafting_overhead(self) -> tuple[float, float]:
         """``(fixed, per_draft)``: the seconds a drafting step takes beyond
         its measured decodes and the overhead of every step, as ``fixed +
         per_draft * k``, fitted by least squares to the running figures of the
@@ -463,10 +463,10 @@ class MtpSource(DraftSource):
     def budget(self, pos: int, tokens_left: Optional[int]) -> int:
         return self._llm._mtp_draft_budget(pos, tokens_left)
 
-    def propose(self, token: int, pos: int, n_max: int) -> List[int]:
+    def propose(self, token: int, pos: int, n_max: int) -> list[int]:
         return self._llm._propose_drafts(token, pos, n_max, self._sampler)
 
-    def after_verify(self, accepted: List[int], pos: int) -> None:
+    def after_verify(self, accepted: list[int], pos: int) -> None:
         self._llm._after_verify(accepted, pos)
 
     def after_single_token(self, token: int, pos: int) -> None:
