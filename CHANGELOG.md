@@ -17,13 +17,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   first use. With no model set up, the Images page offers to download the recommended one
   (SD-Turbo, about 2 GB); any model stable-diffusion.cpp supports can be set instead (SD
   1.x/2.x, SDXL, SD3, FLUX, Z-Image and more, as GGUF, safetensors or ckpt, with separate
-  text encoders and VAE where the model needs them). The new Image backend setting picks
+  text encoders and VAE where the model needs them). The new Generation backend setting picks
   `auto` (ComfyUI when it is set up, otherwise native), `native` or `comfy`, and the Images
   page, `/api/imagine`, `/v1/images/generations`, `localm image`, the chat
   `/generate-image` command, the coder agent and the MCP `generate_image` tool all follow it.
   The Images page and `/api/imagine` take a size, and `localm image` takes `--size`. A GGUF
   image checkpoint without an architecture tag is now registered as an image model instead
   of a chat model.
+- **Video generates without ComfyUI.** The same native stable-diffusion.cpp backend makes
+  short clips with Wan and the other video models it supports, written as H.264 MP4. With no
+  model set up, the Video page offers to download the recommended Wan2.1 T2V 1.3B (three
+  files, about 6.3 GB). Settings > Video gets the Generation backend setting (`auto`,
+  `native`, `comfy`) and native model fields, and the Video page, `/api/video`,
+  `localm video` and the chat `/generate-video` command all follow it.
 - **The Anthropic Messages API at `/v1/messages`.** Claude Code, the Anthropic SDKs and other
   tools that speak the Messages API can point their base URL at localm and use any chat model:
   text and image blocks, a system prompt, `stop_sequences`, tool use with `tool_use` and

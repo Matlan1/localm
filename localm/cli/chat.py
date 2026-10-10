@@ -997,11 +997,12 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     if not arg:
         console.print(f"[dim]Usage: /{label} <{spec['arg']}>[/dim]")
         return
-    if spec["plugin"] == "image":
+    if spec["plugin"] in ("image", "video"):
         import time as _t
+        from importlib import import_module
 
         from ..audit import SessionMode, effective_mode
-        from ..plugins.builtin.image import backend as image_backend
+        media_backend = import_module(f"localm.plugins.builtin.{spec['plugin']}.backend")
         out_dir = home_dir / spec["subdir"]
         out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
 
@@ -1012,7 +1013,7 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
 
         is_privacy = effective_mode("chat") == SessionMode.PRIVACY
         out_dir.mkdir(parents=True, exist_ok=True)
-        result = image_backend.generate_unless_comfy(
+        result = media_backend.generate_unless_comfy(
             arg, out, before_generate=_unload_chat,
             on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
             write_sidecar=not is_privacy, delete_outputs=is_privacy)

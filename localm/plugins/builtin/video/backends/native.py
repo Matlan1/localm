@@ -20,6 +20,8 @@ from typing import Callable, Optional
 
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
+from localm.media.sdcpp.files import ModelFileError as _ModelError
+from localm.media.sdcpp.files import display_name, registered_file, resolve_model_file
 from localm.media.sdcpp.runner import SdCancelled, SdWorkerError
 
 COMPUTE_ALLOWANCE_BYTES = 4 * 1024 ** 3
@@ -27,6 +29,7 @@ COMPUTE_ALLOWANCE_BYTES = 4 * 1024 ** 3
 MIN_SIDE = 64
 MAX_SIDE = 1920
 MAX_FRAMES = 241
+DEFAULT_WIDTH, DEFAULT_HEIGHT = 832, 480
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,8 @@ class RecommendedPart:
     repo: str
     file: str
     size_bytes: int
+    sha256: str
+    model_type: str
 
     @property
     def spec(self) -> str:
@@ -65,23 +70,25 @@ RECOMMENDED_VIDEO_MODELS: tuple[RecommendedVideoModel, ...] = (
         parts=(
             RecommendedPart("model", "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
                             "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
-                            2_838_303_560),
+                            2_838_303_560,
+                            "be531024cd9018cb5b48c40cfbb6a6191645b1c792eb8bf4f8c1c6e10f924dc5",
+                            "diffusion-unet"),
             RecommendedPart("vae", "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
-                            "split_files/vae/wan_2.1_vae.safetensors", 253_815_318),
+                            "split_files/vae/wan_2.1_vae.safetensors", 253_815_318,
+                            "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
+                            "vae"),
             RecommendedPart("t5xxl", "city96/umt5-xxl-encoder-gguf",
-                            "umt5-xxl-encoder-Q4_K_M.gguf", 3_655_145_312),
+                            "umt5-xxl-encoder-Q4_K_M.gguf", 3_655_145_312,
+                            "17cf97a5bbbc60a646d6105b832b6f657ce904a8a1ad970e4b59df0c67584a40",
+                            "text-encoder"),
         ),
-        steps=30, cfg_scale=6.0, flow_shift=3.0, width=832, height=480,
+        steps=30, cfg_scale=6.0, flow_shift=3.0, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
         negative_prompt="static, blurry, low quality, watermark, text"),
 )
 
 _COMPONENT_FIELDS = (("t5xxl", "t5xxl_path"), ("llm", "llm_path"),
-                     ("clip_vision", "clip_vision_path"), ("vae", "vae_path"),
-                     ("high_noise_model", "high_noise_diffusion_model_path"))
-
-
-class _ModelError(Exception):
-    pass
+                     ("clip_vision", "clip_vision_path"), ("vae", "vae_path"))
+_PART_FIELDS = {"model": "diffusion_model_path", "vae": "vae_path", "t5xxl": "t5xxl_path"}
 
 
 def _native_block(s: dict) -> dict:
@@ -100,39 +107,23 @@ def _say(on_progress) -> Callable[[str], None]:
 
 
 def _resolve_file(value: str, what: str) -> Path:
-    from localm.model_manager.registry import get_operator_model_info
-    info = get_operator_model_info(str(value))
-    if info is None:
-        raise _ModelError(f"The native video {what} '{value}' is neither a registered "
-                          "model nor a file on this machine.")
-    path = Path(info[0])
-    if not path.is_file():
-        raise _ModelError(f"The native video {what} '{value}' is not a single model file "
-                          f"({path}).")
-    return path
-
-
-def _registered_file(filename: str) -> Optional[tuple[str, Path]]:
-    from localm.model_manager import load_registry
-    for name, entry in load_registry().items():
-        path = entry.get("path") if isinstance(entry, dict) else None
-        if path and Path(path).name == filename and Path(path).is_file():
-            return name, Path(path)
-    return None
+    """The file a native video model setting names (``resolve_model_file``)."""
+    return resolve_model_file(value, f"video {what}")
 
 
 def missing_parts(rec: RecommendedVideoModel) -> list[RecommendedPart]:
     """The parts of *rec* not yet in the registry."""
-    return [p for p in rec.parts if _registered_file(p.filename) is None]
+    return [p for p in rec.parts if registered_file(p.filename) is None]
 
 
 def missing_model_message() -> str:
     rec = RECOMMENDED_VIDEO_MODELS[0]
     total = sum(p.size_bytes for p in rec.parts) / 1024 ** 3
-    pulls = "; ".join(f"localm pull {p.spec}" for p in rec.parts)
+    pulls = "; ".join(f"localm pull {p.spec} --type {p.model_type}"
+                      for p in missing_parts(rec) or rec.parts)
     return (f"No native video model is set up. The recommended one is {rec.name} "
-            f"({total:.1f} GB in {len(rec.parts)} files): {pulls}. Or set 'Native video "
-            "model' and its text encoder and VAE in Settings > Video.")
+            f"({total:.1f} GB in {len(rec.parts)} files): {pulls}. Or set 'Native model' "
+            "and its text encoder and VAE in Settings > Video.")
 
 
 def resolve_models(s: dict) -> dict:
@@ -145,19 +136,19 @@ def resolve_models(s: dict) -> dict:
     rec = None
     if model:
         ctx["diffusion_model_path"] = str(_resolve_file(model, "model"))
-        label = model
+        label = display_name(model)
         for key, field in _COMPONENT_FIELDS:
             value = (blk.get(key) or "").strip()
             if value:
                 ctx[field] = str(_resolve_file(value, key.replace("_", "-")))
     else:
         rec = RECOMMENDED_VIDEO_MODELS[0]
-        found = {p.role: _registered_file(p.filename) for p in rec.parts}
+        found = {p.role: registered_file(p.filename) for p in rec.parts}
         if any(v is None for v in found.values()):
             raise _ModelError(missing_model_message())
-        fields = {"model": "diffusion_model_path", "vae": "vae_path", "t5xxl": "t5xxl_path"}
         for role, hit in found.items():
-            ctx[fields[role]] = str(hit[1])
+            if hit is not None:
+                ctx[_PART_FIELDS[role]] = str(hit[1])
         label = rec.name
     key = tuple(sorted(ctx.items()))
     return {"key": key, "ctx": ctx, "label": label, "recommended": rec}
@@ -195,6 +186,8 @@ def ensure_available(s: dict, on_progress=None) -> tuple[bool, str]:
         models = resolve_models(s)
     except _ModelError as e:
         return False, str(e)
+    except Exception as e:  # noqa: BLE001
+        return False, f"The native video model could not be checked: {e}"
     problem = _pyav_problem()
     if problem:
         return False, problem
@@ -210,12 +203,14 @@ def ensure_available(s: dict, on_progress=None) -> tuple[bool, str]:
 
 def status(s: dict) -> dict:
     """What the native backend would use, without installing or loading
-    anything (the same shape as the image backend's ``status``)."""
+    anything: ``runtime``, ``runtime_choice``, ``model`` (a name or file name),
+    ``missing`` (the reason it cannot run, or None), ``loaded`` and
+    ``recommended`` (its name, size and the parts not yet downloaded)."""
     rt = sd_runtime.resolve(_runtime_choice(s))
     try:
         models = resolve_models(s)
         model, missing = models["label"], None
-    except _ModelError as e:
+    except Exception as e:  # noqa: BLE001
         model, missing = None, str(e)
     rec = RECOMMENDED_VIDEO_MODELS[0]
     return {
@@ -224,9 +219,14 @@ def status(s: dict) -> dict:
         "model": model,
         "missing": missing,
         "loaded": shared.worker_pid() is not None,
-        "recommended": {"name": rec.name, "parts": [
-            {"role": p.role, "repo": p.repo, "file": p.file, "spec": p.spec,
-             "size_bytes": p.size_bytes} for p in missing_parts(rec)]},
+        "recommended": {
+            "name": rec.name, "width": rec.width, "height": rec.height,
+            "steps": rec.steps, "cfg_scale": rec.cfg_scale,
+            "size_bytes": sum(p.size_bytes for p in rec.parts),
+            "parts": [{"role": p.role, "repo": p.repo, "file": p.file, "spec": p.spec,
+                       "filename": p.filename, "size_bytes": p.size_bytes,
+                       "sha256": p.sha256, "model_type": p.model_type}
+                      for p in missing_parts(rec)]},
     }
 
 
@@ -240,7 +240,7 @@ def vram_estimate_bytes(s: dict) -> Optional[int]:
     fixed compute allowance), or None when they cannot be resolved."""
     try:
         models = resolve_models(s)
-    except _ModelError:
+    except Exception:  # noqa: BLE001
         return None
     total = 0
     for key, value in models["ctx"].items():
@@ -258,6 +258,35 @@ def frame_count(seconds: float, fps: int) -> int:
     raw = max(1, round(float(seconds) * int(fps)))
     k = max(1, round((raw - 1) / 4))
     return min(4 * k + 1, MAX_FRAMES)
+
+
+def _check_size(width: int, height: int) -> Optional[str]:
+    if not (MIN_SIDE <= width <= MAX_SIDE and MIN_SIDE <= height <= MAX_SIDE) \
+            or width % 16 or height % 16:
+        return (f"Video size {width}x{height} must be {MIN_SIDE}..{MAX_SIDE} pixels per side "
+                "and a multiple of 16 for the native backend.")
+    return None
+
+
+def refusal(*, model_overrides=None, placement=None, width=None, height=None,
+            unsupported=()) -> Optional[str]:
+    """Why the native backend cannot honour a request with these inputs, or
+    None. Checked before any download, VRAM handover or load. *unsupported*
+    names keyword arguments the backend does not take."""
+    if unsupported:
+        return ("The native video backend does not support: "
+                + ", ".join(sorted(unsupported)) + ".")
+    if model_overrides:
+        return ("Workflow model choices apply to ComfyUI. The native backend uses "
+                "the model set in Settings > Video.")
+    if placement:
+        return ("Per-component GPU placement applies to ComfyUI only; turn it off or "
+                "use the ComfyUI backend.")
+    if (width is None) != (height is None):
+        return "Give both width and height, or neither."
+    if width is not None and height is not None:
+        return _check_size(int(width), int(height))
+    return None
 
 
 def _write_mp4(out_path: Path, result: dict, fps: int) -> None:
@@ -336,44 +365,51 @@ def _event_relay(say):
     return on_event
 
 
-def generate(s: dict, prompt: str, out_path: Path, *,
-             self_url: Optional[str] = None,
-             write_sidecar: bool = True,
-             instance_token: Optional[str] = None,
-             negative_prompt: Optional[str] = None,
-             seconds: float = 5.0,
-             fps: int = 16,
-             width: Optional[int] = None,
-             height: Optional[int] = None,
-             steps: Optional[int] = None,
-             cfg: Optional[float] = None,
-             seed: Optional[int] = None,
-             input_image: Optional[Path] = None,
-             model_overrides: Optional[dict] = None,
-             swap: bool = False,
-             delete_outputs: Optional[bool] = None,
-             cancel_check=None,
-             placement: Optional[dict] = None,
-             on_progress=None,
-             **_unused) -> tuple[bool, str]:
-    """Generate one clip of *prompt* into *out_path* (MP4, H.264). Returns
-    ``(ok, message)``; never raises. Writes only *out_path* and, when
-    *write_sidecar*, ``<out_path>.json``.
+def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:
+    """Generate one clip of *prompt* into *out_path*; see ``_generate``.
+    Never raises: an unexpected error becomes ``(False, message)``."""
+    try:
+        return _generate(s, prompt, out_path, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.warning("native video generation failed: %s: %s", type(e).__name__, e)
+        return False, f"Native video generation failed: {type(e).__name__}: {e}"
 
-    ``model_overrides`` and ``placement`` are ComfyUI-only and refused with a
-    reason; ``delete_outputs`` has nothing to act on."""
+
+def _generate(s: dict, prompt: str, out_path: Path, *,
+              self_url: Optional[str] = None,
+              write_sidecar: bool = True,
+              instance_token: Optional[str] = None,
+              negative_prompt: Optional[str] = None,
+              seconds: float = 5.0,
+              fps: int = 16,
+              width: Optional[int] = None,
+              height: Optional[int] = None,
+              steps: Optional[int] = None,
+              cfg: Optional[float] = None,
+              seed: Optional[int] = None,
+              input_image: Optional[Path] = None,
+              model_overrides: Optional[dict] = None,
+              swap: bool = False,
+              delete_outputs: Optional[bool] = None,
+              cancel_check=None,
+              placement: Optional[dict] = None,
+              on_progress=None,
+              **unsupported) -> tuple[bool, str]:
+    """Generate one clip of *prompt* into *out_path* (MP4, H.264, with an AAC
+    track when the model returns audio). Returns ``(ok, message)``. Writes only
+    *out_path* and, when *write_sidecar*, ``<out_path>.json``.
+
+    ComfyUI-only inputs (``model_overrides``, ``placement``) and keyword
+    arguments this backend does not take are refused with a reason.
+    ``delete_outputs`` has nothing to act on (there is no second copy). *swap*
+    asks this backend to unload the chat model itself, used when the caller's
+    own unload did not succeed."""
     say = _say(on_progress)
-    if _unused:
-        return False, ("The native video backend does not support: "
-                       + ", ".join(sorted(_unused)) + ".")
-    if model_overrides:
-        return False, ("Workflow model choices apply to ComfyUI. The native backend uses "
-                       "the model set in Settings > Video.")
-    if placement:
-        return False, ("Per-component GPU placement applies to ComfyUI only; turn it off or "
-                       "use the ComfyUI backend.")
-    if (width is None) != (height is None):
-        return False, "Give both width and height, or neither."
+    refused = refusal(model_overrides=model_overrides, placement=placement,
+                      width=width, height=height, unsupported=tuple(unsupported))
+    if refused:
+        return False, refused
     started = time.monotonic()
     try:
         models = resolve_models(s)
@@ -387,14 +423,9 @@ def generate(s: dict, prompt: str, out_path: Path, *,
         return False, problem
     blk = _native_block(s)
     rec = models["recommended"]
-    if width is None:
-        width = blk.get("width") or (rec.width if rec else 832)
-        height = blk.get("height") or (rec.height if rec else 480)
+    if width is None or height is None:
+        width, height = (rec.width, rec.height) if rec else (DEFAULT_WIDTH, DEFAULT_HEIGHT)
     width, height = int(width), int(height)
-    if not (MIN_SIDE <= width <= MAX_SIDE and MIN_SIDE <= height <= MAX_SIDE) \
-            or width % 16 or height % 16:
-        return False, (f"Video size {width}x{height} must be {MIN_SIDE}..{MAX_SIDE} pixels "
-                       "per side and a multiple of 16.")
     frames = frame_count(seconds, fps)
     if swap and self_url:
         from localm.media.comfy_client import _localm_unload
@@ -462,6 +493,7 @@ def generate(s: dict, prompt: str, out_path: Path, *,
                     "cfg": cfg_scale, "steps": steps, "flow_shift": flow_shift,
                     "width": result["width"], "height": result["height"],
                     "frames": len(result["frames"]), "fps": out_fps,
+                    "seconds": round(len(result["frames"]) / out_fps, 2),
                     "input_image": str(input_image) if input_image else None,
                     "backend": "native", "model": models["label"],
                     "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",

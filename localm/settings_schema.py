@@ -1848,35 +1848,40 @@ class MediaField:
 
 
 _IMAGE_ONLY = ["image"]
+_VIDEO_ONLY = ["video"]
+_NATIVE = ["image", "video"]
 
 # Order = display order within each plugin subsection.
 MEDIA_PLUGIN_FIELDS: list = [
-    MediaField("backend", ("backend",), "", Widget.SELECT, "Image backend",
+    MediaField("backend", ("backend",), "", Widget.SELECT, "Generation backend",
                "auto = ComfyUI when it is set up, else native; native = built-in "
                "stable-diffusion.cpp; comfy = ComfyUI.",
-               options=["auto", "native", "comfy"], plugins=_IMAGE_ONLY, default="auto"),
+               options=["auto", "native", "comfy"], plugins=_NATIVE, default="auto"),
     MediaField("native_model", ("native", "model"), "", Widget.TEXT,
-               "Native image model",
-               "Registered model name or file path: a checkpoint, or a diffusion model "
-               "when the native text encoder fields are set. Blank uses the recommended "
-               "model once downloaded.",
-               plugins=_IMAGE_ONLY, admin_only=True),
+               "Native model",
+               "Registered model name or file path: an image checkpoint, or a diffusion "
+               "model when the native text encoder fields are set (video models always "
+               "are). Blank uses the recommended model once downloaded.",
+               plugins=_NATIVE, admin_only=True),
     MediaField("native_runtime", ("native", "runtime"), "", Widget.SELECT,
                "Native runtime",
                "stable-diffusion.cpp build to use. auto picks the best one for this machine.",
                options=["auto", "cpu", "vulkan", "cuda", "rocm", "metal"],
-               plugins=_IMAGE_ONLY, default="auto"),
+               plugins=_NATIVE, default="auto"),
     MediaField("native_steps", ("native", "steps"), "", Widget.TEXT, "Native sampling steps",
-               "Blank uses the model's recommended steps (or 20).", plugins=_IMAGE_ONLY),
+               "Blank uses the model's recommended steps (or 20).", plugins=_NATIVE),
     MediaField("native_cfg_scale", ("native", "cfg_scale"), "", Widget.TEXT,
                "Native CFG scale",
-               "Blank uses the model's recommended value (or 7).", plugins=_IMAGE_ONLY),
+               "Blank uses the model's recommended value (or 7).", plugins=_NATIVE),
+    MediaField("native_flow_shift", ("native", "flow_shift"), "", Widget.TEXT,
+               "Native flow shift",
+               "Blank uses the model's recommended value.", plugins=_VIDEO_ONLY),
     MediaField("native_sample_method", ("native", "sample_method"), "", Widget.TEXT,
                "Native sampler",
                "e.g. euler, euler_a, dpm++2m, lcm. Blank uses the model's default.",
-               plugins=_IMAGE_ONLY),
+               plugins=_NATIVE),
     MediaField("native_vae", ("native", "vae"), "", Widget.TEXT, "Native VAE",
-               "Optional VAE (registered name or file path).", plugins=_IMAGE_ONLY,
+               "Optional VAE (registered name or file path).", plugins=_NATIVE,
                admin_only=True),
     MediaField("native_clip_l", ("native", "clip_l"), "", Widget.TEXT,
                "Native CLIP-L text encoder", "Optional (FLUX, SD3).", plugins=_IMAGE_ONLY,
@@ -1885,11 +1890,15 @@ MEDIA_PLUGIN_FIELDS: list = [
                "Native CLIP-G text encoder", "Optional (SD3).", plugins=_IMAGE_ONLY,
                admin_only=True),
     MediaField("native_t5xxl", ("native", "t5xxl"), "", Widget.TEXT,
-               "Native T5-XXL text encoder", "Optional (FLUX, SD3).", plugins=_IMAGE_ONLY,
-               admin_only=True),
+               "Native T5-XXL text encoder",
+               "Optional (FLUX, SD3). Wan video models take their umt5-xxl encoder here.",
+               plugins=_NATIVE, admin_only=True),
     MediaField("native_llm", ("native", "llm"), "", Widget.TEXT,
-               "Native LLM text encoder", "Optional (Z-Image, Qwen Image).",
-               plugins=_IMAGE_ONLY, admin_only=True),
+               "Native LLM text encoder", "Optional (Z-Image, Qwen Image, LTX-2).",
+               plugins=_NATIVE, admin_only=True),
+    MediaField("native_clip_vision", ("native", "clip_vision"), "", Widget.TEXT,
+               "Native CLIP vision encoder", "Optional (Wan image-to-video).",
+               plugins=_VIDEO_ONLY, admin_only=True),
     # The per-plugin workdir WINS over the global comfy_workdir (scan.py returns
     # the per-plugin value first; image/backend.py and its music/video twins
     # pass it into ensure_comfy()), so gating only the CORE field would leave
@@ -2050,7 +2059,8 @@ def _is_http_url(value: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.hostname)
 
 
-_MEDIA_NUMBER_RANGES = {"native_steps": (int, 1, 150), "native_cfg_scale": (float, 0.0, 30.0)}
+_MEDIA_NUMBER_RANGES = {"native_steps": (int, 1, 150), "native_cfg_scale": (float, 0.0, 30.0),
+                        "native_flow_shift": (float, 0.0, 20.0)}
 
 
 def _media_number(key: str, value):

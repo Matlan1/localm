@@ -1,10 +1,43 @@
-# Video generation (ComfyUI Wan 2.2)
+# Video generation
 
-localm generates short video clips (MP4, h264) through the same local ComfyUI server it uses for images and music. The committed workflow template runs the public **Wan 2.2 TI2V 5B** stack - text-to-video by default, image-to-video when you provide a start picture. Nothing leaves your machine: ComfyUI runs locally, and the one-time model download is the only network access.
+localm generates short video clips (MP4, h264) with one of two backends: its built-in native backend (stable-diffusion.cpp, see [Native backend](#native-backend-no-comfyui)) or the same local ComfyUI server it uses for images and music, described in the rest of this page. The committed workflow template runs the public **Wan 2.2 TI2V 5B** stack - text-to-video by default, image-to-video when you provide a start picture. Nothing leaves your machine: ComfyUI runs locally, and the one-time model download is the only network access.
 
 ## What you get
 
 Four surfaces: the **Video page** in the GUI, the `localm video` **CLI**, the `/generate-video` **chat** command, and the `POST /api/video` HTTP **API**. See [Usage](#usage) below for each. Generated clips are stored in the localm data directory at `gui_video/` and are always saved (see [Privacy](#privacy) for what metadata is written).
+
+## Native backend (no ComfyUI)
+
+Video can also run on localm's built-in native backend, the same stable-diffusion.cpp
+worker that generates images (see [native-image.md](native-image.md)). Settings > Video >
+**Generation backend** picks `auto` (ComfyUI when it is set up, otherwise native),
+`native` or `comfy`; the Video page, `POST /api/video`, `localm video` and the chat
+`/generate-video` command all follow it.
+
+The recommended native model is **Wan2.1 T2V 1.3B**, which needs three files (about
+6.3 GB in total):
+
+```bash
+localm pull Comfy-Org/Wan_2.1_ComfyUI_repackaged:split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors --type diffusion-unet
+localm pull Comfy-Org/Wan_2.1_ComfyUI_repackaged:split_files/vae/wan_2.1_vae.safetensors --type vae
+localm pull city96/umt5-xxl-encoder-gguf:umt5-xxl-encoder-Q4_K_M.gguf --type text-encoder
+```
+
+With nothing set up yet, Generate on the Video page offers to download the three files.
+With those registered and **Native model** left blank, the native backend uses them with
+their recommended settings (832x480, 30 steps, CFG 6, flow shift 3). Any video model
+stable-diffusion.cpp supports can be set instead: **Native model** is the diffusion model,
+**Native T5-XXL text encoder** takes Wan's umt5-xxl, **Native VAE** the VAE, and **Native
+CLIP vision encoder** the clip_vision_h file Wan image-to-video models need.
+
+Frame counts are snapped to 4k+1 like the ComfyUI path (at most 241). Width and height must
+be multiples of 16, from 64 to 1920. The clip is written as H.264 MP4 with PyAV (installed
+with the `voice` extra, which the installers include); a model that also returns audio
+(LTX-2) gets an AAC track. Progress shows each sampling step, Stop cancels a running
+load or generation, and the chat model is unloaded and reloaded around the job as for
+native images. Model paths are owner-only settings; network and device paths are
+refused. Workflow model picks and per-component GPU placement are ComfyUI-only and are
+refused by the native backend with a reason.
 
 ## Expect slow render times - timing examples
 
