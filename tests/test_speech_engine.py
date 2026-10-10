@@ -180,6 +180,49 @@ def isolated(monkeypatch):
     yield
 
 
+class TestUnloadOne:
+    PATH = "Z:/models/voice.gguf"
+
+    def _resident(self, monkeypatch, *, active=0, clears=True):
+        monkeypatch.setattr("localm.config.load_registry", lambda: {
+            "voice": {"path": self.PATH, "model_type": "tts"},
+            "other": {"path": "Z:/models/other.gguf"}})
+        monkeypatch.setattr(emb, "loaded_path", lambda: None)
+        monkeypatch.setattr(rr, "reranker_info", lambda: None)
+        monkeypatch.setattr(speech, "speech_info",
+                            lambda: {"name": "voice", "path": self.PATH, "sample_rate": 24000})
+        monkeypatch.setattr(speech, "active_requests", lambda: active)
+        resets = []
+        monkeypatch.setattr(speech, "reset_speech",
+                            lambda force=True: (resets.append(force), clears)[1])
+        return resets
+
+    def test_an_idle_speech_model_is_released_by_its_name(self, isolated, monkeypatch):
+        resets = self._resident(monkeypatch)
+        res = asyncio.run(hs.unload_one_model("voice"))
+        assert resets == [False] and res["status"] == "unloaded" and res["model"] == "voice"
+
+    def test_a_busy_speech_model_is_reported_in_use_without_a_release(self, isolated, monkeypatch):
+        resets = self._resident(monkeypatch, active=1)
+        res = asyncio.run(hs.unload_one_model("voice"))
+        assert res["status"] == "in_use" and resets == []
+
+    def test_a_request_arriving_after_the_precheck_is_reported_in_use(self, isolated, monkeypatch):
+        resets = self._resident(monkeypatch, clears=False)
+        res = asyncio.run(hs.unload_one_model("voice"))
+        assert resets == [False] and res["status"] == "in_use"
+
+    def test_another_model_leaves_the_speech_model_alone(self, isolated, monkeypatch):
+        resets = self._resident(monkeypatch)
+        assert asyncio.run(hs.unload_one_model("other"))["status"] == "already_unloaded"
+        assert resets == []
+
+    def test_speech_info_reports_the_resident_path(self, engines, home):
+        m = _model(home, "a")
+        speech.synthesize(m, "hi")
+        assert speech.speech_info() == {"name": "a", "path": m.path, "sample_rate": 24000}
+
+
 class TestServerLifecycle:
     def test_unload_all_releases_an_idle_speech_model(self, isolated, monkeypatch):
         calls = []

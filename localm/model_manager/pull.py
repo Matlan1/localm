@@ -1139,7 +1139,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
         )
         return None
     if not reuse_ok:
-        console.print(f"Pulling vision projector: {escape(candidate)}")
+        console.print(f"Pulling projector (mmproj): {escape(candidate)}")
         try:
             _download_mmproj_file(repo_id, candidate, dest, base_dir)
         except Exception as e:

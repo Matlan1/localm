@@ -17,8 +17,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   its mmproj) is recognised as a speech model. `localm speak "text" -o out.wav` and the
   OpenAI-compatible `POST /v1/audio/speech` turn text into a 24 kHz WAV (or raw `pcm`),
   optionally in the voice of a short WAV recording, with a seed for a reproducible result.
-  It runs in its own worker process, shows its progress, and stops when the client goes
-  away. Pocket TTS files are still refused.
+  It runs in its own worker process, shows its progress, appears as loaded on the Models
+  page (Unload releases it), and stops when the client goes away. Pocket TTS files are
+  still refused.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the

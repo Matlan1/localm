@@ -417,12 +417,13 @@ def synthesize(model: SpeechModel, text: str, *, language: Optional[str] = None,
 
 
 def speech_info() -> Optional[dict]:
-    """``{"name", "sample_rate"}`` of the resident speech model, or None. Does
-    not load."""
+    """``{"name", "path", "sample_rate"}`` of the resident speech model, or
+    None. Does not load."""
     with _LOCK:
         if _ENGINE is None:
             return None
-        return {"name": _ENGINE.model.name, "sample_rate": _ENGINE.sample_rate}
+        return {"name": _ENGINE.model.name, "path": _ENGINE.model.path,
+                "sample_rate": _ENGINE.sample_rate}
 
 
 def is_loaded() -> bool:
