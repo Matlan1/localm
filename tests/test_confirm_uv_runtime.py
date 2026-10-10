@@ -687,6 +687,22 @@ def test_the_receipt_is_written_atomically(cm, tmp_path):
     assert [p.name for p in path.parent.iterdir()] == ["r.json"]
 
 
+def test_a_receipt_write_that_fails_midway_leaves_the_previous_receipt_intact(cm, tmp_path, monkeypatch):
+    path = tmp_path / "r.json"
+    path.write_text("previous", encoding="utf-8")
+    replaced = []
+
+    def failing_replace(src, dst):
+        replaced.append((src, dst))
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(cm.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="disk gone"):
+        cm.write_atomic(path, "new content")
+    assert len(replaced) == 1
+    assert path.read_text(encoding="utf-8") == "previous"
+
+
 def test_main_writes_a_receipt_and_exits_2_for_a_bad_tag(cm, tmp_path, capsys):
     path = tmp_path / "r.json"
     rc = cm.main(["--tag", "v1.2", "--workdir", str(tmp_path / "w"), "--receipt", str(path)])
