@@ -60,7 +60,7 @@ NOT MEASURED, written into the receipt: video generation, img2img and LoRA, the
 backends not run on this machine.
 
 Usage:
-    python scripts/confirm_sdcpp_runtime.py --tag master-951-f89d9b1 --workdir W --receipt r.json
+    python scripts/confirm_sdcpp_runtime.py --tag master-952-abcdef0 --workdir W --receipt r.json
     python scripts/confirm_sdcpp_runtime.py --current --workdir W --receipt r.json
 
 Needs localm importable. Nothing under localm/ imports this; it never runs from a

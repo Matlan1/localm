@@ -422,7 +422,7 @@ def test_a_layout_mismatch_names_the_binding_as_the_thing_to_update(cf):
 
 def test_a_worker_that_bound_another_commit_means_the_override_did_not_apply(cf):
     msg = ("stable-diffusion.cpp runtime is commit bbbbbbb, but localm binds commit "
-           "f89d9b1 (master-951-f89d9b1).")
+           "0a1b2c3 (master-123-0a1b2c3).")
     st, checks = _statuses(cf, probe={"ok": False, "error": msg})
     assert st["abi_cpu"] == "SKIP" and "not applied" in checks["abi_cpu"]["detail"]
 

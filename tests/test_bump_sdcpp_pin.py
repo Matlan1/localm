@@ -160,7 +160,7 @@ def test_a_tag_that_is_not_an_sdcpp_release_tag_is_refused(bump, tag):
 
 
 def test_parse_tag_returns_number_and_short_commit(bump):
-    assert bump.parse_tag("master-951-f89d9b1") == (951, "f89d9b1")
+    assert bump.parse_tag("master-123-0a1b2c3") == (123, "0a1b2c3")
 
 
 @pytest.mark.parametrize("target", ["master-100-bbbbbbb", "master-99-bbbbbbb",
