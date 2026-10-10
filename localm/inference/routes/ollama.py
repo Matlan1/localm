@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Optional
 
@@ -32,6 +32,9 @@ from localm import peer_routing, scopes
 from localm.executor import get_plugin_executor
 from localm.inference import ollama_protocol as P
 from localm.inference.protocol import ChatRequest, EmbeddingRequest
+from localm.inference.routes._chat_bridge import (
+    EndpointMissing, chat_endpoint, collect_body, derived_request, validation_text,
+)
 
 _NDJSON = "application/x-ndjson"
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".gguf")
@@ -57,7 +60,7 @@ class OllamaRoute(APIRoute):
                 detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail)
                 return _error(exc.status_code, detail, exc.headers)
             except RequestValidationError as exc:
-                return _error(400, _validation_text(exc.errors()))
+                return _error(400, validation_text(exc.errors()))
         return handler
 
 
@@ -66,45 +69,11 @@ def _error(status: int, message: str,
     return JSONResponse(status_code=status, content={"error": message}, headers=headers)
 
 
-def _validation_text(errors: Sequence[Any]) -> str:
-    if not errors:
-        return "request is invalid"
-    first = errors[0]
-    loc = ".".join(str(p) for p in first.get("loc", ()) if p != "body")
-    msg = first.get("msg", "is invalid")
-    return f"{loc}: {msg}" if loc else msg
-
-
-def _derived_request(request: Request, path: str, body: bytes) -> Request:
-    """*request* re-aimed at *path* with *body* as its whole body. Headers (so
-    auth and principal), app and state are the original's; once the body has
-    been read, ``receive`` is the original's, so disconnects are still seen."""
-    scope = dict(request.scope)
-    scope["path"] = path
-    scope["raw_path"] = path.encode("ascii")
-    scope["path_params"] = {}
-    scope["headers"] = [
-        (k, v) for k, v in scope["headers"]
-        if k.lower() not in (b"content-length", b"content-type")
-    ] + [(b"content-type", b"application/json"),
-         (b"content-length", str(len(body)).encode("ascii"))]
-    sent = False
-
-    async def receive():
-        nonlocal sent
-        if not sent:
-            sent = True
-            return {"type": "http.request", "body": body, "more_body": False}
-        return await request.receive()
-
-    return Request(scope, receive)
-
-
 def _endpoint(app: FastAPI, path: str):
-    for route in app.router.routes:
-        if isinstance(route, APIRoute) and route.path == path and "POST" in (route.methods or ()):
-            return route.endpoint
-    raise P.OllamaError(500, f"{path} is not mounted on this server")
+    try:
+        return chat_endpoint(app, path)
+    except EndpointMissing as exc:
+        raise P.OllamaError(500, str(exc)) from None
 
 
 def _file_facts(entry: dict) -> tuple[int, Optional[float], str]:
@@ -330,8 +299,8 @@ def register(app: FastAPI, ctx) -> None:
         try:
             chat_req = ChatRequest(**plan.body)
         except ValidationError as exc:
-            raise P.OllamaError(400, _validation_text(exc.errors())) from None
-        derived = _derived_request(
+            raise P.OllamaError(400, validation_text(exc.errors())) from None
+        derived = derived_request(
             request, "/v1/chat/completions", json.dumps(plan.body).encode("utf-8"))
         inner = await _endpoint(request.app, "/v1/chat/completions")(chat_req, derived)
         return await _reply(inner, plan, kind, name, started)
@@ -350,7 +319,7 @@ def register(app: FastAPI, ctx) -> None:
                     P.iter_sse_json(body_iterator), kind=kind, model=name,
                     want_thinking=plan.want_thinking, started=started),
                 media_type=_NDJSON, headers=headers)
-        raw = (await _collect_body(body_iterator)
+        raw = (await collect_body(body_iterator)
                if body_iterator is not None else bytes(inner.body))
         try:
             data = json.loads(raw)
@@ -361,15 +330,9 @@ def register(app: FastAPI, ctx) -> None:
         return JSONResponse(P.completion_to_reply(
             kind, data, name, want_thinking=plan.want_thinking, total_ns=total_ns))
 
-    async def _collect_body(body_iterator) -> bytes:
-        parts = []
-        async for part in body_iterator:
-            parts.append(part if isinstance(part, bytes) else part.encode("utf-8"))
-        return b"".join(parts)
-
     async def _error_text(inner: Response) -> str:
         body_iterator = getattr(inner, "body_iterator", None)
-        raw = (await _collect_body(body_iterator)
+        raw = (await collect_body(body_iterator)
                if body_iterator is not None else bytes(inner.body))
         try:
             data = json.loads(raw)
