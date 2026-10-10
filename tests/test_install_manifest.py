@@ -287,6 +287,7 @@ def test_purge_in_a_folder_that_already_existed_deletes_only_localm_entries(tmp_
     (shared / "config.json.lock").write_text("", encoding="utf-8")
     (shared / "config.json.123.tmp").write_text("", encoding="utf-8")
     (shared / "comfy-launch-abcdef123456.log").write_text("", encoding="utf-8")
+    (shared / "runtimes" / "sdcpp").mkdir(parents=True)
     (shared / "later-app-output").mkdir()             # another program, after setup
 
     rep = im.uninstall(tmp_path, purge_data=True, force=True)
@@ -296,7 +297,7 @@ def test_purge_in_a_folder_that_already_existed_deletes_only_localm_entries(tmp_
     assert (shared / "notes.txt").exists()
     assert (shared / "later-app-output").is_dir()
     for gone in ("config.json", "sessions", im.DATA_MARKER, "config.json.lock",
-                 "config.json.123.tmp", "comfy-launch-abcdef123456.log"):
+                 "config.json.123.tmp", "comfy-launch-abcdef123456.log", "runtimes"):
         assert not (shared / gone).exists(), gone
     data = next(d for d in rep["data"] if Path(d["path"]) == shared)
     assert "models" in data["kept_entries"] and "notes.txt" in data["kept_entries"]
@@ -313,6 +314,7 @@ def test_legacy_custom_folder_keeps_what_might_not_be_localms(tmp_path):
     (shared / "photos").mkdir()
     (shared / "models").mkdir()
     (shared / "workflows").mkdir()
+    (shared / "runtimes").mkdir()
     (shared / "chats").mkdir()
     im.manifest_path(tmp_path).write_text(json.dumps({
         "schema": 2, "venv": "", "lib_dir": str(lib), "binaries": [],
@@ -321,6 +323,7 @@ def test_legacy_custom_folder_keeps_what_might_not_be_localms(tmp_path):
     assert shared.is_dir() and (shared / "photos").is_dir()
     assert (shared / "config.json").exists()
     assert (shared / "models").is_dir() and (shared / "workflows").is_dir()
+    assert (shared / "runtimes").is_dir()
     assert not (shared / "chats").exists()
 
 
