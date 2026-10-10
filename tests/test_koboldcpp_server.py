@@ -41,8 +41,7 @@ FAKE = textwrap.dedent(r'''
         import subprocess
         gc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         with open(record, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"event": "grandchild", "pid": gc.pid}) + "
-")
+            f.write(json.dumps({"event": "grandchild", "pid": gc.pid}) + "\n")
     if mode == "crash":
         print("FATAL: failed to load DiT model", flush=True)
         sys.exit(3)
