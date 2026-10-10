@@ -1491,7 +1491,7 @@
   "settings.field.memoryRecallInPrivacyCoder.label": "Privatsphäre-Modus-Abruf: Coder",
   "settings.field.mode.help": "Was localm speichert: privacy = nichts wird automatisch geschrieben; log = ein JSONL-Audit-Trail; full = Log plus ein Chat-Transkript.",
   "settings.field.mode.label": "Sitzungspersistenz",
-  "settings.field.modelAutoswitch.help": "off = nie wechseln; image = nur bei einem Bild oder Audio, das Ihr Modell nicht lesen kann; ask = eines anbieten; loaded = nur geladene Modelle; auto = jedes installierte; eager = auch bei ungeprüftem. Gebundene Chats wechseln nie.",
+  "settings.field.modelAutoswitch.help": "off = nie wechseln; image = nur bei Medien, die Ihr Modell nicht lesen kann; ask = eines anbieten; loaded = nur geladene Modelle; auto = jedes installierte; eager = auch bei ungeprüftem. Gebundene Chats wechseln nie.",
   "settings.field.modelAutoswitch.label": "Automatischer Modellwechsel",
   "settings.field.modelSwapPolicy.help": "auto = Chat geladen lassen, wenn das Medienmodell daneben passt; always = Chat immer entladen; never = Chat immer geladen halten.",
   "settings.field.modelSwapPolicy.label": "Medien-VRAM-Swap",
