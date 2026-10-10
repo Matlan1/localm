@@ -60,8 +60,13 @@ Paths and model names are owner-only settings. Network (UNC) and device paths ar
 ## What it does and does not do
 
 - Style tags, optional lyrics, duration, seed, steps, CFG and shift. ComfyUI-only inputs
-  (workflow model picks, sampler, scheduler, lyrics strength, per-component GPU placement)
-  are refused with a reason rather than ignored.
+  (workflow model picks, sampler, scheduler, lyrics strength) are refused with a reason
+  rather than ignored. Per-component GPU placement applies to ComfyUI only; with it turned
+  on, a native job says so and loads each model on one GPU.
+- A track that comes back broken (no sound, or stuck at full scale, which some GPUs produce
+  for some prompts) is never saved. With the runtime on `auto` the job generates it again on
+  the next backend, ending on the CPU, and says so; with an explicit runtime the job fails
+  and suggests the CPU runtime.
 - The planner picks tempo, key and structure first and ends the song itself, so a track
   usually comes out up to a few seconds shorter than requested; the job says by how much.
   Without the planner the length is exact, but the music often ends early and the rest is

@@ -172,7 +172,7 @@ def generate_unless_comfy(tags: str, out_path: Path, *, on_progress=None,
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     s = prepare_for_job(settings(cfg), cfg)
-    if s.get("backend") == "comfy":
+    if is_comfy(s):
         return None
 
     def say(text: str) -> None:
@@ -287,6 +287,12 @@ _COMFY_REF = SimpleNamespace(
 
 _facade = media_config.make_backend_facade(__package__, _COMFY_REF)
 _impl = _facade.resolve
+
+
+def is_comfy(s: dict) -> bool:
+    """Whether *s* (from ``settings``) runs the ComfyUI backend, including a
+    backend name that cannot be loaded, which falls back to ComfyUI."""
+    return _impl(s) is _COMFY_REF
 ensure_available = _facade.ensure_available
 free_vram = _facade.free_vram
 generate = _facade.generate

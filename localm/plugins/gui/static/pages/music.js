@@ -78,7 +78,11 @@ export async function refreshMusicBackend() {
       const missing = n.missing || [];
       if (missing.length) {
         const size = missing.reduce((sum, m) => sum + (m.size_bytes || 0), 0);
-        text = t("music.backendNativeMissing", { size: fmtBytes(size) });
+        const all = Object.keys(n.models || {}).length;
+        text = missing.length < all
+          ? t("music.backendNativeSomeMissing",
+            { count: missing.length, total: all, size: fmtBytes(size) })
+          : t("music.backendNativeMissing", { size: fmtBytes(size) });
       } else {
         const rt = n.runtime || {};
         text = t("music.backendNative", {
@@ -93,6 +97,13 @@ export async function refreshMusicBackend() {
   }
   const card = $("music-workflow-card");
   if (card) card.hidden = native;
+  for (const [id, key] of [["music-steps", "music.stepsPlaceholder"],
+                           ["music-cfg", "music.cfgPlaceholder"]]) {
+    const input = $(id);
+    if (!input) continue;
+    input.dataset.i18nPlaceholder = native ? `${key}Native` : key;
+    input.placeholder = t(input.dataset.i18nPlaceholder);
+  }
 }
 
 /* ================================================================ */

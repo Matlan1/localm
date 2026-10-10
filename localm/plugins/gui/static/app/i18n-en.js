@@ -2355,6 +2355,7 @@ export const I18N_EN = {
   // ---- Music page ----
   "music.advancedHint": "seed, steps, CFG",
   "music.cfgPlaceholder": "default (5.0)",
+  "music.cfgPlaceholderNative": "default (1.0)",
   "music.empty.hint": "Generate one above; your tracks appear here.",
   "music.empty.title": "No tracks yet",
   "music.enterTags": "Enter style tags first",
@@ -2367,6 +2368,8 @@ export const I18N_EN = {
   "music.backendNative": "Backend: native ACE-Step 1.5 (KoboldCpp), runtime {runtime}.",
   "music.backendNativeMissing":
     "Backend: native ACE-Step 1.5. No music models yet: Generate offers to download the default set ({size}).",
+  "music.backendNativeSomeMissing":
+    "Backend: native ACE-Step 1.5. Missing {count} of {total} default music models: Generate offers to download them ({size}).",
   "music.backendRuntimeOnFirstUse": "installed on first use",
   "music.intro":
     "Generates music on this machine with ACE-Step, on the built-in native runtime or on your ComfyUI (Settings, Music). The chat model unloads when the music models need the VRAM and reloads afterwards.",
@@ -2376,8 +2379,9 @@ export const I18N_EN = {
   "music.lyricsPlaceholder": "[verse]\nNeon lights across the bay…",
   "music.mediaWhat": "the track",
   "music.reloadCheckboxTitle":
-    "Applies to music generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.",
+    "Applies to music generation only. When off, the music backend stays loaded for fast batch generation; the chat model reloads on the next chat message.",
   "music.stepsPlaceholder": "default (50)",
+  "music.stepsPlaceholderNative": "default (8)",
   "music.styleTagsLabel": "Style tags - genre, mood, instruments, BPM, vocal type",
   "music.styleTagsPlaceholder": "synthwave, 80s, female vocals, 120 bpm, dreamy",
   "music.title": "Music generation",

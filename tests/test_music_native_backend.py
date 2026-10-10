@@ -216,7 +216,6 @@ def test_instrumental_and_a_random_seed_when_none_is_given(tmp_path, fake_genera
     ({"model_overrides": {"1": {"ckpt_name": "a"}}}, "Workflow model choices apply to ComfyUI"),
     ({"sampler_name": "euler"}, "sampler setting applies to the ComfyUI workflow"),
     ({"scheduler": "karras", "lyrics_strength": 1.2}, "scheduler, lyrics strength"),
-    ({"placement": {"unet": 1}}, "GPU placement applies to ComfyUI"),
 ])
 def test_comfyui_only_inputs_are_refused_before_any_work(tmp_path, fake_generate, kwargs,
                                                         match):
@@ -457,3 +456,108 @@ def test_a_job_never_downloads_models_and_says_how_to_get_them(monkeypatch, no_c
     assert "ACE-Step text encoder, diffusion, VAE and planner models are not" in msg
     size = sum(models.DEFAULT_SIZES.values()) / 1024 ** 3
     assert f"({size:.1f} GB)" in msg
+
+
+def test_a_failed_save_returns_the_reason_and_leaves_no_partial_file(tmp_path, monkeypatch,
+                                                                    fake_generate):
+    from pathlib import Path
+
+    def refuse(self, target):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    out = tmp_path / "gallery" / "t.wav"
+    ok, msg = native.generate(_s(), "x", out, duration_seconds=1.0, write_sidecar=False)
+    assert list((tmp_path / "gallery").iterdir()) == []
+    assert ok is False and f"could not be saved to {out}" in msg and "access denied" in msg
+
+
+def test_an_unexpected_error_never_escapes_generate(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no free port")
+
+    monkeypatch.setattr(music, "generate_wav", boom)
+    ok, msg = native.generate(_s(), "x", tmp_path / "t.wav", duration_seconds=1.0)
+    assert (ok, msg) == (False, "Native music generation failed: OSError: no free port")
+
+
+@pytest.mark.parametrize("answer,complaint", [({"status": "unloaded"}, False), (None, True)])
+def test_swap_asks_the_server_to_unload_the_chat_model(tmp_path, monkeypatch, fake_generate,
+                                                       answer, complaint):
+    from localm.media import comfy_client
+    calls = []
+    monkeypatch.setattr(comfy_client, "_localm_unload",
+                        lambda url, token=None: calls.append((url, token)) or answer)
+    lines = []
+    ok, _msg = native.generate(_s(), "x", tmp_path / "t.wav", duration_seconds=1.0,
+                               self_url="http://127.0.0.1:9/v1", instance_token="tok",
+                               swap=True, on_progress=lines.append)
+    assert ok and calls == [("http://127.0.0.1:9/v1", "tok")]
+    assert "Freeing VRAM: unloading the chat model..." in lines
+    assert any("Could not unload the chat model" in ln for ln in lines) is complaint
+
+
+def test_swap_without_a_server_says_the_chat_model_stays(tmp_path, monkeypatch, fake_generate):
+    from localm.media import comfy_client
+    monkeypatch.setattr(comfy_client, "_localm_unload",
+                        lambda *a, **k: pytest.fail("unloaded without a server address"))
+    lines = []
+    ok, _msg = native.generate(_s(), "x", tmp_path / "t.wav", duration_seconds=1.0,
+                               swap=True, on_progress=lines.append)
+    assert ok and any("could not be unloaded first" in ln for ln in lines)
+
+
+def test_cli_music_hands_the_gpu_over_through_localm_url(tmp_path, monkeypatch, cli_runner,
+                                                        no_comfy, fake_generate):
+    from localm.media import comfy_client
+    from localm.media.koboldcpp import server
+    monkeypatch.setattr(server, "stop", lambda: True)
+    calls = []
+    monkeypatch.setattr(comfy_client, "_localm_unload",
+                        lambda url, token=None: calls.append(url) or {"status": "unloaded"})
+    monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:9")
+    from localm.cli import main
+    result = cli_runner.invoke(main, ["music", "lofi", "-d", "1", "-o", str(tmp_path / "s.wav")])
+    assert result.exit_code == 0, result.output
+    assert calls == ["http://127.0.0.1:9"]
+
+
+def test_an_unknown_backend_name_falls_back_to_comfyui_in_cli_and_repl(tmp_path, monkeypatch,
+                                                                      cli_runner):
+    from localm.config import load_config, save_config
+    cfg = load_config()
+    cfg.setdefault("plugins", {}).setdefault("music", {})["backend"] = "a1111"
+    save_config(cfg)
+    s = music_backend.prepare_for_job(music_backend.settings(load_config()), load_config())
+    assert s["backend"] == "a1111" and music_backend.is_comfy(s)
+    assert music_backend.generate_unless_comfy("lofi", tmp_path / "t.wav") is None
+    import localm.cli.media as media_cli
+    import localm.music_gen as music_gen
+    ran = []
+    monkeypatch.setattr(music_gen, "generate_music",
+                        lambda tags, out, **k: ran.append(tags) or (True, "saved"))
+    monkeypatch.setattr(media_cli, "_generate_or_abort", lambda url, fn: fn())
+    monkeypatch.setattr(media_cli, "_offer_open", lambda p: None)
+    from localm.cli import main
+    result = cli_runner.invoke(main, ["music", "lofi", "-d", "1",
+                                      "-o", str(tmp_path / "s.flac")])
+    assert result.exit_code == 0, result.output
+    assert ran == ["lofi"]
+
+
+def test_route_says_gpu_placement_is_comfyui_only_for_native(tmp_path, monkeypatch, no_comfy,
+                                                            fake_generate):
+    from fastapi.testclient import TestClient
+    from localm.config import load_config, save_config
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
+    monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda *a, **k: None)
+    cfg = load_config()
+    cfg["comfy_gpu_placement"] = True
+    save_config(cfg)
+    app = _music_app(tmp_path, monkeypatch)
+    h = _key(["music"])
+    with TestClient(app) as c:
+        r = c.post("/api/music", headers=h, json={"tags": "lofi", "duration_seconds": 2})
+        end, lines = _wait_job(c, r.json()["job_id"], h)
+        assert end and end["status"] == "done", lines
+        assert any("GPU placement applies to ComfyUI only" in ln for ln in lines)

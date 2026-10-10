@@ -347,7 +347,9 @@ def _music_via_backend(music_backend, s: dict, tags: str, out, *, lyrics, durati
     """``localm music`` through the music plugin's backend facade (any backend
     other than the inline ComfyUI path): availability, generation with progress
     lines, Ctrl-C stops the runtime, then the backend's VRAM is released. Exits
-    1 on failure and 2 when *out* does not end in the backend's file suffix."""
+    1 on failure and 2 when *out* does not end in the backend's file suffix. With
+    LOCALM_URL set, that server is asked to unload its chat model first."""
+    import os
     import time as _time
 
     from rich.markup import escape
@@ -370,9 +372,11 @@ def _music_via_backend(music_backend, s: dict, tags: str, out, *, lyrics, durati
         console.print(f"[red]{escape(str(message))}[/red]")
         sys.exit(1)
     say(message)
+    localm_url = os.environ.get("LOCALM_URL") or None
     try:
         ok, message = music_backend.generate(
-            s, tags, out_path, write_sidecar=write_sidecar, on_progress=say,
+            s, tags, out_path, self_url=localm_url, swap=bool(localm_url),
+            write_sidecar=write_sidecar, on_progress=say,
             lyrics=lyrics, duration_seconds=duration, **kwargs)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted - stopping the music runtime...[/yellow]")
@@ -428,7 +432,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     _write_sidecar = not _is_privacy
     _cfg = load_config()
     _s = music_backend.prepare_for_job(music_backend.settings(_cfg), _cfg)
-    if _s.get("backend") != "comfy":
+    if not music_backend.is_comfy(_s):
         _music_via_backend(music_backend, _s, tags, out, lyrics=lyr, duration=duration,
                            write_sidecar=_write_sidecar, **kwargs)
         return

@@ -25,7 +25,7 @@ def _native(s: dict) -> dict:
 
 
 def refusal(*, model_overrides=None, sampler_name=None, scheduler=None,
-            lyrics_strength=None, placement=None, **_ignored) -> Optional[str]:
+            lyrics_strength=None, **_ignored) -> Optional[str]:
     """Why the native backend cannot honour a request with these inputs, or
     None. Checked before any download, VRAM handover or load."""
     if model_overrides:
@@ -36,9 +36,6 @@ def refusal(*, model_overrides=None, sampler_name=None, scheduler=None,
     if named:
         return (f"The {', '.join(named)} setting applies to the ComfyUI workflow only; "
                 "leave it unset or use the ComfyUI backend.")
-    if placement:
-        return ("Per-component GPU placement applies to ComfyUI only; turn it off or "
-                "use the ComfyUI backend.")
     return None
 
 
@@ -134,19 +131,41 @@ def status(s: dict) -> dict:
             "models": shown, "missing": missing}
 
 
-def generate(s: dict, tags: str, out_path: Path, *, self_url: str = "",
-             write_sidecar: bool = True, on_progress=None,
-             lyrics: Optional[str] = None, duration_seconds: float = 120.0,
-             swap: bool = False, cancel_check=None, seed: Optional[int] = None,
-             steps: Optional[int] = None, cfg: Optional[float] = None,
-             shift: Optional[float] = None, **kwargs) -> tuple[bool, str]:
-    """Generate one track into *out_path* (a WAV). Returns (ok, message)."""
+def generate(s: dict, tags: str, out_path: Path, **kwargs) -> tuple[bool, str]:
+    """Generate one track into *out_path* (a WAV); see ``_generate``. Never
+    raises: an unexpected error becomes ``(False, message)``."""
+    try:
+        return _generate(s, tags, out_path, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.warning("native music generation failed: %s: %s", type(e).__name__, e)
+        return False, f"Native music generation failed: {type(e).__name__}: {e}"
+
+
+def _generate(s: dict, tags: str, out_path: Path, *, self_url: Optional[str] = "",
+              instance_token: Optional[str] = None, write_sidecar: bool = True,
+              on_progress=None, lyrics: Optional[str] = None,
+              duration_seconds: float = 120.0, swap: bool = False, cancel_check=None,
+              seed: Optional[int] = None, steps: Optional[int] = None,
+              cfg: Optional[float] = None, shift: Optional[float] = None,
+              **kwargs) -> tuple[bool, str]:
+    """Generate one track into *out_path* (a WAV). Returns (ok, message).
+
+    *swap* asks the localm server at *self_url* to unload its chat model first
+    (authenticated with *instance_token* in open mode); without *self_url* the
+    job only says the chat model is still loaded."""
     from localm.media.koboldcpp import music
     say = on_progress or (lambda _m: None)
     refused = refusal(**kwargs)
     if refused:
         return False, refused
-    if swap:
+    if swap and self_url:
+        from localm.media.comfy_client import _localm_unload
+        say("Freeing VRAM: unloading the chat model...")
+        if _localm_unload(self_url, instance_token) is None:
+            say("Could not unload the chat model; the native runtime may not fit in the "
+                "remaining VRAM.")
+    elif swap:
         say("The chat model could not be unloaded first; the native runtime may not "
             "fit in the remaining VRAM.")
     if seed is None or seed <= 0:
@@ -172,12 +191,17 @@ def generate(s: dict, tags: str, out_path: Path, *, self_url: str = "",
         data, backend = music.generate_wav(
             _native(s), s.get("native_runtime") or "auto", request, plan=plan,
             lowvram=bool(s.get("lowvram")), on_progress=say, cancel_check=cancel_check)
-        seconds = music.write_wav(data, out_path)
     except music.Cancelled:
         return False, "Cancelled."
     except (music.ProvisionError, music.ModelError, music.NativeMusicError,
             music.ServerError) as e:
         return False, f"Native music generation failed: {e}"
+    try:
+        seconds = music.write_wav(data, out_path)
+    except music.ServerError as e:
+        return False, f"Native music generation failed: {e}"
+    except OSError as e:
+        return False, f"The track could not be saved to {out_path}: {e}"
     length = f"{seconds:.1f} s track"
     if plan and abs(seconds - float(duration_seconds)) >= 0.5:
         length += f" (requested {float(duration_seconds):g} s; the planner ended the song there)"
