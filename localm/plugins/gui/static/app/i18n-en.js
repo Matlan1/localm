@@ -2297,9 +2297,14 @@ export const I18N_EN = {
   "workflow.useThisWorkflow": "Use this workflow",
 
   // ---- Images page ----
-  "images.advancedHint": "seed, guidance, denoise, CFG, LoRA strength",
+  "images.advancedHint": "size, seed, guidance, denoise, CFG, LoRA strength",
   "images.attachFailed": "Attach failed: {message}",
   "images.attachedToast": "Image attached - type your message",
+  "images.backendComfy": "Backend: ComfyUI.",
+  "images.backendNative": "Backend: native stable-diffusion.cpp, model {model}, runtime {runtime}.",
+  "images.backendNativeNoModel":
+    "Backend: native stable-diffusion.cpp. No image model yet: Generate offers to download {name}.",
+  "images.backendRuntimeOnFirstUse": "installed on first use",
   "images.cfgPlaceholder": "default 3.5, only with negative prompt",
   "images.copiedToast": "Image copied to clipboard",
   "images.copyFailed": "Copy failed: {message}",
@@ -2319,7 +2324,7 @@ export const I18N_EN = {
   "images.inputImageLabel": "Input image path (optional, img2img)",
   "images.inputImagePlaceholder": "path to a base image",
   "images.intro":
-    "Runs your local ComfyUI FLUX pipeline. The LLM unloads automatically to free VRAM for the image model, and reloads on the next chat request. Needs a GPU to be practical - CPU generation is far too slow for this workflow.",
+    "Generates images on this machine with the built-in stable-diffusion.cpp backend, or with your ComfyUI (Settings, Images). The chat model unloads when the image model needs the VRAM and reloads afterwards.",
   "images.item.one": "image",
   "images.item.other": "images",
   "images.loraLabel": "LoRA",
@@ -2337,6 +2342,8 @@ export const I18N_EN = {
   "images.sendToChat": "send to chat",
   "images.sendToChatTitle": "Attach this image to the chat composer",
   "images.setAsInputToast": "Set as img2img input - adjust denoise and generate",
+  "images.sizeLabel": "Size",
+  "images.sizePlaceholder": "model default, e.g. 768x512",
   "images.stop": "Stop",
   "images.stopping": "Stopping…",
   "images.title": "Image generation",

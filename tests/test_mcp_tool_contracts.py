@@ -570,7 +570,9 @@ class TestClientSuppliedStringsAreGuarded:
         assert _UNC not in _text(reply)
         gen.assert_not_called()
 
-    def test_generate_image_reports_progress_to_the_client(self, all_tools):
+    def test_generate_image_reports_progress_to_the_client(self, all_tools, monkeypatch):
+        monkeypatch.setattr("localm.media.backend_choice.comfy_is_set_up",
+                            lambda *a, **k: True)
         from localm.plugins.mcpserver.server import report_progress
         with patch("localm.image_gen.comfy.generate_image",
                    return_value=(True, "saved")) as gen:

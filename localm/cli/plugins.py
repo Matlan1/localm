@@ -680,7 +680,15 @@ def _runtime_fields(name):
         console.print(f"[red]The server refused the request:[/red] "
                       f"{_server_error(resp)}")
         sys.exit(1)
-    for section in resp.json().get("plugins", []):
+    from localm.jsonreply import response_json
+    try:
+        listing = response_json(resp)
+    except ValueError:
+        listing = None
+    if not isinstance(listing, dict):
+        console.print("[red]The server's reply was not valid JSON.[/red]")
+        sys.exit(1)
+    for section in listing.get("plugins", []):
         if section.get("plugin") == name:
             return url, headers, section.get("fields") or []
     # The server DID answer and has no section for this plugin. Locally that is
@@ -817,7 +825,16 @@ def _runtime_plugin_config(name, key, value):
         console.print(f"[red]The server refused the change:[/red] "
                       f"{_server_error(resp)}")
         sys.exit(1)
-    saved = {f["key"]: f for f in resp.json().get("fields", [])}.get(key, {})
+    from localm.jsonreply import response_json
+    try:
+        written = response_json(resp)
+    except ValueError:
+        written = None
+    if not isinstance(written, dict):
+        console.print("[red]The server's reply was not valid JSON, so it is unknown "
+                      "whether the change was saved.[/red]")
+        sys.exit(1)
+    saved = {f["key"]: f for f in written.get("fields", [])}.get(key, {})
     if not saved.get("is_override"):
         _report_set(name, key, None)
     elif "value" not in saved:

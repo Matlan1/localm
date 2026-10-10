@@ -20,6 +20,13 @@ from fastapi.testclient import TestClient
 from localm.plugins.gui.web import attach_gui
 
 
+@pytest.fixture(autouse=True)
+def _comfyui_is_set_up(monkeypatch):
+    """The image plugin's ``auto`` backend resolves to ComfyUI in these tests."""
+    monkeypatch.setattr("localm.media.backend_choice.comfy_is_set_up",
+                        lambda *a, **k: True)
+
+
 def _h(key):
     return {"Authorization": f"Bearer {key}"}
 

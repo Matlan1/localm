@@ -435,7 +435,8 @@ def _cli_rag_embed_fn(url):
                           headers=headers, timeout=120,
                           verify=_tls.requests_verify(embeddings_url))
         r.raise_for_status()
-        return [d["embedding"] for d in r.json()["data"]]
+        from localm.jsonreply import response_json
+        return [d["embedding"] for d in response_json(r)["data"]]
     return _embed
 
 

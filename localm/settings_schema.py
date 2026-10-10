@@ -1844,10 +1844,52 @@ class MediaField:
     image_only: bool = False       # fast_dequant only applies to the Flux image backend
     plugins: Optional[list] = None # restrict to these plugins only (e.g. ["music", "video"])
     admin_only: bool = False       # requires an owner (ADMIN) principal to see or set
+    default: Optional[str] = None  # value shown when neither the block nor a global key sets one
 
+
+_IMAGE_ONLY = ["image"]
 
 # Order = display order within each plugin subsection.
 MEDIA_PLUGIN_FIELDS: list = [
+    MediaField("backend", ("backend",), "", Widget.SELECT, "Image backend",
+               "auto = ComfyUI when it is set up, else native; native = built-in "
+               "stable-diffusion.cpp; comfy = ComfyUI.",
+               options=["auto", "native", "comfy"], plugins=_IMAGE_ONLY, default="auto"),
+    MediaField("native_model", ("native", "model"), "", Widget.TEXT,
+               "Native image model",
+               "Registered model name or file path: a checkpoint, or a diffusion model "
+               "when the native text encoder fields are set. Blank uses the recommended "
+               "model once downloaded.",
+               plugins=_IMAGE_ONLY, admin_only=True),
+    MediaField("native_runtime", ("native", "runtime"), "", Widget.SELECT,
+               "Native runtime",
+               "stable-diffusion.cpp build to use. auto picks the best one for this machine.",
+               options=["auto", "cpu", "vulkan", "cuda", "rocm", "metal"],
+               plugins=_IMAGE_ONLY, default="auto"),
+    MediaField("native_steps", ("native", "steps"), "", Widget.TEXT, "Native sampling steps",
+               "Blank uses the model's recommended steps (or 20).", plugins=_IMAGE_ONLY),
+    MediaField("native_cfg_scale", ("native", "cfg_scale"), "", Widget.TEXT,
+               "Native CFG scale",
+               "Blank uses the model's recommended value (or 7).", plugins=_IMAGE_ONLY),
+    MediaField("native_sample_method", ("native", "sample_method"), "", Widget.TEXT,
+               "Native sampler",
+               "e.g. euler, euler_a, dpm++2m, lcm. Blank uses the model's default.",
+               plugins=_IMAGE_ONLY),
+    MediaField("native_vae", ("native", "vae"), "", Widget.TEXT, "Native VAE",
+               "Optional VAE (registered name or file path).", plugins=_IMAGE_ONLY,
+               admin_only=True),
+    MediaField("native_clip_l", ("native", "clip_l"), "", Widget.TEXT,
+               "Native CLIP-L text encoder", "Optional (FLUX, SD3).", plugins=_IMAGE_ONLY,
+               admin_only=True),
+    MediaField("native_clip_g", ("native", "clip_g"), "", Widget.TEXT,
+               "Native CLIP-G text encoder", "Optional (SD3).", plugins=_IMAGE_ONLY,
+               admin_only=True),
+    MediaField("native_t5xxl", ("native", "t5xxl"), "", Widget.TEXT,
+               "Native T5-XXL text encoder", "Optional (FLUX, SD3).", plugins=_IMAGE_ONLY,
+               admin_only=True),
+    MediaField("native_llm", ("native", "llm"), "", Widget.TEXT,
+               "Native LLM text encoder", "Optional (Z-Image, Qwen Image).",
+               plugins=_IMAGE_ONLY, admin_only=True),
     # The per-plugin workdir WINS over the global comfy_workdir (scan.py returns
     # the per-plugin value first; image/backend.py and its music/video twins
     # pass it into ensure_comfy()), so gating only the CORE field would leave
@@ -1921,8 +1963,8 @@ def media_fields_for(name: str) -> list:
 
 
 def media_admin_only_fields() -> set:
-    """Field keys (across all media plugins) flagged owner-only (today:
-    launch_cmd, api_url). A non-owner config:write key must not set them
+    """Field keys (across all media plugins) flagged owner-only (launch_cmd,
+    api_url, workdir and the native model files). A non-owner config:write key must not set them
     (set_media_config's owner gate) and must not see their resolved value
     either (media_schema_json). The single source of truth for both."""
     return {f.key for f in MEDIA_PLUGIN_FIELDS if f.admin_only}
@@ -1948,9 +1990,10 @@ def media_schema_json(name: str, block: Optional[dict], full_config: dict, *,
             continue
         block_val = _block_get(block, f.block_path)
         has_own = block_val not in (None, "")
-        value = block_val if has_own else full_config.get(f.global_key)
+        global_val = full_config.get(f.global_key) if f.global_key else None
+        value = block_val if has_own else (global_val if global_val is not None else f.default)
         d = {"key": f.key, "widget": f.widget, "label": f.label, "help": f.help,
-             "value": value, "is_override": has_own, "global": full_config.get(f.global_key)}
+             "value": value, "is_override": has_own, "global": global_val}
         if f.options:
             d["options"] = f.options
             
@@ -2007,6 +2050,26 @@ def _is_http_url(value: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.hostname)
 
 
+_MEDIA_NUMBER_RANGES = {"native_steps": (int, 1, 150), "native_cfg_scale": (float, 0.0, 30.0)}
+
+
+def _media_number(key: str, value):
+    """*value* parsed as the number type of *key* and checked against its range."""
+    import math
+    kind, lo, hi = _MEDIA_NUMBER_RANGES[key]
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key}: {value!r} is not a number") from None
+    if not math.isfinite(num) or not (lo <= num <= hi):
+        raise ValueError(f"{key}: {value!r} is outside {lo}..{hi}")
+    if kind is int:
+        if num != int(num):
+            raise ValueError(f"{key}: {value!r} is not a whole number")
+        return int(num)
+    return num
+
+
 def validate_media_block(name: str, updates: dict) -> dict:
     """Coerce + validate a per-plugin media update into a block-merge dict.
 
@@ -2033,6 +2096,8 @@ def validate_media_block(name: str, updates: dict) -> dict:
             raise ValueError(
                 f"api_url must be a valid http(s) URL "
                 f"(e.g. http://127.0.0.1:8188), got {coerced!r}")
+        if f.key in _MEDIA_NUMBER_RANGES and coerced is not None:
+            coerced = _media_number(f.key, coerced)
         cur = merge
         for p in f.block_path[:-1]:
             cur = cur.setdefault(p, {})

@@ -48,11 +48,13 @@ class SdRunner:
         self.load_info: Optional[dict] = None
 
     def is_alive(self) -> bool:
-        return self._proc is not None and self._proc.is_alive()
+        proc = self._proc
+        return proc is not None and proc.is_alive()
 
     @property
     def pid(self) -> Optional[int]:
-        return None if self._proc is None else self._proc.pid
+        proc = self._proc
+        return None if proc is None else proc.pid
 
     def _spawn(self) -> None:
         from localm._mp_spawn import ensure_spawn_uses_venv_python

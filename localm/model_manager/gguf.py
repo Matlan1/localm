@@ -2172,6 +2172,29 @@ def gguf_classifier_head_tensors(path: Path) -> Optional[frozenset]:
                      if name in _GGUF_CLASSIFIER_HEAD_TENSORS)
 
 
+_GGUF_SD_TENSOR_PREFIXES = ("model.diffusion_model.", "first_stage_model.")
+
+
+def gguf_sd_checkpoint(path: Path, meta: Optional[dict] = None) -> bool:
+    """True when the GGUF at *path* declares no ``general.architecture`` and
+    carries Stable Diffusion-family image tensors (a UNet/DiT under
+    ``model.diffusion_model.`` or a VAE under ``first_stage_model.``), the
+    layout stable-diffusion.cpp's converter writes. False when it declares an
+    architecture, is one part of a split GGUF, or its tensor list cannot be read.
+
+    *meta* is an already-computed ``_gguf_metadata_probe(path)`` result."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    if not meta or meta.get("architecture"):
+        return False
+    if _SPLIT_GGUF_RE.match(Path(path).name):
+        return False
+    parsed = _gguf_tensor_offset_entries(Path(path))
+    if parsed is None:
+        return False
+    return any(name.startswith(_GGUF_SD_TENSOR_PREFIXES) for name, _offset in parsed[0])
+
+
 def gguf_reranker_state(path: Path, meta: Optional[dict] = None) -> Optional[bool]:
     """Whether *path*'s own GGUF marks it as a reranker / classifier: it declares
     ``<architecture>.pooling_type`` = rank, or carries
