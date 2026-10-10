@@ -53,6 +53,13 @@ def _wide_console(monkeypatch):
     make_console_wide_and_plain(monkeypatch, width="300")
 
 
+@pytest.fixture(autouse=True)
+def _comfyui_is_set_up(monkeypatch):
+    """The media plugins' ``auto`` backend resolves to ComfyUI in these tests."""
+    monkeypatch.setattr("localm.media.backend_choice.comfy_is_set_up",
+                        lambda *a, **k: True)
+
+
 class TestImageCmdMessageMarkupEscaping:
     def test_bracket_drop_message_survives_verbatim(self):
         with patch("localm.image_gen.comfy.generate_image",

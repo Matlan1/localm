@@ -10,6 +10,10 @@ from localm.plugins.coder.tools import tool_generate_image
 
 class TestFluxImageTool(unittest.TestCase):
     def setUp(self):
+        # The image plugin's ``auto`` backend resolves to ComfyUI in these tests.
+        comfy_set_up = patch("localm.media.backend_choice.comfy_is_set_up", return_value=True)
+        comfy_set_up.start()
+        self.addCleanup(comfy_set_up.stop)
         self.cwd = Path(__file__).parent
         self.output_path = "test_output.png"
         self.abs_output_path = self.cwd / self.output_path

@@ -21,6 +21,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   with a message saying which model to use, instead of being dropped. Model listings report
   `audio_input`, and a projector that reads only audio no longer makes a model count as
   able to see images.
+- **Speech from a text-to-speech model.** A Qwen3-TTS GGUF (`localm pull
+  ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf` fetches it with
+  its mmproj) is recognised as a speech model. `localm speak "text" -o out.wav` and the
+  OpenAI-compatible `POST /v1/audio/speech` turn text into a 24 kHz WAV (or raw `pcm`),
+  optionally in the voice of a short WAV recording, with a seed for a reproducible result.
+  It runs in its own worker process, shows its progress, appears as loaded on the Models
+  page (Unload releases it), and stops when the client goes away. Pocket TTS files are
+  still refused.
 - **Images generate without ComfyUI.** A native image backend runs stable-diffusion.cpp in
   a separate worker process on CPU, Vulkan, CUDA, ROCm or Metal, installing its runtime on
   first use. With no model set up, the Images page offers to download the recommended one
@@ -39,6 +47,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `tool_result` blocks, `thinking` (returned as thinking blocks), streaming with the full
   Messages event sequence, and `/v1/messages/count_tokens`. The `x-api-key` header is accepted
   as well as a bearer token, and errors come back in Anthropic's error shape.
+- **The OpenAI Responses API at `/v1/responses`.** OpenAI SDKs and tools that speak the
+  Responses API can use any localm chat model: input items with text, images and audio,
+  `instructions`, function tools with `function_call` and `function_call_output` items,
+  `text.format` for structured output, reasoning items, and the streaming event sequence.
+  `previous_response_id` continues an earlier response, kept in the server's memory only and
+  only for the key that created it.
 - **Structured output and more OpenAI fields on `/v1/chat/completions`.**
   `response_format` (`json_object`, or `json_schema` with `strict`) constrains the reply,
   token by token, to JSON or to the schema, also alongside `tools`. `presence_penalty`,
@@ -153,8 +167,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   to disk. `POST /v1/images/generations` generates through the image plugin (ComfyUI) and
   returns `b64_json`, or a gallery `url` when an API key is configured, honouring `n` and
   `size`; in privacy mode no image is kept on disk. The official `openai` SDK works against
-  both, and local apps can call them like `/v1/chat/completions`. Speech synthesis
-  (`/v1/audio/speech`) is not served yet. See docs/server-api.md.
+  both, and local apps can call them like `/v1/chat/completions`. See
+  docs/server-api.md.
 - **An Ollama-compatible API on the same server and port.** `/api/chat`, `/api/generate`,
   `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
   answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies

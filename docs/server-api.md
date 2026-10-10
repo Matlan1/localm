@@ -437,6 +437,38 @@ counted with the model's own tokenizer and chat template, tool descriptions incl
 model that would answer the same `/v1/messages` request (capability routing applies, and a model
 another instance serves is counted there). The model is loaded if it is not already.
 
+### `POST /v1/responses` (OpenAI Responses API)
+
+Scope: any valid key (no specific scope required once auth is enabled).
+
+An OpenAI SDK or agent tool that speaks the Responses API can use localm by pointing its base URL
+at the server (`OPENAI_BASE_URL=http://127.0.0.1:8642/v1`) and naming a localm model. The request
+is answered by the same chat path as `/v1/chat/completions`, so capability routing, compaction,
+tool calling, structured output and the response headers work the same way.
+
+| Request field | Behaviour |
+|---|---|
+| `model` | A localm model name (`localm` or empty: the loaded model). |
+| `input` | A string, or a list of items: messages (`user`, `assistant`, `system`, `developer`; content as a string or `input_text`, `output_text`, `input_image` with an `image_url`, and `input_audio` parts), `function_call` and `function_call_output` items (an output is a string, or `input_text` and `input_image` parts; the images reach the model in a user message after the tool results). `reasoning` items are dropped. `input_file` parts, `item_reference` and other item types are a 400. |
+| `instructions` | A system message for this request only; it is not carried into a continuation. |
+| `tools`, `tool_choice`, `parallel_tool_calls` | Function tools work with any chat model, as in [Tool calling](#tool-calling). `tool_choice` `auto`, `none`, `required` or a function by name. Built-in tools (web search, file search, code interpreter, ...) are a 400. |
+| `text.format` | `text`, `json_object`, or `json_schema` (with `strict`), as `response_format` on chat (see [Structured output](#structured-output)). |
+| `max_output_tokens`, `temperature`, `top_p` | Applied. |
+| `reasoning.effort`, `reasoning.summary` | `effort: none` turns thinking off; another value leaves the model's default. A reasoning model's thinking comes back as a `reasoning` item whose content is the full reasoning text; its `summary` stays empty whatever `reasoning.summary` asks. |
+| `previous_response_id` | Continues a stored response: its input and output are sent ahead of this request's input. Responses are kept in the server's memory only, never on disk, are lost when the server restarts, and are visible only to the key that created them. The store holds at most 256 responses and 64 MB of conversation JSON; past either bound, the oldest response of the key holding the most is dropped, so one key filling the store evicts its own responses first. A response expires an hour after it is stored and is removed at the next request to this route after that. A response too large to keep comes back with `store: false`. An unknown, expired, dropped or foreign id is a 404. |
+| `store` | `false` keeps the response out of the store. |
+| `stream` | Server-sent events: `response.created`, `response.in_progress`, per output item `response.output_item.added`, `response.content_part.added`, `response.output_text.delta` (or `response.reasoning_text.delta`), `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, function calls as `response.function_call_arguments.delta` and `.done` carrying the whole arguments, then `response.completed` (or `response.incomplete` when the token cap was reached, `response.failed` when generation failed). Every event carries a `sequence_number`. |
+| `include` | `reasoning.encrypted_content` and the built-in tool entries (`file_search_call.results`, `web_search_call.results`, `web_search_call.action.sources`, `message.input_image.image_url`, `computer_call_output.output.image_url`, `code_interpreter_call.outputs`) are accepted with no effect; a reasoning item carries no encrypted content. Any other value, `message.output_text.logprobs` included, is a 400. |
+| `truncation` | `auto` or `disabled`; either way an over-long conversation is compacted as on chat. |
+| `metadata`, `user`, `prompt_cache_key`, `safety_identifier`, `service_tier`, `max_tool_calls` | Accepted; `metadata` is echoed, the rest have no effect. |
+| localm chat fields | `top_k`, `min_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, `stop`, `grammar` (with `grammar_lazy`, `grammar_triggers`), `required_capabilities`, `pin_model`, `min_context` and `chat_template_kwargs` (for example through an SDK's `extra_body`) are applied as on `/v1/chat/completions`. Other unknown fields have no effect and are named in the debug log. |
+| `background`, `conversation`, `prompt`, `top_logprobs`, `text.verbosity` other than `medium` | A 400 naming the field. |
+
+Only `POST /v1/responses` is served: a stored response cannot be fetched, listed, cancelled or
+deleted through the API. Errors use OpenAI's shape, `{"error": {"message": "...", "type":
+"invalid_request_error", "param": ..., "code": null}}`, with `authentication_error` for a missing
+or wrong key and `not_found_error` for an unknown `previous_response_id`.
+
 ### `POST /v1/embeddings`
 
 Scope: any valid key (no specific scope required once auth is enabled).
@@ -551,11 +583,42 @@ route cannot be fetched by an API client, so `b64_json` is the default and askin
 private directory, returned as `b64_json` (the default there; asking for `url` is a
 `400`), and the directory is deleted before the response is sent.
 
-### Speech synthesis (`/v1/audio/speech`)
+### `POST /v1/audio/speech`
 
-Not served. Text-to-speech runs in the browser (the tts plugin's Kokoro voices) and
-localm has no server-side speech synthesis yet, so a client calling
-`/v1/audio/speech` gets a `404` rather than a stub.
+Scope: `tts`. Served by the tts plugin. Speaks text with a registered text-to-speech
+model: a Qwen3-TTS GGUF and its mmproj (`localm pull
+ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf` fetches
+both). The browser voices of the tts plugin are separate and unaffected.
+
+```python
+audio = client.audio.speech.create(model="tts-1", voice="default",
+                                   input="Hello there.", response_format="wav")
+audio.write_to_file("hello.wav")
+```
+
+A JSON body, or multipart/form-data with the same fields plus an optional `voice_file`.
+The request waits for the whole file: it runs in the isolated speech worker as a
+background job of kind `speak`, so it shows in the activity list with its progress, and a
+client that disconnects cancels it. The audio is returned from memory and never written
+to disk, in any session mode. The seed used is in the `X-Localm-Seed` response header.
+
+| Field | Meaning |
+| --- | --- |
+| `input` | Required, 1 to 4096 characters. Text containing the model's control-token strings (such as `<\|im_end\|>`) is a `400`. |
+| `model` | A registered model of type `tts`. Omitted, `localm`, `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` name the only one; with several registered, name one. |
+| `voice` | `default` (the model's own voice), or the name of a WAV recording saved as `<name>.wav` in the `voices` folder of the data directory. Any other name is a `400` listing the voices. |
+| `voice_file` | Multipart only: a WAV recording (PCM or float, at most 30 s and 16 MB) whose voice to imitate. Not together with a named `voice`. |
+| `response_format` | `wav` (default; 16-bit mono at 24 kHz) or `pcm` (the same samples, raw little-endian, no header). |
+| `language` | Optional code such as `en` or name such as `english`; the model's default when omitted. |
+| `seed` | Optional, 0 to 4294967294, for a reproducible result. Random when omitted. |
+| `speed`, `instructions`, `stream_format` | Only `1.0`, empty and `audio`: other values change the output and are not implemented, so they are a `400`. |
+
+`mp3`, `opus`, `aac` and `flac` are a `400`; other unknown fields are ignored. Failures:
+`400` a bad field, text or recording, `404` no such model, `422` a model that is not a
+text-to-speech model or lacks its mmproj, `413` too large, `501` the llama.cpp runtime
+or the model cannot synthesize speech (run `localm setup-llama` for the pinned runtime),
+`503` the model failed to load, `504` the speech worker hung and was stopped, `502` the
+generation failed or did not end within its frame budget, `409` cancelled.
 
 ### `GET /v1/models`
 

@@ -388,6 +388,27 @@ def test_gui_models_list_reports_reranker_loaded_via_path_match(gui_app_with_eng
     assert by_name["model-b"]["loaded"] is False
 
 
+def test_gui_models_list_reports_a_speech_model_loaded_via_path_match(gui_app_with_engines, monkeypatch):
+    """A registered model that is the resident speech model (never in _engines)
+    shows loaded:true on the Models page and keeps its model_type."""
+    from localm.inference import reranker as rr
+    from localm.inference import speech
+    app, _load_direct = gui_app_with_engines
+    monkeypatch.setattr(emb, "loaded_path", lambda: None)
+    monkeypatch.setattr(rr, "reranker_info", lambda: None)
+    monkeypatch.setattr(speech, "speech_info", lambda: {
+        "name": "voice", "path": "Z:/models/voice.gguf", "sample_rate": 24000})
+    with patch("localm.config.load_registry", return_value={
+        "voice": {"path": "Z:/models/voice.gguf", "model_type": "tts"},
+        "model-b": {"path": "Z:/models/model-b.gguf"},
+    }):
+        with TestClient(app) as client:
+            r = client.get("/api/models")
+    by_name = {m["name"]: m for m in r.json()["models"]}
+    assert by_name["voice"]["loaded"] is True and by_name["voice"]["model_type"] == "tts"
+    assert by_name["model-b"]["loaded"] is False
+
+
 def test_gui_models_list_marks_nothing_loaded_without_a_resident_reranker(gui_app_with_engines, monkeypatch):
     from localm.inference import reranker as rr
     app, _load_direct = gui_app_with_engines

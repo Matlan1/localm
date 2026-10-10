@@ -95,7 +95,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # reranker lock, which a load holds for its whole duration.
         from localm.inference import reranker as _reranker_mod
         rer_info = await loop.run_in_executor(get_plugin_executor(), _reranker_mod.reranker_info)
-        resident_paths = [p for p in (emb_path, rer_info["path"] if rer_info else None) if p]
+        from localm.inference import speech as _speech_mod
+        tts_info = await loop.run_in_executor(get_plugin_executor(), _speech_mod.speech_info)
+        resident_paths = [p for p in (emb_path, rer_info["path"] if rer_info else None,
+                                      tts_info["path"] if tts_info else None) if p]
         rows = []
         for name, entry in sorted(registry.items()):
             epath = _entry_path(entry)
