@@ -37,7 +37,8 @@ function setup({ rejectWith = null } = {}) {
   };
   const { window } = loadApp({ fetchImpl: impl });
   window.maybeCompactConversation = async () => {};
-  window.probeAudioSeconds = async () => 4;
+  const realWavSeconds = window.wavSeconds;
+  window.wavSeconds = async (b) => (b.size === WAV_BYTES.length ? 4 : realWavSeconds(b));
   window.__blobs = [];
   window.URL.createObjectURL = (blob) => { window.__blobs.push(blob); return `blob:test/${window.__blobs.length}`; };
   window.__revoked = [];
@@ -159,16 +160,6 @@ test("a file over the server's size limit is refused before it is read", async (
   assert.equal(reads, 0, "the file was never read");
 });
 
-test("a clip the browser reports as longer than 10 minutes is removed again", async () => {
-  const { window } = setup();
-  window.probeAudioSeconds = async () => 601;
-  window.addAttachedFiles([wavFile(window, "long.wav")]);
-  await waitFor(() => /min/.test(toastText(window)), "the refusal toast");
-  assert.match(toastText(window), /long\.wav is about 11 min long; an audio clip can be at most 10 min/);
-  assert.equal(clipCount(window), 0);
-  assert.equal(window.document.querySelectorAll("#attach-chips .chip").length, 0);
-});
-
 /** A RIFF/WAVE byte array: *seconds* of 8 kHz mono 8-bit audio, an optional
  *  LIST chunk before the data, and the data size field overridden by *sizeField*. */
 function wavBytes({ seconds, list = false, sizeField = null }) {
@@ -195,23 +186,22 @@ test("wavSeconds reads the length from the WAV header, with extra chunks and str
   assert.equal(await secs(wavBytes({ seconds: 3 })), 3);
   assert.equal(await secs(wavBytes({ seconds: 3, list: true })), 3);
   assert.equal(await secs(wavBytes({ seconds: 3, sizeField: 0xFFFFFFFF })), 3, "an unknown data size uses the bytes present");
-  assert.equal(await secs(WAV_BYTES), 0, "a truncated header yields 0, not a guess");
+  assert.equal(await secs(WAV_BYTES.slice(0, 15)), 0, "a truncated header yields 0, not a guess");
   assert.equal(await secs(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])), 0, "not a WAV");
 });
 
-test("an 11 minute WAV is refused from its header even when the browser cannot play it", async () => {
+test("an 11 minute WAV is refused from its header and its chip is removed", async () => {
   const { window } = setup();
-  window.probeAudioSeconds = async () => 0;
   const file = new window.File([wavBytes({ seconds: 601 })], "long.wav", { type: "audio/wav" });
   window.addAttachedFiles([file]);
   await waitFor(() => /min/.test(toastText(window)), "the refusal toast");
-  assert.match(toastText(window), /long\.wav is about 11 min long/);
+  assert.match(toastText(window), /long\.wav is about 11 min long; an audio clip can be at most 10 min/);
   assert.equal(clipCount(window), 0);
+  assert.equal(window.document.querySelectorAll("#attach-chips .chip").length, 0);
 });
 
 test("a short WAV shows its length from the header", async () => {
   const { window } = setup();
-  window.probeAudioSeconds = async () => 0;
   window.addAttachedFiles([new window.File([wavBytes({ seconds: 75 })], "mid.wav", { type: "audio/wav" })]);
   await waitFor(() => clipCount(window) === 1 && evalIn(window, "chat.clips[0].seconds") === 75, "the length");
   assert.match(window.document.querySelector("#attach-chips .chip").textContent, /mid\.wav \(1:15\)/);
@@ -232,9 +222,9 @@ test("an MP3 is attached without a WAV header check", async () => {
   assert.equal(evalIn(window, "chat.clips[0].format"), "mp3");
 });
 
-test("a clip whose length the browser cannot read stays attached for the server to judge", async () => {
+test("a clip whose length cannot be read stays attached for the server to judge", async () => {
   const { window } = setup();
-  window.probeAudioSeconds = async () => 0;
+  window.wavSeconds = async () => 0;
   await attachWav(window);
   assert.equal(evalIn(window, "chat.clips[0].seconds"), 0);
   assert.doesNotMatch(window.document.querySelector("#attach-chips .chip").textContent, /\(\d+:\d\d\)/);
@@ -414,10 +404,10 @@ test("wireParts drops an audio part that has no data instead of throwing", () =>
   ]);
 });
 
-test("a length probe that finishes after the clip was sent shows no refusal", async () => {
+test("a length read that finishes after the clip was sent shows no refusal", async () => {
   const { window } = setup();
   let finish;
-  window.probeAudioSeconds = () => new Promise((resolve) => { finish = resolve; });
+  window.wavSeconds = () => new Promise((resolve) => { finish = resolve; });
   window.addAttachedFiles([wavFile(window)]);
   await waitFor(() => clipCount(window) === 1, "the clip");
   runScript(window, "chat.clips = [];");

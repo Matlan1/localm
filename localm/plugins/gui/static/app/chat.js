@@ -2376,30 +2376,11 @@ export function wavSeconds(blob) {
   });
 }
 
-/** The duration in seconds of the audio *blob* as the browser reports it, or 0
- *  when the browser cannot read it (the server then decides). */
-export function probeAudioSeconds(blob) {
-  return new Promise((resolve) => {
-    const a = document.createElement("audio");
-    const url = URL.createObjectURL(blob);
-    const done = (v) => {
-      clearTimeout(timer);
-      a.removeAttribute("src");
-      URL.revokeObjectURL(url);
-      resolve(v);
-    };
-    const timer = setTimeout(() => done(0), 5000);
-    a.preload = "metadata";
-    a.onloadedmetadata = () => done(Number.isFinite(a.duration) ? a.duration : 0);
-    a.onerror = () => done(0);
-    a.src = url;
-  });
-}
-
 /** Audio attachment: kept in memory as base64 and sent as an input_audio part.
- *  A file over the server's size limit is refused before it is read. The
- *  duration is probed after the chip appears; a clip the browser reports as
- *  longer than the server's limit is removed again. */
+ *  A file over the server's size limit is refused before it is read. A WAV's
+ *  length is read from its header after the chip appears; a WAV longer than the
+ *  server's limit is removed again. Other formats show no length and the server
+ *  judges them. */
 export async function attachAudio(file) {
   if (file.size > AUDIO_MAX_BYTES) {
     throw new Error(t("chat.audio.tooLarge", {
@@ -2421,7 +2402,7 @@ export async function attachAudio(file) {
   const clip = { name: file.name, data, format, size: file.size, seconds: 0 };
   chat.clips.push(clip);
   renderAttachChips();
-  const seconds = (await wavSeconds(file)) || (await probeAudioSeconds(file));
+  const seconds = await wavSeconds(file);
   if (chat.clips.indexOf(clip) === -1) return;
   if (seconds > AUDIO_MAX_SECONDS) {
     chat.clips.splice(chat.clips.indexOf(clip), 1);
