@@ -9,6 +9,9 @@ command at a time:
     ("generate_image", {"prompt", "negative_prompt", "width", "height", "steps",
                         "cfg_scale", "guidance", "seed", "strength", "sample_method",
                         "scheduler", "clip_skip", "init_image"})
+    ("generate_video", {"prompt", "negative_prompt", "width", "height", "video_frames",
+                        "fps", "steps", "cfg_scale", "flow_shift", "seed",
+                        "sample_method", "init_image"})
     ("shutdown", None)
 
 ``resp_q``: zero or more events, then exactly one final reply per command:
@@ -329,6 +332,90 @@ def _do_generate_image(payload, cancel_event):
     return "ok", result
 
 
+def _do_generate_video(payload, cancel_event):
+    from . import _binding as b
+    lib, ctx = _State.lib, _State.ctx
+    if lib is None or ctx is None:
+        raise RuntimeError("no model is loaded in the media worker")
+    p = b._init_struct(lib, "sd_vid_gen_params_init", b.sd_vid_gen_params_t)
+    prompt = str(payload.get("prompt") or "")
+    negative = str(payload.get("negative_prompt") or "")
+    _State.redact = tuple(s for s in (prompt, negative) if len(s) >= 4)
+    p.prompt = prompt.encode("utf-8")
+    p.negative_prompt = negative.encode("utf-8")
+    p.width = int(payload["width"])
+    p.height = int(payload["height"])
+    p.video_frames = int(payload["video_frames"])
+    p.fps = int(payload.get("fps") or 16)
+    seed = payload.get("seed")
+    p.seed = int(seed) if seed is not None else -1
+    if payload.get("steps"):
+        p.sample_params.sample_steps = int(payload["steps"])
+    if payload.get("cfg_scale") is not None:
+        p.sample_params.guidance.txt_cfg = float(payload["cfg_scale"])
+    if payload.get("flow_shift") is not None:
+        p.sample_params.flow_shift = float(payload["flow_shift"])
+    method = _enum_from_name(lib, "sample_method", payload.get("sample_method"))
+    if method is not None:
+        p.sample_params.sample_method = method
+    keep = None
+    init = payload.get("init_image")
+    if init:
+        w, h, c, data = int(init["width"]), int(init["height"]), int(init["channel"]), init["data"]
+        if len(data) != w * h * c:
+            raise ValueError("init image buffer does not match its size")
+        keep = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        p.init_image = b.sd_image_t(w, h, c, ctypes.cast(keep, ctypes.POINTER(ctypes.c_uint8)))
+    frames = ctypes.POINTER(b.sd_image_t)()
+    count = ctypes.c_int(0)
+    audio = ctypes.POINTER(b.sd_audio_t)()
+    fps_out = ctypes.c_int(0)
+    lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
+    _State.last_errors = []
+    _State.sample_steps = int(p.sample_params.sample_steps)
+    _State.decoding = False
+    _State.generating = True
+    try:
+        ok = lib.generate_video(ctx, ctypes.byref(p), ctypes.byref(frames), ctypes.byref(count),
+                                ctypes.byref(audio), ctypes.byref(fps_out))
+    finally:
+        _State.generating = False
+        _State.redact = ()
+        del keep
+    cancelled = cancel_event.is_set()
+    try:
+        if not ok or count.value < 1 or not frames:
+            if cancelled:
+                return "cancelled", "Generation cancelled."
+            raise RuntimeError(_error_with_native("stable-diffusion.cpp video generation failed"))
+        first = frames[0]
+        w, h, c = int(first.width), int(first.height), int(first.channel)
+        out_frames = []
+        for i in range(count.value):
+            img = frames[i]
+            if not img.data or (int(img.width), int(img.height), int(img.channel)) != (w, h, c):
+                raise RuntimeError("stable-diffusion.cpp returned an incomplete frame")
+            out_frames.append(ctypes.string_at(img.data, w * h * c))
+        out_audio = None
+        if audio and audio.contents.data and audio.contents.sample_count:
+            a = audio.contents
+            n = int(a.sample_count) * int(a.channels)
+            out_audio = {"sample_rate": int(a.sample_rate), "channels": int(a.channels),
+                         "sample_count": int(a.sample_count),
+                         "data": ctypes.string_at(a.data, n * 4)}
+        result = {"width": w, "height": h, "channel": c, "frames": out_frames,
+                  "fps": int(fps_out.value) or int(p.fps), "audio": out_audio,
+                  "seed": int(p.seed)}
+    finally:
+        if frames:
+            lib.free_sd_images(frames, count.value)
+        if audio:
+            lib.free_sd_audio(audio)
+    if cancelled:
+        return "cancelled", "Generation cancelled."
+    return "ok", result
+
+
 def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
     """Child entry point: serve commands until "shutdown" or a closed queue."""
     _arm_crash_trace(crash_trace_path)
@@ -375,6 +462,9 @@ def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
                 resp_q.put(("ok", _do_load(payload)))
             elif name == "generate_image":
                 kind, value = _do_generate_image(payload, cancel_event)
+                resp_q.put((kind, value))
+            elif name == "generate_video":
+                kind, value = _do_generate_video(payload, cancel_event)
                 resp_q.put((kind, value))
             else:
                 resp_q.put(("error", f"unknown sd.cpp worker command: {name!r}"))

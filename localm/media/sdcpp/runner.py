@@ -215,6 +215,17 @@ class SdRunner:
         return self._request("generate_image", params, timeout,
                              on_event=on_event, cancel_check=cancel_check)
 
+    def generate_video(self, params: dict, *, timeout: float = GENERATE_TIMEOUT,
+                       on_event: Optional[EventCallback] = None,
+                       cancel_check: Optional[Callable[[], bool]] = None) -> dict:
+        """Generate one clip with the loaded model. Returns ``{"width",
+        "height", "channel", "frames", "fps", "audio", "seed"}`` (``frames`` a
+        list of raw pixel buffers; ``audio`` None or interleaved float32 samples
+        with ``sample_rate``, ``channels`` and ``sample_count``); raises
+        :class:`SdCancelled` or :class:`SdWorkerError`."""
+        return self._request("generate_video", params, timeout,
+                             on_event=on_event, cancel_check=cancel_check)
+
     def _reset(self) -> None:
         for q in (self._req_q, self._resp_q):
             if q is not None:
