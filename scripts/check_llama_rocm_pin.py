@@ -41,6 +41,10 @@ Fails soft on the API: unreachable, rate-limited, or a malformed response all
 print a clearly-labelled "could not check" and exit 0 in default mode (2 under
 --gate) - never a false "up to date".
 
+Environment:
+    GITHUB_TOKEN          sent as a bearer token so the API calls use the
+                          authenticated quota
+
 Usage:
     python scripts/check_llama_rocm_pin.py
     python scripts/check_llama_rocm_pin.py --pinned b1300   # sanity-check a hypothetical
@@ -113,6 +117,16 @@ def _build_number(tag: str):
     return int(m.group(1)) if m else None
 
 
+def _headers() -> dict:
+    """GitHub API request headers, with ``Authorization`` when GITHUB_TOKEN is set."""
+    headers = {"Accept": "application/vnd.github+json",
+               "User-Agent": "localm-check-llama-rocm-pin"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _parse_date(value) -> _dt.datetime | None:
     """'2026-08-12T12:18:24Z' -> aware UTC datetime; anything else -> None."""
     if not isinstance(value, str):
@@ -134,8 +148,7 @@ def upstream_releases() -> tuple[list, str]:
     repo."""
     url = f"https://api.github.com/repos/{_REPO}/releases?per_page={_PER_PAGE}"
     req = urllib.request.Request(
-        url, headers={"Accept": "application/vnd.github+json",
-                      "User-Agent": "localm-check-llama-rocm-pin"})
+        url, headers=_headers())
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             releases = json.loads(r.read().decode("utf-8"))
@@ -186,8 +199,7 @@ def _fetch_release_by_tag_http(repo: str, tag: str):
     release_date(), which never lets that propagate."""
     url = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
     req = urllib.request.Request(
-        url, headers={"Accept": "application/vnd.github+json",
-                      "User-Agent": "localm-check-llama-rocm-pin"})
+        url, headers=_headers())
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
         return json.loads(r.read().decode("utf-8"))
 

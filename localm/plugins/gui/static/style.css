@@ -2184,6 +2184,8 @@ div:has(> .data-table) { overflow-x: auto; }
 
 /* message images */
 .msg-body .msg-img { max-width: 280px; border-radius: 8px; border: 1px solid var(--border); display: block; margin: 6px 0; }
+.msg-body .msg-clip { margin: 6px 0; max-width: 360px; }
+.msg-body .msg-clip-name { font-size: 12px; color: var(--muted, inherit); margin-bottom: 2px; }
 
 /* Full-view image lightbox (VIS-2): click a chat image to view / save / copy. */
 .img-lightbox {

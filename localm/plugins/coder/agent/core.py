@@ -420,7 +420,9 @@ class Agent(
 
         # External tools (MCP, then plugins, then skills) are registered BEFORE the
         # system prompt is built so the model learns about them; each step warns and
-        # continues on failure - external code must never break the agent.
+        # continues on failure - external code must never break the agent. A
+        # restricted session registers none of them: it starts no MCP server,
+        # imports no plugin module and discovers no skill.
         self._init_mcp_tools(cwd)
         self._init_plugin_tools()
         self._init_skill_tools(cwd)
@@ -590,6 +592,8 @@ class Agent(
         # agent did not register (another project's server) is disabled for it.
         self._mcp_docs: str = ""
         self._mcp_tool_names: frozenset = frozenset()
+        if self.restricted:
+            return
         try:
             if self.parent is not None:
                 self._mcp_docs = getattr(self.parent, "_mcp_docs", "") or ""
@@ -614,6 +618,8 @@ class Agent(
         # plugins, the same way as MCP and before the prompt is built. External
         # code defaults to "destructive" (needs confirmation). Failures warn.
         self._plugin_docs: str = ""
+        if self.restricted:
+            return
         try:
             from ..plugin_tools import register_plugin_tools
             plugin_names, plugin_warnings = register_plugin_tools()
@@ -632,6 +638,8 @@ class Agent(
         # the same way as MCP/plugins and before the prompt is built. Read-only
         # tools; a skill's prescribed actions still go through the usual confirm.
         self._skill_docs: str = ""
+        if self.restricted:
+            return
         try:
             from ..skills import register_skill_tools
             skill_names, skill_warnings = register_skill_tools(cwd)
@@ -950,8 +958,14 @@ class Agent(
     def disabled_tools(self) -> frozenset:
         """Tools this session may never run: the explicit set, plus every
         ``mcp_*`` tool in the live registry that this agent did not register
-        itself (another project's server), read fresh on every access."""
-        return self._disabled_tools | self._foreign_mcp_names()
+        itself (another project's server), plus, for a restricted session, every
+        live registry tool outside ``SAFE_RESTRICTED_TOOLS`` (so a plugin or
+        skill tool another session registers later is denied too). Read fresh
+        on every access."""
+        disabled = self._disabled_tools | self._foreign_mcp_names()
+        if getattr(self, "restricted", False):
+            disabled |= frozenset(_agent.TOOL_REGISTRY) - SAFE_RESTRICTED_TOOLS
+        return disabled
 
     @disabled_tools.setter
     def disabled_tools(self, value) -> None:

@@ -119,6 +119,20 @@ class TestWorkerKeepsTheErrorType:
         assert _runner._INPUT_ERROR_TYPES[name] is cls
         assert issubclass(cls, UnsupportedInputError)
 
+    @pytest.mark.parametrize("name", ["AudioInputError", "AudioDecodeUnavailable",
+                                      "VisionInputError", "ImageDecodeUnavailable",
+                                      "UnsupportedInputError"])
+    def test_the_parent_raises_the_tagged_type_from_a_multiplexed_stream(self, name):
+        from localm.inference.backends import base
+        from localm.inference.backends.llamacpp import _runner
+        err = _runner._stream_error(("error", "refused", name))
+        assert type(err) is getattr(base, name)
+        assert not isinstance(err, RuntimeError)
+
+    def test_an_untagged_stream_error_is_still_a_worker_fault(self):
+        from localm.inference.backends.llamacpp import _runner
+        assert isinstance(_runner._stream_error(("error", "boom")), RuntimeError)
+
     def test_the_child_tags_the_subclass_and_keeps_serving(self, monkeypatch):
         import queue
 

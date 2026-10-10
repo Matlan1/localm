@@ -325,13 +325,13 @@ def _in_order(text: str, *fragments: str) -> None:
 
 ROCM_CPU = {"ggml-base.dll": b"base@b10270", "ggml-cpu-x64.dll": b"cpu-x64",
             "ggml-cpu-haswell.dll": b"cpu-haswell", "ggml-cpu-zen4.dll": b"cpu-zen4",
-            "libomp140.x86_64.dll": b"openmp"}
+            "libomp.dll": b"openmp"}
 
 
-def _rocm_cpu_overlay(world, *, scores=None, digest_ok=True):
+def _rocm_cpu_overlay(world, *, scores=None, digest_ok=True, files=None):
     """Serve the pinned upstream CPU archive the amd-rocm provision installs its
     CPU backend from, with this CPU's ggml_backend_score() per variant."""
-    body = _zip(ROCM_CPU, 7)
+    body = _zip(ROCM_CPU if files is None else files, 7)
     world.mp.setitem(sl._PINNED_FALLBACK_SHA256, sl._ROCM_CPU_ASSET,
                      _sha(body) if digest_ok else "0" * 64)
     world.cpu_scores = ({"ggml-cpu-x64.dll": 1, "ggml-cpu-haswell.dll": 64}
@@ -613,11 +613,11 @@ def test_windows_amd_rocm_provision_keeps_blas_kernel_layout(world, pin, note):
               f"CPU backend: ggml-cpu-haswell from llama.cpp {sl._ROCM_CPU_TAG} (SIMD), "
               "replacing the amd-rocm build's own", "OK - amd-rocm runtime loads on this machine.")
     assert world.files() == [".localm-backend", ".localm-cpu-overlay", "LICENSE.llama-cpp",
-                             "ggml-cpu.dll", "ggml-hip.dll", "libomp140.x86_64.dll", "llama.dll",
+                             "ggml-cpu.dll", "ggml-hip.dll", "libomp.dll", "llama.dll",
                              "rocblas.dll", "rocblas/library/Kernels.so-000-gfx1030.hsaco",
                              "rocblas/library/TensileLibrary_gfx1030.dat"]
     assert (world.lib / "ggml-cpu.dll").read_bytes() == b"cpu-haswell"
-    assert (world.lib / "libomp140.x86_64.dll").read_bytes() == b"openmp"
+    assert (world.lib / "libomp.dll").read_bytes() == b"openmp"
     assert json.loads((world.lib / ".localm-cpu-overlay").read_text(encoding="utf-8")) == {
         "tag": sl._ROCM_CPU_TAG, "variant": "ggml-cpu-haswell.dll"}
     assert (world.lib / "LICENSE.llama-cpp").read_text(encoding="utf-8") == sl._LLAMA_CPP_MIT_NOTICE
@@ -641,11 +641,40 @@ def _assert_kept_the_amd_rocm_cpu_backend(world, r, why):
               f"({why}", "Retry with localm setup-llama --backend amd-rocm --force.",
               "OK - amd-rocm runtime loads on this machine.")
     assert (world.lib / "ggml-cpu.dll").read_bytes() == b"ggml-cpu@rocm"
+    assert not (world.lib / "libomp.dll").exists()
     assert not (world.lib / "libomp140.x86_64.dll").exists()
     assert not (world.lib / "ggml-cpu.dll.amd-rocm").exists()
     assert not (world.lib / ".localm-cpu-overlay").is_file()
     assert world.marker() == f"amd-rocm {ROCM}\n"
     assert sl.check_runtime_update()["newer"] is True
+
+
+def test_amd_rocm_cpu_overlay_copies_the_legacy_openmp_runtime_name(world):
+    _amd_rocm_release(world)
+    files = {k: v for k, v in ROCM_CPU.items() if k != "libomp.dll"}
+    files["libomp140.x86_64.dll"] = b"openmp-legacy"
+    _rocm_cpu_overlay(world, files=files)
+    r = world.invoke("--backend", "amd-rocm")
+    assert r.exit_code == 0, r.output
+    assert (world.lib / "ggml-cpu.dll").read_bytes() == b"cpu-haswell"
+    assert (world.lib / "libomp140.x86_64.dll").read_bytes() == b"openmp-legacy"
+    assert not (world.lib / "libomp.dll").exists()
+    assert world.marker() == f"amd-rocm {sl._ROCM_BUILD}\n"
+
+
+def test_amd_rocm_cpu_overlay_rollback_keeps_an_openmp_runtime_the_build_ships(world):
+    world.vendors, world.gpu_names = ["amd"], "amd radeon rx 6900 xt"
+    world.release(LEMONADE, ROCM, [(f"llama-{ROCM}-windows-rocm-gfx103X-x64.zip",
+                                    _zip({**AMD_ROCM, "libomp.dll": b"omp@rocm"}), "ok")])
+    _rocm_cpu_overlay(world)
+    world.probes = [(0, ""),
+                    (1, "OSError: [WinError 127] The specified procedure could not be found")]
+    r = world.invoke("--backend", "amd-rocm")
+    assert r.exit_code == 0, r.output
+    assert (world.lib / "ggml-cpu.dll").read_bytes() == b"ggml-cpu@rocm"
+    assert (world.lib / "libomp.dll").read_bytes() == b"omp@rocm"
+    assert not (world.lib / ".localm-cpu-overlay").is_file()
+    assert world.marker() == f"amd-rocm {ROCM}\n"
 
 
 def test_amd_rocm_cpu_overlay_that_does_not_load_is_rolled_back(world):

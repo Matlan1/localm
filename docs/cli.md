@@ -815,6 +815,10 @@ Four things the table cannot express, and each of them matters:
 - **Restricted sessions are allowlisted, not denylisted.** A newly added tool is
   unavailable to a shared session until it is explicitly added, so this column
   fails closed rather than open.
+- **A restricted session leaves the project's coder configuration alone.** It
+  starts no MCP server, loads no plugin tools or skills, and its write tools refuse
+  any path inside a `.localcoder` directory, at any depth. A `search_replace`
+  sweep skips matching files there and lists them in its result.
 - **The `--scope` glob confines file tools only.** `run_shell` and `run_tests`
   start a process, which a path check cannot bound, so a command can still reach
   outside the scope. Disable those tools for a hard boundary.
