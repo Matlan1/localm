@@ -92,8 +92,9 @@ ALWAYS_REQUIRED = ("isolation", "release_assets", "install", "launcher_version",
 ADVISORY_CHECKS = ("music_gpu",)
 
 NOT_MEASURED = [
-    "backends other than the one run on this machine (cuda, cpu, metal)",
+    "the cuda and metal backends (they need that hardware)",
     "builds other than the one run on this machine",
+    "text generation on backends other than the one run on this machine",
     "ACE-Step model variants other than localm's default set",
     "music quality beyond not-silent and not-constant",
     "music tracks longer than a few seconds",
@@ -191,6 +192,20 @@ def parse_release_assets(body) -> dict:
     return out
 
 
+def github_token() -> str | None:
+    """$GITHUB_TOKEN, else the token `gh auth token` prints, else None."""
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+    try:
+        r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
+                           timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = (r.stdout or "").strip()
+    return out if r.returncode == 0 and out else None
+
+
 def fetch_release_body(tag: str, opener=None):
     """The decoded GitHub API body of the release tagged *tag*."""
     if opener is None:
@@ -198,7 +213,7 @@ def fetch_release_body(tag: str, opener=None):
         opener = verified_urlopen
     headers = {"Accept": "application/vnd.github+json",
                "User-Agent": "localm-confirm-koboldcpp"}
-    token = os.environ.get("GITHUB_TOKEN")
+    token = github_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(RELEASE_URL % (UPSTREAM_REPO, tag), headers=headers)

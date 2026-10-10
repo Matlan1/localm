@@ -115,6 +115,60 @@ def test_table_json_round_trip_and_rejects_malformed(cf):
             cf.table_from_json(bad)
 
 
+class _Resp:
+    def __init__(self, raw):
+        self.raw = raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self.raw
+
+
+def test_the_release_request_carries_the_environment_token(cf, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-env")
+    seen = []
+
+    def opener(req, timeout=None):
+        seen.append(req)
+        return _Resp(b'{"assets": []}')
+    assert cf.fetch_release_body("v1.2", opener=opener) == {"assets": []}
+    assert seen[0].get_header("Authorization") == "Bearer tok-env"
+    assert seen[0].full_url.endswith("/repos/LostRuins/koboldcpp/releases/tags/v1.2")
+
+
+def test_without_an_environment_token_the_gh_token_is_used(cf, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="tok-gh\n", stderr="")
+    monkeypatch.setattr(cf.subprocess, "run", fake_run)
+    assert cf.github_token() == "tok-gh" and calls == [["gh", "auth", "token"]]
+
+
+@pytest.mark.parametrize("outcome", ["missing", "failed", "empty"])
+def test_no_token_anywhere_means_an_anonymous_request(cf, monkeypatch, outcome):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def fake_run(cmd, **kw):
+        if outcome == "missing":
+            raise FileNotFoundError("gh")
+        return subprocess.CompletedProcess(cmd, 1 if outcome == "failed" else 0,
+                                           stdout="", stderr="")
+    monkeypatch.setattr(cf.subprocess, "run", fake_run)
+    assert cf.github_token() is None
+    seen = []
+    cf.fetch_release_body("v1.2", opener=lambda req, timeout=None:
+                          (seen.append(req), _Resp(b"{}"))[1])
+    assert seen[0].get_header("Authorization") is None
+
+
 # --------------------------------------------------------------------------- #
 #  Verdict and receipt                                                         #
 # --------------------------------------------------------------------------- #

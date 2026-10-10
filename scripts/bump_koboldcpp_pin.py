@@ -28,7 +28,8 @@ Without --write it prints a unified diff and changes nothing. It refuses
 
 Exit codes: 0 when the edit was applied or the dry run completed; 1 refused.
 
-Environment: GITHUB_TOKEN, when set, is sent as a bearer token to the API.
+Environment: GITHUB_TOKEN, else the token `gh auth token` prints, is sent as a
+bearer token to the API.
 
 Usage:
     python scripts/bump_koboldcpp_pin.py --tag v1.123 --receipt r.json
