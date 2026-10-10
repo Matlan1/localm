@@ -464,6 +464,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **"Delete saved data" now also removes the voices folder.** The named reference voices
+  for text-to-speech were left behind. A legacy data folder with no record of what was in it
+  before LocaLM keeps a voices folder.
 - **ACE-Step music model files are no longer listed as chat models.** A pulled ACE-Step
   diffusion model, VAE or text encoder is registered as that kind of model and the planner
   as a non-chat model, and choosing any of them for chat says it is a music generation
