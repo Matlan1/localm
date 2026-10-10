@@ -34,10 +34,11 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
 ``req_q`` (parent -> child), one command processed at a time:
     ("load", {model_path, mmproj_path, n_ctx, n_gpu_layers, n_ctx_max, n_ctx_grow,
               vram_overhead_bytes, gpu_split_ratios, n_cpu_moe, use_mmap,
-              main_gpu?, adapters?})
+              main_gpu?, adapters?, n_parallel?})
     ("chat_stream", {messages, max_tokens, temperature, top_p, top_k,
                       repeat_penalty, grammar, grammar_lazy, grammar_triggers, seed,
                       thinking?, min_p?, presence_penalty?, frequency_penalty?})
+    ("chat_stream_mux", {sid, kwargs})   - multiplexed protocol only, see below
     ("count_tokens", text)
     ("count_messages_tokens", messages)
     ("check_grammar", grammar)
@@ -94,21 +95,34 @@ bounded timeout.
 signal takes effect even while the main thread is blocked in a native call:
     ("cancel_load",)
     ("cancel_stream",)
+    ("cancel_stream", sid)               - multiplexed protocol only
+
+MULTIPLEXED PROTOCOL. A load whose reply reports ``parallel_slots`` > 1 switches
+the runner to it for the rest of the child's life. Each stream is sent as
+``("chat_stream_mux", {"sid": sid, "kwargs": kwargs})``; the child runs it on its
+own thread, so streams and simple commands proceed side by side, and wraps every
+envelope of that stream as ``("stream", sid, envelope)`` with the envelopes
+above. ``("cancel_stream", sid)`` stops that stream only. On the parent a demux
+thread owns ``resp_q`` and routes stream envelopes by sid and every other
+envelope to the simple-command reply queue. A fault that would end the child on
+the inline path still ends it: the stream thread exits the process with code 1.
 """
 
 from __future__ import annotations
 
+import itertools
 import multiprocessing as mp
 import os
 import queue as _queue
 import re
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from localm.inference.backends.base import (
     AdapterLoadError, AudioDecodeUnavailable, AudioInputError, ContextCapacityExceededError,
     GrammarUnsupportedError, ImageDecodeUnavailable, InvalidGrammarError, ModelLoadCancelled,
+    PerThread,
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
     UnsupportedInputError, UnsupportedModelRoleError, VisionInputError,
     stream_stop_requested)
@@ -256,9 +270,96 @@ def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None,
         raise
 
 
+def _serve_stream(worker, payload: dict, emit: Callable, cancel_event) -> None:
+    """Child side: run one ``chat_stream`` on *worker* with *payload*, sending
+    its envelopes through *emit*: ``status`` and ``chunk`` while it runs, then
+    ``done``, or a tagged ``error`` for a refusal that leaves the model
+    unharmed. Stops early, still ending with ``done``, once *cancel_event* is
+    set. Any other exception propagates: the caller must not keep serving
+    from this model."""
+    try:
+        def _worker_status(s: str) -> None:
+            emit(("status", s))
+        gen = worker.chat_stream(on_status=_worker_status, **payload)
+        for token in gen:
+            if cancel_event.is_set():
+                gen.close()
+                break
+            emit(("chunk", token))
+        emit(("done", {
+            "finish_reason": worker.last_finish_reason,
+            "grammar_unsupported": worker.grammar_unsupported_this_call,
+            "chatml_fallback_reason": worker.chatml_fallback_reason,
+            "mtp_status": worker.mtp_status,
+            "mtp_active": worker.mtp_active_this_call,
+            "mtp_call_status": worker.mtp_call_status,
+            "mtp_drafted": worker.mtp_drafted,
+            "mtp_accepted": worker.mtp_accepted,
+            "mtp_steps": worker.mtp_steps,
+            "mtp_paused_steps": worker.mtp_paused_steps,
+            "mtp_skipped": worker.mtp_skipped,
+            "speculation": worker.spec_report,
+        }))
+    # Each arm below is a refusal raised before any native decode, or by a
+    # native call that returned a status; the loaded model keeps serving.
+    except ContextCapacityExceededError as e:
+        emit(("error", str(e), "ContextCapacityExceededError"))
+    except PretokenizerUnsafeInputError as e:
+        emit(("error", str(e), "PretokenizerUnsafeInputError"))
+    except GrammarUnsupportedError as e:
+        emit(("error", str(e), "GrammarUnsupportedError"))
+    except InvalidGrammarError as e:
+        emit(("error", str(e), "InvalidGrammarError"))
+    except UnsupportedInputError as e:
+        tag = type(e).__name__
+        emit(("error", str(e),
+              tag if tag in _INPUT_ERROR_TYPES else "UnsupportedInputError"))
+
+
+def _serve_mux_stream(worker, sid: int, payload: dict, resp_q, cancel_event,
+                      cancels: dict, shutting_down=None) -> None:
+    """Child side, one thread per multiplexed stream: :func:`_serve_stream`
+    with every envelope wrapped as ``("stream", sid, envelope)`` and
+    *cancel_event* published as the thread's stream stop check. An exception
+    :func:`_serve_stream` lets through is logged and ends the whole process
+    with exit code 1, as an uncaught fault on the inline path does; once
+    *shutting_down* is set (the worker is closing the model) it is sent as an
+    untagged ``error`` envelope instead."""
+    from localm.inference.backends.base import stream_stop_check
+
+    def emit(envelope) -> None:
+        resp_q.put(("stream", sid, envelope))
+
+    try:
+        with stream_stop_check(cancel_event.is_set):
+            _serve_stream(worker, payload, emit, cancel_event)
+    except Exception as exc:
+        if shutting_down is None or not shutting_down.is_set():
+            _exit_after_stream_fault(sid)
+        emit(("error", str(exc)))
+    except BaseException:
+        _exit_after_stream_fault(sid)
+    finally:
+        cancels.pop(sid, None)
+
+
+def _exit_after_stream_fault(sid: int) -> None:
+    """Log the exception being handled and end the process with exit code 1."""
+    from localm.debuglog import attach_child_logging, logger
+    attach_child_logging()
+    logger.critical("gguf worker stream %d crashed", sid, exc_info=True)
+    for handler in logger.handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    os._exit(1)
+
+
 def _runner_main(req_q, resp_q, ctrl_q) -> None:
     """Long-lived child: owns one GgufWorker (one loaded model) for its whole
-    process lifetime, dispatching one request at a time."""
+    process lifetime, dispatching one command at a time. A multiplexed stream
+    is handed to its own thread, so the next command does not wait for it."""
     from localm.debuglog import attach_child_logging
     attach_child_logging()   # so native load-failure diagnostics captured via
                               # _quiet_stderr/_capture_stderr land in the shared
@@ -285,6 +386,13 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
 
     load_cancel_event = threading.Event()
     stream_cancel_event = threading.Event()
+    # Cancel events of the multiplexed streams in flight, by stream id, and the
+    # ids cancelled before their stream was started; both under mux_lock.
+    mux_cancels: dict = {}
+    early_cancels: set = set()
+    mux_lock = threading.Lock()
+    mux_threads: list = []
+    shutting_down = threading.Event()
 
     def _control_loop() -> None:
         while True:
@@ -295,7 +403,15 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             if kind == "cancel_load":
                 load_cancel_event.set()
             elif kind == "cancel_stream":
-                stream_cancel_event.set()
+                if isinstance(msg, tuple) and len(msg) > 1:
+                    with mux_lock:
+                        event = mux_cancels.get(msg[1])
+                        if event is None:
+                            early_cancels.add(msg[1])
+                    if event is not None:
+                        event.set()
+                else:
+                    stream_cancel_event.set()
 
     threading.Thread(target=_control_loop, daemon=True, name="localm-gguf-ctrl").start()
 
@@ -306,15 +422,18 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
         if cmd is None:
             return
         name = cmd[0]
-        payload = cmd[1] if len(cmd) > 1 else None
+        payload: Any = cmd[1] if len(cmd) > 1 else None
 
         fault = os.environ.get(_FAULT_ENV)
         if fault:
             _simulate_fault(fault)   # test-only; never returns cleanly
 
         if name == "shutdown":
+            shutting_down.set()
             if worker is not None:
                 worker.close()
+            for thread in mux_threads:
+                thread.join(timeout=_SHUTDOWN_STREAM_JOIN_S)
             return
 
         if name == "load":
@@ -348,76 +467,24 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
         if name == "chat_stream":
             stream_cancel_event.clear()   # a stale cancel from a PRIOR stream
                                            # on this same model must not fire early
-            try:
-                def _worker_status(s: str) -> None:
-                    resp_q.put(("status", s))
-                gen = worker.chat_stream(on_status=_worker_status, **payload)
-                for token in gen:
-                    if stream_cancel_event.is_set():
-                        gen.close()
-                        break
-                    resp_q.put(("chunk", token))
-                resp_q.put(("done", {
-                    "finish_reason": worker.last_finish_reason,
-                    "grammar_unsupported": worker.grammar_unsupported_this_call,
-                    "chatml_fallback_reason": worker.chatml_fallback_reason,
-                    "mtp_status": worker.mtp_status,
-                    "mtp_active": worker.mtp_active_this_call,
-                    "mtp_call_status": worker.mtp_call_status,
-                    "mtp_drafted": worker.mtp_drafted,
-                    "mtp_accepted": worker.mtp_accepted,
-                    "mtp_steps": worker.mtp_steps,
-                    "mtp_paused_steps": worker.mtp_paused_steps,
-                    "mtp_skipped": worker.mtp_skipped,
-                    "speculation": worker.spec_report,
-                }))
-            except ContextCapacityExceededError as e:
-                # An oversized prompt exceeding the configured context capacity or
-                # leaving insufficient generation room. Raised in pure Python before
-                # any native inference begins - the loaded model is unharmed and
-                # the worker can keep serving requests without reloading.
-                resp_q.put(("error", str(e), "ContextCapacityExceededError"))
-            except PretokenizerUnsafeInputError as e:
-                # Text this model's pre-tokenizer regex aborts the process on.
-                # Detected in pure Python before llama_tokenize is called, so
-                # nothing native ran and this worker keeps serving. Without this
-                # arm it would fall through to the uncaught path below and kill
-                # the process over a request the caller can resend differently.
-                resp_q.put(("error", str(e), "PretokenizerUnsafeInputError"))
-            except GrammarUnsupportedError as e:
-                # _build_sampler REFUSES a lazy grammar it cannot apply rather
-                # than building a chain with no grammar stage and generating
-                # unconstrained text. Raised while building the sampler, before
-                # a single token and before any native decode, so the loaded
-                # model is untouched and this worker keeps serving. Without this
-                # arm it would fall through to the uncaught path below and kill
-                # the process over a request the caller can resend differently.
-                resp_q.put(("error", str(e), "GrammarUnsupportedError"))
-            except InvalidGrammarError as e:
-                # A malformed grammar the native parser safely rejected (a
-                # checked, ordinary Python exception, not a crash) - the loaded
-                # model is unharmed, so report it cleanly and keep serving. NOT
-                # caught alongside a genuine native fault: any OTHER exception
-                # here propagates uncaught, see below.
-                resp_q.put(("error", str(e), "InvalidGrammarError"))
-            except UnsupportedInputError as e:
-                # Input this model could not process - in practice a
-                # VisionInputError from mtmd (an unprocessable image, or an
-                # mmproj that rejected the prompt). Like the grammar case above,
-                # it is a CHECKED status code from a native call that RETURNED
-                # NORMALLY, so nothing was corrupted and this worker keeps
-                # serving. mtmd_tokenize touches no llama context at all; a
-                # failed vision prefill leaves the native KV populated with
-                # _cached_tokens empty and no image-path record of the cache,
-                # which llama.py's next prefill detects and wipes, so no extra
-                # cleanup is owed here.
-                tag = type(e).__name__
-                resp_q.put(("error", str(e),
-                            tag if tag in _INPUT_ERROR_TYPES else "UnsupportedInputError"))
-            # Any OTHER uncaught fault from the generator (a non-grammar native
-            # fault, re-raised by GgufWorker.chat_stream) propagates OUT of this
-            # whole function, uncaught: the model is left in an unknown state,
-            # so this process must not keep serving from it.
+            _serve_stream(worker, payload, resp_q.put, stream_cancel_event)
+            continue
+
+        if name == "chat_stream_mux":
+            sid = payload["sid"]
+            event = threading.Event()
+            with mux_lock:
+                mux_cancels[sid] = event
+                if sid in early_cancels:
+                    early_cancels.discard(sid)
+                    event.set()
+            thread = threading.Thread(
+                target=_serve_mux_stream,
+                args=(worker, sid, payload["kwargs"], resp_q, event, mux_cancels,
+                      shutting_down),
+                name=f"localm-gguf-stream-{sid}", daemon=True)
+            mux_threads[:] = [t for t in mux_threads if t.is_alive()] + [thread]
+            thread.start()
             continue
 
         if name == "count_tokens":
@@ -508,6 +575,14 @@ FIRST_TOKEN_TIMEOUT_DEFAULT = 900.0
 # Bounded wait for a "done" envelope after requesting a mid-stream cancel.
 _CANCEL_DRAIN_TIMEOUT = 5.0
 
+# Child side: how long a shutdown waits for each multiplexed stream thread to
+# send its last envelope.
+_SHUTDOWN_STREAM_JOIN_S = 2.0
+
+# Parent side, multiplexed runner: how long a try_lock simple request waits for
+# another simple request before it declines with RunnerBusy.
+_MUX_SIMPLE_WAIT = 2.0
+
 # Bounded wait for a simple request/response command (count_tokens, etc.).
 # These never touch a slow native path, so it is short.
 _SIMPLE_CMD_TIMEOUT = 30.0
@@ -524,6 +599,22 @@ _SIMPLE_CMD_TIMEOUT = 30.0
 # process's own FileHandler, attached whenever the server itself was launched
 # with --debug).
 _STREAM_PROGRESS_INTERVAL = 50
+
+
+def _stream_error(result: tuple) -> Exception:
+    """The exception a stream's ``error`` envelope stands for: its tagged type
+    for a refusal that leaves the model loaded, else RuntimeError (the worker
+    faulted)."""
+    msg = result[1]
+    tag = result[2] if len(result) > 2 else ""
+    typed = {
+        "InvalidGrammarError": InvalidGrammarError,
+        "GrammarUnsupportedError": GrammarUnsupportedError,
+        "UnsupportedInputError": UnsupportedInputError,
+        "ContextCapacityExceededError": ContextCapacityExceededError,
+        "PretokenizerUnsafeInputError": PretokenizerUnsafeInputError,
+    }.get(tag)
+    return typed(msg) if typed is not None else RuntimeError(msg)
 
 
 class _RunnerTornDown(Exception):
@@ -606,13 +697,18 @@ class ModelRunner:
     """Parent-side handle to one isolated GGUF worker process. One instance
     per loaded ``GgufBackend`` - never a module-level singleton."""
 
+    # The "done" payload of the stream that last finished; on a multiplexed
+    # runner, the one that last finished on the calling thread.
+    last_done = PerThread(None, when=lambda r: getattr(r, "_mux", False))
+
     def __init__(self) -> None:
         self._proc = None
         self._req_q = None
         self._resp_q = None
         self._ctrl_q = None
-        # Serialises PARENT-side use of the single response queue. The worker
-        # process is already serial (it reads req_q one command at a time), but
+        # Serialises PARENT-side use of the single response queue on the
+        # inline protocol. The worker process is already serial (it reads req_q
+        # one command at a time), but
         # two PARENT threads - a live chat_stream drive on the stream's producer
         # thread and a token-count RPC on an executor thread - would otherwise
         # both call self._resp_q.get() and STEAL each other's envelopes. Every
@@ -621,7 +717,8 @@ class ModelRunner:
         # runner, acquired and released on the SAME thread for each command (the
         # stream's whole drive + close runs on one producer thread), so a plain
         # non-reentrant Lock is correct. shutdown() does NOT take it, so teardown
-        # still works while a command holds it.
+        # still works while a command holds it. The multiplexed protocol does not
+        # use it (see _start_mux).
         self._q_lock = threading.Lock()
         # Where THIS runner's child writes its native-fault trace. Chosen by the
         # parent via debuglog.child_crash_trace_path and set in _spawn(); None
@@ -630,6 +727,24 @@ class ModelRunner:
         # The load phase read from the last consumed fault trace (see
         # crash_phase_from_trace); None when none was captured.
         self._last_crash_phase = None
+        # The death report of the child it was read for, as (proc, report),
+        # read once under _death_lock however many streams see the death.
+        self._death_cache = None
+        self._death_lock = threading.Lock()
+        # Multiplexed streams (a model loaded with parallel slots): a demux
+        # thread owns the response queue and routes ("stream", sid, envelope)
+        # to _streams[sid] and every other envelope to _simple_q.
+        self._mux = False
+        self._streams: dict = {}
+        self._streams_lock = threading.Lock()
+        self._simple_q: Optional[_queue.Queue] = None
+        self._simple_lock = threading.Lock()
+        self._sids = itertools.count(1)
+
+    @property
+    def multiplexed(self) -> bool:
+        """True when streams run concurrently over the multiplexed protocol."""
+        return self._mux
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
@@ -680,17 +795,28 @@ class ModelRunner:
         the debug log"): a Python exception escaping ``_runner_main`` is logged
         with its traceback by ``_runner_entry``, but a hard ``os._exit``
         produces no exception and therefore no traceback."""
+        with self._death_lock:
+            return self._death_report_locked()
+
+    def _death_report_locked(self):
+        proc = self._proc
+        cached = self._death_cache
+        if cached is not None and proc is not None and cached[0] is proc:
+            return cached[1]
         trace = self._native_crash_trace()
         self._last_crash_phase = crash_phase_from_trace(trace)
         native = self._exit_was_native_fault(trace_captured=bool(trace))
         if not trace:
-            return native, " No native fault trace was captured for this exit."
-        from localm.debuglog import logger, native_fault_hint
-        # Logged as well as returned: the trace is multi-line and belongs in the
-        # debug log the message points at, not inlined into an HTTP error body.
-        logger.error("gguf worker native fault trace:\n%s", trace)
-        first = trace.splitlines()[0].strip()
-        return native, f" Native fault: {first} ({native_fault_hint()})."
+            report = (native, " No native fault trace was captured for this exit.")
+        else:
+            from localm.debuglog import logger, native_fault_hint
+            # The full trace goes to the debug log; the report carries its first line.
+            logger.error("gguf worker native fault trace:\n%s", trace)
+            first = trace.splitlines()[0].strip()
+            report = (native, f" Native fault: {first} ({native_fault_hint()}).")
+        if proc is not None:
+            self._death_cache = (proc, report)
+        return report
 
     def _crash_detail(self) -> str:
         """Just the detail half of :meth:`_death_report`, for the load and
@@ -751,6 +877,10 @@ class ModelRunner:
     def _spawn(self) -> None:
         from localm._mp_spawn import ensure_spawn_uses_venv_python
         ensure_spawn_uses_venv_python()   # avoid a renamed-launcher WinError 2
+        self._mux = False
+        self._simple_q = None
+        with self._streams_lock:
+            self._streams.clear()
         ctx = mp.get_context("spawn")   # explicit: identical on every OS
         self._req_q = ctx.Queue()
         self._resp_q = ctx.Queue()
@@ -860,7 +990,11 @@ class ModelRunner:
                 )
         kind = result[0]
         if kind == "ok":
-            return result[1]
+            meta = result[1]
+            slots = meta.get("parallel_slots") if isinstance(meta, dict) else None
+            if isinstance(slots, int) and slots > 1:
+                self._start_mux()
+            return meta
         # No branch below produced a usable model, so this worker holds nothing
         # worth keeping. Reaped here rather than left orphaned for the caller's
         # next load attempt to pile another one alongside it.
@@ -922,7 +1056,15 @@ class ModelRunner:
         progress, does not - see ``_STREAM_PROGRESS_INTERVAL``. They are built
         entirely from envelopes this method already receives, with no extra IPC.
         The worker-died branch below reports WHICH PHASE the child was in (no
-        response ever received vs N chunks already streamed)."""
+        response ever received vs N chunks already streamed).
+
+        On a multiplexed runner (a model loaded with parallel slots) the stream
+        runs through :meth:`_chat_stream_mux` instead, beside other streams."""
+        if self._mux:
+            yield from self._chat_stream_mux(
+                first_chunk_timeout=first_chunk_timeout, on_status=on_status,
+                stop_on_request=stop_on_request, **kwargs)
+            return
         from localm.debuglog import logger
         first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
         awaiting_first = True
@@ -1122,6 +1264,199 @@ class ModelRunner:
                      "killing the worker process", timeout)
         self.shutdown(grace=0)
 
+    # ------------------------------------------------------------------ #
+    #  Multiplexed streams (a model loaded with parallel slots)            #
+    # ------------------------------------------------------------------ #
+
+    def _start_mux(self) -> None:
+        """Switch to the multiplexed protocol: start the demux thread that owns
+        the response queue from now on."""
+        self._simple_q = _queue.Queue()
+        self._mux = True
+        threading.Thread(target=self._demux, args=(self._resp_q, self._simple_q),
+                         name="localm-gguf-demux", daemon=True).start()
+
+    def _demux(self, resp_q, simple_q) -> None:
+        """Route the child's envelopes: ``("stream", sid, envelope)`` to that
+        stream's queue (dropped when the stream already ended), anything else to
+        *simple_q*. Returns once the queue is torn down or the child is gone."""
+        from localm.debuglog import logger
+        while True:
+            try:
+                item = resp_q.get(timeout=_LOAD_POLL_INTERVAL)
+            except _queue.Empty:
+                if self._resp_q is not resp_q or not self.is_alive():
+                    return
+                continue
+            except (ValueError, OSError, EOFError):
+                return
+            if isinstance(item, tuple) and len(item) == 3 and item[0] == "stream":
+                with self._streams_lock:
+                    target = self._streams.get(item[1])
+                if target is not None:
+                    target.put(item[2])
+                else:
+                    logger.debug("gguf runner: envelope for ended stream %r dropped",
+                                 item[1])
+                continue
+            simple_q.put(item)
+
+    def _mux_unloaded_error(self) -> RuntimeError:
+        return RuntimeError(
+            "The model was unloaded while this reply was being generated. It "
+            "will reload on the next request.")
+
+    def _chat_stream_mux(self, *, first_chunk_timeout: Optional[float] = None,
+                         on_status: Optional[Callable[[str], None]] = None,
+                         stop_on_request: bool = False, **kwargs):
+        """:meth:`chat_stream` on a multiplexed runner: same envelopes, errors,
+        timeouts and cancel contract, for one stream among several.
+
+        A status equal to the previous one is not passed to *on_status* again;
+        every status still restarts the wait for the next envelope. A stop
+        published with ``stream_stop_check`` on this thread cancels the stream
+        in the child and ends this generator once the child confirms."""
+        from localm.debuglog import logger
+        first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
+        awaiting_first = True
+        chunks_received = 0
+        last_status = None
+        _stream_t0 = time.monotonic()
+        self.last_done = None
+        sid = next(self._sids)
+        stream_q: _queue.Queue = _queue.Queue()
+        with self._streams_lock:
+            self._streams[sid] = stream_q
+        try:
+            req_q = self._req_q
+            if req_q is None:
+                raise self._mux_unloaded_error()
+            req_q.put(("chat_stream_mux", {"sid": sid, "kwargs": kwargs}))
+            while True:
+                deadline = time.monotonic() + (
+                    first_budget if awaiting_first else _STREAM_CHUNK_TIMEOUT)
+                result = None
+                while result is None:
+                    if stream_stop_requested():
+                        logger.info("gguf worker: stream %d stopped by caller after "
+                                    "%d token(s)", sid, chunks_received)
+                        self._cancel_mux_stream_and_drain(
+                            sid, stream_q,
+                            _STREAM_CHUNK_TIMEOUT if stop_on_request else _CANCEL_DRAIN_TIMEOUT)
+                        return
+                    try:
+                        result = stream_q.get(timeout=_LOAD_POLL_INTERVAL)
+                    except _queue.Empty as e:
+                        if self._proc is None:
+                            raise self._mux_unloaded_error() from e
+                        if not self.is_alive():
+                            native, detail = self._death_report()
+                            opening = ("Native inference fault" if native
+                                       else "The model process exited unexpectedly")
+                            phase = ("prefill/dispatch (no response received yet)"
+                                     if awaiting_first else
+                                     f"decode ({chunks_received} token(s) already streamed)")
+                            logger.error("gguf worker: died mid-stream during %s", phase)
+                            raise RuntimeError(
+                                f"{opening} (worker exit {self._exit_reason()}). The "
+                                "model has been unloaded and will reload on the next "
+                                "request." + detail) from e
+                        if time.monotonic() > deadline:
+                            self.shutdown(grace=0)
+                            if awaiting_first:
+                                raise RuntimeError(
+                                    f"Generation stalled: the model process produced "
+                                    f"no output within {first_budget:.0f}s of prompt "
+                                    "processing. It has been unloaded and will reload "
+                                    "on the next request. Raise "
+                                    "gguf_first_token_timeout_s if this prompt "
+                                    "genuinely needs longer on this hardware.") from e
+                            raise RuntimeError(
+                                "Generation stalled: the model process stopped "
+                                "responding. It has been unloaded and will reload on "
+                                "the next request.") from e
+                kind = result[0]
+                if kind == "status":
+                    status_text = result[1]
+                    if status_text != last_status:
+                        last_status = status_text
+                        logger.info("gguf worker: stream %d status: %s", sid, status_text)
+                        if on_status:
+                            try:
+                                on_status(status_text)
+                            except Exception:
+                                logger.debug("chat_stream on_status callback raised "
+                                             "(ignored)", exc_info=True)
+                    continue
+                if awaiting_first:
+                    logger.info("gguf worker: stream %d prefill complete, first "
+                                "response after %.2fs (kind=%s)", sid,
+                                time.monotonic() - _stream_t0, kind)
+                    awaiting_first = False
+                if kind == "chunk":
+                    chunks_received += 1
+                    if chunks_received % _STREAM_PROGRESS_INTERVAL == 0:
+                        logger.debug("gguf worker: stream %d decode progress, %d "
+                                     "token(s) received", sid, chunks_received)
+                    yield result[1]
+                elif kind == "done":
+                    logger.info("gguf worker: stream %d complete, %d token(s), "
+                                "finish_reason=%s", sid, chunks_received,
+                                result[1].get("finish_reason"))
+                    self.last_done = result[1]
+                    return
+                elif kind == "error":
+                    raise _stream_error(result)
+                else:
+                    raise RuntimeError(f"Unexpected response during generation: {result!r}")
+        except GeneratorExit:
+            logger.info("gguf worker: stream %d cancelled by caller after %d token(s)",
+                        sid, chunks_received)
+            self._cancel_mux_stream_and_drain(sid, stream_q)
+            raise
+        except KeyboardInterrupt:
+            logger.info("gguf worker: stream %d interrupted after %d token(s)",
+                        sid, chunks_received)
+            self._cancel_mux_stream_and_drain(
+                sid, stream_q,
+                _STREAM_CHUNK_TIMEOUT if stop_on_request else _CANCEL_DRAIN_TIMEOUT)
+            raise
+        finally:
+            with self._streams_lock:
+                self._streams.pop(sid, None)
+
+    def _cancel_mux_stream_and_drain(self, sid: int, stream_q: _queue.Queue,
+                                     timeout: float = _CANCEL_DRAIN_TIMEOUT) -> None:
+        """Ask the child to stop stream *sid* and consume its envelopes until its
+        "done" or "error", for at most *timeout* seconds; past that the child is
+        killed, ending every stream on it."""
+        ctrl_q = self._ctrl_q
+        if not self.is_alive() or ctrl_q is None:
+            return
+        try:
+            ctrl_q.put(("cancel_stream", sid))
+        except Exception:
+            self.shutdown(grace=0)
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                result = stream_q.get(timeout=0.5)
+            except _queue.Empty:
+                if not self.is_alive():
+                    return
+                continue
+            if result[0] == "done":
+                if len(result) > 1 and isinstance(result[1], dict):
+                    self.last_done = result[1]
+                return
+            if result[0] == "error":
+                return
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("gguf runner: cancel of stream %d did not confirm within %.0fs; "
+                     "killing the worker process", sid, timeout)
+        self.shutdown(grace=0)
+
     def _simple_request(self, name: str, payload, timeout: float = _SIMPLE_CMD_TIMEOUT,
                         *, try_lock: bool = False):
         """Send one request/response command and return its value.
@@ -1133,12 +1468,21 @@ class ModelRunner:
         another simple command) - used by the token counters, which have a
         documented heuristic fallback and must not queue a 30s-timeout RPC
         behind a whole generation. The default blocking acquire is for commands
-        that genuinely need the real answer (e.g. check_grammar)."""
+        that genuinely need the real answer (e.g. check_grammar).
+
+        On a multiplexed runner streams do not hold the queue: the request takes
+        ``_simple_lock`` instead, waiting up to ``_MUX_SIMPLE_WAIT`` seconds for
+        another simple request with *try_lock*, and reads its reply from the
+        demux thread's queue."""
+        mux = self._mux
+        lock = self._simple_lock if mux else self._q_lock
         if try_lock:
-            if not self._q_lock.acquire(blocking=False):
+            acquired = (lock.acquire(timeout=_MUX_SIMPLE_WAIT) if mux
+                        else lock.acquire(blocking=False))
+            if not acquired:
                 raise RunnerBusy(name)
         else:
-            self._q_lock.acquire()
+            lock.acquire()
         try:
             self._req_q.put((name, payload))
             deadline = time.monotonic() + timeout
@@ -1146,7 +1490,7 @@ class ModelRunner:
             while result is None:
                 wait = max(0.01, min(0.5, deadline - time.monotonic()))
                 try:
-                    result = self._poll(wait)
+                    result = self._poll_simple(wait) if mux else self._poll(wait)
                 except _RunnerTornDown as e:
                     raise RuntimeError(
                         f"The model was unloaded while handling '{name}'.") from e
@@ -1185,7 +1529,14 @@ class ModelRunner:
                 raise RuntimeError(msg)
             raise RuntimeError(f"Unexpected response for '{name}': {result!r}")
         finally:
-            self._q_lock.release()
+            lock.release()
+
+    def _poll_simple(self, timeout: float):
+        """:meth:`_poll` for a simple request's reply on a multiplexed runner."""
+        q = self._simple_q
+        if q is None or self._resp_q is None:
+            raise _RunnerTornDown
+        return q.get(timeout=timeout)
 
     def count_tokens(self, text: str) -> int:
         # try_lock: never block a token count behind a live generation; the

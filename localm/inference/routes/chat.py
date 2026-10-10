@@ -33,6 +33,7 @@ from localm.inference.backends.base import (
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
+from localm.inference.inference_gate import InferenceGate, exclusively
 from localm.inference.openai_compat import (
     UnsupportedFieldError, check_chat_request, check_completion_request, include_usage,
     max_tokens_of, thinking_of,
@@ -198,7 +199,7 @@ def register(app: FastAPI, ctx) -> None:
             if tools or has_tool_history(messages):
                 messages = render_messages(messages, list(tools), choice)
 
-            sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
+            sem = _hs._inference_sems.setdefault(engine.display_name, InferenceGate())
 
             # Reject image input on a text-only model with a 400 instead of dropping
             # the picture. GGUF is always text-only; an unloaded HF model's
@@ -207,7 +208,7 @@ def register(app: FastAPI, ctx) -> None:
                 if not engine.loaded and engine.can_be_multimodal:
                     say(LOADING_MODEL_STATUS)
                     loop = asyncio.get_running_loop()
-                    async with sem:
+                    async with exclusively(sem):
                         await loop.run_in_executor(None, engine.load)
                 if not engine.supports_images:
                     # supports_images is False here, so an mmproj_path set on the
@@ -694,11 +695,11 @@ def register(app: FastAPI, ctx) -> None:
 
         texts = [req.input] if isinstance(req.input, str) else req.input
 
-        sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
+        sem = _hs._inference_sems.setdefault(engine.display_name, InferenceGate())
         loop = asyncio.get_running_loop()
         _hs._pin(engine)
         try:
-            async with sem:
+            async with exclusively(sem):
                 vecs = await loop.run_in_executor(None, lambda: engine.embed(texts))
         except NotImplementedError as e:
             raise HTTPException(422, str(e)) from e
@@ -834,7 +835,7 @@ def register(app: FastAPI, ctx) -> None:
                 if pipeline.has("inlet"):
                     messages = await pipeline.run_inlet(messages, ctx)
 
-            sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
+            sem = _hs._inference_sems.setdefault(engine.display_name, InferenceGate())
 
             gen_kwargs = dict(
                 max_tokens=req.max_tokens,
@@ -928,6 +929,7 @@ def register(app: FastAPI, ctx) -> None:
                 )
 
             gen_error: Exception | None = None
+            _hs._admit_generation(sem, engine)
             async with sem:
                 # Cancelable on client disconnect: an aborted request releases the
                 # per-model _inference_lock instead of generating to end-of-budget.

@@ -186,6 +186,6 @@ localm FastAPI server -- Engine (GGUF/HF) -- your GPU
             L-- coder Agent (per session, in-process thread; coder plugin)
 ```
 
-The coder agent talks to the model through the server's own OpenAI-compatible endpoint, so chat and agent share one engine and inference is serialised cleanly between them.
+The coder agent talks to the model through the server's own OpenAI-compatible endpoint, so chat and agent share one engine and its admission: a GGUF model answers both at once up to its parallel slots, and queues the rest.
 
 The plugin engine ties the rest together. At startup, and again whenever you install, enable, or disable a plugin from the Plugins page, the **PluginManager** mounts each active plugin's API routes (scope-gated) and static assets onto the live FastAPI app, and unmounts them on disable - no server restart. This is how a client-asset plugin like **tts** can add behaviour (its Kokoro voice provider and voice picker) without contributing a tab. See [architecture.md](architecture.md) and [plugins.md](plugins.md) for how plugins load their client-side JS.

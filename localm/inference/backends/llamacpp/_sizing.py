@@ -782,7 +782,8 @@ class VramSizingMixin:
         A hybrid (linear-attention / state-space) stack keeps a fixed-size state
         per recurrent layer that does not grow with the context.
         ``gguf_recurrent_state_bytes`` is one copy of it; the context allocates
-        ``1 + n_rs_seq`` copies. ``n_rs_seq`` is 0 without speculation; with
+        ``parallel_copies + n_rs_seq`` copies (one per parallel slot, 1 when the
+        attribute is absent). ``n_rs_seq`` is 0 without speculation; with
         MTP enabled it is ``llama.mtp_rs_seq`` of the draft-token count, and
         with the ngram or draft source ``_ngram.ngram_rs_seq`` of that source's
         draft cap for a recurrent model (the same calls LlamaCpp makes when it
@@ -814,7 +815,8 @@ class VramSizingMixin:
                     draft = getattr(self, "mtp_draft_tokens", None)
                     n_rs_seq = mtp_rs_seq(
                         0, MTP_DRAFT_TOKENS_DEFAULT if draft is None else draft)
-                charge = per_copy * (1 + n_rs_seq)
+                copies = max(1, int(getattr(self, "parallel_copies", 1) or 1))
+                charge = per_copy * (copies + n_rs_seq)
         except Exception as exc:
             from localm.debuglog import logger as _dbg
             _dbg.debug("recurrent-state VRAM probe failed (%s); charging "

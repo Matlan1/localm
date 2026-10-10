@@ -567,6 +567,12 @@ DEFAULT_CONFIG: dict = {
     # The draft model for spec_source "draft": a registered model name or a
     # GGUF path. `localm spec-drafts MODEL` lists downloaded models that fit.
     "spec_draft_model": "",
+    # How many chat requests one loaded GGUF model answers at the same time,
+    # decoding them together in one batch per step: "auto" or 1-16. Every
+    # request shares the one context window. auto uses 4, fewer when the extra
+    # recurrent state of a hybrid model would not fit in VRAM, and 1 when a
+    # draft source is on (spec_source / mtp_enabled). 1 answers one at a time.
+    "parallel_slots": "auto",
     # Diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) write a whole
     # reply at once over a number of denoising steps. diffusion_steps: steps
     # per reply, None for 128 (or the reply length when shorter).
