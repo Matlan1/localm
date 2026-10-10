@@ -28,6 +28,7 @@ from typing import (Any, Callable, Generator, Iterable, Iterator, Optional,
                     Sequence)
 
 from localm.inference import pretokenizer_guard
+from localm.inference.backends.base import PerThread
 from localm.textguard import (
     content_spans_via_sentinels, map_untrusted_ranges, split_by_trust,
     untrusted_spans_of,
@@ -1252,22 +1253,9 @@ class LlamaCpp:
     n_parallel = 1               # sequences the context holds
     parallel_note = ""           # why fewer slots than requested, "" when none
 
-    @property
-    def last_finish_reason(self) -> str:
-        """Why the generation that last ran on the CALLING thread ended: "stop",
-        "length" or "error". Per thread, so replies decoding together on
-        separate threads each read their own."""
-        return getattr(self._call_state(), "finish_reason", "stop")
-
-    @last_finish_reason.setter
-    def last_finish_reason(self, value: str) -> None:
-        self._call_state().finish_reason = value
-
-    def _call_state(self) -> threading.local:
-        state = self.__dict__.get("_call_tls")
-        if state is None:
-            state = self.__dict__.setdefault("_call_tls", threading.local())
-        return state
+    # Why the last generation ended: "stop", "length" or "error". With parallel
+    # slots, the one that last ran on the calling thread.
+    last_finish_reason = PerThread("stop", when=lambda llm: llm._slots is not None)
 
     @property
     def _cached_tokens(self) -> list[int]:

@@ -71,7 +71,8 @@ class TestLoad:
                          "supports_images": True, "supports_mtp": False,
                          "weight_placement": [], "moe_skip_reason": None,
                          "mmap": None, "adapters": [], "encoder_decoder": False,
-                         "encoder_input_limit": 0, "diffusion": False}
+                         "encoder_input_limit": 0, "diffusion": False,
+                         "parallel_slots": 1, "parallel_note": ""}
         assert w._loaded is True
 
     def test_load_passes_through_weight_placement_from_llamacpp(self, tmp_path):

@@ -156,8 +156,10 @@ def test_release_without_acquire_raises():
 
 class _SlotEngine:
     """Engine stand-in with *slots* parallel slots. Each generation records how
-    many ran at once, waits (up to 3 s) for *together* to be running, then
-    yields its tokens and ends with *finish* (a per-thread value)."""
+    many ran at once, waits (up to 3 s) for *together* to be running, yields
+    its tokens, sets its finish reason (a per-thread value), and returns only
+    once *together* generations have set theirs (up to 3 s), so the value last
+    set by any thread is the same for all of them when they end."""
 
     last_finish_reason = PerThread("stop")
 
@@ -168,6 +170,8 @@ class _SlotEngine:
         self._lock = threading.Lock()
         self.running = 0
         self.max_running = 0
+        self.finished = 0
+        self.finish_together = together
 
     def count_messages_tokens(self, messages):
         return 3
@@ -197,6 +201,14 @@ class _SlotEngine:
             for i in range(3):
                 yield f"{content}{i} "
             self.last_finish_reason = finish
+            with self._lock:
+                self.finished += 1
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                with self._lock:
+                    if self.finished >= self.finish_together:
+                        break
+                time.sleep(0.005)
         finally:
             with self._lock:
                 self.running -= 1
@@ -237,6 +249,7 @@ def test_two_streams_generate_at_once_on_a_model_with_two_slots():
 def test_one_slot_still_runs_streams_one_at_a_time_and_says_so():
     async def scenario():
         eng = _SlotEngine(slots=1, together=2)
+        eng.finish_together = 1
         gate = InferenceGate()
         first = asyncio.ensure_future(
             _sse(_stream_sse(eng, [{"role": "user", "content": "long"}], "slot-model", gate)))

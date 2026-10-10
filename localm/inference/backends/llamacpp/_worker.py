@@ -18,6 +18,8 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Optional
 
+from localm.inference.backends.base import PerThread
+
 from ._sizing import VramSizingMixin
 
 
@@ -43,6 +45,12 @@ class GgufWorker(VramSizingMixin):
     # Set by the runner: a threading.Event that asks the current generation
     # to stop. Polled between denoising steps of a diffusion model.
     stream_cancel: Optional[threading.Event] = None
+    # Why the last chat_stream ended, and whether it took the grammar-fault
+    # retry-without-grammar path (reported in the "done" envelope; the parent
+    # owns the persistent latch). With parallel slots, the one that last ran on
+    # the calling thread.
+    last_finish_reason = PerThread("stop", when=lambda w: w.parallel_slots > 1)
+    grammar_unsupported_this_call = PerThread(False, when=lambda w: w.parallel_slots > 1)
 
     def __init__(
         self,
@@ -116,32 +124,6 @@ class GgufWorker(VramSizingMixin):
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False
-
-    def _call_state(self) -> threading.local:
-        state = self.__dict__.get("_call_tls")
-        if state is None:
-            state = self.__dict__.setdefault("_call_tls", threading.local())
-        return state
-
-    @property
-    def last_finish_reason(self) -> str:
-        """Why the chat_stream that last ran on the CALLING thread ended."""
-        return getattr(self._call_state(), "finish_reason", "stop")
-
-    @last_finish_reason.setter
-    def last_finish_reason(self, value: str) -> None:
-        self._call_state().finish_reason = value
-
-    @property
-    def grammar_unsupported_this_call(self) -> bool:
-        """True when the chat_stream that last ran on the CALLING thread took the
-        grammar-fault retry-without-grammar path; the runner reports it in the
-        "done" envelope and the parent owns the persistent latch."""
-        return bool(getattr(self._call_state(), "grammar_unsupported", False))
-
-    @grammar_unsupported_this_call.setter
-    def grammar_unsupported_this_call(self, value: bool) -> None:
-        self._call_state().grammar_unsupported = bool(value)
 
     @property
     def parallel_slots(self) -> int:

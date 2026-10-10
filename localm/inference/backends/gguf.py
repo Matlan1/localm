@@ -121,18 +121,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     # The {"path", "scale"} of each adapter the last load applied.
     applied_adapters: Sequence[dict] = ()
 
-    # The last reply's results, per thread: a model with parallel slots answers
-    # several requests at once, each read on the thread that drove it.
-    last_finish_reason = PerThread("stop")
-    last_mtp_active = PerThread(False)      # whether the last call actually speculated
-    last_mtp_call_status = PerThread("")    # why the last call stopped speculating partway
-    last_mtp_drafted = PerThread(0)         # draft tokens the last call sent to verification
-    last_mtp_accepted = PerThread(0)        # how many of those the target accepted
-    last_mtp_steps = PerThread(0)           # verification batches the last call decoded
-    last_mtp_paused_steps = PerThread(0)    # steps it ran plain because drafting was slower
-    last_mtp_skipped = PerThread("")        # why the last call could not draft at all
-    _mtp_stopped_this_call = PerThread(False)  # the last call turned MTP off for the model
-    last_speculation = PerThread(None)      # the child's speculation report for the last call
+    # The last reply's results. With parallel slots each thread reads those of
+    # the reply that last ran on it.
+    last_finish_reason = PerThread("stop", when=lambda b: b.parallel_slots > 1)
+    last_mtp_active = PerThread(False, when=lambda b: b.parallel_slots > 1)
+    last_mtp_call_status = PerThread("", when=lambda b: b.parallel_slots > 1)
+    last_mtp_drafted = PerThread(0, when=lambda b: b.parallel_slots > 1)
+    last_mtp_accepted = PerThread(0, when=lambda b: b.parallel_slots > 1)
+    last_mtp_steps = PerThread(0, when=lambda b: b.parallel_slots > 1)
+    last_mtp_paused_steps = PerThread(0, when=lambda b: b.parallel_slots > 1)
+    last_mtp_skipped = PerThread("", when=lambda b: b.parallel_slots > 1)
+    _mtp_stopped_this_call = PerThread(False, when=lambda b: b.parallel_slots > 1)
+    last_speculation = PerThread(None, when=lambda b: b.parallel_slots > 1)
 
     # Parallel slots: the setting ("auto" or a count), the count the last load
     # asked the worker for, and what it reported back.

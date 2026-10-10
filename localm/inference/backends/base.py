@@ -188,15 +188,23 @@ _STREAM_STOP: contextvars.ContextVar[Optional[Callable[[], bool]]] = (
 
 
 class PerThread:
-    """An instance attribute each thread sees separately: a thread reads the
-    value it last set on that instance, or *default* before it set one.
+    """An instance attribute each thread sees separately while *when(instance)*
+    is true (always, without *when*): a thread reads the value it last set on
+    that instance; a thread that never set one reads the value last set by any
+    thread, or *default* when none was set. While *when(instance)* is false it
+    is one shared value: the last one set by any thread.
 
     For per-reply results (a finish reason, drafting figures) on a backend
     that answers several requests at once, each on its own thread."""
 
-    def __init__(self, default: Any = None) -> None:
+    def __init__(self, default: Any = None,
+                 when: Optional[Callable[[Any], bool]] = None) -> None:
         self.default = default
+        self.when = when
         self.name = ""
+
+    def _separate(self, obj: Any) -> bool:
+        return self.when is None or bool(self.when(obj))
 
     def __set_name__(self, owner: type, name: str) -> None:
         self.name = name
@@ -211,10 +219,16 @@ class PerThread:
     def __get__(self, obj: Any, owner: Optional[type] = None) -> Any:
         if obj is None:
             return self
-        return getattr(self._state(obj), self.name, self.default)
+        if self._separate(obj):
+            state = self._state(obj)
+            if hasattr(state, self.name):
+                return getattr(state, self.name)
+        return obj.__dict__.get("_per_thread_latest", {}).get(self.name, self.default)
 
     def __set__(self, obj: Any, value: Any) -> None:
-        setattr(self._state(obj), self.name, value)
+        if self._separate(obj):
+            setattr(self._state(obj), self.name, value)
+        obj.__dict__.setdefault("_per_thread_latest", {})[self.name] = value
 
 
 @contextlib.contextmanager

@@ -218,15 +218,33 @@ def test_context_params_get_one_shared_cache_only_with_slots():
     assert (cp.n_seq_max, cp.kv_unified) == (1, False)
 
 
-def test_the_finish_reason_is_kept_per_thread():
+def test_the_finish_reason_is_kept_per_thread_with_slots():
+    import threading
+    llm = _llm()
+    llm._slots = object()
+    llm.last_finish_reason = "length"
+    seen = {}
+
+    def other():
+        seen["before"] = llm.last_finish_reason
+        llm.last_finish_reason = "stop"
+        seen["after"] = llm.last_finish_reason
+
+    t = threading.Thread(target=other)
+    t.start()
+    t.join()
+    assert (seen["before"], seen["after"]) == ("length", "stop")
+    assert llm.last_finish_reason == "length"
+
+
+def test_without_slots_the_finish_reason_is_one_shared_value():
     import threading
     llm = _llm()
     llm.last_finish_reason = "length"
-    seen = {}
-    t = threading.Thread(target=lambda: seen.update(other=llm.last_finish_reason))
+    t = threading.Thread(target=lambda: setattr(llm, "last_finish_reason", "error"))
     t.start()
     t.join()
-    assert (llm.last_finish_reason, seen["other"]) == ("length", "stop")
+    assert llm.last_finish_reason == "error"
 
 
 def test_text_generation_goes_to_the_slot_scheduler_when_there_is_one():
@@ -254,3 +272,55 @@ def test_text_generation_goes_to_the_slot_scheduler_when_there_is_one():
     assert out == [5, 6]
     assert calls == [("submit", [1, 2, 3], 10), "close"]
     assert llm.last_finish_reason == "length"
+
+
+def test_the_backends_reply_results_are_kept_per_thread(tmp_path):
+    import threading
+    b = _backend(tmp_path)
+    b.parallel_slots = 2
+    b.last_finish_reason = "length"
+    b.last_mtp_drafted = 5
+    b.last_speculation = {"source": "ngram"}
+    seen = {}
+
+    def other():
+        seen["latest"] = (b.last_finish_reason, b.last_mtp_drafted, b.last_speculation)
+        b.last_finish_reason = "stop"
+        b.last_mtp_drafted = 0
+        b.last_speculation = None
+
+    t = threading.Thread(target=other)
+    t.start()
+    t.join()
+    assert seen["latest"] == ("length", 5, {"source": "ngram"})
+    assert (b.last_finish_reason, b.last_mtp_drafted, b.last_speculation) == (
+        "length", 5, {"source": "ngram"})
+    assert _backend(tmp_path).last_finish_reason == "stop"
+
+
+def test_the_engine_reports_slots_only_from_a_positive_int():
+    from localm.inference.engine import Engine
+
+    class _B:
+        parallel_slots = 4
+
+    eng = Engine.__new__(Engine)
+    eng._backend = _B()
+    assert eng.parallel_slots == 4
+    for bad in (0, True, "4", None):
+        _B.parallel_slots = bad
+        assert eng.parallel_slots == 1
+
+
+def test_a_load_payload_names_the_slots_only_when_there_are_several():
+    from localm.inference.http_server import _gpu_placement_fields
+
+    class _Eng:
+        gpu_placement = None
+        mmap_state = None
+        applied_adapters = None
+        parallel_slots = 1
+
+    assert "parallel_slots" not in _gpu_placement_fields(_Eng())
+    _Eng.parallel_slots = 4
+    assert _gpu_placement_fields(_Eng())["parallel_slots"] == 4

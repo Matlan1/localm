@@ -119,7 +119,7 @@ from typing import Callable, Optional
 
 from localm.inference.backends.base import (
     AdapterLoadError, ContextCapacityExceededError,
-    GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled,
+    GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled, PerThread,
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
     UnsupportedInputError, UnsupportedModelRoleError, stream_stop_requested)
 
@@ -646,6 +646,10 @@ class ModelRunner:
     """Parent-side handle to one isolated GGUF worker process. One instance
     per loaded ``GgufBackend`` - never a module-level singleton."""
 
+    # The "done" payload of the stream that last finished; on a multiplexed
+    # runner, the one that last finished on the calling thread.
+    last_done = PerThread(None, when=lambda r: getattr(r, "_mux", False))
+
     def __init__(self) -> None:
         self._proc = None
         self._req_q = None
@@ -685,22 +689,6 @@ class ModelRunner:
         self._simple_q: Optional[_queue.Queue] = None
         self._simple_lock = threading.Lock()
         self._sids = itertools.count(1)
-
-    def _call_state(self) -> threading.local:
-        state = self.__dict__.get("_call_tls")
-        if state is None:
-            state = self.__dict__.setdefault("_call_tls", threading.local())
-        return state
-
-    @property
-    def last_done(self) -> Optional[dict]:
-        """The "done" payload of the stream that last finished on the CALLING
-        thread, or None."""
-        return getattr(self._call_state(), "done", None)
-
-    @last_done.setter
-    def last_done(self, value: Optional[dict]) -> None:
-        self._call_state().done = value
 
     @property
     def multiplexed(self) -> bool:
