@@ -456,28 +456,101 @@ def test_a_broken_current_pin_is_logged_to_issues(env):
 #  Delegated pipelines                                                        #
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("rc,state,verdict", [
-    (1, {"reason": "bad"}, pw.FAIL),
-    (2, {"reason": "busy"}, pw.INCONCLUSIVE),
-    (0, {"verdict": "PASS", "merged_pr": 5, "last_tag_tried": "b2"}, pw.MERGED),
-    (0, {}, pw.NONE_NEWER),
-])
-def test_delegated_outcome_comes_from_exit_code_and_state(env, rc, state, verdict):
-    pp.save_state(state, pin="deleg")
-    adv = _adv(key="deleg", delegate=lambda dry: rc)
-    assert pw.advance_delegated(adv, dry_run=False).verdict == verdict
+def _deleg(rc, *, candidate=("b1", "b2"), key="deleg", on_run=None):
+    def run(dry):
+        if on_run:
+            on_run(dry)
+        return rc
+    return _adv(key=key, candidate=lambda: candidate, delegate=run)
 
 
-def test_delegated_dry_run_pass(env):
-    pp.save_state({"verdict": "PASS", "last_tag_tried": "b2"}, pin="deleg")
-    assert pw.advance_delegated(_adv(key="deleg", delegate=lambda dry: 0), dry_run=True).verdict == pw.DRY_PASS
+def _now_iso(offset_seconds=0):
+    when = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=offset_seconds)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_delegated_nothing_newer_never_calls_the_pipeline():
+    called = []
+    adv = _deleg(0, candidate=None, on_run=lambda d: called.append(d))
+    adv.candidate = lambda: None
+    out = pw.advance_delegated(adv, dry_run=False)
+    assert out.verdict == pw.NONE_NEWER and called == []
+
+
+def test_delegated_names_the_pinned_and_candidate_versions(env):
+    out = pw.advance_delegated(_deleg(0), dry_run=True)
+    assert (out.pinned, out.candidate) == ("b1", "b2")
+
+
+def test_delegated_old_merged_state_is_not_read_as_a_merge_in_this_run(env):
+    """A stale PASS with a merged PR from an earlier run must not make a run that merged
+    nothing report MERGED."""
+    pp.save_state({"last_tag_tried": "b2", "verdict": "PASS", "merged_pr": 5,
+                   "timestamp": "2020-01-01T00:00:00Z"}, pin="deleg")
+    out = pw.advance_delegated(_deleg(0), dry_run=False)
+    assert out.verdict == pw.SKIPPED and "without recording a result" in out.detail
+
+
+def test_delegated_a_merge_recorded_during_this_run_is_reported(env):
+    def record(dry):
+        pp.save_state({"last_tag_tried": "b2", "verdict": "PASS", "merged_pr": 9,
+                       "timestamp": _now_iso(5)}, pin="deleg")
+    out = pw.advance_delegated(_deleg(0, on_run=record), dry_run=False)
+    assert out.verdict == pw.MERGED and out.pr == 9 and "b1 -> b2" in out.detail
+
+
+def test_delegated_dry_run_pass_is_reported_without_any_state(env):
+    out = pw.advance_delegated(_deleg(0), dry_run=True)
+    assert out.verdict == pw.DRY_PASS
+
+
+@pytest.mark.parametrize("rc,verdict", [(1, pw.FAIL), (2, pw.INCONCLUSIVE)])
+def test_delegated_failure_codes(env, rc, verdict):
+    def record(dry):
+        pp.save_state({"last_tag_tried": "b2", "verdict": "FAIL", "reason": "bad build",
+                       "timestamp": _now_iso(5)}, pin="deleg")
+    out = pw.advance_delegated(_deleg(rc, on_run=record), dry_run=False)
+    assert out.verdict == verdict
+    if rc == 1:
+        assert out.detail == "bad build"
+
+
+def test_delegated_failure_does_not_borrow_a_stale_reason(env):
+    pp.save_state({"last_tag_tried": "b2", "verdict": "INCONCLUSIVE", "reason": "an old reason",
+                   "timestamp": "2020-01-01T00:00:00Z"}, pin="deleg")
+    out = pw.advance_delegated(_deleg(2), dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE and "old reason" not in out.detail
+
+
+def test_delegated_a_candidate_already_recorded_fail_is_skipped(env):
+    pp.save_state({"last_tag_tried": "b2", "verdict": "FAIL", "timestamp": "2020-01-01T00:00:00Z"},
+                  pin="deleg")
+    called = []
+    out = pw.advance_delegated(_deleg(0, on_run=lambda d: called.append(d)), dry_run=False)
+    assert out.verdict == pw.SKIPPED and called == []
+
+
+def test_delegated_candidate_lookup_failure_is_inconclusive(env):
+    def boom():
+        raise pp.PipelineError("pin constant renamed")
+    adv = _deleg(0)
+    adv.candidate = boom
+    out = pw.advance_delegated(adv, dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE and "renamed" in out.detail
 
 
 def test_delegated_pipeline_error_is_a_fail(env):
     def boom(dry):
-        raise pp.PipelineError("pin constant renamed")
-    out = pw.advance_delegated(_adv(key="deleg", delegate=boom), dry_run=False)
-    assert out.verdict == pw.FAIL and "renamed" in out.detail
+        raise pp.PipelineError("worktree refused")
+    out = pw.advance_delegated(_deleg(0, on_run=boom), dry_run=False)
+    assert out.verdict == pw.FAIL and "worktree refused" in out.detail
+
+
+def test_receipt_summary_reads_status_or_verdict_keys(tmp_path):
+    path = tmp_path / "r.json"
+    path.write_text('{"checks": {"a": {"status": "PASS"}, "b": {"verdict": "FAIL"}, "c": "SKIP"}}',
+                    encoding="utf-8")
+    assert pw._receipt_summary(path) == "a=PASS, b=FAIL, c=SKIP"
 
 
 # --------------------------------------------------------------------------- #
