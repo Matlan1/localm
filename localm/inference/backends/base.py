@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import threading
 from abc import ABC, abstractmethod
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 
 class UnsupportedInputError(ValueError):
@@ -186,6 +187,36 @@ _STREAM_STOP: contextvars.ContextVar[Optional[Callable[[], bool]]] = (
     contextvars.ContextVar("localm_stream_stop", default=None))
 
 
+class PerThread:
+    """An instance attribute each thread sees separately: a thread reads the
+    value it last set on that instance, or *default* before it set one.
+
+    For per-reply results (a finish reason, drafting figures) on a backend
+    that answers several requests at once, each on its own thread."""
+
+    def __init__(self, default: Any = None) -> None:
+        self.default = default
+        self.name = ""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    @staticmethod
+    def _state(obj: Any) -> threading.local:
+        state = obj.__dict__.get("_per_thread")
+        if state is None:
+            state = obj.__dict__.setdefault("_per_thread", threading.local())
+        return state
+
+    def __get__(self, obj: Any, owner: Optional[type] = None) -> Any:
+        if obj is None:
+            return self
+        return getattr(self._state(obj), self.name, self.default)
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        setattr(self._state(obj), self.name, value)
+
+
 @contextlib.contextmanager
 def stream_stop_check(check: Callable[[], bool]):
     """Publish *check* for the stream the caller iterates inside this block, in
@@ -287,6 +318,10 @@ VISION_CPU_FALLBACK_STATUS = (
 # Emitted via on_status while a model is loaded (or reloaded after an unload)
 # before it can answer.
 LOADING_MODEL_STATUS = "Loading model..."
+
+# Emitted while a request waits for the model to finish other requests before
+# it starts on this one.
+WAITING_FOR_MODEL_STATUS = "Waiting for another request to finish..."
 
 
 # Shown when a grammar is requested of a backend that cannot apply one. Names

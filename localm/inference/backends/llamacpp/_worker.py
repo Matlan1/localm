@@ -67,6 +67,7 @@ class GgufWorker(VramSizingMixin):
         adapters: Optional[list] = None,
         diffusion_steps: Optional[int] = None,
         diffusion_max_tokens: Optional[int] = None,
+        n_parallel: int = 1,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -108,16 +109,44 @@ class GgufWorker(VramSizingMixin):
         # for LlamaCpp's defaults.
         self.diffusion_steps = diffusion_steps
         self.diffusion_max_tokens = diffusion_max_tokens
+        # Parallel slots the parent asked for; LlamaCpp may hold fewer. The
+        # recurrent-state VRAM charge counts one copy per slot asked for.
+        self.n_parallel = n_parallel
+        self.parallel_copies = max(1, int(n_parallel or 1))
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False
-        # Set by chat_stream() when the grammar-fault retry-without-grammar path
-        # is taken, so the runner dispatch loop can report it in the "done"
-        # envelope - the PARENT owns the persistent "stop sending grammar to
-        # this model" latch (policy state that must survive across many calls
-        # on one backend instance), this is just this call's outcome.
-        self.grammar_unsupported_this_call = False
-        self.last_finish_reason = "stop"
+
+    def _call_state(self) -> threading.local:
+        state = self.__dict__.get("_call_tls")
+        if state is None:
+            state = self.__dict__.setdefault("_call_tls", threading.local())
+        return state
+
+    @property
+    def last_finish_reason(self) -> str:
+        """Why the chat_stream that last ran on the CALLING thread ended."""
+        return getattr(self._call_state(), "finish_reason", "stop")
+
+    @last_finish_reason.setter
+    def last_finish_reason(self, value: str) -> None:
+        self._call_state().finish_reason = value
+
+    @property
+    def grammar_unsupported_this_call(self) -> bool:
+        """True when the chat_stream that last ran on the CALLING thread took the
+        grammar-fault retry-without-grammar path; the runner reports it in the
+        "done" envelope and the parent owns the persistent latch."""
+        return bool(getattr(self._call_state(), "grammar_unsupported", False))
+
+    @grammar_unsupported_this_call.setter
+    def grammar_unsupported_this_call(self, value: bool) -> None:
+        self._call_state().grammar_unsupported = bool(value)
+
+    @property
+    def parallel_slots(self) -> int:
+        """Replies the loaded model decodes together (1 before a load)."""
+        return int(getattr(self._llm, "n_parallel", 1) or 1) if self._llm is not None else 1
 
     @property
     def chatml_fallback_reason(self) -> Optional[str]:
@@ -221,7 +250,9 @@ class GgufWorker(VramSizingMixin):
         ``diffusion`` is True for a diffusion language model, and then
         ``diffusion_capacity`` is the most tokens (prompt plus reply) one
         generation can hold and ``diffusion_reply_tokens`` the reply length it
-        is configured for.
+        is configured for. ``parallel_slots`` is how many replies the model
+        decodes together, and ``parallel_note`` why that is fewer than
+        requested ("" when it is not).
 
         Raises :class:`~localm.inference.backends.base.ModelLoadCancelled` if
         ``cancel_event`` was set during the load (native progress-callback
@@ -271,6 +302,8 @@ class GgufWorker(VramSizingMixin):
                 ("diffusion_steps", self.diffusion_steps),
                 ("diffusion_max_tokens", self.diffusion_max_tokens),
             ) if value is not None}
+        if self.n_parallel and self.n_parallel > 1:
+            optional["n_parallel"] = self.n_parallel
         self._llm = LlamaCpp(
             model_path=self.model_path,
             n_ctx=self.n_ctx,
@@ -303,6 +336,8 @@ class GgufWorker(VramSizingMixin):
             "encoder_decoder": bool(getattr(self._llm, "is_encoder_decoder", False)),
             "encoder_input_limit": int(getattr(self._llm, "encoder_input_limit", 0) or 0),
             "diffusion": bool(getattr(self._llm, "is_diffusion", False)),
+            "parallel_slots": self.parallel_slots,
+            "parallel_note": str(getattr(self._llm, "parallel_note", "") or ""),
         }
         if meta["diffusion"]:
             meta["diffusion_capacity"] = int(getattr(self._llm, "_diffusion_capacity", 0) or 0)

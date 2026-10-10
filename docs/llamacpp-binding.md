@@ -405,6 +405,44 @@ accept advances the grammar sampler's parse state twice per token (it throws
 `std::runtime_error` across the C ABI once its stacks empty - WinError
 0xe06d7363) and double-counts the repetition-penalty window.
 
+### Parallel slots (`_slots.py`)
+
+`LlamaCpp(n_parallel=N)` with N above 1 creates its context with
+`n_seq_max = N` and `kv_unified = true`: one KV cache of `n_ctx` cells shared
+by N sequences, so the slots cost no extra KV memory (a model with recurrent
+layers keeps one recurrent state per sequence, which the VRAM sizing charges).
+The model keeps one slot when it is an encoder-decoder or diffusion model, when
+a draft source is on, or when the runtime lacks the `llama_memory_*` API, and N
+is lowered until it divides `n_ubatch`; `n_parallel` and `parallel_note` say
+what it holds and why.
+
+`_generate` then hands each text reply to the `SlotScheduler`: a reply gets a
+free sequence (the one whose cached tokens share the longest prefix with its
+prompt), its own sampler chain, and a reservation of `prompt + budget + 64`
+cells. One scheduler thread makes every native call; each step decodes the
+pending token of every running reply and prompt chunks of the replies still
+prefilling, up to 2048 tokens, then samples each reply from its own row.
+
+- A request that does not fit takes the cells of idle sequences first (least
+  recently used), then grows the context in `n_ctx_grow` steps (re-decoding the
+  running replies' tokens into the new context, and only when the VRAM check
+  says the bigger cache fits on the GPU), and otherwise waits for the running
+  replies, FIFO, with a `waiting` status every few seconds.
+- A reply with no budget reserves 512 cells at a time and ends with `length`
+  at the ceiling.
+- Cancelling a reply (a closed stream, or a stop check that returns True)
+  ends only that sequence.
+- A failed combined decode is retried one sequence at a time, so only the
+  failing reply ends.
+- An image turn runs `_generate_image` inside `SlotScheduler.exclusive()`: it
+  waits for the running replies, holds the model alone, and leaves the cache
+  marked for clearing before the next text reply.
+
+Replies decoded in one batch are not bit-identical to the same replies decoded
+alone, so a greedy reply under concurrency can differ from the same request run
+alone. A reply alone in a slot context is identical to the one-slot model, and
+a reply is unaffected by the content of the replies beside it.
+
 ### Multi-Token Prediction (MTP) speculative decoding
 
 Some models are trained with an extra "next-n" head that predicts more than

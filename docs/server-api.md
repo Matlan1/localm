@@ -888,9 +888,15 @@ for chunk in stream:
 
 ## Behaviour notes
 
-- **Concurrency**: inference is serialised through a semaphore; concurrent
-  requests queue in order. GPU memory is shared and the KV cache is not
-  concurrency-safe, so this is deliberate.
+- **Concurrency**: a GGUF model answers up to `parallel_slots` requests at
+  the same time (default `auto`: 4, or 1 while speculative drafting is on),
+  decoding them together in one batch per step; further requests queue in order
+  and stream a `waiting` status meanwhile. All of them share the model's one
+  context window: a request that does not fit beside the running ones waits for
+  them. A reply decoded beside others is not bit-identical to the same request
+  decoded alone, even at temperature 0. A turn with an image runs on its own,
+  after the replies already running. Other backends answer one request at a
+  time per model.
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context window section of
   [architecture.md](architecture.md)). Conversations that outgrow the

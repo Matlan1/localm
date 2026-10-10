@@ -8,7 +8,8 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
-from localm.inference.backends.base import LOADING_MODEL_STATUS, VISION_CPU_FALLBACK_STATUS
+from localm.inference.backends.base import (
+    LOADING_MODEL_STATUS, VISION_CPU_FALLBACK_STATUS, WAITING_FOR_MODEL_STATUS)
 from localm.inference.stop_sequences import normalize_stop
 
 
@@ -336,10 +337,6 @@ class ChoiceDelta(BaseModel):
 
 # Emitted while the prompt is tokenized and evaluated, before the first token.
 PROCESSING_PROMPT_STATUS = "Processing prompt..."
-
-# Emitted by the SSE route (not a backend's on_status) while a request sits
-# behind the per-model semaphore, before the model has started on it.
-WAITING_FOR_MODEL_STATUS = "Waiting for another request to finish..."
 
 # Emitted by the SSE route while it summarises older messages to fit the
 # context window, before the reply starts.
