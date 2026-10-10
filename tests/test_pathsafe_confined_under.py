@@ -110,6 +110,11 @@ class TestConfinedUnder:
         with pytest.raises(ValueError):
             confined_under(base, "Q:evil")
 
+    @pytest.mark.parametrize("bad", ["Q:", "Q:evil", "z:x/y"])
+    def test_a_leading_drive_is_refused_as_a_drive_qualified_path(self, base, bad):
+        with pytest.raises(ValueError, match=r"drive-qualified path not allowed: "):
+            confined_under(base, bad)
+
     def test_symlink_out_of_base_is_rejected(self, base, tmp_path):
         """Lexical checks are not sufficient: a symlink INSIDE base pointing out
         of it turns a well-formed name into an escape, so the check is on the

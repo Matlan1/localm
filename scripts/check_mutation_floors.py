@@ -135,6 +135,29 @@ def _is_mutant_id(key) -> bool:
     return True
 
 
+def installed_mutmut_version() -> str | None:
+    """The installed mutmut distribution's version, or None when not installed."""
+    from importlib import metadata
+    try:
+        return metadata.version("mutmut")
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def mutmut_version_problem(baseline: dict, installed: str | None) -> str | None:
+    """A problem line when the results came from a mutmut other than the one
+    the baseline records, else None. A baseline recording no version is not
+    compared."""
+    recorded = baseline.get("mutmut")
+    if not isinstance(recorded, str) or not recorded:
+        return None
+    if installed == recorded:
+        return None
+    return (f"mutmut {installed or '(not installed)'} produced these results but the "
+            f"baseline records mutmut {recorded}: mutant numbering and exit codes can "
+            "differ between versions, so re-baseline with the matching mutmut")
+
+
 def only_mutate_modules(pyproject_text: str) -> list[str]:
     """The ``[tool.mutmut] only_mutate`` list, forward-slash paths."""
     import tomllib
@@ -598,6 +621,9 @@ def main(argv: list[str]) -> int:
 
     more, warnings, rows = check(results, baseline, modules)
     problems.extend(more)
+    version_problem = mutmut_version_problem(baseline, installed_mutmut_version())
+    if version_problem:
+        problems.append(version_problem)
 
     print(render_table(rows))
     for w in warnings:
