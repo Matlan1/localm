@@ -314,7 +314,7 @@ def _event_relay(say):
     return on_event
 
 
-def refusal(*, model_overrides=None, lora_name=None, placement=None,
+def refusal(*, model_overrides=None, lora_name=None,
             width=None, height=None, **_ignored) -> Optional[str]:
     """Why the native backend cannot honour a request with these inputs, or
     None. Checked before any download, VRAM handover or load."""
@@ -324,9 +324,6 @@ def refusal(*, model_overrides=None, lora_name=None, placement=None,
     if lora_name:
         return ("LoRAs are not supported by the native image backend yet; "
                 "use the ComfyUI backend for LoRA generation.")
-    if placement:
-        return ("Per-component GPU placement applies to ComfyUI only; turn it off or "
-                "use the ComfyUI backend.")
     if (width is None) != (height is None):
         return "Give both width and height, or neither."
     if width is not None and height is not None:
@@ -371,13 +368,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     *out_path* and, when *write_sidecar*, ``<out_path>.json``.
 
     ComfyUI-only inputs are refused with a reason rather than ignored:
-    ``model_overrides`` (workflow model slots), ``lora_name`` and ``placement``.
+    ``model_overrides`` (workflow model slots) and ``lora_name``.
     ``delete_outputs`` has nothing to act on (there is no second copy).
     *swap* asks this backend to unload the chat model itself, used when the
     caller's own unload did not succeed."""
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, lora_name=lora_name,
-                      placement=placement, width=width, height=height)
+                      width=width, height=height)
     if refused:
         return False, refused
     started = time.monotonic()
