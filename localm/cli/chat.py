@@ -1007,7 +1007,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 
 
 # The REPL media-generation commands (/generate-image, /generate-music,
-# /generate-video) all share one shape: ensure ComfyUI is reachable (auto-
+# /generate-video) share one shape on ComfyUI: ensure ComfyUI is reachable (auto-
 # launching it from the configured comfy_launch_cmd/comfy_workdir if needed),
 # unload the chat model to free VRAM, generate one file into <home>/<subdir>,
 # then free ComfyUI's VRAM. Only the generator, output subdir/extension and the
@@ -1308,7 +1308,7 @@ def _handle_command(
             "/save [file]            save conversation to JSON\n"
             "/compact                summarise older turns to free context\n"
             "/generate-image <prompt> generate an image via ComfyUI FLUX\n"
-            "/generate-music <tags>  generate music via ComfyUI ACE-Step\n"
+            "/generate-music <tags>  generate music (ACE-Step)\n"
             "/generate-video <prompt> generate a clip via ComfyUI Wan\n"
             "/temp <float>           sampling temperature\n"
             "/tokens <int>           max response tokens"
