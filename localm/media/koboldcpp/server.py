@@ -244,7 +244,7 @@ class _Server:
         try:
             with self._opener.open(self.base + "/api/extra/version", timeout=2) as r:
                 data = json.loads(r.read())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return None
         return data if isinstance(data, dict) else None
 
@@ -390,7 +390,7 @@ def run(runtime: Runtime, backend: str, models: ModelSet, work_dir: Path, *,
                                           on_progress=say, activity="Still planning")
                 try:
                     planned = json.loads(raw)
-                except ValueError as e:
+                except (ValueError, RecursionError) as e:
                     raise ServerError("the music planner returned an unreadable reply") from e
                 if isinstance(planned, dict) and not planned.get("error"):
                     body = dict(planned)
