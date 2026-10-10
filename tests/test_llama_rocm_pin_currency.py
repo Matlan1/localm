@@ -388,3 +388,30 @@ class _FakeHTTP:
 
     def __exit__(self, *a):
         return False
+
+
+def test_every_api_call_sends_github_token_when_set(currency, monkeypatch):
+    """Both request sites (the release listing and the by-tag date lookup) send
+    GITHUB_TOKEN as a bearer token when it is set, and no Authorization header
+    when it is not."""
+    captured = []
+
+    def capture(req, timeout=None):
+        captured.append(req)
+        if req.full_url.endswith("/releases/tags/b1"):
+            return _FakeHTTP({"published_at": "2026-01-01T00:00:00Z"})
+        return _FakeHTTP([])
+    monkeypatch.setattr("urllib.request.urlopen", capture)
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    currency.upstream_releases()
+    assert currency.release_date("b1") == _day(0)
+    assert len(captured) == 2
+    assert [r.get_header("Authorization") for r in captured] == [None, None]
+
+    captured.clear()
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
+    currency.upstream_releases()
+    assert currency.release_date("b1") == _day(0)
+    assert len(captured) == 2
+    assert [r.get_header("Authorization") for r in captured] == ["Bearer tok-123"] * 2

@@ -32,6 +32,10 @@ Fails soft on the API: unreachable, rate-limited, or a malformed/empty
 response all print a clearly-labelled "could not check" and exit 0 in default
 mode (2 under --gate), never a false "up to date".
 
+Environment:
+    GITHUB_TOKEN          sent as a bearer token so the API calls use the
+                          authenticated quota
+
 Usage:
     python scripts/check_comfyui_pin.py               # compare against the real pin
     python scripts/check_comfyui_pin.py --pinned v0.9.2   # sanity-check a hypothetical pin
@@ -102,16 +106,23 @@ def _pinned_version(path: Path = _CONSTANTS_PATH) -> str:
 #  Fetching upstream releases                                                 #
 # --------------------------------------------------------------------------- #
 
+def _headers() -> dict:
+    """GitHub API request headers, with ``Authorization`` when GITHUB_TOKEN is set."""
+    headers = {"User-Agent": "localm-comfyui-pin-check",
+               "Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _fetch_releases_http(repo: str):
     """Real GitHub API call. Raises on any failure; callers must not let that
     propagate uncaught (see _fetch_releases)."""
     url = f"https://api.github.com/repos/{repo}/releases?per_page={_PER_PAGE}"
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "localm-comfyui-pin-check",
-            "Accept": "application/vnd.github+json",
-        },
+        headers=_headers(),
     )
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
         return json.loads(r.read().decode("utf-8"))
@@ -150,10 +161,7 @@ def _fetch_release_by_tag_http(repo: str, tag: str):
     url = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "localm-comfyui-pin-check",
-            "Accept": "application/vnd.github+json",
-        },
+        headers=_headers(),
     )
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
         return json.loads(r.read().decode("utf-8"))
@@ -188,10 +196,7 @@ def _fetch_tag_ref_http(repo: str, tag: str):
     url = f"https://api.github.com/repos/{repo}/git/ref/tags/{tag}"
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "localm-comfyui-pin-check",
-            "Accept": "application/vnd.github+json",
-        },
+        headers=_headers(),
     )
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
         return json.loads(r.read().decode("utf-8"))
@@ -205,10 +210,7 @@ def _fetch_tag_object_http(repo: str, sha: str):
     url = f"https://api.github.com/repos/{repo}/git/tags/{sha}"
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "localm-comfyui-pin-check",
-            "Accept": "application/vnd.github+json",
-        },
+        headers=_headers(),
     )
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
         return json.loads(r.read().decode("utf-8"))
