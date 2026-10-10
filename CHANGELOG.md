@@ -31,6 +31,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   checksum, and checks that it loads and finds a compute device, falling back to Vulkan and
   then CPU when the preferred build does not load. `--backend` picks a build and `--status`
   shows what is installed.
+- **One GGUF model answers several requests at once.** Concurrent chat requests to the
+  same model are decoded together instead of waiting for each other, so two or four
+  clients share the GPU's throughput rather than queueing (`parallel_slots`, default
+  `auto`: 4, or 1 while speculative drafting is on; Settings > Engine > Parallel
+  requests). The requests share the model's context window: one that does not fit beside
+  the running ones waits for them and shows a waiting status. A reply generated beside
+  others can differ slightly from the same request run alone, even at temperature 0.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the

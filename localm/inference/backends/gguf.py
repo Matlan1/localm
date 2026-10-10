@@ -24,14 +24,17 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 
 from localm.console import console
 
-from .base import (AdapterLoadError, BaseBackend, ModelLoadCancelled,
+from .base import (AdapterLoadError, BaseBackend, ModelLoadCancelled, PerThread,
                    PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
                    UnsupportedModelRoleError)
 from .llamacpp._runner import RunnerBusy
+
+if TYPE_CHECKING:
+    from localm.inference.parallel_setting import ParallelSetting
 from .llamacpp._sizing import VramSizingMixin
 
 # Process-wide latch: the count_messages_tokens RPC warning prints once per process.
@@ -121,6 +124,26 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     # The {"path", "scale"} of each adapter the last load applied.
     applied_adapters: Sequence[dict] = ()
 
+    # The last reply's results. With parallel slots each thread reads those of
+    # the reply that last ran on it.
+    last_finish_reason = PerThread("stop", when=lambda b: b.parallel_slots > 1)
+    last_mtp_active = PerThread(False, when=lambda b: b.parallel_slots > 1)
+    last_mtp_call_status = PerThread("", when=lambda b: b.parallel_slots > 1)
+    last_mtp_drafted = PerThread(0, when=lambda b: b.parallel_slots > 1)
+    last_mtp_accepted = PerThread(0, when=lambda b: b.parallel_slots > 1)
+    last_mtp_steps = PerThread(0, when=lambda b: b.parallel_slots > 1)
+    last_mtp_paused_steps = PerThread(0, when=lambda b: b.parallel_slots > 1)
+    last_mtp_skipped = PerThread("", when=lambda b: b.parallel_slots > 1)
+    _mtp_stopped_this_call = PerThread(False, when=lambda b: b.parallel_slots > 1)
+    last_speculation = PerThread(None, when=lambda b: b.parallel_slots > 1)
+
+    # Parallel slots: the setting ("auto" or a count), the count the last load
+    # asked the worker for, and what it reported back.
+    parallel_slots_setting: ParallelSetting = 1
+    parallel_copies = 1
+    parallel_slots = 1
+    parallel_note = ""
+
     def __init__(
         self,
         model_path: str,
@@ -140,6 +163,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         spec_draft_model: Optional[str] = None,
         use_mmap: str = "auto",
         adapters: Optional[list] = None,
+        parallel_slots: ParallelSetting = 1,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -213,15 +237,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # load response.
         self.encoder_decoder = False
         self.last_mtp_status = None    # why speculation is or is not running
-        self.last_mtp_active = False   # whether the last call actually speculated
-        self.last_mtp_call_status = ""  # why the last call stopped speculating partway
-        self.last_mtp_drafted = 0      # draft tokens the last call sent to verification
-        self.last_mtp_accepted = 0     # how many of those the target accepted
-        self.last_mtp_steps = 0        # verification batches the last call decoded
-        self.last_mtp_paused_steps = 0  # steps it ran plain because drafting was slower
-        self.last_mtp_skipped = ""     # why the last call could not draft at all
-        self._mtp_stopped_this_call = False  # the last call turned MTP off for the model
-        self.last_speculation = None   # the child's speculation report for the last call
+        from localm.inference.parallel_setting import coerce_parallel_slots
+        setting = coerce_parallel_slots(parallel_slots)
+        if setting is None:
+            raise ValueError("parallel_slots must be auto or 1-16, got %r" % (parallel_slots,))
+        self.parallel_slots_setting = setting
         # Always None in production; the real LlamaCpp instance lives in the
         # child process.
         self._llm = None
@@ -532,6 +552,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 _dbg.warning("draft model %s does not fit in VRAM beside %s; it runs "
                              "on the CPU", Path(str(self.spec_draft_model)).name,
                              Path(self.model_path).name)
+        self._set_parallel_copies(self._requested_parallel_slots())
         # Resolve the effective GPU-layer count once, so _check_vram and
         # _load_native both read the same value.
         self.effective_gpu_layers = self._effective_gpu_layers()
@@ -559,6 +580,42 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             if split_note:
                 vram_hint += f" {split_note}"
             raise RuntimeError(_load_failure_message(exc, vram_hint)) from exc
+
+    def _set_parallel_copies(self, copies: int) -> None:
+        """Ask the next load for *copies* slots; the recurrent-state VRAM charge
+        is recomputed for that many copies."""
+        if copies != self.parallel_copies:
+            self.parallel_copies = copies
+            self._recurrent_state_vram_bytes_cached = None
+
+    def _requested_parallel_slots(self) -> int:
+        """The slots the next load asks the worker for.
+
+        One with a draft source or for a diffusion model. An explicit count is
+        used as given. ``auto`` is ``PARALLEL_AUTO_SLOTS`` for a model without
+        recurrent layers, and for a model with them the largest of 4 and 2
+        whose extra recurrent-state copies fit in the VRAM a full offload
+        leaves free (one when the model does not fully fit, or VRAM cannot be
+        measured); a CPU-only load counts as fitting."""
+        from localm.inference.parallel_setting import (
+            PARALLEL_AUTO_SLOTS)
+        if getattr(self, "spec_source", "off") not in (None, "off") or self.is_diffusion:
+            return 1
+        setting = self.parallel_slots_setting
+        if isinstance(setting, int):
+            return max(1, setting)
+        self._set_parallel_copies(1)
+        per_copy = self._recurrent_state_vram_bytes()
+        if per_copy <= 0 or self.n_gpu_layers == 0:
+            return PARALLEL_AUTO_SLOTS
+        budget = self._auto_gpu_layers_budget()
+        if budget is None or budget.layers < self._DEFAULT_GPU_LAYERS:
+            return 1
+        headroom = budget.free - (budget.model + budget.kv + budget.overhead)
+        for slots in (PARALLEL_AUTO_SLOTS, 2):
+            if (slots - 1) * per_copy <= headroom:
+                return slots
+        return 1
 
     def _check_adapters(self) -> None:
         """Refuse a load whose attached LoRA adapters cannot be applied: a
@@ -737,6 +794,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 value = cfg.get(key)
                 if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                     params[key] = value
+        if self.parallel_copies > 1:
+            params["n_parallel"] = self.parallel_copies
         timeout = self._load_timeout_seconds()
 
         cap_label = f"→{ctx_max}" if ctx_max else "→∞"
@@ -761,6 +820,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._loaded = True
         self._supports_images = bool(meta.get("supports_images"))
         self._supports_mtp = bool(meta.get("supports_mtp"))
+        slots = meta.get("parallel_slots")
+        self.parallel_slots = slots if isinstance(slots, int) and slots > 0 else 1
+        self.parallel_note = str(meta.get("parallel_note") or "")
         reported = meta.get("adapters")
         self.applied_adapters = list(reported) if isinstance(reported, list) else []
         if meta.get("diffusion") is True:
@@ -885,11 +947,24 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         f"about {40 / gb:.0f} tokens/s at 40 GB/s)[/dim]")
 
         self._print_mmap_note()
+        self._print_parallel_note()
         if self.encoder_decoder:
             console.print(
                 f"[dim]  encoder-decoder model: each request reads its messages "
                 f"as plain text, up to {self.effective_ctx_max} tokens[/dim]")
         console.print("[green]✓[/green] Model loaded")
+
+    def _print_parallel_note(self) -> None:
+        """Print how many requests the loaded model answers at once, when more
+        than one, or why fewer than an explicit count asked for."""
+        if self.parallel_slots > 1:
+            console.print(f"[dim]  parallel : up to {self.parallel_slots} requests at "
+                          f"once, sharing one context window[/dim]")
+        if (self.parallel_note and isinstance(self.parallel_slots_setting, int)
+                and self.parallel_slots < self.parallel_slots_setting):
+            console.print(f"[dim]  parallel : {self.parallel_slots} of "
+                          f"{self.parallel_slots_setting} requested: "
+                          f"{self.parallel_note}[/dim]")
 
     def _print_mmap_note(self) -> None:
         """Print the one-line mmap note for the load just finished (see
@@ -948,9 +1023,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     def unload(self) -> None:
         # Ask the isolated worker to close cleanly, killing it if it does not exit
         # promptly. A no-op when the worker already crashed or was never spawned.
-        if self._runner is not None:
+        runner = self._runner
+        if runner is not None:
             try:
-                self._runner.shutdown()
+                runner.shutdown()
             except Exception as e:
                 # Teardown is best-effort: log a correlatable line and drop the
                 # reference below rather than escalating to a hard failure.
@@ -1219,8 +1295,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # what triggers ModelRunner.chat_stream's cancel-and-drain cleanup.
         self.last_finish_reason = "stop"
         self._reset_mtp_call()
+        runner = self._runner
         try:
-            yield from self._runner.chat_stream(
+            if runner is None:
+                raise RuntimeError("The model was unloaded before this reply started. "
+                                   "It will reload on the next request.")
+            yield from runner.chat_stream(
                 first_chunk_timeout=self._first_token_timeout_seconds(),
                 on_status=on_status,
                 stop_on_request=self.is_diffusion,
@@ -1235,15 +1315,22 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # generation stall, and an unload racing the stream. exception() carries
             # the real message and traceback.
             _dbg.exception("worker failure during generation - dropping model instance")
-            try:
-                self.unload()
-            except Exception:
-                self._runner = None
-                self._llm = None
-                self._loaded = False
+            if self._runner is runner:
+                try:
+                    self.unload()
+                except Exception:
+                    self._runner = None
+                    self._llm = None
+                    self._loaded = False
+            elif runner is not None:
+                try:
+                    runner.shutdown()
+                except Exception as e:
+                    _dbg.debug("gguf worker shutdown failed (%s); its process may "
+                               "not be fully torn down", type(e).__name__)
             raise
         else:
-            done = getattr(self._runner, "last_done", None) or {}
+            done = getattr(runner, "last_done", None) or {}
             self.last_finish_reason = done.get("finish_reason", "stop")
             self._record_mtp(done)
             if done.get("grammar_unsupported") and not self._grammar_unsupported:

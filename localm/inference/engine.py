@@ -17,6 +17,7 @@ from localm.console import console
 from localm.debuglog import logger
 from localm.inference.backends.base import LOADING_MODEL_STATUS, BaseBackend
 from localm.inference.mmap_setting import describe_mmap, resolve_use_mmap
+from localm.inference.parallel_setting import resolve_parallel_slots
 from localm.textnorm import scrub_stream
 
 
@@ -223,6 +224,7 @@ def create_backend(
                               if source == "draft" else None),
             mtp_draft_tokens=_resolve_mtp_draft_tokens(cfg, mtp_draft_tokens),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
+            parallel_slots=resolve_parallel_slots(cfg),
         )
 
     raise ValueError(
@@ -516,8 +518,16 @@ class Engine:
     def last_finish_reason(self) -> str:
         """Why the most recent generation ended: "stop" (model finished) or
         "length" (the max_tokens budget ran out). Backends that cannot tell
-        report "stop"."""
+        report "stop". A GGUF backend answers for the generation that last ran
+        on the calling thread."""
         return getattr(self._backend, "last_finish_reason", "stop")
+
+    @property
+    def parallel_slots(self) -> int:
+        """How many requests the loaded model answers at the same time (the
+        last load's figure while unloaded); 1 for a backend without slots."""
+        slots = getattr(self._backend, "parallel_slots", 1)
+        return slots if isinstance(slots, int) and not isinstance(slots, bool) and slots > 0 else 1
 
     @property
     def supports_images(self) -> bool:
