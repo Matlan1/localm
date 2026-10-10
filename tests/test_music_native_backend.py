@@ -127,7 +127,7 @@ def test_settings_resolve_native_on_a_fresh_home(monkeypatch):
     s = music_backend.settings({})
     assert s["backend"] == "native"
     assert s["native_backend"] == "auto" and s["plan"] is True and s["lowvram"] is False
-    assert s["vram_estimate_bytes"] == int(6.5 * 1024 ** 3)
+    assert s["vram_estimate_bytes"] == int(7.6 * 1024 ** 3)
     assert music_backend._impl(s) is native
 
 
@@ -150,7 +150,7 @@ def test_the_native_vram_estimate_comes_from_the_model_files(monkeypatch, tmp_pa
         files[comp] = str(p)
     cfg = {"plugins": {"music": {"backend": "native", "native": dict(files, plan=False)}}}
     s = music_backend.settings(cfg)
-    assert s["vram_estimate_bytes"] == 8700 + 1024 ** 3
+    assert s["vram_estimate_bytes"] == 8700 + int(1.75 * 1024 ** 3)
 
 
 # --------------------------------------------------------------------------- #

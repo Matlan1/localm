@@ -15,7 +15,7 @@ import os
 import signal
 import subprocess
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 # Runs in its own session with SIGINT, SIGHUP and SIGTERM ignored, so a Ctrl-C or
 # a closed terminal that ends localm does not end the watcher first. It kills the
@@ -95,7 +95,7 @@ def _win_job_for(proc: subprocess.Popen):
                     ("PeakProcessMemoryUsed", ctypes.c_size_t),
                     ("PeakJobMemoryUsed", ctypes.c_size_t)]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # pyright: ignore[reportAttributeAccessIssue]
     kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
     kernel32.SetInformationJobObject.argtypes = [
@@ -108,7 +108,8 @@ def _win_job_for(proc: subprocess.Popen):
     info = _EXTENDED()
     info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     ok = kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
-    if ok and kernel32.AssignProcessToJobObject(job, int(proc._handle)):
+    if ok and kernel32.AssignProcessToJobObject(
+            job, int(proc._handle)):  # pyright: ignore[reportAttributeAccessIssue]
         return job
     kernel32.CloseHandle(job)
     return None
@@ -117,9 +118,9 @@ def _win_job_for(proc: subprocess.Popen):
 def start(argv: list, *, cwd: str, env: dict) -> ManagedProcess:
     """Start *argv* with stdout and stderr merged into one text pipe, tied to
     localm's lifetime as described in the module docstring."""
-    kwargs = dict(cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                  stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-                  bufsize=1)
+    kwargs: dict[str, Any] = dict(
+        cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1)
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         proc = subprocess.Popen(argv, **kwargs)
@@ -159,7 +160,7 @@ def kill(mp: ManagedProcess, *, grace: float = 5.0) -> None:
             try:
                 import ctypes
                 from ctypes import wintypes
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # pyright: ignore[reportAttributeAccessIssue]
                 kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
                 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
                 kernel32.TerminateJobObject(mp._job, 1)

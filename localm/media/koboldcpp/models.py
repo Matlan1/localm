@@ -46,7 +46,7 @@ DISTINCT_PREFIX = "ace-step-"
 COMPONENTS = ("text_encoder", "dit", "vae", "lm")
 
 _OVERHEAD_WITH_LM = int(3.5 * 1024 ** 3)
-_OVERHEAD_WITHOUT_LM = int(1.5 * 1024 ** 3)
+_OVERHEAD_WITHOUT_LM = int(1.75 * 1024 ** 3)
 
 Progress = Callable[[str], None]
 CancelCheck = Callable[[], bool]

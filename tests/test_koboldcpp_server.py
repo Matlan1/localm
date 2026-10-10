@@ -65,7 +65,7 @@ FAKE = textwrap.dedent(r'''
         return buf.getvalue()
 
     class H(BaseHTTPRequestHandler):
-        def log_message(self, *a):
+        def log_message(self, format, *args):
             pass
         def _send(self, code, body, ctype="application/json"):
             self.send_response(code)
@@ -222,6 +222,7 @@ def test_a_job_starts_the_server_plans_and_generates(fake_kcpp, tmp_path, starte
 def test_the_server_is_reused_and_restarted_for_another_model_set(fake_kcpp, tmp_path, started):
     _run(tmp_path)
     first = server.running_pid()
+    assert first is not None
     _run(tmp_path)
     assert server.running_pid() == first and len(started) == 1
     _run(tmp_path, models=server.ModelSet("te2.gguf", "dit.gguf", "vae.gguf"))
@@ -327,7 +328,7 @@ def test_a_slow_load_times_out_as_a_start_error(fake_kcpp, tmp_path, monkeypatch
 
 
 class _Squatter(BaseHTTPRequestHandler):
-    def log_message(self, *a):
+    def log_message(self, format, *args):
         pass
 
     def do_GET(self):
@@ -407,6 +408,7 @@ def _start_parent(tmp_path, **popen_kw):
     root = str(Path(__file__).resolve().parent.parent)
     parent = subprocess.Popen([BASE_PYTHON, str(script), root, BASE_PYTHON],
                               stdout=subprocess.PIPE, text=True, **popen_kw)
+    assert parent.stdout is not None
     info = json.loads(parent.stdout.readline())
     return parent, info
 
