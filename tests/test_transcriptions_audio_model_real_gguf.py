@@ -114,3 +114,48 @@ def test_a_bad_clip_is_400_and_the_model_keeps_serving(client, clip):
     again = client.post(URL, files={"file": ("fox.wav", wav, "audio/wav")})
     assert again.status_code == 200
     assert _words(phrase) in _words(again.json()["text"])
+
+
+def _flac_from_wav(wav: bytes) -> bytes:
+    import io
+
+    av = pytest.importorskip("av")
+    out = io.BytesIO()
+    with av.open(io.BytesIO(wav)) as src, av.open(out, "w", format="flac") as dst:
+        stream_in = src.streams.audio[0]
+        stream_out = dst.add_stream("flac", rate=stream_in.rate)
+        for frame in src.decode(stream_in):
+            for packet in stream_out.encode(frame):
+                dst.mux(packet)
+        for packet in stream_out.encode(None):
+            dst.mux(packet)
+    return out.getvalue()
+
+
+def _repeated(wav: bytes, times: int) -> bytes:
+    import io
+    import wave
+
+    with wave.open(io.BytesIO(wav)) as src:
+        params, frames = src.getparams(), src.readframes(src.getnframes())
+    out = io.BytesIO()
+    with wave.open(out, "wb") as dst:
+        dst.setparams(params)
+        dst.writeframes(frames * times)
+    return out.getvalue()
+
+
+def test_a_flac_clip_is_transcribed(client, clip):
+    wav, phrase = clip
+    flac = _flac_from_wav(wav)
+    assert flac[:4] == b"fLaC"
+    r = client.post(URL, files={"file": ("fox.flac", flac, "audio/flac")})
+    assert r.status_code == 200, r.text
+    assert _words(r.json()["text"]) == _words(phrase), r.json()
+
+
+def test_a_long_clip_is_transcribed_whole(client, clip):
+    wav, phrase = clip
+    r = client.post(URL, files={"file": ("fox.wav", _repeated(wav, 6), "audio/wav")})
+    assert r.status_code == 200, r.text
+    assert _words(r.json()["text"]).count(_words(phrase)) >= 3, r.json()
