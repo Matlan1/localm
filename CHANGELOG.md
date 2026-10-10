@@ -20,6 +20,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   It runs in its own worker process, shows its progress, appears as loaded on the Models
   page (Unload releases it), and stops when the client goes away. Pocket TTS files are
   still refused.
+- **The Anthropic Messages API at `/v1/messages`.** Claude Code, the Anthropic SDKs and other
+  tools that speak the Messages API can point their base URL at localm and use any chat model:
+  text and image blocks, a system prompt, `stop_sequences`, tool use with `tool_use` and
+  `tool_result` blocks, `thinking` (returned as thinking blocks), streaming with the full
+  Messages event sequence, and `/v1/messages/count_tokens`. The `x-api-key` header is accepted
+  as well as a bearer token, and errors come back in Anthropic's error shape.
 - **Structured output and more OpenAI fields on `/v1/chat/completions`.**
   `response_format` (`json_object`, or `json_schema` with `strict`) constrains the reply,
   token by token, to JSON or to the schema, also alongside `tools`. `presence_penalty`,

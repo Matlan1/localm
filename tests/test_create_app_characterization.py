@@ -222,6 +222,9 @@ _KERNEL_ROUTES = {
     ("api", "DELETE", "/api/delete"): ("scope:models:write",),
     ("api", "POST", "/api/blobs/{digest}"): ("scope:models:write",),
     ("api", "HEAD", "/api/blobs/{digest}"): ("scope:models:write",),
+    # routes/anthropic.py
+    ("api", "POST", "/v1/messages"): ("auth",),
+    ("api", "POST", "/v1/messages/count_tokens"): ("auth",),
 }
 
 # attach_engine(): plugin management, plugin dependency install, background jobs.
