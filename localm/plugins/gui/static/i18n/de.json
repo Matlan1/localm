@@ -44,6 +44,7 @@
   "chat.compact.trimmed": "Ältere Nachrichten wurden gekürzt (Zusammenfassung nicht verfügbar)",
   "chat.compactTitle": "Ältere Nachrichten zusammenfassen, um Kontext freizugeben",
   "chat.conv.delete": "Unterhaltung löschen",
+  "chat.conv.tooLarge": "Diese Unterhaltung ist zu groß für die Speicherung auf dem Server (große Anhänge) - sie wird nur in diesem Browser gehalten",
   "chat.conv.deleteFailed": "Die Unterhaltung konnte auf dem Server nicht gelöscht werden - sie taucht möglicherweise wieder auf",
   "chat.conv.empty": "Noch keine Unterhaltungen",
   "chat.conv.empty.hint": "Starten Sie eine mit dem + darüber.",
