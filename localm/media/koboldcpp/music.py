@@ -63,10 +63,19 @@ def prepare(native_cfg: dict, choice: str, *, plan: bool = True,
     :class:`ModelError`, :class:`NativeMusicError` or :class:`Cancelled`."""
     say = on_progress or (lambda _m: None)
     backend = backend_order(choice)[0]
-    runtime.ensure_for_backend(backend, on_progress=say)
+    _ensure_runtime(backend, say, cancel_check)
     models = resolve_models(native_cfg, use_lm=plan, pull_missing=True,
                             on_progress=say, cancel_check=cancel_check)
     return backend, models
+
+
+def _ensure_runtime(backend: str, say: Progress,
+                    cancel_check: Optional[CancelCheck]) -> runtime.Runtime:
+    try:
+        return runtime.ensure_for_backend(backend, on_progress=say,
+                                          cancel_check=cancel_check)
+    except runtime.InstallCancelled as e:
+        raise Cancelled() from e
 
 
 def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = True,
@@ -79,22 +88,23 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
     models = resolve_models(native_cfg, use_lm=plan, pull_missing=True,
                             on_progress=say, cancel_check=cancel_check)
     errors: list[str] = []
+    auto = choice.strip().lower() == "auto"
     for i, backend in enumerate(order):
-        rt = runtime.ensure_for_backend(backend, on_progress=say)
+        rt = _ensure_runtime(backend, say, cancel_check)
         try:
             data = server.run(rt, backend, models, work_dir(), prepare=plan,
                               request=request, timeout=timeout, lowvram=lowvram,
                               on_progress=say, cancel_check=cancel_check)
         except StartError as e:
-            if choice.strip().lower() == "auto":
+            if auto and e.crashed:
                 runtime.record_backend(backend, False, str(e))
             errors.append(f"{backend}: {e}")
-            if i + 1 < len(order):
+            if auto and i + 1 < len(order):
                 say(f"The {backend} backend did not start here ({e}); "
                     f"trying {order[i + 1]}.")
                 continue
             raise NativeMusicError("; ".join(errors)) from e
-        if choice.strip().lower() == "auto" and not runtime.backend_worked(backend):
+        if not runtime.backend_worked(backend):
             runtime.record_backend(backend, True)
         return data, backend
     raise NativeMusicError("; ".join(errors) or "no backend to try")

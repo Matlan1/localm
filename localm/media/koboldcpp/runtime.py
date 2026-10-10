@@ -12,14 +12,16 @@ installed once it carries ``MARKER``.
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import json
 import os
 import shutil
-import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,10 +41,14 @@ BUILD_BACKENDS = {
 }
 
 _DOWNLOAD_STALL_TIMEOUT = 60
+# How long a recorded backend crash keeps ``auto`` from trying that backend.
+FAILED_TTL = 24 * 3600
 UNPACK_TIMEOUT = 600
 VERSION_TIMEOUT = 60
 
 Progress = Callable[[str], None]
+
+_records_lock = threading.Lock()
 
 
 class ProvisionError(RuntimeError):
@@ -51,6 +57,10 @@ class ProvisionError(RuntimeError):
 
 class DownloadError(ProvisionError):
     """A download was refused, failed, or did not verify."""
+
+
+class InstallCancelled(ProvisionError):
+    """The install was cancelled; nothing was installed."""
 
 
 @dataclass
@@ -149,11 +159,16 @@ def _read_json(path: Path) -> Optional[dict]:
 
 
 def installed(build: str) -> Optional[Runtime]:
-    """The installed runtime for *build* at the pinned tag, or None."""
+    """The installed runtime for *build* at the pinned tag and asset, or None."""
+    plat = platform_key()
+    pinned = pins.ASSETS.get((plat, build)) if plat else None
+    if pinned is None:
+        return None
     d = runtime_dir(build)
     meta = _read_json(d / MARKER)
     if (not meta or meta.get("tag") != pins.TAG or meta.get("version") != pins.VERSION
-            or meta.get("build") != build):
+            or meta.get("build") != build or meta.get("asset") != pinned[0]
+            or meta.get("sha256") != pinned[2]):
         return None
     launcher = d / launcher_name()
     if not launcher.is_file():
@@ -168,19 +183,20 @@ def _private_temp_env(tmp: Path) -> dict:
     return env
 
 
-def _download(url: str, dest: Path, on_progress: Progress, label: str) -> None:
+def _download(url: str, dest: Path, on_progress: Progress, label: str,
+              cancel_check: Optional[Callable[[], bool]] = None) -> None:
     from localm.http_ssl import verified_urlopen
     from localm.model_manager.pull import _ssrf_resolve_final_url
     final = _ssrf_resolve_final_url(url)
     req = urllib.request.Request(final, headers={"User-Agent": "localm-setup-music"})
-    prev = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(_DOWNLOAD_STALL_TIMEOUT)
     last_pct = -1
     nread = 0
     try:
         with verified_urlopen(req, timeout=_DOWNLOAD_STALL_TIMEOUT) as r, open(dest, "wb") as f:
             total = int(r.headers.get("Content-Length") or 0)
             while True:
+                if cancel_check is not None and cancel_check():
+                    raise InstallCancelled("the download was cancelled")
                 chunk = r.read(256 * 1024)
                 if not chunk:
                     break
@@ -198,8 +214,6 @@ def _download(url: str, dest: Path, on_progress: Progress, label: str) -> None:
             "network") from e
     except OSError as e:
         raise DownloadError(f"the download of {label} failed after {nread} bytes: {e}") from e
-    finally:
-        socket.setdefaulttimeout(prev)
 
 
 def verify_file(path: Path, size: int, sha256: str, label: str) -> None:
@@ -225,22 +239,61 @@ def _make_executable(path: Path) -> None:
         path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _unpack(binary: Path, staging: Path, tmp: Path) -> None:
+def _kill_tree(proc: subprocess.Popen) -> None:
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _unpack(binary: Path, staging: Path, tmp: Path,
+            cancel_check: Optional[Callable[[], bool]] = None) -> None:
     """Run the verified release binary's own ``--unpack`` into *staging*."""
     _make_executable(binary)
+    log = tmp / "unpack.log"
+    kwargs = {}
+    if sys.platform != "win32":
+        kwargs["start_new_session"] = True
     try:
-        proc = subprocess.run(
-            [str(binary), "--unpack", str(staging)], cwd=str(tmp),
-            env=_private_temp_env(tmp), stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=UNPACK_TIMEOUT)
-    except subprocess.TimeoutExpired as e:
-        raise ProvisionError(f"unpacking KoboldCpp did not finish in {UNPACK_TIMEOUT} s") from e
+        with open(log, "w", encoding="utf-8", errors="replace") as out:
+            proc = subprocess.Popen(
+                [str(binary), "--unpack", str(staging)], cwd=str(tmp),
+                env=_private_temp_env(tmp), stdin=subprocess.DEVNULL,
+                stdout=out, stderr=subprocess.STDOUT, **kwargs)
+            deadline = time.monotonic() + UNPACK_TIMEOUT
+            while proc.poll() is None:
+                if cancel_check is not None and cancel_check():
+                    _kill_tree(proc)
+                    raise InstallCancelled("unpacking was cancelled")
+                if time.monotonic() > deadline:
+                    _kill_tree(proc)
+                    raise ProvisionError(
+                        f"unpacking KoboldCpp did not finish in {UNPACK_TIMEOUT} s")
+                time.sleep(0.25)
     except OSError as e:
         raise ProvisionError(f"could not run the KoboldCpp binary to unpack it: {e}") from e
     launcher = staging / launcher_name()
     if not launcher.is_file():
-        tail = "\n".join((proc.stdout or "").strip().splitlines()[-5:])
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        tail = "\n".join(text.strip().splitlines()[-5:])
         raise ProvisionError(
             f"unpacking KoboldCpp produced no {launcher_name()} (exit {proc.returncode}): "
             f"{tail or 'no output'}")
@@ -264,16 +317,90 @@ def launcher_version(launcher: Path, tmp: Optional[Path] = None) -> str:
     return lines[-1] if lines else ""
 
 
+_install_locks: dict = {}
+_install_locks_guard = threading.Lock()
+
+# A lock directory younger than this with no holder PID written yet belongs to an
+# install that is still starting.
+_LOCK_STARTUP_GRACE = 30.0
+
+
+def _lock_holder(lockdir: Path) -> Optional[int]:
+    try:
+        return int((lockdir / "pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _lock_is_stale(lockdir: Path) -> bool:
+    from localm.instances import pid_alive
+    holder = _lock_holder(lockdir)
+    if holder is None:
+        try:
+            age = time.time() - lockdir.stat().st_mtime
+        except OSError:
+            return False
+        return age > _LOCK_STARTUP_GRACE
+    return holder != os.getpid() and not pid_alive(holder)
+
+
+@contextlib.contextmanager
+def _install_lock(build: str, say: Progress, cancel_check: Optional[Callable[[], bool]]):
+    """Hold the install of *build* against other threads and other localm
+    processes. The cross-process half is a directory created atomically beside
+    the runtimes, released on exit and taken over when its holder PID is gone."""
+    with _install_locks_guard:
+        lk = _install_locks.setdefault(build, threading.Lock())
+    told = False
+
+    def wait_once() -> None:
+        nonlocal told
+        if not told:
+            say("Waiting for another install of the native music runtime to finish...")
+            told = True
+        if cancel_check is not None and cancel_check():
+            raise InstallCancelled("cancelled while waiting for another install")
+
+    while not lk.acquire(timeout=0.5):
+        wait_once()
+    try:
+        root = runtimes_root()
+        root.mkdir(parents=True, exist_ok=True)
+        lockdir = root / f".install-{build}.lock"
+        while True:
+            try:
+                lockdir.mkdir()
+            except FileExistsError:
+                if _lock_is_stale(lockdir):
+                    shutil.rmtree(lockdir, ignore_errors=True)
+                    continue
+                wait_once()
+                time.sleep(1.0)
+                continue
+            (lockdir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+            break
+        try:
+            yield
+        finally:
+            shutil.rmtree(lockdir, ignore_errors=True)
+    finally:
+        lk.release()
+
+
 def install(build: str, *, force: bool = False,
             on_progress: Optional[Progress] = None,
+            cancel_check: Optional[Callable[[], bool]] = None,
             unpack: Optional[Callable[[Path, Path, Path], None]] = None,
             version_of: Optional[Callable[[Path], str]] = None) -> Runtime:
     """Download, verify, unpack and check the runtime for *build*.
 
     Network access goes through ``netpolicy`` as an explicit download, every
     redirect hop checked. The binary is executed only after its size and sha256
-    match the pin. *unpack* and *version_of* replace the real subprocess steps
-    (tests only)."""
+    match the pin. Installs of one build are serialised across threads and
+    processes; one that finds the runtime installed by the holder before it
+    returns that. *cancel_check* is polled during the download and the unpack
+    (raising :class:`InstallCancelled`). *unpack* and *version_of* replace the
+    real subprocess steps (tests only)."""
     say = on_progress or (lambda _m: None)
     plat = platform_key()
     if plat is None or (plat, build) not in pins.ASSETS:
@@ -287,37 +414,48 @@ def install(build: str, *, force: bool = False,
     from localm import netpolicy
     name, size, sha = pins.ASSETS[(plat, build)]
     root = runtimes_root()
-    root.mkdir(parents=True, exist_ok=True)
     dest = runtime_dir(build)
-    with tempfile.TemporaryDirectory(prefix=".koboldcpp-", dir=root) as tmp_s:
-        tmp = Path(tmp_s)
-        binary = tmp / name
-        staging = tmp / "staging"
-        say(f"Installing the native music runtime (KoboldCpp {pins.TAG}, {build} build, "
-            f"{size / 1024 ** 2:.0f} MB)")
-        try:
-            _download(pins.asset_url(name), binary, say, name)
-        except netpolicy.NetworkPolicyError as e:
-            raise DownloadError(f"the download was refused by the network policy: {e}") from e
-        verify_file(binary, size, sha, name)
-        say("Unpacking the native music runtime...")
-        (unpack or _unpack)(binary, staging, tmp)
-        version = (version_of or (lambda p: launcher_version(p, tmp)))(staging / launcher_name())
-        if version != pins.VERSION:
-            raise ProvisionError(
-                f"the unpacked KoboldCpp reports version {version or 'nothing'}, "
-                f"expected {pins.VERSION}")
-        (staging / MARKER).write_text(json.dumps(
-            {"tag": pins.TAG, "version": pins.VERSION, "build": build, "asset": name,
-             "sha256": sha}, indent=2), encoding="utf-8")
-        if dest.exists():
+    with _install_lock(build, say, cancel_check):
+        if not force:
+            rt = installed(build)
+            if rt is not None:
+                return rt
+        for old in root.glob(".koboldcpp-*"):
+            shutil.rmtree(old, ignore_errors=True)
+        with tempfile.TemporaryDirectory(prefix=".koboldcpp-", dir=root) as tmp_s:
+            tmp = Path(tmp_s)
+            binary = tmp / name
+            staging = tmp / "staging"
+            say(f"Installing the native music runtime (KoboldCpp {pins.TAG}, {build} build, "
+                f"{size / 1024 ** 2:.0f} MB)")
             try:
-                shutil.rmtree(dest)
+                _download(pins.asset_url(name), binary, say, name, cancel_check)
+            except netpolicy.NetworkPolicyError as e:
+                raise DownloadError(
+                    f"the download was refused by the network policy: {e}") from e
+            verify_file(binary, size, sha, name)
+            say("Unpacking the native music runtime...")
+            if unpack is not None:
+                unpack(binary, staging, tmp)
+            else:
+                _unpack(binary, staging, tmp, cancel_check)
+            version = (version_of or (lambda p: launcher_version(p, tmp)))(
+                staging / launcher_name())
+            if version != pins.VERSION:
+                raise ProvisionError(
+                    f"the unpacked KoboldCpp reports version {version or 'nothing'}, "
+                    f"expected {pins.VERSION}")
+            (staging / MARKER).write_text(json.dumps(
+                {"tag": pins.TAG, "version": pins.VERSION, "build": build, "asset": name,
+                 "sha256": sha}, indent=2), encoding="utf-8")
+            try:
+                if dest.exists():
+                    shutil.rmtree(dest)
+                os.replace(staging, dest)
             except OSError as e:
                 raise ProvisionError(
-                    f"could not replace {dest} ({e}); stop any music generation that is "
-                    "using it and retry") from e
-        os.replace(staging, dest)
+                    f"could not install into {dest} ({e}); stop any music generation that "
+                    "is using it and retry") from e
     say(f"Native music runtime ready (KoboldCpp {pins.VERSION}, {build} build)")
     return Runtime(build=build, path=dest, launcher=dest / launcher_name())
 
@@ -327,12 +465,19 @@ def _backends_file() -> Path:
 
 
 def backend_failed(backend: str) -> Optional[str]:
-    """The recorded reason *backend* did not work at the pinned tag, or None."""
+    """The recorded reason *backend* did not work at the pinned tag, or None when
+    it has no failure recorded in the last ``FAILED_TTL`` seconds."""
     data = _read_json(_backends_file()) or {}
     entry = data.get(backend)
-    if isinstance(entry, dict) and entry.get("ok") is False:
-        return str(entry.get("reason") or "it did not work here")
-    return None
+    if not isinstance(entry, dict) or entry.get("ok") is not False:
+        return None
+    try:
+        age = time.time() - float(entry.get("at", 0))
+    except (TypeError, ValueError):
+        return None
+    if age < 0 or age > FAILED_TTL:
+        return None
+    return str(entry.get("reason") or "it did not work here")
 
 
 def backend_worked(backend: str) -> bool:
@@ -342,18 +487,31 @@ def backend_worked(backend: str) -> bool:
 
 
 def record_backend(backend: str, ok: bool, reason: str = "") -> None:
-    """Remember whether *backend* worked, so ``auto`` skips one that did not."""
-    path = _backends_file()
-    data = _read_json(path) or {}
-    data[backend] = {"ok": bool(ok), "reason": reason[:500]}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    """Remember whether *backend* worked, so ``auto`` skips one that crashed
+    (for ``FAILED_TTL``) and a later success clears the failure."""
+    with _records_lock:
+        path = _backends_file()
+        data = _read_json(path) or {}
+        data[backend] = {"ok": bool(ok), "reason": reason[:500], "at": time.time()}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+
+
+def clear_backend_records() -> None:
+    """Forget every recorded backend result at the pinned tag."""
+    with _records_lock:
+        try:
+            _backends_file().unlink()
+        except FileNotFoundError:
+            pass
 
 
 def ensure_for_backend(backend: str, *, force: bool = False,
-                       on_progress: Optional[Progress] = None) -> Runtime:
+                       on_progress: Optional[Progress] = None,
+                       cancel_check: Optional[Callable[[], bool]] = None) -> Runtime:
     """The installed runtime that runs *backend*, installing its build first
     when needed."""
-    return install(build_for(backend), force=force, on_progress=on_progress)
+    return install(build_for(backend), force=force, on_progress=on_progress,
+                   cancel_check=cancel_check)

@@ -17,38 +17,44 @@ import subprocess
 import sys
 from typing import Optional
 
+# Runs in its own session with SIGINT, SIGHUP and SIGTERM ignored, so a Ctrl-C or
+# a closed terminal that ends localm does not end the watcher first. It kills the
+# process group (whose id is the child's PID) once localm is gone, and exits when
+# the group is empty. See test_the_watcher_outlives_localm_and_kills_the_group.
 _WATCHER = r"""
 import os, signal, sys, time
-parent, child = int(sys.argv[1]), int(sys.argv[2])
-def alive(pid):
+for s in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
+    signal.signal(s, signal.SIG_IGN)
+parent, group = int(sys.argv[1]), int(sys.argv[2])
+def group_alive():
     try:
-        os.kill(pid, 0)
+        os.killpg(group, 0)
         return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-while alive(child):
+while group_alive():
     if os.getppid() != parent:
         try:
-            os.killpg(child, signal.SIGKILL)
+            os.killpg(group, signal.SIGKILL)
         except OSError:
-            try:
-                os.kill(child, signal.SIGKILL)
-            except OSError:
-                pass
+            pass
         break
     time.sleep(1.0)
 """
 
 
 class ManagedProcess:
-    """A started KoboldCpp process and what is needed to kill exactly it."""
+    """A started KoboldCpp process and what is needed to kill exactly it.
+    ``pgid`` is the process group localm created for it (POSIX), or None."""
 
-    def __init__(self, proc: subprocess.Popen, job=None, watcher=None) -> None:
+    def __init__(self, proc: subprocess.Popen, job=None, watcher=None,
+                 pgid: Optional[int] = None) -> None:
         self.proc = proc
         self._job = job
         self._watcher = watcher
+        self.pgid = pgid
 
     @property
     def pid(self) -> int:
@@ -134,12 +140,12 @@ def start(argv: list, *, cwd: str, env: dict) -> ManagedProcess:
         watcher = subprocess.Popen(
             [sys.executable, "-I", "-c", _WATCHER, str(os.getpid()), str(proc.pid)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True)
+            close_fds=True, start_new_session=True)
     except OSError as e:
         from localm.debuglog import logger
         logger.warning("koboldcpp: could not start the exit watcher for pid %s (%s); it is "
                        "stopped with localm's normal shutdown only", proc.pid, e)
-    return ManagedProcess(proc, watcher=watcher)
+    return ManagedProcess(proc, watcher=watcher, pgid=proc.pid)
 
 
 def kill(mp: ManagedProcess, *, grace: float = 5.0) -> None:
@@ -168,26 +174,31 @@ def kill(mp: ManagedProcess, *, grace: float = 5.0) -> None:
             except (OSError, subprocess.SubprocessError):
                 pass
     else:
-        try:
-            pgid = os.getpgid(proc.pid)
-        except OSError:
-            pgid = None
+        pgid = mp.pgid
         if pgid is not None and (pgid <= 1 or pgid == os.getpgrp()):
             pgid = None
         for sig in (signal.SIGTERM, signal.SIGKILL):
-            if proc.poll() is not None:
-                break
             try:
                 if pgid is not None:
                     os.killpg(pgid, sig)
-                else:
+                elif proc.poll() is None:
                     proc.send_signal(sig)
+                else:
+                    break
+            except ProcessLookupError:
+                break
             except OSError:
                 pass
             try:
                 proc.wait(timeout=grace)
             except subprocess.TimeoutExpired:
                 continue
+            if pgid is None:
+                break
+            try:
+                os.killpg(pgid, 0)
+            except OSError:
+                break
     try:
         proc.kill()
     except OSError:

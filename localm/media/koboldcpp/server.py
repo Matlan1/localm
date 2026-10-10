@@ -20,6 +20,7 @@ import atexit
 import collections
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -52,7 +53,22 @@ class ServerError(RuntimeError):
 
 
 class StartError(ServerError):
-    """The server did not start or did not load the music models."""
+    """The server did not start or did not load the music models. ``crashed`` is
+    True when the process exited while loading for a reason other than running
+    out of memory."""
+
+    def __init__(self, message: str, *, crashed: bool = False) -> None:
+        super().__init__(message)
+        self.crashed = crashed
+
+
+_MEMORY_RE = re.compile(
+    r"out of memory|outofmemory|\boom\b|failed to allocate|cudamalloc|vk_error_out_of"
+    r"|insufficient memory", re.IGNORECASE)
+
+
+def _mentions_memory(text: str) -> bool:
+    return _MEMORY_RE.search(text) is not None
 
 
 class Cancelled(Exception):
@@ -85,8 +101,9 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def build_argv(key: ServerKey, port: int, password: str) -> list:
-    """The launcher command line for *key*: music models only, loopback, API key."""
+def build_argv(key: ServerKey, port: int) -> list:
+    """The launcher command line for *key*: music models only, loopback. The API
+    key is passed in the ``KCPP_PASSWORD`` environment variable, not here."""
     m = key.models
     argv = [key.launcher,
             "--musicembeddings", m.text_encoder,
@@ -94,8 +111,7 @@ def build_argv(key: ServerKey, port: int, password: str) -> list:
             "--musicvae", m.vae]
     if m.lm:
         argv += ["--musicllm", m.lm]
-    argv += ["--host", "127.0.0.1", "--port", str(port), "--password", password,
-             "--skiplauncher", "--quiet"]
+    argv += ["--host", "127.0.0.1", "--port", str(port), "--skiplauncher", "--quiet"]
     if key.lowvram:
         argv.append("--musiclowvram")
     if key.backend == "cuda":
@@ -148,11 +164,11 @@ class _Server:
         env = dict(os.environ)
         for k in ("TEMP", "TMP", "TMPDIR"):
             env[k] = str(self.work_dir)
-        env.pop("KCPP_PASSWORD", None)
+        env["KCPP_PASSWORD"] = self.password
         env["PYTHONUNBUFFERED"] = "1"
         t0 = last_beat = time.monotonic()
         try:
-            self.mp = _proc.start(build_argv(self.key, self.port, self.password),
+            self.mp = _proc.start(build_argv(self.key, self.port),
                                   cwd=str(self.work_dir), env=env)
         except OSError as e:
             raise StartError(f"the music runtime could not be started: {e}") from e
@@ -167,11 +183,18 @@ class _Server:
             code = self.mp.poll()
             if code is not None:
                 self.stop()
+                tail = self.log_tail()
                 raise StartError(
                     f"the music runtime exited while loading (exit code {code}): "
-                    f"{self.log_tail() or 'no output'}")
+                    f"{tail or 'no output'}",
+                    crashed=not _mentions_memory("\n".join(self.log)))
             info = self._version()
             if info is not None:
+                if self._listener_is_ours() is False:
+                    self.stop()
+                    raise StartError(
+                        f"another program is listening on port {self.port}, which the music "
+                        "runtime was started on; retry")
                 if not info.get("music"):
                     self.stop()
                     raise StartError(
@@ -188,6 +211,34 @@ class _Server:
                 last_beat = now
                 on_progress(f"Still loading the music models ({now - t0:.0f} s)...")
             time.sleep(_POLL)
+
+    def _listener_is_ours(self) -> Optional[bool]:
+        """Whether the socket listening on ``self.port`` belongs to the started
+        process or its children: True, False, or None when it cannot be told
+        (psutil missing or access denied)."""
+        try:
+            import psutil
+        except ImportError:
+            return None
+        if self.mp is None:
+            return None
+        try:
+            root = psutil.Process(self.mp.pid)
+            procs = [root] + root.children(recursive=True)
+        except psutil.Error:
+            return None
+        for proc in procs:
+            try:
+                get = getattr(proc, "net_connections", None) or proc.connections
+                conns = get(kind="tcp")
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.Error:
+                return None
+            for c in conns:
+                if c.laddr and c.laddr.port == self.port and not c.raddr:
+                    return True
+        return False
 
     def _version(self) -> Optional[dict]:
         try:
@@ -358,6 +409,7 @@ def run(runtime: Runtime, backend: str, models: ModelSet, work_dir: Path, *,
             raise
         except ServerError:
             if not srv.alive():
+                srv.stop()
                 _server = None
             raise
         if not data:

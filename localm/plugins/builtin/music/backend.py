@@ -99,16 +99,17 @@ def resolve_backend_choice(choice: str, full_config: dict, comfy_blk: dict,
 
 def _native_estimate_bytes(native_blk: dict, plan: bool) -> int:
     """VRAM the native model set needs, from the files when they are present."""
-    from localm.media.koboldcpp.models import (COMPONENTS, default_name,
-                                               estimate_bytes, resolve_path)
+    from localm.media.koboldcpp.models import (COMPONENTS, estimate_bytes, find_default,
+                                               resolve_path)
     from localm.media.koboldcpp.server import ModelSet
     found = {}
     for comp in COMPONENTS:
         if comp == "lm" and not plan:
             continue
-        p = resolve_path(str(native_blk.get(comp) or "") or default_name(comp))
+        configured = str(native_blk.get(comp) or "")
+        p = resolve_path(configured) if configured else find_default(comp)
         if p is None:
-            return int(6.5 * 1024 ** 3)
+            return int(7.6 * 1024 ** 3)
         found[comp] = str(p)
     return estimate_bytes(ModelSet(text_encoder=found["text_encoder"], dit=found["dit"],
                                    vae=found["vae"], lm=found.get("lm")))

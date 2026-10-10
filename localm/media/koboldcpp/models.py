@@ -2,10 +2,13 @@
 """The ACE-Step 1.5 model files the native music backend loads, and pulling the
 default set on first use.
 
-Each component is configured as a localm registry model name or a file path.
-Unset components use the smallest published set from ``DEFAULT_REPO``, pulled
-through ``localm pull`` (so the download goes through the same network policy,
-verification and registry as any other model) with its progress relayed.
+Each component is configured as a localm registry model name or a file path,
+and must carry that component's GGUF architecture. Unset components use the
+smallest published set from ``DEFAULT_REPO``, pulled through ``localm pull`` (so
+the download goes through the same network policy, verification and registry as
+any other model) with its progress relayed. When a different model already holds
+a default file's registry name, the default is pulled under ``DISTINCT_PREFIX``
+plus that name.
 """
 
 from __future__ import annotations
@@ -30,19 +33,39 @@ DEFAULT_FILES = {
     "vae": "vae-BF16.gguf",
 }
 
+# component -> the general.architecture its GGUF must carry.
+ARCHITECTURES = {
+    "lm": "acestep-lm",
+    "text_encoder": "acestep-text-enc",
+    "dit": "acestep-dit",
+    "vae": "acestep-vae",
+}
+
+DISTINCT_PREFIX = "ace-step-"
+
 COMPONENTS = ("text_encoder", "dit", "vae", "lm")
+
+_OVERHEAD_WITH_LM = int(3.5 * 1024 ** 3)
+_OVERHEAD_WITHOUT_LM = int(1.5 * 1024 ** 3)
 
 Progress = Callable[[str], None]
 CancelCheck = Callable[[], bool]
 
 
 class ModelError(RuntimeError):
-    """A configured model could not be found, or the default could not be pulled."""
+    """A configured model could not be found or is not that component, or the
+    default could not be pulled."""
 
 
-def default_name(component: str) -> str:
-    """The registry name ``localm pull`` gives the default file of *component*."""
-    return Path(DEFAULT_FILES[component]).stem
+def _label(component: str) -> str:
+    return component.replace("_", " ")
+
+
+def default_names(component: str) -> list[str]:
+    """Registry names the default file of *component* may be registered under:
+    the name ``localm pull`` gives it, then the distinct name."""
+    stem = Path(DEFAULT_FILES[component]).stem
+    return [stem, DISTINCT_PREFIX + stem]
 
 
 def resolve_path(value: str) -> Optional[Path]:
@@ -61,11 +84,41 @@ def resolve_path(value: str) -> Optional[Path]:
     return None
 
 
-def _pull(spec: str, on_progress: Progress, cancel_check: CancelCheck) -> None:
+def architecture_of(path: Path) -> Optional[str]:
+    from localm.model_manager import gguf_architecture
+    try:
+        return gguf_architecture(path)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def find_default(component: str) -> Optional[Path]:
+    """The downloaded default file of *component*, or None. A registry entry
+    under a default name whose architecture is not this component's is skipped."""
+    for name in default_names(component):
+        p = resolve_path(name)
+        if p is not None and architecture_of(p) == ARCHITECTURES[component]:
+            return p
+    return None
+
+
+def default_pull(component: str) -> tuple[str, Optional[str]]:
+    """``(spec, name)`` for pulling the default file of *component*: *name* is
+    None when its usual registry name is free, else the distinct name."""
+    spec = f"{DEFAULT_REPO}:{DEFAULT_FILES[component]}"
+    plain = default_names(component)[0]
+    return spec, (None if resolve_path(plain) is None else default_names(component)[1])
+
+
+def _pull(spec: str, name: Optional[str], on_progress: Progress,
+          cancel_check: CancelCheck) -> None:
     from localm.model_manager._shared import PROGRESS_SENTINEL
     env = dict(os.environ, LOCALM_PROGRESS_JSON="1", HF_HUB_DISABLE_PROGRESS_BARS="1")
+    argv = [sys.executable, "-X", "utf8", "-m", "localm", "pull"]
+    if name:
+        argv += ["--name", name]
     proc = subprocess.Popen(
-        [sys.executable, "-X", "utf8", "-m", "localm", "pull", "--", spec],
+        argv + ["--", spec],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace", env=env)
     tail: list = []
@@ -111,9 +164,10 @@ def resolve_models(native_cfg: dict, *, use_lm: bool = True, pull_missing: bool 
                    cancel_check: Optional[CancelCheck] = None) -> ModelSet:
     """The model set for *native_cfg* (``plugins.music.native``).
 
-    A configured component must resolve, or :class:`ModelError` names it; it is
-    never replaced by the default. An unset component uses the default, pulled
-    first when *pull_missing* is true. The LM is skipped when *use_lm* is false."""
+    A configured component must resolve to a file with that component's
+    architecture, or :class:`ModelError` says why; it is never replaced by the
+    default. An unset component uses the default, pulled first when
+    *pull_missing* is true. The LM is skipped when *use_lm* is false."""
     say = on_progress or (lambda _m: None)
     cancelled = cancel_check or (lambda: False)
     paths: dict = {}
@@ -125,23 +179,30 @@ def resolve_models(native_cfg: dict, *, use_lm: bool = True, pull_missing: bool 
             p = resolve_path(configured)
             if p is None:
                 raise ModelError(
-                    f"the configured music {comp.replace('_', ' ')} model '{configured}' "
+                    f"the configured music {_label(comp)} model '{configured}' "
                     "is not a file or a model in the library")
+            arch = architecture_of(p)
+            if arch != ARCHITECTURES[comp]:
+                raise ModelError(
+                    f"the configured music {_label(comp)} model '{configured}' is not an "
+                    f"ACE-Step {_label(comp)} (its architecture is {arch or 'unreadable'}, "
+                    f"expected {ARCHITECTURES[comp]})")
             paths[comp] = p
             continue
-        p = resolve_path(default_name(comp))
+        p = find_default(comp)
         if p is None:
             if not pull_missing:
                 raise ModelError(
-                    f"the default music {comp.replace('_', ' ')} model is not downloaded; "
+                    f"the default music {_label(comp)} model is not downloaded; "
                     "run 'localm setup-music' first")
-            spec = f"{DEFAULT_REPO}:{DEFAULT_FILES[comp]}"
-            say(f"Downloading the default music {comp.replace('_', ' ')} model "
+            spec, name = default_pull(comp)
+            say(f"Downloading the default music {_label(comp)} model "
                 f"({DEFAULT_FILES[comp]})...")
-            _pull(spec, say, cancelled)
-            p = resolve_path(default_name(comp))
+            _pull(spec, name, say, cancelled)
+            p = find_default(comp)
             if p is None:
-                raise ModelError(f"{spec} downloaded but is not in the model library")
+                raise ModelError(f"{spec} downloaded but is not in the model library as an "
+                                 f"ACE-Step {_label(comp)}")
         paths[comp] = p
     return ModelSet(text_encoder=str(paths["text_encoder"]), dit=str(paths["dit"]),
                     vae=str(paths["vae"]),
@@ -158,5 +219,4 @@ def estimate_bytes(models: ModelSet) -> int:
                 total += Path(p).stat().st_size
             except OSError:
                 pass
-    overhead = 2 * 1024 ** 3 if models.lm else 1024 ** 3
-    return total + overhead
+    return total + (_OVERHEAD_WITH_LM if models.lm else _OVERHEAD_WITHOUT_LM)

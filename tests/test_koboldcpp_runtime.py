@@ -10,7 +10,11 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
+import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,13 +36,15 @@ def fake_release(tmp_path, monkeypatch):
         (release / name).write_bytes(BODY)
         monkeypatch.setitem(pins.ASSETS, ("windows", build), (name, len(BODY), SHA))
     calls = []
+    state = SimpleNamespace(calls=calls, release=release, delay=0.0)
 
-    def fake_download(url, dest, on_progress, label):
+    def fake_download(url, dest, on_progress, label, cancel_check=None):
         calls.append(label)
+        time.sleep(state.delay)
         shutil.copyfile(release / label, dest)
 
     monkeypatch.setattr(runtime, "_download", fake_download)
-    return SimpleNamespace(calls=calls, release=release)
+    return state
 
 
 def _fake_unpack(record=None):
@@ -222,6 +228,7 @@ def test_setup_music_reports_a_failure_and_exits_1(cli_runner, monkeypatch):
     def boom(*a, **k):
         raise runtime.ProvisionError("no build for this platform")
 
+    monkeypatch.setattr(runtime, "platform_key", lambda: "windows")
     monkeypatch.setattr(runtime, "ensure_for_backend", boom)
     from localm.media.koboldcpp.cli import main
     result = cli_runner.invoke(main, ["--backend", "vulkan"])
@@ -232,3 +239,202 @@ def test_setup_music_reports_a_failure_and_exits_1(cli_runner, monkeypatch):
 def test_setup_music_is_a_localm_command():
     from localm.cli import main
     assert "setup-music" in main.commands
+
+
+def test_a_marker_for_another_asset_or_checksum_is_not_installed(fake_release):
+    rt = runtime.install("nocuda", unpack=_fake_unpack(), version_of=_version)
+    good = json.loads((rt.path / runtime.MARKER).read_text(encoding="utf-8"))
+    for key, value in (("asset", "other.exe"), ("sha256", "0" * 64)):
+        meta = dict(good, **{key: value})
+        (rt.path / runtime.MARKER).write_text(json.dumps(meta), encoding="utf-8")
+        assert runtime.installed("nocuda") is None
+    (rt.path / runtime.MARKER).write_text(json.dumps(good), encoding="utf-8")
+    assert runtime.installed("nocuda") is not None
+
+
+def test_two_installs_at_once_download_once(fake_release):
+    fake_release.delay = 1.0
+    results, errors = [], []
+
+    def go():
+        try:
+            results.append(runtime.install("nocuda", unpack=_fake_unpack(),
+                                           version_of=_version))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=go) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert errors == []
+    assert len(results) == 2 and all(r.path == runtime.runtime_dir("nocuda") for r in results)
+    assert fake_release.calls == ["fake-nocuda.exe"]
+    assert not list(runtime.runtimes_root().glob(".install-*"))
+
+
+def _dead_pid() -> int:
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def test_a_lock_left_by_a_dead_install_is_taken_over(fake_release):
+    root = runtime.runtimes_root()
+    root.mkdir(parents=True, exist_ok=True)
+    lock = root / ".install-nocuda.lock"
+    lock.mkdir()
+    (lock / "pid").write_text(str(_dead_pid()), encoding="utf-8")
+    (root / ".koboldcpp-leftover").mkdir()
+    (root / ".koboldcpp-leftover" / "part.exe").write_bytes(b"x" * 100)
+    rt = runtime.install("nocuda", unpack=_fake_unpack(), version_of=_version)
+    assert rt.launcher.is_file()
+    assert not lock.exists()
+    assert not (root / ".koboldcpp-leftover").exists()
+
+
+def test_a_live_install_elsewhere_is_waited_for_and_cancel_ends_the_wait(fake_release):
+    root = runtime.runtimes_root()
+    root.mkdir(parents=True, exist_ok=True)
+    lock = root / ".install-nocuda.lock"
+    lock.mkdir()
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        (lock / "pid").write_text(str(holder.pid), encoding="utf-8")
+        lines = []
+        t0 = time.monotonic()
+        with pytest.raises(runtime.InstallCancelled):
+            runtime.install("nocuda", on_progress=lines.append,
+                            cancel_check=lambda: time.monotonic() - t0 > 2,
+                            unpack=_fake_unpack(), version_of=_version)
+        assert any("Waiting for another install" in ln for ln in lines)
+        assert fake_release.calls == []
+        assert lock.exists()
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+class _SlowResponse:
+    headers = {"Content-Length": str(10 * 1024 * 1024)}
+
+    def __init__(self):
+        self.reads = 0
+
+    def read(self, n):
+        self.reads += 1
+        time.sleep(0.05)
+        return b"\0" * n if self.reads <= 40 else b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_cancel_during_the_download_stops_it_and_installs_nothing(monkeypatch):
+    monkeypatch.setattr(runtime, "platform_key", lambda: "windows")
+    import localm.http_ssl as http_ssl
+    import localm.model_manager.pull as pull
+    resp = _SlowResponse()
+    monkeypatch.setattr(pull, "_ssrf_resolve_final_url", lambda url: url)
+    monkeypatch.setattr(http_ssl, "verified_urlopen", lambda req, timeout=None: resp)
+    ran = []
+    with pytest.raises(runtime.InstallCancelled):
+        runtime.install("nocuda", cancel_check=lambda: resp.reads >= 3,
+                        unpack=_fake_unpack(ran), version_of=_version)
+    assert resp.reads == 3 and ran == []
+    assert runtime.installed("nocuda") is None
+    assert not list(runtime.runtimes_root().glob(".koboldcpp-*"))
+
+
+def test_cancel_during_the_unpack_kills_it(tmp_path):
+    if sys.platform == "win32":
+        fake = tmp_path / "slow-unpack.cmd"
+        fake.write_text("@ping -n 60 127.0.0.1 > nul\r\n", encoding="utf-8")
+    else:
+        fake = tmp_path / "slow-unpack"
+        fake.write_text("#!/bin/sh\nsleep 60\n", encoding="utf-8")
+    t0 = time.monotonic()
+    with pytest.raises(runtime.InstallCancelled):
+        runtime._unpack(fake, tmp_path / "staging", tmp_path,
+                        cancel_check=lambda: time.monotonic() - t0 > 1.5)
+    assert time.monotonic() - t0 < 20
+
+
+def test_a_remembered_failure_expires(monkeypatch):
+    runtime.record_backend("cuda", False, "exit code 3")
+    assert runtime.backend_failed("cuda") == "exit code 3"
+    real_time = time.time
+    monkeypatch.setattr(runtime.time, "time", lambda: real_time() + runtime.FAILED_TTL + 60)
+    assert runtime.backend_failed("cuda") is None
+
+
+def test_setup_music_force_forgets_backend_results(cli_runner, monkeypatch):
+    runtime.record_backend("cuda", False, "exit code 3")
+    monkeypatch.setattr(runtime, "platform_key", lambda: "windows")
+
+    def boom(*a, **k):
+        raise runtime.ProvisionError("stop here")
+
+    monkeypatch.setattr(runtime, "ensure_for_backend", boom)
+    from localm.media.koboldcpp.cli import main
+    result = cli_runner.invoke(main, ["--backend", "vulkan", "--force"])
+    assert result.exit_code == 1
+    assert runtime.backend_failed("cuda") is None
+
+
+# --------------------------------------------------------------------------- #
+#  Model files: each component must carry its own architecture                 #
+# --------------------------------------------------------------------------- #
+
+def _gguf_file(path, arch):
+    from tests.test_gguf_architecture_roles import _gguf
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return _gguf(path, arch)
+
+
+def test_a_configured_model_of_the_wrong_kind_is_refused(tmp_path):
+    from localm.media.koboldcpp import models
+    good = {c: str(_gguf_file(tmp_path / f"{c}.gguf", a))
+            for c, a in models.ARCHITECTURES.items()}
+    ms = models.resolve_models(good, use_lm=True, pull_missing=False)
+    assert ms.dit == good["dit"] and ms.lm == good["lm"]
+    wrong = dict(good, text_encoder=str(_gguf_file(tmp_path / "qwen.gguf", "qwen3")))
+    with pytest.raises(models.ModelError,
+                       match="not an ACE-Step text encoder .*qwen3.*acestep-text-enc"):
+        models.resolve_models(wrong, pull_missing=False)
+
+
+def test_another_model_under_a_default_name_is_not_used(tmp_path, monkeypatch):
+    from localm import model_manager as mm
+    from localm.media.koboldcpp import models
+    plain, distinct = models.default_names("text_encoder")
+    clash = _gguf_file(tmp_path / f"{plain}.gguf", "qwen3")
+    assert mm.add_local(str(clash)) is True
+    assert models.resolve_path(plain) is not None
+    assert models.find_default("text_encoder") is None
+    assert models.default_pull("text_encoder") == (
+        f"{models.DEFAULT_REPO}:{models.DEFAULT_FILES['text_encoder']}", distinct)
+    pulled = []
+
+    def fake_pull(spec, name, say, cancel):
+        pulled.append((spec, name))
+        target = _gguf_file(tmp_path / "pulled" / f"{name}.gguf", "acestep-text-enc")
+        assert mm.add_local(str(target)) is True
+
+    monkeypatch.setattr(models, "_pull", fake_pull)
+    others = {c: str(_gguf_file(tmp_path / f"{c}.gguf", a))
+              for c, a in models.ARCHITECTURES.items() if c != "text_encoder"}
+    ms = models.resolve_models(others, use_lm=True, pull_missing=True)
+    assert pulled == [(f"{models.DEFAULT_REPO}:{models.DEFAULT_FILES['text_encoder']}",
+                       distinct)]
+    assert Path(ms.text_encoder).name == f"{distinct}.gguf"
+
+
+def test_a_free_default_name_is_pulled_under_its_usual_name():
+    from localm.media.koboldcpp import models
+    assert models.default_pull("dit") == (
+        f"{models.DEFAULT_REPO}:{models.DEFAULT_FILES['dit']}", None)
