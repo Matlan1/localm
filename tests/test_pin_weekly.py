@@ -716,7 +716,7 @@ def _stub_main(monkeypatch, *, fingerprint_after):
     monkeypatch.setattr(pw, "script_fingerprint", lambda: fingerprint_after)
     monkeypatch.setattr(pw, "run_weekly", lambda advs, **k: calls.append("ran") or (0, Path("r.md")))
     execs = []
-    monkeypatch.setattr(pw.os, "execv", lambda exe, argv: execs.append(argv))
+    monkeypatch.setattr(pw, "_reexec", lambda args, **k: execs.append([sys.executable, "pin_weekly.py", *args]))
     monkeypatch.delenv(pw.REEXEC_ENV, raising=False)
     return calls, execs
 
@@ -727,6 +727,30 @@ def test_main_restarts_on_the_new_code_when_the_sync_changed_the_scripts(monkeyp
     assert len(execs) == 1 and execs[0][-2:] == ["--only", "uv"]
     assert pw.os.environ.get(pw.REEXEC_ENV) == "1"
     monkeypatch.delenv(pw.REEXEC_ENV)
+
+
+def test_main_returns_the_restarted_runs_exit_code_when_the_restart_runs_to_completion(monkeypatch):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="after")
+    monkeypatch.setattr(pw, "_reexec", lambda args, **k: 7)
+    assert pw.main(["--only", "uv"]) == 7
+    assert "ran" not in calls
+    monkeypatch.delenv(pw.REEXEC_ENV)
+
+
+def test_reexec_on_windows_runs_a_child_and_returns_its_exit_code(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pw.subprocess, "run", lambda cmd, **k: seen.append(cmd) or subprocess.CompletedProcess(cmd, 5))
+    monkeypatch.setattr(pw.os, "execv", lambda *a: (_ for _ in ()).throw(AssertionError("execv on windows")))
+    assert pw._reexec(["--only", "uv"], windows=True) == 5
+    assert seen[0][1].endswith("pin_weekly.py") and seen[0][-2:] == ["--only", "uv"]
+
+
+def test_reexec_on_posix_replaces_the_process(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pw.os, "execv", lambda exe, argv: seen.append((exe, argv)))
+    monkeypatch.setattr(pw.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("run on posix")))
+    assert pw._reexec(["--dry-run"], windows=False) is None
+    assert seen[0][0] == sys.executable and seen[0][1][-1] == "--dry-run"
 
 
 def test_main_does_not_restart_twice(monkeypatch):
