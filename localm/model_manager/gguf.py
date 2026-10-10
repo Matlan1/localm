@@ -700,6 +700,16 @@ _GGUF_NON_CHAT_ARCHITECTURES = {
     "pockettts": "a text-to-speech model",
 }
 
+# Text-to-speech architectures localm synthesizes speech with (registry type
+# 'tts'). Each needs its mmproj, which holds the speech generation stages.
+GGUF_TTS_ARCHITECTURES = frozenset({"qwen3tts"})
+
+
+def gguf_is_tts_architecture(architecture: Optional[str]) -> bool:
+    """True when ``general.architecture`` names a text-to-speech model localm can
+    synthesize speech with."""
+    return architecture in GGUF_TTS_ARCHITECTURES
+
 # llama.cpp architectures with an encoder and a decoder stack. They register as
 # chat models; gguf_kv_bytes_per_token sizes their decoder stack and reads a
 # missing attention.head_count_kv as attention.head_count.
@@ -717,10 +727,13 @@ _GGUF_NON_CHAT_ARCHITECTURES.update(
 
 def gguf_non_chat_model_type(architecture: Optional[str]) -> Optional[str]:
     """The registry type for a GGUF whose ``general.architecture`` is not a chat
-    model (``diffusion-unet`` for image/video checkpoints, ``unknown`` for the
-    other non-chat roles), or None when it may be a chat model."""
+    model (``diffusion-unet`` for image/video checkpoints, ``tts`` for the
+    text-to-speech models localm synthesizes with, ``unknown`` for the other
+    non-chat roles), or None when it may be a chat model."""
     if architecture in _GGUF_IMAGE_ARCHITECTURES:
         return "diffusion-unet"
+    if architecture in GGUF_TTS_ARCHITECTURES:
+        return "tts"
     return "unknown" if architecture in _GGUF_NON_CHAT_ARCHITECTURES else None
 
 
@@ -731,6 +744,9 @@ def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
     what = _GGUF_NON_CHAT_ARCHITECTURES.get(architecture or "")
     if what is None:
         return None
+    if architecture in GGUF_TTS_ARCHITECTURES:
+        return (f"This model's architecture ('{architecture}') is {what}, not a "
+                "chat model: use it with 'localm speak' or POST /v1/audio/speech.")
     return (f"This model's architecture ('{architecture}') is {what}, not a chat "
             "model, so localm cannot chat with it.")
 
