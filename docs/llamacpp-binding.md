@@ -439,9 +439,11 @@ prefilling, up to 2048 tokens, then samples each reply from its own row.
   marked for clearing before the next text reply.
 
 Replies decoded in one batch are not bit-identical to the same replies decoded
-alone, so a greedy reply under concurrency can differ from the same request run
-alone. A reply alone in a slot context is identical to the one-slot model, and
-a reply is unaffected by the content of the replies beside it.
+alone, and on a GPU the same batch can round differently from one run to the
+next, so a greedy reply under concurrency can differ from the same request run
+alone. A reply decoded alone, from a clean cache or from a prefix it decoded
+alone, matches the one-slot model. A reply's logits do not depend on what the
+replies beside it contain.
 
 ### Multi-Token Prediction (MTP) speculative decoding
 
