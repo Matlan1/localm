@@ -262,8 +262,8 @@ def _decode_with_av(raw: bytes, target: int, max_seconds: float):
     from localm.inference.backends.base import AudioInputError
     out = array("f")
     limit = int(max_seconds * target) + 1
-    decode_errors = (getattr(av, "FFmpegError", None) or av.AVError, ValueError,
-                     OSError, EOFError)
+    import av.error
+    decode_errors = (av.error.FFmpegError, ValueError, OSError, EOFError)
     try:
         with av.open(io.BytesIO(raw), mode="r") as container:
             if not container.streams.audio:
