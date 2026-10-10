@@ -339,8 +339,9 @@ localm video "a fox runs through snow" --duration 5
 ```
 
 `localm image` needs no ComfyUI: with nothing set up it uses the built-in native
-backend (stable-diffusion.cpp), which installs its runtime on first use. Music
-and video still need ComfyUI. `localm setup-sdcpp` (under Setup and diagnostics)
+backend (stable-diffusion.cpp), which installs its runtime on first use, and so
+does `localm video` ([docs/video.md](video.md)). Music still needs ComfyUI.
+`localm setup-sdcpp` (under Setup and diagnostics)
 installs the runtime ahead of time. Full guide: [docs/native-image.md](native-image.md).
 
 ### localm's own ComfyUI (optional)

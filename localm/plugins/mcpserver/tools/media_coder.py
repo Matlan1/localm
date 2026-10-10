@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""MCP tools that run a local generation pipeline: ``generate_image`` (FLUX
-via ComfyUI) and ``run_coder_task`` (the coder agent, in this process).
+"""MCP tools that run a local generation pipeline: ``generate_image`` (the
+image plugin's backend: built-in stable-diffusion.cpp or ComfyUI) and
+``run_coder_task`` (the coder agent, in this process).
 
 ``run_coder_task`` reads the timeout cap and the server log function from the
 server module at call time, so they resolve to whatever that module currently
@@ -417,7 +418,8 @@ def build(engines: EngineCache) -> dict[str, dict]:
 
     return {
         "generate_image": {
-            "description": ("Generate an image with the local FLUX model via ComfyUI. "
+            "description": ("Generate an image locally with the image plugin's backend "
+                            "(the built-in stable-diffusion.cpp runtime, or ComfyUI). "
                             "Returns the saved file path and seed."),
             "inputSchema": {
                 "type": "object",

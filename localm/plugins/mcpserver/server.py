@@ -27,7 +27,8 @@ Conditional:
     embed            - embedding vectors (only when the backend can embed)
     run_coder_task   - delegate a coding task to the coder agent
                        (coder plugin active, unless --no-coder)
-    generate_image   - local FLUX via ComfyUI (unless --no-images)
+    generate_image   - local image generation through the image plugin's
+                       backend (unless --no-images)
     memory_recall    - read the owner's durable chat memory, read-only
                        (memory plugin active, unless --no-memory)
     memory_append    - offer one fact for that memory (also needs --memory-write)
