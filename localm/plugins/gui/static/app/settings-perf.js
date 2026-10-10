@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, setConversationPin, stripUserImages, syncPinModelToggle, updateStatusIndicator } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
 import { $, GIB, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -2419,7 +2419,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       return { role: m.role, content: assistantHistoryText(m.content, answered) };
     }
     return {
-      role: m.role, content: m.content,
+      role: m.role, content: wireParts(m.content),
       untrusted_spans: m.untrusted_spans ? m.untrusted_spans.slice() : undefined,
     };
   });
@@ -2479,10 +2479,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // rejects it (400), we must drop the image so the chat is not wedged.
   const sentImage = messages.some((m) => Array.isArray(m.content) &&
     m.content.some((p) => p.type === "image_url"));
+  const sentAudio = messages.some((m) => Array.isArray(m.content) &&
+    m.content.some((p) => p.type === "input_audio"));
 
   const box = $("chat-messages");
   const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "");
-  mountStatusIndicator(liveBody, sentImage ? t("chat.status.encodingImage") : t("chat.status.processing"));
+  mountStatusIndicator(liveBody, sentImage ? t("chat.status.encodingImage")
+    : sentAudio ? t("chat.status.encodingAudio") : t("chat.status.processing"));
   chat.stick = true;   // R31: a fresh send re-arms autoscroll (follow the reply)
   box.scrollTop = box.scrollHeight;
 
@@ -2494,6 +2497,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let finishReason = null;
   let aborted = false;
   let visionRejected = false;
+  let audioRejected = false;
   let requestFailed = false;   // a generic (non-vision, non-abort) send failure
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
   let routing = null;   // which model answered, when not the one asked for
@@ -2651,6 +2655,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       readOk = true;
     } else if (e.name === "AbortError") {
       aborted = true;
+    } else if (sentAudio && e.status === 400 && !full.trim()) {
+      audioRejected = true;
+      const n = stripUserAudio(conv);
+      saveConversations(conv);
+      toast(n
+        ? t("chat.audio.rejected", { detail: e.detail || e.message })
+        : "Chat request failed: " + e.message, true);
     } else if (sentImage && e.status === 400 && !full.trim()) {
       // VIS-1: a text-only model rejected the image. Drop it from history so the
       // next turn is text-only and the chat stays usable, instead of re-sending
@@ -2731,7 +2742,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // reply saved every send is the "every turn after the image is empty" wedge.
   // Re-render from real history (which now has the image stripped) and stop
   // here so the chat recovers.
-  if (visionRejected) {
+  if (visionRejected || audioRejected) {
     renderChat();
     return outcome;
   }
@@ -3072,7 +3083,7 @@ export async function processChatQueue() {
   if (idx === -1) return;
   const [item] = chat.queue.splice(idx, 1);
   renderQueuedIndicator();
-  await dispatchChatTurn(conv, item.text, item.attachments, item.docs);
+  await dispatchChatTurn(conv, item.text, item.attachments, item.docs, item.clips);
 }
 
 /** Runs one chat turn. The turn owns a single AbortController (chat.abort,
@@ -3120,7 +3131,7 @@ export async function runChatTurn(work) {
   return { stopped };
 }
 
-export async function dispatchChatTurn(conv, text, attachments = [], docs = []) {
+export async function dispatchChatTurn(conv, text, attachments = [], docs = [], clips = []) {
   const isFirstMessage = conv.messages.length === 0;
 
   for (const doc of docs || []) {
@@ -3132,18 +3143,22 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = []) 
   }
 
   let content;
-  if (attachments && attachments.length) {
-    content = [{ type: "text", text }];
-    for (const att of attachments) {
+  const hasImages = !!(attachments && attachments.length);
+  const hasClips = !!(clips && clips.length);
+  if (hasImages || hasClips) {
+    content = (hasImages || text) ? [{ type: "text", text }] : [];
+    for (const att of attachments || []) {
       content.push({ type: "image_url", image_url: { url: att.dataUri } });
     }
+    for (const clip of clips || []) content.push(audioPart(clip));
   } else {
     content = text || "Please read the attached document(s).";
   }
   conv.messages.push({ role: "user", content });
 
   if (isFirstMessage) {
-    conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") || "Document chat";
+    conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") ||
+      (hasClips ? clips[0].name.slice(0, 42) : "Document chat");
     renderConvList();
   }
   saveConversations(conv);
@@ -3172,7 +3187,8 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = []) 
 export async function sendChat() {
   const input = $("chat-input");
   const text = input ? input.value.trim() : "";
-  if (!text && chat.attachments.length === 0 && chat.docs.length === 0) {
+  if (!text && chat.attachments.length === 0 && chat.docs.length === 0 &&
+      chat.clips.length === 0) {
     if (chat.queue.length > 0 && !chatBusy()) {
       await processChatQueue();
     }
@@ -3206,10 +3222,12 @@ export async function sendChat() {
     text,
     attachments: [...chat.attachments],
     docs: [...chat.docs],
+    clips: [...chat.clips],
     convId: conv.id,
   };
   chat.attachments = [];
   chat.docs = [];
+  chat.clips = [];
   renderAttachChips();
   if (input) {
     input.value = "";
@@ -3230,7 +3248,7 @@ export async function sendChat() {
     return;
   }
 
-  await dispatchChatTurn(conv, item.text, item.attachments, item.docs);
+  await dispatchChatTurn(conv, item.text, item.attachments, item.docs, item.clips);
 }
 
 /** The exported-transcript label for message *m*: noteLabel's override
@@ -3266,6 +3284,7 @@ export function exportConversation() {
   for (const m of conv.messages) {
     lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
     if (msgImages(m).length) lines.push(`*[${msgImages(m).length} image(s) attached]*`, "");
+    if (msgAudioClips(m).length) lines.push(`*[${msgAudioClips(m).length} audio clip(s) attached]*`, "");
   }
   // Include alternative branches that compaction summarised away and archived
   // (chat.js pruneBranches -> conv.droppedBranches). This is what makes those
