@@ -65,15 +65,22 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
                                              the model - so anything the CALLER
                                              can fix must carry a tag
     ("chunk", text)                       - one streamed token (chat_stream only)
+    ("logprobs", [record, ...])           - NON-TERMINAL, only for a chat_stream
+                                             whose kwargs carry "logprobs": the
+                                             records of the tokens generated
+                                             since the last such envelope, sent
+                                             before the chunk that carries
+                                             their text and before "done"
     ("done", {finish_reason, grammar_unsupported, chatml_fallback_reason})
                                           - end of one chat_stream
     ("progress", payload)                 - NON-TERMINAL: the load is still
                                              running. See below.
 
 TERMINAL vs NON-TERMINAL envelopes. Every kind above except ``progress`` ENDS
-the wait that received it: ``chunk`` is non-terminal and ``done`` ends the
-stream, and on the load path ``progress`` is non-terminal while everything
-else ends the load.
+the wait that received it: ``chunk`` and ``logprobs`` are non-terminal and
+``done`` ends the stream, and on the load path ``progress`` is non-terminal
+while everything else ends the load. A ``logprobs`` envelope on a stream that
+did not ask for them is a protocol error.
 
 ``progress``'s payload is UNINTERPRETED here: this module only guarantees
 delivery, so whatever decides what is worth reporting during a load owns the
@@ -275,17 +282,29 @@ def _serve_stream(worker, payload: dict, emit: Callable, cancel_event) -> None:
     its envelopes through *emit*: ``status`` and ``chunk`` while it runs, then
     ``done``, or a tagged ``error`` for a refusal that leaves the model
     unharmed. Stops early, still ending with ``done``, once *cancel_event* is
-    set. Any other exception propagates: the caller must not keep serving
+    set. With ``logprobs`` in *payload*, the token records gathered since the
+    last chunk go out as one ``logprobs`` envelope before each chunk and before
+    ``done``. Any other exception propagates: the caller must not keep serving
     from this model."""
     try:
         def _worker_status(s: str) -> None:
             emit(("status", s))
-        gen = worker.chat_stream(on_status=_worker_status, **payload)
+        sink: Optional[list] = [] if payload.get("logprobs") is not None else None
+
+        def _send_records() -> None:
+            if sink:
+                records = list(sink)
+                sink.clear()
+                emit(("logprobs", records))
+        extra = {"logprob_sink": sink} if sink is not None else {}
+        gen = worker.chat_stream(on_status=_worker_status, **extra, **payload)
         for token in gen:
             if cancel_event.is_set():
                 gen.close()
                 break
+            _send_records()
             emit(("chunk", token))
+        _send_records()
         emit(("done", {
             "finish_reason": worker.last_finish_reason,
             "grammar_unsupported": worker.grammar_unsupported_this_call,
@@ -571,6 +590,10 @@ _STREAM_CHUNK_TIMEOUT = 120.0
 # is caught. Overridable per install via the ``gguf_first_token_timeout_s``
 # config key (see gguf.py).
 FIRST_TOKEN_TIMEOUT_DEFAULT = 900.0
+
+# The error for a "logprobs" envelope on a stream that did not ask for them.
+_UNASKED_LOGPROBS = ("Unexpected response during generation: token log "
+                     "probabilities for a stream that did not request them")
 
 # Bounded wait for a "done" envelope after requesting a mid-stream cancel.
 _CANCEL_DRAIN_TIMEOUT = 5.0
@@ -1013,7 +1036,8 @@ class ModelRunner:
 
     def chat_stream(self, *, first_chunk_timeout: Optional[float] = None,
                     on_status: Optional[Callable[[str], None]] = None,
-                    stop_on_request: bool = False, **kwargs):
+                    stop_on_request: bool = False,
+                    on_logprobs: Optional[Callable[[list], None]] = None, **kwargs):
         """Yield text tokens. On the caller's ``GeneratorExit`` (a plain
         generator ``.close()``, which is how ``http_server.py`` cancels a
         stream), relays a ``cancel_stream`` signal to the child and drains for
@@ -1058,12 +1082,18 @@ class ModelRunner:
         The worker-died branch below reports WHICH PHASE the child was in (no
         response ever received vs N chunks already streamed).
 
+        With ``logprobs`` in *kwargs*, each ``logprobs`` envelope's records are
+        passed to *on_logprobs* before the chunk that follows them. When
+        *on_logprobs* raises, the child is cancelled and drained and the
+        exception propagates; a ``logprobs`` envelope with no *on_logprobs* is a
+        protocol error (RuntimeError).
+
         On a multiplexed runner (a model loaded with parallel slots) the stream
         runs through :meth:`_chat_stream_mux` instead, beside other streams."""
         if self._mux:
             yield from self._chat_stream_mux(
                 first_chunk_timeout=first_chunk_timeout, on_status=on_status,
-                stop_on_request=stop_on_request, **kwargs)
+                stop_on_request=stop_on_request, on_logprobs=on_logprobs, **kwargs)
             return
         from localm.debuglog import logger
         first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
@@ -1154,6 +1184,15 @@ class ModelRunner:
                                 on_status(status_text)
                             except Exception:
                                 logger.debug("chat_stream on_status callback raised (ignored)", exc_info=True)
+                        continue
+                    if kind == "logprobs":
+                        if on_logprobs is None:
+                            raise RuntimeError(_UNASKED_LOGPROBS)
+                        try:
+                            on_logprobs(result[1])
+                        except Exception:
+                            self._cancel_stream_and_drain()
+                            raise
                         continue
                     if awaiting_first:
                         logger.info(
@@ -1308,7 +1347,8 @@ class ModelRunner:
 
     def _chat_stream_mux(self, *, first_chunk_timeout: Optional[float] = None,
                          on_status: Optional[Callable[[str], None]] = None,
-                         stop_on_request: bool = False, **kwargs):
+                         stop_on_request: bool = False,
+                         on_logprobs: Optional[Callable[[list], None]] = None, **kwargs):
         """:meth:`chat_stream` on a multiplexed runner: same envelopes, errors,
         timeouts and cancel contract, for one stream among several.
 
@@ -1387,6 +1427,15 @@ class ModelRunner:
                             except Exception:
                                 logger.debug("chat_stream on_status callback raised "
                                              "(ignored)", exc_info=True)
+                    continue
+                if kind == "logprobs":
+                    if on_logprobs is None:
+                        raise RuntimeError(_UNASKED_LOGPROBS)
+                    try:
+                        on_logprobs(result[1])
+                    except Exception:
+                        self._cancel_mux_stream_and_drain(sid, stream_q)
+                        raise
                     continue
                 if awaiting_first:
                     logger.info("gguf worker: stream %d prefill complete, first "

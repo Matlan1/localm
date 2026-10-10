@@ -822,3 +822,43 @@ def test_a_grammar_reply_drafts_and_its_sampler_sees_only_emitted_tokens(draft_t
     assert fake.main_accepted == tokens
     assert llm.mtp_drafted > 0 and llm.mtp_call_status == ""
     mock_api.llama_sampler_accept.assert_not_called()
+
+
+class _RowScorer:
+    """Scores a token after checking that the row it is asked about samples to
+    that token; the score is minus the row's position."""
+
+    def __init__(self, fake):
+        self.fake = fake
+        self.seen = []
+        self.closed = False
+
+    def score(self, ctx, idx, token):
+        from localm.inference.backends.llamacpp._logprobs import ScoredToken
+        positions, tokens, logits, _ = self.fake._last[id(ctx)]
+        i = max(k for k, flag in enumerate(logits) if flag) if idx < 0 else idx
+        self.seen.append((token, next_token(tokens[i])))
+        return ScoredToken(token, -float(positions[i]), ())
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("mtp, draft_tokens", [(False, 1), (True, 1), (True, 3)])
+@pytest.mark.parametrize("wrong", [(), (8, 9, 14), tuple(range(7, 40))])
+def test_every_emitted_token_is_scored_on_the_row_it_was_sampled_from(mtp, draft_tokens, wrong):
+    from localm.inference.backends.llamacpp._logprobs import ScoredToken
+    llm = _llama(mtp=mtp, draft_tokens=draft_tokens)
+    fake = FakeNative(llm, wrong_draft_positions=wrong)
+    scorer = _RowScorer(fake)
+    llm._logprob_scorer = lambda n: scorer if n is not None else None
+
+    tokens, _ = _generate(llm, fake, max_new_tokens=24, logprobs=2)
+
+    assert tokens == _reference(PROMPT, 24)
+    assert all(isinstance(t, ScoredToken) for t in tokens)
+    assert [-int(t.logprob) for t in tokens] == list(range(len(PROMPT) - 1, len(PROMPT) + 23))
+    assert all(token == expected for token, expected in scorer.seen)
+    assert scorer.closed
+    if mtp:
+        assert llm.mtp_drafted > 0

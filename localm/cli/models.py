@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -128,8 +129,8 @@ _MTP_PROBE_PROMPTS = (
 # Sampling for the comparison. Deliberately NOT greedy: at temperature 0 the
 # draft and the target both sample greedily, drafts are accepted far more often
 # than in ordinary use, and the measured speedup comes out too high.
-_MTP_PROBE_SAMPLING = dict(temperature=0.8, top_p=0.95, top_k=40,
-                           repeat_penalty=1.1)
+_MTP_PROBE_SAMPLING: dict[str, Any] = dict(temperature=0.8, top_p=0.95, top_k=40,
+                                          repeat_penalty=1.1)
 _MTP_PROBE_SEED = 20260901
 
 

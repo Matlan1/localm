@@ -386,6 +386,9 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
 class StreamChoice(BaseModel):
     index: int = 0
     delta: ChoiceDelta
+    # {"content": [...]}: the log probabilities of this delta's content tokens,
+    # when the request asked for them.
+    logprobs: Optional[dict[str, Any]] = None
     finish_reason: Optional[str] = None
 
 
@@ -485,6 +488,9 @@ class ChatChunk(BaseModel):
 class FullChoice(BaseModel):
     index: int = 0
     message: Message
+    # {"content": [...]}: the log probabilities of the reply's content tokens,
+    # when the request asked for them.
+    logprobs: Optional[dict[str, Any]] = None
     finish_reason: str = "stop"
     # localm extension: the stop sequence that ended the reply, when one did.
     stop_sequence: Optional[str] = None
