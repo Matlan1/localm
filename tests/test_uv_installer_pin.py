@@ -280,7 +280,8 @@ _PWSH7_PATH = _pwsh7_module_path() if os.name == "nt" else None
 
 def _run_bat_block(tmp_path: Path, name: str, *, release_files: dict[str, bytes],
                    expected_sha: str | None = None, version: str = "0.13.0",
-                   ps_module_path: str | None = None, delayed: bool = False):
+                   ps_module_path: str | None = None, delayed: bool = False,
+                   inject: tuple[str, str] | None = None):
     """Runs the real block from *name* in a throwaway folder, with the release
     download served from a local directory through a file:// URL."""
     releases = tmp_path / "releases"
@@ -300,6 +301,9 @@ def _run_bat_block(tmp_path: Path, name: str, *, release_files: dict[str, bytes]
     if expected_sha is not None:
         joined = re.sub(r'^set "UV_INSTALLER_SHA256=[^"]*"',
                         f'set "UV_INSTALLER_SHA256={expected_sha}"', joined, flags=re.MULTILINE)
+    if inject:
+        assert joined.count(inject[0]) == 1, inject[0]
+        joined = joined.replace(*inject)
     work = tmp_path / "work"
     scratch = tmp_path / "scratch"
     work.mkdir()
@@ -415,3 +419,21 @@ class TestUnderDelayedExpansion:
         assert "REFUSED rc=61" in r.stdout, r.stdout + r.stderr
         assert "[!] Could not download the uv 9.99.99 installer" in r.stdout
         assert not ran
+
+
+@_needs_windows
+@pytest.mark.parametrize("name", BATS)
+def test_an_installer_that_cannot_be_read_is_refused_and_never_run(tmp_path, name):
+    r, ran, leftovers = _run_bat_block(
+        tmp_path, name, release_files=_STUB_FILES, expected_sha=_STUB_SHA,
+        inject=("[IO.File]::Open($f,", "[IO.File]::Open($f+'.absent',"))
+    assert "REFUSED rc=62" in r.stdout, r.stdout + r.stderr
+    assert "could not be read to check it" in r.stdout
+    assert not ran
+    assert leftovers == []
+
+
+@pytest.mark.parametrize("rel", [*SCRIPTS, *BATS, "README.md", "docs/linux-setup.md"])
+def test_nothing_tells_the_user_to_run_astrals_unpinned_installer(rel):
+    text = (ROOT / rel).read_text(encoding="utf-8")
+    assert re.findall(r"astral\.sh/uv/(?:[\d.]+/)?install\.(?:ps1|sh)", text) == []

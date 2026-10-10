@@ -168,9 +168,8 @@ The API is served over HTTPS with localm's built-in certificate. See [docs/docke
 <summary>Expand for the direct <code>uv</code> commands (advanced/CI path)</summary>
 
 This path uses `uv` directly, so it assumes `uv` is installed (the `setup.bat` /
-`setup.sh` installers add it for you; standalone: `powershell -c "irm
-https://astral.sh/uv/install.ps1 | iex"` on Windows, or `curl -LsSf
-https://astral.sh/uv/install.sh | sh` on Linux/macOS).
+`setup.sh` installers add it for you; standalone: `winget install astral-sh.uv` on
+Windows, or download it from https://github.com/astral-sh/uv/releases).
 
 ```bash
 # Portable (default, self-contained): keeps uv's downloaded Python runtime AND

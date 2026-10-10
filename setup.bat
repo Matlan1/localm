@@ -1237,8 +1237,8 @@ rem  :uv_manual_hint - the manual uv-install command; used from two call sites
 rem  above (declined the auto-install, and the auto-install still failed).
 rem ===========================================================================
 :uv_manual_hint
-echo    powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
 echo    winget install astral-sh.uv
+echo    or download uv from https://github.com/astral-sh/uv/releases
 goto :eof
 
 rem ===========================================================================
