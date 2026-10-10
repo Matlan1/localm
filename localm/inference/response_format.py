@@ -21,10 +21,13 @@ from localm.inference.json_schema_grammar import (
 )
 
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_RULE_DEF = re.compile(r"^\s*([A-Za-z0-9-]+)\s*::=", re.MULTILINE)
+_RULE_DEF = re.compile(r"^[ \t]*([A-Za-z0-9-]+)[ \t]*::=", re.MULTILINE)
+# A string literal or character class always matches, up to its close or to the
+# end of the input, so tokenizing is one linear pass.
+# See test_the_grammar_tokenizer_takes_an_unterminated_literal_in_one_token.
 _TOKENS = re.compile(
-    r'"(?:\\.|[^"\\])*"'          # string literal
-    r"|\[(?:\\.|[^\]\\])*\]"      # character class
+    r'"(?:\\.|[^"\\])*(?:"|\\?\Z)'      # string literal
+    r"|\[(?:\\.|[^\]\\])*(?:\]|\\?\Z)"  # character class
     r"|#[^\n]*"                   # comment
     r"|\{[0-9,\s]*\}"             # repeat count
     r"|[A-Za-z0-9-]+"             # rule name
