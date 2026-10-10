@@ -342,14 +342,6 @@ def lib_filename() -> str:
     return "libstable-diffusion.so"
 
 
-def _ggml_filename() -> str:
-    if sys.platform == "win32":
-        return "ggml.dll"
-    if sys.platform == "darwin":
-        return "libggml.dylib"
-    return "libggml.so"
-
-
 def _declare(lib: ctypes.CDLL) -> None:
     """Set argtypes/restype for every function this module calls."""
     def fn(name, restype, *argtypes):
@@ -402,19 +394,29 @@ def _add_dll_dir(directory: Path) -> None:
             str(directory) + os.pathsep + os.environ.get("LD_LIBRARY_PATH", ""))
 
 
-def _register_backends(runtime_dir: Path) -> None:
-    """Register the runtime's ggml compute backends from *runtime_dir*.
+def _register_backends(lib, runtime_dir: Path) -> None:
+    """Register the runtime's ggml compute backends from *runtime_dir* for the
+    loaded stable-diffusion library *lib*.
 
     A split build (``ggml`` beside the main library, backends as loadable
     modules) is registered with ``ggml_backend_load_all_from_path`` on that
     directory: the library's own default search looks beside the host
-    executable, which here is the Python interpreter. A monolithic build has no
-    separate ``ggml`` and registers its backends when it loads."""
-    ggml_path = runtime_dir / _ggml_filename()
-    if not ggml_path.exists():
-        return
-    mode = 0 if sys.platform == "win32" else ctypes.RTLD_GLOBAL
-    ggml = ctypes.CDLL(str(ggml_path), mode=mode)
+    executable, which here is the Python interpreter. A monolithic build
+    registers its backends when it loads, so nothing is done when a device is
+    already registered.
+
+    On Windows the functions come from ``ggml.dll`` beside the library. Elsewhere
+    they are looked up through *lib*'s own handle, which also searches the
+    libraries it links, so registration reaches the ggml copy *lib* uses; a ggml
+    loaded by another path is a separate copy with its own backend registry.
+    See test_backends_register_through_the_main_library_handle."""
+    if sys.platform == "win32":
+        ggml_path = runtime_dir / "ggml.dll"
+        if not ggml_path.exists():
+            return
+        ggml = ctypes.CDLL(str(ggml_path), mode=0)
+    else:
+        ggml = lib
     count = getattr(ggml, "ggml_backend_dev_count", None)
     if count is not None:
         count.restype = c_size_t
@@ -442,7 +444,7 @@ def load_library(runtime_dir: Path, extra_dll_dirs: Optional[list] = None) -> ct
         _add_dll_dir(Path(d))
     mode = 0 if sys.platform == "win32" else ctypes.RTLD_GLOBAL
     lib = ctypes.CDLL(str(runtime_dir / lib_filename()), mode=mode)
-    _register_backends(runtime_dir)
+    _register_backends(lib, runtime_dir)
     _declare(lib)
     verify_abi(lib)
     return lib

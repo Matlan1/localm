@@ -169,6 +169,76 @@ def test_the_pinned_commit_matches_the_tag():
     assert pins.TAG.endswith(pins.COMMIT[:7])
 
 
+class _FakeGgmlLib:
+    """A loaded library exposing ggml's backend registry functions."""
+
+    def __init__(self, devices=0):
+        self.devices = devices
+        self.loaded_from = []
+
+        def dev_count():
+            return self.devices
+
+        def load_all_from_path(path):
+            self.loaded_from.append(path)
+            self.devices += 1
+
+        self.ggml_backend_dev_count = dev_count
+        self.ggml_backend_load_all_from_path = load_all_from_path
+
+
+def _no_cdll(path, mode=0):
+    raise AssertionError(f"loaded {path} by path")
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_backends_register_through_the_main_library_handle(tmp_path, monkeypatch, platform):
+    for name in ("libggml.so", "libggml.so.0", "libggml.dylib"):
+        (tmp_path / name).write_bytes(b"")
+    monkeypatch.setattr(b.sys, "platform", platform)
+    monkeypatch.setattr(b.ctypes, "CDLL", _no_cdll)
+    lib = _FakeGgmlLib()
+    b._register_backends(lib, tmp_path)
+    assert lib.loaded_from == [str(tmp_path).encode("utf-8")]
+    assert lib.devices == 1
+
+
+def test_windows_registers_through_ggml_dll_beside_the_library(tmp_path, monkeypatch):
+    (tmp_path / "ggml.dll").write_bytes(b"")
+    ggml = _FakeGgmlLib()
+    opened = []
+
+    def cdll(path, mode=0):
+        opened.append(path)
+        return ggml
+
+    monkeypatch.setattr(b.sys, "platform", "win32")
+    monkeypatch.setattr(b.ctypes, "CDLL", cdll)
+    lib = _FakeGgmlLib()
+    b._register_backends(lib, tmp_path)
+    assert opened == [str(tmp_path / "ggml.dll")]
+    assert ggml.loaded_from == [str(tmp_path).encode("utf-8")]
+    assert lib.loaded_from == []
+
+
+def test_windows_without_ggml_dll_registers_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(b.sys, "platform", "win32")
+    monkeypatch.setattr(b.ctypes, "CDLL", _no_cdll)
+    lib = _FakeGgmlLib()
+    b._register_backends(lib, tmp_path)
+    assert lib.loaded_from == []
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_backends_already_registered_are_not_loaded_again(tmp_path, monkeypatch, platform):
+    (tmp_path / "ggml.dll").write_bytes(b"")
+    lib = _FakeGgmlLib(devices=1)
+    monkeypatch.setattr(b.sys, "platform", platform)
+    monkeypatch.setattr(b.ctypes, "CDLL", lambda path, mode=0: lib)
+    b._register_backends(lib, tmp_path)
+    assert lib.loaded_from == []
+
+
 @pytest.mark.integration
 def test_layouts_match_a_real_runtime():
     """Set LOCALM_SDCPP_TEST_RUNTIME to an installed runtime directory. The
