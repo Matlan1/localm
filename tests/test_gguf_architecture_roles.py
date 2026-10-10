@@ -70,8 +70,9 @@ EMBEDDING_ARCHITECTURES = [
 ]
 NON_CHAT_ARCHITECTURES = [
     "eagle3", "dflash", "gemma4-assistant",
-    "wavtokenizer-dec", "qwen3tts", "pockettts",
+    "wavtokenizer-dec", "pockettts",
 ]
+TTS_ARCHITECTURES = ["qwen3tts"]
 DIFFUSION_LM_ARCHITECTURES = ["dream", "llada", "llada-moe", "rnd1"]
 
 
@@ -96,6 +97,13 @@ class TestArchitectureRoles:
         mtype, meta = _detect_local_model_type(f, is_gguf=True, is_hf=False)
         assert mtype == "unknown"
         assert meta["architecture"] == arch
+
+    @pytest.mark.parametrize("arch", TTS_ARCHITECTURES)
+    def test_text_to_speech_architectures_are_tts_and_never_chat(self, tmp_path, arch):
+        f = _gguf(tmp_path / "m.gguf", arch)
+        mtype, meta = _detect_local_model_type(f, is_gguf=True, is_hf=False)
+        assert mtype == "tts" and meta["architecture"] == arch
+        assert gguf_chat_refusal(arch) is not None
 
     @pytest.mark.parametrize("arch", IMAGE_ARCHITECTURES)
     def test_image_and_video_checkpoints_are_diffusion_models(self, tmp_path, arch):
@@ -169,7 +177,7 @@ class TestChatRefusal:
 
 
 class TestBackendRefusesBeforeLoading:
-    @pytest.mark.parametrize("arch", ["eagle3", "wavtokenizer-dec", "flux"])
+    @pytest.mark.parametrize("arch", ["eagle3", "wavtokenizer-dec", "flux", "qwen3tts"])
     def test_load_raises_before_any_vram_probe_or_worker(self, tmp_path, monkeypatch, arch):
         f = _gguf(tmp_path / "m.gguf", arch)
         backend = GgufBackend(str(f))
