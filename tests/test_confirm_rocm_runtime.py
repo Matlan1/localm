@@ -131,7 +131,10 @@ URL = "https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/b1342/lla
 def test_resolve_compares_the_installers_url_and_digest_with_the_release():
     ok = {"url": URL, "sha256": "2" * 64}
     assert confirm.evaluate_resolve(ok, True, CAND)[0] == PASS
-    assert confirm.evaluate_resolve(ok, False, CAND)[0] == SKIP
+    status, detail = confirm.evaluate_resolve(ok, False, CAND)
+    assert status == PASS and "pinned fallback" in detail, "a rate limited listing still proves the fallback pair"
+    assert confirm.evaluate_resolve({**ok, "sha256": "9" * 64}, False, CAND)[0] == FAIL
+    assert confirm.evaluate_resolve({"url": None, "sha256": None}, False, CAND)[0] == FAIL
     assert confirm.evaluate_resolve({**ok, "sha256": None}, True, CAND)[0] == FAIL
     assert confirm.evaluate_resolve({**ok, "sha256": "9" * 64}, True, CAND)[0] == FAIL
     assert confirm.evaluate_resolve({**ok, "url": URL.replace("b1342", "b1307")}, True, CAND)[0] == FAIL

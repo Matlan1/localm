@@ -208,8 +208,6 @@ def classify_install_failure(log: str) -> str:
 
 def evaluate_resolve(resolved: dict, listing_ok: bool, cand: bump.Candidate) -> tuple[str, str]:
     """(status, detail) for what the installer would download versus the release listing."""
-    if not listing_ok:
-        return SKIP, "the installer's release listing request returned nothing (offline or rate limited)"
     want_url = (f"https://github.com/{bump.LEMONADE_REPO}/releases/download/"
                 f"{cand.tag}/{cand.gfx103x_asset}")
     if resolved.get("url") != want_url:
@@ -217,7 +215,9 @@ def evaluate_resolve(resolved: dict, listing_ok: bool, cand: bump.Candidate) -> 
     if resolved.get("sha256") != cand.gfx103x_sha256:
         return FAIL, (f"the installer would verify against sha256 {resolved.get('sha256')!r}, "
                       f"the release publishes {cand.gfx103x_sha256}")
-    return PASS, f"{cand.gfx103x_asset} sha256 {cand.gfx103x_sha256[:16]}... matches the release listing"
+    source = ("the release listing" if listing_ok else
+              "the pinned fallback (the installer's release listing request returned nothing)")
+    return PASS, f"{cand.gfx103x_asset} sha256 {cand.gfx103x_sha256[:16]}... from {source} matches the release"
 
 
 def evaluate_install(out: dict, cand: bump.Candidate) -> tuple[str, str]:
