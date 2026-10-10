@@ -293,6 +293,7 @@ def _check_gguf_node(now):
 
 _UV_SITES = (
     ("setup.sh", r'^UV_INSTALLER_VERSION="([^"]+)"'),
+    ("setup-gui.sh", r'^UV_INSTALLER_VERSION="([^"]+)"'),
     ("setup.bat", r'^set "UV_INSTALLER_VERSION=([^"]+)"'),
     ("setup-gui.bat", r'^set "UV_INSTALLER_VERSION=([^"]+)"'),
     ("docker/Dockerfile", r'^ARG UV_VERSION=(\S+)'),

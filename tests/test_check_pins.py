@@ -179,6 +179,7 @@ def test_gguf_node_stale_when_main_moved_far_past_the_pin(monkeypatch):
 
 def test_uv_flags_disagreeing_pins_as_inconsistent_even_when_all_are_current(monkeypatch, tmp_path):
     for rel, line in (("setup.sh", 'UV_INSTALLER_VERSION="0.13.0"\n'),
+                      ("setup-gui.sh", 'UV_INSTALLER_VERSION="0.13.0"\n'),
                       ("setup.bat", 'set "UV_INSTALLER_VERSION=0.13.0"\n'),
                       ("setup-gui.bat", 'set "UV_INSTALLER_VERSION=0.13.0"\n'),
                       ("docker/Dockerfile", "ARG UV_VERSION=0.12.24\n")):

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -97,6 +99,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(pp, "open_pr",
                         lambda wt, br, cand, old, title=None, body=None:
                         spies.calls.append(("pr", title)) or 77)
+    monkeypatch.setattr(pw, "close_superseded_prs",
+                        lambda wt, key, keep: spies.calls.append(("supersede", key, keep)) or [])
     monkeypatch.setattr(pp, "wait_for_ci", lambda wt: spies.calls.append(("ci",)) or spies.ci)
     monkeypatch.setattr(pp, "merge_pr",
                         lambda n, wt, br, cand, old, title=None, body=None:
@@ -179,8 +183,9 @@ def test_pass_bumps_in_the_worktree_commits_opens_pr_waits_and_merges(env, tmp_p
     assert out.verdict == pw.MERGED and out.pr == 77
     assert (env.worktree / "bumped.txt").read_text(encoding="utf-8") == "v2"
     assert "- moved v1 to v2" in (env.worktree / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert [c[0] for c in env.calls] == ["branch", "push", "pr", "ci", "merge"]
-    assert env.calls[0] == ("branch", "v2", "fake")
+    assert [c[0] for c in env.calls] == ["supersede", "branch", "push", "pr", "ci", "merge"]
+    assert env.calls[0] == ("supersede", "fake", "claude/pin-pipeline-fake-v2")
+    assert env.calls[1] == ("branch", "v2", "fake")
     state = pp.load_state(pin="fake")
     assert state["verdict"] == "PASS" and state["merged_pr"] == 77
 
@@ -189,7 +194,7 @@ def test_a_refused_bump_is_a_fail_and_nothing_is_pushed(env, monkeypatch):
     monkeypatch.setenv("FAKE_BUMP_RC", "1")
     out = pw.advance(_adv(), dry_run=False)
     assert out.verdict == pw.FAIL and "REFUSED: bad receipt" in out.detail
-    assert [c[0] for c in env.calls] == ["branch"]
+    assert [c[0] for c in env.calls] == ["supersede", "branch"]
 
 
 def test_failing_targeted_tests_stop_before_any_push(env):
@@ -215,8 +220,90 @@ def test_pending_ci_is_inconclusive_and_never_merges(env):
 def test_a_bump_that_is_not_auto_merged_opens_the_pr_and_stops(env):
     out = pw.advance(_adv(auto_merge=lambda o, n: False), dry_run=False)
     assert out.verdict == pw.REVIEW and out.pr == 77
-    assert [c[0] for c in env.calls] == ["branch", "push", "pr"]
+    assert [c[0] for c in env.calls] == ["supersede", "branch", "push", "pr"]
     assert pp.load_state(pin="fake")["verdict"] == "REVIEW"
+
+
+# --------------------------------------------------------------------------- #
+#  Review-only pins (no confirm script)                                       #
+# --------------------------------------------------------------------------- #
+
+def _review_adv(**kw):
+    return _adv(confirm_script=None, **kw)
+
+
+def test_a_pin_without_a_confirm_script_can_never_auto_merge():
+    assert _review_adv().auto_merge("v1", "v2") is False
+    assert _adv().auto_merge("v1", "v2") is True
+
+
+def test_review_only_bump_opens_a_pr_without_a_receipt_and_never_merges(env, monkeypatch, tmp_path):
+    seen = []
+    real = pw.subprocess.run
+
+    def spy(cmd, *a, **k):
+        seen.append(cmd)
+        return real(cmd, *a, **k)
+    monkeypatch.setattr(pw.subprocess, "run", spy)
+    out = pw.advance(_review_adv(bump_args=("--lib", "marked")), dry_run=False)
+    assert out.verdict == pw.REVIEW and out.pr == 77
+    assert [c[0] for c in env.calls] == ["supersede", "branch", "push", "pr"]
+    bump = next(c for c in seen if "bump_fake_pin.py" in " ".join(map(str, c)))
+    flat = [str(x) for x in bump]
+    assert "--receipt" not in flat
+    assert flat[flat.index("--lib"):flat.index("--lib") + 4] == ["--lib", "marked", "--tag", "v2"]
+    assert "--write" in flat
+    assert (env.worktree / "bumped.txt").read_text(encoding="utf-8") == "v2"
+    assert pp.load_state(pin="fake")["verdict"] == "REVIEW"
+
+
+def test_review_only_dry_run_changes_nothing(env):
+    out = pw.advance(_review_adv(), dry_run=True)
+    assert out.verdict == pw.DRY_PASS and env.calls == []
+
+
+def test_a_review_pr_already_open_for_the_same_candidate_is_not_reopened(env):
+    pw.advance(_review_adv(), dry_run=False)
+    env.calls.clear()
+    again = pw.advance(_review_adv(), dry_run=False)
+    assert again.verdict == pw.SKIPPED and "#77" in again.detail and env.calls == []
+
+
+def test_a_newer_candidate_after_a_review_pr_opens_a_fresh_one(env):
+    pw.advance(_review_adv(), dry_run=False)
+    env.calls.clear()
+    out = pw.advance(_review_adv(candidate=lambda: ("v1", "v3")), dry_run=False)
+    assert out.verdict == pw.REVIEW
+    assert env.calls[0] == ("supersede", "fake", "claude/pin-pipeline-fake-v3")
+
+
+def test_verify_current_of_a_review_only_pin_is_reported_as_not_measured(env):
+    out = pw.verify_current(_review_adv())
+    assert out.verdict == pw.NOT_MEASURED and "no runtime check" in out.detail
+
+
+def test_close_superseded_prs_closes_only_this_pins_older_branches(monkeypatch, tmp_path):
+    listing = json.dumps([
+        {"number": 1, "headRefName": "claude/pin-pipeline-fake-v1"},
+        {"number": 2, "headRefName": "claude/pin-pipeline-fake-v3"},
+        {"number": 3, "headRefName": "claude/pin-pipeline-other-v1"},
+        {"number": 4, "headRefName": "claude/unrelated"}])
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=listing if cmd[2] == "list" else "", stderr="")
+    monkeypatch.setattr(pw.subprocess, "run", fake_run)
+    closed = pw.close_superseded_prs(tmp_path, "fake", "claude/pin-pipeline-fake-v3")
+    assert closed == [1]
+    assert [c[2] for c in calls] == ["list", "close"] and calls[1][3] == "1"
+
+
+def test_close_superseded_prs_raises_infra_error_when_the_listing_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(pw.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 1, stdout="", stderr="gh: not logged in"))
+    with pytest.raises(pp.InfraError):
+        pw.close_superseded_prs(tmp_path, "fake", "x")
 
 
 def test_an_infra_error_after_a_pass_is_inconclusive_not_a_build_fail(env, monkeypatch):
@@ -374,6 +461,7 @@ def test_severity_ordering():
     assert pw.severity([o(pw.INCONCLUSIVE), o(pw.PASS)]) == 2
     assert pw.severity([o(pw.INCONCLUSIVE), o(pw.FAIL)]) == 1
     assert pw.severity([o(pw.REVIEW)]) == 2
+    assert pw.severity([o(pw.NOT_MEASURED)]) == 0
     assert pw.severity([]) == 0
 
 
@@ -486,10 +574,15 @@ def test_github_candidate_unparseable_pin_raises(monkeypatch):
 
 def test_shipped_advancers_cover_every_runtime_with_a_pipeline_or_a_named_gap():
     advs = pw.build_advancers()
-    assert [a.key for a in advs] == ["llama", "comfyui", "rocm", "koboldcpp", "sdcpp"]
+    assert [a.key for a in advs] == [
+        "llama", "comfyui", "rocm", "koboldcpp", "sdcpp", "uv", "vendored-marked",
+        "vendored-dompurify", "vendored-highlightjs", "vendored-katex", "cuda-runtime",
+        "gguf-node", "docker-base"]
+    assert all(a.auto_merge("1.0.0", "1.0.1") is False for a in advs if a.confirm_script is None)
     assert len({a.key for a in advs}) == len(advs)
     for a in advs:
-        assert a.confirm_script.startswith("scripts/confirm_") and a.bump_script.startswith("scripts/bump_")
+        assert a.confirm_script is None or a.confirm_script.startswith("scripts/confirm_")
+        assert a.bump_script.startswith("scripts/bump_")
         assert a.delegate is not None or a.candidate is not None
         for t in a.tests:
             assert t.startswith("tests/test_")
@@ -497,10 +590,14 @@ def test_shipped_advancers_cover_every_runtime_with_a_pipeline_or_a_named_gap():
 
 def test_every_advancer_script_that_exists_follows_the_contract_cli():
     for a in pw.build_advancers():
-        for rel in (a.confirm_script, a.bump_script):
+        scripts = [a.bump_script] if a.confirm_script is None else [a.confirm_script, a.bump_script]
+        for rel in scripts:
             path = Path(_PATH).parent.parent / rel
             if not path.is_file():
                 continue
             text = path.read_text(encoding="utf-8")
-            assert '"--receipt"' in text, rel
-            assert ('"--current"' in text) or rel.startswith("scripts/bump_") or a.verify_current_cmd, rel
+            assert '"--tag"' in text or a.delegate, rel
+            if a.confirm_script is not None:
+                assert '"--receipt"' in text, rel
+            if rel == a.confirm_script and not a.verify_current_cmd:
+                assert '"--current"' in text, rel

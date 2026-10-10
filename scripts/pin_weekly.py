@@ -36,6 +36,7 @@ import datetime as _dt
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -56,6 +57,7 @@ REVIEW = "OPENED FOR REVIEW"
 NOT_BUILT = "NOT BUILT"
 SKIPPED = "SKIPPED"
 NOT_RUN = "NOT RUN"
+NOT_MEASURED = "NOT MEASURED"
 
 CONFIRM_TIMEOUT_SECONDS = 3 * 3600
 TEST_TIMEOUT_SECONDS = 30 * 60
@@ -93,7 +95,7 @@ class Outcome:
 class Advancer:
     key: str
     title: str
-    confirm_script: str
+    confirm_script: str | None
     bump_script: str
     candidate: Callable[[], tuple[str, str] | None]
     tests: tuple[str, ...] = ()
@@ -102,7 +104,12 @@ class Advancer:
     auto_merge: Callable[[str, str], bool] = lambda old, new: True
     delegate: Callable[[bool], int] | None = None
     verify_current_cmd: Callable[[Path, Path], list[str]] | None = None
+    bump_args: tuple[str, ...] = ()
     extra: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.confirm_script is None:
+            self.auto_merge = lambda old, new: False
 
 
 # --------------------------------------------------------------------------- #
@@ -197,7 +204,7 @@ def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
     confirm script and a bump script that follow dev-notes/pin-automation/CONTRACT.md."""
     out = Outcome(adv.key, adv.title, "advance", NONE_NEWER)
     for rel in (adv.confirm_script, adv.bump_script):
-        if not (REPO / rel).is_file():
+        if rel is not None and not (REPO / rel).is_file():
             out.verdict, out.detail = NOT_BUILT, f"{rel} does not exist"
             return out
 
@@ -213,14 +220,22 @@ def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
 
     state = pp.load_state(pin=adv.key)
     skip = pp.should_skip(state, new)
+    if skip is None and state.get("last_tag_tried") == new and state.get("verdict") == "REVIEW":
+        skip = f"PR #{state.get('open_pr')} for {new} is already open for review"
     if skip:
         out.verdict, out.detail = SKIPPED, skip
         return out
 
     receipt = _receipt_path(adv.key, new)
+    now_iso = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if adv.confirm_script is None:
+        out.detail = "no runtime confirmation exists for this pin; the PR is opened for review"
+        if dry_run:
+            out.verdict = DRY_PASS
+            return out
+        return _bump_with_error_handling(adv, out, old, new, None, now_iso)
     out.receipt = str(receipt)
     verdict, detail = run_confirm(adv, ["--tag", new], receipt)
-    now_iso = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     if verdict == NOT_RUN:
         out.verdict, out.detail = INCONCLUSIVE, detail
         return out
@@ -245,6 +260,11 @@ def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
         out.verdict = DRY_PASS
         return out
 
+    return _bump_with_error_handling(adv, out, old, new, receipt, now_iso)
+
+
+def _bump_with_error_handling(adv: Advancer, out: Outcome, old: str, new: str,
+                              receipt: Path | None, now_iso: str) -> Outcome:
     try:
         return _bump_and_merge(adv, out, old, new, receipt, now_iso)
     except pp.InfraError as e:
@@ -252,7 +272,7 @@ def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
         out.verdict, out.detail = INCONCLUSIVE, f"infra: {e}"
     except pp.PipelineError as e:
         pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
-                       "receipt_path": str(receipt), "reason": str(e)}, pin=adv.key)
+                       "receipt_path": str(receipt or ""), "reason": str(e)}, pin=adv.key)
         pp.append_fail_issue(new, str(e), receipt, pin=adv.key)
         out.verdict, out.detail = FAIL, str(e)
     except Exception as e:  # noqa: BLE001 - a tooling crash after a PASS is logged, never a build FAIL
@@ -264,15 +284,44 @@ def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
     return out
 
 
-def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Path,
+def close_superseded_prs(worktree: Path, key: str, keep_branch: str) -> list[int]:
+    """Close every open pin-pipeline PR for *key* except the one on *keep_branch*, so a
+    newer candidate replaces an older review-only PR instead of piling up beside it.
+    Returns the closed PR numbers; raises InfraError when the PR list cannot be read."""
+    prefix = f"claude/pin-pipeline-{key}-"
+    proc = subprocess.run(["gh", "pr", "list", "--state", "open", "--json", "number,headRefName"],
+                          cwd=worktree, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise pp.InfraError(f"gh pr list failed: {proc.stderr}")
+    try:
+        prs = json.loads(proc.stdout)
+    except ValueError:
+        raise pp.InfraError(f"could not parse gh pr list output: {proc.stdout!r}") from None
+    closed = []
+    for pr in prs:
+        head = pr.get("headRefName", "")
+        if head.startswith(prefix) and head != keep_branch:
+            res = subprocess.run(
+                ["gh", "pr", "close", str(pr["number"]), "--comment",
+                 "Superseded by a newer upstream release."],
+                cwd=worktree, capture_output=True, text=True)
+            if res.returncode != 0:
+                raise pp.InfraError(f"could not close superseded PR #{pr['number']}: {res.stderr}")
+            closed.append(pr["number"])
+    return closed
+
+
+def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Path | None,
                     now_iso: str) -> Outcome:
     worktree = pp.ensure_pipeline_worktree()
+    close_superseded_prs(worktree, adv.key, f"claude/pin-pipeline-{adv.key}-{new}")
     branch = pp.prepare_bump_branch(worktree, new, pin=adv.key)
 
-    proc = subprocess.run(
-        [sys.executable, str(worktree / adv.bump_script), "--tag", new, "--receipt", str(receipt),
-         "--write"], cwd=worktree, env=pp._worktree_env(worktree), capture_output=True,
-        text=True)
+    bump_cmd = [sys.executable, str(worktree / adv.bump_script), *adv.bump_args, "--tag", new]
+    if receipt is not None:
+        bump_cmd += ["--receipt", str(receipt)]
+    proc = subprocess.run(bump_cmd + ["--write"], cwd=worktree, env=pp._worktree_env(worktree),
+                          capture_output=True, text=True)
     if proc.returncode != 0:
         raise pp.PipelineError(f"{adv.bump_script} refused: {(proc.stdout + proc.stderr)[-800:]}")
 
@@ -291,11 +340,15 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
             raise pp.PipelineError(f"targeted tests failed after the bump:\n{test_out[-2000:]}")
 
     title = f"Advance the bundled {adv.title} to {new}"
-    body = (f"Moves the bundled {adv.title} from {old} to {new}. The new build was installed "
-            f"and exercised on real hardware before the pin changed.\n\n"
+    tested = ("The new build was installed and exercised on real hardware before the pin changed."
+              if adv.confirm_script else
+              "This build could not be exercised on this machine; review before merging.")
+    body = (f"Moves the bundled {adv.title} from {old} to {new}. {tested}\n\n"
             "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
+    how = (f"confirmed with {adv.confirm_script}" if adv.confirm_script
+           else "mechanical bump, opened for review")
     message = (f"chore({adv.key}): advance the pinned build to {new}\n\n"
-               f"Automated: confirmed with {adv.confirm_script} before advancing from {old}.\n\n"
+               f"Automated: {how} before advancing from {old}.\n\n"
                "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\n")
     pp.commit_and_push(worktree, branch, new, old, message=message)
     pr = pp.open_pr(worktree, branch, new, old, title=title, body=body)
@@ -303,7 +356,7 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
 
     if not adv.auto_merge(old, new):
         pp.save_state({"last_tag_tried": new, "verdict": "REVIEW", "timestamp": now_iso,
-                       "receipt_path": str(receipt), "open_pr": pr}, pin=adv.key)
+                       "receipt_path": str(receipt or ""), "open_pr": pr}, pin=adv.key)
         out.verdict = REVIEW
         out.detail = f"PR #{pr} opened; this bump is not auto-merged"
         return out
@@ -312,7 +365,7 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
     if ci == "GREEN":
         pp.merge_pr(pr, worktree, branch, new, old, title=title, body=body)
         pp.save_state({"last_tag_tried": new, "verdict": "PASS", "timestamp": now_iso,
-                       "receipt_path": str(receipt), "merged_pr": pr}, pin=adv.key)
+                       "receipt_path": str(receipt or ""), "merged_pr": pr}, pin=adv.key)
         out.verdict, out.detail = MERGED, f"PR #{pr}: {old} -> {new}"
         return out
     if ci == "PENDING":
@@ -321,7 +374,7 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
         return out
     reason = f"CI red on PR #{pr}; left open, not merged"
     pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
-                   "receipt_path": str(receipt), "reason": reason, "open_pr": pr}, pin=adv.key)
+                   "receipt_path": str(receipt or ""), "reason": reason, "open_pr": pr}, pin=adv.key)
     pp.append_fail_issue(new, reason, receipt, pin=adv.key)
     out.verdict, out.detail = FAIL, reason
     return out
@@ -376,6 +429,10 @@ def verify_current(adv: Advancer) -> Outcome:
         out.verdict = _verdict_from_rc(rc)
         out.detail = _receipt_summary(receipt) if receipt.exists() else text[-400:]
         return out
+    if adv.confirm_script is None:
+        out.verdict = NOT_MEASURED
+        out.detail = "no runtime check exists for this pin on this machine"
+        return out
     if not (REPO / adv.confirm_script).is_file():
         out.verdict, out.detail = NOT_BUILT, f"{adv.confirm_script} does not exist"
         return out
@@ -414,6 +471,62 @@ def _github_candidate(repo: str, pin_file: str, pin_pattern: str, key) -> Callab
     return find
 
 
+def _vendored_candidate(name: str) -> Callable[[], tuple[str, str] | None]:
+    spec = next(v for v in cp._VENDORED if v[0] == name)
+    _, rel, pattern, (source, ref), _tolerance = spec
+
+    def find():
+        pinned = cp._read_const(rel, pattern)
+        pin_key = cp._semver_key(pinned)
+        releases = cp._github_releases(ref) if source == "gh" else cp._npm_releases(ref)
+        newer = [(cp._semver_key(t), t) for t, _ in releases]
+        newer = [(k, t) for k, t in newer if k is not None and k > pin_key]
+        if not newer:
+            return None
+        return pinned, re.sub(r"^v", "", max(newer)[1])
+    return find
+
+
+def _cuda_runtime_candidate() -> tuple[str, str] | None:
+    text = cp._read_text("localm/setup_llama/cuda.py")
+    m = cp._CUDA_RUNTIME_RE.search(text)
+    if not m:
+        raise cp.FetchError("_CUDA_RUNTIME_PIN not found in localm/setup_llama/cuda.py")
+    pins = re.findall(r'"([a-z0-9._-]+)":\s*\(\s*"([^"]+)"', m.group(1))
+    old, new = [], []
+    for package, version in pins:
+        latest, _ = cp._pypi_latest(package)
+        old.append(f"{package}=={version}")
+        new.append(f"{package}=={latest}")
+    if old == new:
+        return None
+    return ",".join(old), ",".join(new)
+
+
+def _gguf_node_candidate() -> tuple[str, str] | None:
+    pinned = cp._read_const("localm/media/managed_comfy_fresh.py",
+                            r'name="ComfyUI-GGUF",\s*repo="[^"]+",\s*commit="([0-9a-f]{40})"')
+    head = cp._get_json("https://api.github.com/repos/city96/ComfyUI-GGUF/commits/main")
+    try:
+        head_sha = head["sha"]
+    except (KeyError, TypeError) as e:
+        raise cp.FetchError("unexpected commits response shape") from e
+    return None if head_sha == pinned else (pinned, head_sha)
+
+
+def _docker_base_candidate() -> tuple[str, str] | None:
+    ref = cp._read_const("docker/Dockerfile",
+                         r"^ARG UBUNTU_IMAGE=(ubuntu:[\d.]+@sha256:[0-9a-f]{64})$")
+    image, _, pinned = ref.partition("@")
+    repo, _, tag = image.partition(":")
+    body = cp._get_json(f"https://hub.docker.com/v2/repositories/library/{repo}/tags/{tag}")
+    try:
+        current = body["digest"]
+    except (KeyError, TypeError) as e:
+        raise cp.FetchError("unexpected Docker Hub response shape") from e
+    return None if current == pinned else (pinned, current)
+
+
 def _rocm_candidate() -> tuple[str, str] | None:
     mod = _load("check_llama_rocm_pin", SCRIPTS / "check_llama_rocm_pin.py")
     pin = mod.pinned_tag()
@@ -426,6 +539,15 @@ def _rocm_candidate() -> tuple[str, str] | None:
     if pin_n is None or best_n is None or best_n <= pin_n:
         return None
     return pin, best["tag"]
+
+
+def _semver_major(tag: str) -> int | None:
+    key = cp._semver_key(tag)
+    return key[0] if key else None
+
+
+def _same_major_only(old: str, new: str) -> bool:
+    return _semver_major(old) is not None and _semver_major(old) == _semver_major(new)
 
 
 def _llama_delegate(dry_run: bool) -> int:
@@ -488,6 +610,32 @@ def build_advancers() -> list[Advancer]:
                         "tests/test_sdcpp_runtime.py", "tests/test_bump_sdcpp_pin.py"),
                  changelog=_bullet("stable-diffusion.cpp runtime",
                                    "An existing install picks it up the next time image generation starts.")),
+        Advancer("uv", "uv installer", "scripts/confirm_uv_runtime.py", "scripts/bump_uv_pin.py",
+                 candidate=_github_candidate("astral-sh/uv", "setup.sh",
+                                             r'^UV_INSTALLER_VERSION="([^"]+)"', cp._semver_key),
+                 tests=("tests/test_uv_installer_pin.py", "tests/test_docker_image_files.py",
+                        "tests/test_bump_uv_pin.py"), gpu=False),
+        *_review_only_advancers(),
+    ]
+
+
+def _review_only_advancers() -> list[Advancer]:
+    """Pins that cannot be exercised on this machine (or whose output ships to every
+    browser): the bump is mechanical, CI runs on the PR, and a person merges it."""
+    vendored = [
+        Advancer(f"vendored-{name.lower().replace('.', '')}", f"vendored {name}", None,
+                 "scripts/bump_vendored_js.py", candidate=_vendored_candidate(name),
+                 bump_args=("--lib", name), gpu=False)
+        for name in ("marked", "DOMPurify", "highlight.js", "KaTeX")
+    ]
+    return [
+        *vendored,
+        Advancer("cuda-runtime", "Linux CUDA runtime wheels", None,
+                 "scripts/bump_cuda_runtime_pin.py", candidate=_cuda_runtime_candidate, gpu=False),
+        Advancer("gguf-node", "ComfyUI-GGUF node", None, "scripts/bump_gguf_node_pin.py",
+                 candidate=_gguf_node_candidate, gpu=False),
+        Advancer("docker-base", "Docker base image", None, "scripts/bump_docker_base_pin.py",
+                 candidate=_docker_base_candidate, gpu=False),
     ]
 
 
