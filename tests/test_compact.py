@@ -37,6 +37,15 @@ class TestEstimateTokens:
         ]}]
         assert estimate_tokens(msgs) >= 750
 
+    def test_audio_clips_add_flat_cost_and_are_named(self):
+        from localm.inference.compact import _text_of
+        msg = {"role": "user", "content": [
+            {"type": "text", "text": "listen"},
+            {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+        ]}
+        assert _text_of(msg) == "listen [audio]"
+        assert estimate_tokens([msg], count_tokens=lambda t: 0) == 750
+
     def test_broken_counter_falls_back(self):
         def boom(_):
             raise RuntimeError("tokenizer gone")
