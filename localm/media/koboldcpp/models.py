@@ -18,7 +18,7 @@ import os
 import subprocess
 import sys
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Callable, Optional
 
 from .server import Cancelled, ModelSet
@@ -92,7 +92,7 @@ def shown_name(value: str) -> str:
     """*value* as shown to users: a registered model name unchanged, a file path
     as its file name only."""
     value = (value or "").strip()
-    return Path(value).name if ("/" in value or "\\" in value) else value
+    return PureWindowsPath(value).name if ("/" in value or "\\" in value) else value
 
 
 def _raw_path(value: str) -> str:
