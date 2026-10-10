@@ -37,8 +37,8 @@ if os.environ.get("FAKE_CONFIRM_SLEEP"):
     time.sleep(float(os.environ["FAKE_CONFIRM_SLEEP"]))
 open(os.environ.get("FAKE_CONFIRM_LOG", os.devnull), "a").write(" ".join(args) + "\\n")
 verdict = {0: "PASS", 1: "FAIL"}.get(rc, "INCONCLUSIVE")
-json.dump({"schema": 1, "verdict": verdict, "checks": {"load": {"status": verdict}}},
-          open(receipt, "w"))
+json.dump({"schema": 1, "verdict": verdict, "why": os.environ.get("FAKE_CONFIRM_WHY", ""),
+           "checks": {"load": {"status": verdict}}}, open(receipt, "w"))
 sys.exit(rc)
 """
 
@@ -88,7 +88,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(pw, "WEEKLY_DIR", state / "weekly")
     monkeypatch.setattr(pp, "STATE_DIR", state)
     monkeypatch.setattr(pp, "ISSUES_PATH", issues)
-    for name in ("FAKE_CONFIRM_RC", "FAKE_CONFIRM_SLEEP", "FAKE_BUMP_RC", "FAKE_CONFIRM_LOG"):
+    for name in ("FAKE_CONFIRM_RC", "FAKE_CONFIRM_SLEEP", "FAKE_BUMP_RC", "FAKE_CONFIRM_LOG",
+                 "FAKE_CONFIRM_WHY"):
         monkeypatch.delenv(name, raising=False)
 
     spies = Spies()
@@ -202,6 +203,26 @@ def test_failing_targeted_tests_stop_before_any_push(env):
     out = pw.advance(_adv(tests=("tests/test_that_does_not_exist.py",)), dry_run=False)
     assert out.verdict == pw.FAIL and "targeted tests failed" in out.detail
     assert "push" not in [c[0] for c in env.calls]
+
+
+def test_a_candidate_that_needs_a_code_change_is_reported_once_not_as_a_build_fail(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CONFIRM_RC", "1")
+    monkeypatch.setenv("FAKE_CONFIRM_WHY", "binding needs a code update, not an automatic bump")
+    out = pw.advance(_adv(candidate=lambda: ("v1", "v2")), dry_run=False)
+    assert out.verdict == pw.NEEDS_UPDATE and "needs a change to localm's own code" in out.detail
+    text = env.issues.read_text(encoding="utf-8")
+    assert "NEW-PIN-PIPELINE-FAKE-BINDING-NEEDS-CODE-UPDATE" in text
+    assert "CONFIRM-FAILED" not in text
+    again = pw.advance(_adv(candidate=lambda: ("v1", "v3")), dry_run=False)
+    assert again.verdict == pw.NEEDS_UPDATE
+    assert env.issues.read_text(encoding="utf-8").count("NEEDS-CODE-UPDATE [OPEN") == 1
+    assert env.calls == []
+
+
+def test_an_ordinary_fail_is_still_a_build_fail(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CONFIRM_RC", "1")
+    out = pw.advance(_adv(), dry_run=False)
+    assert out.verdict == pw.FAIL
 
 
 def test_red_ci_is_a_fail_and_never_merges(env):
@@ -475,6 +496,7 @@ def test_severity_ordering():
     assert pw.severity([o(pw.INCONCLUSIVE), o(pw.FAIL)]) == 1
     assert pw.severity([o(pw.REVIEW)]) == 2
     assert pw.severity([o(pw.NOT_MEASURED)]) == 0
+    assert pw.severity([o(pw.NEEDS_UPDATE)]) == 2
     assert pw.severity([]) == 0
 
 

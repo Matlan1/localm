@@ -58,6 +58,8 @@ NOT_BUILT = "NOT BUILT"
 SKIPPED = "SKIPPED"
 NOT_RUN = "NOT RUN"
 NOT_MEASURED = "NOT MEASURED"
+NEEDS_UPDATE = "NEEDS CODE UPDATE"
+CODE_UPDATE_MARKER = "needs a code update"
 
 CONFIRM_TIMEOUT_SECONDS = 3 * 3600
 TEST_TIMEOUT_SECONDS = 30 * 60
@@ -180,6 +182,16 @@ def _receipt_path(key: str, tag: str) -> Path:
     return path
 
 
+def receipt_needs_code_update(receipt: Path) -> bool:
+    """True when the receipt's failure says the candidate is fine but localm's own code must
+    change before the pin can move (for example a C struct layout the binding does not know)."""
+    try:
+        text = receipt.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return CODE_UPDATE_MARKER in text
+
+
 def _receipt_summary(receipt: Path) -> str:
     try:
         data = json.loads(receipt.read_text(encoding="utf-8"))
@@ -240,6 +252,17 @@ def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
         out.verdict, out.detail = INCONCLUSIVE, detail
         return out
     out.detail = _receipt_summary(receipt) or detail[-300:]
+    if verdict == FAIL and receipt_needs_code_update(receipt):
+        reason = f"{new} needs a change to localm's own code before the pin can move"
+        pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
+                       "receipt_path": str(receipt), "reason": reason}, pin=adv.key)
+        pp.append_fail_issue(
+            "binding", reason, receipt, pin=adv.key, kind="NEEDS-CODE-UPDATE",
+            summary=f"{adv.title} releases newer than the pin need a code change in localm\n"
+                    f"    scripts/pin_weekly.py confirmed {new}: {out.detail}. The pin stays where it "
+                    f"is until the binding is updated by hand.")
+        out.verdict, out.detail = NEEDS_UPDATE, f"{reason} ({out.detail})"
+        return out
     if verdict == FAIL:
         reason = f"{adv.confirm_script} reported FAIL"
         pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
@@ -642,7 +665,7 @@ def _review_only_advancers() -> list[Advancer]:
 def severity(outcomes: list[Outcome]) -> int:
     if any(o.verdict == FAIL for o in outcomes):
         return 1
-    if any(o.verdict in (INCONCLUSIVE, NOT_BUILT, REVIEW) for o in outcomes):
+    if any(o.verdict in (INCONCLUSIVE, NOT_BUILT, REVIEW, NEEDS_UPDATE) for o in outcomes):
         return 2
     return 0
 
