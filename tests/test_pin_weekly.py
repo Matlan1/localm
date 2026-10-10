@@ -545,6 +545,42 @@ def test_run_weekly_skip_verify_current(env, monkeypatch, tmp_path):
     assert not log.exists()
 
 
+def test_ensure_github_token_keeps_an_existing_token(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "from-env")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("gh must not be asked when GITHUB_TOKEN is set")
+    monkeypatch.setattr(pw.subprocess, "run", must_not_run)
+    assert pw.ensure_github_token() == "env"
+
+
+def test_ensure_github_token_exports_the_gh_token_to_children(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(pw.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(
+        cmd, 0, stdout="tok-123\n", stderr=""))
+    assert pw.ensure_github_token() == "gh"
+    assert pw.os.environ["GITHUB_TOKEN"] == "tok-123"
+    monkeypatch.delenv("GITHUB_TOKEN")
+
+
+@pytest.mark.parametrize("result", [
+    subprocess.CompletedProcess([], 1, stdout="", stderr="not logged in"),
+    subprocess.CompletedProcess([], 0, stdout="  \n", stderr="")])
+def test_ensure_github_token_without_a_usable_gh_token_is_none(monkeypatch, result):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(pw.subprocess, "run", lambda cmd, **k: result)
+    assert pw.ensure_github_token() == "none" and "GITHUB_TOKEN" not in pw.os.environ
+
+
+def test_ensure_github_token_when_gh_is_missing_is_none(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def missing(*a, **k):
+        raise FileNotFoundError("gh")
+    monkeypatch.setattr(pw.subprocess, "run", missing)
+    assert pw.ensure_github_token() == "none"
+
+
 def test_main_rejects_an_unknown_only_name(capsys):
     assert pw.main(["--only", "nope"]) == 2
     assert "no runtime matches" in capsys.readouterr().err

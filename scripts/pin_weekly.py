@@ -118,6 +118,23 @@ class Advancer:
 #  Process helpers                                                            #
 # --------------------------------------------------------------------------- #
 
+def ensure_github_token() -> str:
+    """Export GITHUB_TOKEN for this process and every child from `gh auth token` when it is
+    not already set, so the many API calls of a weekly run are not rate limited as an
+    anonymous client. Returns where the token came from: "env", "gh" or "none"."""
+    if os.environ.get("GITHUB_TOKEN"):
+        return "env"
+    try:
+        proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return "none"
+    token = proc.stdout.strip()
+    if proc.returncode != 0 or not token:
+        return "none"
+    os.environ["GITHUB_TOKEN"] = token
+    return "gh"
+
+
 def _kill_tree(pid: int) -> None:
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
@@ -745,6 +762,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no runtime matches --only {args.only!r}", file=sys.stderr)
             return 2
 
+    source = ensure_github_token()
+    print(f"GitHub API auth: {source}" + (" (anonymous requests are rate limited)" if source == "none" else ""))
     try:
         with pp.pipeline_lock():
             pp.sync_main_checkout()
