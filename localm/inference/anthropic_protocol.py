@@ -30,6 +30,9 @@ _ERROR_TYPES = {
 
 _ERROR_TEXT_PREFIX = "[inference error"
 
+# Routes a cross-origin page may call (matched exactly, like the inference API).
+CROSS_ORIGIN_OK_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens"})
+
 
 class AnthropicError(Exception):
     """A request the Messages layer refuses, rendered as an Anthropic error body."""
@@ -111,7 +114,8 @@ def output_format(output_config: Optional[dict[str, Any]]) -> Optional[dict[str,
     fmt = output_config.get("format")
     if fmt is None:
         return None
-    if not isinstance(fmt, dict) or fmt.get("type") != "json_schema"             or not isinstance(fmt.get("schema"), dict):
+    if (not isinstance(fmt, dict) or fmt.get("type") != "json_schema"
+            or not isinstance(fmt.get("schema"), dict)):
         raise AnthropicError(
             400, "output_config.format must be {\"type\": \"json_schema\", \"schema\": {...}}")
     return {"type": "json_schema",
@@ -236,10 +240,33 @@ def messages_to_openai(system: Any, messages: list[dict[str, Any]]) -> list[dict
             continue
         if not parts:
             continue
-        if all(p["type"] == "text" for p in parts):
-            out.append({"role": "user", "content": "".join(p["text"] for p in parts)})
+        if len(parts) == 1 and parts[0]["type"] == "text":
+            out.append({"role": "user", "content": parts[0]["text"]})
         else:
             out.append({"role": "user", "content": parts})
+    return _merge_turns(out)
+
+
+def _as_parts(content: Any) -> list[dict[str, Any]]:
+    return [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+
+
+def _merge_turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """*messages* with consecutive user turns, and consecutive assistant turns,
+    joined into one, as the Messages API treats them."""
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        prev = out[-1] if out else None
+        if prev is None or prev["role"] != msg["role"] or msg["role"] not in ("user", "assistant"):
+            out.append(dict(msg))
+            continue
+        if msg["role"] == "user":
+            prev["content"] = _as_parts(prev["content"]) + _as_parts(msg["content"])
+        else:
+            prev["content"] = (prev.get("content") or "") + (msg.get("content") or "")
+            calls = (prev.get("tool_calls") or []) + (msg.get("tool_calls") or [])
+            if calls:
+                prev["tool_calls"] = calls
     return out
 
 
@@ -386,11 +413,13 @@ def message_from_completion(data: dict[str, Any], model: str,
     for call in message.get("tool_calls") or []:
         if isinstance(call, dict):
             content.append(_tool_use_block(call))
-    stop_sequence = choice.get("stop_sequence")
+    stop_sequence = choice.get("stop_sequence") or None
+    reason = stop_reason(finish, stop_sequence)
     return {
         "id": new_message_id(), "type": "message", "role": "assistant", "model": model,
-        "content": content, "stop_reason": stop_reason(finish, stop_sequence),
-        "stop_sequence": stop_sequence or None, "usage": _usage(data.get("usage")),
+        "content": content, "stop_reason": reason,
+        "stop_sequence": stop_sequence if reason == "stop_sequence" else None,
+        "usage": _usage(data.get("usage")),
     }
 
 
@@ -528,10 +557,11 @@ async def message_stream(events: AsyncIterator[dict[str, Any]], *, model: str,
     for line in blocks.close():
         yield line
     counts = _usage(usage)
+    reason = stop_reason(finish, stop_sequence)
     yield sse_event("message_delta", {
         "type": "message_delta",
-        "delta": {"stop_reason": stop_reason(finish, stop_sequence),
-                  "stop_sequence": stop_sequence},
+        "delta": {"stop_reason": reason,
+                  "stop_sequence": stop_sequence if reason == "stop_sequence" else None},
         "usage": {"input_tokens": counts["input_tokens"],
                   "output_tokens": counts["output_tokens"]}})
     yield sse_event("message_stop", {"type": "message_stop"})

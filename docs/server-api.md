@@ -384,7 +384,8 @@ prompts, `best_of` above 1, `n` other than 1, `logprobs`, a non-empty
 ### `POST /v1/messages` (Anthropic Messages API)
 
 Scope: any valid key (no specific scope required once auth is enabled). Anthropic clients
-authenticate with `x-api-key`, which localm accepts as well as `Authorization: Bearer`; the
+authenticate with `x-api-key`, which the API routes accept as well as `Authorization: Bearer`
+(the bearer token wins when both are sent; the GUI login takes only the bearer form); the
 `anthropic-version` and `anthropic-beta` headers are accepted and not needed.
 
 An Anthropic SDK or an agent tool that speaks the Messages API can use localm by pointing its
@@ -405,8 +406,9 @@ compaction, tool calling and the response headers work the same way.
 | `stream` | Server-sent events in Anthropic's order: `message_start`, `ping`, per block `content_block_start` / `content_block_delta` (`text_delta`, `thinking_delta` then `signature_delta`, `input_json_delta` carrying a tool call's whole input) / `content_block_stop`, then `message_delta` with `stop_reason` and `usage`, then `message_stop`. `message_start` reports 0 input tokens; `message_delta` carries the real `input_tokens` and `output_tokens`. A generation that fails partway ends with an `error` event. |
 | `metadata`, `service_tier`, `cache_control`, `inference_geo` | Accepted; no effect. |
 
-`stop_reason` is `end_turn`, `max_tokens`, `stop_sequence` (with `stop_sequence` naming the match)
-or `tool_use`. A thinking block carries an empty `signature`. Errors use Anthropic's shape,
+`stop_reason` is `end_turn`, `max_tokens`, `stop_sequence` (with `stop_sequence` naming the match;
+otherwise `stop_sequence` is `null`) or `tool_use`. Consecutive turns of the same role are joined,
+and a turn's text blocks stay separate blocks, as the Messages API treats them. A thinking block carries an empty `signature`. Errors use Anthropic's shape,
 `{"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}`, with
 `authentication_error` for a missing or wrong key, `not_found_error`, `request_too_large` and
 `overloaded_error` mapped from the matching status.
@@ -414,8 +416,9 @@ or `tool_use`. A thinking block carries an empty `signature`. Errors use Anthrop
 ### `POST /v1/messages/count_tokens`
 
 Same request fields as `/v1/messages` (without `max_tokens`); returns `{"input_tokens": N}`,
-counted with the model's own tokenizer and chat template, tool descriptions included. The model
-is loaded if it is not already.
+counted with the model's own tokenizer and chat template, tool descriptions included, by the
+model that would answer the same `/v1/messages` request (capability routing applies, and a model
+another instance serves is counted there). The model is loaded if it is not already.
 
 ### `POST /v1/embeddings`
 

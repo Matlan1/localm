@@ -12,6 +12,7 @@ shape. The wire translation lives in ``localm.inference.anthropic_protocol``."""
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 from typing import Any
 
@@ -23,6 +24,7 @@ from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import localm.inference.http_server as _hs
+from localm import peer_routing
 from localm.inference import anthropic_protocol as A
 from localm.inference.ollama_protocol import iter_sse_json
 from localm.inference.protocol import ChatRequest
@@ -37,8 +39,8 @@ from localm.inference.tool_calling import (
 
 class AnthropicRoute(APIRoute):
     """An APIRoute whose failures are rendered as Anthropic error bodies: a
-    refused credential, a request that fails validation (400) and an
-    :class:`AnthropicError`."""
+    refused credential, a request that fails validation (400), an
+    :class:`AnthropicError`, and an unexpected error (500, its traceback logged)."""
 
     def get_route_handler(self):
         original = super().get_route_handler()
@@ -53,6 +55,10 @@ class AnthropicRoute(APIRoute):
                 return _error(exc.status_code, detail, exc.headers)
             except RequestValidationError as exc:
                 return _error(400, validation_text(exc.errors()))
+            except Exception:
+                from localm.debuglog import logger as _dbg
+                _dbg.exception("unhandled error on %s", request.url.path)
+                return _error(500, "Internal server error")
         return handler
 
 
@@ -134,11 +140,21 @@ def register(app: FastAPI, ctx) -> None:
             choice = parse_tool_choice(chat_req.tool_choice, tools)
         except ToolsError as exc:
             raise A.AnthropicError(400, str(exc)) from None
+        route = await asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(_hs.plan_capability_route, req.model, messages, None))
+        if not req.model and route.resolved is None:
+            raise A.AnthropicError(400, "model is required")
+        peer = peer_routing.get_route(route.resolved) if route.resolved else None
+        if peer is not None:
+            return await peer_routing.forward(
+                peer, request, "/v1/messages/count_tokens",
+                body=peer_routing.forward_body(peer, await request.body()))
         if tools or has_tool_history(messages):
             messages = render_messages(messages, list(tools), choice)
-        if not req.model and not (_hs._active_model_name or _hs._default_model_name):
-            raise A.AnthropicError(400, "model is required")
-        engine = await _hs.get_engine(req.model)
+        if route.routed:
+            engine = await _hs.get_engine(route.resolved, activate=False)
+        else:
+            engine = await _hs.get_engine(req.model)
         _hs._pin(engine)
         try:
             tokens = await asyncio.get_running_loop().run_in_executor(

@@ -5252,18 +5252,19 @@ async def _stream_sse_body(
         yield f"data: {compacting.model_dump_json()}\n\n"
         new_messages, changed, _gone = await _compact_for_capacity(engine, messages)
         refusal = ""
+        refusal_status = 413
         if changed:
             messages = list(new_messages)
             try:
                 prompt_tokens = await asyncio.get_running_loop().run_in_executor(
                     None, engine.count_messages_tokens, messages)
             except PretokenizerUnsafeInputError as e:
-                refusal = str(e)
+                refusal, refusal_status = str(e), 400
                 prompt_tokens = None
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("token recount after compaction failed")
-                refusal = inference_error_text(e).strip()
+                refusal, refusal_status = inference_error_text(e).strip(), 500
                 prompt_tokens = None
         capacity = engine.context_capacity()
         if (not refusal and isinstance(capacity, int) and capacity > 0
@@ -5275,8 +5276,9 @@ async def _stream_sse_body(
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
-            err_chunk = ChatChunk.token(refusal, model_id, chunk_id, ts)
-            yield f"data: {err_chunk.model_dump_json()}\n\n"
+            err_chunk = ChatChunk.token(refusal, model_id, chunk_id, ts).model_dump(mode="json")
+            err_chunk["localm_error"] = {"status": refusal_status, "detail": refusal}
+            yield f"data: {json.dumps(err_chunk, ensure_ascii=False, separators=(',', ':'))}\n\n"
             for data in _final_chunks(model_id, chunk_id, ts, "error",
                                       UsageInfo(prompt_tokens=prompt_tokens or 0,
                                                 total_tokens=prompt_tokens or 0,
@@ -5485,7 +5487,8 @@ async def _stream_sse_body(
     meter.record(usage.prompt_tokens, usage.completion_tokens,
                  usage.ttft_ms, usage.tokens_per_sec)
     for data in _final_chunks(model_id, chunk_id, ts, finish_reason, usage, include_usage,
-                              stop_sequence=router.stop_sequence):
+                              stop_sequence=(router.stop_sequence
+                                             if finish_reason == "stop" else None)):
         yield data
 
 
@@ -5497,9 +5500,9 @@ def _final_chunks(model_id: str, chunk_id: str, ts: int, finish_reason: str,
     *include_usage* a chunk with empty ``choices`` carrying *usage* (otherwise
     the finish chunk carries it), then ``[DONE]``."""
     done = ChatChunk.done(model_id, chunk_id, ts, finish_reason=finish_reason,
-                          usage=None if include_usage else usage,
-                          stop_sequence=stop_sequence)
-    lines = [f"data: {done.model_dump_json()}\n\n"]
+                          usage=None if include_usage else usage).model_dump(mode="json")
+    done["choices"][0]["stop_sequence"] = stop_sequence
+    lines = [f"data: {json.dumps(done, ensure_ascii=False, separators=(',', ':'))}\n\n"]
     if include_usage:
         tail = ChatChunk(id=chunk_id, created=ts, model=model_id, choices=[], usage=usage)
         lines.append(f"data: {tail.model_dump_json()}\n\n")
@@ -6450,7 +6453,7 @@ async def _complete(
                                 reasoning_content=reasoning or None,
                                 tool_calls=tool_calls),
                 finish_reason=finish_reason,
-                stop_sequence=stop_sequence,
+                stop_sequence=stop_sequence if finish_reason == "stop" else None,
             )
         ],
         usage=usage,

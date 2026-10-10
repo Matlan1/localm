@@ -440,7 +440,8 @@ def test_output_config_format_constrains_the_reply_to_the_schema(home):
 
 
 @pytest.mark.parametrize("config", [
-    {"format": {"type": "json_object"}}, {"format": {"type": "json_schema"}}, "json"])
+    {"format": {"type": "json_object"}}, {"format": {"type": "json_schema"}}, "json",
+    {"format": {"type": "text", "schema": {"type": "object"}}}])
 def test_a_malformed_output_config_is_a_400(home, config):
     r = Served().post(output_config=config)
     assert r.status_code == 400 and "output_config" in r.json()["error"]["message"]
@@ -450,3 +451,104 @@ def test_between_tools_thinking_turns_thinking_on(home):
     served = Served()
     served.post(thinking={"type": "between_tools"})
     assert served.kwargs["thinking"] is True
+
+
+# ------------------------------------------------------------------ review fixes
+
+
+def test_a_tool_call_ended_by_a_stop_sequence_reports_tool_use_only(home):
+    served = Served([call(), " then STOP more"])
+    body = served.post(tools=[WEATHER], stop_sequences=["STOP"]).json()
+    assert body["stop_reason"] == "tool_use" and body["stop_sequence"] is None
+    evs = events(served.post(tools=[WEATHER], stop_sequences=["STOP"], stream=True))
+    assert evs[-2]["delta"] == {"stop_reason": "tool_use", "stop_sequence": None}
+    chat = served.client.post("/v1/chat/completions", json={
+        "model": MODEL, "messages": [{"role": "user", "content": "x"}],
+        "tools": [{"type": "function", "function": {
+            "name": "get_weather", "parameters": WEATHER["input_schema"]}}],
+        "stop": ["STOP"]}).json()
+    assert chat["choices"][0]["finish_reason"] == "tool_calls"
+    assert chat["choices"][0]["stop_sequence"] is None
+
+
+def test_only_the_finish_chunk_carries_stop_sequence(home):
+    served = Served(["one ", "END"])
+    r = served.client.post("/v1/chat/completions", json={
+        "model": MODEL, "messages": [{"role": "user", "content": "x"}],
+        "stop": ["END"], "stream": True})
+    chunks = [json.loads(line[5:]) for line in r.text.split("\n")
+              if line.startswith("data:") and "[DONE]" not in line]
+    assert all("stop_sequence" not in c["choices"][0] for c in chunks[:-1])
+    assert chunks[-1]["choices"][0]["stop_sequence"] == "END"
+
+
+def test_text_blocks_stay_separate_parts(home):
+    served = Served()
+    served.post(messages=[{"role": "user", "content": [
+        {"type": "text", "text": "Hello"}, {"type": "text", "text": "World"}]}])
+    assert served.messages[-1]["content"] == [{"type": "text", "text": "Hello"},
+                                              {"type": "text", "text": "World"}]
+
+
+def test_consecutive_same_role_turns_are_joined():
+    out = A.messages_to_openai(None, [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "t",
+                                           "signature": ""}]},
+        {"role": "user", "content": "b"},
+        {"role": "assistant", "content": "c"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "x", "name": "f",
+                                           "input": {}}]}])
+    assert [m["role"] for m in out] == ["user", "assistant"]
+    assert out[0]["content"] == [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
+    assert out[1]["content"] == "c" and out[1]["tool_calls"][0]["id"] == "x"
+
+
+def test_a_streamed_overflow_refusal_keeps_its_reason(home, monkeypatch):
+    import localm.inference.compact as compact
+    served = Served()
+    served.engine.count_messages_tokens.side_effect = lambda ms: 9000 if len(ms) > 3 else 5000
+    monkeypatch.setattr(compact, "compact_messages", lambda ms, gen: (ms[-2:], True))
+    turns = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
+             for i in range(7)]
+    evs = events(served.post(stream=True, messages=turns))
+    assert evs[-1]["type"] == "error"
+    assert "exceeds" in evs[-1]["error"]["message"]
+    assert not [e for e in evs if e["type"] == "content_block_delta"]
+    r = served.client.post("/v1/chat/completions", json={
+        "model": MODEL, "messages": turns, "stream": True})
+    refusal = [json.loads(line[5:]) for line in r.text.split("\n")
+               if line.startswith("data:") and "localm_error" in line]
+    assert refusal and refusal[0]["localm_error"]["status"] == 413
+
+
+def test_count_tokens_is_answered_by_the_peer_that_serves_the_model(home, monkeypatch):
+    from fastapi.responses import JSONResponse
+
+    from localm import peer_routing
+    seen = {}
+
+    async def fake_forward(route, request, path, *, body=None, headers=None):
+        seen.update(path=path, body=json.loads(body))
+        return JSONResponse({"input_tokens": 99})
+    monkeypatch.setattr(peer_routing, "get_route",
+                        lambda name: object() if name == MODEL else None)
+    monkeypatch.setattr(peer_routing, "forward", fake_forward)
+    monkeypatch.setattr(peer_routing, "forward_body", lambda route, raw: raw)
+    served = Served()
+    r = served.post("/v1/messages/count_tokens")
+    assert r.json() == {"input_tokens": 99}
+    assert seen["path"] == "/v1/messages/count_tokens"
+    served.engine.count_messages_tokens.assert_not_called()
+
+
+def test_an_unexpected_error_keeps_the_anthropic_shape(home, monkeypatch):
+    def broken(req, model):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(A, "plan_messages", broken)
+    r = TestClient(create_app(Served().engine), raise_server_exceptions=False).post(
+        "/v1/messages", json={"model": MODEL, "max_tokens": 5,
+                              "messages": [{"role": "user", "content": "x"}]})
+    assert r.status_code == 500
+    assert r.json() == {"type": "error", "error": {"type": "api_error",
+                                                   "message": "Internal server error"}}
