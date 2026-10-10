@@ -489,9 +489,8 @@ def test_a_deep_non_strict_schema_is_a_400_naming_the_depth():
     inner: dict = {"type": "string"}
     for _ in range(1400):
         inner = {"type": "array", "items": inner}
-    schema = {"type": "object", "properties": {"a": inner, "b": {"type": "string",
-                                                                 "pattern": "^x"}}}
-    with pytest.raises(ResponseFormatError, match="levels deep"):
+    schema = {"type": "object", "pattern": "^x", "properties": {"a": inner}}
+    with pytest.raises(ResponseFormatError, match="more than 128 levels deep"):
         format_grammar(ResponseFormat("json_schema", "x", schema, False))
 
 
