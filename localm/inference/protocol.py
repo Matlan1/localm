@@ -177,7 +177,7 @@ class CompletionRequest(SamplingFields):
     # never fall through to the model that actually answered.
     model: Optional[str] = None
     # One prompt; a list holding exactly one string is accepted too.
-    prompt: Union[str, List[Any]]
+    prompt: Union[str, list[Any]]
     stream: bool = False
     # True: the reply starts with the prompt.
     echo: bool = False
