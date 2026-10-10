@@ -264,23 +264,41 @@ _CUDA_RUNTIME_PYPI_PACKAGES = {
     "cuda-13": ("nvidia-cuda-runtime", "nvidia-cublas"),
 }
 
+# package -> (version, sha256 of its Linux x86_64 wheel). The wheel fetched is
+# exactly this version, verified against this digest.
+_CUDA_RUNTIME_PIN = {
+    "nvidia-cuda-runtime-cu12": ("12.9.79",
+        "25bba2dfb01d48a9b59ca474a1ac43c6ebf7011f1b0b8cc44f54eb6ac48a96c3"),
+    "nvidia-cublas-cu12": ("12.9.2.10",
+        "e4f53a8ca8c5d6e8c492d0d0a3d565ecb59a751b19cfdaa4f6da0ab2104c1702"),
+    "nvidia-cuda-runtime": ("13.4.92",
+        "9641f797da20ce1dd8e779b6e96d08cf9ba564cec8e8225458811ee26423f3a5"),
+    "nvidia-cublas": ("13.8.1.7",
+        "c11a27fd4379510e5b1f84b367a2514d1e52fe5cc13442117a0e0a1addee3cf2"),
+}
+
 
 def _pypi_wheel_url_and_sha(package: str) -> tuple:
-    """The (url, sha256) of *package*'s latest Linux x86_64 wheel from PyPI's
-    JSON API, or (None, None) if unavailable. Never raises (mirrors
-    _release_assets' contract: a best-effort lookup whose caller always has a
-    fallback path, so a network hiccup here must not crash setup)."""
-    api = f"https://pypi.org/pypi/{package}/json"
+    """The (url, sha256) of *package*'s pinned Linux x86_64 wheel from PyPI's
+    JSON API, or (None, None) when *package* has no entry in _CUDA_RUNTIME_PIN
+    or the lookup fails. The digest returned is the pin's own, so the download
+    is verified against the pin and not against whatever PyPI reports. Never
+    raises (mirrors _release_assets' contract: a best-effort lookup whose
+    caller always has a fallback path, so a network hiccup here must not crash
+    setup)."""
+    pinned = _CUDA_RUNTIME_PIN.get(package)
+    if pinned is None:
+        return None, None
+    version, sha = pinned
+    api = f"https://pypi.org/pypi/{package}/{version}/json"
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/json",
                                                     "User-Agent": "localm-setup-llama"})
         with _sl.verified_urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode("utf-8"))
-        version = data["info"]["version"]
-        for f in data["releases"].get(version, []):
+        for f in data["urls"]:
             name = str(f.get("filename", ""))
             if name.endswith(".whl") and "x86_64" in name and "linux" in name.lower():
-                sha = (f.get("digests") or {}).get("sha256")
                 url = f.get("url")
                 if url:
                     return url, sha

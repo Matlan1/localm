@@ -13,11 +13,11 @@ resolved and recorded.
 
 This is a MAINTENANCE SIGNAL, the same shape as scripts/check_llama_pin.py,
 scripts/check_comfyui_pin.py and scripts/check_llama_rocm_pin.py for this
-tree's other pinned dependencies, but REPORT-ONLY with no ``--gate`` mode:
-unlike those three, there is no single upstream "release" to compare
-against - four independently-versioned packages plus a separate Python-ABI
-signal do not reduce to one pass/fail verdict without inventing an aggregation
-rule this script has no basis for. It always exits 0 and changes nothing.
+tree's other pinned dependencies. The AMD index publishes no release dates, so
+there is no age tolerance: with ``--gate`` any package whose pinned version is
+older than the newest published wheel is STALE (exit 1), and a package that
+could not be checked makes the run exit 2 unless something is stale. Without
+``--gate`` it always exits 0 and changes nothing.
 
 TWO THINGS REPORTED, since they share the same fetch:
 
@@ -41,6 +41,7 @@ three packages' results.
 
 Usage:
     python scripts/check_amd_rocm_wheels_pin.py
+    python scripts/check_amd_rocm_wheels_pin.py --gate
 
 Stdlib only (urllib + re), so it runs anywhere without extra installs - it
 does not need localm, uv, or the AMD wheels themselves installed.
@@ -242,13 +243,14 @@ def newest_win_amd64_pytag(wheels: list[dict]) -> str | None:
 #  Reporting                                                                  #
 # --------------------------------------------------------------------------- #
 
-def _report_package(pkg: str, pinned: str | None, wheels: list[dict] | None) -> None:
+def _report_package(pkg: str, pinned: str | None, wheels: list[dict] | None) -> str:
+    """Print the verdict line for *pkg* and return it: "current", "stale" or "unknown"."""
     if pinned is None:
         print(f"{pkg}: could not read the pinned version from the source - has it moved?")
-        return
+        return "unknown"
     if wheels is None:
         print(f"{pkg}: pinned {pinned}; could not check (AMD wheel index unreachable)")
-        return
+        return "unknown"
 
     pytag = "cp312" if pkg in _TORCH_STACK else None
     newest = newest_win_amd64_version(wheels, pytag=pytag)
@@ -256,19 +258,20 @@ def _report_package(pkg: str, pinned: str | None, wheels: list[dict] | None) -> 
     if newest is None:
         print(f"{pkg}: pinned {pinned}; the index published no matching {where} wheel "
               "to compare against")
-        return
+        return "unknown"
     newest_raw, newest_tuple = newest
 
     pinned_tuple = _base_version_tuple(pinned)
     if pinned_tuple is None:
         print(f"{pkg}: pinned version {pinned!r} does not parse as a plain version; "
               "skipping the comparison")
-        return
+        return "unknown"
 
     if newest_tuple > pinned_tuple:
         print(f"{pkg}: STALE - pinned {pinned}, newest published ({where}) is {newest_raw}")
-    else:
-        print(f"{pkg}: current - pinned {pinned} is the newest published ({where})")
+        return "stale"
+    print(f"{pkg}: current - pinned {pinned} is the newest published ({where})")
+    return "current"
 
 
 def _report_python_abi(wheels_by_pkg: dict[str, list[dict] | None]) -> None:
@@ -329,7 +332,10 @@ def _report_python_abi(wheels_by_pkg: dict[str, list[dict] | None]) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.parse_args(argv)
+    ap.add_argument("--gate", action="store_true",
+                    help="exit 1 when any package is older than the newest published wheel, "
+                         "2 when none is but one could not be checked (default: always exit 0)")
+    args = ap.parse_args(argv)
 
     wheels_by_pkg: dict[str, list[dict] | None] = {}
     for pkg in _PACKAGES:
@@ -341,13 +347,18 @@ def main(argv: list[str] | None = None) -> int:
 
     print("AMD ROCm wheel pin currency (report only; changes nothing)")
     print()
+    verdicts = []
     for pkg in _TORCH_STACK:
-        _report_package(pkg, _pinned_torch_stack_version(pkg), wheels_by_pkg[pkg])
+        verdicts.append(_report_package(pkg, _pinned_torch_stack_version(pkg), wheels_by_pkg[pkg]))
     for pkg in _ROCM_SDK:
-        _report_package(pkg, _pinned_rocm_sdk_version(pkg), wheels_by_pkg[pkg])
+        verdicts.append(_report_package(pkg, _pinned_rocm_sdk_version(pkg), wheels_by_pkg[pkg]))
     print()
     _report_python_abi(wheels_by_pkg)
-    return 0
+    if not args.gate:
+        return 0
+    if "stale" in verdicts:
+        return 1
+    return 2 if "unknown" in verdicts else 0
 
 
 if __name__ == "__main__":

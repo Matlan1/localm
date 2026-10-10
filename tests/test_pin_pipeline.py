@@ -35,6 +35,15 @@ pipeline = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(pipeline)
 
 
+@pytest.fixture(autouse=True)
+def _never_write_the_real_issues_file(monkeypatch, tmp_path_factory):
+    """Every test in this module runs with ISSUES_PATH pointing at a file that
+    does not exist, so a pipeline path that logs a FAIL can never append to the
+    repository's real issues file."""
+    monkeypatch.setattr(pipeline, "ISSUES_PATH",
+                        tmp_path_factory.mktemp("issues-guard") / "issues.txt")
+
+
 def _day(n: int) -> dt.datetime:
     return dt.datetime(2026, 1, 1, tzinfo=dt.UTC) + dt.timedelta(days=n)
 
@@ -193,6 +202,14 @@ def test_append_fail_issue_inserts_right_after_the_intro_anchor(tmp_path):
     assert out.index("NEW-PIN-PIPELINE-LLAMA") < out.index("SOME-EXISTING-ENTRY"), (
         "the new entry goes at the top, the existing entry must survive untouched")
     assert "simulated FAIL reason" in out
+
+
+def test_append_fail_issue_default_path_is_the_module_attribute_at_call_time(monkeypatch, tmp_path):
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    monkeypatch.setattr(pipeline, "ISSUES_PATH", path)
+    assert pipeline.append_fail_issue("b10999", "reason", None) is True
+    assert "b10999" in path.read_text(encoding="utf-8")
 
 
 def test_append_fail_issue_is_idempotent_for_the_same_candidate(tmp_path):
