@@ -280,7 +280,7 @@ _PWSH7_PATH = _pwsh7_module_path() if os.name == "nt" else None
 
 def _run_bat_block(tmp_path: Path, name: str, *, release_files: dict[str, bytes],
                    expected_sha: str | None = None, version: str = "0.13.0",
-                   ps_module_path: str | None = None):
+                   ps_module_path: str | None = None, delayed: bool = False):
     """Runs the real block from *name* in a throwaway folder, with the release
     download served from a local directory through a file:// URL."""
     releases = tmp_path / "releases"
@@ -297,7 +297,7 @@ def _run_bat_block(tmp_path: Path, name: str, *, release_files: dict[str, bytes]
     joined = joined.replace(host, base)
     joined = re.sub(r'^set "UV_INSTALLER_VERSION=[^"]*"',
                     f'set "UV_INSTALLER_VERSION={version}"', joined, flags=re.MULTILINE)
-    if expected_sha:
+    if expected_sha is not None:
         joined = re.sub(r'^set "UV_INSTALLER_SHA256=[^"]*"',
                         f'set "UV_INSTALLER_SHA256={expected_sha}"', joined, flags=re.MULTILINE)
     work = tmp_path / "work"
@@ -305,7 +305,7 @@ def _run_bat_block(tmp_path: Path, name: str, *, release_files: dict[str, bytes]
     work.mkdir()
     scratch.mkdir()
     probe = work / "probe.bat"
-    probe.write_bytes(("@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\n"
+    probe.write_bytes(("@echo off\r\nsetlocal EnableExtensions " + ("EnableDelayedExpansion" if delayed else "DisableDelayedExpansion") + "\r\n"
                        'cd /d "%~dp0"\r\n' + joined + "\r\n"
                        "echo REACHED rc=%UVRC%\r\nexit /b 0\r\n"
                        ":uv_refused\r\necho REFUSED rc=%UVRC%\r\nexit /b 1\r\n").encode("utf-8"))
@@ -381,3 +381,37 @@ def test_the_verified_installer_cannot_be_rewritten_before_it_runs(tmp_path, nam
     assert "REACHED rc=0" in r.stdout, r.stdout + r.stderr
     assert ran
     assert (tmp_path / "marker.txt").read_text(encoding="utf-8-sig").strip() == "blocked"
+
+
+@_needs_windows
+@pytest.mark.parametrize("name", BATS)
+def test_an_empty_pin_refuses_instead_of_running_the_installer(tmp_path, name):
+    r, ran, leftovers = _run_bat_block(tmp_path, name, release_files=_STUB_FILES, expected_sha="")
+    assert "REFUSED rc=62" in r.stdout, r.stdout + r.stderr
+    assert not ran
+    assert leftovers == []
+
+
+@_needs_windows
+class TestUnderDelayedExpansion:
+    """setup.bat runs with EnableDelayedExpansion; the same line must behave the same there."""
+
+    def test_a_matching_installer_runs(self, tmp_path):
+        r, ran, leftovers = _run_bat_block(tmp_path, "setup.bat", release_files=_STUB_FILES,
+                                           expected_sha=_STUB_SHA, delayed=True)
+        assert "REACHED rc=0" in r.stdout, r.stdout + r.stderr
+        assert ran
+        assert leftovers == []
+
+    def test_a_mismatch_is_refused_with_a_literal_bang_marker(self, tmp_path):
+        r, ran, _ = _run_bat_block(tmp_path, "setup.bat", release_files=_STUB_FILES, delayed=True)
+        assert "REFUSED rc=62" in r.stdout, r.stdout + r.stderr
+        assert "[!] The downloaded uv installer did not match its expected checksum" in r.stdout
+        assert not ran
+
+    def test_a_missing_release_is_refused(self, tmp_path):
+        r, ran, _ = _run_bat_block(tmp_path, "setup.bat", release_files=_STUB_FILES,
+                                   expected_sha=_STUB_SHA, version="9.99.99", delayed=True)
+        assert "REFUSED rc=61" in r.stdout, r.stdout + r.stderr
+        assert "[!] Could not download the uv 9.99.99 installer" in r.stdout
+        assert not ran
