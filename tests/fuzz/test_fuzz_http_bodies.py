@@ -93,8 +93,12 @@ _client_cache: dict = {}
 
 
 def _client() -> TestClient:
+    from localm.inference import http_server
     if "c" not in _client_cache:
-        _client_cache["c"] = TestClient(create_app(_engine()), raise_server_exceptions=False)
+        engine = _engine()
+        _client_cache["c"] = TestClient(create_app(engine), raise_server_exceptions=False)
+        _client_cache["engine"] = engine
+    http_server._engine = _client_cache["engine"]
     return _client_cache["c"]
 
 
