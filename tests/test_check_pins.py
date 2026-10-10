@@ -522,6 +522,35 @@ def test_annotations_and_summary_only_under_github_actions(monkeypatch, tmp_path
     assert "| pin | status |" in summary.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("url,sent", [
+    ("https://api.github.com/repos/o/r/releases", True),
+    ("https://auth.docker.io/token?service=registry.docker.io", False),
+    ("https://registry-1.docker.io/v2/library/ubuntu/manifests/24.04", False),
+    ("https://pypi.org/pypi/nvidia-cublas/json", False),
+    ("https://registry.npmjs.org/marked", False),
+    ("https://api.github.com.evil.example/x", False),
+    ("", False)])
+def test_the_github_token_is_sent_to_api_github_com_only(monkeypatch, url, sent):
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-1")
+    headers = cp._headers(url)
+    assert ("Authorization" in headers) is sent
+    if sent:
+        assert headers["Authorization"] == "Bearer tok-1"
+
+
+def test_get_json_does_not_leak_the_github_token_to_other_hosts(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-1")
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req.get_header("Authorization"))
+        return _FakeResp({}, b"{}")
+    monkeypatch.setattr(cp.urllib.request, "urlopen", fake_urlopen)
+    cp._get_json("https://auth.docker.io/token?x=1")
+    cp._get_json("https://api.github.com/repos/o/r")
+    assert seen == [None, "Bearer tok-1"]
+
+
 def test_registry_covers_every_inventory_group():
     names = {s.name for s in cp.build_registry()}
     for required in ("llama.cpp", "ROCm llama (lemonade)", "ComfyUI", "AMD ROCm wheels", "koboldcpp",

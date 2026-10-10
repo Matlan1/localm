@@ -155,6 +155,10 @@ def ensure_github_token() -> str:
     return "gh"
 
 
+def _without_token(env: dict) -> dict:
+    return {k: v for k, v in env.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+
+
 def _resolve_exe(cmd: list[str]) -> list[str]:
     """Replace the program name with its full path (Windows needs npm.cmd resolved)."""
     exe = shutil.which(cmd[0])
@@ -329,14 +333,24 @@ def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
     return _bump_with_error_handling(adv, out, old, new, receipt, now_iso)
 
 
+def discard_worktree_changes() -> None:
+    """Best effort: leave the shared pipeline worktree clean after a failed bump."""
+    try:
+        pp.reset_pipeline_worktree(pp.ensure_pipeline_worktree())
+    except Exception as e:  # noqa: BLE001 - the next branch preparation resets again and reports
+        print(f"(could not clean the pipeline worktree: {e})")
+
+
 def _bump_with_error_handling(adv: Advancer, out: Outcome, old: str, new: str,
                               receipt: Path | None, now_iso: str) -> Outcome:
     try:
         return _bump_and_merge(adv, out, old, new, receipt, now_iso)
     except pp.InfraError as e:
+        discard_worktree_changes()
         pp._record_inconclusive(new, receipt, pin=adv.key, reason=str(e))
         out.verdict, out.detail = INCONCLUSIVE, f"infra: {e}"
     except pp.PipelineError as e:
+        discard_worktree_changes()
         if CODE_UPDATE_MARKER in str(e):
             reason = f"{new} needs a change to localm's own code before the pin can move"
             pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
@@ -352,6 +366,7 @@ def _bump_with_error_handling(adv: Advancer, out: Outcome, old: str, new: str,
         pp.append_fail_issue(new, str(e), receipt, pin=adv.key)
         out.verdict, out.detail = FAIL, str(e)
     except Exception as e:  # noqa: BLE001 - a tooling crash after a PASS is logged, never a build FAIL
+        discard_worktree_changes()
         reason = f"unexpected error after a PASS confirm: {type(e).__name__}: {e}"
         pp._record_inconclusive(new, receipt, pin=adv.key, reason=reason, force_issue=True,
                                 issue_summary=f"{adv.title} {new}: unexpected pipeline error "
@@ -410,7 +425,7 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
 
     for cmd in adv.post_bump_cmds:
         rc, cmd_out = run_cmd(_resolve_exe(list(cmd)), cwd=worktree, timeout=TEST_TIMEOUT_SECONDS,
-                              env=pp._worktree_env(worktree))
+                              env=_without_token(pp._worktree_env(worktree)))
         if rc != 0:
             raise pp.PipelineError(f"`{' '.join(cmd)}` failed after the bump:\n{cmd_out[-2000:]}")
 
@@ -824,31 +839,42 @@ def write_report(text: str, outcomes: list[Outcome], started: _dt.datetime) -> P
 #  Entry point                                                                #
 # --------------------------------------------------------------------------- #
 
+def _isolated(label: str, adv: Advancer, kind: str, fn) -> Outcome:
+    """Run one step for one runtime; an exception (SystemExit included) becomes an
+    INCONCLUSIVE outcome so the remaining runtimes still run and the report is written."""
+    try:
+        return fn()
+    except (Exception, SystemExit) as e:
+        print(f"[{label}] {adv.title}: unexpected {type(e).__name__}: {e}")
+        return Outcome(adv.key, adv.title, kind, INCONCLUSIVE,
+                       f"unexpected {type(e).__name__}: {str(e)[:300]}")
+
+
 def run_weekly(advancers: list[Advancer], *, dry_run: bool, verify: bool = True) -> tuple[int, Path]:
     started = _dt.datetime.now(_dt.UTC)
-    rows = cp.run_checks(cp.build_registry(), started)
     outcomes: list[Outcome] = []
     for adv in advancers:
-        out = (advance_delegated(adv, dry_run=dry_run) if adv.delegate
-               else advance(adv, dry_run=dry_run))
+        out = _isolated("advance", adv, "advance", lambda adv=adv: (
+            advance_delegated(adv, dry_run=dry_run) if adv.delegate else advance(adv, dry_run=dry_run)))
         print(f"[advance] {adv.title}: {out.verdict} {out.detail[:160]}")
         outcomes.append(out)
     if verify:
         for adv in advancers:
             advanced = next((o for o in outcomes if o.key == adv.key and o.kind == "advance"), None)
-            if advanced is not None and advanced.verdict == MERGED:
+            if advanced is not None and advanced.verdict == MERGED and adv.confirm_script:
                 outcomes.append(Outcome(adv.key, adv.title, "verify-current", PASS,
                                         "confirmed moments ago as the candidate that was just merged"))
                 continue
-            out = verify_current(adv)
+            out = _isolated("verify-current", adv, "verify-current", lambda adv=adv: verify_current(adv))
             print(f"[verify-current] {adv.title}: {out.verdict} {out.detail[:160]}")
             if out.verdict == FAIL:
                 _report_current_failure(out)
             outcomes.append(out)
+    rows = cp.run_checks(cp.build_registry(), _dt.datetime.now(_dt.UTC))
     report = render_report(rows, outcomes, started, dry_run)
     path = write_report(report, outcomes, started)
     print(f"report: {path}")
-    return severity(outcomes), path
+    return max(severity(outcomes), cp.exit_code(rows)), path
 
 
 def main(argv: list[str] | None = None) -> int:
