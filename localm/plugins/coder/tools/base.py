@@ -138,6 +138,86 @@ def _confine(cwd: Path, path: str) -> Path:
         ) from e
 
 
+# Directory names a restricted (scoped-key) coder session may not create, or
+# create or change anything inside, at any depth of the project.
+RESTRICTED_UNWRITABLE_DIRS: frozenset[str] = frozenset({".localcoder"})
+
+RESTRICTED_UNWRITABLE_MESSAGE = (
+    "a .localcoder directory holds this project's coder configuration, and a "
+    "restricted session cannot create or change anything inside it")
+
+
+def unwritable_component(parts) -> Optional[str]:
+    """The first of *parts* naming a ``RESTRICTED_UNWRITABLE_DIRS`` entry, or None.
+
+    Matches case-insensitively and ignoring trailing dots and spaces, the
+    spellings Windows folds onto the same directory name."""
+    for part in parts:
+        if str(part).rstrip(" .").casefold() in RESTRICTED_UNWRITABLE_DIRS:
+            return str(part)
+    return None
+
+
+def inside_unwritable_dir(cwd_resolved: Path, resolved: Path) -> bool:
+    """Whether the already-resolved *resolved* lies inside a
+    ``RESTRICTED_UNWRITABLE_DIRS`` directory of the project at *cwd_resolved*.
+
+    True when a component below the project root names one, or when *resolved*
+    lies inside what such a directory resolves to (one that is a link to a
+    differently named folder), checked at the project root and at every
+    directory on the way down to *resolved*. An ``OSError`` while checking
+    counts as inside. False for a path outside the project.
+    """
+    try:
+        rel = resolved.relative_to(cwd_resolved).parts
+    except ValueError:
+        return False
+    if unwritable_component(rel) is not None:
+        return True
+    anchor = cwd_resolved
+    for depth in range(len(rel)):
+        if depth:
+            anchor = anchor / rel[depth - 1]
+        for name in RESTRICTED_UNWRITABLE_DIRS:
+            entry = anchor / name
+            try:
+                if entry.exists() and resolved.is_relative_to(entry.resolve()):
+                    return True
+            except OSError:
+                return True
+    return False
+
+
+def restricted_unwritable(cwd: Path, path: str) -> bool:
+    """Whether a restricted session must refuse to write the model-named *path*.
+
+    Checked on *path*'s own components relative to *cwd* (so
+    ``a/../.localcoder/x`` and a backslash-separated spelling are caught before
+    anything collapses them), then on the location :func:`_confine` resolves it
+    to, with :func:`inside_unwritable_dir` (so a file link into such a
+    directory, or a write into the folder a linked ``.localcoder`` points at, is
+    caught). A path ``_confine`` refuses is not reported here: the write tool
+    refuses it on its own.
+    """
+    raw = Path(str(path).replace("\\", "/"))
+    lexical: tuple = raw.parts
+    if raw.is_absolute():
+        lexical = ()
+        for anchor in (cwd, cwd.resolve()):
+            try:
+                lexical = raw.relative_to(anchor).parts
+                break
+            except ValueError:
+                continue
+    if unwritable_component(lexical) is not None:
+        return True
+    try:
+        resolved = _confine(cwd, str(path))
+    except PermissionError:
+        return False
+    return inside_unwritable_dir(cwd.resolve(), resolved)
+
+
 @dataclass
 class SubprocessResult:
     """Outcome of one :func:`run_subprocess` call.

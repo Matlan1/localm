@@ -211,7 +211,7 @@ Each `[mcp.servers.NAME]` table declares:
 
 ### How tools appear
 
-When you run `localm coder`, it spawns each configured server and fetches its tool list. Tools are named `mcp_<server>_<tool>` and appear in the agent's system prompt. For example:
+When you run `localm coder`, it spawns each configured server and fetches its tool list. Tools are named `mcp_<server>_<tool>` and appear in the agent's system prompt. A restricted coder session (one opened with a shared, non-owner `coder` key, or a scheduled coder job without `--allow-shell`) starts none of these servers and cannot edit `.localcoder/config.toml`. For example:
 
 - Server `fs` with tool `search` becomes `mcp_fs_search`
 - Server `search` with tool `query` becomes `mcp_search_query`

@@ -1684,6 +1684,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
+- **A plain `coder` API key can no longer run commands through the project's coder
+  configuration.** A restricted coder session (a shared, non-owner key) started any
+  MCP server listed in the project's `.localcoder/config.toml` when it opened, and
+  its file tools could create or change that file. So a key meant for reading and
+  editing could write a server command and run it by opening a second session, and
+  the same file also reached the owner's next session (MCP servers, auto-approve,
+  privacy mode). A restricted session now starts no MCP server, loads no plugin
+  tools or skills, and refuses to create or change anything inside a `.localcoder`
+  directory at any depth; a `search_replace` sweep leaves those files alone and
+  lists them. Owner sessions are unchanged.
 - **`setup.sh`, `setup-gui.sh`, `setup.bat` and `setup-gui.bat` install a fixed uv release and check it before running it.**
   They used to run whatever Astral's installer URL returned. They now download the installer
   of one pinned uv release and run it only when its checksum matches; a failed download, a
