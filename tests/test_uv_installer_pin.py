@@ -242,6 +242,16 @@ def test_the_bat_installer_runs_only_after_the_checksum_comparison(name):
     assert line.count("-File $f") == 1
 
 
+@pytest.mark.parametrize("name", BATS)
+def test_the_bat_installer_is_hashed_through_a_handle_that_stays_open_until_it_has_run(name):
+    line = _bat_install_line(name)
+    opened = line.index("[IO.File]::Open($f,'Open','Read','Read')")
+    hashed = line.index("ComputeHash($fs)")
+    run = line.index("-File $f")
+    released = line.index("$fs.Dispose()")
+    assert opened < hashed < run < released
+
+
 def _bat_block(name: str) -> list[str]:
     """The pin, the download-verify-run line and the refusal branches of *name*."""
     lines = _text(name).splitlines()
@@ -353,3 +363,21 @@ def test_a_powershell_7_parent_does_not_break_the_installer(tmp_path, name):
                                expected_sha=_STUB_SHA, ps_module_path=_PWSH7_PATH)
     assert "REACHED rc=0" in r.stdout, r.stdout + r.stderr
     assert ran
+
+
+_TAMPER_STUB = (
+    "try { [IO.File]::WriteAllText($PSCommandPath, 'tampered'); $r = 'overwritten' }\n"
+    "catch { $r = 'blocked' }\n"
+    "Set-Content -LiteralPath $env:STUB_MARKER -Value $r\n")
+
+
+@_needs_windows
+@pytest.mark.parametrize("name", BATS)
+def test_the_verified_installer_cannot_be_rewritten_before_it_runs(tmp_path, name):
+    data = _TAMPER_STUB.encode("utf-8")
+    r, ran, _ = _run_bat_block(
+        tmp_path, name, release_files={"0.13.0/uv-installer.ps1": data},
+        expected_sha=hashlib.sha256(data).hexdigest())
+    assert "REACHED rc=0" in r.stdout, r.stdout + r.stderr
+    assert ran
+    assert (tmp_path / "marker.txt").read_text(encoding="utf-8-sig").strip() == "blocked"
