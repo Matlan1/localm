@@ -271,6 +271,7 @@ def _red_png_data_url():
 
 
 def test_an_image_turn_waits_for_the_text_reply_in_flight():
+    from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
     require_native_runtime()
     model = fetch_gguf(_VLM_REPO, _VLM_FILE)
     mmproj = fetch_gguf(_VLM_REPO, _VLM_MMPROJ)
@@ -285,26 +286,29 @@ def test_an_image_turn_waits_for_the_text_reply_in_flight():
         def text():
             pieces = []
             last = None
-            for piece in _ask(be, LONG[0], max_tokens=600):
+            for piece in _ask(be, LONG[0], max_tokens=300,
+                              grammar="root ::= [a-z ]{2000,}"):
                 text_started.set()
                 last = time.perf_counter()
                 pieces.append(piece)
-            out["text"] = {"text": "".join(pieces), "last": last}
+            out["text"] = {"text": "".join(pieces), "last": last,
+                           "finish": be.last_finish_reason}
 
         def image():
             text_started.wait(30)
             t0 = time.perf_counter()
             pieces = []
             stamps = []
+            statuses = []
             for piece in be.chat_stream(
                     [{"role": "user", "content": [
                         {"type": "text", "text": "What color is this image?"},
                         {"type": "image_url", "image_url": {"url": _red_png_data_url()}}]}],
-                    max_tokens=24, temperature=0.0, seed=1):
+                    max_tokens=24, temperature=0.0, seed=1, on_status=statuses.append):
                 stamps.append(time.perf_counter())
                 pieces.append(piece)
             out["image"] = {"text": "".join(pieces), "first": stamps[0] if stamps else None,
-                            "start": t0}
+                            "start": t0, "statuses": statuses}
 
         t_text = threading.Thread(target=text, daemon=True)
         t_text.start()
@@ -312,7 +316,9 @@ def test_an_image_turn_waits_for_the_text_reply_in_flight():
         t_image.start()
         t_text.join(120)
         t_image.join(120)
+        assert out["text"]["finish"] == "length"
         assert out["text"]["text"] and out["image"]["text"].strip()
+        assert WAITING_FOR_MODEL_STATUS in out["image"]["statuses"]
         assert out["image"]["first"] >= out["text"]["last"], \
             "the image turn decoded while the text reply was still running"
         after = "".join(_ask(be, "Say hello.", max_tokens=12))
