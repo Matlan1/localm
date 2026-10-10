@@ -49,7 +49,7 @@ def installed_cpu_overlay(target: Path) -> Optional[dict]:
     the amd-rocm build there still runs its own CPU backend. Never raises."""
     try:
         data = json.loads((target / CPU_OVERLAY_MARKER).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict) or not data.get("variant"):
         return None

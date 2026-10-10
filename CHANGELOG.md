@@ -33,6 +33,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `--no-rerank`, and the query API reports whether a query was reranked. With no
   reranker installed nothing changes; if the reranker fails, the unreranked order is
   kept and the reason is shown.
+  With the Q8_0 files of bge-reranker-v2-m3 (gpustack) or Qwen3-Reranker-0.6B (ggml-org),
+  the reranker's score also decides which excerpts are relevant enough to reach the
+  chat, so a rephrased question finds its answer where the keyword and similarity check used
+  to drop it, and unrelated questions still bring in nothing.
 - **A loaded reranker can be unloaded from the Models page.** A reranker that is in
   memory now shows as loaded there, and its Unload button (or `localm unload <name>`)
   frees it unless a rerank is running.
@@ -406,6 +410,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `tokenizer.json` or shard index is over-nested, has an enormous number or has the wrong shape is refused or treated
   as having no metadata, and an uploaded workflow, `model_meta.json` or install record that is over-nested is
   rejected or ignored. An over-nested `config.json` no longer stops localm from starting.
+- **Over-nested or enormous-number JSON no longer crashes the feature that reads it.** Memory, coder episode, scheduled job, knowledge collection, conversation, prompt library, gallery index and settings files, the reply of a peer or another localm instance, the coder agent's tool calls, reviews and MCP server output, and a model's tool-call arguments are now handled like any other unreadable JSON: skipped or reported, while the rest of the data still loads.
 - **`localm doctor` recognises the macOS runtime.** On a Mac it reported the Metal build as "no llama library", skipped the native ABI check and the GPU probe, and ended with "CPU mode only"; it now checks the library like on other systems and names the Metal GPU.
 - **A knowledge collection whose `meta.json` is not valid UTF-8 no longer breaks the collection list.** The list, the collection detail view and a model rename now treat that collection as unreadable, flag it as corrupt and carry on with the others, instead of failing for every collection.
 - **Bug reports no longer carry email addresses.** Any email address in a report

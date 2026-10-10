@@ -466,6 +466,17 @@ def test_status_unreadable_marker_is_unknown_not_up_to_date(home, app):
     assert body["installed_commit"] is None
 
 
+@pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+def test_status_hostile_marker_is_unknown_not_a_crash(home, app, doc):
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
+    paths = _install_managed()
+    (paths.root / MARKER_FILENAME).write_text(doc, encoding="utf-8")
+    with TestClient(app) as client:
+        body = client.get("/api/comfy/managed-status").json()
+    assert body["update_available"] is None
+    assert body["installed_commit"] is None
+
+
 def test_status_non_git_install_is_not_updatable_and_says_why(home, app):
     """The S2 non-git copy fallback cannot take a pinned update. update_managed_comfy()
     refuses honestly at run time; this advisory field lets the GUI say so BEFORE the

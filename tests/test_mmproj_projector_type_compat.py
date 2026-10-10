@@ -3,6 +3,7 @@
 loaded from a copy that records the type its tensors show, because the bundled
 runtime refuses it otherwise ("unknown projector type")."""
 
+import json
 import logging
 import os
 import struct
@@ -254,6 +255,37 @@ class TestCompatibleMmprojPath:
             out = mtmd_mod.compatible_mmproj_path(str(src))
         assert out == str(src)
         assert any("free" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+    def test_hostile_meta_sidecar_is_rewritten_not_fatal(
+            self, tmp_path, compat_cache, doc, caplog):
+        src = tmp_path / "mmproj-model-f16.gguf"
+        _small_llava15(src)
+        first = mtmd_mod.compatible_mmproj_path(str(src))
+        meta = first[:-len(".gguf")] + ".json"
+        with open(meta, "w", encoding="utf-8") as fh:
+            fh.write(doc)
+
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            again = mtmd_mod.compatible_mmproj_path(str(src))
+
+        assert again == first
+        assert json.loads(open(meta, encoding="utf-8").read())["source"]
+        assert not any("writing a compatible copy failed" in r.getMessage()
+                       for r in caplog.records)
+
+    @pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+    def test_prune_leaves_a_copy_whose_sidecar_is_hostile(
+            self, tmp_path, doc, caplog):
+        (tmp_path / "x.json").write_text(doc, encoding="utf-8")
+        (tmp_path / "x.gguf").write_bytes(b"copy")
+
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            mtmd_mod._prune_orphaned_compat_copies(tmp_path)
+
+        assert (tmp_path / "x.gguf").exists() and (tmp_path / "x.json").exists()
+        assert any("could not check or remove" in r.getMessage()
+                   for r in caplog.records)
 
 
 def test_load_mmproj_hands_mtmd_the_compatible_path(tmp_path, compat_cache, monkeypatch):

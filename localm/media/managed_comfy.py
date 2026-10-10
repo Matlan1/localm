@@ -189,7 +189,7 @@ def _lock_holder(lock: Path) -> tuple:
     cannot be read; ``op`` is "update" when absent."""
     try:
         data = json.loads((lock / _LOCK_OWNER).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None, "update"
     if not isinstance(data, dict):
         return None, "update"

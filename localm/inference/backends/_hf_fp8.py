@@ -51,7 +51,7 @@ def quant_method(model_path: str) -> Optional[str]:
     cfg_path = Path(model_path) / "config.json"
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         logger.debug("hf fp8: could not read %s: %s", cfg_path, e)
         return None
     qc = cfg.get("quantization_config") if isinstance(cfg, dict) else None
@@ -154,7 +154,7 @@ def weight_files(model_path: str) -> list:
         try:
             weight_map = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
             names = sorted({str(v) for v in weight_map.values()})
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
             logger.debug("hf fp8: could not read %s: %s", index, e)
             return []
         base = root.resolve()
@@ -187,7 +187,7 @@ def expanded_bf16_bytes(model_path: str) -> Optional[int]:
                     continue
                 numel = math.prod(int(d) for d in info["shape"])
                 total += numel * _INT_ITEMSIZE.get(str(info["dtype"]), BF16_BYTES)
-        except (OSError, ValueError, KeyError, TypeError) as e:
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as e:
             logger.debug("hf fp8: could not size %s: %s", path, e)
             return None
     return total

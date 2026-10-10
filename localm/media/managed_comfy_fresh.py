@@ -269,7 +269,7 @@ def _class_types_in(workflow_path) -> set:
     Never raises: an unreadable/invalid file contributes nothing."""
     try:
         data = json.loads(Path(workflow_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return set()
     out = set()
     if isinstance(data, dict):

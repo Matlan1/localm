@@ -125,7 +125,7 @@ def register(app: FastAPI, ctx) -> None:
                 v = marker.get("comfyui_version")
                 installed_commit = c if isinstance(c, str) else None
                 installed_version = v if isinstance(v, str) else None
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             # An unreadable marker is not fatal: report unknown rather than guessing
             # "up to date", which would hide a genuinely available update.
             pass

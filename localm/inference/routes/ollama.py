@@ -354,7 +354,7 @@ def register(app: FastAPI, ctx) -> None:
                if body_iterator is not None else bytes(inner.body))
         try:
             data = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise P.OllamaError(
                 502, "the model route returned a reply that is not JSON") from None
         total_ns = int((time.perf_counter() - started) * 1_000_000_000)
@@ -373,7 +373,7 @@ def register(app: FastAPI, ctx) -> None:
                if body_iterator is not None else bytes(inner.body))
         try:
             data = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             return raw.decode("utf-8", "replace")[:500] or "request failed"
         if isinstance(data, dict):
             return str(data.get("error") or data.get("detail") or "request failed")

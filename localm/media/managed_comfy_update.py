@@ -79,7 +79,7 @@ def _update_marker(root: Path, target_commit: str, target_version: Optional[str]
             data = json.loads(marker_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 data = {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         data = {}
     data.update({
         "stage": "S4",

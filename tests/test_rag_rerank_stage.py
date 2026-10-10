@@ -2,6 +2,7 @@
 """``Collection.query(rerank_fn=...)`` and the rerank evaluation harness."""
 
 import math
+from pathlib import Path
 
 import pytest
 
@@ -138,6 +139,95 @@ class TestRerankStage:
         assert calls == []
 
 
+class TestScoreGate:
+    @pytest.fixture
+    def kb(self, tmp_path):
+        docs = tmp_path / "d"
+        docs.mkdir()
+        (docs / "full.txt").write_text("alpha beta gamma delta " + _NOISE,
+                                       encoding="utf-8")
+        (docs / "partial.txt").write_text("alpha " + _NOISE, encoding="utf-8")
+        c = Collection("gate", base=tmp_path / "rag").create()
+        c.add_paths([str(docs)])
+        return c
+
+    QUERY = "alpha beta gamma delta"
+
+    def _scores(self, coll, **by_source):
+        by_text = {c["text"]: Path(c["source"]).name for c in coll._chunks}
+        calls = []
+
+        def fn(query, texts):
+            calls.append(list(texts))
+            return [by_source.get(by_text[t], 0.0) for t in texts]
+
+        return fn, calls
+
+    def test_a_hit_the_floor_drops_is_kept_when_the_reranker_scores_it_high(self, kb):
+        fn, _ = self._scores(kb, **{"partial.txt": 0.9, "full.txt": 0.1})
+        floored = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                           rerank_candidates=5)
+        assert _names(floored) == ["full.txt"]
+        gated = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                         rerank_candidates=5, rerank_min_score=0.5)
+        assert _names(gated) == ["partial.txt"]
+        assert gated[0]["rerank_score"] == 0.9
+
+    def test_a_hit_the_floor_keeps_is_dropped_below_the_minimum_score(self, kb):
+        fn, _ = self._scores(kb, **{"full.txt": 0.2, "partial.txt": 0.1})
+        assert _names(kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                               rerank_candidates=5)) == ["full.txt"]
+        assert kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                        rerank_candidates=5, rerank_min_score=0.5) == []
+
+    def test_the_whole_pool_reaches_the_reranker_not_just_the_floor_survivors(self, kb):
+        fn, calls = self._scores(kb, **{"partial.txt": 0.9})
+        kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                 rerank_candidates=5, rerank_min_score=0.5)
+        assert len(calls) == 1 and len(calls[0]) == 2
+
+    def test_a_single_candidate_is_still_scored(self, kb):
+        fn, calls = self._scores(kb, **{"partial.txt": 0.9})
+        hits = kb.query("alpha", k=1, relevant_only=True, rerank_fn=fn,
+                        rerank_candidates=1, rerank_min_score=0.5)
+        assert len(calls) == 1 and len(calls[0]) == 1
+        assert len(hits) == 1
+
+    def test_without_relevant_only_the_minimum_score_is_not_applied(self, kb):
+        fn, _ = self._scores(kb, **{"full.txt": 0.2, "partial.txt": 0.1})
+        hits = kb.query(self.QUERY, k=2, rerank_fn=fn, rerank_candidates=5,
+                        rerank_min_score=0.5)
+        assert len(hits) == 2
+
+    def test_without_a_minimum_score_the_floor_stays_the_gate(self, kb):
+        fn, _ = self._scores(kb, **{"partial.txt": 0.9})
+        hits = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                        rerank_candidates=5, rerank_min_score=None)
+        assert _names(hits) == ["full.txt"]
+
+    def test_a_reference_to_the_conversation_never_passes_on_a_rerank_score(self, kb):
+        fn, _ = self._scores(kb, **{"full.txt": 0.99, "partial.txt": 0.99})
+        hits = kb.query("alpha beta gamma delta, why did that fail", k=2,
+                        relevant_only=True, rerank_fn=fn, rerank_candidates=5,
+                        rerank_min_score=0.5)
+        assert hits == []
+
+    def test_a_failing_reranker_falls_back_to_the_floor(self, kb):
+        def boom(q, t):
+            raise RuntimeError("down")
+        hits = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=boom,
+                        rerank_candidates=5, rerank_min_score=0.5)
+        assert _names(hits) == ["full.txt"]
+        assert all("rerank_score" not in h for h in hits)
+        assert "reranking failed (RuntimeError)" in kb.rerank_degrade_reason
+
+    def test_the_minimum_score_is_inclusive(self, kb):
+        fn, _ = self._scores(kb, **{"partial.txt": 0.5, "full.txt": 0.4999})
+        hits = kb.query(self.QUERY, k=2, relevant_only=True, rerank_fn=fn,
+                        rerank_candidates=5, rerank_min_score=0.5)
+        assert _names(hits) == ["partial.txt"]
+
+
 class TestHarnessMetrics:
     def test_hit_and_reciprocal_rank(self):
         assert ev.hit_at([0, 0, 1], 2) == 0.0
@@ -170,6 +260,49 @@ class TestHarnessMetrics:
                               rerank_fn=lambda a, b: [])
         assert failing["rerank_degraded"] == 1
         assert failing["hit@1"] == base["hit@1"]
+
+
+class TestGateHarness:
+    def test_evaluate_gate_counts_recall_and_off_topic_precision(self, coll):
+        on = [{"id": "q", "doc": "doc5.txt", "query": "harbor crane",
+               "gold": ["harbor crane"]}]
+        off = [{"id": "o1", "category": "near", "query": "harbor crane"},
+               {"id": "o2", "category": "unrelated", "query": "zebra xylophone"}]
+        fn, _ = _by_text(coll, "doc5.txt")
+        floor = ev.evaluate_gate(coll, on, off, k=1)
+        assert floor["recall"] == 0.0 and floor["answered"] == 1.0
+        assert floor["precision"] == 0.5 and floor["leaks"] == ["o1"]
+        assert floor["categories"] == {"near": 0.0, "unrelated": 1.0}
+        gated = ev.evaluate_gate(coll, on, off, k=1, rerank_fn=fn,
+                                 min_score=0.5, candidates=5)
+        assert gated["recall"] == 1.0 and gated["precision"] == 0.5
+        strict = ev.evaluate_gate(coll, on, off, k=1, rerank_fn=fn,
+                                  min_score=2.0, candidates=5)
+        assert strict["recall"] == 0.0 and strict["precision"] == 1.0
+        assert strict["leaks"] == []
+
+    def test_the_gate_table_has_one_row_per_gate_and_a_column_per_category(self):
+        res = {"categories": {"near": 0.5, "unrelated": 1.0}, "recall": 0.25,
+               "answered": 0.5, "precision": 0.75, "leaks": []}
+        table = ev.format_gate_table({"floor only": res, "other": res})
+        lines = table.splitlines()
+        assert len(lines) == 3
+        assert "near" in lines[0] and "unrelated" in lines[0]
+        assert lines[1].startswith("floor only") and "0.250" in lines[1]
+
+
+class TestOfftopicLabels:
+    def test_the_off_topic_questions_are_labelled_and_unique(self):
+        queries = ev.load_offtopic()
+        assert len(queries) >= 40
+        assert len({q["id"] for q in queries}) == len(queries)
+        assert {q["category"] for q in queries} == {
+            "unrelated", "near", "conversation", "chitchat"}
+        assert all(q["query"].strip() for q in queries)
+
+    def test_no_off_topic_question_is_also_an_on_topic_one(self):
+        on = {q["query"].lower() for q in ev.load_queries()}
+        assert not on & {q["query"].lower() for q in ev.load_offtopic()}
 
 
 class TestFixtureLabels:

@@ -603,6 +603,22 @@ def test_rollback_last_warns_on_corrupt_manifest_and_falls_back(tmp_path, monkey
     assert (install / "brand_new").exists()   # fallback cannot remove an unrecorded new entry
 
 
+@pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+def test_rollback_last_treats_a_hostile_manifest_as_unreadable(
+        doc, tmp_path, monkeypatch, caplog):
+    import logging
+    install = _stage_rollback(tmp_path, monkeypatch, manifest=None)
+    updir = (tmp_path / "home") / "updates"
+    (updir / "applied_names.json").write_text(doc, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        updater.rollback_last(installed=install)
+
+    assert "unreadable" in caplog.text
+    assert (install / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"
+    assert (install / "brand_new").exists()
+
+
 def test_apply_early_abort_preserves_prior_manifest(tmp_path, monkeypatch, sig_env):
     """The manifest unlink sits AFTER download/verify/extract, so an EARLY abort
     (bad signature, downgrade, corrupt zip) leaves the PREVIOUS update's

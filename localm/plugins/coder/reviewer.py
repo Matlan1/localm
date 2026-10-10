@@ -113,14 +113,14 @@ def _extract_json(raw: str) -> dict:
         obj = json.loads(text)
         if isinstance(obj, dict):
             return obj
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         pass
     i, j = text.find("{"), text.rfind("}")
     if i != -1 and j > i:
         try:
             obj = json.loads(text[i: j + 1])
             return obj if isinstance(obj, dict) else {}
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             return {}
     return {}
 
