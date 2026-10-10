@@ -208,6 +208,14 @@ def test_cpu_and_vulkan_archives_of_one_platform_are_told_apart(bump):
     assert out["assets"][("linux", "vulkan")].endswith("x86_64-vulkan.zip")
 
 
+def test_a_companion_file_with_a_longer_name_is_not_an_archive(bump):
+    names = list(_names(NEW_SHORT).values())
+    names += [n + ".sig" for n in names] + [n + ".sha256" for n in names]
+    out = bump.classify_assets(NEW_SHORT, names, list(bump.ASSET_PATTERNS), [])
+    assert out["ambiguous"] == [] and out["missing"] == []
+    assert not any(n.endswith((".sig", ".sha256")) for n in out["assets"].values())
+
+
 def test_two_archives_for_one_key_are_ambiguous(bump):
     names = list(_names(NEW_SHORT).values()) + [f"sd-master-{NEW_SHORT}-bin-win-rocm-7.99.0-x64.zip"]
     out = bump.classify_assets(NEW_SHORT, names, [("windows", "rocm")], [])
