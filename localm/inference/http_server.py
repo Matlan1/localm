@@ -1023,9 +1023,11 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     from localm.vram import wait_for_vram_release
 
     from localm.inference import reranker as _reranker_mod
+    from localm.inference import speech as _speech_mod
     embedder_dim = await loop.run_in_executor(None, embedder_mod.loaded_dim)
     reranker_loaded = await loop.run_in_executor(None, _reranker_mod.is_loaded)
-    if embedder_dim is None and not reranker_loaded:
+    speech_loaded = await loop.run_in_executor(None, _speech_mod.is_loaded)
+    if embedder_dim is None and not reranker_loaded and not speech_loaded:
         return False
     attempt.embedder_attempted = True
     cleared = False
@@ -1035,6 +1037,10 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     if reranker_loaded:
         cleared = await loop.run_in_executor(
             None, functools.partial(_reranker_mod.reset_reranker, force=False)
+        ) or cleared
+    if speech_loaded:
+        cleared = await loop.run_in_executor(
+            None, functools.partial(_speech_mod.reset_speech, force=False)
         ) or cleared
     if not cleared:
         return False
@@ -2062,6 +2068,13 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
             embedder_was_loaded = True
         else:
             skipped_in_use.append("reranker model")
+    from localm.inference import speech as _speech_mod
+    if await loop.run_in_executor(None, _speech_mod.is_loaded):
+        if await loop.run_in_executor(
+                None, functools.partial(_speech_mod.reset_speech, force=False)):
+            embedder_was_loaded = True
+        else:
+            skipped_in_use.append("speech model")
     return embedder_was_loaded
 
 
@@ -2200,6 +2213,52 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
+async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
+    """If *name* is a registered model whose path matches the resident speech
+    model, release it and report the freed VRAM. Returns None when *name* is not
+    the resident speech model; ``{"status": "in_use"}`` while a synthesis is in
+    flight. Every speech reader runs in an executor: each takes the speech lock,
+    which a load holds for its whole duration."""
+    from localm.inference import speech as _speech_mod
+    info = await loop.run_in_executor(None, _speech_mod.speech_info)
+    if info is None:
+        return None
+    from pathlib import Path
+    from localm.config import load_registry
+    from localm.model_manager import _entry_path
+    entry_path = _entry_path(load_registry().get(name))
+    if entry_path is None:
+        return None
+    try:
+        if Path(entry_path).resolve() != Path(info["path"]).resolve():
+            return None
+    except OSError:
+        return None
+
+    if await loop.run_in_executor(None, _speech_mod.active_requests) > 0:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
+
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
+
+    _free = _live_free_vram_bytes
+
+    before, before_fresh, before_scope = _vram_free_reading()
+    cleared = await loop.run_in_executor(
+        None, functools.partial(_speech_mod.reset_speech, force=False))
+    if not cleared:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
+    if before is not None:
+        released, after = await loop.run_in_executor(
+            None, lambda: wait_for_vram_release(_free, before_bytes=before))
+    else:
+        released, after = 0, before
+    result = {"status": "unloaded", "model": name, "was_active": False}
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh, before_scope=before_scope)
+    return result
+
+
 async def unload_one_model(name: str, *, force: bool = False) -> dict:
     """Release ONE currently-loaded model from GPU/CPU memory, leaving any
     other loaded models untouched - the targeted counterpart to
@@ -2236,6 +2295,9 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
         reranker_result = await _unload_reranker_if_matches(name, loop)
         if reranker_result is not None:
             return reranker_result
+        speech_result = await _unload_speech_if_matches(name, loop)
+        if speech_result is not None:
+            return speech_result
         return {"status": "already_unloaded", "model": name}
     # Honor the in-flight-request pin: an engine a request is
     # generating on must not be unloaded out from under it (it would reload it
@@ -2870,6 +2932,11 @@ def _hang_restart_action(app) -> None:
         _reranker_mod.release_for_exit()
     except Exception:
         _dbg_swallow("reranker release during forced restart failed")
+    try:
+        from localm.inference import speech as _speech_mod
+        _speech_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("speech worker release during forced restart failed")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
@@ -3821,6 +3888,11 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     except Exception:
         _dbg_swallow("reranker release during shutdown failed (non-fatal)")
     try:
+        from localm.inference import speech as _speech_mod
+        _speech_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("speech worker release during shutdown failed (non-fatal)")
+    try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
     except Exception:
@@ -4100,6 +4172,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         embedder_had_something = embedder_had_something or _reranker_mod.is_resident()
     except Exception:
         _dbg_swallow("reranker loaded-state check during restart failed (non-fatal)")
+    try:
+        from localm.inference import speech as _speech_mod
+        embedder_had_something = embedder_had_something or _speech_mod.is_resident()
+    except Exception:
+        _dbg_swallow("speech loaded-state check during restart failed (non-fatal)")
 
     # A subprocess-isolated GPU probe when torch is not resident. See
     # test_do_restart_skips_vram_wait_when_nothing_was_loaded.
@@ -4147,6 +4224,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         released_embedder = _reranker_mod.release_for_exit() or released_embedder
     except Exception:
         _dbg_swallow("reranker release during restart failed (non-fatal)")
+    try:
+        from localm.inference import speech as _speech_mod
+        released_embedder = _speech_mod.release_for_exit() or released_embedder
+    except Exception:
+        _dbg_swallow("speech worker release during restart failed (non-fatal)")
 
     # Wait for the frees above to actually land before re-exec. The re-exec'd
     # process spawns a brand-new GGUF worker that constructs a fresh

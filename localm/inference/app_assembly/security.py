@@ -76,8 +76,9 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
     _CROSS_ORIGIN_OK = (
         "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
         "/v1/rerank",
-        # OpenAI-compatible media routes mounted by the voice and image plugins.
-        "/v1/audio/transcriptions", "/v1/images/generations",
+        # OpenAI-compatible media routes mounted by the voice, tts and image
+        # plugins.
+        "/v1/audio/transcriptions", "/v1/audio/speech", "/v1/images/generations",
         # Surface management (phase 5 on-demand GUI mount) is driven by a local
         # process (the attaching `localm gui`), not the browser shell: no Origin,
         # no shell_token. The route does its OWN strict auth (this instance's

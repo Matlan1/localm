@@ -566,11 +566,42 @@ route cannot be fetched by an API client, so `b64_json` is the default and askin
 private directory, returned as `b64_json` (the default there; asking for `url` is a
 `400`), and the directory is deleted before the response is sent.
 
-### Speech synthesis (`/v1/audio/speech`)
+### `POST /v1/audio/speech`
 
-Not served. Text-to-speech runs in the browser (the tts plugin's Kokoro voices) and
-localm has no server-side speech synthesis yet, so a client calling
-`/v1/audio/speech` gets a `404` rather than a stub.
+Scope: `tts`. Served by the tts plugin. Speaks text with a registered text-to-speech
+model: a Qwen3-TTS GGUF and its mmproj (`localm pull
+ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf` fetches
+both). The browser voices of the tts plugin are separate and unaffected.
+
+```python
+audio = client.audio.speech.create(model="tts-1", voice="default",
+                                   input="Hello there.", response_format="wav")
+audio.write_to_file("hello.wav")
+```
+
+A JSON body, or multipart/form-data with the same fields plus an optional `voice_file`.
+The request waits for the whole file: it runs in the isolated speech worker as a
+background job of kind `speak`, so it shows in the activity list with its progress, and a
+client that disconnects cancels it. The audio is returned from memory and never written
+to disk, in any session mode. The seed used is in the `X-Localm-Seed` response header.
+
+| Field | Meaning |
+| --- | --- |
+| `input` | Required, 1 to 4096 characters. Text containing the model's control-token strings (such as `<\|im_end\|>`) is a `400`. |
+| `model` | A registered model of type `tts`. Omitted, `localm`, `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` name the only one; with several registered, name one. |
+| `voice` | `default` (the model's own voice), or the name of a WAV recording saved as `<name>.wav` in the `voices` folder of the data directory. Any other name is a `400` listing the voices. |
+| `voice_file` | Multipart only: a WAV recording (PCM or float, at most 30 s and 16 MB) whose voice to imitate. Not together with a named `voice`. |
+| `response_format` | `wav` (default; 16-bit mono at 24 kHz) or `pcm` (the same samples, raw little-endian, no header). |
+| `language` | Optional code such as `en` or name such as `english`; the model's default when omitted. |
+| `seed` | Optional, 0 to 4294967294, for a reproducible result. Random when omitted. |
+| `speed`, `instructions`, `stream_format` | Only `1.0`, empty and `audio`: other values change the output and are not implemented, so they are a `400`. |
+
+`mp3`, `opus`, `aac` and `flac` are a `400`; other unknown fields are ignored. Failures:
+`400` a bad field, text or recording, `404` no such model, `422` a model that is not a
+text-to-speech model or lacks its mmproj, `413` too large, `501` the llama.cpp runtime
+or the model cannot synthesize speech (run `localm setup-llama` for the pinned runtime),
+`503` the model failed to load, `504` the speech worker hung and was stopped, `502` the
+generation failed or did not end within its frame budget, `409` cancelled.
 
 ### `GET /v1/models`
 
