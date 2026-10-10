@@ -360,7 +360,10 @@ def test_isolation_fails_when_localm_is_not_this_checkouts(cf, tmp_path, monkeyp
 
 def _alive(pid: int) -> bool:
     import psutil
-    return psutil.pid_exists(pid)
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
 
 
 def _wait_dead(pid: int, seconds: float = 15.0) -> bool:
