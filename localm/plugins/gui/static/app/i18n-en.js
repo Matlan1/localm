@@ -105,6 +105,8 @@ export const I18N_EN = {
   "common.modelDownload.unsupportedFormat":
     "'{filename}' is missing (needed by {class_type}.{input_name}). localm downloads only .safetensors and .gguf model files automatically. Add this file to your ComfyUI installation's matching models folder, then try again.",
   "common.modelDownload.body": "This workflow needs '{filename}' ({size}), which isn't installed.",
+  "common.modelDownload.bodyNative": "Generating needs '{filename}' ({size}), which isn't downloaded yet.",
+  "common.modelDownload.bodyNativeNoSize": "Generating needs '{filename}', which isn't downloaded yet.",
   "common.modelDownload.download": "Download",
   "common.modelDownload.failed": "Download failed: {message}",
   "common.modelDownload.notNow": "Not now",

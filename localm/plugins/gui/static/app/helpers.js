@@ -1370,9 +1370,10 @@ function _offerModelDownload(missingModel, log, plugin) {
       resolve(value);
     };
     openModal(t("common.modelDownload.title", { filename }), (body) => {
+      const native = missingModel.native ? "Native" : "";
       body.appendChild(el("p", "", source.size_bytes
-        ? t("common.modelDownload.body", { filename, size: fmtBytes(source.size_bytes) })
-        : t("common.modelDownload.bodyNoSize", { filename })));
+        ? t(`common.modelDownload.body${native}`, { filename, size: fmtBytes(source.size_bytes) })
+        : t(`common.modelDownload.body${native}NoSize`, { filename })));
       body.appendChild(el("p", "",
         t("common.modelDownload.source", { repo: source.repo, file: source.file })));
       if (source.origin === "huggingface") {

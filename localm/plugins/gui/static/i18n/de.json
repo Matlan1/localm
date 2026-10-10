@@ -593,6 +593,8 @@
   "common.modelDownload.unusableName": "'{filename}' fehlt (benötigt von {class_type}.{input_name}). Der Name enthält Zeichen, unter denen localm keine Datei speichern kann, daher kann sie nicht automatisch heruntergeladen werden. Fügen Sie sie dem passenden Modellordner Ihrer ComfyUI-Installation hinzu und versuchen Sie es erneut.",
   "common.modelDownload.unsupportedFormat": "'{filename}' fehlt (benötigt von {class_type}.{input_name}). localm lädt nur .safetensors- und .gguf-Modelldateien automatisch herunter. Fügen Sie die Datei dem passenden Modellordner Ihrer ComfyUI-Installation hinzu und versuchen Sie es erneut.",
   "common.modelDownload.body": "Dieser Workflow benötigt '{filename}' ({size}), das nicht installiert ist.",
+  "common.modelDownload.bodyNative": "Zum Generieren wird '{filename}' ({size}) benötigt, das noch nicht heruntergeladen ist.",
+  "common.modelDownload.bodyNativeNoSize": "Zum Generieren wird '{filename}' benötigt, das noch nicht heruntergeladen ist.",
   "common.modelDownload.download": "Herunterladen",
   "common.modelDownload.failed": "Herunterladen fehlgeschlagen: {message}",
   "common.modelDownload.notNow": "Nicht jetzt",
