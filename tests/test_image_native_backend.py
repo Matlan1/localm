@@ -444,7 +444,9 @@ def test_bad_native_values_are_refused(updates, needle):
 def test_native_fields_belong_to_the_image_plugin_only():
     from localm.settings_schema import validate_media_block
     with pytest.raises(ValueError, match="unknown media field"):
-        validate_media_block("music", {"backend": "native"})
+        validate_media_block("video", {"native_clip_l": "clip.safetensors"})
+    with pytest.raises(ValueError, match="unknown media field"):
+        validate_media_block("music", {"native_model": "sd-turbo"})
 
 
 def test_the_schema_shows_auto_by_default_and_hides_paths_from_non_owners():

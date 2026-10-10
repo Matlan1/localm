@@ -55,7 +55,7 @@ CATALOG: tuple = (
                  extra="browser"),
     CatalogEntry("image", "Image generation (built in, or ComfyUI)",
                  commands=("generate-image",)),
-    CatalogEntry("music", "Music generation (ComfyUI ACE-Step by default)",
+    CatalogEntry("music", "Music generation (ACE-Step, native or through ComfyUI)",
                  commands=("generate-music",)),
     CatalogEntry("video", "Short-video generation (built in, or ComfyUI)",
                  commands=("generate-video",)),

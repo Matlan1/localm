@@ -9,6 +9,7 @@ backend order, and which start failures ``auto`` remembers."""
 
 from __future__ import annotations
 
+import array
 import io
 import json
 import os
@@ -28,7 +29,7 @@ from localm.media.koboldcpp import _proc, music, runtime, server
 from localm.media.koboldcpp.runtime import Runtime
 
 FAKE = textwrap.dedent(r'''
-    import io, json, os, sys, time, wave
+    import array, io, json, os, sys, time, wave
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     args = sys.argv[1:]
@@ -58,10 +59,15 @@ FAKE = textwrap.dedent(r'''
         time.sleep(float(os.environ.get("FAKE_SLEEP", "30")))
 
     def wav(seconds):
+        n = 2 * int(48000 * seconds)
+        if mode == "flat":
+            samples = array.array("h", [32767]) * n
+        else:
+            samples = array.array("h", [((i // 2) % 200) - 100 for i in range(n)])
         buf = io.BytesIO()
         with wave.open(buf, "wb") as w:
             w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
-            w.writeframes(b"\x01\x00\x02\x00" * int(48000 * seconds))
+            w.writeframes(samples.tobytes())
         return buf.getvalue()
 
     class H(BaseHTTPRequestHandler):
@@ -485,6 +491,65 @@ def test_write_wav_keeps_only_format_and_data(tmp_path):
     assert not (tmp_path / "track.wav.part").exists()
 
 
+def test_write_wav_removes_the_partial_file_when_saving_fails(tmp_path, monkeypatch):
+    def refuse(self, target):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    out = tmp_path / "track.wav"
+    with pytest.raises(PermissionError):
+        music.write_wav(_signal(), out)
+    assert list(tmp_path.iterdir()) == []
+
+
+def _signal(seconds: float = 1.0, *, rate: int = 48000, width: int = 2, edit=None) -> bytes:
+    n = int(rate * seconds)
+    samples = array.array("h", [((i * 37) % 2001) - 1000 for i in range(2 * n)])
+    if edit is not None:
+        edit(samples, rate)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(samples.tobytes() if width == 2 else bytes(n * 2))
+    return buf.getvalue()
+
+
+def _pin(level: int, seconds: float, channel: int = 0):
+    def edit(samples, rate):
+        for i in range(int(rate * seconds)):
+            samples[2 * (rate // 10 + i) + channel] = level
+    return edit
+
+
+def _constant(level: int):
+    def edit(samples, rate):
+        for i in range(len(samples)):
+            samples[i] = level
+    return edit
+
+
+@pytest.mark.parametrize("data,reason", [
+    (_signal(), None),
+    (_signal(edit=_pin(32767, 0.1)), None),
+    (_signal(edit=_pin(32767, 0.3)), "stuck at full scale"),
+    (_signal(edit=_pin(-32768, 0.3, channel=1)), "stuck at full scale"),
+    (_signal(edit=_constant(32767)), "stuck at full scale"),
+    (_signal(edit=_constant(1200)), "constant level"),
+    (_signal(edit=_constant(0)), "constant level"),
+    (_signal(width=1), None),
+    (b"not a wav", None),
+], ids=["music", "short-clip", "pinned-left", "pinned-negative-right", "flat-full-scale",
+        "flat-level", "silence", "8-bit", "unreadable"])
+def test_broken_reason(data, reason):
+    got = music.broken_reason(data)
+    if reason is None:
+        assert got is None
+    else:
+        assert got is not None and reason in got
+
+
 @pytest.mark.parametrize("data", [b"", b"not a wav at all", b"RIFF\x00\x00\x00\x00WAVE"])
 def test_write_wav_refuses_unreadable_audio(tmp_path, data):
     out = tmp_path / "track.wav"
@@ -541,6 +606,25 @@ def test_auto_falls_back_and_remembers_a_crash(two_backends):
     assert runtime.backend_failed("cuda") is not None
     assert runtime.backend_worked("vulkan")
     assert any("cuda backend did not start" in ln and "trying vulkan" in ln for ln in lines)
+
+
+def test_auto_generates_a_broken_track_again_on_the_next_backend(two_backends):
+    two_backends["cuda"] = "flat"
+    lines = []
+    data, used = music.generate_wav({}, "auto", REQUEST, plan=False, on_progress=lines.append)
+    assert used == "vulkan" and music.broken_reason(data) is None
+    assert any("cuda backend returned a broken track (the audio is stuck at full scale)" in ln
+               and "generating it again on vulkan" in ln for ln in lines)
+    assert runtime.backend_failed("cuda") is None and not runtime.backend_worked("cuda")
+
+
+def test_an_explicit_backend_returning_a_broken_track_fails_with_the_cpu_hint(two_backends):
+    two_backends["vulkan"] = "flat"
+    with pytest.raises(music.NativeMusicError) as exc:
+        music.generate_wav({}, "vulkan", REQUEST, plan=False)
+    assert "vulkan: the track came back broken (the audio is stuck at full scale)" in str(exc.value)
+    assert "set the native runtime to cpu" in str(exc.value)
+    assert runtime.backend_failed("vulkan") is None
 
 
 def test_auto_does_not_remember_running_out_of_memory(two_backends):

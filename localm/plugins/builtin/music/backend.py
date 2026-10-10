@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ComfyUI (ACE-Step) backend for the music plugin.
+"""Backend selection and the ComfyUI (ACE-Step) backend for the music plugin.
+
+``settings`` resolves the ``backend`` setting (``auto``, ``native`` or
+``comfy``) through ``localm.media.backend_choice``. The native backend lives in
+``backends/native.py``; the ComfyUI one is inline below.
 
 Mirrors the image plugin's backend: a thin wrapper over the shared Comfy HTTP
 plumbing fed with THIS plugin's per-plugin config (resolved through
@@ -37,6 +41,7 @@ from typing import Optional
 
 from localm import music_gen as _music_gen
 from localm.image_gen import comfy as _comfy
+from localm.media import backend_choice
 from localm.media.managed_comfy import legacy_comfy_value, managed_comfy_active
 from localm.plugins import media_config
 from localm.vram import media_estimate_bytes, resolve_swap_policy
@@ -64,15 +69,26 @@ def _comfy_output_dir_env(output_dir: Optional[str]):
 
 
 def settings(full_config: dict) -> dict:
-    """Resolve the music plugin's effective backend settings."""
+    """Resolve the music plugin's effective backend settings.
+
+    ``backend`` is the backend that will run (``auto`` already resolved from
+    config alone; ``prepare_for_job`` re-checks it); ``backend_choice`` is what
+    is configured and ``backend_note`` says how ``auto`` resolved, or None.
+    ``native`` is the native backend's own block, with ``native_runtime``
+    (``auto``, ``cuda``, ``vulkan``, ``cpu`` or ``metal``), ``plan`` (use the
+    ACE-Step planner) and ``lowvram`` read out of it."""
     block, warning = media_config.resolve_config("music", full_config)
     comfy_blk = block.get("comfy") if isinstance(block.get("comfy"), dict) else {}
-    backend_name = block.get("backend", "comfy")
+    native_raw = block.get("native")
+    native_blk: dict = native_raw if isinstance(native_raw, dict) else {}
+    backend_choice_value = str(block.get("backend") or "auto").strip().lower() or "auto"
     # When the configured backend cannot be loaded the job still falls back to
     # comfy (best-effort), and the warning says so instead of reporting the
     # chosen backend as active.
     warning = media_config.combine_warnings(
-        warning, media_config.backend_unavailable_warning(__package__, backend_name))
+        warning, media_config.backend_unavailable_warning(
+            str(__package__),
+            "comfy" if backend_choice_value == "auto" else backend_choice_value))
     # When the managed ComfyUI instance is selected ("own"), neither the
     # per-plugin comfy.* fields nor the legacy global launch_cmd/workdir keys
     # may be honoured - any of them defeats ensure_comfy()'s managed-routing
@@ -95,8 +111,17 @@ def settings(full_config: dict) -> dict:
     workdir = "" if own_active else (
         comfy_blk.get("workdir")
         or legacy_comfy_value("comfy_workdir", full_config) or "")
+    backend_name, backend_note = backend_choice.resolve(
+        backend_choice_value, full_config, comfy_blk or {}, api_url, "Music",
+        native_name="ACE-Step")
     return {
         "backend": backend_name,
+        "backend_choice": backend_choice_value,
+        "backend_note": backend_note,
+        "native": native_blk,
+        "native_runtime": str(native_blk.get("runtime") or "auto").strip().lower() or "auto",
+        "plan": native_blk.get("plan", True) is not False,
+        "lowvram": native_blk.get("lowvram", False) is True,
         "api_url": api_url,
         "launch_cmd": launch_cmd,
         "workdir": workdir,
@@ -116,6 +141,65 @@ def settings(full_config: dict) -> dict:
         "vram_estimate_bytes": media_estimate_bytes("music", block),
         "warning": warning,
     }
+
+
+def prepare_for_job(s: dict, full_config: dict) -> dict:
+    """Finish resolving *s* (from ``settings``) for one generation, in the job's
+    own thread: ``auto`` re-checked against a live ComfyUI
+    (``backend_choice.refine_auto``), and a native job's
+    ``vram_estimate_bytes`` taken from its model files unless the plugin sets
+    ``vram_estimate_gb``. Returns *s*, updated in place."""
+    backend_choice.refine_auto(s, "Music")
+    if s.get("backend") == "native":
+        block, _w = media_config.resolve_config("music", full_config)
+        if not isinstance(block.get("vram_estimate_gb"), (int, float)):
+            from .backends import native
+            s["vram_estimate_bytes"] = native.vram_estimate_bytes(s)
+    return s
+
+
+def generate_unless_comfy(tags: str, out_path: Path, *, on_progress=None,
+                          before_generate=None, config: Optional[dict] = None,
+                          **kwargs) -> Optional[tuple[bool, str, Path]]:
+    """Generate through the configured music backend for a caller that has its
+    own ComfyUI path (the chat REPL, ``localm music``).
+
+    Returns None when the backend is ComfyUI, so the caller runs its own
+    ComfyUI code unchanged; otherwise ``(ok, message, path)``, where *path* is
+    *out_path* with the backend's file suffix. Runs ``ensure_available``, then
+    *before_generate* (e.g. unloading a chat model), then ``generate`` with
+    *kwargs*, and always releases the backend's VRAM afterwards. *on_progress*
+    receives every status line."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    s = prepare_for_job(settings(cfg), cfg)
+    if is_comfy(s):
+        return None
+
+    def say(text: str) -> None:
+        if on_progress is not None:
+            on_progress(text)
+
+    for note in (s.get("warning"), s.get("backend_note")):
+        if note:
+            say(note)
+    impl = _impl(s)
+    path = out_path.with_suffix(getattr(impl, "OUTPUT_SUFFIX", out_path.suffix))
+    refusal = getattr(impl, "refusal", None)
+    refused = refusal(**kwargs) if refusal is not None else None
+    if refused:
+        return False, refused, path
+    ok, message = ensure_available(s, on_progress=say)
+    if not ok:
+        return False, message, path
+    say(message)
+    if before_generate is not None:
+        before_generate()
+    try:
+        ok, message = generate(s, tags, path, on_progress=say, **kwargs)
+        return ok, message, path
+    finally:
+        free_vram(s)
 
 
 # --- ComfyUI (ACE-Step) reference implementation (default "comfy" backend) ---
@@ -204,6 +288,12 @@ _COMFY_REF = SimpleNamespace(
 
 _facade = media_config.make_backend_facade(__package__, _COMFY_REF)
 _impl = _facade.resolve
+
+
+def is_comfy(s: dict) -> bool:
+    """Whether *s* (from ``settings``) runs the ComfyUI backend, including a
+    backend name that cannot be loaded, which falls back to ComfyUI."""
+    return _impl(s) is _COMFY_REF
 ensure_available = _facade.ensure_available
 free_vram = _facade.free_vram
 generate = _facade.generate

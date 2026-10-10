@@ -1850,6 +1850,7 @@ class MediaField:
 _IMAGE_ONLY = ["image"]
 _VIDEO_ONLY = ["video"]
 _NATIVE = ["image", "video"]
+_MUSIC_ONLY = ["music"]
 
 # Order = display order within each plugin subsection.
 MEDIA_PLUGIN_FIELDS: list = [
@@ -1899,6 +1900,31 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("native_clip_vision", ("native", "clip_vision"), "", Widget.TEXT,
                "Native CLIP vision encoder", "Optional (Wan image-to-video).",
                plugins=_VIDEO_ONLY, admin_only=True),
+    MediaField("backend", ("backend",), "", Widget.SELECT, "Music backend",
+               "auto = ComfyUI when it is set up, else native; native = built-in "
+               "ACE-Step 1.5 (KoboldCpp); comfy = ComfyUI.",
+               options=["auto", "native", "comfy"], plugins=_MUSIC_ONLY, default="auto"),
+    MediaField("native_runtime", ("native", "runtime"), "", Widget.SELECT,
+               "Native runtime",
+               "Compute backend for native music. auto picks the best one for this machine "
+               "and falls back to Vulkan, then CPU.",
+               options=["auto", "cuda", "vulkan", "cpu", "metal"],
+               plugins=_MUSIC_ONLY, default="auto"),
+    MediaField("native_dit", ("native", "dit"), "", Widget.TEXT,
+               "Native diffusion model",
+               "ACE-Step diffusion model (registered name or file path). Blank uses the "
+               "default, which localm setup-music or the Music page downloads.",
+               plugins=_MUSIC_ONLY, admin_only=True),
+    MediaField("native_text_encoder", ("native", "text_encoder"), "", Widget.TEXT,
+               "Native text encoder",
+               "ACE-Step text encoder (registered name or file path). Blank uses the default.",
+               plugins=_MUSIC_ONLY, admin_only=True),
+    MediaField("native_vae", ("native", "vae"), "", Widget.TEXT, "Native VAE",
+               "ACE-Step VAE (registered name or file path). Blank uses the default.",
+               plugins=_MUSIC_ONLY, admin_only=True),
+    MediaField("native_lm", ("native", "lm"), "", Widget.TEXT, "Native planner",
+               "ACE-Step planner LM (registered name or file path). Blank uses the default.",
+               plugins=_MUSIC_ONLY, admin_only=True),
     # The per-plugin workdir WINS over the global comfy_workdir (scan.py returns
     # the per-plugin value first; image/backend.py and its music/video twins
     # pass it into ensure_comfy()), so gating only the CORE field would leave

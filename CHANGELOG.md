@@ -98,6 +98,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and then CPU (CPU on Apple Silicon) when the preferred backend does not start. `--backend`
   picks one, `--status` shows what is installed, and `--no-models` / `--no-test` skip those
   steps.
+- **Music generates without ComfyUI.** With nothing set up, the Music page, the chat `/music`
+  command and `localm music` generate ACE-Step 1.5 tracks with the native backend (the
+  runtime `localm setup-music` installs), and keep using ComfyUI where one is set up. The
+  Music settings pick the backend (`auto`, `native` or `comfy`), the native runtime and the
+  model files. The page says which backend runs and offers to download the default models;
+  a generation never downloads them by itself. Tracks are WAV files with no embedded
+  metadata, and inputs only ComfyUI understands are refused with the reason. A track that
+  comes back broken (some GPUs produce one for some prompts) is never saved; on the `auto`
+  runtime it is generated again on the CPU.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the

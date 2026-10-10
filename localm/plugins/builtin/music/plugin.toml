@@ -1,7 +1,7 @@
 [plugin]
 name = "music"
 version = "1.0.0"
-description = "Music generation (ComfyUI ACE-Step by default) and a library for the chat surface."
+description = "Music generation (ACE-Step, native or through ComfyUI) and a library for the chat surface."
 scope = "music"
 register = "plug"
 data_subdir = "gui_music"

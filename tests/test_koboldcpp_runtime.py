@@ -438,3 +438,24 @@ def test_a_free_default_name_is_pulled_under_its_usual_name():
     from localm.media.koboldcpp import models
     assert models.default_pull("dit") == (
         f"{models.DEFAULT_REPO}:{models.DEFAULT_FILES['dit']}", None)
+
+
+@pytest.mark.parametrize("value", ["//fileserver/share/dit.gguf",
+                                   "//./PhysicalDrive0/dit.gguf",
+                                   "//?/C:/models/dit.gguf"])
+def test_network_and_device_paths_are_refused_without_opening_them(tmp_path, monkeypatch,
+                                                                  value):
+    from localm.media.koboldcpp import models
+    value = value.replace("/", chr(92))
+    opened = []
+    real_is_file = Path.is_file
+    monkeypatch.setattr(Path, "is_file",
+                        lambda self: opened.append(str(self)) or real_is_file(self))
+    assert models.resolve_path(value) is None
+    cfg = {c: str(_gguf_file(tmp_path / f"{c}.gguf", a))
+           for c, a in models.ARCHITECTURES.items()}
+    cfg["dit"] = value
+    with pytest.raises(models.ModelError, match="'dit.gguf' is a network or device path") as e:
+        models.resolve_models(cfg, pull_missing=False)
+    assert "fileserver" not in str(e.value) and "PhysicalDrive0" not in str(e.value)
+    assert not [o for o in opened if "dit.gguf" in o and chr(92) * 2 in o]

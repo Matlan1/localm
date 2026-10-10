@@ -560,12 +560,13 @@
     <section id="view-music" class="view">
       <div class="page">
         <h2 data-i18n="music.title">Music generation</h2>
-        <div class="sub" data-i18n="music.intro">Runs the ACE-Step workflow on your local ComfyUI (same VRAM
-        handover as image generation). Track length is arbitrary; longer tracks just
-        take longer.</div>
+        <div class="sub" data-i18n="music.intro">Generates music on this machine with ACE-Step, on the built-in
+        native runtime or on your ComfyUI (Settings, Music). The chat model unloads when the music
+        models need the VRAM and reloads afterwards.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="music"></span>
             <div class="card-head-text"><h3 data-i18n="mediaGallery.generate">Generate</h3></div></div>
+          <div class="sub" id="music-backend-note" hidden></div>
           <label data-i18n="music.styleTagsLabel">Style tags - genre, mood, instruments, BPM, vocal type</label>
           <textarea id="music-tags" rows="2" placeholder="synthwave, 80s, female vocals, 120 bpm, dreamy" data-i18n-placeholder="music.styleTagsPlaceholder"></textarea>
           <label data-i18n="music.lyricsLabel">Lyrics (optional - empty generates an instrumental; [verse] / [chorus] markers supported)</label>
@@ -586,7 +587,7 @@
           <div class="actions">
             <button class="btn-primary" id="music-generate" data-i18n="mediaGallery.generate">Generate</button>
             <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation and free the GPU" data-i18n="mediaGallery.stopButton" data-i18n-title="mediaGallery.stopTitle">Stop</button>
-            <label class="inline-check" title="Applies to music generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="music.reloadCheckboxTitle">
+            <label class="inline-check" title="Applies to music generation only. When off, the music backend stays loaded for fast batch generation; the chat model reloads on the next chat message." data-i18n="mediaGallery.reloadCheckboxLabel" data-i18n-title="music.reloadCheckboxTitle">
               <input type="checkbox" id="music-reload-llm" checked> reload chat model after generation
             </label>
           </div>
@@ -601,7 +602,7 @@
           <div id="music-bulk" class="media-bulk" style="display:none"></div>
           <div id="music-history" class="media-grid"></div>
         </div>
-        <div class="card">
+        <div class="card" id="music-workflow-card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
             <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
           <div class="sub" data-i18n="workflow.intro">The ComfyUI workflow this page uses. Upload one (in

@@ -5,7 +5,7 @@
 
 "use strict";
 
-import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { hideStop, showStop } from "./images.js";
@@ -27,7 +27,10 @@ const musicGallery = createGallery({
   emptyHintKey: "music.empty.hint",
   cardClass: "thumb-track",
 
-  beforeRefresh: () => refreshReloadToggle("music", "music-reload-llm"),
+  beforeRefresh: () => {
+    refreshMusicBackend();
+    refreshReloadToggle("music", "music-reload-llm");
+  },
 
   buildPreview: musicPreview,
   buildDetailPreview: playerDetail("audio", "track"),
@@ -51,6 +54,58 @@ export const refreshMusicHistory = musicGallery.refresh;
 
 bindReloadToggle("music", "music-reload-llm");
 
+/* Which backend generates (from /api/music/backend). The native backend has no
+   ComfyUI workflow, so the Workflow card is hidden and its model picks are not
+   sent while it is active; the note under the Generate heading says which
+   backend runs. */
+export const musicBackend = { active: null, choice: null };
+
+export async function refreshMusicBackend() {
+  let data;
+  try {
+    const r = await fetch("/api/music/backend", { headers: authHeaders() });
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+  musicBackend.active = data.active || null;
+  musicBackend.choice = data.choice || null;
+  const native = musicBackend.active === "native";
+  const note = $("music-backend-note");
+  if (note) {
+    let text = "";
+    if (native) {
+      const n = data.native || {};
+      const missing = n.missing || [];
+      if (missing.length) {
+        const size = missing.reduce((sum, m) => sum + (m.size_bytes || 0), 0);
+        const all = Object.keys(n.models || {}).length;
+        text = missing.length < all
+          ? t("music.backendNativeSomeMissing",
+            { count: missing.length, total: all, size: fmtBytes(size) })
+          : t("music.backendNativeMissing", { size: fmtBytes(size) });
+      } else {
+        const rt = n.runtime || {};
+        text = t("music.backendNative", {
+          runtime: rt.installed ? (rt.backend || rt.choice) : t("music.backendRuntimeOnFirstUse"),
+        });
+      }
+    } else if (musicBackend.active === "comfy") {
+      text = t("music.backendComfy");
+    }
+    note.textContent = text;
+    note.hidden = !text;
+  }
+  const card = $("music-workflow-card");
+  if (card) card.hidden = native;
+  for (const [id, key] of [["music-steps", "music.stepsPlaceholder"],
+                           ["music-cfg", "music.cfgPlaceholder"]]) {
+    const input = $(id);
+    if (!input) continue;
+    input.dataset.i18nPlaceholder = native ? `${key}Native` : key;
+    input.placeholder = t(input.dataset.i18nPlaceholder);
+  }
+}
+
 /* ================================================================ */
 /*  Generation                                                       */
 /* ================================================================ */
@@ -68,7 +123,9 @@ $("music-generate").onclick = async () => {
     const v = $(id).value.trim();
     if (v !== "" && !Number.isNaN(Number(v))) body[field] = Number(v);
   }
-  if (modelOverrides.music && Object.keys(modelOverrides.music).length) {
+  if (musicBackend.active === null) await refreshMusicBackend();
+  const native = musicBackend.active === "native";
+  if (!native && modelOverrides.music && Object.keys(modelOverrides.music).length) {
     body.model_overrides = modelOverrides.music;
   }
 
@@ -78,7 +135,8 @@ $("music-generate").onclick = async () => {
   log.textContent = "";
   $("music-result").replaceChildren();
   try {
-    await checkModelsBeforeGenerate("music", log, { model_overrides: modelOverrides.music });
+    await checkModelsBeforeGenerate("music", log,
+      native ? {} : { model_overrides: modelOverrides.music });
     const r = await fetch("/api/music", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });
