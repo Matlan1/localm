@@ -112,7 +112,8 @@ def _complete_model(ctx, param, incomplete):
               help="RNG seed for sampling: the same seed, model, prompt and "
                    "settings repeat the same random choices. A GGUF reply can "
                    "still depend on what the model answered before (its prompt "
-                   "cache), so the output is not guaranteed to repeat. Ignored "
+                   "cache) or on speculative drafting, so the output is not "
+                   "guaranteed to repeat. Ignored "
                    "by --anthropic (no such API param).")
 @click.option("--verbose",          is_flag=True,
               help="Print full tool outputs.")
