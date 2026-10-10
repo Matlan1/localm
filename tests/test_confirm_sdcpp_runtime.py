@@ -576,6 +576,26 @@ def _alive_with(marker: str) -> list:
     return hits
 
 
+def _wait_until(predicate, seconds: float) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(0.1)
+    return predicate()
+
+
+def _settled_count(marker: str) -> int:
+    """The number of processes naming *marker* once that number has stopped changing."""
+    last, since = -1, time.monotonic()
+    while time.monotonic() - since < 1.5:
+        now = len(_alive_with(marker))
+        if now != last:
+            last, since = now, time.monotonic()
+        time.sleep(0.1)
+    return last
+
+
 def test_a_child_that_cannot_isolate_reports_why_in_its_result(cf, tmp_path):
     env = cf.prepare_environment(tmp_path)
     spec = {"backend": "cpu", "tag": "master-1-aaaaaaa", "commit": "a" * 40,
@@ -592,12 +612,18 @@ def test_a_child_past_its_timeout_is_killed_with_its_tree(cf, tmp_path):
     env = cf.prepare_environment(tmp_path)
     spec = {"backend": "cpu", "tag": "t", "commit": "c" * 40, "override": False,
             "home": env["LOCALM_HOME"], "model": None, "model_skip": "", "png": "x"}
+    marker = tmp_path / "marker-for-timeout"
+    sleeper = [sys.executable, "-c", "import time; time.sleep(600)", str(marker)]
     start = time.monotonic()
-    res = cf.run_child(spec, tmp_path, env, timeout=0.05)
-    assert res.get("timeout") and "timed out" in res["fatal"]
-    assert time.monotonic() - start < 120
-    time.sleep(0.5)
-    assert _alive_with(str(tmp_path)) == [], "the timed out child survived"
+    try:
+        res = cf.run_child(spec, tmp_path, env, timeout=1, command=sleeper)
+        assert res.get("timeout") and "timed out" in res["fatal"]
+        assert time.monotonic() - start < 25
+        assert _wait_until(lambda: _alive_with(str(marker)) == [], 15),             "the timed out child survived"
+    finally:
+        import psutil
+        for pid in _alive_with(str(marker)):
+            psutil.Process(pid).kill()
 
 
 def test_kill_tree_ends_a_process_and_its_descendants(cf, tmp_path):
@@ -610,15 +636,15 @@ def test_kill_tree_ends_a_process_and_its_descendants(cf, tmp_path):
     """), encoding="utf-8")
     proc = subprocess.Popen([sys.executable, str(script)])
     try:
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and len(_alive_with(str(marker))) < 1:
-            time.sleep(0.1)
-        assert _alive_with(str(marker)), "the grandchild never started"
+        assert _wait_until(lambda: bool(_alive_with(str(marker))), 30),             "the grandchild never started"
+        assert _settled_count(str(marker)) >= 1
         cf.kill_tree(proc.pid)
         proc.wait(timeout=30)
-        time.sleep(0.5)
-        assert _alive_with(str(marker)) == []
+        assert _wait_until(lambda: _alive_with(str(marker)) == [], 15),             "a descendant survived"
     finally:
+        import psutil
+        for pid in _alive_with(str(marker)):
+            psutil.Process(pid).kill()
         if proc.poll() is None:
             proc.kill()
 

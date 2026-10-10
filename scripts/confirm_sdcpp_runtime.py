@@ -688,17 +688,18 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def run_child(spec: dict, run_dir: Path, env: dict, timeout: float = CHILD_TIMEOUT) -> dict:
-    """Run the child for ``spec["backend"]`` and return its result dict. A child that
-    times out is killed with its tree; one that leaves no result yields a ``fatal``
+def run_child(spec: dict, run_dir: Path, env: dict, timeout: float = CHILD_TIMEOUT,
+              command=None) -> dict:
+    """Run the child for ``spec["backend"]`` and return its result dict. *command*
+    replaces the child's argv. A child that times out is killed with its tree; one that leaves no result yields a ``fatal``
     entry with the tail of its log."""
     backend = spec["backend"]
     spec_path = run_dir / f"spec-{backend}.json"
     out_path = run_dir / f"result-{backend}.json"
     log_path = run_dir / f"child-{backend}.log"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
-    cmd = [sys.executable, str(Path(__file__).resolve()), "--internal-run", str(spec_path),
-           str(out_path)]
+    cmd = command or [sys.executable, str(Path(__file__).resolve()), "--internal-run",
+                      str(spec_path), str(out_path)]
     pid = None
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT,
