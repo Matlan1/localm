@@ -544,7 +544,10 @@ def _constant(level: int):
         "flat-level", "silence", "8-bit", "unreadable"])
 def test_broken_reason(data, reason):
     got = music.broken_reason(data)
-    assert (got is None) if reason is None else (reason in got)
+    if reason is None:
+        assert got is None
+    else:
+        assert got is not None and reason in got
 
 
 @pytest.mark.parametrize("data", [b"", b"not a wav at all", b"RIFF\x00\x00\x00\x00WAVE"])
