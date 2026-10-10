@@ -137,7 +137,9 @@ def _system_text(system: Any) -> str:
 
 def _image_part(block: dict[str, Any], where: str) -> dict[str, Any]:
     source = block.get("source")
-    kind = source.get("type") if isinstance(source, dict) else None
+    if not isinstance(source, dict):
+        raise AnthropicError(400, f"{where}.source must be an object")
+    kind = source.get("type")
     if kind == "base64":
         media = source.get("media_type")
         data = source.get("data")
