@@ -2364,7 +2364,7 @@ export const I18N_EN = {
   "music.backendComfy": "Backend: ComfyUI.",
   "music.backendNative": "Backend: native ACE-Step 1.5 (KoboldCpp), runtime {runtime}.",
   "music.backendNativeMissing":
-    "Backend: native ACE-Step 1.5. The default models ({size}) download when you first generate.",
+    "Backend: native ACE-Step 1.5. No music models yet: Generate offers to download the default set ({size}).",
   "music.backendRuntimeOnFirstUse": "installed on first use",
   "music.intro":
     "Generates music on this machine with ACE-Step, on the built-in native runtime or on your ComfyUI (Settings, Music). The chat model unloads when the music models need the VRAM and reloads afterwards.",

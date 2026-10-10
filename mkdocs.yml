@@ -68,6 +68,7 @@ nav:
       - Privacy modes and diagnostics: privacy.md
   - Media generation:
       - Native image generation: native-image.md
+      - Native music generation: native-music.md
       - FLUX image generation: flux-setup.md
       - Video generation: video.md
       - Managed ComfyUI: managed-comfyui.md

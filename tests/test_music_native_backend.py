@@ -435,3 +435,18 @@ def test_repl_generate_music_runs_through_the_backend(tmp_path, monkeypatch, no_
     files = list((tmp_path / "gui_music").glob("*_cli.wav"))
     assert len(files) == 1 and Engine.unloaded == 1
     assert "Track saved to" in console.file.getvalue()
+
+
+def test_a_job_never_downloads_models_and_says_how_to_get_them(monkeypatch, no_comfy):
+    from localm.media.koboldcpp import runtime
+
+    def never(*a, **k):
+        raise AssertionError("a job started a download")
+
+    monkeypatch.setattr(models, "_pull", never)
+    monkeypatch.setattr(runtime, "ensure_for_backend", never)
+    ok, msg = native.ensure_available(_s())
+    assert ok is False
+    assert "not downloaded" in msg and "localm setup-music" in msg and "Music page" in msg
+    size = sum(models.DEFAULT_SIZES.values()) / 1024 ** 3
+    assert f"({size:.1f} GB)" in msg

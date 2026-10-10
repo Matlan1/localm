@@ -1167,7 +1167,7 @@
   "music.historyHint": "Eine Karte ankreuzen, um sie für Sammelaktionen auszuwählen; auf eine klicken für Details, Metadaten und Aktionen für einzelne Titel.",
   "music.backendComfy": "Backend: ComfyUI.",
   "music.backendNative": "Backend: natives ACE-Step 1.5 (KoboldCpp), Laufzeit {runtime}.",
-  "music.backendNativeMissing": "Backend: natives ACE-Step 1.5. Die Standardmodelle ({size}) werden bei der ersten Erstellung heruntergeladen.",
+  "music.backendNativeMissing": "Backend: natives ACE-Step 1.5. Noch keine Musikmodelle: Generieren bietet den Download des Standardsatzes an ({size}).",
   "music.backendRuntimeOnFirstUse": "wird bei der ersten Nutzung installiert",
   "music.intro": "Erstellt Musik auf diesem Rechner mit ACE-Step, mit der eingebauten nativen Laufzeit oder mit Ihrem ComfyUI (Einstellungen, Musik). Das Chat-Modell wird entladen, wenn die Musikmodelle den VRAM brauchen, und danach wieder geladen.",
   "music.item.one": "Titel",

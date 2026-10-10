@@ -84,20 +84,39 @@ def default_names(component: str) -> list[str]:
     return [stem, DISTINCT_PREFIX + stem]
 
 
-def resolve_path(value: str) -> Optional[Path]:
-    """The file for a configured *value*: an existing file path, else a registry
-    model name. None when it is neither."""
+def shown_name(value: str) -> str:
+    """*value* as shown to users: a registered model name unchanged, a file path
+    as its file name only."""
     value = (value or "").strip()
-    if not value:
-        return None
-    p = Path(value).expanduser()
-    if p.is_file():
-        return p
+    return Path(value).name if ("/" in value or "\\" in value) else value
+
+
+def _raw_path(value: str) -> str:
     from localm.model_manager import get_model_path
     found = get_model_path(value)
-    if found is not None and Path(found).is_file():
-        return Path(found)
-    return None
+    return str(found) if found is not None else value
+
+
+def is_network_or_device(value: str) -> bool:
+    """True when *value*, or the file a registry name points at, is a UNC or
+    device path. Judged on the string alone, without touching the filesystem."""
+    from localm.pathsafe import is_unc_or_device_path
+    value = (value or "").strip()
+    return bool(value) and is_unc_or_device_path(_raw_path(value))
+
+
+def resolve_path(value: str) -> Optional[Path]:
+    """The file for a configured *value*: a registry model name, else a local
+    file path. None when it is neither, and for a UNC or device path, which is
+    never opened."""
+    value = (value or "").strip()
+    if not value or is_network_or_device(value):
+        return None
+    p = Path(_raw_path(value)).expanduser()
+    try:
+        return p if p.is_file() else None
+    except OSError:
+        return None
 
 
 def architecture_of(path: Path) -> Optional[str]:
@@ -187,20 +206,26 @@ def resolve_models(native_cfg: dict, *, use_lm: bool = True, pull_missing: bool 
     say = on_progress or (lambda _m: None)
     cancelled = cancel_check or (lambda: False)
     paths: dict = {}
+    not_downloaded: list = []
     for comp in COMPONENTS:
         if comp == "lm" and not use_lm:
             continue
         configured = str(native_cfg.get(comp) or "").strip()
         if configured:
+            shown = shown_name(configured)
+            if is_network_or_device(configured):
+                raise ModelError(
+                    f"the configured music {_label(comp)} model '{shown}' is a network or "
+                    "device path, which is not allowed")
             p = resolve_path(configured)
             if p is None:
                 raise ModelError(
-                    f"the configured music {_label(comp)} model '{configured}' "
+                    f"the configured music {_label(comp)} model '{shown}' "
                     "is not a file or a model in the library")
             arch = architecture_of(p)
             if arch != ARCHITECTURES[comp]:
                 raise ModelError(
-                    f"the configured music {_label(comp)} model '{configured}' is not an "
+                    f"the configured music {_label(comp)} model '{shown}' is not an "
                     f"ACE-Step {_label(comp)} (its architecture is {arch or 'unreadable'}, "
                     f"expected {ARCHITECTURES[comp]})")
             paths[comp] = p
@@ -208,9 +233,8 @@ def resolve_models(native_cfg: dict, *, use_lm: bool = True, pull_missing: bool 
         p = find_default(comp)
         if p is None:
             if not pull_missing:
-                raise ModelError(
-                    f"the default music {_label(comp)} model is not downloaded; "
-                    "run 'localm setup-music' first")
+                not_downloaded.append(comp)
+                continue
             spec, name = default_pull(comp)
             say(f"Downloading the default music {_label(comp)} model "
                 f"({DEFAULT_FILES[comp]})...")
@@ -220,6 +244,13 @@ def resolve_models(native_cfg: dict, *, use_lm: bool = True, pull_missing: bool 
                 raise ModelError(f"{spec} downloaded but is not in the model library as an "
                                  f"ACE-Step {_label(comp)}")
         paths[comp] = p
+    if not_downloaded:
+        size = sum(DEFAULT_SIZES[c] for c in not_downloaded) / 1024 ** 3
+        raise ModelError(
+            f"the default ACE-Step {', '.join(_label(c) for c in not_downloaded)} "
+            f"model{'s are' if len(not_downloaded) > 1 else ' is'} not downloaded "
+            f"({size:.1f} GB): run 'localm setup-music', or generate from the Music "
+            "page, which offers the download")
     return ModelSet(text_encoder=str(paths["text_encoder"]), dit=str(paths["dit"]),
                     vae=str(paths["vae"]),
                     lm=str(paths["lm"]) if "lm" in paths else None)

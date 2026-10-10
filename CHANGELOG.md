@@ -72,13 +72,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   checksum, and checks that it loads and finds a compute device, falling back to Vulkan and
   then CPU when the preferred build does not load. `--backend` picks a build and `--status`
   shows what is installed.
-- **`localm setup-music` installs native music generation.** It downloads the KoboldCpp
-  build that runs ACE-Step 1.5 on this machine (CUDA, Vulkan, CPU or Metal) from a pinned
-  release through the network policy, checks its size and checksum before running it, pulls
-  the default ACE-Step 1.5 models, and generates a short test track, falling back to Vulkan
-  and then CPU (CPU on Apple Silicon) when the preferred backend does not start. `--backend`
-  picks one, `--status` shows what is installed, and `--no-models` / `--no-test` skip those
-  steps.
 - **One GGUF model answers several requests at once.** Concurrent chat requests to the
   same model are decoded together instead of waiting for each other, so two or four
   clients share the GPU's throughput rather than queueing (`parallel_slots`, default
@@ -93,6 +86,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and then CPU (CPU on Apple Silicon) when the preferred backend does not start. `--backend`
   picks one, `--status` shows what is installed, and `--no-models` / `--no-test` skip those
   steps.
+- **Music generates without ComfyUI.** With nothing set up, the Music page, the chat `/music`
+  command and `localm music` generate ACE-Step 1.5 tracks with the native backend (the
+  runtime `localm setup-music` installs), and keep using ComfyUI where one is set up. The
+  Music settings pick the backend (`auto`, `native` or `comfy`), the native runtime and the
+  model files. The page says which backend runs and offers to download the default models;
+  a generation never downloads them by itself. Tracks are WAV files with no embedded
+  metadata, and inputs only ComfyUI understands are refused with the reason.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the

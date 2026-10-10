@@ -58,14 +58,16 @@ def work_dir() -> Path:
 def prepare(native_cfg: dict, choice: str, *, plan: bool = True,
             on_progress: Optional[Progress] = None,
             cancel_check: Optional[CancelCheck] = None) -> tuple[str, server.ModelSet]:
-    """Install the runtime for the first backend to try and pull any missing
-    default models. Returns (backend, model set). Raises :class:`ProvisionError`,
-    :class:`ModelError`, :class:`NativeMusicError` or :class:`Cancelled`."""
+    """Install the runtime for the first backend to try and check the model
+    files are present (default models are never downloaded here; see
+    ``models.resolve_models``). Returns (backend, model set). Raises
+    :class:`ProvisionError`, :class:`ModelError`, :class:`NativeMusicError` or
+    :class:`Cancelled`."""
     say = on_progress or (lambda _m: None)
     backend = backend_order(choice)[0]
-    _ensure_runtime(backend, say, cancel_check)
-    models = resolve_models(native_cfg, use_lm=plan, pull_missing=True,
+    models = resolve_models(native_cfg, use_lm=plan, pull_missing=False,
                             on_progress=say, cancel_check=cancel_check)
+    _ensure_runtime(backend, say, cancel_check)
     return backend, models
 
 
@@ -85,7 +87,7 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
     """Generate one track. Returns (WAV bytes, backend that produced it)."""
     say = on_progress or (lambda _m: None)
     order = backend_order(choice)
-    models = resolve_models(native_cfg, use_lm=plan, pull_missing=True,
+    models = resolve_models(native_cfg, use_lm=plan, pull_missing=False,
                             on_progress=say, cancel_check=cancel_check)
     errors: list[str] = []
     auto = choice.strip().lower() == "auto"

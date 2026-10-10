@@ -43,8 +43,9 @@ def refusal(*, model_overrides=None, sampler_name=None, scheduler=None,
 
 
 def ensure_available(s: dict, on_progress=None) -> tuple[bool, str]:
-    """Install the runtime and pull missing default models, so the job's later
-    VRAM handover is not followed by a long download."""
+    """Check the model files are present, then install the runtime when
+    needed. Default models are never downloaded here: a missing one fails with
+    how to get it."""
     from localm.media.koboldcpp import music, pins
     say = on_progress or (lambda _m: None)
     try:
@@ -120,7 +121,8 @@ def status(s: dict) -> dict:
         if comp == "lm" and not s.get("plan", True):
             continue
         p = paths.get(comp)
-        shown[comp] = (str(blk.get(comp)).strip() if blk.get(comp) else p.name) if p else None
+        shown[comp] = (models.shown_name(str(blk.get(comp))) if blk.get(comp) else p.name) \
+            if p else None
         if p is None and not str(blk.get(comp) or "").strip():
             spec, name = models.default_pull(comp)
             missing.append({"component": comp, "file": models.DEFAULT_FILES[comp],
