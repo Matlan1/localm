@@ -70,9 +70,9 @@ moved, `load_mode` inserted, three booleans folded into it), then inserted a
 4-byte `lazy_mode` enum directly after `load_mode` at b10653 (spelled
 `tensor_read_lazy` until b10679), so localm binds
 `LlamaModelParamsV1` (<= lemonade b1288 / upstream b10103),
-`LlamaModelParamsV2` (>= lemonade b1307 / upstream b10105..b10649) and
-`LlamaModelParamsV3` (upstream >= b10653) and picks one per loaded library at
-load time. There is deliberately no bare `LlamaModelParams` name - go through
+`LlamaModelParamsV2` (lemonade b1307 / upstream b10105..b10649) and
+`LlamaModelParamsV3` (upstream >= b10653; lemonade b1342, built from upstream
+b11513, is V3) and picks one per loaded library at load time. There is deliberately no bare `LlamaModelParams` name - go through
 `_abi.model_params_class()` / `_api.llama_model_default_params()`.
 
 | Offset | Type | V1 field | V2 field | V3 field | Default |
@@ -101,16 +101,17 @@ over-allocated to 224) - THREE layouts
 
 upstream inserted a new `uint32_t` field, `n_outputs_max_per_seq`, directly
 before `n_threads` sometime between lemonade b1307 (2026-08-04, confirmed
-absent) and ggml-org b10360 (2026-08-11, confirmed present) - both are live in
-production (the bundled AMD ROCm build vs. the fetched cuda/vulkan/cpu builds),
-so localm binds `LlamaContextParamsV1` (no `n_outputs_max_per_seq`) and
+absent) and ggml-org b10360 (2026-08-11, confirmed present) - both can be
+installed (an amd-rocm b1307 install that was never re-provisioned vs. every
+newer build), so localm binds `LlamaContextParamsV1` (no `n_outputs_max_per_seq`) and
 `LlamaContextParamsV2` (with it) and picks one per loaded library, same
 mechanism as `LlamaModelParams` above.
 
 ggml-org b11480 then inserted a `size_t moe_cache_size` (device cache in bytes
 for MoE experts kept in host memory, default 0 = disabled) directly after
 `type_v`; b11479 is the last release without it. Every field from
-`abort_callback` onward moved 8 bytes later, which is `LlamaContextParamsV3`.
+`abort_callback` onward moved 8 bytes later, which is `LlamaContextParamsV3`
+(the bundled amd-rocm build, lemonade b1342 / upstream b11513, has it).
 No bare `LlamaContextParams` name - go through `_abi.context_params_class()` /
 `_api.llama_context_default_params()`.
 

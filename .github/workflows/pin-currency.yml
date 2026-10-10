@@ -92,6 +92,8 @@ jobs:
 
       - name: Compare the pinned ComfyUI version against upstream
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set +e
           python scripts/check_comfyui_pin.py --gate
@@ -117,6 +119,8 @@ jobs:
 
       - name: Compare the pinned lemonade-sdk ROCm build against upstream
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set +e
           python scripts/check_llama_rocm_pin.py --gate

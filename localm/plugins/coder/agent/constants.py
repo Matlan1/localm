@@ -39,6 +39,15 @@ _UNDOABLE_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "edit_files", "patch_file", "edit_notebook_cell",
 })
 
+# Restricted-allowlist write tools whose targets are named in their args and
+# read through _call_target_paths. In a restricted session the dispatcher refuses
+# any of them aimed inside a RESTRICTED_UNWRITABLE_DIRS directory (tools/base.py).
+# search_replace is not here: its targets come from a sweep, which it filters
+# itself when the dispatcher passes it _restricted.
+_RESTRICTED_PATH_WRITE_TOOLS: frozenset[str] = frozenset({
+    "write_file", "edit_file", "edit_files", "patch_file", "edit_notebook_cell",
+})
+
 # Tools patch mode intercepts (capture a diff, never touch disk). Superset of
 # _UNDOABLE_TOOLS: search_replace is patch-mode-eligible via its own dry_run,
 # not via the pre-call snapshot path.

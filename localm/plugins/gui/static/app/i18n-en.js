@@ -127,7 +127,13 @@ export const I18N_EN = {
   // ---- Chat view ----
   "chat.advanced": "Advanced",
   "chat.advanced.hint": "sampling, seed, grammar",
-  "chat.attach": "Attach images or documents (pdf, docx, txt, md, …)",
+  "chat.attach": "Attach images, audio or documents (pdf, docx, txt, md, …)",
+  "chat.audio.notWav": "{name} is not a valid WAV file.",
+  "chat.audio.readError": "Could not read {name}.",
+  "chat.audio.rejected": "The audio clip was not accepted ({detail}) and was removed from the chat. You can keep chatting (text only).",
+  "chat.audio.unplayable": "This audio clip cannot be played.",
+  "chat.audio.tooLarge": "{name} is {size} MB; an audio clip can be at most {max} MB.",
+  "chat.audio.tooLong": "{name} is about {minutes} min long; an audio clip can be at most {max} min.",
   "chat.camera": "Take a photo with the camera",
   "chat.compact": "compact",
   "chat.compact.archived.one":
@@ -244,6 +250,7 @@ export const I18N_EN = {
   "chat.usage.draftStopped": "Draft stopped",
   "chat.usage.draftUnavailable": "Draft unavailable",
   "chat.usage.draftReason": "Draft-model drafting: {reason}",
+  "chat.status.encodingAudio": "Encoding audio…",
   "chat.status.encodingAudioCpu": "Encoding audio (CPU)…",
   "chat.status.encodingAudioGpu": "Encoding audio (GPU)…",
   "chat.status.audioCpuRetry": "GPU audio encode failed; retrying on CPU (this may take longer)…",
