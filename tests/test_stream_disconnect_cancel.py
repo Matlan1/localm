@@ -18,6 +18,7 @@ both run for real.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 
@@ -152,6 +153,50 @@ def test_chat_stream_disconnect_releases_inference_lock():
         assert "t0" in tok
         await agen2.aclose()
         assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0)
+
+    asyncio.run(scenario())
+
+
+class _LogprobLockingEngine(_LockingEngine):
+    """_LockingEngine that also hands each token's log probability record to
+    on_logprobs before yielding the token, like a GGUF backend asked for
+    logprobs."""
+
+    def chat_stream(self, messages, logprobs=None, on_logprobs=None, **kwargs):
+        assert logprobs == 1 and on_logprobs is not None
+        return self._scored(on_logprobs)
+
+    def _scored(self, on_logprobs):
+        with self.inference_lock:
+            self.entered.set()
+            i = 0
+            while True:
+                text = f"t{i} "
+                on_logprobs([(text.encode(), -0.5, ((text.encode(), -0.5),))])
+                yield text
+                i += 1
+                time.sleep(self._delay)
+
+
+@pytest.mark.parametrize("stream_fn", [_stream_sse, _stream_sse_completion])
+def test_a_disconnect_while_logprobs_stream_releases_inference_lock(stream_fn):
+    async def scenario():
+        eng = _LogprobLockingEngine()
+        agen = stream_fn(eng, _MSG, "lock-model", asyncio.Semaphore(1), logprobs=1)
+        scored = []
+        while len(scored) < 2:
+            line = await asyncio.wait_for(agen.__anext__(), timeout=3.0)
+            body = json.loads(line[len("data: "):]) if line.startswith("data: {") else {}
+            for choice in body.get("choices") or []:
+                text = choice.get("text") or (choice.get("delta") or {}).get("content")
+                if text:
+                    assert choice.get("logprobs"), line
+                    scored.append(text)
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+
+        await agen.aclose()
+
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0),             "inference lock still held after a disconnect with logprobs pending"
 
     asyncio.run(scenario())
 

@@ -92,10 +92,12 @@ class SlotStream:
     def __init__(self, scheduler: SlotScheduler, prompt: list[int], budget: int,
                  sampler: Any, reserve: int,
                  on_status: Optional[Callable[[str], None]],
-                 stop_requested: Optional[Callable[[], bool]]) -> None:
+                 stop_requested: Optional[Callable[[], bool]],
+                 scorer: Any = None) -> None:
         self.prompt = prompt
         self.budget = budget
         self.sampler = sampler
+        self.scorer = scorer
         self.reserve = reserve
         self.finish_reason = "stop"
         self.cancelled = threading.Event()
@@ -175,7 +177,8 @@ class SlotScheduler:
     ``target_ctx(n)``, ``vram_fit(n)``, ``recreate(n, offload_kqv)``,
     ``n_batch()``, ``decode(entries)``, ``sample(sampler, row)``,
     ``is_eog(tok)``, ``seq_rm(seq, p0, p1)``, ``clear_memory()``,
-    ``free_sampler(sampler)``, ``stderr_scope()``.
+    ``free_sampler(sampler)``, ``stderr_scope()``, and, for a reply submitted
+    with a scorer, ``score(scorer, row, tok)``.
 
     Not reentrant from the scheduler thread. Thread-safe otherwise."""
 
@@ -207,11 +210,15 @@ class SlotScheduler:
 
     def submit(self, prompt: list[int], budget: int, sampler: Any, *,
                on_status: Optional[Callable[[str], None]] = None,
-               stop_requested: Optional[Callable[[], bool]] = None) -> SlotStream:
+               stop_requested: Optional[Callable[[], bool]] = None,
+               scorer: Any = None) -> SlotStream:
         """Queue a reply to *prompt* of at most *budget* tokens (<= 0 for no
-        budget), sampled with *sampler*. The scheduler owns *sampler* once this
-        returns and frees it when the reply ends; when this raises, the caller
-        still owns it. Raises RuntimeError once the scheduler is closed."""
+        budget), sampled with *sampler*. With *scorer* (a
+        ``LogprobScorer``) every token the stream yields is the scorer's
+        ``ScoredToken`` for it. The scheduler owns *sampler* and *scorer* once
+        this returns and frees them when the reply ends; when this raises, the
+        caller still owns them. Raises RuntimeError once the scheduler is
+        closed."""
         if not prompt:
             raise ValueError("prompt must not be empty")
         reserve = len(prompt) + (budget if budget > 0 else UNLIMITED_STEP) + RESERVE_PAD
@@ -219,7 +226,7 @@ class SlotScheduler:
         if ceiling:
             reserve = min(reserve, ceiling)
         stream = SlotStream(self, list(prompt), budget, sampler, reserve,
-                            on_status, stop_requested)
+                            on_status, stop_requested, scorer)
         with self._cond:
             if self._closed:
                 raise RuntimeError(UNLOADED_MESSAGE)
@@ -616,7 +623,14 @@ class SlotScheduler:
             if self._ops.is_eog(token):
                 self._end(slot, "stop")
                 continue
-            stream._put(token)
+            emit: int = token
+            if stream.scorer is not None:
+                try:
+                    emit = self._ops.score(stream.scorer, row, token)
+                except (OSError, RuntimeError) as exc:
+                    self._end(slot, "error", exc)
+                    continue
+            stream._put(emit)
             slot.generated += 1
             if stream.budget > 0 and slot.generated >= stream.budget:
                 self._end(slot, "length")
@@ -730,6 +744,13 @@ class SlotScheduler:
             except Exception:
                 from localm.debuglog import logger
                 logger.debug("gguf slots: freeing a sampler raised", exc_info=True)
+        scorer, stream.scorer = stream.scorer, None
+        if scorer is not None:
+            try:
+                scorer.close()
+            except Exception:
+                from localm.debuglog import logger
+                logger.debug("gguf slots: freeing a logprob scorer raised", exc_info=True)
         stream._put(end)
 
 
@@ -803,6 +824,9 @@ class LlamaSlotOps:
     def sample(self, sampler: Any, row: int) -> int:
         from . import _api as api
         return int(api.llama_sampler_sample(sampler, self._llm._ctx_ptr, row))
+
+    def score(self, scorer: Any, row: int, token: int) -> int:
+        return scorer.score(self._llm._ctx_ptr, row, token)
 
     def is_eog(self, token: int) -> bool:
         return bool(self._llm._tokenizer.is_eog(token))

@@ -2156,11 +2156,13 @@ class LlamaCpp:
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         sampling: Optional[dict] = None,
+        logprobs: Optional[int] = None,
     ) -> Iterator[int]:
         """
         Yield generated token ids one at a time. *sampling* holds extra
         :func:`_build_sampler` keywords (``min_p``, ``penalty_freq``,
-        ``penalty_present``).
+        ``penalty_present``). With *logprobs* every id is a
+        :class:`._logprobs.ScoredToken` carrying that many alternatives.
 
         KV cache strategy: when this llama.cpp build exports the
         llama_memory_* API and the request fits in the live context, the
@@ -2176,7 +2178,7 @@ class LlamaCpp:
                 prompt_tokens, max_new_tokens, temperature, top_k, top_p,
                 repeat_penalty, grammar=grammar, grammar_lazy=grammar_lazy,
                 grammar_triggers=grammar_triggers, seed=seed, on_status=on_status,
-                sampling=sampling)
+                sampling=sampling, logprobs=logprobs)
             return
         with self._inference_lock:
             if not self._model_ptr:
@@ -2219,10 +2221,12 @@ class LlamaCpp:
             # any raise out of prefill, both exit early. Binding one inside the
             # try loses the real error to an UnboundLocalError.
             sampler = None
+            scorer = None
             source = None
             # Carries a rejected speculation's replacement token into the next
             # loop iteration; set only by the reject branch below.
             pending_token = None
+            pending_emit = None
             try:
                 # One contiguous suppression scope covering context work and
                 # prefill. The ROCm lazy-buffer verification messages fire
@@ -2259,6 +2263,7 @@ class LlamaCpp:
                     grammar_triggers=grammar_triggers,
                     **(sampling or {}),
                 )
+                scorer = self._logprob_scorer(logprobs)
                 # A draft source never hands its proposals to the request's
                 # sampler: every emitted token, with or without a grammar in that
                 # sampler, is one the sampler itself sampled from a verification
@@ -2327,9 +2332,14 @@ class LlamaCpp:
                             # that no longer matches the KV cache.
                             if pending_token is not None:
                                 token, pending_token = pending_token, None
+                                emit, pending_emit = pending_emit, None
                             else:
                                 token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
+                                emit = None
                             eog = self._tokenizer.is_eog(token)
+                            if emit is None:
+                                emit = (token if scorer is None or eog
+                                        else scorer.score(self._ctx_ptr, -1, token))
 
                         if step is not None:
                             step_s = clock() - step[0] - consumer_s
@@ -2342,7 +2352,7 @@ class LlamaCpp:
                         if eog:
                             break   # last_finish_reason stays "stop"
 
-                        yield token   # consumer runs here; an unload can interleave
+                        yield emit   # consumer runs here; an unload can interleave
                         tokens_generated += 1
 
                         # Coarse heartbeat, OUTSIDE the lock above (never add
@@ -2393,6 +2403,7 @@ class LlamaCpp:
                         # --- Speculative drafting (while the source drafts) ---
                         drafts: list[int] = []
                         accepted: list[int] = []
+                        emits: list[int] = []
                         timed = speculate = verify_ok = observed = grew = False
                         if source.drafting():
                             observed = source.observes_steps
@@ -2438,6 +2449,9 @@ class LlamaCpp:
                                         replacement = None
                                         for i, draft in enumerate(drafts):
                                             verified = api.llama_sampler_sample(sampler, self._ctx_ptr, i)
+                                            emits.append(
+                                                verified if scorer is None
+                                                else scorer.score(self._ctx_ptr, i, verified))
                                             if verified != draft:
                                                 replacement = verified
                                                 break
@@ -2470,6 +2484,7 @@ class LlamaCpp:
                                             # rejected position, emitted at the loop
                                             # head without a second sample.
                                             pending_token = replacement
+                                            pending_emit = emits[-1]
                                     else:
                                         # Decode failed, fall back to single token
                                         api.llama_batch_free(batch)
@@ -2489,7 +2504,7 @@ class LlamaCpp:
                             if timed:
                                 step = (step_t0, True, 1 + len(accepted),
                                         len(drafts) if verify_ok else None, True)
-                            for draft in accepted:
+                            for draft in emits[:len(accepted)]:
                                 yield_t0 = clock()
                                 yield draft
                                 consumer_s += clock() - yield_t0
@@ -2568,6 +2583,8 @@ class LlamaCpp:
             finally:
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
+                if scorer is not None:
+                    scorer.close()
                 if source is not None:
                     source.end_call()
 
@@ -2612,6 +2629,16 @@ class LlamaCpp:
             raise RuntimeError("Model not loaded")
         return tokenizer
 
+    def _logprob_scorer(self, logprobs: Optional[int]):
+        """A :class:`._logprobs.LogprobScorer` reporting *logprobs* alternatives
+        per token for the loaded model, or None when *logprobs* is None. The
+        caller closes it."""
+        if logprobs is None:
+            return None
+        from ._logprobs import LogprobScorer
+        n_vocab = int(api.llama_vocab_n_tokens(self._loaded_tokenizer()._vocab))
+        return LogprobScorer(api, n_vocab, logprobs)
+
     def _decoder_start_token(self) -> int:
         """The token an encoder-decoder model's decoder starts from: the model's
         declared decoder-start token, else its BOS. Raises RuntimeError when the
@@ -2642,6 +2669,7 @@ class LlamaCpp:
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         sampling: Optional[dict] = None,
+        logprobs: Optional[int] = None,
     ) -> Iterator[int]:
         """Yield the token ids an encoder-decoder model (T5) generates for
         *messages*, one at a time.
@@ -2697,6 +2725,7 @@ class LlamaCpp:
             tokens_generated = 0
             in_decode = False
             sampler = None
+            scorer = None
             try:
                 with self._gen_lock:
                     if self._stop.is_set() or self._ctx_ptr is None:
@@ -2725,6 +2754,7 @@ class LlamaCpp:
                     grammar_triggers=grammar_triggers,
                     **(sampling or {}),
                 )
+                scorer = self._logprob_scorer(logprobs)
                 in_decode = True
                 if on_status:
                     on_status("Generating response...")
@@ -2753,9 +2783,11 @@ class LlamaCpp:
                             pos += 1
                             token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
                             eog = tokenizer.is_eog(token)
+                            emit = (token if scorer is None or eog
+                                    else scorer.score(self._ctx_ptr, -1, token))
                         if eog:
                             break
-                        yield token
+                        yield emit
                         tokens_generated += 1
                         if (tokens_generated
                                 and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
@@ -2781,6 +2813,8 @@ class LlamaCpp:
             finally:
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
+                if scorer is not None:
+                    scorer.close()
 
     def _generate_diffusion(
         self,
@@ -2972,6 +3006,7 @@ class LlamaCpp:
         grammar: Optional[str] = None,
         grammar_lazy: bool = False,
         grammar_triggers: Optional[list[str]] = None,
+        logprobs: Optional[int] = None,
     ) -> Iterator[int]:
         """Yield generated token ids for a chat whose prompt includes image(s)
         or audio clip(s).
@@ -3028,6 +3063,7 @@ class LlamaCpp:
             tokens_generated = 0
             in_decode = False
             sampler = None
+            scorer = None
             try:
                 text_messages, images = self._messages_with_markers(
                     messages, self._mtmd.marker,
@@ -3117,6 +3153,7 @@ class LlamaCpp:
                     grammar_triggers=grammar_triggers,
                     **(sampling or {}),
                 )
+                scorer = self._logprob_scorer(logprobs)
                 in_decode = True
                 logger.info("gguf generate (vision): entering decode loop")
                 _decode_t0 = time.monotonic()
@@ -3136,9 +3173,11 @@ class LlamaCpp:
                         # internally (see the note in _generate).
                         token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
                         eog = self._tokenizer.is_eog(token)
+                        emit = (token if scorer is None or eog
+                                else scorer.score(self._ctx_ptr, -1, token))
                     if eog:
                         break
-                    yield token
+                    yield emit
                     with self._gen_lock:
                         if self._stop.is_set() or self._ctx_ptr is None:
                             self.last_finish_reason = "error"
@@ -3183,6 +3222,8 @@ class LlamaCpp:
             finally:
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
+                if scorer is not None:
+                    scorer.close()
 
     def _prefill_vision(self, vprompt, needed: int,
                         on_status: Optional[Callable[[str], None]] = None) -> tuple[int, int]:
@@ -3413,6 +3454,7 @@ class LlamaCpp:
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         sampling: Optional[dict] = None,
+        logprobs: Optional[int] = None,
     ) -> Iterator[int]:
         """``_generate`` for a model with parallel slots: the reply decodes on
         the slot scheduler beside other replies. Same statuses, budget clamp,
@@ -3440,15 +3482,23 @@ class LlamaCpp:
             grammar_triggers=grammar_triggers,
             **(sampling or {}),
         )
+        try:
+            scorer = self._logprob_scorer(logprobs)
+        except BaseException:
+            api.llama_sampler_free(sampler)
+            raise
         from localm.debuglog import logger
         from localm.inference.backends.base import stream_stop_requested
         self.last_finish_reason = "stop"
         try:
             stream = slots.submit(prompt_tokens, max_new_tokens, sampler,
                                         on_status=on_status,
-                                        stop_requested=stream_stop_requested)
+                                        stop_requested=stream_stop_requested,
+                                        scorer=scorer)
         except BaseException:
             api.llama_sampler_free(sampler)
+            if scorer is not None:
+                scorer.close()
             raise
         logger.info("gguf generate (slots): queued, %d prompt token(s)", n_prompt)
         tokens_generated = 0
@@ -4518,6 +4568,8 @@ class LlamaCpp:
         min_p: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        logprobs: Optional[int] = None,
+        logprob_sink: Optional[list] = None,
         **_ignored,
     ):
         """
@@ -4540,7 +4592,20 @@ class LlamaCpp:
         which polls *should_stop* between denoising steps, and refuses a
         non-zero *min_p*, *presence_penalty* or *frequency_penalty* with
         :class:`UnsupportedInputError`.
+
+        With *logprobs* (0 to ``MAX_TOP_LOGPROBS``) and *logprob_sink* (a list),
+        every generated token is scored against the logits row it was sampled
+        from, and ``(token_bytes, logprob, ((alt_bytes, alt_logprob), ...))`` is
+        appended to *logprob_sink* before that token's text is produced, with
+        *logprobs* alternatives per token. Pass both or neither. A diffusion
+        language model refuses *logprobs* with :class:`UnsupportedInputError`.
         """
+        if (logprobs is None) != (logprob_sink is None):
+            raise ValueError("logprobs and logprob_sink must be passed together")
+        if logprobs is not None and self.is_diffusion:
+            from localm.inference.backends.base import UnsupportedInputError
+            raise UnsupportedInputError(
+                "logprobs cannot be returned by a diffusion language model")
         sampling: dict = {}
         if min_p is not None:
             sampling["min_p"] = min_p
@@ -4567,7 +4632,8 @@ class LlamaCpp:
                 seed=seed,
                 on_status=on_status,
                 sampling=sampling,
-            ), stream)
+                logprobs=logprobs,
+            ), stream, logprob_sink)
 
         # Use the model's embedded chat template when available (Gemma, Llama3,
         # Mistral, etc.) so we don't force ChatML on every model.
@@ -4636,6 +4702,7 @@ class LlamaCpp:
                 grammar=grammar,
                 grammar_lazy=grammar_lazy,
                 grammar_triggers=grammar_triggers,
+                logprobs=logprobs,
             )
         else:
             gen = self._generate(
@@ -4651,14 +4718,21 @@ class LlamaCpp:
                 seed=seed,
                 on_status=on_status,
                 sampling=sampling,
+                logprobs=logprobs,
             )
 
-        return self._completion_result(gen, stream)
+        return self._completion_result(gen, stream, logprob_sink)
 
-    def _completion_result(self, gen: Iterator[int], stream: bool):
+    def _completion_result(self, gen: Iterator[int], stream: bool,
+                           logprob_sink: Optional[list] = None):
         """The ``create_chat_completion`` result for the token generator *gen*:
         the streaming chunk generator when *stream*, else the whole completion
-        dict."""
+        dict. With *logprob_sink*, each token's record is appended to it as the
+        token passes (see :func:`._logprobs.tap_records`)."""
+        if logprob_sink is not None:
+            from ._logprobs import tap_records
+            gen = tap_records(gen, self._loaded_tokenizer().token_to_piece_bytes,
+                              logprob_sink)
         if stream:
             return self._stream_chunks(gen)
         else:

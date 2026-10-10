@@ -275,7 +275,6 @@ def test_max_completion_tokens_caps_the_reply(home):
 @pytest.mark.parametrize("extra, field", [
     ({"n": 2}, "n=2"),
     ({"n": 0}, "n=0"),
-    ({"logprobs": True}, "logprobs"),
     ({"top_logprobs": 3}, "top_logprobs"),
     ({"functions": [{"name": "f"}]}, "functions"),
     ({"function_call": "auto"}, "function_call"),
@@ -400,7 +399,6 @@ def test_a_one_prompt_list_is_a_prompt(home):
     ({"prompt": [1, 2]}, "prompt"),
     ({"best_of": 3}, "best_of"),
     ({"suffix": "end"}, "suffix"),
-    ({"logprobs": 0}, "logprobs"),
     ({"n": 2}, "n=2"),
     ({"logit_bias": {"1": 1}}, "logit_bias"),
 ])

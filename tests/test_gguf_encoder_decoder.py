@@ -216,6 +216,35 @@ class TestFlattening:
 # --------------------------------------------------------------------------- #
 
 class TestGeneration:
+    def test_logprobs_score_every_emitted_token_on_its_own_decoder_row(self):
+        from localm.inference.backends.llamacpp._logprobs import ScoredToken
+        llm = _llama()
+        fake = FakeT5(llm)
+        seen = []
+
+        class _Scorer:
+            closed = False
+
+            def score(self, ctx, idx, token):
+                assert ctx is fake.ctx and idx == -1
+                seen.append(token)
+                return ScoredToken(token, -float(max(fake.kv)), ())
+
+            def close(self):
+                self.closed = True
+
+        scorer = _Scorer()
+        llm._logprob_scorer = lambda n: scorer if n is not None else None
+        msgs = _user("What is the capital of France?")
+
+        tokens, _, _ = _run(llm, fake, msgs, logprobs=1)
+
+        assert tokens == reply_for(_expected_encoder_input(msgs))
+        assert all(isinstance(t, ScoredToken) for t in tokens)
+        assert [-int(t.logprob) for t in tokens] == list(range(len(tokens)))
+        assert seen == tokens and EOS not in seen
+        assert scorer.closed
+
     def test_one_request_encodes_once_and_decodes_from_the_start_token(self):
         llm = _llama()
         fake = FakeT5(llm)

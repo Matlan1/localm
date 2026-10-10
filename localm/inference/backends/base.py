@@ -518,6 +518,15 @@ class BaseBackend(ABC):
         return False
 
     @property
+    def supports_logprobs(self) -> bool:
+        """True when this backend, in its current state, can report the log
+        probability of each generated token and its most likely alternatives
+        (``chat_stream``'s *logprobs* and *on_logprobs*). Default False: a
+        backend that never declared it is refused the request rather than
+        answering without them."""
+        return False
+
+    @property
     def supports_mtp(self) -> bool:
         """True when this backend has active Multi-Token Prediction (MTP) heads
         loaded for speculative drafting. Default False."""
@@ -650,6 +659,13 @@ class BaseBackend(ABC):
             them.  ``presence_penalty`` subtracts a fixed amount from the logit
             of every token already generated, ``frequency_penalty`` that amount
             times how often it was generated.
+
+        A backend whose :attr:`supports_logprobs` is True also takes
+        ``logprobs`` (0 to 20 alternatives per token) and ``on_logprobs``, a
+        callable given lists of ``(token_bytes, logprob, ((alt_bytes,
+        alt_logprob), ...))`` records, one per generated token in order, each
+        before the text that holds the token is yielded. They are passed only
+        when the caller asked for log probabilities.
         """
 
     @property

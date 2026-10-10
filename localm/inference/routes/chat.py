@@ -36,7 +36,7 @@ from localm.inference.gbnf import check_grammar_structure, validate_trigger_patt
 from localm.inference.inference_gate import InferenceGate, exclusively
 from localm.inference.openai_compat import (
     UnsupportedFieldError, check_chat_request, check_completion_request, include_usage,
-    max_tokens_of, thinking_of,
+    logprobs_of, max_tokens_of, thinking_of,
 )
 from localm.inference.pretokenizer_guard import count_tokens_or_estimate
 from localm.inference.response_format import (
@@ -102,6 +102,19 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(
                 400, f"{', '.join(refused)} cannot be applied by model "
                      f"{engine.display_name!r}; omit {pronoun}")
+
+    def _check_logprobs(engine, stream_pipeline) -> None:
+        """400 when *engine* cannot report token log probabilities, or when
+        *stream_pipeline* (a streamed request's chat pipeline) has a stream hook
+        that may rewrite the pieces they describe."""
+        if not engine.supports_logprobs:
+            raise HTTPException(
+                400, f"logprobs cannot be returned by model {engine.display_name!r}; "
+                     "omit logprobs and top_logprobs")
+        if stream_pipeline is not None and stream_pipeline.has("stream"):
+            raise HTTPException(
+                400, "logprobs cannot be returned on a streamed reply while a plugin "
+                     "rewrites the stream; send stream: false or omit logprobs")
 
     async def _prepare_chat(req: ChatRequest, request: Request, messages: list,
                             route, say, tools=(),
@@ -252,6 +265,9 @@ def register(app: FastAPI, ctx) -> None:
 
             sampling = _sampling_kwargs(req)
             _check_sampling(engine, sampling)
+            logprobs = logprobs_of(req)
+            if logprobs is not None:
+                _check_logprobs(engine, pipeline if req.stream else None)
 
             grammar, grammar_lazy, grammar_triggers = (
                 req.grammar, req.grammar_lazy, req.grammar_triggers)
@@ -289,6 +305,7 @@ def register(app: FastAPI, ctx) -> None:
                 thinking=thinking,
                 tool_names=tool_names,
                 max_tool_calls=1 if tool_names and req.parallel_tool_calls is False else None,
+                logprobs=logprobs,
                 **sampling,
             )
             # Strip None so Engine uses its config defaults
@@ -834,6 +851,9 @@ def register(app: FastAPI, ctx) -> None:
                 ctx.state["capacity"] = engine.context_capacity()
                 if pipeline.has("inlet"):
                     messages = await pipeline.run_inlet(messages, ctx)
+            n_logprobs = logprobs_of(req)
+            if n_logprobs is not None:
+                _check_logprobs(engine, pipeline if req.stream else None)
 
             sem = _hs._inference_sems.setdefault(engine.display_name, InferenceGate())
 
@@ -846,9 +866,11 @@ def register(app: FastAPI, ctx) -> None:
                 grammar=req.grammar,
                 seed=req.seed,
                 stop=req.stop,
+                logprobs=n_logprobs,
                 **sampling,
             )
-            gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+            gen_kwargs: dict[str, Any] = {k: v for k, v in gen_kwargs.items()
+                                          if v is not None}
             if req.grammar_lazy:
                 # Same contract as /v1/chat/completions: lazy needs its triggers.
                 if not req.grammar or not req.grammar_triggers:
@@ -929,6 +951,7 @@ def register(app: FastAPI, ctx) -> None:
                 )
 
             gen_error: Exception | None = None
+            lp_records: list = []
             _hs._admit_generation(sem, engine)
             async with sem:
                 # Cancelable on client disconnect: an aborted request releases the
@@ -936,7 +959,9 @@ def register(app: FastAPI, ctx) -> None:
                 # Backend errors map through the same table _complete uses; anything
                 # else falls through to the generic backstop.
                 try:
-                    text = await _generate_full(engine, messages, request, **gen_kwargs)
+                    text = await _generate_full(engine, messages, request,
+                                                on_logprobs=lp_records.extend,
+                                                **gen_kwargs)
                 except _hs._BACKEND_ERROR_TYPES as e:
                     raise HTTPException(_hs.backend_error_status(e), str(e)) from e
                 except RuntimeError as e:
@@ -951,8 +976,10 @@ def register(app: FastAPI, ctx) -> None:
                     # text, which a model-load RuntimeError carries verbatim.
                     text = _hs.inference_error_text(e)
 
+            generated = text
             if gen_error is None and req.stop:
                 text, _stopped = apply_stop(text, req.stop)
+            visible = text
             outcome = "error" if gen_error is not None else "success"
             if ctx is not None:
                 ctx.outcome = outcome
@@ -970,16 +997,23 @@ def register(app: FastAPI, ctx) -> None:
             _hs._record_generation_metrics(prompt_tokens, completion_tokens, None, None)
             ts  = int(time.time())
             cid = make_chunk_id()
+            choice: dict[str, Any] = {
+                "text": (prompt + text) if req.echo and gen_error is None else text,
+                "index": 0,
+                # "error", not "stop", when generation failed, matching the
+                # terminal frame the streaming twin emits.
+                "finish_reason": "error" if gen_error is not None else "stop"}
+            if n_logprobs is not None:
+                choice["logprobs"] = (
+                    _hs.completion_text_logprobs(generated, lp_records, n_logprobs,
+                                                 visible, changed=text != visible)
+                    if gen_error is None else None)
             return {
                 "id": cid,
                 "object": "text_completion",
                 "created": ts,
                 "model": reported_model,
-                # "error", not "stop", when generation failed, matching the terminal
-                # frame the streaming twin emits.
-                "choices": [{"text": (prompt + text) if req.echo and gen_error is None else text,
-                             "index": 0,
-                             "finish_reason": "error" if gen_error is not None else "stop"}],
+                "choices": [choice],
                 "usage": {
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,

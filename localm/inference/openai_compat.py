@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The OpenAI request fields localm does not serve, refused by name.
 
-A field that would change what the client gets back (a second choice, token
-log probabilities, audio, a deprecated function-call shape) is refused with a
-message naming it rather than ignored. Fields that are hints only (``user``,
+A field that would change what the client gets back (a second choice, audio,
+a deprecated function-call shape) is refused with a message naming it rather
+than ignored. Fields that are hints only (``user``,
 ``metadata``, ``store``, ``service_tier``, ``prediction``, ``verbosity``,
 ``prompt_cache_key``, ``safety_identifier``) are accepted and have no effect.
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from localm.inference.logprobs import MAX_TOP_LOGPROBS
 from localm.inference.protocol import ChatRequest, CompletionRequest
 
 
@@ -45,9 +46,12 @@ def check_chat_request(req: ChatRequest) -> None:
         raise UnsupportedFieldError(
             "functions and function_call are not supported: send tools and "
             "tool_choice instead")
-    if req.logprobs or req.top_logprobs:
-        raise UnsupportedFieldError(
-            "logprobs and top_logprobs are not supported; omit them")
+    if req.top_logprobs is not None:
+        if not 0 <= req.top_logprobs <= MAX_TOP_LOGPROBS:
+            raise UnsupportedFieldError(
+                f"top_logprobs must be between 0 and {MAX_TOP_LOGPROBS}")
+        if req.top_logprobs and not req.logprobs:
+            raise UnsupportedFieldError("top_logprobs requires logprobs: true")
     if req.audio is not None:
         raise UnsupportedFieldError("audio output is not supported; omit audio")
     if req.modalities is not None:
@@ -73,7 +77,13 @@ def check_completion_request(req: CompletionRequest) -> str:
         raise UnsupportedFieldError(
             f"best_of={req.best_of} is not supported: send best_of=1 or omit it")
     if req.logprobs is not None:
-        raise UnsupportedFieldError("logprobs is not supported; omit it")
+        if not 0 <= req.logprobs <= MAX_TOP_LOGPROBS:
+            raise UnsupportedFieldError(
+                f"logprobs must be between 0 and {MAX_TOP_LOGPROBS}")
+        if req.echo:
+            raise UnsupportedFieldError(
+                "echo with logprobs is not supported: the prompt's tokens are not "
+                "scored; send one of them")
     if req.suffix:
         raise UnsupportedFieldError("suffix (fill-in-the-middle) is not supported")
     prompt: Any = req.prompt
@@ -90,6 +100,17 @@ def max_tokens_of(req: ChatRequest) -> Optional[int]:
     """The reply cap *req* asks for, from ``max_completion_tokens`` or
     ``max_tokens``."""
     return req.max_completion_tokens if req.max_completion_tokens is not None else req.max_tokens
+
+
+def logprobs_of(req: ChatRequest | CompletionRequest) -> Optional[int]:
+    """How many alternatives per token *req* asks for with its log
+    probabilities, or ``None`` when it asks for none. Call after the request's
+    check function."""
+    if isinstance(req, CompletionRequest):
+        return req.logprobs
+    if not req.logprobs:
+        return None
+    return req.top_logprobs or 0
 
 
 def include_usage(req: ChatRequest | CompletionRequest) -> bool:

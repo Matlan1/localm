@@ -451,35 +451,52 @@ class ToolCallStream:
     text otherwise. A JSON object or list of objects that opens the reply or
     follows a call, the way some models answer without the tags, is a call when
     each object is one; otherwise it is text, released when its closing bracket
-    arrives. Calls to a function not in *names* stay text."""
+    arrives. Calls to a function not in *names* stay text.
+
+    After each ``feed`` or ``finish``, ``spans`` holds one ``(start, end)`` per
+    text event that call returned, in order: the offsets, in the whole stream
+    fed so far, of the slice the event's text is."""
 
     def __init__(self, names: Optional[set[str]] = None) -> None:
         self.names = names
         self._buf = ""
+        self._pos = 0           # stream offset of _buf[0]
+        self._call_at = 0       # stream offset of the open call's opening tag
         self._in_call = False
         self._seen_text = False
         self._skip_ws = False
         self._bare_checked = False
         self._value_end = _ValueEnd()
         self._close = _CloseFinder()
+        self.spans: list[tuple[int, int]] = []
 
     def _new_segment(self) -> None:
         self._bare_checked = False
         self._value_end = _ValueEnd()
 
+    def _skip(self, n: int) -> None:
+        self._buf = self._buf[n:]
+        self._pos += n
+
+    def _text(self, events: list, start: int, end: int, value: str) -> None:
+        events.append(("text", value))
+        self.spans.append((start, end))
+
     def feed(self, text: str) -> list[tuple[str, Any]]:
         events: list[tuple[str, Any]] = []
+        self.spans = []
         self._buf += text
         while True:
             if self._in_call:
                 end = self._close.find(self._buf)
                 if end < 0:
                     return events
-                body, self._buf = self._buf[:end], self._buf[end + len(CLOSE_TAG):]
+                body = self._buf[:end]
+                self._skip(end + len(CLOSE_TAG))
                 self._in_call = False
                 call = self._parse_body(body)
                 if call is None:
-                    events.append(("text", OPEN_TAG + body + CLOSE_TAG))
+                    self._text(events, self._call_at, self._pos, OPEN_TAG + body + CLOSE_TAG)
                     self._seen_text = True
                 else:
                     events.append(("call", call))
@@ -487,7 +504,7 @@ class ToolCallStream:
                 self._new_segment()
                 continue
             if self._skip_ws:
-                self._buf = self._buf.lstrip()
+                self._skip(len(self._buf) - len(self._buf.lstrip()))
                 if not self._buf:
                     return events
                 self._skip_ws = False
@@ -502,50 +519,57 @@ class ToolCallStream:
                     if end is None:
                         if len(self._buf) <= _MAX_BARE_VALUE:
                             return events
-                        events.append(("text", self._buf))
-                        self._buf = ""
+                        self._text(events, self._pos, self._pos + len(self._buf), self._buf)
+                        self._skip(len(self._buf))
                         self._seen_text = True
                         self._bare_checked = True
                         return events
-                    raw, self._buf = self._buf[:end], self._buf[end:]
+                    raw = self._buf[:end]
+                    raw_at = self._pos
+                    self._skip(end)
                     calls = self._parse_bare(raw)
                     if calls:
                         events.extend(("call", c) for c in calls)
                         self._skip_ws = True
                         self._new_segment()
                     else:
-                        events.append(("text", raw))
+                        self._text(events, raw_at, raw_at + end, raw)
                         self._seen_text = True
                         self._bare_checked = True
                     continue
                 self._bare_checked = True
             start = self._buf.find(OPEN_TAG)
             if start >= 0:
-                before, self._buf = self._buf[:start], self._buf[start + len(OPEN_TAG):]
+                before = self._buf[:start]
                 if before:
-                    events.append(("text", before))
+                    self._text(events, self._pos, self._pos + start, before)
                     self._seen_text = True
+                self._call_at = self._pos + start
+                self._skip(start + len(OPEN_TAG))
                 self._in_call = True
                 self._close = _CloseFinder()
                 continue
             hold = _held_prefix(self._buf, OPEN_TAG)
             release = self._buf[:len(self._buf) - hold]
             if release:
-                events.append(("text", release))
+                self._text(events, self._pos, self._pos + len(release), release)
                 self._seen_text = True
-            self._buf = self._buf[len(self._buf) - hold:]
+            self._skip(len(release))
             return events
 
     def finish(self) -> list[tuple[str, Any]]:
         events: list[tuple[str, Any]] = []
-        rest, self._buf = self._buf, ""
+        self.spans = []
+        rest, rest_at = self._buf, self._pos
+        self._skip(len(rest))
         if self._in_call:
             call = self._parse_body(rest)
             if call is not None:
                 return [("call", call)]
-            return [("text", OPEN_TAG + rest)]
+            self._text(events, self._call_at, self._pos, OPEN_TAG + rest)
+            return events
         if rest and not (self._skip_ws and not rest.strip()):
-            events.append(("text", rest))
+            self._text(events, rest_at, self._pos, rest)
         return events
 
     def _parse_body(self, body: str) -> Optional[ParsedCall]:

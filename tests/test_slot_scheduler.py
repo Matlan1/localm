@@ -155,6 +155,9 @@ class _SimContext:
     def free_sampler(self, sampler):
         self.freed.append(sampler)
 
+    def score(self, scorer, row, token):
+        return scorer.score(row, token)
+
     def stderr_scope(self):
         return contextlib.nullcontext()
 
@@ -628,3 +631,63 @@ def test_a_failed_context_recreate_ends_the_running_and_the_waiting_reply(made):
             _drain(stream)
     rec = _collect(sched, PROMPTS[2], 5)
     assert rec["out"] == _reference(PROMPTS[2], 5)[0]
+
+
+class _Scorer:
+    """Scores a token as a ScoredToken holding its row; raises at *fail_at*."""
+
+    def __init__(self, fail_at=None):
+        self.scored = []
+        self.closed = 0
+        self.fail_at = fail_at
+
+    def score(self, row, token):
+        from localm.inference.backends.llamacpp._logprobs import ScoredToken
+        if self.fail_at is not None and len(self.scored) == self.fail_at:
+            raise RuntimeError("llama.cpp returned no logits for output row 0")
+        self.scored.append(token)
+        return ScoredToken(token, -float(len(self.scored)), ((token, -1.0),))
+
+    def close(self):
+        self.closed += 1
+
+
+def test_a_scored_reply_yields_scored_tokens_and_closes_its_scorer_once(made):
+    from localm.inference.backends.llamacpp._logprobs import ScoredToken
+    sched = made(_SimContext(), 2)
+    scorer = _Scorer()
+    rec = _collect(sched, PROMPTS[0], 50, sampler=_Sampler(eog_at=6), scorer=scorer)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 50, eog_at=6)
+    assert all(isinstance(t, ScoredToken) for t in rec["out"])
+    assert [t.logprob for t in rec["out"]] == [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]
+    assert scorer.scored == rec["out"] and EOG not in scorer.scored
+    assert scorer.closed == 1
+
+
+def test_a_scoring_fault_ends_that_reply_only(made):
+    sched = made(_SimContext(), 2)
+    scorer = _Scorer(fail_at=2)
+    results = {}
+
+    def faulty():
+        try:
+            _collect(sched, PROMPTS[0], 20, scorer=scorer)
+        except RuntimeError as e:
+            results["error"] = str(e)
+    _run_threads([faulty, lambda: _collect(sched, PROMPTS[1], 20, results=results, key="ok")])
+    assert "no logits" in results["error"]
+    assert results["ok"]["out"] == _reference(PROMPTS[1], 20)[0]
+    assert scorer.closed == 1
+
+
+def test_a_cancelled_reply_closes_its_scorer(made):
+    ctx = _SimContext()
+    sched = made(ctx, 1)
+    scorer = _Scorer()
+    with ctx.lock():
+        running = sched.submit(PROMPTS[0], 30, _Sampler())
+        queued = sched.submit(PROMPTS[1], 30, _Sampler(), scorer=scorer)
+        queued.close()
+    _drain(running)
+    _drain(queued)
+    assert scorer.closed == 1

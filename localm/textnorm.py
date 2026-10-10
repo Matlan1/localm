@@ -109,6 +109,75 @@ def scrub_text(text: str) -> str:
     return _SCRUB_RE.sub(lambda m: _SCRUB_REPLACEMENTS[m.lastgroup], text)
 
 
+class ScrubMap:
+    """Where each part of :func:`scrub_text`'s output came from, for a text
+    that only grows.
+
+    :meth:`spans` takes the text so far (each call's text must extend the
+    previous call's) and returns ``(src_start, src_end, out_start, out_end,
+    replacement)`` tuples covering the text and ``scrub_text(text)`` end to end,
+    in order: ``replacement`` is None for text copied unchanged and the
+    replacement string for a rewritten marker. Text within ``_MARKER_HOLD``
+    characters of the end is mapped as if the text ended there; a marker it
+    turns into once more text arrives is mapped on a later call."""
+
+    def __init__(self) -> None:
+        self._final: list[tuple[int, int, int, int, Optional[str]]] = []
+        self._src = 0
+        self._out = 0
+        self._spans: list[tuple[int, int, int, int, Optional[str]]] = []
+        self._seen = -1
+
+    def spans(self, text: str) -> list[tuple[int, int, int, int, Optional[str]]]:
+        n = len(text)
+        if n == self._seen:
+            return self._spans
+        tail: list[tuple[int, int, int, int, Optional[str]]] = []
+        src, out = self._src, self._out
+        for m in _SCRUB_RE.finditer(text, src):
+            if m.start() > src:
+                tail.append((src, m.start(), out, out + m.start() - src, None))
+                out += m.start() - src
+            replacement = _SCRUB_REPLACEMENTS[str(m.lastgroup)]
+            tail.append((m.start(), m.end(), out, out + len(replacement), replacement))
+            out += len(replacement)
+            src = m.end()
+        if src < n:
+            tail.append((src, n, out, out + n - src, None))
+        settled = n - _MARKER_HOLD
+        rest: list[tuple[int, int, int, int, Optional[str]]] = []
+        for i, span in enumerate(tail):
+            s0, s1, o0, o1, replacement = span
+            if (s1 <= settled) if replacement is None else (s0 < settled):
+                _join_span(self._final, span)
+            elif replacement is None and s0 < settled:
+                cut = settled - s0
+                _join_span(self._final, (s0, settled, o0, o0 + cut, None))
+                rest = [(settled, s1, o0 + cut, o1, None)] + tail[i + 1:]
+                break
+            else:
+                rest = tail[i:]
+                break
+        if self._final:
+            self._src, self._out = self._final[-1][1], self._final[-1][3]
+        spans = list(self._final)
+        for span in rest:
+            _join_span(spans, span)
+        self._spans = spans
+        self._seen = n
+        return self._spans
+
+
+def _join_span(spans: list, span: tuple[int, int, int, int, Optional[str]]) -> None:
+    """Append *span* to *spans*, merged into the last one when both are copied
+    text and *span* continues it."""
+    if spans and span[4] is None and spans[-1][4] is None and spans[-1][1] == span[0]:
+        s0, _s1, o0, _o1, _r = spans[-1]
+        spans[-1] = (s0, span[1], o0, span[3], None)
+    else:
+        spans.append(span)
+
+
 def _tagged(items, ignorecase: bool) -> list:
     return [(op, av, ignorecase) for op, av in items]
 
@@ -260,17 +329,35 @@ class ThinkSplitter:
     stretch: if the block then closes, the stretch was reasoning; if the stream
     ends with the block still open, it flushes as content. The result always
     equals ``split_think(text, exit_marker)`` over the whole stream.
+
+    After each :meth:`feed` or :meth:`flush`, ``spans`` holds the
+    ``(start, end)`` offsets, in the whole stream fed so far, of the slices that
+    call's content was cut from, in order.
     """
 
     def __init__(self, exit_marker: Optional[str] = None) -> None:
         self._buf = ""
+        self._pos = 0            # stream offset of _buf[0]
         self._in_think = False
         self._exit_marker = exit_marker or None
         self._marked = False     # holding from exit_marker until </think> or the end
         self._scan = 0           # where the next </think> search in a held stretch starts
+        self.spans: list[tuple[int, int]] = []
+
+    def _skip(self, n: int) -> None:
+        self._buf = self._buf[n:]
+        self._pos += n
+
+    def _take(self, n: int, out: list[str], content: bool) -> None:
+        if n:
+            out.append(self._buf[:n])
+            if content:
+                self.spans.append((self._pos, self._pos + n))
+        self._skip(n)
 
     def feed(self, piece: str) -> tuple[str, str]:
         self._buf += piece
+        self.spans = []
         out_c: list[str] = []
         out_r: list[str] = []
         while True:
@@ -279,16 +366,15 @@ class ThinkSplitter:
                 if i == -1:
                     self._scan = max(0, len(self._buf) - len(_THINK_CLOSE) + 1)
                     break
-                out_r.append(self._buf[:i])
-                self._buf = self._buf[i + len(_THINK_CLOSE):]
+                self._take(i, out_r, False)
+                self._skip(len(_THINK_CLOSE))
                 self._in_think = self._marked = False
                 self._scan = 0
             elif self._in_think:
                 i = self._buf.find(_THINK_CLOSE)
                 m = self._buf.find(self._exit_marker) if self._exit_marker else -1
                 if m != -1 and (i == -1 or m < i):
-                    out_r.append(self._buf[:m])
-                    self._buf = self._buf[m:]
+                    self._take(m, out_r, False)
                     self._marked = True
                     self._scan = 0
                     continue
@@ -296,23 +382,19 @@ class ThinkSplitter:
                     hold = _held_tag_suffix(self._buf, _THINK_CLOSE)
                     if self._exit_marker:
                         hold = max(hold, _held_tag_suffix(self._buf, self._exit_marker))
-                    cut = len(self._buf) - hold
-                    out_r.append(self._buf[:cut])
-                    self._buf = self._buf[cut:]
+                    self._take(len(self._buf) - hold, out_r, False)
                     break
-                out_r.append(self._buf[:i])
-                self._buf = self._buf[i + len(_THINK_CLOSE):]
+                self._take(i, out_r, False)
+                self._skip(len(_THINK_CLOSE))
                 self._in_think = False
             else:
                 i = self._buf.find(_THINK_OPEN)
                 if i == -1:
                     hold = _held_tag_suffix(self._buf, _THINK_OPEN)
-                    cut = len(self._buf) - hold
-                    out_c.append(self._buf[:cut])
-                    self._buf = self._buf[cut:]
+                    self._take(len(self._buf) - hold, out_c, True)
                     break
-                out_c.append(self._buf[:i])
-                self._buf = self._buf[i + len(_THINK_OPEN):]
+                self._take(i, out_c, True)
+                self._skip(len(_THINK_OPEN))
                 self._in_think = True
         return "".join(out_c), "".join(out_r)
 
@@ -320,10 +402,13 @@ class ThinkSplitter:
         """Release the held tail at end of stream. A still-open think block
         flushes its remainder as reasoning, unless it is held from the exit
         marker; otherwise as content."""
-        buf, self._buf = self._buf, ""
+        self.spans = []
+        out: list[str] = []
         if self._in_think and not self._marked:
-            return "", buf
-        return buf, ""
+            self._take(len(self._buf), out, False)
+            return "", "".join(out)
+        self._take(len(self._buf), out, True)
+        return "".join(out), ""
 
 
 # How many ``[TOOL_CALLS]`` tokens one reply may emit before the stream is cut.
