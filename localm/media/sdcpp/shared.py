@@ -61,4 +61,5 @@ def free() -> bool:
 
 def worker_pid() -> Optional[int]:
     """The live worker's process id, or None."""
-    return runner.pid if runner.is_alive() else None
+    pid = runner.pid
+    return pid if pid is not None and runner.is_alive() else None

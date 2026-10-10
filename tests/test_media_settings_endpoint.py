@@ -359,3 +359,36 @@ def test_generic_config_get_does_not_leak_per_plugin_media_secrets(env):
 
     leaked = {"launch_cmd", "api_url", "workdir"} & set(scoped_comfy)
     assert not leaked, f"non-owner read the owner-only media values: {sorted(leaked)}"
+
+
+@pytest.mark.parametrize("field,stored", [("native_model", "model"), ("native_vae", "vae"),
+                                          ("native_t5xxl", "t5xxl")])
+def test_a_scoped_writer_cannot_set_a_native_model_file(env, field, stored):
+    """A config:write key without admin gets 403 for a native model file field
+    and nothing is stored; the owner key saves it."""
+    from localm import auth, scopes
+    from localm.config import load_config
+
+    auth.set_api_key("owner-secret-media-native")
+    writer = auth.create_key("writer", [scopes.CONFIG_WRITE],
+                             allow_privileged=True)["key"]
+    client = TestClient(create_app(None))
+
+    r = client.post("/v1/media/config/image", json={field: "x.gguf"},
+                    headers={"Authorization": f"Bearer {writer}"})
+    assert r.status_code == 403, r.text
+    assert field in r.text
+    image = (load_config().get("plugins") or {}).get("image") or {}
+    assert stored not in (image.get("native") or {})
+
+    r = client.post("/v1/media/config/image", json={field: "x.gguf"},
+                    headers={"Authorization": "Bearer owner-secret-media-native"})
+    assert r.status_code == 200, r.text
+    assert load_config()["plugins"]["image"]["native"][stored] == "x.gguf"
+
+
+@pytest.mark.parametrize("value", ["1e400", "-inf", 1e400])
+def test_an_out_of_range_number_is_a_400_not_a_server_error(client, value):
+    r = client.post("/v1/media/config/image", json={"native_steps": value})
+    assert r.status_code == 400, r.text
+    assert "native_steps" in r.text

@@ -114,6 +114,13 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             job.push({"type": "line", "text": s["warning"]})
         if s.get("backend_note"):
             job.push({"type": "line", "text": s["backend_note"]})
+        if s.get("backend") == "native":
+            from .backends import native
+            refused = native.refusal(model_overrides=req.model_overrides,
+                                     lora_name=lora_name, width=width, height=height)
+            if refused:
+                job.push({"type": "line", "text": refused})
+                return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
         job.push({"type": "line", "text": msg})
@@ -256,7 +263,8 @@ async def imagine(req: ImagineRequest, request: Request):
 @_router.get("/api/imagine/backend")
 async def imagine_backend():
     """Which image backend generation will use: ``choice`` (configured),
-    ``active`` (``auto`` resolved from config, without probing ComfyUI) and
+    ``active`` (``auto`` resolved as a job resolves it, with one short probe of
+    the configured ComfyUI address) and
     ``note``; for the native backend also ``native`` (see
     ``backends.native.status``). Reads config, the registry and the runtime
     directory, off the event loop."""
@@ -266,7 +274,8 @@ async def imagine_backend():
     )
 
     def _read():
-        s = _backend.settings(load_config())
+        from localm.media import backend_choice
+        s = backend_choice.refine_auto(_backend.settings(load_config()), "Image")
         out = {"choice": s.get("backend_choice"), "active": s.get("backend"),
                "note": s.get("backend_note"), "warning": s.get("warning")}
         if s.get("backend") == "native":

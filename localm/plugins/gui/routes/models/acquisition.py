@@ -252,8 +252,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             """The preflight answer when the image plugin runs the native
             backend, or None when it runs ComfyUI."""
             from localm.config import load_config
+            from localm.media import backend_choice
             from localm.plugins.builtin.image import backend as image_backend
-            s = image_backend.settings(load_config())
+            s = backend_choice.refine_auto(image_backend.settings(load_config()), "Image")
             if s.get("backend") != "native":
                 return None
             from localm.plugins.builtin.image.backends import native

@@ -429,6 +429,10 @@ def test_backend_and_native_fields_validate_and_nest():
     ({"native_steps": "2.5"}, "whole number"),
     ({"native_steps": "many"}, "not a number"),
     ({"native_cfg_scale": "nan"}, "outside"),
+    ({"native_cfg_scale": "inf"}, "outside"),
+    ({"native_steps": "1e400"}, "outside"),
+    ({"native_steps": "-inf"}, "outside"),
+    ({"native_steps": float("inf")}, "outside"),
     ({"native_runtime": "opencl"}, "not one of"),
 ])
 def test_bad_native_values_are_refused(updates, needle):
@@ -762,3 +766,282 @@ def test_chat_repl_generates_with_the_native_backend(native_configured, tmp_path
     assert _Engine.unloaded == 1
     assert "native stable-diffusion.cpp" in out.getvalue()
     assert not native_configured.alive
+
+
+def test_mcp_generate_image_tool_uses_the_native_backend(native_configured, monkeypatch):
+    import localm.image_gen.comfy as ic
+    import localm.plugins.mcpserver.server as srv
+    from localm.config import home_dir
+    from PIL import Image
+    monkeypatch.setenv("LOCALM_MODE", "full")
+    progress = []
+    monkeypatch.setattr(srv, "report_progress", progress.append)
+    comfy_calls = []
+    monkeypatch.setattr(ic, "generate_image", lambda *a, **k: comfy_calls.append(a))
+    engines = srv.EngineCache(default_model="stub", engine_factory=lambda name: None)
+    tools = srv.build_tools(engines, enable_images=True, enable_coder=False,
+                            enable_memory=False)
+    reply = tools["generate_image"]["handler"]({"prompt": "a fox"})
+    assert reply.get("isError") is not True, reply
+    [png] = list((home_dir() / "mcp-images").glob("*.png"))
+    with Image.open(png) as im:
+        assert im.size == (512, 512)
+    assert comfy_calls == []
+    assert native_configured.generates[0]["prompt"] == "a fox"
+    assert any(str(p).startswith("Step 1/2") for p in progress)
+    assert not native_configured.alive
+
+
+# --------------------------------------------------------------------------- #
+#  what users see: file names only, refused paths, clear errors               #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("value,shown", [
+    ("sd-turbo", "sd-turbo"),
+    ("C:\\models\\private\\ck.gguf", "ck.gguf"),
+    ("/srv/models/private/ck.gguf", "ck.gguf"),
+    ("\\\\192.0.2.1\\share\\ck.gguf", "ck.gguf"),
+])
+def test_display_name_never_shows_a_directory(value, shown):
+    assert native.display_name(value) == shown
+
+
+def test_labels_and_errors_name_only_the_file(tmp_path):
+    private = tmp_path / "private"
+    private.mkdir()
+    model = private / "ck.gguf"
+    model.write_bytes(b"x")
+    s = {"native": {"model": str(model)}}
+    assert native.resolve_models(s)["label"] == "ck.gguf"
+    assert native.status(s)["model"] == "ck.gguf"
+    hf_dir = private / "hf-dir"
+    hf_dir.mkdir()
+    for bad in (private / "gone.gguf", hf_dir):
+        with pytest.raises(native._ModelError) as ei:
+            native.resolve_models({"native": {"model": str(bad)}})
+        assert bad.name in str(ei.value)
+        assert "private" not in str(ei.value)
+
+
+def test_a_network_path_is_refused_without_touching_the_filesystem(monkeypatch):
+    seen = []
+
+    def spy(real):
+        def wrapped(self, *a, **k):
+            if str(self).replace("/", "\\").startswith("\\\\"):
+                seen.append(str(self))
+                return False
+            return real(self, *a, **k)
+        return wrapped
+
+    monkeypatch.setattr(Path, "exists", spy(Path.exists))
+    monkeypatch.setattr(Path, "is_file", spy(Path.is_file))
+    with pytest.raises(native._ModelError, match="network or device path") as ei:
+        native.resolve_models({"native": {"model": "\\\\192.0.2.1\\share\\ck.gguf"}})
+    assert "192.0.2.1" not in str(ei.value)
+    assert seen == []
+
+
+def test_an_unreadable_model_path_is_a_clear_error(tmp_path, monkeypatch):
+    model = tmp_path / "ck.gguf"
+    real = Path.exists
+
+    def exists(self, *a, **k):
+        if self == model:
+            raise PermissionError(13, "Permission denied")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    with pytest.raises(native._ModelError, match=r"cannot be read \(PermissionError\)"):
+        native.resolve_models({"native": {"model": str(model)}})
+    ok, msg = native.ensure_available({"native": {"model": str(model)}})
+    assert not ok and "PermissionError" in msg
+    assert native.status({"native": {"model": str(model)}})["missing"]
+    assert native.vram_estimate_bytes({"native": {"model": str(model)}}) is None
+
+
+def test_ensure_available_reports_an_unexpected_model_check_failure(monkeypatch):
+    def broken(s):
+        raise RuntimeError("registry unreadable")
+
+    monkeypatch.setattr(native, "resolve_models", broken)
+    ok, msg = native.ensure_available({"native": {}})
+    assert not ok and "registry unreadable" in msg
+
+
+@pytest.mark.parametrize("size,expected", [
+    ((301, 205), (296, 200)),
+    ((4000, 3000), (2048, 1536)),
+    ((3000, 1000), (2048, 680)),
+    ((30, 5000), (64, 2048)),
+    ((10, 10), (64, 64)),
+])
+def test_fit_size_keeps_the_aspect_ratio_within_the_limits(size, expected):
+    assert native.fit_size(*size) == expected
+
+
+def test_img2img_without_a_size_scales_a_large_input_keeping_its_aspect(fake_native,
+                                                                         tmp_path):
+    from PIL import Image
+    runner, s = fake_native
+    src = tmp_path / "wide.png"
+    Image.new("RGB", (3000, 1000)).save(src)
+    ok, msg = native.generate(s, "p", tmp_path / "w.png", write_sidecar=False,
+                              input_image=src)
+    assert ok, msg
+    g = runner.generates[0]
+    assert (g["width"], g["height"]) == (2048, 680)
+
+
+def test_generate_never_raises_and_releases_the_worker(fake_native, tmp_path, monkeypatch):
+    from PIL import Image
+    runner, s = fake_native
+    runner.raise_on_generate = RuntimeError("boom")
+    out = tmp_path / "x.png"
+    ok, msg = native.generate(s, "p", out, write_sidecar=True)
+    assert not ok and "RuntimeError: boom" in msg
+    assert not out.exists() and not out.with_suffix(".png.json").exists()
+    runner.raise_on_generate = None
+    src = tmp_path / "huge.png"
+    Image.new("RGB", (64, 64)).save(src)
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+    ok, msg = native.generate(s, "p", out, write_sidecar=False, input_image=src)
+    assert not ok and "DecompressionBombError" in msg
+    assert not out.exists()
+    assert shared.lock.acquire(blocking=False)
+    shared.lock.release()
+
+
+def test_a_native_refusal_fails_the_job_before_any_vram_handover(native_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    app, runner = native_app
+    unloads, provisions = [], []
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: True)
+    monkeypatch.setattr("localm.vram.unload_chat_for_media",
+                        lambda *a, **k: unloads.append(a) or True)
+    monkeypatch.setattr(sd_runtime, "provision", lambda *a, **k: provisions.append(a))
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p", "lora_name": "style.safetensors"})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "failed"
+    lines = [e.get("text", "") for e in job._history if e.get("type") == "line"]
+    assert any("LoRA" in ln for ln in lines)
+    assert unloads == [] and provisions == [] and runner.loads == []
+
+
+def test_backend_route_shows_only_the_model_file_name(native_app):
+    from fastapi.testclient import TestClient
+    app, _runner = native_app
+    with TestClient(app) as c:
+        data = c.get("/api/imagine/backend").json()
+    assert data["native"]["model"] == "model.gguf"
+
+
+def test_backend_route_reports_comfy_when_one_answers_under_auto(native_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    app, _runner = native_app
+    monkeypatch.setattr(comfy_client, "_comfy_alive", lambda url, timeout=3.0: True)
+    with TestClient(app) as c:
+        data = c.get("/api/imagine/backend").json()
+    assert data["choice"] == "auto" and data["active"] == "comfy"
+    assert "native" not in data
+
+
+def test_preflight_checks_comfyui_when_one_answers_under_auto(gui_app, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(comfy_client, "_comfy_alive", lambda url, timeout=3.0: True)
+    asked = []
+    monkeypatch.setattr(comfy_client, "describe_missing_models",
+                        lambda workflow, api_url: asked.append(api_url) or [])
+    with TestClient(gui_app) as c:
+        data = c.post("/api/media/image/preflight", json={}).json()
+    assert asked, data
+    assert not any(m.get("native") for m in data.get("missing", []))
+
+
+# --------------------------------------------------------------------------- #
+#  the process-wide worker: idle countdown and serialisation                  #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def live_worker(monkeypatch):
+    runner = _FakeRunner()
+    runner.alive = True
+    monkeypatch.setattr(shared, "runner", runner)
+    yield runner
+    shared.cancel_idle_timer()
+
+
+def _wait_fired(timer):
+    timer.join(5.0)
+    assert not timer.is_alive()
+
+
+def test_the_idle_countdown_stops_an_unused_worker(live_worker):
+    assert shared.worker_pid() == live_worker.pid
+    shared.arm_idle_timer(0.01)
+    _wait_fired(shared._idle_timer)
+    assert not live_worker.alive
+    assert shared.worker_pid() is None
+
+
+def test_the_idle_countdown_leaves_a_worker_that_is_in_use(live_worker):
+    with shared.lock:
+        shared.arm_idle_timer(0.01)
+        _wait_fired(shared._idle_timer)
+    assert live_worker.alive
+
+
+def test_rearming_cancels_the_pending_countdown(live_worker):
+    shared.arm_idle_timer(60)
+    first = shared._idle_timer
+    shared.arm_idle_timer(60)
+    assert shared._idle_timer is not first and first.finished.is_set()
+
+
+def test_free_cancels_the_countdown_and_stops_the_worker(live_worker):
+    shared.arm_idle_timer(60)
+    pending = shared._idle_timer
+    assert shared.free() is True
+    assert pending.finished.is_set() and shared._idle_timer is None
+    assert not live_worker.alive
+
+
+@pytest.fixture
+def timed_native(tmp_path, monkeypatch):
+    runner = _FakeRunner()
+    monkeypatch.setattr(shared, "runner", runner)
+    rt = sd_runtime.Runtime(backend="vulkan", path=tmp_path / "rt")
+    monkeypatch.setattr(sd_runtime, "resolve", lambda choice="auto": rt)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"weights")
+    yield runner, {"backend": "native", "native": {"model": str(model)}}
+    shared.cancel_idle_timer()
+
+
+def test_a_generation_restarts_the_idle_countdown(timed_native, tmp_path):
+    runner, s = timed_native
+    shared.arm_idle_timer(60)
+    before = shared._idle_timer
+    ok, msg = native.generate(s, "p", tmp_path / "o.png", write_sidecar=False)
+    assert ok, msg
+    after = shared._idle_timer
+    assert before.finished.is_set()
+    assert after is not None and after is not before
+    assert after.interval == shared.IDLE_UNLOAD_SECONDS
+    assert runner.alive
+
+
+def test_generations_wait_for_the_worker_in_turn(timed_native, tmp_path):
+    import threading
+    runner, s = timed_native
+    results = []
+    with shared.lock:
+        t = threading.Thread(target=lambda: results.append(
+            native.generate(s, "p", tmp_path / "q.png", write_sidecar=False)))
+        t.start()
+        t.join(0.3)
+        assert t.is_alive() and runner.loads == []
+    t.join(10.0)
+    assert not t.is_alive() and results[0][0] is True

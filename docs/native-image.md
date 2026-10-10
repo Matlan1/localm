@@ -62,15 +62,19 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
 | Native sampling steps, CFG scale, sampler | Blank uses the model's recommended values (SD-Turbo: 2 steps, CFG 1), else stable-diffusion.cpp's defaults (20 steps, CFG 7). |
 | Native VAE, CLIP-L, CLIP-G, T5-XXL, LLM | Optional model parts. |
 
-Paths and model names are owner-only settings.
+Paths and model names are owner-only settings: a key without admin rights can neither
+set nor read them, and the Images page and job log show only a model's file name. Network
+(UNC) and device paths are refused.
 
 ## What it does and does not do
 
 - txt2img and img2img (the input image is resized to the requested size; without a
-  size, its own size rounded down to a multiple of 8). Size: 64 to 2048 pixels per
+  size, its own size, scaled down to fit 2048 pixels per side with its aspect ratio
+  kept, rounded down to a multiple of 8). Size: 64 to 2048 pixels per
   side, multiples of 8.
 - Progress (loading, each sampling step, decoding) streams to the job log, the CLI
-  and the MCP progress notifications. Stop cancels the running generation.
+  and the MCP progress notifications. Stop cancels a running model load or
+  generation; the first-use runtime download runs to completion.
 - The chat model is unloaded first when the image model needs the VRAM (Media VRAM
   swap setting) and reloaded afterwards. The worker keeps its model loaded between
   generations and exits after 10 minutes without one, when VRAM is handed back, or

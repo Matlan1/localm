@@ -1957,8 +1957,8 @@ def media_fields_for(name: str) -> list:
 
 
 def media_admin_only_fields() -> set:
-    """Field keys (across all media plugins) flagged owner-only (today:
-    launch_cmd, api_url). A non-owner config:write key must not set them
+    """Field keys (across all media plugins) flagged owner-only (launch_cmd,
+    api_url, workdir and the native model files). A non-owner config:write key must not set them
     (set_media_config's owner gate) and must not see their resolved value
     either (media_schema_json). The single source of truth for both."""
     return {f.key for f in MEDIA_PLUGIN_FIELDS if f.admin_only}
@@ -2049,15 +2049,18 @@ _MEDIA_NUMBER_RANGES = {"native_steps": (int, 1, 150), "native_cfg_scale": (floa
 
 def _media_number(key: str, value):
     """*value* parsed as the number type of *key* and checked against its range."""
+    import math
     kind, lo, hi = _MEDIA_NUMBER_RANGES[key]
     try:
-        num = kind(float(value)) if kind is int else kind(value)
+        num = float(value)
     except (TypeError, ValueError):
         raise ValueError(f"{key}: {value!r} is not a number") from None
-    if kind is int and float(value) != num:
-        raise ValueError(f"{key}: {value!r} is not a whole number")
-    if not (lo <= num <= hi) or num != num:
+    if not math.isfinite(num) or not (lo <= num <= hi):
         raise ValueError(f"{key}: {value!r} is outside {lo}..{hi}")
+    if kind is int:
+        if num != int(num):
+            raise ValueError(f"{key}: {value!r} is not a whole number")
+        return int(num)
     return num
 
 

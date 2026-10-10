@@ -78,16 +78,35 @@ def _say(on_progress) -> Callable[[str], None]:
     return say
 
 
+def display_name(value: str) -> str:
+    """*value* as shown to users: a registered model name unchanged, a file path
+    reduced to its file name."""
+    return str(value).replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def _resolve_file(value: str, what: str) -> Path:
+    """The file a native model setting names: a registered model, else a local
+    path. UNC and device paths are refused without touching the filesystem.
+    Raises ``_ModelError``; messages name the file, never its directory."""
     from localm.model_manager.registry import get_model_info
+    from localm.pathsafe import is_unc_or_device_path
+    shown = display_name(value)
     info = get_model_info(str(value))
-    path = Path(info[0]) if info is not None else Path(str(value)).expanduser()
-    if not path.exists():
-        raise _ModelError(f"The native image {what} '{value}' is neither a registered "
+    raw = str(info[0]) if info is not None else str(value)
+    if is_unc_or_device_path(raw):
+        raise _ModelError(f"The native image {what} '{shown}' is a network or device "
+                          "path, which is not allowed.")
+    path = Path(raw).expanduser()
+    try:
+        exists, is_file = path.exists(), path.is_file()
+    except OSError as e:
+        raise _ModelError(f"The native image {what} '{shown}' cannot be read "
+                          f"({type(e).__name__}).") from e
+    if not exists:
+        raise _ModelError(f"The native image {what} '{shown}' is neither a registered "
                           "model nor a file on this machine.")
-    if not path.is_file():
-        raise _ModelError(f"The native image {what} '{value}' is not a single model file "
-                          f"({path}).")
+    if not is_file:
+        raise _ModelError(f"The native image {what} '{shown}' is not a single model file.")
     return path
 
 
@@ -126,7 +145,7 @@ def resolve_models(s: dict) -> dict:
     rec = None
     if model:
         main = _resolve_file(model, "model")
-        label = model
+        label = display_name(model)
         rec = _recommended_for(main)
     else:
         found = _recommended_in_registry()
@@ -170,6 +189,8 @@ def ensure_available(s: dict, on_progress=None) -> tuple[bool, str]:
         models = resolve_models(s)
     except _ModelError as e:
         return False, str(e)
+    except Exception as e:  # noqa: BLE001
+        return False, f"The native image model could not be checked: {e}"
     try:
         rt = _ensure_runtime(s, say)
     except sd_runtime.ProvisionError as e:
@@ -189,7 +210,7 @@ def status(s: dict) -> dict:
     try:
         models = resolve_models(s)
         model, missing = models["label"], None
-    except _ModelError as e:
+    except Exception as e:  # noqa: BLE001
         model, missing = None, str(e)
     rec = RECOMMENDED_MODELS[0]
     return {
@@ -220,7 +241,7 @@ def vram_estimate_bytes(s: dict) -> Optional[int]:
     fixed compute allowance), or None when they cannot be resolved."""
     try:
         models = resolve_models(s)
-    except _ModelError:
+    except Exception:  # noqa: BLE001
         return None
     total = 0
     for key, value in models["ctx"].items():
@@ -252,13 +273,22 @@ def _check_size(w: int, h: int) -> Optional[str]:
     return None
 
 
+def fit_size(width: int, height: int) -> tuple[int, int]:
+    """*width* x *height* scaled down, keeping the aspect ratio, to fit
+    ``MAX_SIDE`` on each side, then rounded down to multiples of 8 and raised
+    to at least ``MIN_SIDE``."""
+    big = max(width, height)
+    if big > MAX_SIDE:
+        width, height = width * MAX_SIDE // big, height * MAX_SIDE // big
+    return max(MIN_SIDE, width // 8 * 8), max(MIN_SIDE, height // 8 * 8)
+
+
 def _load_init_image(path: Path, width: Optional[int], height: Optional[int]) -> dict:
     from PIL import Image
     with Image.open(path) as im:
         im = im.convert("RGB")
         if width is None or height is None:
-            width = max(MIN_SIDE, min(MAX_SIDE, im.width - im.width % 8))
-            height = max(MIN_SIDE, min(MAX_SIDE, im.height - im.height % 8))
+            width, height = fit_size(im.width, im.height)
         if (im.width, im.height) != (width, height):
             im = im.resize((width, height), Image.Resampling.LANCZOS)
         return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
@@ -316,7 +346,38 @@ def _event_relay(say):
     return on_event
 
 
-def generate(s: dict, prompt: str, out_path: Path, *,
+def refusal(*, model_overrides=None, lora_name=None, placement=None,
+            width=None, height=None, **_ignored) -> Optional[str]:
+    """Why the native backend cannot honour a request with these inputs, or
+    None. Checked before any download, VRAM handover or load."""
+    if model_overrides:
+        return ("Workflow model choices apply to ComfyUI. The native backend uses "
+                "the model set in Settings > Images.")
+    if lora_name:
+        return ("LoRAs are not supported by the native image backend yet; "
+                "use the ComfyUI backend for LoRA generation.")
+    if placement:
+        return ("Per-component GPU placement applies to ComfyUI only; turn it off or "
+                "use the ComfyUI backend.")
+    if (width is None) != (height is None):
+        return "Give both width and height, or neither."
+    if width is not None and height is not None:
+        return _check_size(int(width), int(height))
+    return None
+
+
+def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:
+    """Generate one image of *prompt* into *out_path*; see ``_generate``.
+    Never raises: an unexpected error becomes ``(False, message)``."""
+    try:
+        return _generate(s, prompt, out_path, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.warning("native image generation failed: %s: %s", type(e).__name__, e)
+        return False, f"Native image generation failed: {type(e).__name__}: {e}"
+
+
+def _generate(s: dict, prompt: str, out_path: Path, *,
              self_url: Optional[str] = None,
              write_sidecar: bool = True,
              instance_token: Optional[str] = None,
@@ -338,7 +399,7 @@ def generate(s: dict, prompt: str, out_path: Path, *,
              width: Optional[int] = None,
              height: Optional[int] = None) -> tuple[bool, str]:
     """Generate one image of *prompt* into *out_path* (a PNG without embedded
-    metadata). Returns ``(ok, message)``; never raises. Writes only
+    metadata). Returns ``(ok, message)``. Writes only
     *out_path* and, when *write_sidecar*, ``<out_path>.json``.
 
     ComfyUI-only inputs are refused with a reason rather than ignored:
@@ -347,21 +408,10 @@ def generate(s: dict, prompt: str, out_path: Path, *,
     *swap* asks this backend to unload the chat model itself, used when the
     caller's own unload did not succeed."""
     say = _say(on_progress)
-    if model_overrides:
-        return False, ("Workflow model choices apply to ComfyUI. The native backend uses "
-                       "the model set in Settings > Images.")
-    if lora_name:
-        return False, ("LoRAs are not supported by the native image backend yet; "
-                       "use the ComfyUI backend for LoRA generation.")
-    if placement:
-        return False, ("Per-component GPU placement applies to ComfyUI only; turn it off or "
-                       "use the ComfyUI backend.")
-    if (width is None) != (height is None):
-        return False, "Give both width and height, or neither."
-    if width is not None and height is not None:
-        bad = _check_size(int(width), int(height))
-        if bad:
-            return False, bad
+    refused = refusal(model_overrides=model_overrides, lora_name=lora_name,
+                      placement=placement, width=width, height=height)
+    if refused:
+        return False, refused
     started = time.monotonic()
     try:
         models = resolve_models(s)
