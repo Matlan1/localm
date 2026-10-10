@@ -1605,6 +1605,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
+- **A plain `coder` API key can no longer run commands through the project's coder
+  configuration.** A restricted coder session (a shared, non-owner key) started any
+  MCP server listed in the project's `.localcoder/config.toml` when it opened, and
+  its file tools could create or change that file. So a key meant for reading and
+  editing could write a server command and run it by opening a second session, and
+  the same file also reached the owner's next session (MCP servers, auto-approve,
+  privacy mode). A restricted session now starts no MCP server, loads no plugin
+  tools or skills, and refuses to create or change anything inside a `.localcoder`
+  directory at any depth; a `search_replace` sweep leaves those files alone and
+  lists them. Owner sessions are unchanged.
 - **Hugging Face models no longer download and run code from the Hugging Face kernel
   hub unless the network policy allows it.** transformers could fetch a compiled kernel
   package from the Hub while a model was loading or replying and import it, even with
