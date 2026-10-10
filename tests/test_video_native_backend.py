@@ -100,7 +100,9 @@ def test_the_recommended_set_resolves_once_every_part_is_registered(tmp_path):
     (tmp_path / last.filename).write_bytes(b"x")
     _register(last.role, tmp_path / last.filename, last.model_type)
     m = native.resolve_models({"native": {}})
-    assert set(m["ctx"]) == {"diffusion_model_path", "vae_path", "t5xxl_path"}
+    assert set(m["ctx"]) == {"diffusion_model_path", "vae_path", "t5xxl_path",
+                             "diffusion_flash_attn"}
+    assert m["ctx"]["diffusion_flash_attn"] is True
     assert m["recommended"] is rec and m["label"] == rec.name
 
 
@@ -229,7 +231,8 @@ def test_generate_writes_an_mp4_with_every_frame(fake_video, tmp_path):
     info = _probe(out)
     assert (info["w"], info["h"], info["frames"]) == (128, 96, 17)
     assert round(info["fps"]) == 16 and info["audio"] == 0
-    assert runner.loads[0] == {"diffusion_model_path": s["native"]["model"],
+    assert runner.loads[0] == {"diffusion_flash_attn": True,
+                               "diffusion_model_path": s["native"]["model"],
                                "t5xxl_path": s["native"]["t5xxl"], "vae_path": s["native"]["vae"]}
     side = json.loads(out.with_suffix(".mp4.json").read_text(encoding="utf-8"))
     assert side["frames"] == 17 and side["backend"] == "native" and side["model"] == "dit.gguf"

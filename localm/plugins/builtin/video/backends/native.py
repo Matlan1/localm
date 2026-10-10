@@ -128,8 +128,9 @@ def missing_model_message() -> str:
 
 def resolve_models(s: dict) -> dict:
     """The model files the native backend would load for settings *s*:
-    ``{"key", "ctx", "label", "recommended"}``. Raises ``_ModelError`` with a
-    user-facing reason when they cannot be resolved."""
+    ``{"key", "ctx", "label", "recommended"}``. ``ctx`` also turns on
+    diffusion flash attention. Raises ``_ModelError`` with a user-facing
+    reason when they cannot be resolved."""
     blk = _native_block(s)
     model = (blk.get("model") or "").strip()
     ctx: dict = {}
@@ -150,6 +151,7 @@ def resolve_models(s: dict) -> dict:
             if hit is not None:
                 ctx[_PART_FIELDS[role]] = str(hit[1])
         label = rec.name
+    ctx["diffusion_flash_attn"] = True
     key = tuple(sorted(ctx.items()))
     return {"key": key, "ctx": ctx, "label": label, "recommended": rec}
 

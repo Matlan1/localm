@@ -72,7 +72,7 @@ class SdRunner:
                 self._crash_trace_path = child_crash_trace_path("sdcpp-worker")
             except OSError as e:
                 logger.warning("could not allocate a native-fault trace file (%s); a "
-                               "native fault in the image worker will not be traced", e)
+                               "native fault in the media worker will not be traced", e)
         self._proc = ctx.Process(
             target=worker_main,
             args=(self._req_q, self._resp_q, self._cancel, self._crash_trace_path),
@@ -109,7 +109,7 @@ class SdRunner:
         *on_event*. Raises :class:`SdCancelled` or :class:`SdWorkerError`."""
         proc, resp_q, cancel = self._proc, self._resp_q, self._cancel
         if proc is None or resp_q is None or cancel is None:
-            raise SdWorkerError("The image worker is not running.")
+            raise SdWorkerError("The media worker is not running.")
         deadline = time.monotonic() + timeout
         cancel_deadline = None
         while True:
@@ -131,17 +131,17 @@ class SdRunner:
                     if cancel_deadline is not None:
                         raise SdCancelled("Generation cancelled.") from None
                     raise SdWorkerError(
-                        f"The image worker process crashed (exit code {reason}) during "
+                        f"The media worker process crashed (exit code {reason}) during "
                         f"'{label}'. The server stayed up.{detail}") from None
                 now = time.monotonic()
                 if cancel_deadline is not None and now > cancel_deadline:
                     self.shutdown(grace=0)
                     raise SdCancelled(
-                        "Generation cancelled (the image worker was stopped).") from None
+                        "Generation cancelled (the media worker was stopped).") from None
                 if now > deadline:
                     self.shutdown(grace=0)
                     raise SdWorkerError(
-                        f"The image worker '{label}' timed out after {timeout:.0f}s and "
+                        f"The media worker '{label}' timed out after {timeout:.0f}s and "
                         "was stopped. The server stayed up.") from None
                 continue
             kind = msg[0]
@@ -162,11 +162,11 @@ class SdRunner:
                 raise SdCancelled(msg[1] or "Generation cancelled.")
             if kind == "error":
                 raise SdWorkerError(str(msg[1]))
-            raise SdWorkerError(f"Unexpected reply from the image worker: {msg!r}")
+            raise SdWorkerError(f"Unexpected reply from the media worker: {msg!r}")
 
     def _request(self, name: str, payload, timeout: float, **kw):
         if self._req_q is None or self._cancel is None or not self.is_alive():
-            raise SdWorkerError("The image worker is not running.")
+            raise SdWorkerError("The media worker is not running.")
         self._cancel.clear()
         self._req_q.put((name, payload))
         return self._wait(name, timeout, **kw)

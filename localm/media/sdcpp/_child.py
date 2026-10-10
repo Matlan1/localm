@@ -259,7 +259,7 @@ def _do_generate_image(payload, cancel_event):
     from . import _binding as b
     lib, ctx = _State.lib, _State.ctx
     if lib is None or ctx is None:
-        raise RuntimeError("no model is loaded in the image worker")
+        raise RuntimeError("no model is loaded in the media worker")
     p = b._init_struct(lib, "sd_img_gen_params_init", b.sd_img_gen_params_t)
     prompt = str(payload.get("prompt") or "")
     negative = str(payload.get("negative_prompt") or "")

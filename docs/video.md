@@ -30,6 +30,13 @@ stable-diffusion.cpp supports can be set instead: **Native model** is the diffus
 **Native T5-XXL text encoder** takes Wan's umt5-xxl, **Native VAE** the VAE, and **Native
 CLIP vision encoder** the clip_vision_h file Wan image-to-video models need.
 
+Measured on a 16 GB RX 6900 XT with the ROCm runtime: Wan2.1 T2V 1.3B at 832x480, 33
+frames (2 s at 16 fps) and 30 steps took about 9 s per step and 7 minutes in total,
+including loading the model and decoding the frames. The Vulkan runtime on the same card
+took about 165 s per step at that size (small clips such as 480x272 run at a few seconds
+per step), so prefer the ROCm or CUDA runtime for video where one is available; **Native
+runtime** `auto` already picks it.
+
 Frame counts are snapped to 4k+1 like the ComfyUI path (at most 241). Width and height must
 be multiples of 16, from 64 to 1920. The clip is written as H.264 MP4 with PyAV (installed
 with the `voice` extra, which the installers include); a model that also returns audio
