@@ -552,3 +552,22 @@ def test_an_unexpected_error_keeps_the_anthropic_shape(home, monkeypatch):
     assert r.status_code == 500
     assert r.json() == {"type": "error", "error": {"type": "api_error",
                                                    "message": "Internal server error"}}
+
+
+def test_the_translator_drops_a_stop_sequence_on_a_tool_use_reply():
+    import asyncio
+    data = {"choices": [{"finish_reason": "tool_calls", "stop_sequence": "STOP",
+                         "message": {"content": "", "tool_calls": [
+                             {"id": "c", "function": {"name": "f", "arguments": "{}"}}]}}]}
+    assert A.message_from_completion(data, MODEL, False)["stop_sequence"] is None
+
+    async def chunks():
+        yield {"choices": [{"delta": {"tool_calls": data["choices"][0]["message"]["tool_calls"]}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "tool_calls", "stop_sequence": "STOP"}]}
+
+    async def collect():
+        return [line async for line in A.message_stream(chunks(), model=MODEL, want_thinking=False)]
+    lines = asyncio.run(collect())
+    delta = [json.loads(x.decode().split("data: ", 1)[1]) for x in lines
+             if b"message_delta" in x][0]["delta"]
+    assert delta == {"stop_reason": "tool_use", "stop_sequence": None}
