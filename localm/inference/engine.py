@@ -665,6 +665,11 @@ class Engine:
         grammar. See ``BaseBackend.supports_grammar`` for why the default denies."""
         return getattr(self._backend, "supports_grammar", False)
 
+    def unsupported_sampling(self, names) -> list:
+        """The sampling options in *names* (``min_p``, ``presence_penalty``,
+        ``frequency_penalty``) the active backend cannot apply."""
+        return self._backend.unsupported_sampling(names)
+
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Up-front grammar validation, delegated to the backend.
 
@@ -698,10 +703,15 @@ class Engine:
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Iterator[str]:
         """Stream the reply to *messages*. ``thinking=False`` asks a reasoning
         model to answer without its reasoning channel; ``None`` leaves the
-        model's default. The other parameters default to the config values."""
+        model's default. *min_p*, *presence_penalty* and *frequency_penalty* are
+        passed to the backend only when set; check :meth:`unsupported_sampling`
+        first. The other parameters default to the config values."""
         # Auto-reload if the model was unloaded. Holds the process-global load
         # lock so a reload cannot race another load onto the GPU, and
         # double-checks inside the lock so a model another thread just brought
@@ -718,7 +728,11 @@ class Engine:
                     self._backend.load()
 
         cfg = load_config()
-        extra = {"thinking": thinking} if thinking is not None else {}
+        extra: dict = {"thinking": thinking} if thinking is not None else {}
+        for key, value in (("min_p", min_p), ("presence_penalty", presence_penalty),
+                           ("frequency_penalty", frequency_penalty)):
+            if value is not None:
+                extra[key] = value
         # Normalise model-internal control markers (harmony and Gemma channel
         # tags, and similar) once here, so every backend inherits it. The GGUF
         # backend also scrubs internally and scrub_stream is idempotent; the HF

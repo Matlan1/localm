@@ -218,6 +218,11 @@ class HFBackend(BaseBackend):
         confirmed HF embedder to the dedicated on-device embedder."""
         return self._can_embed
 
+    def unsupported_sampling(self, names) -> list:
+        """None: transformers applies min_p, and the worker adds a logits
+        processor for the presence and frequency penalties."""
+        return []
+
     @property
     def supports_grammar(self) -> bool:
         """True only when xgrammar (the optional ``[grammar]`` extra) is
@@ -492,6 +497,9 @@ class HFBackend(BaseBackend):
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Iterator[str]:
         # Checked before the loaded-state gate below and before touching
         # self._runner, so any caller gets a clean UnsupportedInputError for an
@@ -515,7 +523,11 @@ class HFBackend(BaseBackend):
         # done envelope, which HFRunner.chat_stream caches as
         # self._runner.last_done.
         self.last_finish_reason = "stop"
-        extra = {"thinking": thinking} if thinking is not None else {}
+        extra: dict = {"thinking": thinking} if thinking is not None else {}
+        for key, value in (("min_p", min_p), ("presence_penalty", presence_penalty),
+                           ("frequency_penalty", frequency_penalty)):
+            if value is not None:
+                extra[key] = value
         yield from self._runner.chat_stream(
             first_chunk_timeout=self._first_token_timeout_seconds(),
             on_status=on_status,

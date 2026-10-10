@@ -5202,12 +5202,15 @@ async def _stream_sse_body(
     chunk_id: Optional[str] = None,
     role_sent: bool = False,
     meter: Optional[_GenerationMeter] = None,
+    include_usage: bool = False,
     **gen_kwargs,
 ) -> AsyncGenerator[str, None]:
     """Stream the reply to *messages* as SSE ``data:`` lines.
 
     *chunk_id* reuses the id of a stream the caller already opened, and
-    *role_sent* skips the role chunk that caller already sent.
+    *role_sent* skips the role chunk that caller already sent. With
+    *include_usage* the usage moves from the finish chunk to a last chunk with
+    empty ``choices``, as OpenAI's ``stream_options.include_usage`` asks.
 
     With *compact* (or, when *prompt_tokens* is not given, when the prompt
     nearly fills the context), the conversation is compacted after the role
@@ -5273,12 +5276,12 @@ async def _stream_sse_body(
                 ctx.outcome = "error"
             err_chunk = ChatChunk.token(refusal, model_id, chunk_id, ts)
             yield f"data: {err_chunk.model_dump_json()}\n\n"
-            done = ChatChunk.done(model_id, chunk_id, ts, finish_reason="error",
-                                  usage=UsageInfo(prompt_tokens=prompt_tokens or 0,
-                                                  total_tokens=prompt_tokens or 0,
-                                                  context_capacity=capacity))
-            yield f"data: {done.model_dump_json()}\n\n"
-            yield "data: [DONE]\n\n"
+            for data in _final_chunks(model_id, chunk_id, ts, "error",
+                                      UsageInfo(prompt_tokens=prompt_tokens or 0,
+                                                total_tokens=prompt_tokens or 0,
+                                                context_capacity=capacity),
+                                      include_usage):
+                yield data
             return
 
     if sem.locked():
@@ -5480,10 +5483,23 @@ async def _stream_sse_body(
     )
     meter.record(usage.prompt_tokens, usage.completion_tokens,
                  usage.ttft_ms, usage.tokens_per_sec)
-    done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
-                          finish_reason=finish_reason)
-    yield f"data: {done.model_dump_json()}\n\n"
-    yield "data: [DONE]\n\n"
+    for data in _final_chunks(model_id, chunk_id, ts, finish_reason, usage, include_usage):
+        yield data
+
+
+def _final_chunks(model_id: str, chunk_id: str, ts: int, finish_reason: str,
+                  usage: UsageInfo, include_usage: bool) -> list:
+    """The SSE lines that end a chat stream: the finish chunk, then with
+    *include_usage* a chunk with empty ``choices`` carrying *usage* (otherwise
+    the finish chunk carries it), then ``[DONE]``."""
+    done = ChatChunk.done(model_id, chunk_id, ts, finish_reason=finish_reason,
+                          usage=None if include_usage else usage)
+    lines = [f"data: {done.model_dump_json()}\n\n"]
+    if include_usage:
+        tail = ChatChunk(id=chunk_id, created=ts, model=model_id, choices=[], usage=usage)
+        lines.append(f"data: {tail.model_dump_json()}\n\n")
+    lines.append("data: [DONE]\n\n")
+    return lines
 
 
 def _stream_sse_completion(*args, **kwargs) -> AsyncIterator[str]:
@@ -5505,8 +5521,13 @@ async def _stream_sse_completion_body(
     ctx=None,
     prompt_tokens: Optional[int] = None,
     meter: Optional[_GenerationMeter] = None,
+    include_usage: bool = False,
+    echo: Optional[str] = None,
     **gen_kwargs,
 ) -> AsyncGenerator[str, None]:
+    """Stream a text completion as SSE ``data:`` lines. *echo*, when given, is
+    sent as the first text. With *include_usage* the usage moves from the finish
+    chunk to a last chunk with empty ``choices``."""
     meter = meter or _GenerationMeter()
     chunk_id = make_chunk_id()
     ts = int(time.time())
@@ -5577,6 +5598,14 @@ async def _stream_sse_completion_body(
                 loop.call_soon_threadsafe(token_queue.put_nowait, None)
             except RuntimeError:
                 pass
+
+    if echo:
+        echoed = {
+            "id": chunk_id, "object": "text_completion.chunk",
+            "created": ts, "model": model_id,
+            "choices": [{"text": echo, "index": 0, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(echoed)}\n\n"
 
     async with sem:
         gen_start = time.perf_counter()
@@ -5697,7 +5726,13 @@ async def _stream_sse_completion_body(
     }
     meter.record(prompt_tokens, completion_tokens,
                  done["usage"]["ttft_ms"], done["usage"]["tokens_per_sec"])
+    usage_only = None
+    if include_usage:
+        usage_only = {"id": chunk_id, "object": "text_completion.chunk", "created": ts,
+                      "model": model_id, "choices": [], "usage": done.pop("usage")}
     yield f"data: {json.dumps(done)}\n\n"
+    if usage_only is not None:
+        yield f"data: {json.dumps(usage_only)}\n\n"
     yield "data: [DONE]\n\n"
 
 

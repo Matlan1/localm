@@ -994,6 +994,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         all at once."""
         return not self.is_diffusion
 
+    def unsupported_sampling(self, names) -> list:
+        """Every name in *names* for a diffusion language model, none otherwise:
+        llama.cpp's sampler chain applies min_p and the presence and frequency
+        penalties."""
+        return list(names) if self.is_diffusion else []
+
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
         so a bad grammar is a clean 400 rather than a native fault that would latch
@@ -1151,6 +1157,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Iterator[str]:
         # Image input: with an mmproj loaded it flows through to
         # create_chat_completion's image path. A text-only model refuses the image
@@ -1158,6 +1167,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         from .base import IMAGE_UNSUPPORTED_MESSAGE, UnsupportedInputError, messages_contain_image
         if messages_contain_image(messages) and not self.supports_images:
             raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+        sampling = {k: v for k, v in (("min_p", min_p), ("presence_penalty", presence_penalty),
+                                      ("frequency_penalty", frequency_penalty))
+                    if v is not None}
+        refused = self.unsupported_sampling(sampling)
+        if refused:
+            raise UnsupportedInputError(
+                f"{', '.join(refused)} cannot be applied by a diffusion language model")
 
         # Once a native grammar fault has been seen, skip grammar up-front and
         # generate unconstrained, so a grammar request never breaks chat.
@@ -1183,6 +1199,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             kwargs["seed"] = seed
         if thinking is not None:
             kwargs["thinking"] = thinking
+        kwargs.update(sampling)
 
         # The grammar-fault retry-without-grammar logic runs inside the isolated
         # worker (GgufWorker.chat_stream). This method relays the resulting stream

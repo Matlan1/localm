@@ -579,3 +579,51 @@ def schema_to_grammar(schema: Any) -> str:
     if root == "root":
         raise SchemaGrammarError("the schema is only a reference to itself")
     return comp.render(root)
+
+
+_SUBSCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
+_SUBSCHEMA_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
+_SUBSCHEMA_ONE = ("items", "additionalProperties", "not", "contains", "if", "then", "else",
+                  "propertyNames")
+_MAX_LOOSEN_STEPS = 32
+
+
+def _without_keyword(node: Any, keyword: str) -> Any:
+    """Copy of the schema *node* with *keyword* removed wherever a schema (not a
+    property name) carries it."""
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == keyword:
+            continue
+        if key in _SUBSCHEMA_MAPS and isinstance(value, dict):
+            out[key] = {name: _without_keyword(sub, keyword) for name, sub in value.items()}
+        elif key in _SUBSCHEMA_LISTS and isinstance(value, list):
+            out[key] = [_without_keyword(sub, keyword) for sub in value]
+        elif key in _SUBSCHEMA_ONE:
+            out[key] = _without_keyword(value, keyword)
+        else:
+            out[key] = value
+    return out
+
+
+def loosen_schema(schema: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(schema, dropped)``: *schema* with the keywords the compiler cannot
+    enforce removed one by one until it compiles, and the keywords removed;
+    ``None`` when it still does not compile."""
+    dropped: list[str] = []
+    current = schema
+    for _ in range(_MAX_LOOSEN_STEPS):
+        try:
+            schema_to_grammar(current)
+            return current, dropped
+        except SchemaGrammarError as exc:
+            if not exc.keyword:
+                return None, dropped
+            stripped = _without_keyword(current, exc.keyword)
+            if stripped == current:
+                return None, dropped
+            current = stripped
+            dropped.append(exc.keyword)
+    return None, dropped

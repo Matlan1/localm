@@ -387,6 +387,9 @@ class GgufWorker(VramSizingMixin):
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ):
         """Yield text tokens one at a time. The caller (the runner's dispatch
         loop) already filtered out an image the model cannot see and already
@@ -424,6 +427,10 @@ class GgufWorker(VramSizingMixin):
                 kw["seed"] = seed
             if thinking is not None:
                 kw["thinking"] = thinking
+            for key, value in (("min_p", min_p), ("presence_penalty", presence_penalty),
+                               ("frequency_penalty", frequency_penalty)):
+                if value is not None:
+                    kw[key] = value
             if self.stream_cancel is not None:
                 kw["should_stop"] = self.stream_cancel.is_set
             return kw

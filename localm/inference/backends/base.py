@@ -423,6 +423,13 @@ class BaseBackend(ABC):
         loaded for speculative drafting. Default False."""
         return False
 
+    def unsupported_sampling(self, names) -> list:
+        """The sampling options in *names* (``min_p``, ``presence_penalty``,
+        ``frequency_penalty``) this backend cannot apply, in order. Default: all
+        of them, so a backend that never declared support refuses them rather
+        than generating as if they were not set."""
+        return list(names)
+
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Check *grammar* against this backend before generation starts.
 
@@ -503,6 +510,9 @@ class BaseBackend(ABC):
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Iterator[str]:
         """
         Yield text tokens one at a time.
@@ -534,6 +544,12 @@ class BaseBackend(ABC):
             channel (see :func:`no_think_prompt`); ``None`` and ``True`` leave
             the model's default.  A model with no ``<think>`` convention is
             unaffected.
+        min_p, presence_penalty, frequency_penalty:
+            OpenAI sampling options, passed only when the caller set them and
+            only to a backend whose :meth:`unsupported_sampling` does not list
+            them.  ``presence_penalty`` subtracts a fixed amount from the logit
+            of every token already generated, ``frequency_penalty`` that amount
+            times how often it was generated.
         """
 
     @property
