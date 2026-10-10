@@ -137,6 +137,10 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             placement, notice = resolve_media_placement(_cfg, s["api_url"])
             if notice:
                 job.push({"type": "line", "text": notice})
+        elif _cfg.get("comfy_gpu_placement"):
+            job.push({"type": "line", "text":
+                      "Per-component GPU placement applies to ComfyUI only; the native "
+                      "backend loads each model on one GPU."})
         swap = decide_media_swap(s)
         # The gate above reads COMBINED free VRAM across a configured GPU split,
         # but each media model component loads WHOLE onto ONE card (localm ORDERS the

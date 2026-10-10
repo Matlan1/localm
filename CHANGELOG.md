@@ -494,6 +494,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A native image job now says GPU placement is ComfyUI-only.** With per-component GPU placement turned on
+  and the native image backend in use, the job log now says the setting applies to ComfyUI only and that each
+  model loads on one GPU. Before, the setting was silently ignored.
 - **A bad audio clip or image no longer unloads a GGUF model.** An unreadable clip or picture is refused with a
   `400` and the model stays loaded. Before, the model was dropped and the request got a server error.
 - **The Seed help no longer promises an identical reply.** A GGUF model computes only the

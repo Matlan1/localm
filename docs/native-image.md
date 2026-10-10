@@ -82,7 +82,8 @@ set nor read them, and the Images page and job log show only a model's file name
 - The PNG carries no embedded metadata. A `.json` sidecar with the prompt and
   settings is written next to it except in privacy mode.
 - ComfyUI-only features are refused with a reason rather than ignored: workflow model
-  picks, ComfyUI LoRA files and per-component GPU placement.
+  picks and ComfyUI LoRA files. Per-component GPU placement applies to ComfyUI only; with
+  it turned on, a native job says so and loads each model on one GPU.
 
 ## Tested hardware
 
