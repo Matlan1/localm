@@ -527,7 +527,8 @@ def _gpu_placement_fields(engine) -> dict:
     yet, or a backend without a layer-count knob - see Engine.gpu_placement),
     plus the ``Engine.mmap_state`` fields (``use_mmap``, ``mmap``,
     ``mmap_from_disk``, ``mmap_note``) when the load reported them, plus
-    ``adapters`` (``Engine.applied_adapters``) when LoRA adapters are applied.
+    ``adapters`` (``Engine.applied_adapters``) when LoRA adapters are applied,
+    plus ``parallel_slots`` when the model answers more than one request at once.
     Merged into every switch_engine()/load-route success payload so a caller
     can tell a full GPU load from a silent CPU fallback instead of a bare
     "loaded"/"already_active" that hides it."""
@@ -539,6 +540,9 @@ def _gpu_placement_fields(engine) -> dict:
     adapters = getattr(engine, "applied_adapters", None)
     if isinstance(adapters, list) and adapters:
         fields["adapters"] = adapters
+    slots = _engine_parallel_slots(engine)
+    if slots > 1:
+        fields["parallel_slots"] = slots
     return fields
 
 

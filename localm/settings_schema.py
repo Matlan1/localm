@@ -271,7 +271,7 @@ CORE_FIELDS: list = [
                  "time; they share its context window. auto uses 4 (1 while "
                  "speculative drafting is on). 1 answers one at a time.",
                  group="Engine", applies=Applies.NEXT_LOAD,
-                 options=["auto", "1", "2", "4", "8", "16"]),
+                 options=["auto"] + [str(n) for n in range(1, 17)]),
     SettingField("diffusion_steps", Widget.NUMBER, "Diffusion steps",
                  "Denoising steps per reply for diffusion language models "
                  "(Dream, LLaDA, RND1). More steps: better text, slower reply. "

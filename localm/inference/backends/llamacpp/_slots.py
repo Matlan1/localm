@@ -303,6 +303,7 @@ class SlotScheduler:
             while running:
                 with self._cond:
                     while not self._closed and not self._has_work():
+                        self._reap_queued()
                         self._heartbeat_queued()
                         self._cond.wait(WAIT_HEARTBEAT_S if self._queue else None)
                     if self._closed:
@@ -371,10 +372,13 @@ class SlotScheduler:
             if slot.stream is not None and slot.stream.cancelled.is_set():
                 self._end(slot, "stop")
         with self._cond:
-            gone = [s for s in self._queue if s.cancelled.is_set()]
-            for stream in gone:
-                self._queue.remove(stream)
+            self._reap_queued()
+
+    def _reap_queued(self) -> None:
+        """End the queued replies that were cancelled. Caller holds _cond."""
+        gone = [s for s in self._queue if s.cancelled.is_set()]
         for stream in gone:
+            self._queue.remove(stream)
             self._release(stream, _End("stop"))
 
     def _heartbeat_queued(self) -> None:

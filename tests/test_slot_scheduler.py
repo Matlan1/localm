@@ -204,12 +204,15 @@ def made():
 
 def test_concurrent_replies_each_equal_the_reply_decoded_alone(made):
     ctx = _SimContext()
+    ctx.step_delay = 0.002
     sched = made(ctx, 4)
+    with ctx.lock():
+        streams = [sched.submit(PROMPTS[i], 40, _Sampler()) for i in range(4)]
     results = {}
-    _run_threads([lambda i=i: _collect(sched, PROMPTS[i], 40, results=results, key=i)
+    _run_threads([lambda i=i: results.__setitem__(i, _drain(streams[i]))
                   for i in range(4)])
     for i, prompt in enumerate(PROMPTS):
-        assert (results[i]["out"], results[i]["reason"]) == _reference(prompt, 40)
+        assert results[i] == _reference(prompt, 40)
     assert any(len({e[2] for e in call}) > 1 for call in ctx.calls), \
         "no decode carried more than one sequence"
 
@@ -247,6 +250,7 @@ def test_every_sampler_is_freed_exactly_once(made):
 def test_a_request_that_does_not_fit_waits_for_the_running_reply(made):
     # 200 cells, no growth: each request reserves 5 + 100 + RESERVE_PAD cells.
     ctx = _SimContext(capacity=200, n_ctx_max=200)
+    ctx.step_delay = 0.01
     sched = made(ctx, 2)
     first = sched.submit(PROMPTS[0], 100, _Sampler())
     tok = next(first)
@@ -311,6 +315,7 @@ def test_a_cache_that_cannot_be_truncated_is_rebuilt_from_scratch(made):
 
 def test_growing_the_context_replays_the_running_replies(made):
     ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256)
+    ctx.step_delay = 0.005
     sched = made(ctx, 2)
     first = sched.submit(PROMPTS[0], 150, _Sampler())
     got = [next(first) for _ in range(5)]
@@ -389,7 +394,7 @@ def test_a_cancelled_queued_request_never_decodes(made):
 
 def test_a_stop_check_cancels_a_waiting_reply(made):
     ctx = _SimContext(capacity=200, n_ctx_max=200)
-    ctx.step_delay = 0.002
+    ctx.step_delay = 0.01
     sched = made(ctx, 2)
     running = sched.submit(PROMPTS[0], 100, _Sampler())
     next(running)
@@ -440,6 +445,33 @@ def test_exclusive_section_waits_for_active_slots_without_deadlock(made):
     assert late["x"]["out"] == _reference(PROMPTS[2], 5)[0]
     assert waits, "on_wait was never called while waiting"
     assert ctx.cleared >= 1
+
+
+def test_a_request_cancelled_behind_an_exclusive_section_ends_at_once(made):
+    ctx = _SimContext()
+    sched = made(ctx, 2)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with sched.exclusive():
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert held.wait(5)
+    sampler = _Sampler()
+    queued = sched.submit(PROMPTS[0], 10, sampler)
+    queued.close()
+    t0 = time.monotonic()
+    out, reason = _drain(queued)
+    waited = time.monotonic() - t0
+    release.set()
+    holder.join(5)
+    assert (out, reason) == ([], "stop")
+    assert waited < 2, f"the cancel waited {waited:.1f}s for the exclusive section"
+    assert sampler in ctx.freed
 
 
 def test_close_ends_queued_and_active_replies_and_frees_their_samplers(made):

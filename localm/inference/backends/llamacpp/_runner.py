@@ -672,8 +672,10 @@ class ModelRunner:
         # The load phase read from the last consumed fault trace (see
         # crash_phase_from_trace); None when none was captured.
         self._last_crash_phase = None
-        # The death report of the child it was read for, as (proc, report).
+        # The death report of the child it was read for, as (proc, report),
+        # read once under _death_lock however many streams see the death.
         self._death_cache = None
+        self._death_lock = threading.Lock()
         # Multiplexed streams (a model loaded with parallel slots): a demux
         # thread owns the response queue and routes ("stream", sid, envelope)
         # to _streams[sid] and every other envelope to _simple_q.
@@ -754,6 +756,10 @@ class ModelRunner:
         the debug log"): a Python exception escaping ``_runner_main`` is logged
         with its traceback by ``_runner_entry``, but a hard ``os._exit``
         produces no exception and therefore no traceback."""
+        with self._death_lock:
+            return self._death_report_locked()
+
+    def _death_report_locked(self):
         proc = self._proc
         cached = self._death_cache
         if cached is not None and proc is not None and cached[0] is proc:

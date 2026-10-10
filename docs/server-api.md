@@ -540,7 +540,8 @@ completed). A model too large to fully fit VRAM still loads deliberately,
 offloading as many layers as fit and running the rest on CPU rather than
 refusing outright; `degraded` is true whenever fewer than the full layer
 count landed on the GPU, so a caller can tell that apart from a full GPU
-load.
+load. `parallel_slots` appears when the loaded model answers more than one
+request at once, and says how many.
 
 `POST /v1/models/unload` returns `status` (`"unloaded"`, `"in_use"` when
 every loaded model was mid-request and none could be freed, or
