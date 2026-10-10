@@ -38,9 +38,10 @@ localm setup-music --status
    GPUs included); a backend that does not start falls back to Vulkan, then CPU, and
    says so. A generation installs the runtime itself when it is missing.
 
-2. **Models.** The default set (about 4.1 GB) comes from
+2. **Models.** The default set (about 3 GB) comes from
    `Serveurperso/ACE-Step-1.5-GGUF`: the planner (`acestep-5Hz-lm-0.6B`), the text encoder
-   (`Qwen3-Embedding-0.6B`), the turbo diffusion model and the VAE. `localm setup-music`
+   (`Qwen3-Embedding-0.6B`), the turbo diffusion model (Q4_K_M; the larger Q8_0 file can be
+   set as the native diffusion model in the music settings) and the VAE. `localm setup-music`
    downloads it; on the Music page, Generate offers each missing file. A generation never
    downloads models by itself.
 
