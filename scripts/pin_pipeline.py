@@ -662,12 +662,27 @@ def close_stale_pr(branch: str, worktree: Path) -> None:
             raise InfraError(f"could not delete stale remote branch {branch}: {result.stderr}")
 
 
+def reset_pipeline_worktree(worktree: Path) -> None:
+    """Discard every uncommitted change and untracked file in the dedicated pipeline
+    worktree, so one pin's leftover edit can never ride along in another pin's commit.
+    Raises InfraError when git refuses or the tree is still not clean afterwards."""
+    for args in (["reset", "--hard"], ["clean", "-fd"]):
+        result = _run_git(args, cwd=worktree)
+        if result.returncode != 0:
+            raise InfraError(f"git {' '.join(args)} failed in the pipeline worktree: {result.stderr}")
+    status = _run_git(["status", "--porcelain"], cwd=worktree)
+    if status.returncode != 0 or status.stdout.strip():
+        raise InfraError(
+            f"the pipeline worktree is not clean after a reset: {status.stdout or status.stderr}")
+
+
 def prepare_bump_branch(worktree: Path, candidate: str, *, pin: str = "llama") -> str:
     """Reset the pipeline worktree to a fresh branch off origin/master, ready
     for this candidate's bump commit. Raises InfraError if the fetch or the
     detach fails, rather than branching off whatever the worktree was on
     before. See test_prepare_bump_branch_refuses_when_fetch_fails."""
     branch = f"claude/pin-pipeline-{pin}-{candidate}"
+    reset_pipeline_worktree(worktree)
     result = _run_git(["fetch", "origin"], cwd=worktree)
     if result.returncode != 0:
         raise InfraError(f"git fetch origin failed: {result.stderr}")
@@ -799,6 +814,7 @@ def merge_pr(pr_number: int, worktree: Path, branch: str, candidate: str, old_ta
 # --------------------------------------------------------------------------- #
 
 _LOCK_OWNER_FILE = "owner.json"
+LOCK_OWNERLESS_GRACE_SECONDS = 600
 
 
 def _pipeline_lock_path() -> Path:
@@ -837,7 +853,13 @@ def pipeline_lock():
             pid = owner.get("pid") if isinstance(owner, dict) else None
         except (OSError, ValueError):
             pass
-        if isinstance(pid, int) and not pid_alive(pid):
+        ownerless_for = 0.0
+        if not isinstance(pid, int):
+            try:
+                ownerless_for = time.time() - lock.stat().st_mtime
+            except OSError:
+                ownerless_for = 0.0
+        if (isinstance(pid, int) and not pid_alive(pid)) or ownerless_for > LOCK_OWNERLESS_GRACE_SECONDS:
             try:
                 (lock / _LOCK_OWNER_FILE).unlink(missing_ok=True)
                 lock.rmdir()

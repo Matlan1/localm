@@ -24,7 +24,9 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -733,6 +735,73 @@ def test_prepare_bump_branch_creates_a_fresh_branch_off_origin_master(tmp_path, 
     current = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                              cwd=worktree, capture_output=True, text=True).stdout.strip()
     assert current == branch
+
+
+def _dirty_worktree(tmp_path):
+    repo = _init_scratch_repo(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+    (worktree / "README.md").write_text("EDITED BY A FAILED BUMP\n", encoding="utf-8")
+    (worktree / "leftover.txt").write_text("untracked\n", encoding="utf-8")
+    return worktree
+
+
+def test_reset_pipeline_worktree_discards_tracked_edits_and_untracked_files(tmp_path):
+    worktree = _dirty_worktree(tmp_path)
+    pipeline.reset_pipeline_worktree(worktree)
+    assert (worktree / "README.md").read_text(encoding="utf-8") == "scratch\n"
+    assert not (worktree / "leftover.txt").exists()
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=worktree, capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+
+
+def test_reset_pipeline_worktree_refuses_a_tree_it_cannot_make_clean(tmp_path):
+    worktree = _dirty_worktree(tmp_path)
+    nested = worktree / "nested-repo"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "x.txt").write_text("x\n", encoding="utf-8")
+    with pytest.raises(pipeline.InfraError, match="not clean"):
+        pipeline.reset_pipeline_worktree(worktree)
+
+
+def test_reset_pipeline_worktree_raises_infra_error_outside_a_repository(tmp_path):
+    with pytest.raises(pipeline.InfraError):
+        pipeline.reset_pipeline_worktree(tmp_path)
+
+
+def test_prepare_bump_branch_never_carries_a_previous_pins_edit_into_the_next_branch(tmp_path, monkeypatch):
+    worktree = _dirty_worktree(tmp_path)
+    monkeypatch.setattr(pipeline, "close_stale_pr", lambda branch, worktree: None)
+    pipeline.prepare_bump_branch(worktree, "b10999")
+    assert (worktree / "README.md").read_text(encoding="utf-8") == "scratch\n"
+    assert not (worktree / "leftover.txt").exists()
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=worktree, check=True)
+    subprocess.run(["git", "add", "-u"], cwd=worktree, check=True)
+    staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=worktree,
+                            capture_output=True, text=True).stdout.strip()
+    assert staged == ""
+
+
+def test_pipeline_lock_reclaims_an_ownerless_lock_after_the_grace_period(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    lock = pipeline._pipeline_lock_path()
+    lock.mkdir(parents=True)
+    old = time.time() - pipeline.LOCK_OWNERLESS_GRACE_SECONDS - 60
+    os.utime(lock, (old, old))
+    with pipeline.pipeline_lock():
+        assert lock.exists()
+    assert not lock.exists()
+
+
+def test_pipeline_lock_keeps_refusing_a_fresh_ownerless_lock(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    pipeline._pipeline_lock_path().mkdir(parents=True)
+    with pytest.raises(pipeline.PipelineLockBusy, match="owner unreadable"):
+        with pipeline.pipeline_lock():
+            pass
 
 
 def test_prepare_bump_branch_refuses_when_fetch_fails(tmp_path):

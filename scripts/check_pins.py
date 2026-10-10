@@ -34,6 +34,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -91,10 +92,11 @@ class PinSpec:
 #  Network                                                                    #
 # --------------------------------------------------------------------------- #
 
-def _headers() -> dict:
+def _headers(url: str = "") -> dict:
+    """Request headers for *url*. The GitHub token is sent to api.github.com only."""
     headers = {"User-Agent": "localm-check-pins", "Accept": "application/vnd.github+json"}
     token = os.environ.get("GITHUB_TOKEN")
-    if token:
+    if token and urllib.parse.urlsplit(url).hostname == "api.github.com":
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
@@ -125,7 +127,7 @@ def _urlopen_retry(req, *, read: bool = False):
 def _get_json(url: str):
     """GET *url* as JSON. Raises FetchError on any failure, including a body that
     is not JSON. Tests replace this function; nothing else opens a socket."""
-    req = urllib.request.Request(url, headers=_headers())
+    req = urllib.request.Request(url, headers=_headers(url))
     try:
         return json.loads(_urlopen_retry(req, read=True).decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:

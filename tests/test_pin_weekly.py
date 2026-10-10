@@ -93,6 +93,8 @@ def env(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
     spies = Spies()
+    spies.resets = []
+    monkeypatch.setattr(pp, "reset_pipeline_worktree", lambda wt: spies.resets.append(wt))
     monkeypatch.setattr(pp, "sync_main_checkout", lambda: None)
     monkeypatch.setattr(pp, "ensure_pipeline_worktree", lambda: worktree)
     monkeypatch.setattr(pp, "prepare_bump_branch",
@@ -748,6 +750,110 @@ def test_main_sync_failure_before_the_lock_is_inconclusive(monkeypatch, capsys):
     monkeypatch.setattr(pp, "sync_main_checkout", boom)
     assert pw.main(["--only", "uv"]) == 2
     assert "ran" not in calls and execs == []
+
+
+def test_a_failed_bump_leaves_the_shared_worktree_clean(env, monkeypatch):
+    monkeypatch.setenv("FAKE_BUMP_RC", "1")
+    pw.advance(_adv(), dry_run=False)
+    assert env.resets == [env.worktree]
+
+
+def test_failing_targeted_tests_leave_the_shared_worktree_clean(env):
+    pw.advance(_adv(tests=("tests/test_that_does_not_exist.py",)), dry_run=False)
+    assert env.resets == [env.worktree]
+
+
+def test_an_infra_error_leaves_the_shared_worktree_clean(env, monkeypatch):
+    def boom(wt, br, cand, old, message=None):
+        raise pp.InfraError("push failed")
+    monkeypatch.setattr(pp, "commit_and_push", boom)
+    pw.advance(_adv(), dry_run=False)
+    assert env.resets == [env.worktree]
+
+
+def test_a_successful_bump_does_not_reset_the_worktree(env):
+    assert pw.advance(_adv(), dry_run=False).verdict == pw.MERGED
+    assert env.resets == []
+
+
+def test_a_failing_reset_does_not_hide_the_original_failure(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BUMP_RC", "1")
+
+    def refuse(wt):
+        raise pp.InfraError("git reset failed")
+    monkeypatch.setattr(pp, "reset_pipeline_worktree", refuse)
+    out = pw.advance(_adv(), dry_run=False)
+    assert out.verdict == pw.FAIL and "REFUSED: bad receipt" in out.detail
+    assert "could not clean the pipeline worktree" in capsys.readouterr().out
+
+
+def test_one_runtime_raising_does_not_stop_the_others_or_the_report(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+
+    def renamed():
+        raise SystemExit("constant renamed")
+
+    def broken():
+        raise KeyError("boom")
+    advs = [_adv(key="a", title="A", candidate=renamed, verify_current_cmd=lambda w, r: renamed()),
+            _adv(key="b", title="B", candidate=broken),
+            _adv(key="c", title="C", candidate=lambda: None)]
+    code, path = pw.run_weekly(advs, dry_run=False)
+    assert code == 2
+    assert path.is_file()
+    by = {(r["key"], r["kind"]): r for r in json_rows(path)}
+    assert by[("a", "advance")]["verdict"] == pw.INCONCLUSIVE and "SystemExit" in by[("a", "advance")]["detail"]
+    assert by[("b", "advance")]["verdict"] == pw.INCONCLUSIVE and "KeyError" in by[("b", "advance")]["detail"]
+    assert by[("c", "advance")]["verdict"] == pw.NONE_NEWER
+    assert ("c", "verify-current") in by and by[("a", "verify-current")]["verdict"] == pw.INCONCLUSIVE
+
+
+def json_rows(path):
+    import json
+    return json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+
+
+def test_a_stale_currency_row_makes_the_run_exit_nonzero_even_when_every_step_passed(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    monkeypatch.setattr(cp, "run_checks", lambda specs, now=None: [cp.Row(name="x", status=cp.STALE)])
+    code, _ = pw.run_weekly([_adv(candidate=lambda: None)], dry_run=False)
+    assert code == 1
+
+
+def test_an_unreadable_currency_row_makes_the_run_exit_two(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    monkeypatch.setattr(cp, "run_checks", lambda specs, now=None: [cp.Row(name="x", status=cp.UNKNOWN)])
+    code, _ = pw.run_weekly([_adv(candidate=lambda: None)], dry_run=False)
+    assert code == 2
+
+
+def test_the_currency_table_is_computed_after_the_advances(env, monkeypatch):
+    order = []
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    monkeypatch.setattr(cp, "run_checks", lambda specs, now=None: order.append("currency") or [])
+    pw.run_weekly([_adv(candidate=lambda: order.append("candidate") or None)], dry_run=False)
+    assert order.index("candidate") < order.index("currency")
+
+
+def test_a_merge_without_a_runtime_confirm_is_not_reported_as_confirmed(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    adv = _review_adv(post_bump_cmds=((sys.executable, "-c", "print('ok')"),),
+                      auto_merge=lambda o, n: True)
+    code, path = pw.run_weekly([adv], dry_run=False)
+    by = {(r["key"], r["kind"]): r for r in json_rows(path)}
+    assert by[("fake", "advance")]["verdict"] == pw.MERGED
+    assert by[("fake", "verify-current")]["verdict"] == pw.NOT_MEASURED
+
+
+def test_the_post_bump_commands_do_not_see_the_github_token(env, monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
+    monkeypatch.setenv("GH_TOKEN", "secret-token-2")
+    seen = tmp_path / "env.txt"
+    code = (f"import os; open({str(seen)!r}, 'w').write("
+            "repr((os.environ.get('GITHUB_TOKEN'), os.environ.get('GH_TOKEN'))))")
+    pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", code),),
+                           auto_merge=lambda o, n: False), dry_run=False)
+    assert seen.read_text(encoding="utf-8") == "(None, None)"
 
 
 def test_main_rejects_an_unknown_only_name(capsys):
