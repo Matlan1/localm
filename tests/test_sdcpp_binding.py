@@ -89,10 +89,13 @@ def _with_extra_int_before(struct_type, field_name):
     return type(f"Shifted_{struct_type.__name__}", (Structure,), {"_fields_": fields})
 
 
+_PINNED_SHORT = pins.COMMIT[:7].encode()
+
+
 class _FakeLib:
     """Implements the three ``*_init`` functions and ``sd_commit``."""
 
-    def __init__(self, commit=b"f89d9b1", ctx_type=b.sd_ctx_params_t,
+    def __init__(self, commit=_PINNED_SHORT, ctx_type=b.sd_ctx_params_t,
                  img_type=b.sd_img_gen_params_t, vid_type=b.sd_vid_gen_params_t):
         self.commit = commit
         self.types = {"ctx": ctx_type, "img": img_type, "vid": vid_type}
@@ -158,10 +161,10 @@ def test_a_library_struct_larger_than_the_binding_keeps_its_trailing_defaults():
     assert back.tail == 1234
 
 
-@pytest.mark.parametrize("commit", [b"deadbee", b"", None, b"f89d"])
+@pytest.mark.parametrize("commit", [b"deadbee", b"", None, pins.COMMIT[:4].encode()])
 def test_a_different_commit_is_refused(commit):
     lib = _FakeLib(commit=commit)
-    with pytest.raises(b.AbiMismatch, match="localm binds commit f89d9b1"):
+    with pytest.raises(b.AbiMismatch, match=f"localm binds commit {pins.COMMIT[:7]}"):
         b.verify_abi(lib)
 
 
