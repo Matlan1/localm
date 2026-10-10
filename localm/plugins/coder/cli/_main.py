@@ -329,7 +329,7 @@ def main(
             "egress data. run_shell and run_shell_background now require --yes "
             "(else they are denied this run); network tools still obey net_mode "
             "(off/ask/allow). Pass --yes to auto-approve, or run interactively to "
-            "confirm each call.")
+            "confirm each call.", to_stderr=True)
 
     # ------------------------------------------------------------------ #
     #  Create agent

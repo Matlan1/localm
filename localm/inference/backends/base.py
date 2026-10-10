@@ -407,12 +407,26 @@ GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE = (
 # Shown when a LAZY grammar is requested of a backend that can constrain
 # generation but cannot do it lazily. A distinct string from
 # GRAMMAR_UNSUPPORTED_MESSAGE above, which names a different recovery.
+GRAMMAR_LAZY_UNSUPPORTED_HEAD = (
+    "A LAZY grammar (one that leaves generation unconstrained until a trigger "
+    "pattern matches, then enforces the grammar from there) cannot be applied "
+    "here, so the requested grammar would be ignored and the reply would not "
+    "match it."
+)
+
 GRAMMAR_LAZY_UNSUPPORTED_MESSAGE = (
-    "This model cannot apply a LAZY grammar (one that leaves generation "
-    "unconstrained until a trigger pattern matches, then enforces the grammar "
-    "from there), so the requested grammar would be ignored and the reply would "
-    "not match it. Use a GGUF-format model, whose native sampler implements lazy "
+    GRAMMAR_LAZY_UNSUPPORTED_HEAD
+    + " Use a GGUF-format model, whose native sampler implements lazy "
     "grammars, or resend without grammar_lazy to constrain the whole reply."
+)
+
+# Shown when a GGUF model's llama.cpp runtime lacks lazy grammar support. Starts
+# with GRAMMAR_LAZY_UNSUPPORTED_HEAD, which is what the coder matches on.
+GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE = (
+    GRAMMAR_LAZY_UNSUPPORTED_HEAD
+    + " The llama.cpp runtime installed here is too old to apply lazy grammars: "
+    "run 'localm setup-llama' to install a current one, or resend without "
+    "grammar_lazy to constrain the whole reply."
 )
 
 

@@ -885,10 +885,10 @@ ws     ::= [ \t\n\r]*
         mutually non-containing."""
         from localm.inference.backends.base import (
             GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE,
-            GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
+            GRAMMAR_LAZY_UNSUPPORTED_HEAD,
             GRAMMAR_UNSUPPORTED_MESSAGE,
         )
-        if GRAMMAR_LAZY_UNSUPPORTED_MESSAGE in str(e):
+        if GRAMMAR_LAZY_UNSUPPORTED_HEAD in str(e):
             if getattr(self, "_lazy_grammar_confirmed_unsupported", False):
                 return False   # already disabled; a repeat means something else is wrong
             self._lazy_grammar_confirmed_unsupported = True

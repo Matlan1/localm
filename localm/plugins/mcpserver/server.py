@@ -54,11 +54,12 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
+from localm import __version__ as _LOCALM_VERSION
 from localm.inference.backends.base import LOADING_MODEL_STATUS
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = _LOCALM_VERSION
 
 # Wall-clock bound on how long a load waits for a resident that is still
 # serving a request to free itself before the load is refused as busy. The

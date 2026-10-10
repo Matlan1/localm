@@ -750,8 +750,8 @@ class TestHostAndPort:
         r = gui.invoke("-H", "0.0.0.0")
         assert r.exit_code == 2, r.output
         assert why in r.flat
-        assert ("Refusing to start: binding past loopback without auth. Set "
-                "$env:LOCALM_API_KEY first, or pass --insecure to override.") in r.flat
+        assert ("Refusing to start: binding past loopback without auth. "
+                "Run 'localm key generate' first, or pass --insecure to override.") in r.flat
         assert gui.nothing_started()
         assert gui.certs == []
 

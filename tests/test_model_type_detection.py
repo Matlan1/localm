@@ -904,3 +904,22 @@ class TestSyncModelsDirBackfillsArchAndExpertCount:
         result = mm.sync_models_dir()
         assert result.backfilled == 0
         assert "architecture" not in mm.load_registry()["an-hf-model"]
+
+
+# ------------------------- the pull's detection note ---------------------- #
+
+def test_pull_note_names_a_reranker_a_reranker(tmp_path):
+    from localm.model_manager.pull import _embedding_detection_note
+    f = tmp_path / "qwen3-rerank.gguf"
+    f.write_bytes(_build_gguf_bytes(
+        "qwen3", {"qwen3.pooling_type": "1", "qwen3.classifier.output_labels": "no,yes"}))
+    assert gguf_embedding_signal(f) is True
+    assert "reranker" in _embedding_detection_note(f)
+    assert "embedding model" not in _embedding_detection_note(f)
+
+
+def test_pull_note_keeps_calling_a_plain_embedder_an_embedding_model(tmp_path):
+    from localm.model_manager.pull import _embedding_detection_note
+    f = tmp_path / "qwen3-embed.gguf"
+    f.write_bytes(_build_gguf_bytes("qwen3", {"qwen3.pooling_type": "1"}))
+    assert "embedding model" in _embedding_detection_note(f)

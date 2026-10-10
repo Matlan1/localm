@@ -1277,6 +1277,14 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,
     return dest
 
 
+def _embedding_detection_note(path) -> str:
+    """The console line a pull prints for a GGUF typed as an embedding model:
+    names it a reranker when its own metadata marks it as one."""
+    if _mm.gguf_reranker_signal(path):
+        return "[dim]Detected as a reranker (GGUF metadata).[/dim]"
+    return "[dim]Detected as an embedding model (GGUF metadata).[/dim]"
+
+
 def _non_chat_detection_note(architecture) -> str:
     """The console line a pull prints for a GGUF typed from its non-chat
     ``general.architecture``."""
@@ -1458,7 +1466,7 @@ def _pull_gguf_file(
                     console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
                     reg_type = "mmproj"
                 elif _mm.gguf_embedding_signal(dest):
-                    console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
+                    console.print(_embedding_detection_note(dest))
                     reg_type = "embedding"
                 elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
                     console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
@@ -1628,7 +1636,7 @@ def _pull_gguf_file(
                 console.print("[dim]Detected as a vision projector (GGUF metadata).[/dim]")
                 reg_type = "mmproj"
             elif _mm.gguf_embedding_signal(base_dir / filename):
-                console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
+                console.print(_embedding_detection_note(base_dir / filename))
                 reg_type = "embedding"
             elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
                 console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
