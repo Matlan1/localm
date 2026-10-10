@@ -21,6 +21,22 @@ from localm.config import port_in_use
 from localm.console import show_url
 
 
+def _ipv6_loopback_available() -> bool:
+    """True when this host can bind an IPv6 loopback socket."""
+    if not socket.has_ipv6:
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+needs_ipv6 = pytest.mark.skipif(
+    not _ipv6_loopback_available(), reason="this host has no IPv6 loopback")
+
+
 # ------------------------------------------------------------------ #
 #  The crash itself                                                   #
 # ------------------------------------------------------------------ #
@@ -35,6 +51,7 @@ class TestPortProbeIsFamilyAware:
         params."""
         assert port_in_use(9, host) in (True, False)
 
+    @needs_ipv6
     def test_probe_reports_a_listening_ipv6_socket(self):
         """The instrument must be able to answer TRUE over IPv6, or every False
         above proves nothing: a probe that could only ever say "free" would pass
@@ -61,6 +78,7 @@ class TestPortProbeIsFamilyAware:
 # ------------------------------------------------------------------ #
 
 class TestListenSocket:
+    @needs_ipv6
     def test_ipv6_wildcard_is_dual_stack(self):
         """asyncio's create_server sets IPV6_V6ONLY unconditionally, which would
         make ``-H ::`` unreachable from every IPv4 client on the LAN. Control:
@@ -74,6 +92,7 @@ class TestListenSocket:
         finally:
             sock.close()
 
+    @needs_ipv6
     def test_a_specific_ipv6_literal_is_not_widened(self):
         """A single address names one family. Clearing V6ONLY on ``::1`` would
         claim a reach it does not have."""
@@ -85,7 +104,8 @@ class TestListenSocket:
 
     @pytest.mark.parametrize("host, family", [
         ("127.0.0.1", socket.AF_INET), ("0.0.0.0", socket.AF_INET),
-        ("::1", socket.AF_INET6), ("::", socket.AF_INET6),
+        pytest.param("::1", socket.AF_INET6, marks=needs_ipv6),
+        pytest.param("::", socket.AF_INET6, marks=needs_ipv6),
     ])
     def test_family_follows_the_host(self, host, family):
         sock = netlisten.create_listen_socket(host, 0)
@@ -94,6 +114,7 @@ class TestListenSocket:
         finally:
             sock.close()
 
+    @needs_ipv6
     def test_dual_stack_wildcard_actually_accepts_an_ipv4_client(self):
         """The property users care about, measured rather than inferred from a
         socket option: an IPv4 client connects to a ``::`` listener.

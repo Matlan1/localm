@@ -18,6 +18,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   path returns `json` and `text`; `srt`, `vtt` and `verbose_json` need timestamps it does not
   have and are refused with a message saying so.
 - **Attach an audio clip in the chat composer.** The attach button and drag-and-drop now take audio files (WAV, and MP3, FLAC, OGG, M4A or AAC with the voice extra) next to images and documents. The clip appears as its own chip with its length, plays back in the conversation, and is sent as an `input_audio` part, so a model that can hear audio, such as Qwen3-ASR, transcribes it. A file over 50 MB or a WAV over 10 minutes is refused before it is sent, and when the server refuses a clip (for example a model that cannot hear audio) its message is shown and the clip is dropped so the chat stays usable.
+- **Audio clips in long chats.** A clip the model cannot decode now drops out of the chat with the server's message, instead of failing on every later turn. Compaction counts and names audio clips like images. Conversations with large clips save to the server up to 96 MB, and a conversation too big even for that tells you it is kept only in this browser.
 - **Token log probabilities.** For GGUF models, `/v1/chat/completions` returns `logprobs` and
   up to 20 `top_logprobs` for each token of the reply's content, streamed or not, and
   `/v1/completions` returns the legacy `logprobs` object. In a chat reply, the tokens of the
@@ -495,6 +496,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A deeply nested JSON body no longer causes a server error on speech and Responses.** `POST /v1/audio/speech` answers a body nested thousands of levels deep with a 400 saying it is not valid JSON, and `POST /v1/responses` answers a nested reply from the chat route with a 502 instead of a 500. The TLS certificate and key settings also report a path too long for the operating system as a missing file instead of failing the save.
 - **A native image job now says GPU placement is ComfyUI-only.** With per-component GPU placement turned on
   and the native image backend in use, the job log now says the setting applies to ComfyUI only and that each
   model loads on one GPU. Before, the setting was silently ignored.

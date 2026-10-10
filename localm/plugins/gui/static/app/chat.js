@@ -760,6 +760,7 @@ export function saveConversations(changed) {
 
 export const _convPushTimers = new Map();
 let _convPushWarned = false;   // one warning per breakage, re-armed on success
+const _convTooLargeWarned = new Set();   // conversation ids already toasted for a 413
 
 /** Debounced upsert of one conversation to the server store. */
 export function pushConversation(conv) {
@@ -784,6 +785,10 @@ export function pushConversation(conv) {
       });
       if (!r.ok) {
         _remoteSaveOk = false;
+        if (r.status === 413 && !_convTooLargeWarned.has(conv.id)) {
+          _convTooLargeWarned.add(conv.id);
+          toast(t("chat.conv.tooLarge"), true);
+        }
         if (!_convPushWarned) {
           _convPushWarned = true;
           console.error("conversation save failed (HTTP " + r.status + ") - " +

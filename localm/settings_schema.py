@@ -1631,7 +1631,11 @@ def _validate_one(key: str, val, field: SettingField, default):
         s = "" if val is None else str(val).strip()
         if not s:
             return ""
-        if not Path(s).is_file():
+        try:
+            is_file = Path(s).is_file()
+        except OSError:
+            is_file = False
+        if not is_file:
             raise ValueError(f"{key}: file not found: {s}")
         return s
     if key == "mdns_name":

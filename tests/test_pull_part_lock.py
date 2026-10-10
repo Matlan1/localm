@@ -229,8 +229,14 @@ def test_a_live_holders_lock_is_never_reclaimed(home):
 def test_a_dead_holders_lock_is_reclaimed(home):
     """A crashed download's lock is reclaimed rather than wedging the
     destination forever."""
-    dead = subprocess.Popen([sys.executable, "-c", "pass"])
-    dead.wait(timeout=30)
+    from localm import instances
+    for _ in range(20):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait(timeout=30)
+        if not instances.pid_alive(dead.pid):
+            break
+    else:
+        pytest.fail("every exited child's pid was immediately reused")
 
     d = _part_lock_dir("m.gguf")
     d.mkdir(parents=True)
