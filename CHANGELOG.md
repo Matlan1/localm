@@ -495,6 +495,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A GGUF file with a bad `general.alignment` is refused.** When localm rewrites a model file's
+  metadata, an alignment that is not a power of two is now refused up front, as the GGUF loader
+  already refuses it, instead of producing a file the loader would reject.
 - **A native image job now says GPU placement is ComfyUI-only.** With per-component GPU placement turned on
   and the native image backend in use, the job log now says the setting applies to ComfyUI only and that each
   model loads on one GPU. Before, the setting was silently ignored.
