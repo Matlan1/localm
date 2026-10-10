@@ -583,28 +583,24 @@ def test_queued_requests_hear_they_wait_while_an_exclusive_section_drains(made, 
     ctx = _SimContext()
     ctx.step_delay = 0.01
     sched = made(ctx, 1)
-    running = sched.submit(PROMPTS[0], 60, _Sampler())
+    running = sched.submit(PROMPTS[0], 150, _Sampler())
     next(running)
-    holder = threading.Thread(target=lambda: sched.exclusive().__enter__(), daemon=True)
     statuses = []
     queued = sched.submit(PROMPTS[1], 3, _Sampler(), on_status=statuses.append)
+    watcher = threading.Thread(target=lambda: [None for _ in queued], daemon=True)
+    watcher.start()
+    holder = threading.Thread(target=lambda: sched.exclusive().__enter__(), daemon=True)
     holder.start()
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and sched._exclusive_waiting == 0:
         time.sleep(0.01)
-    seen = threading.Event()
-
-    def watch():
-        for _ in queued:
-            pass
-
-    watcher = threading.Thread(target=watch, daemon=True)
-    watcher.start()
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline and WAITING_FOR_MODEL_STATUS not in statuses:
+    assert sched._exclusive_waiting == 1
+    time.sleep(0.3)
+    before = statuses.count(WAITING_FOR_MODEL_STATUS)
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline and statuses.count(WAITING_FOR_MODEL_STATUS) <= before:
         time.sleep(0.02)
-    if WAITING_FOR_MODEL_STATUS in statuses:
-        seen.set()
+    after = statuses.count(WAITING_FOR_MODEL_STATUS)
     queued.close()
     _drain(running)
-    assert seen.is_set(), "a queued request heard nothing while the exclusive section waited"
+    assert after > before, "a queued request heard nothing while the exclusive section waited"
