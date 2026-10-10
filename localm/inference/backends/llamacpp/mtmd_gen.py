@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from localm.debuglog import dedup_native_stderr, logger
+from localm.debuglog import logger
 
 from . import _api as api
 
@@ -345,6 +345,7 @@ class SpeechSynthesizer:
     def __init__(self, model_path: str, mmproj_path: str, *,
                  n_gpu_layers: int = 0, n_ctx: int = DEFAULT_N_CTX,
                  n_threads: Optional[int] = None, main_gpu: Optional[int] = None) -> None:
+        from .llama import _quiet_stderr
         from .mtmd import MtmdContext, _encode_threads, _load_lib
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -356,13 +357,18 @@ class SpeechSynthesizer:
         self._vocab = None
         self._mem = None
         self._last_gen_seed: Optional[int] = None
-        self._m = bind_generation_api(_load_lib())
-        if not api.has_embeddings_api() or not api.has_memory_api():
-            raise SpeechUnavailable(
-                "The installed llama.cpp runtime lacks the embeddings or memory "
-                "interface speech synthesis needs.")
+        from . import _loader
+        binary_dir = _loader.runtime_binary_dir()
+        if binary_dir is not None:
+            _loader._warn_if_not_bundled(binary_dir)
+        with _quiet_stderr():
+            self._m = bind_generation_api(_load_lib())
+            if not api.has_embeddings_api() or not api.has_memory_api():
+                raise SpeechUnavailable(
+                    "The installed llama.cpp runtime lacks the embeddings or memory "
+                    "interface speech synthesis needs.")
+            api.llama_backend_init()
         threads = int(n_threads) if n_threads else _encode_threads()
-        api.llama_backend_init()
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = int(n_gpu_layers)
         if n_gpu_layers >= 99:
@@ -374,7 +380,7 @@ class SpeechSynthesizer:
         else:
             apply_main_gpu(mp)
         try:
-            with dedup_native_stderr():
+            with _quiet_stderr():
                 self._model = api.llama_load_model_from_file(model_path, mp)
                 if not self._model:
                     raise SpeechUnavailable(
@@ -551,17 +557,21 @@ class SpeechSynthesizer:
         seed = int(seed) & _UINT32_MAX
         if seed == _UINT32_MAX:
             seed = 0
-        try:
-            return self._run(text, lang, reference, seed, budget, on_progress, should_stop)
-        except SpeechStageFailed:
-            if not self._mtmd.on_gpu:
-                raise
-            if not self._retry_projector_on_cpu():
-                raise SpeechUnavailable(
-                    "The speech model's projector failed on the GPU and could not "
-                    "be reopened on the CPU; the model is unloaded and loads again "
-                    "on the next request.") from None
-            return self._run(text, lang, reference, seed, budget, on_progress, should_stop)
+        from .llama import _stderr_ctx_for_generate
+        with _stderr_ctx_for_generate(False)():
+            try:
+                return self._run(text, lang, reference, seed, budget, on_progress,
+                                 should_stop)
+            except SpeechStageFailed:
+                if not self._mtmd.on_gpu:
+                    raise
+                if not self._retry_projector_on_cpu():
+                    raise SpeechUnavailable(
+                        "The speech model's projector failed on the GPU and could not "
+                        "be reopened on the CPU; the model is unloaded and loads again "
+                        "on the next request.") from None
+                return self._run(text, lang, reference, seed, budget, on_progress,
+                                 should_stop)
 
     def _reseed_generation_rng(self, seed: int) -> None:
         """Make the projector's generation RNG start from *seed* on the next
