@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The ACE-Step 1.5 model files the native music backend loads, and pulling the
-default set on first use.
+default set.
 
 Each component is configured as a localm registry model name or a file path,
-and must carry that component's GGUF architecture. Unset components use the
-smallest published set from ``DEFAULT_REPO``, pulled through ``localm pull`` (so
-the download goes through the same network policy, verification and registry as
-any other model) with its progress relayed. When a different model already holds
+and must carry that component's GGUF architecture. Unset components use
+``DEFAULT_FILES`` from ``DEFAULT_REPO``. A generation never downloads them
+(``resolve_models`` with ``pull_missing=False`` raises :class:`ModelError` naming
+the missing files); ``localm setup-music`` and the Music page's download offer
+pull them through localm's model pull (so the download goes through the same
+network policy, verification and registry as any other model) with progress. When a different model already holds
 a default file's registry name, the default is pulled under ``DISTINCT_PREFIX``
 plus that name.
 """
@@ -29,7 +31,7 @@ DEFAULT_REPO = "Serveurperso/ACE-Step-1.5-GGUF"
 DEFAULT_FILES = {
     "lm": "acestep-5Hz-lm-0.6B-Q8_0.gguf",
     "text_encoder": "Qwen3-Embedding-0.6B-Q8_0.gguf",
-    "dit": "acestep-v15-turbo-Q8_0.gguf",
+    "dit": "acestep-v15-turbo-Q4_K_M.gguf",
     "vae": "vae-BF16.gguf",
 }
 
@@ -37,7 +39,7 @@ DEFAULT_FILES = {
 DEFAULT_SIZES = {
     "lm": 709846656,
     "text_encoder": 784144960,
-    "dit": 2549528000,
+    "dit": 1445710272,
     "vae": 337420928,
 }
 
