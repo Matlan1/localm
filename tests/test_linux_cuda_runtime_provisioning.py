@@ -118,10 +118,14 @@ def test_pypi_wheel_url_and_sha_none_when_no_linux_wheel(monkeypatch):
 
 
 def test_pypi_wheel_url_and_sha_refuses_an_unpinned_package_without_any_request(monkeypatch):
-    def must_not_be_called(req, timeout=10):
-        raise AssertionError("an unpinned package must not reach the network")
-    monkeypatch.setattr(sl, "verified_urlopen", must_not_be_called)
+    requested = []
+
+    def record(req, timeout=10):
+        requested.append(req.full_url)
+        raise OSError("unreachable")
+    monkeypatch.setattr(sl, "verified_urlopen", record)
     assert sl._pypi_wheel_url_and_sha("nvidia-some-other-package") == (None, None)
+    assert requested == []
 
 
 def test_every_cuda_runtime_package_is_pinned_to_a_version_and_a_sha256():

@@ -15,6 +15,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -329,9 +330,21 @@ def test_an_unexpected_exception_after_a_pass_is_logged(env, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_run_cmd_times_out_kills_the_tree_and_reports_inconclusive(tmp_path):
-    rc, out = pw.run_cmd([sys.executable, "-c", "import time; time.sleep(30)"],
-                         cwd=tmp_path, timeout=1)
+    pidfile = tmp_path / "grandchild.pid"
+    code = "; ".join([
+        "import subprocess, sys, time",
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])",
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))",
+        "time.sleep(60)",
+    ])
+    rc, out = pw.run_cmd([sys.executable, "-c", code], cwd=tmp_path, timeout=3)
     assert rc == 2 and "timed out" in out
+    grandchild = int(pidfile.read_text(encoding="utf-8"))
+    from localm.instances import pid_alive
+    deadline = time.monotonic() + 10
+    while pid_alive(grandchild) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not pid_alive(grandchild)
 
 
 def test_run_cmd_returns_the_real_exit_code_and_output(tmp_path):
