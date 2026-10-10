@@ -191,6 +191,12 @@ class TestValidation:
         r = client.post(URL, content=b"{not json", headers={"content-type": "application/json"})
         assert r.status_code == 400 and "valid JSON" in r.json()["detail"]
 
+    def test_deeply_nested_json_is_400_not_500(self, client, synth):
+        body = b'{"input": ' + b"[" * 100_000 + b"]" * 100_000 + b"}"
+        r = client.post(URL, content=body, headers={"content-type": "application/json"})
+        assert r.status_code == 400 and "valid JSON" in r.json()["detail"]
+        assert synth.calls == []
+
     def test_a_json_array_is_400(self, client):
         assert client.post(URL, json=["hi"]).status_code == 400
 

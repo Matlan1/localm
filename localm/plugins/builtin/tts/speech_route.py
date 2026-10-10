@@ -154,7 +154,7 @@ async def _read_json(request: Request) -> dict:
                                      f"{MAX_JSON_BYTES // 1024} KB).")
     try:
         data = json.loads(bytes(body).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as e:
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise _bad("The request body is not valid JSON.") from e
     if not isinstance(data, dict):
         raise _bad("The request body must be a JSON object.")
