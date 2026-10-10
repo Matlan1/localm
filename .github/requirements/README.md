@@ -19,7 +19,7 @@ The workflows install Python packages only with `pip install --require-hashes`.
 Regenerate from the repository root (delete `mutmut-constraints.txt` afterwards):
 
 ```bash
-printf 'torch==2.11.0+cpu\n' | uv pip compile - --no-config --no-emit-package setuptools --generate-hashes --emit-index-url \
+printf 'torch==2.13.0+cpu\n' | uv pip compile - --no-config --no-emit-package setuptools --generate-hashes --emit-index-url \
   --python-version 3.12 --python-platform x86_64-manylinux_2_28 \
   --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple \
   --index-strategy unsafe-best-match -o .github/requirements/torch-cpu.txt

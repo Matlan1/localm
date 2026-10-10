@@ -123,7 +123,7 @@ def _runs(job: str) -> str:
 
 def test_the_torch_cpu_set_is_hash_locked_and_pins_the_cpu_build():
     pins = _locked_pins(TORCH_CPU)
-    assert pins.get("torch") == "2.11.0+cpu"
+    assert pins.get("torch") == "2.13.0+cpu"
     assert "setuptools" not in pins
 
 
