@@ -29,7 +29,8 @@ DEFAULT_URL_SHA256 = (
 # llama.cpp 71ad0590f480, which carries the V3 llama_model_params (lazy_mode)
 # and llama_context_params (moe_cache_size) layouts - see
 # inference/backends/llamacpp/_structs.py and _abi.py, which bind every layout
-# from lemonade b1288 on, so an already-provisioned runtime keeps working. (b1xxx here are lemonade-sdk tags, NOT ggml-org ones - the two
+# from lemonade b1288 on, so an already-provisioned runtime keeps working.
+# (b1xxx here are lemonade-sdk tags, NOT ggml-org ones - the two
 # schemes collide; see inference/backends/llamacpp/_structs.py.)
 _ROCM_TAG = "b1342"
 
