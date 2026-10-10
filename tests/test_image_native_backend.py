@@ -774,21 +774,26 @@ def test_mcp_generate_image_tool_uses_the_native_backend(native_configured, monk
     from localm.config import home_dir
     from PIL import Image
     monkeypatch.setenv("LOCALM_MODE", "full")
-    progress = []
-    monkeypatch.setattr(srv, "report_progress", progress.append)
     comfy_calls = []
     monkeypatch.setattr(ic, "generate_image", lambda *a, **k: comfy_calls.append(a))
     engines = srv.EngineCache(default_model="stub", engine_factory=lambda name: None)
     tools = srv.build_tools(engines, enable_images=True, enable_coder=False,
                             enable_memory=False)
-    reply = tools["generate_image"]["handler"]({"prompt": "a fox"})
-    assert reply.get("isError") is not True, reply
+    server = srv.MCPStdioServer({"generate_image": tools["generate_image"]})
+    call = json.dumps({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                       "params": {"name": "generate_image", "arguments": {"prompt": "a fox"},
+                                  "_meta": {"progressToken": "img"}}}) + "\n"
+    out = io.StringIO()
+    server.run_stdio(stdin=io.StringIO(call), stdout=out)
+    msgs = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert msgs[-1]["id"] == 9 and msgs[-1]["result"].get("isError") is not True, msgs[-1]
     [png] = list((home_dir() / "mcp-images").glob("*.png"))
     with Image.open(png) as im:
         assert im.size == (512, 512)
     assert comfy_calls == []
     assert native_configured.generates[0]["prompt"] == "a fox"
-    assert any(str(p).startswith("Step 1/2") for p in progress)
+    notes = [m["params"]["message"] for m in msgs if m.get("method") == "notifications/progress"]
+    assert any(n.startswith("Step 1/2") for n in notes), notes
     assert not native_configured.alive
 
 
