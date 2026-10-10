@@ -394,6 +394,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **localm's managed ComfyUI now installs v0.39.0, up from v0.31.1.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **The bundled llama.cpp runtime moved from b11118 to b11541.** An existing install picks it up with `localm setup-llama --force`.
 - **Linux CUDA setup installs fixed NVIDIA runtime libraries.** `localm setup-llama` on Linux now fetches a pinned, checksum-verified version of the CUDA runtime and cuBLAS libraries instead of whichever version PyPI lists as newest.
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
