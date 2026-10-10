@@ -292,6 +292,15 @@ class TestSynthesisLoop:
         assert synth._mtmd.retries == 1 and out.frames == 4
         assert synth._m.calls.count("init") == 1 and synth._m.calls.count("free") == 1
 
+    def test_a_projector_that_cannot_reopen_on_the_cpu_makes_it_unavailable(self, synth):
+        synth._mtmd.on_gpu = True
+        synth._mtmd.retry_on_cpu = lambda: False
+        synth._m.fail_step = 2
+        with pytest.raises(g.SpeechUnavailable, match="could not be reopened"):
+            synth.synthesize("hello", seed=1)
+        with pytest.raises(g.SpeechUnavailable, match="closed"):
+            synth.synthesize("hello", seed=1)
+
     def test_a_cpu_stage_failure_is_reported(self, synth):
         synth._m.fail_step = 2
         with pytest.raises(g.SpeechStageFailed):

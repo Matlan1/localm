@@ -2209,11 +2209,10 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
 
 async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
     """If *name* is a registered model whose path matches the resident speech
-    model, release it and report the freed VRAM, as ``_unload_reranker_if_matches``
-    does for the reranker. Returns None when *name* is not the resident speech
-    model; ``{"status": "in_use"}`` while a synthesis is in flight. Every speech
-    reader runs in an executor: each takes the speech lock, which a load holds for
-    its whole duration."""
+    model, release it and report the freed VRAM. Returns None when *name* is not
+    the resident speech model; ``{"status": "in_use"}`` while a synthesis is in
+    flight. Every speech reader runs in an executor: each takes the speech lock,
+    which a load holds for its whole duration."""
     from localm.inference import speech as _speech_mod
     info = await loop.run_in_executor(None, _speech_mod.speech_info)
     if info is None:

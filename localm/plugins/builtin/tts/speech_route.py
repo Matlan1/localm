@@ -85,7 +85,7 @@ def _parse_seed(value) -> Optional[int]:
         raise _bad("seed must be an integer.")
     try:
         seed = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise _bad(f"seed must be an integer (got {str(value)[:40]!r}).") from None
     if isinstance(value, float) and seed != value:
         raise _bad("seed must be an integer.")

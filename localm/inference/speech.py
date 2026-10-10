@@ -27,13 +27,14 @@ from typing import Callable, Optional
 from localm import pathscrub
 from localm.debuglog import logger
 
-# LOCK ORDER: engine._LOAD_LOCK (outer) -> _LOCK (inner), never the reverse, as
-# in reranker.py. _LOCK is held for a whole worker spawn and model load, so no
-# reader below may be called from an `async def` handler.
+# LOCK ORDER: engine._LOAD_LOCK (outer) -> _LOCK (inner), never the reverse.
+# _LOCK is held for a whole worker spawn and model load, so no reader below may
+# be called from an `async def` handler. A request is counted in
+# active_requests under _LOCK before get_engine returns the engine.
 _LOCK = threading.RLock()
 _ENGINE: Optional[SpeechEngine] = None
 _ENGINE_KEY: Optional[tuple] = None
-_LOAD_FAILED: dict[tuple, tuple[str, float]] = {}
+_LOAD_FAILED: dict[tuple, tuple[str, float, bool]] = {}
 _LOAD_RETRY_AFTER_S = 60.0
 
 OPENAI_MODEL_ALIASES = ("tts-1", "tts-1-hd", "gpt-4o-mini-tts")
@@ -201,15 +202,18 @@ def _file_key(model: SpeechModel) -> tuple:
     return one(model.path) + one(model.mmproj)
 
 
-def _latched_failure(key: tuple) -> Optional[str]:
+def _raise_latched(key: tuple) -> None:
+    """Raise the recorded load failure for *key* again while it is recent.
+    Call with _LOCK held."""
     failed = _LOAD_FAILED.get(key)
     if failed is None:
-        return None
-    reason, at = failed
-    if time.monotonic() - at < _LOAD_RETRY_AFTER_S:
-        return reason
-    del _LOAD_FAILED[key]
-    return None
+        return
+    reason, at, unavailable = failed
+    if time.monotonic() - at >= _LOAD_RETRY_AFTER_S:
+        del _LOAD_FAILED[key]
+        return
+    from localm.inference.backends.llamacpp.mtmd_gen import SpeechUnavailable
+    raise (SpeechUnavailable if unavailable else SpeechUnavailableError)(reason)
 
 
 def _estimate_bytes(model: SpeechModel, n_ctx: int) -> int:
@@ -275,6 +279,7 @@ class SpeechEngine:
         self._rpc_lock = threading.Lock()
         self._count_lock = threading.Lock()
         self.active_requests = 0
+        self.broken = False
         meta = self._runner.spawn_and_load({
             "model_path": model.path, "mmproj_path": model.mmproj,
             "n_gpu_layers": int(n_gpu_layers), "n_ctx": self.n_ctx,
@@ -285,15 +290,25 @@ class SpeechEngine:
 
     @property
     def alive(self) -> bool:
-        return self._runner.is_alive()
+        return self._runner.is_alive() and not self.broken
+
+    def claim(self) -> None:
+        """Count one request against this engine until :meth:`release`."""
+        with self._count_lock:
+            self.active_requests += 1
+
+    def release(self) -> None:
+        with self._count_lock:
+            self.active_requests -= 1
 
     def speak(self, text: str, *, language: Optional[str] = None,
               reference_wav: Optional[bytes] = None, seed: Optional[int] = None,
               on_progress: Optional[ProgressFn] = None,
               should_cancel: Optional[Callable[[], bool]] = None) -> SpeechOutput:
         """Speak *text*. *reference_wav* is a WAV recording whose voice to
-        imitate. Raises the speech errors of ``mtmd_gen`` and RuntimeError when
-        the worker crashed or hung (it is gone afterwards)."""
+        imitate. The caller holds a :meth:`claim` for the duration. Raises the
+        speech errors of ``mtmd_gen`` and RuntimeError when the worker crashed
+        or hung (it is gone afterwards)."""
         from localm.inference.backends.llamacpp.mtmd_gen import (
             FRAMES_PER_SECOND, SpeechInputError)
         reference = None
@@ -308,34 +323,28 @@ class SpeechEngine:
                                             max_seconds=MAX_REFERENCE_SECONDS)
             except WavError as e:
                 raise SpeechInputError(f"The reference voice could not be read: {e}.") from e
-        with self._count_lock:
-            self.active_requests += 1
+        if not self._rpc_lock.acquire(blocking=False):
+            if on_progress is not None:
+                on_progress({"stage": "waiting"})
+            while not self._rpc_lock.acquire(timeout=0.5):
+                if should_cancel is not None and should_cancel():
+                    from localm.inference.backends.llamacpp.mtmd_gen import SpeechCancelled
+                    raise SpeechCancelled("The speech request was cancelled while waiting.")
         try:
-            if not self._rpc_lock.acquire(blocking=False):
-                if on_progress is not None:
-                    on_progress({"stage": "waiting"})
-                while not self._rpc_lock.acquire(timeout=0.5):
-                    if should_cancel is not None and should_cancel():
-                        from localm.inference.backends.llamacpp.mtmd_gen import SpeechCancelled
-                        raise SpeechCancelled("The speech request was cancelled while waiting.")
-            try:
-                if on_progress is not None:
-                    on_progress({"stage": "speaking", "frames": 0, "seconds": 0.0})
+            if on_progress is not None:
+                on_progress({"stage": "speaking", "frames": 0, "seconds": 0.0})
 
-                def _frames(n: int) -> None:
-                    if on_progress is not None:
-                        on_progress({"stage": "speaking", "frames": n,
-                                     "seconds": n / FRAMES_PER_SECOND})
+            def _frames(n: int) -> None:
+                if on_progress is not None:
+                    on_progress({"stage": "speaking", "frames": n,
+                                 "seconds": n / FRAMES_PER_SECOND})
 
-                result = self._runner.speak(
-                    {"text": text, "language": language, "reference": reference,
-                     "seed": seed},
-                    on_progress=_frames, should_cancel=should_cancel)
-            finally:
-                self._rpc_lock.release()
+            result = self._runner.speak(
+                {"text": text, "language": language, "reference": reference,
+                 "seed": seed},
+                on_progress=_frames, should_cancel=should_cancel)
         finally:
-            with self._count_lock:
-                self.active_requests -= 1
+            self._rpc_lock.release()
         return SpeechOutput(wav=result["wav"], sample_rate=int(result["sample_rate"]),
                             n_samples=int(result["n_samples"]),
                             frames=int(result["frames"]), seed=int(result["seed"]))
@@ -344,19 +353,26 @@ class SpeechEngine:
         self._runner.shutdown(grace=grace)
 
 
-def get_engine(model: SpeechModel, *, on_progress: Optional[ProgressFn] = None) -> SpeechEngine:
+def get_engine(model: SpeechModel, *, on_progress: Optional[ProgressFn] = None,
+               claim: bool = False) -> SpeechEngine:
     """The resident engine for *model*, loading it first (and releasing a
-    different resident one). Raises :class:`SpeechUnavailableError` when the
-    load fails (a failed file pair is not retried for a minute unless it
-    changes) or a different speech model is still busy."""
+    different resident one). With *claim*, one request is counted against the
+    engine under the module lock, so no release can close it in between; the
+    caller then calls ``release()``.
+
+    Raises ``mtmd_gen.SpeechUnavailable`` when the runtime or the model files
+    cannot synthesize speech, and :class:`SpeechUnavailableError` when the load
+    fails otherwise or a different speech model is still busy. A failed file
+    pair is not retried for a minute unless it changes."""
     global _ENGINE, _ENGINE_KEY
+    from localm.inference.backends.llamacpp.mtmd_gen import SpeechUnavailable
     key = _file_key(model)
     with _LOCK:
         if _ENGINE is not None and _ENGINE_KEY == key and _ENGINE.alive:
+            if claim:
+                _ENGINE.claim()
             return _ENGINE
-        failed = _latched_failure(key)
-        if failed is not None:
-            raise SpeechUnavailableError(failed)
+        _raise_latched(key)
     if on_progress is not None:
         on_progress({"stage": "loading"})
     from localm.inference.backends.llamacpp.mtmd_gen import DEFAULT_N_CTX
@@ -367,10 +383,10 @@ def get_engine(model: SpeechModel, *, on_progress: Optional[ProgressFn] = None) 
     with _LOAD_LOCK:
         with _LOCK:
             if _ENGINE is not None and _ENGINE_KEY == key and _ENGINE.alive:
+                if claim:
+                    _ENGINE.claim()
                 return _ENGINE
-            failed = _latched_failure(key)
-            if failed is not None:
-                raise SpeechUnavailableError(failed)
+            _raise_latched(key)
             current = _ENGINE
             if current is not None and current.alive and current.active_requests > 0:
                 raise SpeechUnavailableError(
@@ -383,12 +399,17 @@ def get_engine(model: SpeechModel, *, on_progress: Optional[ProgressFn] = None) 
                 _ENGINE = SpeechEngine(model, n_gpu_layers=ngl)
             except Exception as e:
                 reason_text = pathscrub.scrub_paths(str(e))
-                _LOAD_FAILED[key] = (reason_text, time.monotonic())
+                _LOAD_FAILED[key] = (reason_text, time.monotonic(),
+                                     isinstance(e, SpeechUnavailable))
                 logger.warning("could not load speech model %s (%s)", model.name, e)
+                if isinstance(e, SpeechUnavailable):
+                    raise SpeechUnavailable(reason_text) from e
                 raise SpeechUnavailableError(reason_text) from e
             _ENGINE_KEY = key
             logger.info("speech model ready: %s (%d Hz, projector on %s)", model.name,
                         _ENGINE.sample_rate, "GPU" if _ENGINE.projector_on_gpu else "CPU")
+            if claim:
+                _ENGINE.claim()
             return _ENGINE
 
 
@@ -399,19 +420,26 @@ def synthesize(model: SpeechModel, text: str, *, language: Optional[str] = None,
     """Speak *text* with *model* (loading it when needed). A worker that
     crashed or hung is dropped, so the next request starts a fresh one."""
     global _ENGINE, _ENGINE_KEY
-    engine = get_engine(model, on_progress=on_progress)
+    from localm.inference.backends.llamacpp.mtmd_gen import SpeechUnavailable
+    engine = get_engine(model, on_progress=on_progress, claim=True)
     logger.info("speech: %d characters with %s", len(text), model.name)
     try:
         out = engine.speak(text, language=language, reference_wav=reference_wav,
                            seed=seed, on_progress=on_progress,
                            should_cancel=should_cancel)
-    except RuntimeError:
+    except RuntimeError as e:
+        if isinstance(e, SpeechUnavailable):
+            engine.broken = True
         if not engine.alive:
             with _LOCK:
                 if _ENGINE is engine:
                     _ENGINE = None
                     _ENGINE_KEY = None
+            if engine.broken:
+                engine.close(grace=5.0)
         raise
+    finally:
+        engine.release()
     logger.info("speech: %.2f s of audio (%d frames)", out.seconds, out.frames)
     return out
 

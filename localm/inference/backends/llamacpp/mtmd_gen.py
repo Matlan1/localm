@@ -490,7 +490,8 @@ class SpeechSynthesizer:
         Raises :class:`SpeechInputError`, ``PretokenizerUnsafeInputError``,
         :class:`SpeechCancelled`, :class:`SpeechBudgetExceeded` or
         :class:`SpeechStageFailed`. A projector GPU failure is retried once on
-        the CPU before it is reported."""
+        the CPU; when the projector cannot be reopened there,
+        :class:`SpeechUnavailable` is raised and the synthesizer is unusable."""
         if self._helper is None:
             raise SpeechUnavailable("the speech model is closed")
         n_tokens = self.check_text(text)
@@ -516,7 +517,10 @@ class SpeechSynthesizer:
             if not self._mtmd.on_gpu:
                 raise
             if not self._retry_projector_on_cpu():
-                raise
+                raise SpeechUnavailable(
+                    "The speech model's projector failed on the GPU and could not "
+                    "be reopened on the CPU; the model is unloaded and loads again "
+                    "on the next request.") from None
             return self._run(text, lang, reference, seed, budget, on_progress, should_stop)
 
     def _retry_projector_on_cpu(self) -> bool:

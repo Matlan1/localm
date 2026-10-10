@@ -39,10 +39,17 @@ class _FakeEngine:
         self.alive_flag = True
         self.closed = False
         self.outcome = None
+        self.broken = False
 
     @property
     def alive(self):
-        return self.alive_flag
+        return self.alive_flag and not self.broken
+
+    def claim(self):
+        self.active_requests += 1
+
+    def release(self):
+        self.active_requests -= 1
 
     def speak(self, text, **kw):
         if self.outcome is not None:
@@ -139,6 +146,112 @@ class TestResidency:
         assert speech.reset_speech(force=False) is False and speech.is_loaded()
         speech._ENGINE.active_requests = 0
         assert speech.reset_speech(force=False) is True and not speech.is_loaded()
+
+
+class TestReviewFixes:
+    def test_a_load_that_cannot_synthesize_stays_unavailable_not_a_load_error(
+            self, engines, home, monkeypatch):
+        from localm.inference.backends.llamacpp.mtmd_gen import SpeechUnavailable
+
+        class NoSpeech(_FakeEngine):
+            def __init__(self, model, **kw):
+                raise SpeechUnavailable("runtime predates the speech interface")
+        monkeypatch.setattr(speech, "SpeechEngine", NoSpeech)
+        m = _model(home, "a")
+        for _ in range(2):
+            with pytest.raises(SpeechUnavailable) as info:
+                speech.get_engine(m)
+            assert not isinstance(info.value, speech.SpeechUnavailableError)
+
+    def test_a_claimed_engine_cannot_be_released_before_it_speaks(self, engines, home):
+        m = _model(home, "a")
+        eng = speech.get_engine(m, claim=True)
+        assert eng.active_requests == 1
+        assert speech.reset_speech(force=False) is False and speech.is_loaded()
+        eng.release()
+        assert speech.reset_speech(force=False) is True
+
+    def test_synthesize_releases_its_claim(self, engines, home):
+        speech.synthesize(_model(home, "a"), "hi")
+        assert speech._ENGINE.active_requests == 0
+
+    def test_an_engine_that_became_unusable_is_dropped_and_reloaded(self, engines, home):
+        from localm.inference.backends.llamacpp.mtmd_gen import SpeechUnavailable
+        m = _model(home, "a")
+        speech.synthesize(m, "hi")
+        eng = speech._ENGINE
+        eng.outcome = SpeechUnavailable("projector could not be reopened")
+        with pytest.raises(SpeechUnavailable):
+            speech.synthesize(m, "hi")
+        assert speech._ENGINE is None and eng.closed is True
+        speech.synthesize(m, "hi")
+        assert _FakeEngine.loads == ["a", "a"]
+
+
+class _FakeRunner:
+    def __init__(self):
+        self.payloads = []
+
+    def is_alive(self):
+        return True
+
+    def speak(self, payload, *, on_progress=None, should_cancel=None):
+        self.payloads.append(payload)
+        for n in (1, 2, 25):
+            on_progress(n)
+        return {"wav": b"RIFF", "sample_rate": 24000, "n_samples": 48000,
+                "frames": 25, "seed": 3}
+
+
+def _real_engine():
+    import threading
+    eng = object.__new__(speech.SpeechEngine)
+    eng.model = speech.SpeechModel("a", "a.gguf", "p.gguf")
+    eng._runner = _FakeRunner()
+    eng._rpc_lock = threading.Lock()
+    eng._count_lock = threading.Lock()
+    eng.active_requests = 0
+    eng.broken = False
+    eng.sample_rate = 24000
+    eng.encoder_sample_rate = 24000
+    eng.projector_on_gpu = False
+    return eng
+
+
+class TestRealEngineSpeak:
+    def test_progress_is_reported_in_seconds_of_audio(self):
+        eng = _real_engine()
+        events = []
+        out = eng.speak("hi", seed=3, on_progress=events.append)
+        assert out.frames == 25 and out.seconds == 2.0
+        assert events[0] == {"stage": "speaking", "frames": 0, "seconds": 0.0}
+        assert events[-1] == {"stage": "speaking", "frames": 25, "seconds": 2.0}
+
+    def test_a_reference_wav_is_sent_as_float32_at_the_encoder_rate(self):
+        import struct
+        eng = _real_engine()
+        pcm = struct.pack("<2h", 16384, -16384)
+        wav = (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt "
+               + struct.pack("<IHHIIHH", 16, 1, 1, 24000, 48000, 2, 16)
+               + b"data" + struct.pack("<I", len(pcm)) + pcm)
+        eng.speak("hi", reference_wav=wav)
+        assert eng._runner.payloads[0]["reference"] == struct.pack("<2f", 0.5, -0.5)
+
+    def test_a_reference_that_is_not_a_wav_is_an_input_error(self):
+        from localm.inference.backends.llamacpp.mtmd_gen import SpeechInputError
+        eng = _real_engine()
+        with pytest.raises(SpeechInputError, match="could not be read"):
+            eng.speak("hi", reference_wav=b"ID3 not a wav")
+        assert eng._runner.payloads == []
+
+    def test_a_second_request_waits_and_can_be_cancelled_while_waiting(self):
+        from localm.inference.backends.llamacpp.mtmd_gen import SpeechCancelled
+        eng = _real_engine()
+        eng._rpc_lock.acquire()
+        events = []
+        with pytest.raises(SpeechCancelled, match="while waiting"):
+            eng.speak("hi", on_progress=events.append, should_cancel=lambda: True)
+        assert events == [{"stage": "waiting"}] and eng._runner.payloads == []
 
 
 class TestVoices:

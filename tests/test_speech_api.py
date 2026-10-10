@@ -180,6 +180,13 @@ class TestValidation:
         assert _post(client, {"input": "hi", "seed": 5, "language": "de"}).status_code == 200
         assert synth.calls[0]["seed"] == 5 and synth.calls[0]["language"] == "de"
 
+    @pytest.mark.parametrize("raw", [b"Infinity", b"-Infinity", b"1e400"])
+    def test_an_infinite_seed_is_400_not_500(self, client, synth, raw):
+        r = client.post(URL, content=b'{"input": "hi", "seed": ' + raw + b"}",
+                        headers={"content-type": "application/json"})
+        assert r.status_code == 400 and "seed must be an integer" in r.json()["detail"]
+        assert synth.calls == []
+
     def test_invalid_json_is_400(self, client):
         r = client.post(URL, content=b"{not json", headers={"content-type": "application/json"})
         assert r.status_code == 400 and "valid JSON" in r.json()["detail"]
@@ -294,6 +301,16 @@ class TestJobAndPrivacy:
         assert _post(client).status_code == 200
         assert sorted(p for p in home.rglob("*")) == before
 
+    def test_nothing_is_written_to_disk_in_privacy_mode(self, client, home, monkeypatch):
+        from localm import audit
+        monkeypatch.setattr(audit, "effective_mode",
+                            lambda *a, **k: audit.SessionMode.PRIVACY)
+        before = sorted(p for p in home.rglob("*"))
+        r = client.post(URL, data={"input": "hi"},
+                        files={"voice_file": ("ref.wav", WAV, "audio/wav")})
+        assert r.status_code == 200
+        assert sorted(p for p in home.rglob("*")) == before
+
     def test_a_client_that_goes_away_cancels_the_synthesis(self, home, monkeypatch):
         from localm.plugins.builtin.tts import speech_route
         from localm.plugins.gui.jobs import JobManager
@@ -351,6 +368,37 @@ def test_openapi_describes_both_request_bodies(home):
     content = schema["paths"][URL]["post"]["requestBody"]["content"]
     assert content["application/json"]["schema"]["required"] == ["input"]
     assert "voice_file" in content["multipart/form-data"]["schema"]["properties"]
+
+
+class TestAuth:
+    @pytest.fixture
+    def keys(self, client):
+        from localm import auth
+        return {
+            "tts": auth.create_key("t", ["tts"])["key"],
+            "chat": auth.create_key("c", ["chat"])["key"],
+            "voice": auth.create_key("v", ["voice"])["key"],
+            "admin": auth.create_key("a", ["admin"], allow_privileged=True)["key"],
+        }
+
+    @staticmethod
+    def _bearer(key):
+        return {"Authorization": f"Bearer {key}"}
+
+    def test_no_key_is_401_and_nothing_is_synthesized(self, client, synth, keys):
+        assert _post(client).status_code == 401
+        assert synth.calls == []
+
+    @pytest.mark.parametrize("who", ["chat", "voice"])
+    def test_a_key_without_the_tts_scope_is_403(self, client, synth, keys, who):
+        r = _post(client, headers=self._bearer(keys[who]))
+        assert r.status_code == 403 and "tts" in r.json()["detail"]
+        assert synth.calls == []
+
+    @pytest.mark.parametrize("who", ["tts", "admin"])
+    def test_tts_and_admin_keys_are_served(self, client, synth, keys, who):
+        assert _post(client, headers=self._bearer(keys[who])).status_code == 200
+        assert len(synth.calls) == 1
 
 
 class TestKernelOriginGate:

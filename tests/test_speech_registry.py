@@ -114,6 +114,23 @@ class TestProjectorAttachment:
         assert Path(registry.get_model_mmproj("voice-model")).name == mmproj.name
 
 
+    def test_a_copied_tts_model_records_its_mmproj_on_the_entry(self, home):
+        from localm.config import load_registry
+        from localm.model_manager import registry
+        folder = home / "outside"
+        folder.mkdir()
+        model = folder / "Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf"
+        model.write_bytes(build_gguf("qwen3tts"))
+        mmproj = folder / "mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf"
+        mmproj.write_bytes(build_gguf("clip", [("general.type", 8, "mmproj")]))
+        assert registry.add_local(str(model), "copied", on_duplicate="skip",
+                                  no_hash=True, store="copy") is True
+        entry = load_registry()["copied"]
+        assert entry["model_type"] == "tts"
+        assert Path(entry["mmproj"]).name == mmproj.name
+        assert Path(entry["mmproj"]).parent == Path(entry["path"]).parent
+
+
 class TestSurfaces:
     def test_the_cli_type_choices_include_tts(self):
         from click.testing import CliRunner
