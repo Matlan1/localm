@@ -42,7 +42,7 @@ def settings(full_config: dict) -> dict:
     # and the returned warning says so.
     warning = media_config.combine_warnings(
         warning, media_config.backend_unavailable_warning(
-            __package__,
+            str(__package__),
             "comfy" if backend_choice_value == "auto" else backend_choice_value))
     # When the managed ComfyUI instance is selected ("own"), neither the
     # per-plugin comfy.* fields nor the legacy global comfy_api_url /
@@ -70,7 +70,7 @@ def settings(full_config: dict) -> dict:
         comfy_blk.get("workdir")
         or legacy_comfy_value("comfy_workdir", full_config) or "")
     backend_name, backend_note = backend_choice.resolve(
-        backend_choice_value, full_config, comfy_blk, api_url, "Image")
+        backend_choice_value, full_config, comfy_blk or {}, api_url, "Image")
     return {
         "backend": backend_name,
         "backend_choice": backend_choice_value,

@@ -294,7 +294,7 @@ def _write_sidecar(out_path: Path, record: dict) -> str:
 
 
 def _event_relay(say):
-    state = {"phase": None}
+    state: dict = {"phase": None}
 
     def on_event(event) -> None:
         if event[0] == "log":
@@ -358,7 +358,7 @@ def generate(s: dict, prompt: str, out_path: Path, *,
                        "use the ComfyUI backend.")
     if (width is None) != (height is None):
         return False, "Give both width and height, or neither."
-    if width is not None:
+    if width is not None and height is not None:
         bad = _check_size(int(width), int(height))
         if bad:
             return False, bad
@@ -395,7 +395,7 @@ def generate(s: dict, prompt: str, out_path: Path, *,
             if input_image is not None:
                 init = _load_init_image(Path(input_image), width, height)
                 width, height = init["width"], init["height"]
-            if width is None:
+            if width is None or height is None:
                 width, height = _default_size(info.get("version", ""), rec, blk)
             if seed is None or seed < 0:
                 seed = secrets.randbelow(2 ** 31)
