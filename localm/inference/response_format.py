@@ -21,15 +21,35 @@ from localm.inference.json_schema_grammar import (
 )
 
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_RULE_DEF = re.compile(r"^\s*([A-Za-z0-9-]+)\s*::=", re.MULTILINE)
-_TOKENS = re.compile(
-    r'"(?:\\.|[^"\\])*"'          # string literal
-    r"|\[(?:\\.|[^\]\\])*\]"      # character class
-    r"|#[^\n]*"                   # comment
-    r"|\{[0-9,\s]*\}"             # repeat count
-    r"|[A-Za-z0-9-]+"             # rule name
-    r"|.",
-    re.DOTALL)
+_RULE_DEF = re.compile(r"^[ \t]*([A-Za-z0-9-]+)[ \t]*::=", re.MULTILINE)
+_RULE_NAME = re.compile(r"[A-Za-z0-9-]+")
+_REPEAT = re.compile(r"\{[0-9,\s]*\}")
+
+
+def _tokens(grammar: str) -> list[str]:
+    """*grammar* split into string literals, character classes, comments,
+    repeat counts, rule names and single characters, in one linear pass. A
+    literal or class without its close runs to the end of the input.
+    See test_the_grammar_tokenizer_takes_an_unterminated_literal_in_one_token."""
+    out: list[str] = []
+    i, n = 0, len(grammar)
+    while i < n:
+        c = grammar[i]
+        if c == '"' or c == "[":
+            close = '"' if c == '"' else "]"
+            j = i + 1
+            while j < n and grammar[j] != close:
+                j += 2 if grammar[j] == "\\" else 1
+            j = min(j + 1, n)
+        elif c == "#":
+            j = grammar.find("\n", i)
+            j = n if j < 0 else j
+        else:
+            m = (_REPEAT if c == "{" else _RULE_NAME).match(grammar, i)
+            j = m.end() if m else i + 1
+        out.append(grammar[i:j])
+        i = j
+    return out
 
 # A <think> block of at most 1900 characters that cannot contain "</t" before
 # its closing tag; the same bound as gbnf.TOOL_CALLS_AFTER_THINK.
@@ -114,7 +134,7 @@ def prefix_rules(grammar: str, prefix: str) -> str:
     all digits."""
     defined = set(_RULE_DEF.findall(grammar))
     return "".join(
-        prefix + tok if tok in defined else tok for tok in _TOKENS.findall(grammar))
+        prefix + tok if tok in defined else tok for tok in _tokens(grammar))
 
 
 def combine(*alternatives: str) -> str:

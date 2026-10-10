@@ -11,6 +11,8 @@ Routes (mounted by the engine, auto-scoped to the ``tts`` capability):
   GET /api/tts/status   - is the plugin usable / which engine
   GET /api/tts/config   - resolved {engine, model, device, dtype, voice, speed,
                           library, wasm_paths, net_mode}
+  POST /v1/audio/speech - server-side speech from a text-to-speech GGUF
+                          (``speech_route.py``), separate from the browser voices
 
 Config resolution mirrors the media plugins' template+override idea: the shipped
 defaults live in the tracked ``tts.example.json`` template, and the user's
@@ -29,6 +31,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from localm.debuglog import logger
+from localm.plugins.builtin.tts import speech_route as _speech_route
 from localm.plugins.builtin.tts.settings import defaults as _defaults
 
 _router = APIRouter()
@@ -76,6 +79,7 @@ def register(host) -> None:
     _host = host
     host.mount_static("static")          # -> /plugins/tts/ (public; SPA import()s it)
     host.mount_router(_router)           # -> /api/tts/* (scope-gated to "tts")
+    host.mount_router(_speech_route.router)  # -> /v1/audio/speech (scope-gated to "tts")
 
 
 def unregister() -> None:

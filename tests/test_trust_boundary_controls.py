@@ -40,6 +40,7 @@ _REVIEWED_CROSS_ORIGIN_OK = (
     "/v1/embeddings",
     "/v1/rerank",
     "/v1/audio/transcriptions",
+    "/v1/audio/speech",
     "/v1/images/generations",
     "/v1/surfaces/gui",
     "/v1/instances/cooperate-unload",
@@ -64,6 +65,10 @@ _REVIEWED_ANTHROPIC_CROSS_ORIGIN_OK = frozenset({
     "/v1/messages",
     "/v1/messages/count_tokens",
 })
+
+# The reviewed contents of _RESPONSES_CROSS_ORIGIN_OK: the OpenAI Responses
+# route, matched by equality on the full path, never by prefix.
+_REVIEWED_RESPONSES_CROSS_ORIGIN_OK = frozenset({"/v1/responses"})
 
 _CROSS_ORIGIN = {"Origin": "http://localhost:9999"}
 
@@ -129,6 +134,15 @@ class TestOriginGateExemption:
         live = _live_guard_var(app, "_ANTHROPIC_CROSS_ORIGIN_OK")
         assert set(live) == _REVIEWED_ANTHROPIC_CROSS_ORIGIN_OK
 
+    def test_live_responses_exempt_set_equals_the_reviewed_set(self, app):
+        live = _live_guard_var(app, "_RESPONSES_CROSS_ORIGIN_OK")
+        assert set(live) == _REVIEWED_RESPONSES_CROSS_ORIGIN_OK
+
+    def test_a_path_under_the_responses_route_is_not_exempt(self, app):
+        with TestClient(app) as c:
+            r = c.post("/v1/responses/resp_x/cancel", json={}, headers=_CROSS_ORIGIN)
+        assert r.status_code == 403 and "cross-origin" in r.text.lower()
+
     def test_a_path_under_an_anthropic_route_is_not_exempt(self, app):
         with TestClient(app) as c:
             r = c.post("/v1/messages/batches", json={}, headers=_CROSS_ORIGIN)
@@ -145,7 +159,8 @@ class TestOriginGateExemption:
             for method, path in unsafe:
                 if (path in _REVIEWED_CROSS_ORIGIN_OK
                         or path in _REVIEWED_OLLAMA_CROSS_ORIGIN_OK
-                        or path in _REVIEWED_ANTHROPIC_CROSS_ORIGIN_OK):
+                        or path in _REVIEWED_ANTHROPIC_CROSS_ORIGIN_OK
+                        or path in _REVIEWED_RESPONSES_CROSS_ORIGIN_OK):
                     continue
                 r = c.request(method, _concrete(path), headers=_CROSS_ORIGIN)
                 detail = r.json().get("detail", "") if r.headers.get("content-type", "").startswith("application/json") else r.text

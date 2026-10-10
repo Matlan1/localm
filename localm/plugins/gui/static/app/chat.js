@@ -2378,7 +2378,7 @@ export function mountStatusIndicator(bodyEl, text, isWarn = false) {
 
 // Status codes (delta.status_code) that call for the warning style, independent
 // of which language the accompanying text is in.
-const WARN_STATUS_CODES = new Set(["vision_cpu_retry"]);
+const WARN_STATUS_CODES = new Set(["vision_cpu_retry", "audio_cpu_retry"]);
 
 /** The chat.status.* catalog key for a snake_case server status code. */
 function statusIndicatorI18nKey(code) {

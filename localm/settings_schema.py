@@ -346,8 +346,8 @@ CORE_FIELDS: list = [
                  "one. Blank pins nothing.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("model_autoswitch", Widget.SELECT, "Model autoswitch",
-                 "off = never switch; image = only for an image your model can't "
-                 "read; ask = offer one; loaded = loaded models only; auto = any "
+                 "off = never switch; image = only for media your model can't read; "
+                 "ask = offer one; loaded = loaded models only; auto = any "
                  "installed model; eager = also if unchecked. Pinned chats never "
                  "switch.",
                  group="Models",

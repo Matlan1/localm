@@ -312,9 +312,11 @@ class EngineCache:
             eng = self._engines.get(current)
             peers = set(self._peers)
             resident = list(self._lru) + list(peers)
-        if (eng is not None and getattr(eng, "loaded", False)
-                and getattr(eng, "supports_images", False) is True):
-            known[caps.VISION] = True
+        if eng is not None and getattr(eng, "loaded", False):
+            if getattr(eng, "supports_images", False) is True:
+                known[caps.VISION] = True
+            if getattr(eng, "supports_audio", False) is True:
+                known[caps.AUDIO] = True
 
         def skip_set():
             return {n: s for n, s in self.routing_latch().skipped().items()

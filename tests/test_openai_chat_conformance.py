@@ -423,6 +423,35 @@ def test_prefix_rules_renames_rules_but_not_literals_classes_or_counts():
                    'p-item ::= "item" [a-z]+ "\\"root\\"" # root\n')
 
 
+@pytest.mark.parametrize("tail", [
+    '"' + '\\"' * 5000,
+    '"' + '\\"' * 5000 + "\\",
+    "[" + "[" * 5000,
+    "[" + "\\]" * 5000 + "\\",
+])
+def test_the_grammar_tokenizer_takes_an_unterminated_literal_in_one_token(tail):
+    from localm.inference import response_format
+    tokens = response_format._tokens("root ::= " + tail)
+    assert tokens[-1] == tail
+    assert len(tokens) == 7
+    assert prefix_rules("root ::= " + tail, "p-") == "p-root ::= " + tail
+
+
+def test_the_grammar_tokenizer_splits_a_generated_grammar_losslessly():
+    from localm.inference import response_format
+    grammar, _ = format_grammar(ResponseFormat("json_schema", "p", PERSON, True))
+    grammar = after_think(grammar) + '# note "x\nq ::= [\\]a-z]{2,3} "\\\\"\n'
+    tokens = response_format._tokens(grammar)
+    assert "".join(tokens) == grammar
+    assert "[\\]a-z]" in tokens and "{2,3}" in tokens and '"\\\\"' in tokens
+    assert '# note "x' in tokens
+
+
+def test_a_rule_definition_is_a_name_and_its_operator_on_one_line():
+    out = prefix_rules('root ::= a\n\t a ::= "x"\nb\n ::= "y"\n', "p-")
+    assert out == 'p-root ::= p-a\n\t p-a ::= "x"\nb\n ::= "y"\n'
+
+
 def test_combine_and_after_think_produce_grammars_that_pass_the_structure_check():
     from localm.inference.gbnf import check_grammar_structure
     one, _ = format_grammar(ResponseFormat("json_schema", "p", PERSON, True))
