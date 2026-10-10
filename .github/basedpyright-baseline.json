@@ -5466,14 +5466,6 @@
         ],
         "./localm/plugins/builtin/video/backend.py": [
             {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 58,
-                    "endColumn": 69,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportOptionalMemberAccess",
                 "range": {
                     "startColumn": 47,

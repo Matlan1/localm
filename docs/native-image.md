@@ -7,7 +7,7 @@ CUDA, ROCm and Metal GPUs.
 
 ## Which backend runs
 
-Settings > Images > **Image backend** (config `plugins.image.backend`):
+Settings > Images > **Generation backend** (config `plugins.image.backend`):
 
 | Value | Behaviour |
 |---|---|
@@ -49,7 +49,7 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
 
    Any model stable-diffusion.cpp supports works: SD 1.x/2.x and SDXL checkpoints,
    SD3, FLUX, Z-Image, Qwen Image and more, as GGUF, safetensors or ckpt. Set
-   **Native image model** to a registered model name or a file path. Models that come
+   **Native model** to a registered model name or a file path. Models that come
    as separate parts (FLUX, SD3, Z-Image) also need their text encoders and VAE in the
    matching fields (CLIP-L, CLIP-G, T5-XXL, LLM, VAE).
 
@@ -57,7 +57,7 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
 
 | Setting | Meaning |
 |---|---|
-| Native image model | Checkpoint, or diffusion model when encoders are set. Blank: the recommended model once downloaded. |
+| Native model | Checkpoint, or diffusion model when encoders are set. Blank: the recommended model once downloaded. |
 | Native runtime | `auto`, `cpu`, `vulkan`, `cuda`, `rocm`, `metal`. |
 | Native sampling steps, CFG scale, sampler | Blank uses the model's recommended values (SD-Turbo: 2 steps, CFG 1), else stable-diffusion.cpp's defaults (20 steps, CFG 7). |
 | Native VAE, CLIP-L, CLIP-G, T5-XXL, LLM | Optional model parts. |

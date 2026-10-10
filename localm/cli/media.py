@@ -182,12 +182,14 @@ def _generate_or_abort(api_url: str, run):
         raise
 
 
-def _image_via_backend(image_backend, s: dict, prompt: str, out_path: Path, *,
-                       negative, guidance, cfg, seed, input_image, denoise, lora_name,
-                       width, height) -> None:
-    """``localm image`` through the image plugin's backend facade (any backend
-    other than the inline ComfyUI path): availability, generation with progress
-    lines, Ctrl-C stops the worker, then the backend's VRAM is released."""
+def _via_backend(media_backend, s: dict, prompt: str, out_path: Path, what: str,
+                 **gen_kwargs) -> None:
+    """``localm image`` / ``localm video`` through the plugin's backend facade
+    (any backend other than the inline ComfyUI path): availability, generation
+    with progress lines, Ctrl-C stops the worker, then the backend's VRAM is
+    released. *what* names the worker in the interrupt message; *gen_kwargs*
+    go to ``generate`` together with the privacy, sidecar and VRAM-swap
+    arguments set here. Exits 1 on failure."""
     import os
 
     from rich.markup import escape
@@ -200,7 +202,12 @@ def _image_via_backend(image_backend, s: dict, prompt: str, out_path: Path, *,
     for note in (s.get("warning"), s.get("backend_note")):
         if note:
             say(note)
-    ok, message = image_backend.ensure_available(s, on_progress=say)
+    refusal = getattr(media_backend._impl(s), "refusal", None)
+    refused = refusal(s=s, **gen_kwargs) if refusal is not None else None
+    if refused:
+        console.print(f"[red]{escape(str(refused))}[/red]")
+        sys.exit(1)
+    ok, message = media_backend.ensure_available(s, on_progress=say)
     if not ok:
         console.print(f"[red]{escape(str(message))}[/red]")
         sys.exit(1)
@@ -208,20 +215,18 @@ def _image_via_backend(image_backend, s: dict, prompt: str, out_path: Path, *,
     is_privacy = effective_mode("server") == SessionMode.PRIVACY
     localm_url = os.environ.get("LOCALM_URL") or None
     try:
-        ok, message = image_backend.generate(
+        ok, message = media_backend.generate(
             s, prompt, out_path,
             self_url=localm_url, write_sidecar=not is_privacy,
-            negative_prompt=negative, guidance=guidance, cfg=cfg, seed=seed,
-            input_image=Path(input_image) if input_image else None, denoise=denoise,
-            lora_name=lora_name, swap=bool(localm_url), delete_outputs=is_privacy,
-            on_progress=say, width=width, height=height)
+            swap=bool(localm_url), delete_outputs=is_privacy,
+            on_progress=say, **gen_kwargs)
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted - stopping the image worker...[/yellow]")
-        image_backend.free_vram(s)
+        console.print(f"\n[yellow]Interrupted - stopping the {what} worker...[/yellow]")
+        media_backend.free_vram(s)
         raise
     color = "green" if ok else "red"
     console.print(f"[{color}]{escape(str(message))}[/{color}]")
-    image_backend.free_vram(s)
+    media_backend.free_vram(s)
     if not ok:
         sys.exit(1)
     _offer_open(out_path)
@@ -292,10 +297,10 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     image_backend = import_module("localm.plugins.builtin.image.backend")
     s = image_backend.prepare_for_job(image_backend.settings(_cfg), _cfg)
     if s.get("backend") != "comfy":
-        _image_via_backend(image_backend, s, prompt, out_path, negative=negative,
-                           guidance=guidance, cfg=cfg, seed=seed,
-                           input_image=input_image, denoise=denoise,
-                           lora_name=lora_name, width=width, height=height)
+        _via_backend(image_backend, s, prompt, out_path, "image",
+                     negative_prompt=negative, guidance=guidance, cfg=cfg, seed=seed,
+                     input_image=Path(input_image) if input_image else None,
+                     denoise=denoise, lora_name=lora_name, width=width, height=height)
         return
 
     from ..image_gen.comfy import (free_comfy_vram,
@@ -417,10 +422,11 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
                    "rule; ~5s is the model's native length).")
 @click.option("--fps", default=24, show_default=True, help="Frame rate.")
 @click.option("--width", type=int, default=None,
-              help="Width (multiple of 16; default 1280 - the model's native "
-                   "resolution; quality collapses well below it).")
+              help="Width (multiple of 16; default the model's native resolution: "
+                   "1280 for ComfyUI Wan 2.2, 832 for the native Wan2.1 1.3B; "
+                   "quality collapses well below it).")
 @click.option("--height", type=int, default=None,
-              help="Height (multiple of 16; default 704 - see --width).")
+              help="Height (multiple of 16; default 704 for ComfyUI, 480 native).")
 @click.option("--image", "input_image", type=click.Path(exists=True),
               default=None,
               help="Animate this picture instead of starting from noise "
@@ -432,34 +438,50 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
 @click.option("--cfg", type=float, default=None, help="Guidance (default 5.0).")
 def video_cmd(prompt, negative, duration, fps, width, height, input_image,
               out, seed, steps, cfg):
-    """Generate a short video clip with the local ComfyUI Wan 2.2 workflow.
+    """Generate a short video clip with the video plugin's backend: the built-in
+    native one (stable-diffusion.cpp, Wan2.1 1.3B by default) or the ComfyUI
+    Wan 2.2 workflow, as set in the video settings ('auto' uses ComfyUI when
+    it is set up, else native).
 
     \b
     Examples:
       localm video "a red fox running through snow, tracking shot"
       localm video "waves rolling in at dusk" --image beach.png -d 5
 
-    ComfyUI must be running (or start it via the GUI, which can auto-launch
-    it when comfy_launch_cmd is configured). Video is the slowest generator -
-    expect many minutes per clip; see docs/video.md for model setup.
+    On ComfyUI it must be running (or start it via the GUI, which can
+    auto-launch it when comfy_launch_cmd is configured). Video is the slowest
+    generator - expect many minutes per clip; see docs/video.md for model setup.
     """
     import time as _time
+    from importlib import import_module
+
     from rich.console import Console
     from rich.markup import escape
+
     from ..audit import SessionMode, effective_mode
+    from ..config import load_config
     from ..video_gen import generate_video
     console = Console()
 
-    # generate_video() calls ensure_comfy() internally: auto-launch from
-    # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
-
-    api_url = _plugin_api_url("video")
     out_path = Path(out) if out \
         else Path(f"video_{_time.strftime('%Y%m%d_%H%M%S')}.mp4")
     kwargs = {k: v for k, v in
               (("negative_prompt", negative), ("width", width),
                ("height", height), ("seed", seed), ("steps", steps),
                ("cfg", cfg)) if v is not None}
+    _cfg = load_config()
+    video_backend = import_module("localm.plugins.builtin.video.backend")
+    s = video_backend.prepare_for_job(video_backend.settings(_cfg), _cfg)
+    if s.get("backend") != "comfy":
+        _via_backend(video_backend, s, prompt, out_path, "video",
+                     seconds=duration, fps=fps,
+                     input_image=Path(input_image) if input_image else None, **kwargs)
+        return
+
+    # generate_video() calls ensure_comfy() internally: auto-launch from
+    # comfy_launch_cmd/comfy_workdir, or a clear error when unset.
+
+    api_url = _plugin_api_url("video")
     _is_privacy = effective_mode("server") == SessionMode.PRIVACY
     _write_sidecar = not _is_privacy
 
