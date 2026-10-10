@@ -1007,7 +1007,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 
 
 # The REPL media-generation commands (/generate-image, /generate-music,
-# /generate-video) all share one shape: ensure ComfyUI is reachable (auto-
+# /generate-video) share one shape on ComfyUI: ensure ComfyUI is reachable (auto-
 # launching it from the configured comfy_launch_cmd/comfy_workdir if needed),
 # unload the chat model to free VRAM, generate one file into <home>/<subdir>,
 # then free ComfyUI's VRAM. Only the generator, output subdir/extension and the
@@ -1088,6 +1088,28 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
             write_sidecar=not is_privacy, delete_outputs=is_privacy)
         if result is not None:
             console.print(escape(result[1]))
+            return
+    if spec["plugin"] == "music":
+        import time as _t
+
+        from ..audit import SessionMode, effective_mode
+        from ..plugins.builtin.music import backend as music_backend
+        out_dir = home_dir / spec["subdir"]
+        out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
+
+        def _unload_chat_for_music() -> None:
+            console.print("[dim]Freeing VRAM (chat model unloads, "
+                          "reloads on your next message)...[/dim]")
+            engine.unload()
+
+        is_privacy = effective_mode("chat") == SessionMode.PRIVACY
+        out_dir.mkdir(parents=True, exist_ok=True)
+        music_result = music_backend.generate_unless_comfy(
+            arg, out, before_generate=_unload_chat_for_music,
+            on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
+            write_sidecar=not is_privacy, delete_outputs=is_privacy)
+        if music_result is not None:
+            console.print(escape(music_result[1]))
             return
     from ..image_gen.comfy import ensure_comfy, free_comfy_vram
     from .media import _plugin_api_url
@@ -1287,7 +1309,7 @@ def _handle_command(
             "/save [file]            save conversation to JSON\n"
             "/compact                summarise older turns to free context\n"
             "/generate-image <prompt> generate an image (built in, or ComfyUI)\n"
-            "/generate-music <tags>  generate music via ComfyUI ACE-Step\n"
+            "/generate-music <tags>  generate music (built in, or ComfyUI)\n"
             "/generate-video <prompt> generate a clip (built in, or ComfyUI)\n"
             "/temp <float>           sampling temperature\n"
             "/tokens <int>           max response tokens"

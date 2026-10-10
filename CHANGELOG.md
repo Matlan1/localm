@@ -18,6 +18,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   path returns `json` and `text`; `srt`, `vtt` and `verbose_json` need timestamps it does not
   have and are refused with a message saying so.
 - **Attach an audio clip in the chat composer.** The attach button and drag-and-drop now take audio files (WAV, and MP3, FLAC, OGG, M4A or AAC with the voice extra) next to images and documents. The clip appears as its own chip with its length, plays back in the conversation, and is sent as an `input_audio` part, so a model that can hear audio, such as Qwen3-ASR, transcribes it. A file over 50 MB or a WAV over 10 minutes is refused before it is sent, and when the server refuses a clip (for example a model that cannot hear audio) its message is shown and the clip is dropped so the chat stays usable.
+- **Token log probabilities.** For GGUF models, `/v1/chat/completions` returns `logprobs` and
+  up to 20 `top_logprobs` for each token of the reply's content, streamed or not, and
+  `/v1/completions` returns the legacy `logprobs` object. In a chat reply, the tokens of the
+  reasoning, of tool calls and of text cut by a stop sequence are left out. A model that
+  cannot report them refuses the request with a 400 instead of answering without them.
 - **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
   `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
   same from the command line. A GGUF model whose projector has an audio encoder (for example
@@ -98,6 +103,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and then CPU (CPU on Apple Silicon) when the preferred backend does not start. `--backend`
   picks one, `--status` shows what is installed, and `--no-models` / `--no-test` skip those
   steps.
+- **Music generates without ComfyUI.** With nothing set up, the Music page, the chat `/music`
+  command and `localm music` generate ACE-Step 1.5 tracks with the native backend (the
+  runtime `localm setup-music` installs), and keep using ComfyUI where one is set up. The
+  Music settings pick the backend (`auto`, `native` or `comfy`), the native runtime and the
+  model files. The page says which backend runs and offers to download the default models;
+  a generation never downloads them by itself. Tracks are WAV files with no embedded
+  metadata, and inputs only ComfyUI understands are refused with the reason. A track that
+  comes back broken (some GPUs produce one for some prompts) is never saved; on the `auto`
+  runtime it is generated again on the CPU.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the
@@ -379,6 +393,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **Linux CUDA setup installs fixed NVIDIA runtime libraries.** `localm setup-llama` on Linux now fetches a pinned, checksum-verified version of the CUDA runtime and cuBLAS libraries instead of whichever version PyPI lists as newest.
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
   layers auto-sized (the default), such a model now keeps the experts of as few
   layers as needed in system RAM and every layer on the GPU, instead of moving
@@ -480,6 +495,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A native image job now says GPU placement is ComfyUI-only.** With per-component GPU placement turned on
+  and the native image backend in use, the job log now says the setting applies to ComfyUI only and that each
+  model loads on one GPU. Before, the setting was silently ignored.
 - **A bad audio clip or image no longer unloads a GGUF model.** An unreadable clip or picture is refused with a
   `400` and the model stays loaded. Before, the model was dropped and the request got a server error.
 - **The Seed help no longer promises an identical reply.** A GGUF model computes only the

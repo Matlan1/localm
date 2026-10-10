@@ -300,7 +300,6 @@ def test_a_recommended_model_brings_its_steps_cfg_and_size(fake_native, tmp_path
 @pytest.mark.parametrize("kwargs,needle", [
     ({"model_overrides": {"1": {"unet_name": "x"}}}, "ComfyUI"),
     ({"lora_name": "style.safetensors"}, "LoRA"),
-    ({"placement": {"unet": 1}}, "placement"),
     ({"width": 512}, "both width and height"),
     ({"width": 513, "height": 512}, "multiple of 8"),
     ({"width": 4096, "height": 512}, "outside"),
@@ -444,7 +443,9 @@ def test_bad_native_values_are_refused(updates, needle):
 def test_native_fields_belong_to_the_image_plugin_only():
     from localm.settings_schema import validate_media_block
     with pytest.raises(ValueError, match="unknown media field"):
-        validate_media_block("music", {"backend": "native"})
+        validate_media_block("video", {"native_clip_l": "clip.safetensors"})
+    with pytest.raises(ValueError, match="unknown media field"):
+        validate_media_block("music", {"native_model": "sd-turbo"})
 
 
 def test_the_schema_shows_auto_by_default_and_hides_paths_from_non_owners():
@@ -563,6 +564,21 @@ def test_imagine_route_generates_natively_at_the_requested_size(native_app):
         assert im.size == (768, 512)
     lines = [e.get("text", "") for e in job._history if e.get("type") == "line"]
     assert any("native stable-diffusion.cpp" in ln for ln in lines)
+    assert runner.generates[0]["prompt"] == "a lighthouse"
+
+
+def test_route_says_gpu_placement_is_comfyui_only_for_native(native_app):
+    from fastapi.testclient import TestClient
+    from localm.config import update_config
+    app, runner = native_app
+    update_config(lambda cfg: cfg.__setitem__("comfy_gpu_placement", True))
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "a lighthouse"})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+    lines = [e.get("text", "") for e in job._history if e.get("type") == "line"]
+    assert job.status == "done", lines
+    assert any("GPU placement applies to ComfyUI only" in ln for ln in lines)
     assert runner.generates[0]["prompt"] == "a lighthouse"
 
 

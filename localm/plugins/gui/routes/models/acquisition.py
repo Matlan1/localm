@@ -277,10 +277,36 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                            "model_type": f["model_type"], "origin": "curated"},
             } for f in files]}
 
+        def _native_music_check():
+            """The preflight answer when the music plugin runs the native
+            backend (each default model not downloaded yet, offered for
+            download), or None when it runs ComfyUI."""
+            from localm.config import load_config
+            from localm.media import backend_choice
+            from localm.plugins.builtin.music import backend as music_backend
+            s = backend_choice.refine_auto(music_backend.settings(load_config()), "Music")
+            if s.get("backend") != "native":
+                return None
+            from localm.plugins.builtin.music.backends import native
+            st = native.status(s)
+            configured = s.get("native") or {}
+            from localm.media.koboldcpp.models import LABELS
+            unresolved = [str(LABELS.get(c, c)) for c, v in st["models"].items()
+                          if v is None and configured.get(c)]
+            warning = (f"Configured music models not found: {', '.join(unresolved)}."
+                       if unresolved else None)
+            return {"status": "verified", "warning": warning, "missing": [{
+                "filename": m["file"], "native": True, "searchable": False,
+                "source": {"repo": m["repo"], "file": m["file"], "spec": m["spec"],
+                           "sha256": None, "name": m["name"], "size_bytes": m["size_bytes"],
+                           "model_type": m["model_type"], "origin": "curated"},
+            } for m in st["missing"]]}
+
         def _check():
-            if kind in ("image", "video"):
+            if kind in ("image", "video", "music"):
                 try:
-                    native_answer = _native_check()
+                    native_answer = (_native_music_check() if kind == "music"
+                                     else _native_check())
                 except Exception as e:
                     logger.warning("%s backend preflight failed: %s", kind, e)
                     return {"status": "unavailable", "missing": [],

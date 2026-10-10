@@ -584,7 +584,10 @@ def test_video_native_fields_validate_and_nest():
 @pytest.mark.parametrize("plugin,field", [("video", "native_clip_g"),
                                           ("image", "native_flow_shift"),
                                           ("image", "native_clip_vision"),
-                                          ("music", "backend")])
+                                          ("music", "native_model"),
+                                          ("music", "native_steps"),
+                                          ("image", "native_dit"),
+                                          ("video", "native_lm")])
 def test_native_fields_belong_to_their_plugins(plugin, field):
     from localm.settings_schema import validate_media_block
     with pytest.raises(ValueError, match="unknown media field"):

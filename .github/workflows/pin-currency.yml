@@ -11,6 +11,12 @@ name: pin currency
 #                        --gate.
 #   rocm-currency        same gate shape for _ROCM_TAG (lemonade-sdk/llamacpp-rocm)
 #                        via scripts/check_llama_rocm_pin.py --gate.
+#   all-pins-currency    scripts/check_pins.py --gate over every other pin localm
+#                        ships or fetches (koboldcpp, stable-diffusion.cpp, the
+#                        ComfyUI-GGUF node, uv, the Docker base image, the Linux CUDA
+#                        build source and runtime wheels, the ROCm CPU archive, the
+#                        AMD ROCm wheels, the vendored browser libraries), as one
+#                        table in the job summary.
 #   candidate-preflight  dispatch-only, given `candidate_tag`: runs the llama.cpp
 #                        bump pre-flight scripts against that tag on
 #                        windows-latest, which carries the MSVC toolchain the
@@ -128,6 +134,33 @@ jobs:
           set -e
           if [ "$rc" = "2" ]; then
             echo "::warning::the ROCm build pin could not be compared against upstream this run (see above); this is NOT 'current'"
+            exit 0
+          fi
+          exit "$rc"
+
+  all-pins-currency:
+    name: Every other pin currency gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Compare every other pinned runtime against upstream
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python scripts/check_pins.py --gate --exclude "llama.cpp,ROCm llama (lemonade),ComfyUI"
+          rc=$?
+          set -e
+          if [ "$rc" = "2" ]; then
+            echo "::warning::a pin could not be compared against upstream this run (see above); this is NOT 'current'"
             exit 0
           fi
           exit "$rc"

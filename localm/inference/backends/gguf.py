@@ -1079,6 +1079,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         process."""
         return not self.is_diffusion and not getattr(self, "_grammar_unsupported", False)
 
+    @property
+    def supports_logprobs(self) -> bool:
+        """True for every model except a diffusion language model, which writes
+        its reply all at once and has no per-token distribution to report."""
+        return not self.is_diffusion
+
     def unsupported_sampling(self, options: dict) -> list:
         """For a diffusion language model, every option in *options* whose value
         is not 0 (its sampler has no min_p or penalties stage, which is what 0
@@ -1252,6 +1258,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         min_p: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        logprobs: Optional[int] = None,
+        on_logprobs: Optional[Callable[[list], None]] = None,
     ) -> Iterator[str]:
         # Image and audio input: with an mmproj loaded they flow through to
         # create_chat_completion's media path. A model without the encoder
@@ -1270,6 +1278,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         if refused:
             raise UnsupportedInputError(
                 f"{', '.join(refused)} cannot be applied by a diffusion language model")
+        if logprobs is not None:
+            if on_logprobs is None:
+                raise ValueError("logprobs needs on_logprobs to receive them")
+            if not self.supports_logprobs:
+                raise UnsupportedInputError(
+                    "logprobs cannot be returned by a diffusion language model")
 
         # Once a native grammar fault has been seen, skip grammar up-front and
         # generate unconstrained, so a grammar request never breaks chat.
@@ -1295,6 +1309,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             kwargs["seed"] = seed
         if thinking is not None:
             kwargs["thinking"] = thinking
+        if logprobs is not None:
+            kwargs["logprobs"] = logprobs
         kwargs.update(sampling)
 
         # The grammar-fault retry-without-grammar logic runs inside the isolated
@@ -1316,6 +1332,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 first_chunk_timeout=self._first_token_timeout_seconds(),
                 on_status=on_status,
                 stop_on_request=self.is_diffusion,
+                on_logprobs=on_logprobs,
                 **kwargs)
         except RuntimeError:
             # The isolated worker crashed or stalled and the model is gone. Drop it

@@ -105,6 +105,8 @@ export const I18N_EN = {
   "common.modelDownload.unsupportedFormat":
     "'{filename}' is missing (needed by {class_type}.{input_name}). localm downloads only .safetensors and .gguf model files automatically. Add this file to your ComfyUI installation's matching models folder, then try again.",
   "common.modelDownload.body": "This workflow needs '{filename}' ({size}), which isn't installed.",
+  "common.modelDownload.bodyNative": "Generating needs '{filename}' ({size}), which isn't downloaded yet.",
+  "common.modelDownload.bodyNativeNoSize": "Generating needs '{filename}', which isn't downloaded yet.",
   "common.modelDownload.download": "Download",
   "common.modelDownload.failed": "Download failed: {message}",
   "common.modelDownload.notNow": "Not now",
@@ -2360,6 +2362,7 @@ export const I18N_EN = {
   // ---- Music page ----
   "music.advancedHint": "seed, steps, CFG",
   "music.cfgPlaceholder": "default (5.0)",
+  "music.cfgPlaceholderNative": "default (1.0)",
   "music.empty.hint": "Generate one above; your tracks appear here.",
   "music.empty.title": "No tracks yet",
   "music.enterTags": "Enter style tags first",
@@ -2368,16 +2371,24 @@ export const I18N_EN = {
   "music.generationStatus": "Generation {status}",
   "music.historyHint":
     "Tick a card to select it for bulk actions; click one for details, metadata, and per-track actions.",
+  "music.backendComfy": "Backend: ComfyUI.",
+  "music.backendNative": "Backend: native ACE-Step 1.5 (KoboldCpp), runtime {runtime}.",
+  "music.backendNativeMissing":
+    "Backend: native ACE-Step 1.5. No music models yet: Generate offers to download the default set ({size}).",
+  "music.backendNativeSomeMissing":
+    "Backend: native ACE-Step 1.5. Missing {count} of {total} default music models: Generate offers to download them ({size}).",
+  "music.backendRuntimeOnFirstUse": "installed on first use",
   "music.intro":
-    "Runs the ACE-Step workflow on your local ComfyUI (same VRAM handover as image generation). Track length is arbitrary; longer tracks just take longer.",
+    "Generates music on this machine with ACE-Step, on the built-in native runtime or on your ComfyUI (Settings, Music). The chat model unloads when the music models need the VRAM and reloads afterwards.",
   "music.item.one": "track",
   "music.item.other": "tracks",
   "music.lyricsLabel": "Lyrics (optional - empty generates an instrumental; [verse] / [chorus] markers supported)",
   "music.lyricsPlaceholder": "[verse]\nNeon lights across the bay…",
   "music.mediaWhat": "the track",
   "music.reloadCheckboxTitle":
-    "Applies to music generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.",
+    "Applies to music generation only. When off, the music backend stays loaded for fast batch generation; the chat model reloads on the next chat message.",
   "music.stepsPlaceholder": "default (50)",
+  "music.stepsPlaceholderNative": "default (8)",
   "music.styleTagsLabel": "Style tags - genre, mood, instruments, BPM, vocal type",
   "music.styleTagsPlaceholder": "synthwave, 80s, female vocals, 120 bpm, dreamy",
   "music.title": "Music generation",

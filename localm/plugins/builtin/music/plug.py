@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Music plugin: ComfyUI ACE-Step music generation + a library for the chat surface.
+"""Music plugin: ACE-Step music generation (native or ComfyUI) + a library for the chat surface.
 
 Routes (mounted by the engine, auto-scoped to the ``music`` capability):
   POST   /api/music                       - generate a track (background job)
+  GET    /api/music/backend               - which backend generates, and what it uses
   GET    /api/music/history               - generated tracks, newest first
   GET    /api/music/file/{name}           - serve a generated track
   DELETE /api/music/file/{name}           - delete a track (+ sidecar)
@@ -13,9 +14,9 @@ SSE endpoint. The GUI is not required: the job registry is created by
 ``attach_engine``, so a headless ``localm serve`` can generate too.
 It still needs this server's own address for the chat/media VRAM handover (see
 ``resolve_self_url``), and 503s with that specific reason if it cannot be
-determined. The backend is selected per-plugin (default
-ComfyUI ACE-Step) and reads this plugin's own config (see backend.py). Ships
-DISABLED by default.
+determined. The backend is selected per-plugin (``auto``: ComfyUI when one is
+set up, else the native ACE-Step runtime) and reads this plugin's own config
+(see backend.py). Ships DISABLED by default.
 """
 
 from __future__ import annotations
@@ -61,6 +62,10 @@ class MoveFileRequest(BaseModel):
     dest: str                         # destination directory on this machine
 class RenameFileRequest(BaseModel):
     new_name: str                     # new filename (extension kept if omitted)
+
+
+_AUDIO_TYPES = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav",
+                ".ogg": "audio/ogg"}
 
 
 def _music_dir() -> Path:
@@ -111,13 +116,25 @@ async def music(req: MusicRequest, request: Request):
         # Resolved here, in the job's own worker thread, not the route above.
         # See test_comfy_media_routes_offloaded.
         _cfg = load_config()
-        s = _backend.settings(_cfg)
+        s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
         # Privacy mode forces no on-disk traces: it suppresses the sidecar AND
         # forces ComfyUI's own output copy to be deleted, regardless of the
         # opt-in delete_outputs setting.
         is_privacy = effective_mode("server") == SessionMode.PRIVACY
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
+        if s.get("backend_note"):
+            job.push({"type": "line", "text": s["backend_note"]})
+        track_path = out_path.with_suffix(
+            getattr(_backend._impl(s), "OUTPUT_SUFFIX", out_path.suffix))
+        if s.get("backend") == "native":
+            from .backends import native
+            refused = native.refusal(
+                model_overrides=req.model_overrides, sampler_name=req.sampler_name,
+                scheduler=req.scheduler, lyrics_strength=req.lyrics_strength)
+            if refused:
+                job.push({"type": "line", "text": refused})
+                return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
         job.push({"type": "line", "text": msg})
@@ -125,13 +142,19 @@ async def music(req: MusicRequest, request: Request):
             return False
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
                                  unload_chat_for_media)
-        from localm.media.comfy_client import resolve_media_placement
-        # Per-component GPU placement (opt-in) plus the user-facing notice, in one shared
-        # helper (image/music/video share this preamble). placement is applied inside
-        # generate_music; notice is what to tell the user.
-        placement, notice = resolve_media_placement(_cfg, s["api_url"])
-        if notice:
-            job.push({"type": "line", "text": notice})
+        placement = None
+        if s.get("backend") == "comfy":
+            from localm.media.comfy_client import resolve_media_placement
+            # Per-component GPU placement (opt-in) plus the user-facing notice, in one
+            # shared helper (image/music/video share this preamble). placement is
+            # applied inside generate_music; notice is what to tell the user.
+            placement, notice = resolve_media_placement(_cfg, s["api_url"])
+            if notice:
+                job.push({"type": "line", "text": notice})
+        elif _cfg.get("comfy_gpu_placement"):
+            job.push({"type": "line", "text":
+                      "Per-component GPU placement applies to ComfyUI only; the native "
+                      "backend loads each model on one GPU."})
         swap = decide_media_swap(s)
         # The gate reads COMBINED free VRAM across a configured GPU split, but
         # each media model component loads WHOLE onto ONE card (localm ORDERS the cards
@@ -155,9 +178,14 @@ async def music(req: MusicRequest, request: Request):
             job.push({"type": "line", "text":
                       "Both models fit in VRAM - keeping the chat model loaded "
                       "(no swap)."})
-        job.push({"type": "line", "text":
-                  f"Submitting ACE-Step workflow to the music backend "
-                  f"({req.duration_seconds:.0f}s track)..."})
+        if s.get("backend") == "native":
+            job.push({"type": "line", "text":
+                      f"Generating a {req.duration_seconds:.0f}s track with the native "
+                      "ACE-Step runtime..."})
+        else:
+            job.push({"type": "line", "text":
+                      f"Submitting ACE-Step workflow to the music backend "
+                      f"({req.duration_seconds:.0f}s track)..."})
         kwargs = {}
         if req.seed is not None:
             kwargs["seed"] = req.seed
@@ -176,7 +204,7 @@ async def music(req: MusicRequest, request: Request):
         if req.model_overrides:
             kwargs["model_overrides"] = req.model_overrides
         ok, message = _backend.generate(
-            s, req.tags, out_path,
+            s, req.tags, track_path,
             self_url=self_url,
             instance_token=instance_token,
             write_sidecar=not is_privacy,
@@ -193,8 +221,8 @@ async def music(req: MusicRequest, request: Request):
         )
         job.push({"type": "line", "text": message})
         if ok:
-            job.result = out_path.name
-            gallery.stamp_owner("music", out_path.name, owner)
+            job.result = track_path.name
+            gallery.stamp_owner("music", track_path.name, owner)
         # The real deliverable is decided right here - mark it before the VRAM
         # handover below, which is best-effort cleanup that can itself raise
         # (e.g. a non-comfy backend's free_vram()) and must never be able to
@@ -217,12 +245,38 @@ async def music(req: MusicRequest, request: Request):
     return {"job_id": job.id}
 
 
+@_router.get("/api/music/backend")
+async def music_backend():
+    """Which music backend generation will use: ``choice`` (configured),
+    ``active`` (``auto`` resolved as a job resolves it, with one short probe of
+    the configured ComfyUI address) and ``note``; for the native backend also
+    ``native`` (see ``backends.native.status``). Reads config, the registry and
+    the runtime directory, off the event loop."""
+    from localm.config import load_config
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+
+    def _read():
+        from localm.media import backend_choice
+        s = backend_choice.refine_auto(_backend.settings(load_config()), "Music")
+        out = {"choice": s.get("backend_choice"), "active": s.get("backend"),
+               "note": s.get("backend_note"), "warning": s.get("warning")}
+        if s.get("backend") == "native":
+            from .backends import native
+            out["native"] = native.status(s)
+        return out
+    try:
+        return await run_in_threadpool_bounded(_read, timeout=20.0)
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading the music backend settings timed out: {e}") from e
+
+
 @_router.get("/api/music/file/{name}",
              dependencies=[Depends(gallery.require_owner("music"))])
 async def music_file(name: str):
     path = _music_path(name)
-    media = "audio/mpeg" if path.suffix.lower() == ".mp3" else "audio/flac"
-    return FileResponse(str(path), media_type=media)
+    return FileResponse(str(path), media_type=_AUDIO_TYPES.get(path.suffix.lower(), "audio/flac"))
 
 
 @_router.delete("/api/music/file/{name}",

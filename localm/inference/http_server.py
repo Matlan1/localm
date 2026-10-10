@@ -5074,22 +5074,78 @@ def _audit_exchange(audit, transcript, messages: list, reply: str,
         pass  # auditing must never break serving
 
 
-def _events_sse(events: list, model_id: str, chunk_id: str, ts: int) -> list:
+def _events_sse(events: list, model_id: str, chunk_id: str, ts: int,
+                logprobs: Optional[list] = None) -> list:
     """SSE ``data:`` lines for the ``("reasoning" | "text" | "call", value)``
     events of a :class:`_ReplyRouter`, one chunk per event. A call is sent whole,
-    in one ``delta.tool_calls`` entry."""
+    in one ``delta.tool_calls`` entry. *logprobs*, when given, holds one
+    ``logprobs.content`` list per ``"text"`` event, in order, carried by that
+    event's chunk."""
     from localm.inference.protocol import ChatChunk, ChoiceDelta, StreamChoice
     out = []
+    texts = iter(logprobs) if logprobs is not None else None
     for kind, value in events:
+        lp = None
         if kind == "call":
             delta = ChoiceDelta(tool_calls=[value.as_openai(with_index=True)])
         else:
             delta = ChoiceDelta(**{
                 "reasoning_content" if kind == "reasoning" else "content": value})
+            if kind == "text" and texts is not None:
+                lp = {"content": next(texts)}
         chunk = ChatChunk(id=chunk_id, created=ts, model=model_id,
-                          choices=[StreamChoice(delta=delta)])
+                          choices=[StreamChoice(delta=delta, logprobs=lp)])
         out.append(f"data: {chunk.model_dump_json()}\n\n")
     return out
+
+
+class _LogprobStream:
+    """The log probabilities of one reply's visible text, as it is routed.
+
+    :meth:`records` takes the backend's token records, :meth:`route` a piece
+    received from the engine (returning the router's events and one
+    ``logprobs.content`` list per text event) and :meth:`flush` the end of the
+    reply. A reply whose text cannot be aligned with its tokens is logged once
+    at WARNING and reports no further log probabilities; ``failed`` turns
+    True."""
+
+    def __init__(self, router: _ReplyRouter, top_n: int) -> None:
+        from localm.inference.logprobs import LogprobAligner
+        self._router = router
+        self._top_n = top_n
+        self._aligner = LogprobAligner()
+        self._events_seen = 0
+        self.failed = False
+
+    def records(self, records: list) -> None:
+        self._aligner.add(records)
+
+    def route(self, piece: str) -> tuple[list, Optional[list]]:
+        self._aligner.received(piece)
+        events = self._router.feed(piece)
+        return events, self._content(events)
+
+    def flush(self) -> tuple[list, Optional[list]]:
+        self._aligner.finish()
+        events = self._router.flush()
+        return events, self._content(events)
+
+    def _content(self, events: list) -> Optional[list]:
+        from localm.inference.logprobs import LogprobAlignmentError, chat_logprobs_content
+        n = sum(1 for kind, _ in events if kind == "text")
+        spans = self._router.event_spans[self._events_seen:self._events_seen + n]
+        self._events_seen += n
+        if self.failed:
+            return None
+        try:
+            return [chat_logprobs_content(self._aligner.take(s), self._top_n)
+                    for s in spans]
+        except LogprobAlignmentError as e:
+            self.failed = True
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("logprobs: the reply text could not be matched to its "
+                         "tokens (%s); the rest of the reply carries none", e)
+            return None
 
 
 def _pin(engine) -> None:
@@ -5359,6 +5415,8 @@ async def _stream_sse_body(
     stop = gen_kwargs.pop("stop", None)
     router = _ReplyRouter(stop, tool_names, gen_kwargs)
     gen_kwargs.pop("max_tool_calls", None)
+    n_logprobs = gen_kwargs.get("logprobs")
+    lp_stream = _LogprobStream(router, n_logprobs) if n_logprobs is not None else None
 
     if prompt_tokens is None:
         prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
@@ -5432,6 +5490,10 @@ async def _stream_sse_body(
         def __init__(self, text: str) -> None:
             self.text = text
 
+    class _Records:
+        def __init__(self, records: list) -> None:
+            self.records = records
+
     # A mid-stream client disconnect makes Starlette throw GeneratorExit into this
     # async generator. Without a cancel path the producer thread below would keep
     # driving engine.chat_stream() all the way to end-of-generation, holding
@@ -5458,10 +5520,15 @@ async def _stream_sse_body(
         def _on_status(s: str) -> None:
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
 
+        def _on_logprobs(records: list) -> None:
+            loop.call_soon_threadsafe(token_queue.put_nowait, _Records(records))
+
         from localm.inference.backends.base import stream_stop_check
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
+            if lp_stream is not None:
+                gen_opts["on_logprobs"] = _on_logprobs
             with stream_stop_check(cancel_event.is_set):
                 gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
                 for token in gen:
@@ -5529,6 +5596,10 @@ async def _stream_sse_body(
                         chunk = ChatChunk.status_chunk(token.text, model_id, chunk_id, ts)
                         yield f"data: {chunk.model_dump_json()}\n\n"
                         continue
+                    if isinstance(token, _Records):
+                        if lp_stream is not None:
+                            lp_stream.records(token.records)
+                        continue
                     if isinstance(token, Exception):
                         gen_error = token
                         continue
@@ -5539,7 +5610,11 @@ async def _stream_sse_body(
                     if pipeline is not None and ctx is not None and pipeline.has("stream"):
                         token = pipeline.run_stream(token, ctx)
                     completion_parts.append(token)
-                    for data in _events_sse(router.feed(token), model_id, chunk_id, ts):
+                    if lp_stream is not None:
+                        events, lp = lp_stream.route(token)
+                    else:
+                        events, lp = router.feed(token), None
+                    for data in _events_sse(events, model_id, chunk_id, ts, lp):
                         yield data
                     if router.stopped:
                         break
@@ -5567,7 +5642,11 @@ async def _stream_sse_body(
         gen_end = meter.gen_end = time.perf_counter()
         # Release any tail held back while disambiguating a partial <think> tag,
         # a partial tool call or a partial stop sequence.
-        for data in _events_sse(router.flush(), model_id, chunk_id, ts):
+        if lp_stream is not None:
+            events, lp = lp_stream.flush()
+        else:
+            events, lp = router.flush(), None
+        for data in _events_sse(events, model_id, chunk_id, ts, lp):
             yield data
 
     error_text = ""
@@ -5678,6 +5757,28 @@ async def _stream_sse_completion_body(
     stopper = StopFilter(stop) if stop else None
     stopped = False
     emitted: list[str] = []
+    from localm.inference.logprobs import (
+        LogprobAligner, LogprobAlignmentError, completion_logprobs)
+    n_logprobs: Optional[int] = gen_kwargs.get("logprobs")
+    lp_aligner = LogprobAligner() if n_logprobs is not None else None
+    lp_failed = False
+    lp_shown = 0
+
+    def _piece_logprobs(piece: str) -> Optional[dict]:
+        nonlocal lp_failed, lp_shown
+        start = lp_shown
+        lp_shown += len(piece)
+        if lp_aligner is None or n_logprobs is None or lp_failed:
+            return None
+        try:
+            return completion_logprobs(
+                lp_aligner.take([(start, lp_shown)]), n_logprobs)
+        except LogprobAlignmentError as e:
+            lp_failed = True
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("logprobs: the completion could not be matched to its "
+                         "tokens (%s); the rest of it carries none", e)
+            return None
     # *messages* arrive already inlet-transformed; count tokens on what
     # inference sees (matches the chat path) if not already provided.
     if prompt_tokens is None:
@@ -5698,6 +5799,10 @@ async def _stream_sse_completion_body(
         def __init__(self, text: str) -> None:
             self.text = text
 
+    class _Records:
+        def __init__(self, records: list) -> None:
+            self.records = records
+
     def _generate():
         # chat_stream INSIDE the try: it eagerly runs the auto-reload before
         # returning the generator, so an eager raise must not escape the try and
@@ -5707,10 +5812,15 @@ async def _stream_sse_completion_body(
         def _on_status(s: str) -> None:
             loop.call_soon_threadsafe(token_queue.put_nowait, _StatusSignal(s))
 
+        def _on_logprobs(records: list) -> None:
+            loop.call_soon_threadsafe(token_queue.put_nowait, _Records(records))
+
         from localm.inference.backends.base import stream_stop_check
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
+            if lp_aligner is not None:
+                gen_opts["on_logprobs"] = _on_logprobs
             with stream_stop_check(cancel_event.is_set):
                 gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
                 for token in gen:
@@ -5779,6 +5889,10 @@ async def _stream_sse_completion_body(
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"
                         continue
+                    if isinstance(token, _Records):
+                        if lp_aligner is not None:
+                            lp_aligner.add(token.records)
+                        continue
                     if isinstance(token, Exception):
                         gen_error = token
                         continue
@@ -5788,6 +5902,8 @@ async def _stream_sse_completion_body(
                     # so usage and the audit trail reflect what the client receives.
                     if pipeline is not None and ctx is not None and pipeline.has("stream"):
                         token = pipeline.run_stream(token, ctx)
+                    if lp_aligner is not None:
+                        lp_aligner.received(token)
                     piece = token
                     if stopper is not None:
                         piece = stopper.feed(token)
@@ -5795,10 +5911,14 @@ async def _stream_sse_completion_body(
                         emitted.append(piece)
                     completion_parts.append(token)
                     if piece or stopper is None:
+                        choice: dict[str, Any] = {"text": piece, "index": 0,
+                                                  "finish_reason": None}
+                        if lp_aligner is not None:
+                            choice["logprobs"] = _piece_logprobs(piece)
                         chunk = {
                             "id": chunk_id, "object": "text_completion.chunk",
                             "created": ts, "model": model_id,
-                            "choices": [{"text": piece, "index": 0, "finish_reason": None}],
+                            "choices": [choice],
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"
                     if stopped:
@@ -5819,10 +5939,14 @@ async def _stream_sse_completion_body(
     if stopper is not None and not stopped:
         tail = stopper.flush()
         if tail:
+            tail_choice: dict[str, Any] = {"text": tail, "index": 0, "finish_reason": None}
+            if lp_aligner is not None:
+                lp_aligner.finish()
+                tail_choice["logprobs"] = _piece_logprobs(tail)
             tail_chunk = {
                 "id": chunk_id, "object": "text_completion.chunk",
                 "created": ts, "model": model_id,
-                "choices": [{"text": tail, "index": 0, "finish_reason": None}],
+                "choices": [tail_choice],
             }
             yield f"data: {json.dumps(tail_chunk)}\n\n"
 
@@ -6054,10 +6178,14 @@ class _ReplyRouter:
     ``("reasoning" | "text" | "call", value)`` events (a call's value is a
     ``ParsedCall``). After a stop sequence matches, nothing more is returned.
     ``content`` holds the visible text and the calls (as the model wrote them) in
-    order, ``reasoning`` the reasoning, ``calls`` the calls."""
+    order, ``reasoning`` the reasoning, ``calls`` the calls. ``text_spans`` holds,
+    for the visible text returned so far, the ``(start, end)`` ranges of the
+    pieces fed that it was cut from, in order, and ``event_spans`` the same
+    ranges split per ``"text"`` event returned."""
 
     def __init__(self, stops, tool_names, gen_kwargs: dict) -> None:
         from localm.inference.gbnf import think_exit_marker
+        from localm.inference.logprobs import SegMap
         from localm.textnorm import ThinkSplitter
         self._think = ThinkSplitter(exit_marker=think_exit_marker(
             gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
@@ -6067,6 +6195,11 @@ class _ReplyRouter:
         self.calls: list = []
         self.content: list[str] = []
         self.reasoning: list[str] = []
+        self.text_spans: list[tuple[int, int]] = []
+        self.event_spans: list[list[tuple[int, int]]] = []
+        self._answer = SegMap()     # reasoning-free text -> the pieces fed
+        self._visible = SegMap()    # text left by the tool parser -> reasoning-free text
+        self._shown = 0             # visible text returned so far
 
     @property
     def stopped(self) -> bool:
@@ -6081,13 +6214,19 @@ class _ReplyRouter:
 
     def feed(self, token: str) -> list:
         content, reasoning = self._think.feed(token)
+        self._note_answer()
         return self._route(content, reasoning, final=False)
 
     def flush(self) -> list:
         if self.stopped:
             return []
         content, reasoning = self._think.flush()
+        self._note_answer()
         return self._route(content, reasoning, final=True)
+
+    def _note_answer(self) -> None:
+        for start, end in self._think.spans:
+            self._answer.add(start, end - start)
 
     def _cut(self, text: str) -> str:
         return self._stop.feed(text) if self._stop is not None else text
@@ -6101,6 +6240,13 @@ class _ReplyRouter:
         if not text:
             return []
         self.content.append(text)
+        start = self._shown
+        self._shown += len(text)
+        spans: list[tuple[int, int]] = []
+        for a, b in self._visible.map(start, self._shown):
+            spans.extend(self._answer.map(a, b))
+        self.text_spans.extend(spans)
+        self.event_spans.append(spans)
         return [("text", text)]
 
     def _route(self, content: str, reasoning: str, final: bool) -> list:
@@ -6111,14 +6257,20 @@ class _ReplyRouter:
         events: list[tuple[str, Any]]
         if self._tools is None:
             events = [("text", content)]
+            spans = [(self._answer.total - len(content), self._answer.total)]
         else:
             events = self._tools.feed(content)
+            spans = list(self._tools.spans)
             if final:
                 events += self._tools.finish()
+                spans += self._tools.spans
+        text_spans = iter(spans)
         for kind, value in events:
             if self.stopped:
                 break
             if kind == "text":
+                start, end = next(text_spans)
+                self._visible.add(start, end - start)
                 out += self._text(self._cut(value))
                 continue
             out += self._text(self._release())
@@ -6132,7 +6284,9 @@ class _ReplyRouter:
 
 
 async def _generate_full(engine, messages: list, request=None, *,
-                         timing: Optional[dict] = None, **gen_kwargs) -> str:
+                         timing: Optional[dict] = None,
+                         on_logprobs: Optional[Callable[[list], None]] = None,
+                         **gen_kwargs) -> str:
     """Consume a whole (non-streaming) generation in an executor while watching for
     a client disconnect, and return the accumulated text.
 
@@ -6141,6 +6295,9 @@ async def _generate_full(engine, messages: list, request=None, *,
     decode-window throughput even though this path does not stream to the client:
     the handler still drives ``engine.chat_stream`` internally, so the first token
     boundary IS observable here. Left absent by callers that do not report metrics.
+
+    *on_logprobs* receives the backend's token records when ``logprobs`` is in
+    *gen_kwargs*; it is called on the generation thread.
 
     A non-streaming handler is a plain coroutine, and Starlette does NOT cancel it
     when the client disconnects (unlike a StreamingResponse, whose async generator
@@ -6173,7 +6330,8 @@ async def _generate_full(engine, messages: list, request=None, *,
     def _run() -> str:
         from localm.inference.backends.base import stream_stop_check
         _log_assembled_prompt(messages)
-        gen = engine.chat_stream(messages, **gen_kwargs)
+        extra = {"on_logprobs": on_logprobs} if gen_kwargs.get("logprobs") is not None else {}
+        gen = engine.chat_stream(messages, **gen_kwargs, **extra)
         parts: list[str] = []
         try:
             with stream_stop_check(cancel_event.is_set):
@@ -6457,6 +6615,8 @@ async def _complete(
     # Up to the model's parallel slots generate at once.
     gen_error: Exception | None = None
     timing: dict = {}
+    n_logprobs = gen_kwargs.get("logprobs")
+    lp_records: list = []
     _admit_generation(sem, engine)
     async with sem:
         gen_start = time.perf_counter()
@@ -6465,7 +6625,8 @@ async def _complete(
         # end-of-budget behind the next request's back.
         try:
             text = await _generate_full(engine, messages, request,
-                                        timing=timing, **gen_kwargs)
+                                        timing=timing, on_logprobs=lp_records.extend,
+                                        **gen_kwargs)
         except _BACKEND_ERROR_TYPES as e:
             # A backend refusal the CALLER can act on (an image this vision model
             # could not process, a grammar the deferred check finally rejected at
@@ -6501,6 +6662,7 @@ async def _complete(
             text = inference_error_text(e)
         gen_end = time.perf_counter()
     first_token_at = timing.get("first_token_at")
+    generated = text
 
     stop = gen_kwargs.get("stop")
     tool_names = gen_kwargs.get("tool_names")
@@ -6538,6 +6700,7 @@ async def _complete(
         ctx.outcome = outcome
     # Outlet fully controls the returned content in the non-streaming path (but a
     # failed generation surfaces its error verbatim, not reshaped by the outlet).
+    before_outlet = text
     if gen_error is None and pipeline is not None and ctx is not None and pipeline.has("outlet"):
         text = await pipeline.run_outlet(text, messages, ctx)
 
@@ -6564,6 +6727,12 @@ async def _complete(
         from localm.textnorm import split_think
         answer, reasoning = split_think(text, exit_marker=think_exit_marker(
             gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
+
+    logprobs = None
+    if n_logprobs is not None and gen_error is None:
+        logprobs = _reply_logprobs(generated, lp_records, n_logprobs, answer,
+                                   changed=text != before_outlet, stop=stop,
+                                   tool_names=tool_names, gen_kwargs=gen_kwargs)
 
     completion_tokens = await _count_streamed_tokens(engine, text)
     usage = UsageInfo(
@@ -6593,6 +6762,7 @@ async def _complete(
                 message=Message(role="assistant", content=answer,
                                 reasoning_content=reasoning or None,
                                 tool_calls=tool_calls),
+                logprobs=logprobs,
                 finish_reason=finish_reason,
                 stop_sequence=stop_sequence if finish_reason == "stop" else None,
             )
@@ -6600,6 +6770,67 @@ async def _complete(
         usage=usage,
     )
     return JSONResponse(response.model_dump())
+
+
+def completion_text_logprobs(generated: str, records: list, top_n: int, visible: str, *,
+                             changed: bool) -> Optional[dict]:
+    """The legacy ``/v1/completions`` ``logprobs`` object for a non-streamed
+    reply: the tokens of *visible* (the start of the *generated* text) from the
+    backend's *records*. None, logged at WARNING, when an outlet hook *changed*
+    the reply or the text cannot be matched to its tokens."""
+    from localm.debuglog import logger as _dbg
+    from localm.inference.logprobs import (
+        LogprobAligner, LogprobAlignmentError, completion_logprobs)
+    if changed:
+        _dbg.warning("logprobs: a chat outlet hook changed the completion, so its "
+                     "log probabilities are not returned")
+        return None
+    aligner = LogprobAligner()
+    aligner.add(records)
+    aligner.finish()
+    aligner.received(generated)
+    try:
+        entries = aligner.take([(0, len(visible))])
+    except LogprobAlignmentError as e:
+        _dbg.warning("logprobs: the completion could not be matched to its "
+                     "tokens (%s); no log probabilities", e)
+        return None
+    return completion_logprobs(entries, top_n)
+
+
+def _reply_logprobs(generated: str, records: list, top_n: int, answer: str, *,
+                    changed: bool, stop, tool_names, gen_kwargs: dict) -> Optional[dict]:
+    """``choices[0].logprobs`` for a non-streamed chat reply: the tokens of the
+    visible *answer* within the *generated* text, from the backend's
+    *records*. None, logged at WARNING, when an outlet hook *changed* the reply
+    or the answer cannot be matched to its tokens."""
+    from localm.debuglog import logger as _dbg
+    from localm.inference.logprobs import (
+        LogprobAligner, LogprobAlignmentError, chat_logprobs_content)
+    if changed:
+        _dbg.warning("logprobs: a chat outlet hook changed the reply, so its "
+                     "log probabilities are not returned")
+        return None
+    router = _ReplyRouter(stop, tool_names, gen_kwargs)
+    visible = "".join(value for kind, value in router.feed(generated) + router.flush()
+                      if kind == "text")
+    if not answer:
+        return {"content": []}
+    if visible != answer:
+        _dbg.warning("logprobs: the reply's visible text differs from the text "
+                     "its tokens were matched against; no log probabilities")
+        return None
+    aligner = LogprobAligner()
+    aligner.add(records)
+    aligner.finish()
+    aligner.received(generated)
+    try:
+        entries = aligner.take(router.text_spans)
+    except LogprobAlignmentError as e:
+        _dbg.warning("logprobs: the reply text could not be matched to its "
+                     "tokens (%s); no log probabilities", e)
+        return None
+    return {"content": chat_logprobs_content(entries, top_n)}
 
 
 def _protocol_messages_to_dicts(messages: list[Message]) -> list:

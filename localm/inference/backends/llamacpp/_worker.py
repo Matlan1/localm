@@ -408,8 +408,13 @@ class GgufWorker(VramSizingMixin):
         min_p: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        logprobs: Optional[int] = None,
+        logprob_sink: Optional[list] = None,
     ):
-        """Yield text tokens one at a time. The caller (the runner's dispatch
+        """Yield text tokens one at a time. With *logprobs* and *logprob_sink*,
+        each generated token's record is appended to *logprob_sink* before its
+        text is yielded (see ``LlamaCpp.create_chat_completion``); a retry
+        without the grammar empties it first. The caller (the runner's dispatch
         loop) already filtered out an image the model cannot see and already
         nulled ``grammar`` if the parent's persistent latch says this model
         does not support it - this method only handles a fault seen for the
@@ -451,6 +456,9 @@ class GgufWorker(VramSizingMixin):
                     kw[key] = value
             if self.stream_cancel is not None:
                 kw["should_stop"] = self.stream_cancel.is_set
+            if logprobs is not None:
+                kw["logprobs"] = logprobs
+                kw["logprob_sink"] = logprob_sink
             return kw
 
         def _stream(g: Optional[str]):
@@ -481,6 +489,8 @@ class GgufWorker(VramSizingMixin):
                 _dbg.warning("native grammar sampler faulted (%s); "
                              "degrading to unconstrained generation", e)
                 self.last_finish_reason = "stop"
+                if logprob_sink is not None:
+                    logprob_sink.clear()
                 yield from _stream(None)
                 return
             # Any other native fault (access violation etc.): do not soften it,

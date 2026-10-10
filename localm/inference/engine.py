@@ -681,6 +681,11 @@ class Engine:
         grammar. See ``BaseBackend.supports_grammar`` for why the default denies."""
         return getattr(self._backend, "supports_grammar", False)
 
+    @property
+    def supports_logprobs(self) -> bool:
+        """True when the active backend can report token log probabilities."""
+        return bool(getattr(self._backend, "supports_logprobs", False))
+
     def unsupported_sampling(self, options: dict) -> list:
         """The names of the sampling *options* (``{name: value}`` for ``min_p``,
         ``presence_penalty``, ``frequency_penalty``) the active backend cannot
@@ -723,12 +728,16 @@ class Engine:
         min_p: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        logprobs: Optional[int] = None,
+        on_logprobs: Optional[Callable[[list], None]] = None,
     ) -> Iterator[str]:
         """Stream the reply to *messages*. ``thinking=False`` asks a reasoning
         model to answer without its reasoning channel; ``None`` leaves the
         model's default. *min_p*, *presence_penalty* and *frequency_penalty* are
         passed to the backend only when set; check :meth:`unsupported_sampling`
-        first. The other parameters default to the config values."""
+        first. *logprobs* and *on_logprobs* are passed only when *logprobs* is
+        set; check :attr:`supports_logprobs` first. The other parameters default
+        to the config values."""
         # Auto-reload if the model was unloaded. Holds the process-global load
         # lock so a reload cannot race another load onto the GPU, and
         # double-checks inside the lock so a model another thread just brought
@@ -750,6 +759,9 @@ class Engine:
                            ("frequency_penalty", frequency_penalty)):
             if value is not None:
                 extra[key] = value
+        if logprobs is not None:
+            extra["logprobs"] = logprobs
+            extra["on_logprobs"] = on_logprobs
         # Normalise model-internal control markers (harmony and Gemma channel
         # tags, and similar) once here, so every backend inherits it. The GGUF
         # backend also scrubs internally and scrub_stream is idempotent; the HF
