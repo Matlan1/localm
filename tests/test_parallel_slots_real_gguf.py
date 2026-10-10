@@ -6,10 +6,10 @@ scheduler all run on the native runtime.
 @integration: needs the native runtime (localm setup-llama) and the model on
 disk or reachable; their absence is a skip, any later failure is real.
 
-Greedy replies decoded in the same batch as other replies are not
-bit-identical to the same reply decoded alone (batch-size dependent kernels),
-so these tests compare a reply only with one decoded under the same batch
-shape.
+Text is compared only for a reply decoded alone from a clean cache; the same
+batch can round differently run to run on a GPU. Isolation between replies is
+checked on their logits, against that run-to-run noise and against a control
+that does leak.
 """
 from __future__ import annotations
 
@@ -99,25 +99,67 @@ def test_two_replies_decode_at_the_same_time(slots4):
         "the replies did not overlap"
 
 
-def test_identical_requests_at_once_get_identical_replies(slots4):
-    a, b = _together(slots4, [LONG[0], LONG[0]])
-    assert a["text"] == b["text"] and a["text"]
+def _isolated_logits(llm, ops, own, neighbour, *, shared_seq=False):
+    """The logits row of *own*'s last token after one decode that also holds
+    *neighbour*, from a cleared cache. With *shared_seq* the neighbour's tokens
+    come first in the SAME sequence, so *own* attends to them (the leak
+    control)."""
+    import ctypes as _ct
+
+    from localm.inference.backends.llamacpp import _api as api
+    with llm._gen_lock:
+        ops.clear_memory()
+        if shared_seq:
+            entries = ([(t, i, 0, False) for i, t in enumerate(neighbour)]
+                       + [(t, len(neighbour) + i, 0, i == len(own) - 1)
+                          for i, t in enumerate(own)])
+        else:
+            entries = ([(t, i, 0, i == len(own) - 1) for i, t in enumerate(own)]
+                       + [(t, i, 1, i == len(neighbour) - 1) for i, t in enumerate(neighbour)])
+        assert ops.decode(entries) == 0
+        row = next(i for i, e in enumerate(entries) if e[3] and e[2] == 0)
+        n_vocab = api.llama_vocab_n_tokens(llm._tokenizer._vocab)
+        ptr = api.llama_get_logits_ith(llm._ctx_ptr, row)
+        values = _ct.cast(ptr, _ct.POINTER(_ct.c_float * n_vocab)).contents
+        out = list(values)
+        ops.clear_memory()
+    return out
 
 
-def test_a_reply_does_not_see_the_reply_beside_it(slots4):
-    # Same batch shape both times: the neighbours have the same token count and
-    # both run to the budget, so only their content differs.
-    first = "Count from 1 to 200, separated by spaces."
-    neighbours = ["Count from 300 to 500, separated by spaces.",
-                  "Count from 600 to 800, separated by spaces."]
-    lens = [slots4.count_messages_tokens([{"role": "user", "content": n}])
-            for n in neighbours]
-    assert lens[0] == lens[1], f"neighbour prompts differ in length: {lens}"
-    a1, n1 = _together(slots4, [first, neighbours[0]], max_tokens=32)
-    a2, n2 = _together(slots4, [first, neighbours[1]], max_tokens=32)
-    assert n1["finish"] == "length" and n2["finish"] == "length"
-    assert n1["text"] != n2["text"]
-    assert a1["text"] == a2["text"]
+def test_a_reply_does_not_see_the_reply_beside_it(model_path):
+    # A neighbour's content moves this reply's logits by no more than the
+    # run-to-run noise of the same batch, and far less than seeing the
+    # neighbour's tokens does.
+    from localm.inference.backends.llamacpp._slots import LlamaSlotOps
+    from localm.inference.backends.llamacpp.llama import LlamaCpp
+    llm = LlamaCpp(model_path, n_ctx=2048, n_gpu_layers=99, n_parallel=4)
+    try:
+        assert llm.n_parallel == 4
+        ops = LlamaSlotOps(llm)
+
+        def toks(text):
+            return llm._tokenizer.encode(text, add_bos=True)
+
+        own = toks("The capital city of France is")
+        b = toks("Seven times eight equals fifty six, and")
+        c = b[:1] + b[:0:-1]
+        assert len(b) == len(c) and b != c
+        with_b = _isolated_logits(llm, ops, own, b)
+        with_b_again = _isolated_logits(llm, ops, own, b)
+        with_c = _isolated_logits(llm, ops, own, c)
+        leaked = _isolated_logits(llm, ops, own, b, shared_seq=True)
+
+        def dist(x, y):
+            return max(abs(p - q) for p, q in zip(x, y, strict=True))
+
+        noise = dist(with_b, with_b_again)
+        neighbour = dist(with_b, with_c)
+        leak = dist(with_b, leaked)
+        assert leak > 1.0, f"the leak control moved the logits by only {leak}"
+        assert neighbour < leak / 10, (noise, neighbour, leak)
+        assert neighbour <= max(10 * noise, 0.05), (noise, neighbour, leak)
+    finally:
+        llm.close()
 
 
 def test_a_grammar_applies_to_its_own_reply_only(slots4):
@@ -161,20 +203,22 @@ def test_a_token_count_during_a_reply_is_exact(slots4):
     assert idle != max(1, len(text) // 4)
 
 
-def test_a_reply_alone_matches_the_one_slot_model(model_path, slots4):
+def test_a_reply_alone_matches_the_one_slot_model(model_path):
+    # Both models are loaded fresh for this comparison.
     prompt = "Name three colors of the rainbow."
-    with_slots = "".join(_ask(slots4, prompt))
-    slots4.unload()
+    with_slots = _load(model_path, 4)
     try:
-        single = _load(model_path, 1)
-        try:
-            assert single.parallel_slots == 1
-            alone = "".join(_ask(single, prompt))
-        finally:
-            single.unload()
+        assert with_slots.parallel_slots == 4
+        sloted = "".join(_ask(with_slots, prompt))
     finally:
-        slots4.load()
-    assert with_slots == alone and alone
+        with_slots.unload()
+    single = _load(model_path, 1)
+    try:
+        assert single.parallel_slots == 1
+        alone = "".join(_ask(single, prompt))
+    finally:
+        single.unload()
+    assert sloted == alone and alone
 
 
 @pytest.fixture(scope="module")
