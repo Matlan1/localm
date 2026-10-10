@@ -25,6 +25,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a GGUF vision model is now applied instead of dropped, and a GGUF model whose grammar
   sampler faulted earlier refuses grammar requests until localm restarts instead of
   answering without the constraint.
+- **`localm setup-sdcpp` installs a native image generation runtime.** It downloads the
+  stable-diffusion.cpp build that fits this machine (CPU, Vulkan, CUDA, ROCm or Metal) from
+  a pinned upstream release through the network policy, verifies it against a pinned
+  checksum, and checks that it loads and finds a compute device, falling back to Vulkan and
+  then CPU when the preferred build does not load. `--backend` picks a build and `--status`
+  shows what is installed.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the
