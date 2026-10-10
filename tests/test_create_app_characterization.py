@@ -225,6 +225,8 @@ _KERNEL_ROUTES = {
     # routes/anthropic.py
     ("api", "POST", "/v1/messages"): ("auth",),
     ("api", "POST", "/v1/messages/count_tokens"): ("auth",),
+    # routes/responses.py
+    ("api", "POST", "/v1/responses"): ("auth",),
 }
 
 # attach_engine(): plugin management, plugin dependency install, background jobs.

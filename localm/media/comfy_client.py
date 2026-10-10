@@ -2133,7 +2133,8 @@ def _upload_image(image_path: Path, api_url: str) -> str:
         method="POST",
     )
     with _comfy_urlopen(req, timeout=30) as resp:
-        result = json.loads(resp.read().decode())
+        from localm.jsonreply import loads as _json_loads
+        result = _json_loads(resp.read().decode())
     name = result.get("name")
     if not name:
         raise RuntimeError(f"ComfyUI upload returned no filename: {result}")

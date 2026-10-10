@@ -20,12 +20,30 @@ permanent public record of what shipped and are never rewritten; the in-progress
   It runs in its own worker process, shows its progress, appears as loaded on the Models
   page (Unload releases it), and stops when the client goes away. Pocket TTS files are
   still refused.
+- **Images generate without ComfyUI.** A native image backend runs stable-diffusion.cpp in
+  a separate worker process on CPU, Vulkan, CUDA, ROCm or Metal, installing its runtime on
+  first use. With no model set up, the Images page offers to download the recommended one
+  (SD-Turbo, about 2 GB); any model stable-diffusion.cpp supports can be set instead (SD
+  1.x/2.x, SDXL, SD3, FLUX, Z-Image and more, as GGUF, safetensors or ckpt, with separate
+  text encoders and VAE where the model needs them). The new Image backend setting picks
+  `auto` (ComfyUI when it is set up, otherwise native), `native` or `comfy`, and the Images
+  page, `/api/imagine`, `/v1/images/generations`, `localm image`, the chat
+  `/generate-image` command, the coder agent and the MCP `generate_image` tool all follow it.
+  The Images page and `/api/imagine` take a size, and `localm image` takes `--size`. A GGUF
+  image checkpoint without an architecture tag is now registered as an image model instead
+  of a chat model.
 - **The Anthropic Messages API at `/v1/messages`.** Claude Code, the Anthropic SDKs and other
   tools that speak the Messages API can point their base URL at localm and use any chat model:
   text and image blocks, a system prompt, `stop_sequences`, tool use with `tool_use` and
   `tool_result` blocks, `thinking` (returned as thinking blocks), streaming with the full
   Messages event sequence, and `/v1/messages/count_tokens`. The `x-api-key` header is accepted
   as well as a bearer token, and errors come back in Anthropic's error shape.
+- **The OpenAI Responses API at `/v1/responses`.** OpenAI SDKs and tools that speak the
+  Responses API can use any localm chat model: input items with text, images and audio,
+  `instructions`, function tools with `function_call` and `function_call_output` items,
+  `text.format` for structured output, reasoning items, and the streaming event sequence.
+  `previous_response_id` continues an earlier response, kept in the server's memory only and
+  only for the key that created it.
 - **Structured output and more OpenAI fields on `/v1/chat/completions`.**
   `response_format` (`json_object`, or `json_schema` with `strict`) constrains the reply,
   token by token, to JSON or to the schema, also alongside `tools`. `presence_penalty`,

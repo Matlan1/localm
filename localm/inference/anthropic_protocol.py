@@ -389,7 +389,7 @@ def _tool_use_block(call: dict[str, Any]) -> dict[str, Any]:
     args = fn.get("arguments")
     try:
         parsed = json.loads(args) if isinstance(args, str) and args.strip() else {}
-    except ValueError:
+    except (ValueError, RecursionError):
         parsed = {}
     return {"type": "tool_use", "id": call.get("id") or "toolu_" + uuid.uuid4().hex[:24],
             "name": fn.get("name") or "", "input": parsed if isinstance(parsed, dict) else {}}

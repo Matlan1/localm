@@ -1463,6 +1463,10 @@ def _pull_gguf_file(
                 elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
                     console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
                     reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
+                elif _mm.gguf_sd_checkpoint(dest):
+                    console.print("[dim]Detected as an image generation model (Stable "
+                                  "Diffusion tensors in the GGUF).[/dim]")
+                    reg_type = "diffusion-unet"
             mmproj_path = _mmproj_for_registration(
                 reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
@@ -1629,6 +1633,10 @@ def _pull_gguf_file(
             elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
                 console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
                 reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
+            elif _mm.gguf_sd_checkpoint(base_dir / filename):
+                console.print("[dim]Detected as an image generation model (Stable "
+                              "Diffusion tensors in the GGUF).[/dim]")
+                reg_type = "diffusion-unet"
         mmproj_path = _mmproj_for_registration(
             reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
         _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",

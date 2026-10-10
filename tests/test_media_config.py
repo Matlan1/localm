@@ -142,3 +142,35 @@ def test_non_media_source_ignored():
     block, warn = mc.resolve_config("image", cfg)
     assert warn is None                       # coder is not a media plugin
     assert block["comfy"]["api_url"] == "http://i"
+
+
+def test_share_keeps_the_sharers_own_backend_and_native_settings():
+    plugins = {
+        "image": {"backend": "native", "native": {"model": "sd-turbo"},
+                  "comfy": {"api_url": "http://image"}},
+        "video": {"use_config_from": "image", "backend": "comfy",
+                  "native": {"model": "wan"}},
+        "music": {"use_config_from": "image"},
+    }
+    cfg = _cfg(plugins)
+    video, warn = mc.resolve_config("video", cfg, active={"image", "video", "music"})
+    assert warn is None
+    assert video["comfy"]["api_url"] == "http://image"
+    assert video["backend"] == "comfy" and video["native"] == {"model": "wan"}
+    music, warn = mc.resolve_config("music", cfg, active={"image", "video", "music"})
+    assert warn is None
+    assert music["comfy"]["api_url"] == "http://image"
+    assert "backend" not in music and "native" not in music
+
+
+def test_a_plugin_sharing_the_image_config_keeps_its_comfyui_backend(monkeypatch):
+    from localm.plugins.builtin.music import backend as music_backend
+    from localm.plugins.builtin.video import backend as video_backend
+    monkeypatch.setattr(mc, "active_plugins", lambda cfg: {"image", "music", "video"})
+    cfg = _cfg({"image": {"backend": "native", "native": {"model": "sd-turbo"}},
+                "music": {"use_config_from": "image"},
+                "video": {"use_config_from": "image"}})
+    for backend in (video_backend, music_backend):
+        s = backend.settings(cfg)
+        assert s["backend"] == "comfy"
+        assert s["warning"] is None

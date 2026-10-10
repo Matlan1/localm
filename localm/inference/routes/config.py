@@ -328,23 +328,22 @@ def register(app: FastAPI, ctx) -> None:
         fields and the other plugins are untouched. A blank field clears that
         plugin's override (it falls back to the shared global default)."""
         from localm.config import ConfigUnreadable, load_config, update_config
-        from localm.settings_schema import (MEDIA_PLUGINS, media_schema_json,
-                                             validate_media_block)
+        from localm.settings_schema import (MEDIA_PLUGINS, media_admin_only_fields,
+                                             media_schema_json, validate_media_block)
         if name not in MEDIA_PLUGINS:
             raise HTTPException(404, f"unknown media plugin: {name}")
-        # launch_cmd is run through the shell, api_url redirects the render target,
-        # and workdir is both where the launcher is AUTO-DISCOVERED when launch_cmd
-        # is blank (discover_launch_cmd -> shlex.split -> Popen) and what the model
-        # scanner walks into registry.json; the per-plugin workdir wins over the
-        # global comfy_workdir. All three require an ADMIN principal in protected
+        # Every field media_admin_only_fields() names (launch_cmd, api_url, workdir
+        # and the native model file fields) requires an ADMIN principal in protected
         # mode. Open mode is the trusted local owner, so caller_scopes is None.
-        if any(k in ("launch_cmd", "api_url", "workdir") for k in (body or {})):
+        owner_only = sorted(k for k in (body or {}) if k in media_admin_only_fields())
+        if owner_only:
             held = _hs.caller_scopes(request)
             if held is not None and scopes.ADMIN not in held:
                 raise HTTPException(
-                    403, "Setting a media backend's launch_cmd, api_url or workdir "
-                    "requires an admin key (it configures a shell command, a network "
-                    "target, or the folder a launcher is discovered in).")
+                    403, f"Setting {', '.join(owner_only)} requires an admin key (it "
+                    "configures a shell command, a network target, a folder a launcher "
+                    "is discovered in, or a file on this machine that is loaded as a "
+                    "model).")
         try:
             merge = validate_media_block(name, body or {})
         except ValueError as e:

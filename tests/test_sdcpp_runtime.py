@@ -242,3 +242,10 @@ def test_setup_sdcpp_reports_a_failure_and_exits_1(cli_runner, monkeypatch):
 def test_setup_sdcpp_is_a_localm_command():
     from localm.cli import main
     assert "setup-sdcpp" in main.commands
+
+
+@pytest.mark.parametrize("doc", ["[" * 100_000, "9" * 5_000], ids=["deep", "bigint"])
+def test_read_json_of_a_hostile_file_is_none(tmp_path, doc):
+    path = tmp_path / "meta.json"
+    path.write_text(doc, encoding="utf-8")
+    assert runtime._read_json(path) is None

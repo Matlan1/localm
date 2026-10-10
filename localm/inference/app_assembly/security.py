@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 import localm.inference.http_server as _hs
 from localm.inference import anthropic_protocol as _anthropic
 from localm.inference import ollama_protocol as _ollama
+from localm.inference import responses_protocol as _responses
 
 
 def add_cors(app: FastAPI) -> Any:
@@ -107,6 +108,9 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
     # The Anthropic Messages routes, matched by exact path so a later route under
     # /v1/messages/ is not exempt by inheritance.
     _ANTHROPIC_CROSS_ORIGIN_OK = _anthropic.CROSS_ORIGIN_OK_PATHS
+    # The OpenAI Responses route, matched by exact path so a later route under
+    # /v1/responses/ is not exempt by inheritance.
+    _RESPONSES_CROSS_ORIGIN_OK = _responses.CROSS_ORIGIN_OK_PATHS
     _OLLAMA_OPEN_MODE_GETS = _ollama.OPEN_MODE_GET_PATHS
 
     _cors_allowlist = frozenset(cors_cfg) if isinstance(cors_cfg, list) else frozenset()
@@ -191,7 +195,8 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
                       or _path.startswith(_CROSS_ORIGIN_GET_REFUSED_PREFIXES))))
                 and not _path.startswith(_CROSS_ORIGIN_OK)
                 and _path not in _OLLAMA_CROSS_ORIGIN_OK
-                and _path not in _ANTHROPIC_CROSS_ORIGIN_OK):
+                and _path not in _ANTHROPIC_CROSS_ORIGIN_OK
+                and _path not in _RESPONSES_CROSS_ORIGIN_OK):
             if _cross_origin_refused(request):
                 return JSONResponse(
                     status_code=403,
@@ -234,7 +239,8 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
         if ((is_unsafe or is_metadata_get)
                 and not request.url.path.startswith(_CROSS_ORIGIN_OK)
                 and request.url.path not in _OLLAMA_CROSS_ORIGIN_OK
-                and request.url.path not in _ANTHROPIC_CROSS_ORIGIN_OK):
+                and request.url.path not in _ANTHROPIC_CROSS_ORIGIN_OK
+                and request.url.path not in _RESPONSES_CROSS_ORIGIN_OK):
             from localm.auth import (any_key_configured, ct_equal,
                                      require_auth_enabled)
             if not any_key_configured() and not require_auth_enabled():
