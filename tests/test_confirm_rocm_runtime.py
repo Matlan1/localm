@@ -505,7 +505,7 @@ def test_kill_tree_stops_a_process_and_its_children():
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         print(child.pid, flush=True)
         time.sleep(60)
-    """)], stdout=subprocess.PIPE, text=True)
+    """)], stdout=subprocess.PIPE, text=True, start_new_session=(sys.platform != "win32"))
     try:
         child_pid = int(parent.stdout.readline())
         assert psutil.pid_exists(child_pid)
