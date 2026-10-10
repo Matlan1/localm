@@ -43,6 +43,7 @@ from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_non_chat_model_type
+from .gguf import gguf_sd_checkpoint
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
@@ -55,7 +56,7 @@ from .gguf import hub_snapshot_repo_id
 from .gguf import logical_model_path
 from .gguf import scan_hub_cache
 
-MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'unknown'})
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'unknown'})
 
 # HuggingFace architecture class-name suffixes that deterministically mark a text
 # generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
@@ -63,6 +64,10 @@ MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae
 # hard signal), NOT fuzzy substring tag matching. An architecture not matched here
 # is left 'unknown' rather than silently assumed to be an LLM.
 _HF_LLM_ARCH_SUFFIXES = ("ForCausalLM", "ForConditionalGeneration", "LMHeadModel")
+
+# Registry types whose entry records an mmproj: the vision projector of an 'llm',
+# the speech generation stages of a 'tts' model.
+_PROJECTOR_TYPES = ("llm", "tts")
 
 
 def is_auto_chat_eligible(entry: dict) -> bool:
@@ -76,12 +81,13 @@ def is_auto_chat_eligible(entry: dict) -> bool:
     embeddings-mode context (see ``inference/embedder.py``), not the causal chat
     path, so it is never auto-picked as the default chat model - and
     ``setup-embeddings`` can register one into the main registry, making an
-    embedding-only registry a reachable first-run state. A GGUF LoRA adapter
-    (see :func:`is_gguf_adapter_entry`) cannot load on its own and is excluded
-    too.
+    embedding-only registry a reachable first-run state. type='tts' (a
+    text-to-speech model) runs through the speech path, never the chat path, and
+    is excluded for the same reason. A GGUF LoRA adapter (see
+    :func:`is_gguf_adapter_entry`) cannot load on its own and is excluded too.
     """
     return (isinstance(entry, dict)
-            and entry.get("model_type", "llm") not in ("unknown", "embedding")
+            and entry.get("model_type", "llm") not in ("unknown", "embedding", "tts")
             and not is_gguf_adapter_entry(entry))
 
 
@@ -247,6 +253,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
             non_chat = gguf_non_chat_model_type(gguf_metadata.get("architecture"))
             if non_chat:
                 return non_chat, gguf_metadata
+            if gguf_sd_checkpoint(path, meta=meta):
+                return "diffusion-unet", gguf_metadata
             return "llm", gguf_metadata
         if is_hf:
             if (path / "adapter_config.json").exists():
@@ -2987,7 +2995,7 @@ def _register_with_dedup(
                 console.print(f"[red]{escape(str(e))}[/red]")
                 return False
             dest = stored.path
-            if mmproj is None and model_type == "llm":
+            if mmproj is None and model_type in _PROJECTOR_TYPES:
                 mmproj = stored.mmproj
             if action == "move":
                 dest_str = str(dest.resolve())
@@ -3013,7 +3021,7 @@ def _register_with_dedup(
                     for alias_name in dup_names:
                         if r.get(alias_name, {}).get("path") == moved_from:
                             r[alias_name]["path"] = dest_str
-                            if (mmproj and r[alias_name].get("model_type") == "llm"
+                            if (mmproj and r[alias_name].get("model_type") in _PROJECTOR_TYPES
                                     and not r[alias_name].get("mmproj")):
                                 r[alias_name]["mmproj"] = entry["mmproj"]
                     r[model_name] = entry
@@ -3938,7 +3946,7 @@ def _add_local_llamafile(path: Path, name: Optional[str], on_duplicate: str,
         registered_any = _mm._register_with_dedup(
             model_name, file, "local", on_duplicate=on_duplicate,
             digest=digest or _mm._hash_with_progress(file), model_type=effective,
-            mmproj=mmproj if effective == "llm" else None,
+            mmproj=mmproj if effective in _PROJECTOR_TYPES else None,
             architecture=meta.get("architecture"),
             expert_count=meta.get("expert_count"),
         ) or registered_any
@@ -4477,7 +4485,7 @@ def add_local(
     # (sync_models_dir/`localm list` will pick it up under an auto name).
     registered = _mm._register_with_dedup(
         model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size, model_type=model_type,
-        mmproj=stored_mmproj if model_type == "llm" else None,
+        mmproj=stored_mmproj if model_type in _PROJECTOR_TYPES else None,
         architecture=gguf_metadata.get("architecture"), expert_count=gguf_metadata.get("expert_count"),
     )
     if not registered and store:

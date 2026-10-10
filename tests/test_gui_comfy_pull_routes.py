@@ -15,6 +15,13 @@ from fastapi.testclient import TestClient
 from localm import scopes as S
 
 
+@pytest.fixture(autouse=True)
+def _comfyui_is_set_up(monkeypatch):
+    """The image plugin's ``auto`` backend resolves to ComfyUI in these tests."""
+    monkeypatch.setattr("localm.media.backend_choice.comfy_is_set_up",
+                        lambda *a, **k: True)
+
+
 @pytest.fixture
 def scoped_app(tmp_path, monkeypatch):
     home = tmp_path / ".localm"

@@ -1092,6 +1092,12 @@ class TestStdioRobustness:
 # --------------------------------------------------------------------------- #
 
 class TestGenerateImageSafety:
+
+    @pytest.fixture(autouse=True)
+    def _comfyui_is_set_up(self, monkeypatch):
+        """The image plugin's ``auto`` backend resolves to ComfyUI in these tests."""
+        monkeypatch.setattr("localm.media.backend_choice.comfy_is_set_up",
+                            lambda *a, **k: True)
     def _call(self, server, args):
         return server.handle({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",

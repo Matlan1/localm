@@ -273,6 +273,25 @@ relevant; the scale depends on the model (bge returns an unbounded score, Qwen3-
 probability of "yes"). Only the best `--top-n` are shown. The model runs in this process; a
 document longer than the model's window is cut to fit and marked.
 
+### Speech
+
+A text-to-speech GGUF (Qwen3-TTS) registers as type `tts` and needs its mmproj, which
+`localm pull` fetches from the same repository. `localm speak` writes a WAV file:
+
+```bash
+localm pull ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf
+localm speak "Hello there." -o hello.wav
+localm speak --file chapter.txt -o chapter.wav --seed 7 --language en
+localm speak "Hello there." -o hello.wav --voice-file my-voice.wav   # imitate a recording
+localm speak --list-voices
+```
+
+`--model` can be left out when exactly one speech model is registered. A named `--voice`
+is a WAV recording saved as `<name>.wav` in the `voices` folder of the data directory. The
+model runs in this process; a status line shows how much audio has been made, and Ctrl+C
+stops it. The seed is printed so a result can be reproduced. The server's
+`POST /v1/audio/speech` does the same.
+
 ### LoRA adapters
 
 A GGUF LoRA adapter (a `.gguf` whose header says `general.type = adapter`, as made by
@@ -309,13 +328,19 @@ localm unload [MODEL]           # free VRAM on the running server: all models, o
 
 ## Media generation
 
-These are core CLI commands (they need only a running ComfyUI, not a plugin install). The GUI Media pages and the `/generate-*` chat commands belong to the media plugins. See [docs/flux-setup.md](flux-setup.md) and [docs/video.md](video.md) for model setup.
+These are core CLI commands, not plugin installs. The GUI Media pages and the `/generate-*` chat commands belong to the media plugins. See [docs/flux-setup.md](flux-setup.md) and [docs/video.md](video.md) for ComfyUI model setup.
 
 ```bash
 localm image "A cat on a sunny beach"
+localm image "a lighthouse at dusk" --size 768x512
 localm music "lofi, jazzy, mellow" --lyrics song.txt -d 180
 localm video "a fox runs through snow" --duration 5
 ```
+
+`localm image` needs no ComfyUI: with nothing set up it uses the built-in native
+backend (stable-diffusion.cpp), which installs its runtime on first use. Music
+and video still need ComfyUI. `localm setup-sdcpp` (under Setup and diagnostics)
+installs the runtime ahead of time. Full guide: [docs/native-image.md](native-image.md).
 
 ### localm's own ComfyUI (optional)
 

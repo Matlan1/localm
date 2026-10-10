@@ -168,7 +168,7 @@ the CPU, or the draft model did not fit in VRAM beside it). The field is `null` 
 | Field | Behaviour |
 |---|---|
 | `max_tokens`, `max_completion_tokens` | The reply cap; either name works. Both with different values is a 400. |
-| `temperature`, `top_p`, `seed`, `stop` | Applied. |
+| `temperature`, `top_p`, `seed`, `stop` | Applied. The finish chunk, or the non-streaming choice, carries `stop_sequence` (a localm extension): the stop sequence that ended the reply, or `null`. |
 | `presence_penalty`, `frequency_penalty` | Applied (-2 to 2): a token's logit drops by `presence_penalty` once it has appeared, and by `frequency_penalty` times the number of times it appeared. On a GGUF model the window is the last 64 tokens, as in llama.cpp. A penalty of 0 applies nothing. A diffusion language model cannot apply a non-zero value of them or of `min_p` (400). |
 | `response_format` | See [Structured output](#structured-output). |
 | `tools`, `tool_choice`, `parallel_tool_calls` | See [Tool calling](#tool-calling). |
@@ -381,6 +381,77 @@ starts the reply text with the prompt. `presence_penalty`, `frequency_penalty`,
 prompts, `best_of` above 1, `n` other than 1, `logprobs`, a non-empty
 `logit_bias` and `suffix` are each a 400 naming the field.
 
+### `POST /v1/messages` (Anthropic Messages API)
+
+Scope: any valid key (no specific scope required once auth is enabled). Anthropic clients
+authenticate with `x-api-key`, which the API routes accept as well as `Authorization: Bearer`
+(the bearer token wins when both are sent; the GUI login takes only the bearer form); the
+`anthropic-version` and `anthropic-beta` headers are accepted and not needed.
+
+An Anthropic SDK or an agent tool that speaks the Messages API can use localm by pointing its
+base URL at the server (`ANTHROPIC_BASE_URL=http://127.0.0.1:8642`) and naming a localm model.
+The request is answered by the same chat path as `/v1/chat/completions`, so capability routing,
+compaction, tool calling and the response headers work the same way.
+
+| Request field | Behaviour |
+|---|---|
+| `model` | A localm model name (`localm` or empty: the loaded model). Another name is a 404 `not_found_error`. |
+| `max_tokens` | Required, the reply cap. |
+| `messages` | `user` and `assistant` turns; `content` is a string or blocks: `text`, `image` (`base64` or `url` source), `tool_use` (assistant), `tool_result` (user; text or image content, `is_error` marks a failed call). `thinking` blocks from earlier turns are dropped. Other block types (documents, server tool results) are a 400. |
+| `system` | A string or a list of text blocks. |
+| `stop_sequences`, `temperature`, `top_p`, `top_k` | Applied. |
+| `tools`, `tool_choice` | Custom tools (`name`, `description`, `input_schema`) work with any chat model, as in [Tool calling](#tool-calling). `tool_choice` `auto`, `any`, `tool` (by name) and `none`; `disable_parallel_tool_use` allows one call. Server tools (web search, code execution, ...) and `mcp_servers` are a 400. |
+| `thinking` | `{"type": "enabled"}` (or `adaptive`, `between_tools`) lets a reasoning model think and returns its reasoning as a `thinking` block; without it, or with `disabled`, the model answers without thinking. `budget_tokens` is not applied. |
+| `output_config` | `format: {"type": "json_schema", "schema": {...}}` constrains the reply to the schema, as a strict `response_format` does on chat (see [Structured output](#structured-output)). `effort` is accepted and not applied. |
+| `stream` | Server-sent events in Anthropic's order: `message_start`, `ping`, per block `content_block_start` / `content_block_delta` (`text_delta`, `thinking_delta` then `signature_delta`, `input_json_delta` carrying a tool call's whole input) / `content_block_stop`, then `message_delta` with `stop_reason` and `usage`, then `message_stop`. `message_start` reports 0 input tokens; `message_delta` carries the real `input_tokens` and `output_tokens`. A generation that fails partway ends with an `error` event. |
+| `metadata`, `service_tier`, `cache_control`, `inference_geo` | Accepted; no effect. |
+
+`stop_reason` is `end_turn`, `max_tokens`, `stop_sequence` (with `stop_sequence` naming the match;
+otherwise `stop_sequence` is `null`) or `tool_use`. Consecutive turns of the same role are joined,
+and a turn's text blocks stay separate blocks, as the Messages API treats them. A thinking block carries an empty `signature`. Errors use Anthropic's shape,
+`{"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}`, with
+`authentication_error` for a missing or wrong key, `not_found_error`, `request_too_large` and
+`overloaded_error` mapped from the matching status.
+
+### `POST /v1/messages/count_tokens`
+
+Same request fields as `/v1/messages` (without `max_tokens`); returns `{"input_tokens": N}`,
+counted with the model's own tokenizer and chat template, tool descriptions included, by the
+model that would answer the same `/v1/messages` request (capability routing applies, and a model
+another instance serves is counted there). The model is loaded if it is not already.
+
+### `POST /v1/responses` (OpenAI Responses API)
+
+Scope: any valid key (no specific scope required once auth is enabled).
+
+An OpenAI SDK or agent tool that speaks the Responses API can use localm by pointing its base URL
+at the server (`OPENAI_BASE_URL=http://127.0.0.1:8642/v1`) and naming a localm model. The request
+is answered by the same chat path as `/v1/chat/completions`, so capability routing, compaction,
+tool calling, structured output and the response headers work the same way.
+
+| Request field | Behaviour |
+|---|---|
+| `model` | A localm model name (`localm` or empty: the loaded model). |
+| `input` | A string, or a list of items: messages (`user`, `assistant`, `system`, `developer`; content as a string or `input_text`, `output_text`, `input_image` with an `image_url`, and `input_audio` parts), `function_call` and `function_call_output` items (an output is a string, or `input_text` and `input_image` parts; the images reach the model in a user message after the tool results). `reasoning` items are dropped. `input_file` parts, `item_reference` and other item types are a 400. |
+| `instructions` | A system message for this request only; it is not carried into a continuation. |
+| `tools`, `tool_choice`, `parallel_tool_calls` | Function tools work with any chat model, as in [Tool calling](#tool-calling). `tool_choice` `auto`, `none`, `required` or a function by name. Built-in tools (web search, file search, code interpreter, ...) are a 400. |
+| `text.format` | `text`, `json_object`, or `json_schema` (with `strict`), as `response_format` on chat (see [Structured output](#structured-output)). |
+| `max_output_tokens`, `temperature`, `top_p` | Applied. |
+| `reasoning.effort`, `reasoning.summary` | `effort: none` turns thinking off; another value leaves the model's default. A reasoning model's thinking comes back as a `reasoning` item whose content is the full reasoning text; its `summary` stays empty whatever `reasoning.summary` asks. |
+| `previous_response_id` | Continues a stored response: its input and output are sent ahead of this request's input. Responses are kept in the server's memory only, never on disk, are lost when the server restarts, and are visible only to the key that created them. The store holds at most 256 responses and 64 MB of conversation JSON; past either bound, the oldest response of the key holding the most is dropped, so one key filling the store evicts its own responses first. A response expires an hour after it is stored and is removed at the next request to this route after that. A response too large to keep comes back with `store: false`. An unknown, expired, dropped or foreign id is a 404. |
+| `store` | `false` keeps the response out of the store. |
+| `stream` | Server-sent events: `response.created`, `response.in_progress`, per output item `response.output_item.added`, `response.content_part.added`, `response.output_text.delta` (or `response.reasoning_text.delta`), `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, function calls as `response.function_call_arguments.delta` and `.done` carrying the whole arguments, then `response.completed` (or `response.incomplete` when the token cap was reached, `response.failed` when generation failed). Every event carries a `sequence_number`. |
+| `include` | `reasoning.encrypted_content` and the built-in tool entries (`file_search_call.results`, `web_search_call.results`, `web_search_call.action.sources`, `message.input_image.image_url`, `computer_call_output.output.image_url`, `code_interpreter_call.outputs`) are accepted with no effect; a reasoning item carries no encrypted content. Any other value, `message.output_text.logprobs` included, is a 400. |
+| `truncation` | `auto` or `disabled`; either way an over-long conversation is compacted as on chat. |
+| `metadata`, `user`, `prompt_cache_key`, `safety_identifier`, `service_tier`, `max_tool_calls` | Accepted; `metadata` is echoed, the rest have no effect. |
+| localm chat fields | `top_k`, `min_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, `stop`, `grammar` (with `grammar_lazy`, `grammar_triggers`), `required_capabilities`, `pin_model`, `min_context` and `chat_template_kwargs` (for example through an SDK's `extra_body`) are applied as on `/v1/chat/completions`. Other unknown fields have no effect and are named in the debug log. |
+| `background`, `conversation`, `prompt`, `top_logprobs`, `text.verbosity` other than `medium` | A 400 naming the field. |
+
+Only `POST /v1/responses` is served: a stored response cannot be fetched, listed, cancelled or
+deleted through the API. Errors use OpenAI's shape, `{"error": {"message": "...", "type":
+"invalid_request_error", "param": ..., "code": null}}`, with `authentication_error` for a missing
+or wrong key and `not_found_error` for an unknown `previous_response_id`.
+
 ### `POST /v1/embeddings`
 
 Scope: any valid key (no specific scope required once auth is enabled).
@@ -495,11 +566,42 @@ route cannot be fetched by an API client, so `b64_json` is the default and askin
 private directory, returned as `b64_json` (the default there; asking for `url` is a
 `400`), and the directory is deleted before the response is sent.
 
-### Speech synthesis (`/v1/audio/speech`)
+### `POST /v1/audio/speech`
 
-Not served. Text-to-speech runs in the browser (the tts plugin's Kokoro voices) and
-localm has no server-side speech synthesis yet, so a client calling
-`/v1/audio/speech` gets a `404` rather than a stub.
+Scope: `tts`. Served by the tts plugin. Speaks text with a registered text-to-speech
+model: a Qwen3-TTS GGUF and its mmproj (`localm pull
+ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf` fetches
+both). The browser voices of the tts plugin are separate and unaffected.
+
+```python
+audio = client.audio.speech.create(model="tts-1", voice="default",
+                                   input="Hello there.", response_format="wav")
+audio.write_to_file("hello.wav")
+```
+
+A JSON body, or multipart/form-data with the same fields plus an optional `voice_file`.
+The request waits for the whole file: it runs in the isolated speech worker as a
+background job of kind `speak`, so it shows in the activity list with its progress, and a
+client that disconnects cancels it. The audio is returned from memory and never written
+to disk, in any session mode. The seed used is in the `X-Localm-Seed` response header.
+
+| Field | Meaning |
+| --- | --- |
+| `input` | Required, 1 to 4096 characters. Text containing the model's control-token strings (such as `<\|im_end\|>`) is a `400`. |
+| `model` | A registered model of type `tts`. Omitted, `localm`, `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` name the only one; with several registered, name one. |
+| `voice` | `default` (the model's own voice), or the name of a WAV recording saved as `<name>.wav` in the `voices` folder of the data directory. Any other name is a `400` listing the voices. |
+| `voice_file` | Multipart only: a WAV recording (PCM or float, at most 30 s and 16 MB) whose voice to imitate. Not together with a named `voice`. |
+| `response_format` | `wav` (default; 16-bit mono at 24 kHz) or `pcm` (the same samples, raw little-endian, no header). |
+| `language` | Optional code such as `en` or name such as `english`; the model's default when omitted. |
+| `seed` | Optional, 0 to 4294967294, for a reproducible result. Random when omitted. |
+| `speed`, `instructions`, `stream_format` | Only `1.0`, empty and `audio`: other values change the output and are not implemented, so they are a `400`. |
+
+`mp3`, `opus`, `aac` and `flac` are a `400`; other unknown fields are ignored. Failures:
+`400` a bad field, text or recording, `404` no such model, `422` a model that is not a
+text-to-speech model or lacks its mmproj, `413` too large, `501` the llama.cpp runtime
+or the model cannot synthesize speech (run `localm setup-llama` for the pinned runtime),
+`503` the model failed to load, `504` the speech worker hung and was stopped, `502` the
+generation failed or did not end within its frame budget, `409` cancelled.
 
 ### `GET /v1/models`
 
@@ -540,7 +642,8 @@ completed). A model too large to fully fit VRAM still loads deliberately,
 offloading as many layers as fit and running the rest on CPU rather than
 refusing outright; `degraded` is true whenever fewer than the full layer
 count landed on the GPU, so a caller can tell that apart from a full GPU
-load.
+load. `parallel_slots` appears when the loaded model answers more than one
+request at once, and says how many.
 
 `POST /v1/models/unload` returns `status` (`"unloaded"`, `"in_use"` when
 every loaded model was mid-request and none could be freed, or
@@ -888,9 +991,15 @@ for chunk in stream:
 
 ## Behaviour notes
 
-- **Concurrency**: inference is serialised through a semaphore; concurrent
-  requests queue in order. GPU memory is shared and the KV cache is not
-  concurrency-safe, so this is deliberate.
+- **Concurrency**: a GGUF model answers up to `parallel_slots` requests at
+  the same time (default `auto`: 4, or 1 while speculative drafting is on),
+  decoding them together in one batch per step; further requests queue in order
+  and stream a `waiting` status meanwhile. All of them share the model's one
+  context window: a request that does not fit beside the running ones waits for
+  them. A reply decoded beside others is not bit-identical to the same request
+  decoded alone, even at temperature 0. A turn with an image runs on its own,
+  after the replies already running. Other backends answer one request at a
+  time per model.
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context window section of
   [architecture.md](architecture.md)). Conversations that outgrow the

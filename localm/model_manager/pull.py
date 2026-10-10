@@ -1139,7 +1139,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
         )
         return None
     if not reuse_ok:
-        console.print(f"Pulling vision projector: {escape(candidate)}")
+        console.print(f"Pulling projector (mmproj): {escape(candidate)}")
         try:
             _download_mmproj_file(repo_id, candidate, dest, base_dir)
         except Exception as e:
@@ -1277,6 +1277,18 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,
     return dest
 
 
+def _non_chat_detection_note(architecture) -> str:
+    """The console line a pull prints for a GGUF typed from its non-chat
+    ``general.architecture``."""
+    from rich.markup import escape
+
+    from localm.model_manager.gguf import gguf_is_tts_architecture
+    if gguf_is_tts_architecture(architecture):
+        return ("[dim]Detected as a text-to-speech model (GGUF metadata). Speak "
+                "with it using 'localm speak'.[/dim]")
+    return f"[yellow]{escape(_mm.gguf_chat_refusal(architecture) or '')}[/yellow]"
+
+
 def _mmproj_for_registration(
     reg_type: str,
     repo_id: str,
@@ -1285,12 +1297,13 @@ def _mmproj_for_registration(
     dest_dir: Optional[Path],
     mmproj_spec: Optional[str],
 ) -> Optional[Path]:
-    """The vision-projector Path to record on this pull's registry entry, or
-    None. An explicit --mmproj wins when given, else the same-repo listing is
+    """The projector Path to record on this pull's registry entry, or None: the
+    vision projector of an 'llm', or the speech generation stages of a 'tts'
+    model. An explicit --mmproj wins when given, else the same-repo listing is
     auto-checked. Skipped entirely for a foreign destination (an explicit
-    dest_dir), for anything that is not a plain 'llm' registration, and for a
-    *filename* that already looks like a projector by its own name."""
-    if dest_dir is not None or reg_type != "llm" or "mmproj" in filename.lower():
+    dest_dir), for any other registration type, and for a *filename* that
+    already looks like a projector by its own name."""
+    if dest_dir is not None or reg_type not in ("llm", "tts") or "mmproj" in filename.lower():
         return None
     if mmproj_spec:
         return _fetch_explicit_mmproj(mmproj_spec, base_dir, model_filename=filename)
@@ -1448,8 +1461,12 @@ def _pull_gguf_file(
                     console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
                     reg_type = "embedding"
                 elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
-                    console.print(f"[yellow]{_mm.gguf_chat_refusal(gguf_meta.get('architecture'))}[/yellow]")
+                    console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
                     reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
+                elif _mm.gguf_sd_checkpoint(dest):
+                    console.print("[dim]Detected as an image generation model (Stable "
+                                  "Diffusion tensors in the GGUF).[/dim]")
+                    reg_type = "diffusion-unet"
             mmproj_path = _mmproj_for_registration(
                 reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
@@ -1614,8 +1631,12 @@ def _pull_gguf_file(
                 console.print("[dim]Detected as an embedding model (GGUF metadata).[/dim]")
                 reg_type = "embedding"
             elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
-                console.print(f"[yellow]{_mm.gguf_chat_refusal(gguf_meta.get('architecture'))}[/yellow]")
+                console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
                 reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
+            elif _mm.gguf_sd_checkpoint(base_dir / filename):
+                console.print("[dim]Detected as an image generation model (Stable "
+                              "Diffusion tensors in the GGUF).[/dim]")
+                reg_type = "diffusion-unet"
         mmproj_path = _mmproj_for_registration(
             reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
         _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",

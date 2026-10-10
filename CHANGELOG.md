@@ -12,6 +12,38 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Speech from a text-to-speech model.** A Qwen3-TTS GGUF (`localm pull
+  ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF:Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf` fetches it with
+  its mmproj) is recognised as a speech model. `localm speak "text" -o out.wav` and the
+  OpenAI-compatible `POST /v1/audio/speech` turn text into a 24 kHz WAV (or raw `pcm`),
+  optionally in the voice of a short WAV recording, with a seed for a reproducible result.
+  It runs in its own worker process, shows its progress, appears as loaded on the Models
+  page (Unload releases it), and stops when the client goes away. Pocket TTS files are
+  still refused.
+- **Images generate without ComfyUI.** A native image backend runs stable-diffusion.cpp in
+  a separate worker process on CPU, Vulkan, CUDA, ROCm or Metal, installing its runtime on
+  first use. With no model set up, the Images page offers to download the recommended one
+  (SD-Turbo, about 2 GB); any model stable-diffusion.cpp supports can be set instead (SD
+  1.x/2.x, SDXL, SD3, FLUX, Z-Image and more, as GGUF, safetensors or ckpt, with separate
+  text encoders and VAE where the model needs them). The new Image backend setting picks
+  `auto` (ComfyUI when it is set up, otherwise native), `native` or `comfy`, and the Images
+  page, `/api/imagine`, `/v1/images/generations`, `localm image`, the chat
+  `/generate-image` command, the coder agent and the MCP `generate_image` tool all follow it.
+  The Images page and `/api/imagine` take a size, and `localm image` takes `--size`. A GGUF
+  image checkpoint without an architecture tag is now registered as an image model instead
+  of a chat model.
+- **The Anthropic Messages API at `/v1/messages`.** Claude Code, the Anthropic SDKs and other
+  tools that speak the Messages API can point their base URL at localm and use any chat model:
+  text and image blocks, a system prompt, `stop_sequences`, tool use with `tool_use` and
+  `tool_result` blocks, `thinking` (returned as thinking blocks), streaming with the full
+  Messages event sequence, and `/v1/messages/count_tokens`. The `x-api-key` header is accepted
+  as well as a bearer token, and errors come back in Anthropic's error shape.
+- **The OpenAI Responses API at `/v1/responses`.** OpenAI SDKs and tools that speak the
+  Responses API can use any localm chat model: input items with text, images and audio,
+  `instructions`, function tools with `function_call` and `function_call_output` items,
+  `text.format` for structured output, reasoning items, and the streaming event sequence.
+  `previous_response_id` continues an earlier response, kept in the server's memory only and
+  only for the key that created it.
 - **Structured output and more OpenAI fields on `/v1/chat/completions`.**
   `response_format` (`json_object`, or `json_schema` with `strict`) constrains the reply,
   token by token, to JSON or to the schema, also alongside `tools`. `presence_penalty`,
@@ -38,6 +70,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and then CPU (CPU on Apple Silicon) when the preferred backend does not start. `--backend`
   picks one, `--status` shows what is installed, and `--no-models` / `--no-test` skip those
   steps.
+- **One GGUF model answers several requests at once.** Concurrent chat requests to the
+  same model are decoded together instead of waiting for each other, so two or four
+  clients share the GPU's throughput rather than queueing (`parallel_slots`, default
+  `auto`: 4, or 1 while speculative drafting is on; Settings > Engine > Parallel
+  requests). The requests share the model's context window: one that does not fit beside
+  the running ones waits for them and shows a waiting status. A reply generated beside
+  others can differ slightly from the same request run alone, even at temperature 0.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the
@@ -126,8 +165,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   to disk. `POST /v1/images/generations` generates through the image plugin (ComfyUI) and
   returns `b64_json`, or a gallery `url` when an API key is configured, honouring `n` and
   `size`; in privacy mode no image is kept on disk. The official `openai` SDK works against
-  both, and local apps can call them like `/v1/chat/completions`. Speech synthesis
-  (`/v1/audio/speech`) is not served yet. See docs/server-api.md.
+  both, and local apps can call them like `/v1/chat/completions`. See
+  docs/server-api.md.
 - **An Ollama-compatible API on the same server and port.** `/api/chat`, `/api/generate`,
   `/api/embed`, `/api/embeddings`, `/api/tags`, `/api/show`, `/api/ps` and `/api/version`
   answer in Ollama's format, so a tool that speaks Ollama can use a localm model. Replies
@@ -1616,6 +1655,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
+- **`setup.sh` and `setup-gui.sh` install a fixed uv release and check it before running it.**
+  They used to run whatever Astral's installer URL returned. They now download the installer
+  of one pinned uv release and run it only when its checksum matches; a failed download, a
+  checksum mismatch, or a machine with no `sha256sum`, `shasum` or `openssl` stops the uv
+  install with the reason instead of running unchecked code.
 - **Hugging Face models no longer download and run code from the Hugging Face kernel
   hub unless the network policy allows it.** transformers could fetch a compiled kernel
   package from the Hub while a model was loading or replying and import it, even with

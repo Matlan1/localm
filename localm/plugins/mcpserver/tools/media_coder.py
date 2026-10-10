@@ -243,6 +243,22 @@ def build(engines: EngineCache) -> dict[str, dict]:
         # comfy.generate_image builds its own rich Console / Progress on stdout;
         # the JSON-RPC frame stream lives on stdout too, so route any stray
         # output to stderr or it corrupts the protocol.
+        from localm.plugins.builtin.image import backend as image_backend
+        with _quiet_stdout():
+            native = image_backend.generate_unless_comfy(
+                prompt, out,
+                guidance=args.get("guidance"),
+                negative_prompt=args.get("negative_prompt"),
+                seed=args.get("seed"),
+                input_image=input_p,
+                denoise=args.get("denoise"),
+                write_sidecar=not is_privacy,
+                delete_outputs=is_privacy,
+                on_progress=_srv.report_progress,
+            )
+        if native is not None:
+            ok, message = native
+            return _text_result(message, is_error=not ok)
         with _quiet_stdout():
             ok, message = gen_img(
                 prompt, out,

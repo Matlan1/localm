@@ -698,6 +698,16 @@ _GGUF_NON_CHAT_ARCHITECTURES = {
     "pockettts": "a text-to-speech model",
 }
 
+# Text-to-speech architectures localm synthesizes speech with (registry type
+# 'tts'). Each needs its mmproj, which holds the speech generation stages.
+GGUF_TTS_ARCHITECTURES = frozenset({"qwen3tts"})
+
+
+def gguf_is_tts_architecture(architecture: Optional[str]) -> bool:
+    """True when ``general.architecture`` names a text-to-speech model localm can
+    synthesize speech with."""
+    return architecture in GGUF_TTS_ARCHITECTURES
+
 # llama.cpp architectures with an encoder and a decoder stack. They register as
 # chat models; gguf_kv_bytes_per_token sizes their decoder stack and reads a
 # missing attention.head_count_kv as attention.head_count.
@@ -727,12 +737,15 @@ _GGUF_NON_CHAT_ARCHITECTURES.update(
 def gguf_non_chat_model_type(architecture: Optional[str]) -> Optional[str]:
     """The registry type for a GGUF whose ``general.architecture`` is not a chat
     model (``diffusion-unet`` for image/video checkpoints, the component's type
-    for ACE-Step music components, ``unknown`` for the other non-chat roles), or
-    None when it may be a chat model."""
+    for ACE-Step music components, ``tts`` for the text-to-speech models localm
+    synthesizes with, ``unknown`` for the other non-chat roles), or None when it
+    may be a chat model."""
     if architecture in _GGUF_IMAGE_ARCHITECTURES:
         return "diffusion-unet"
     if architecture in _GGUF_MUSIC_ARCHITECTURES:
         return _GGUF_MUSIC_ARCHITECTURES[architecture]
+    if architecture in GGUF_TTS_ARCHITECTURES:
+        return "tts"
     return "unknown" if architecture in _GGUF_NON_CHAT_ARCHITECTURES else None
 
 
@@ -743,6 +756,9 @@ def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
     what = _GGUF_NON_CHAT_ARCHITECTURES.get(architecture or "")
     if what is None:
         return None
+    if architecture in GGUF_TTS_ARCHITECTURES:
+        return (f"This model's architecture ('{architecture}') is {what}, not a "
+                "chat model: use it with 'localm speak' or POST /v1/audio/speech.")
     return (f"This model's architecture ('{architecture}') is {what}, not a chat "
             "model, so localm cannot chat with it.")
 
@@ -2170,6 +2186,29 @@ def gguf_classifier_head_tensors(path: Path) -> Optional[frozenset]:
         return None
     return frozenset(name for name, _offset in parsed[0]
                      if name in _GGUF_CLASSIFIER_HEAD_TENSORS)
+
+
+_GGUF_SD_TENSOR_PREFIXES = ("model.diffusion_model.", "first_stage_model.")
+
+
+def gguf_sd_checkpoint(path: Path, meta: Optional[dict] = None) -> bool:
+    """True when the GGUF at *path* declares no ``general.architecture`` and
+    carries Stable Diffusion-family image tensors (a UNet/DiT under
+    ``model.diffusion_model.`` or a VAE under ``first_stage_model.``), the
+    layout stable-diffusion.cpp's converter writes. False when it declares an
+    architecture, is one part of a split GGUF, or its tensor list cannot be read.
+
+    *meta* is an already-computed ``_gguf_metadata_probe(path)`` result."""
+    if meta is None:
+        meta = _gguf_metadata_probe(path)
+    if not meta or meta.get("architecture"):
+        return False
+    if _SPLIT_GGUF_RE.match(Path(path).name):
+        return False
+    parsed = _gguf_tensor_offset_entries(Path(path))
+    if parsed is None:
+        return False
+    return any(name.startswith(_GGUF_SD_TENSOR_PREFIXES) for name, _offset in parsed[0])
 
 
 def gguf_reranker_state(path: Path, meta: Optional[dict] = None) -> Optional[bool]:

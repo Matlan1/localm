@@ -1,0 +1,7 @@
+{
+ "sdk": "3.28.0",
+ "method": "POST",
+ "path": "/audio/speech",
+ "content_type": "application/json",
+ "body_b64": "eyJtb2RlbCI6InR0cy0xIiwiaW5wdXQiOiJIZWxsbyBmcm9tIHRoZSBTREsuIiwidm9pY2UiOiJkZWZhdWx0IiwicmVzcG9uc2VfZm9ybWF0Ijoid2F2Iiwic3BlZWQiOjEuMH0="
+}

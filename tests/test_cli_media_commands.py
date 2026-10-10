@@ -9,10 +9,18 @@ localm/image_gen/comfy.py, plus any img2img source image, is removed).
 from contextlib import ExitStack
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from localm.audit import SessionMode
 from localm.cli import main
+
+
+@pytest.fixture(autouse=True)
+def _comfyui_is_set_up(monkeypatch):
+    """The image plugin's ``auto`` backend resolves to ComfyUI in these tests."""
+    monkeypatch.setattr("localm.media.backend_choice.comfy_is_set_up",
+                        lambda *a, **k: True)
 
 
 def _invoke(args, generate_target, *, mode, default_api_url_target,

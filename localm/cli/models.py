@@ -1203,7 +1203,13 @@ def _rename_on_running_server(old_name: str, new_name: str):
         return None
 
     if resp.ok:
-        data = resp.json()
+        from ..jsonreply import response_json
+        try:
+            data = response_json(resp)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            data = {}
         console.print(f"[green]✓[/green] Renamed [bold]{escape(old_name)}[/bold] -> "
                       f"[bold]{escape(str(data.get('new_name', new_name)))}[/bold]")
         for note in data.get("notes") or []:
@@ -1766,7 +1772,15 @@ def unload_cmd(model):
                       f"{escape(str(detail or resp.text))}")
         sys.exit(1)
 
-    data = resp.json()
+    from ..jsonreply import response_json
+    try:
+        data = response_json(resp)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        console.print("[red]The server answered, but its reply was not valid JSON, "
+                      "so it is unknown whether the model was unloaded.[/red]")
+        sys.exit(1)
     if data.get("status") == "already_unloaded":
         # A targeted unload on a registered-but-not-loaded model is an
         # idempotent no-op success, reported as such rather than as an unload.

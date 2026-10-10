@@ -49,8 +49,9 @@ from localm.inference.backends.base import (
 )
 from localm.inference import residency, switch_admission
 from localm.inference.engine import Engine
+from localm.inference.inference_gate import InferenceGate, exclusively, set_capacity
 from localm.inference.routing_latch import RoutingLatch
-from localm.inference.stop_sequences import StopFilter, apply_stop
+from localm.inference.stop_sequences import StopFilter, apply_stop_matched
 from localm.inference.tool_calling import ToolCallStream
 from localm.inference.protocol import (
     COMPACTING_STATUS, LOADING_MODEL_STATUS, ChatChunk, ChatResponse, ChoiceDelta,
@@ -110,8 +111,9 @@ _last_active_model_name: str | None = None
 # unassigned global raises NameError, not a clean "None" check.
 _audit = None
 
-# Inference serialisation - per-model semaphores mapping display name -> Semaphore
-_inference_sems: dict[str, asyncio.Semaphore] = {}
+# Per-model admission, display name -> InferenceGate: generations share it up
+# to the model's parallel slots, loads and unloads hold it alone.
+_inference_sems: dict[str, InferenceGate] = {}
 
 # Bounds the dedicated-embedder /v1/embeddings path to ONE default-pool worker
 # at a time. Not an _inference_sems entry: those follow the chat engines'
@@ -129,7 +131,7 @@ def _get_embedder_sem() -> asyncio.Semaphore:
 
 # Backward compatibility references
 _engine: Engine | None = None
-_inference_sem: asyncio.Semaphore | None = None
+_inference_sem: InferenceGate | None = None
 
 # The server's running event loop, captured once at lifespan startup so an OFF-loop
 # worker thread (notably the jobs runner, which runs on a run_in_executor thread) can
@@ -525,7 +527,8 @@ def _gpu_placement_fields(engine) -> dict:
     yet, or a backend without a layer-count knob - see Engine.gpu_placement),
     plus the ``Engine.mmap_state`` fields (``use_mmap``, ``mmap``,
     ``mmap_from_disk``, ``mmap_note``) when the load reported them, plus
-    ``adapters`` (``Engine.applied_adapters``) when LoRA adapters are applied.
+    ``adapters`` (``Engine.applied_adapters``) when LoRA adapters are applied,
+    plus ``parallel_slots`` when the model answers more than one request at once.
     Merged into every switch_engine()/load-route success payload so a caller
     can tell a full GPU load from a silent CPU fallback instead of a bare
     "loaded"/"already_active" that hides it."""
@@ -537,6 +540,9 @@ def _gpu_placement_fields(engine) -> dict:
     adapters = getattr(engine, "applied_adapters", None)
     if isinstance(adapters, list) and adapters:
         fields["adapters"] = adapters
+    slots = _engine_parallel_slots(engine)
+    if slots > 1:
+        fields["parallel_slots"] = slots
     return fields
 
 
@@ -617,10 +623,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     if make_engine is not None:
         _engine_factory = make_engine
 
-    sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
+    sem = _inference_sems.setdefault(name, InferenceGate())
 
     loop = asyncio.get_running_loop()
-    async with sem:
+    async with exclusively(sem):
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
 
@@ -1017,9 +1023,11 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     from localm.vram import wait_for_vram_release
 
     from localm.inference import reranker as _reranker_mod
+    from localm.inference import speech as _speech_mod
     embedder_dim = await loop.run_in_executor(None, embedder_mod.loaded_dim)
     reranker_loaded = await loop.run_in_executor(None, _reranker_mod.is_loaded)
-    if embedder_dim is None and not reranker_loaded:
+    speech_loaded = await loop.run_in_executor(None, _speech_mod.is_loaded)
+    if embedder_dim is None and not reranker_loaded and not speech_loaded:
         return False
     attempt.embedder_attempted = True
     cleared = False
@@ -1029,6 +1037,10 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     if reranker_loaded:
         cleared = await loop.run_in_executor(
             None, functools.partial(_reranker_mod.reset_reranker, force=False)
+        ) or cleared
+    if speech_loaded:
+        cleared = await loop.run_in_executor(
+            None, functools.partial(_speech_mod.reset_speech, force=False)
         ) or cleared
     if not cleared:
         return False
@@ -1646,7 +1658,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
     # Back-compat: if a test or script set _engine directly, import it into the multi-model dicts
     if _engine is not None and _engine.display_name not in _engines:
         _engines[_engine.display_name] = _engine
-        _inference_sems[_engine.display_name] = _inference_sem or asyncio.Semaphore(1)
+        _inference_sems[_engine.display_name] = _inference_sem or InferenceGate()
         if _engine.display_name not in _engines_lru:
             _engines_lru.append(_engine.display_name)
         if not _active_model_name:
@@ -1702,7 +1714,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         if activate:
             _active_model_name = name
             _engine = _engines[name]
-            _inference_sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
+            _inference_sem = _inference_sems.setdefault(name, InferenceGate())
         return _engines[name]
 
     if not load:
@@ -1999,7 +2011,7 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
             # caller's own just-stopped generation), or force=True proceeds
             # regardless - engine.unload() below still forcibly kills the
             # worker if something is genuinely still running.
-        sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
+        sem = _inference_sems.setdefault(name, InferenceGate())
         # Flag BEFORE acquiring the semaphore so no request that arrives after the
         # pin check above can take get_engine's fast path and pin this engine while
         # we free it (the pin-arrives-during-the-unload-await window); such a
@@ -2007,7 +2019,7 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
         # Cleared in finally so the kept-in-_engines engine reloads lazily.
         engine.unloading = True
         try:
-            async with sem:
+            async with exclusively(sem):
                 def _unloaded(name=name):
                     unloaded_models.append(name)
                     if name in _engines_lru:
@@ -2056,6 +2068,13 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
             embedder_was_loaded = True
         else:
             skipped_in_use.append("reranker model")
+    from localm.inference import speech as _speech_mod
+    if await loop.run_in_executor(None, _speech_mod.is_loaded):
+        if await loop.run_in_executor(
+                None, functools.partial(_speech_mod.reset_speech, force=False)):
+            embedder_was_loaded = True
+        else:
+            skipped_in_use.append("speech model")
     return embedder_was_loaded
 
 
@@ -2194,6 +2213,52 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
+async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
+    """If *name* is a registered model whose path matches the resident speech
+    model, release it and report the freed VRAM. Returns None when *name* is not
+    the resident speech model; ``{"status": "in_use"}`` while a synthesis is in
+    flight. Every speech reader runs in an executor: each takes the speech lock,
+    which a load holds for its whole duration."""
+    from localm.inference import speech as _speech_mod
+    info = await loop.run_in_executor(None, _speech_mod.speech_info)
+    if info is None:
+        return None
+    from pathlib import Path
+    from localm.config import load_registry
+    from localm.model_manager import _entry_path
+    entry_path = _entry_path(load_registry().get(name))
+    if entry_path is None:
+        return None
+    try:
+        if Path(entry_path).resolve() != Path(info["path"]).resolve():
+            return None
+    except OSError:
+        return None
+
+    if await loop.run_in_executor(None, _speech_mod.active_requests) > 0:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
+
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
+
+    _free = _live_free_vram_bytes
+
+    before, before_fresh, before_scope = _vram_free_reading()
+    cleared = await loop.run_in_executor(
+        None, functools.partial(_speech_mod.reset_speech, force=False))
+    if not cleared:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
+    if before is not None:
+        released, after = await loop.run_in_executor(
+            None, lambda: wait_for_vram_release(_free, before_bytes=before))
+    else:
+        released, after = 0, before
+    result = {"status": "unloaded", "model": name, "was_active": False}
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh, before_scope=before_scope)
+    return result
+
+
 async def unload_one_model(name: str, *, force: bool = False) -> dict:
     """Release ONE currently-loaded model from GPU/CPU memory, leaving any
     other loaded models untouched - the targeted counterpart to
@@ -2230,6 +2295,9 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
         reranker_result = await _unload_reranker_if_matches(name, loop)
         if reranker_result is not None:
             return reranker_result
+        speech_result = await _unload_speech_if_matches(name, loop)
+        if speech_result is not None:
+            return speech_result
         return {"status": "already_unloaded", "model": name}
     # Honor the in-flight-request pin: an engine a request is
     # generating on must not be unloaded out from under it (it would reload it
@@ -2246,7 +2314,7 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     _free = _live_free_vram_bytes
 
     before, before_fresh, before_scope = _vram_free_reading()
-    sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
+    sem = _inference_sems.setdefault(name, InferenceGate())
     # Flag BEFORE acquiring the semaphore so no request that arrives after the pin
     # check above can fast-path-pin this engine while we free it (the pin-arrives-
     # during-the-unload-await window); such a request blocks on the same
@@ -2254,7 +2322,7 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     # kept-in-_engines engine reloads lazily.
     engine.unloading = True
     try:
-        async with sem:
+        async with exclusively(sem):
             await loop.run_in_executor(None, engine.unload)
             if name in _engines_lru:
                 _engines_lru.remove(name)
@@ -2517,8 +2585,8 @@ async def _idle_unload_once(ttl: int) -> bool:
         if getattr(engine, "active_requests", 0) > 0:
             continue
             
-        sem = _inference_sems.get(name) or _inference_sem or asyncio.Semaphore(1)
-        async with sem:
+        sem = _inference_sems.get(name) or _inference_sem or InferenceGate()
+        async with exclusively(sem):
             # Recheck under the lock
             last_act = _last_activity_per_model.get(name, _last_activity)
             if not (engine.loaded and (time.monotonic() - last_act) >= ttl):
@@ -2865,6 +2933,11 @@ def _hang_restart_action(app) -> None:
     except Exception:
         _dbg_swallow("reranker release during forced restart failed")
     try:
+        from localm.inference import speech as _speech_mod
+        _speech_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("speech worker release during forced restart failed")
+    try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
     except Exception:
@@ -3117,10 +3190,11 @@ def _bearer_token(request) -> Optional[str]:
 
 def _request_token(request) -> tuple[Optional[str], str]:
     """Resolve the presented key and where it came from. The Authorization
-    header wins (programmatic clients); otherwise the HttpOnly ``localm_session``
-    cookie (the browser GUI). Returns ``(token, source)`` with *source* one of
+    header wins (programmatic clients), then the ``x-api-key`` header (what
+    Anthropic clients send); otherwise the HttpOnly ``localm_session`` cookie
+    (the browser GUI). Returns ``(token, source)`` with *source* one of
     ``"header"`` / ``"cookie"`` / ``"none"``."""
-    header = _bearer_token(request)
+    header = _bearer_token(request) or (request.headers.get("x-api-key") or "").strip()
     if header:
         return header, "header"
     cookie = (request.cookies.get(SESSION_COOKIE) or "").strip()
@@ -3814,6 +3888,11 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     except Exception:
         _dbg_swallow("reranker release during shutdown failed (non-fatal)")
     try:
+        from localm.inference import speech as _speech_mod
+        _speech_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("speech worker release during shutdown failed (non-fatal)")
+    try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
     except Exception:
@@ -4093,6 +4172,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         embedder_had_something = embedder_had_something or _reranker_mod.is_resident()
     except Exception:
         _dbg_swallow("reranker loaded-state check during restart failed (non-fatal)")
+    try:
+        from localm.inference import speech as _speech_mod
+        embedder_had_something = embedder_had_something or _speech_mod.is_resident()
+    except Exception:
+        _dbg_swallow("speech loaded-state check during restart failed (non-fatal)")
 
     # A subprocess-isolated GPU probe when torch is not resident. See
     # test_do_restart_skips_vram_wait_when_nothing_was_loaded.
@@ -4140,6 +4224,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         released_embedder = _reranker_mod.release_for_exit() or released_embedder
     except Exception:
         _dbg_swallow("reranker release during restart failed (non-fatal)")
+    try:
+        from localm.inference import speech as _speech_mod
+        released_embedder = _speech_mod.release_for_exit() or released_embedder
+    except Exception:
+        _dbg_swallow("speech worker release during restart failed (non-fatal)")
 
     # Wait for the frees above to actually land before re-exec. The re-exec'd
     # process spawns a brand-new GGUF worker that constructs a fresh
@@ -4272,7 +4361,7 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
         _default_model_name = engine.display_name
         _active_model_name = engine.display_name
         _engine = engine
-        _inference_sem = asyncio.Semaphore(1)
+        _inference_sem = InferenceGate()
         _inference_sems[engine.display_name] = _inference_sem
         _last_activity_per_model[engine.display_name] = time.monotonic()
     else:
@@ -4326,7 +4415,7 @@ def _make_lifespan():
         # see unload_one_model and the _server_loop comment above.
         _server_loop = asyncio.get_running_loop()
         if _active_model_name:
-            _inference_sem = asyncio.Semaphore(1)
+            _inference_sem = InferenceGate()
             _inference_sems[_active_model_name] = _inference_sem
         # Prune expired browser sessions once at startup so an install that rarely
         # mints new sessions does not accumulate stale rows (create() only prunes
@@ -4646,6 +4735,45 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     mounting.attach_plugins(app, engine)
 
     return app
+
+
+def _engine_parallel_slots(engine) -> int:
+    """How many generations *engine* runs at once; 1 unless it reports a
+    positive int."""
+    slots = getattr(engine, "parallel_slots", 1)
+    return slots if isinstance(slots, int) and not isinstance(slots, bool) and slots > 0 else 1
+
+
+def _admit_generation(gate, engine) -> None:
+    """Size *gate* to the generations *engine* runs at once, before a generation
+    acquires it."""
+    set_capacity(gate, _engine_parallel_slots(engine))
+
+
+def _call_outcome(engine) -> dict:
+    """The finished reply's finish reason and drafting figures, read on the
+    thread that drove the reply (a GGUF backend keeps them per thread)."""
+    return {"finish_reason": _engine_finish_reason(engine),
+            "mtp": _mtp_usage(engine),
+            "speculation": _speculation_usage(engine)}
+
+
+def _snapshot_outcome(box: dict, engine) -> None:
+    """Fill *box* with :func:`_call_outcome` of *engine*, on the calling thread.
+    A failed read is logged and leaves *box* as it was."""
+    try:
+        box.update(_call_outcome(engine))
+    except Exception:
+        from localm.debuglog import logger as _dbg
+        _dbg.exception("reading the reply's outcome failed")
+
+
+def _outcome(box: dict, key: str, engine):
+    """*key* of a reply's snapshotted outcome *box*, or read from *engine* now
+    when the snapshot does not have it."""
+    if key in box:
+        return box[key]
+    return _call_outcome(engine)[key]
 
 
 def _engine_finish_reason(engine) -> str:
@@ -5192,7 +5320,7 @@ async def _stream_sse_body(
     engine: Engine,
     messages: list,
     model_id: str,
-    sem: asyncio.Semaphore,
+    sem: InferenceGate | asyncio.Semaphore,
     audit=None,
     transcript=None,
     pipeline=None,
@@ -5251,18 +5379,19 @@ async def _stream_sse_body(
         yield f"data: {compacting.model_dump_json()}\n\n"
         new_messages, changed, _gone = await _compact_for_capacity(engine, messages)
         refusal = ""
+        refusal_status = 413
         if changed:
             messages = list(new_messages)
             try:
                 prompt_tokens = await asyncio.get_running_loop().run_in_executor(
                     None, engine.count_messages_tokens, messages)
             except PretokenizerUnsafeInputError as e:
-                refusal = str(e)
+                refusal, refusal_status = str(e), 400
                 prompt_tokens = None
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("token recount after compaction failed")
-                refusal = inference_error_text(e).strip()
+                refusal, refusal_status = inference_error_text(e).strip(), 500
                 prompt_tokens = None
         capacity = engine.context_capacity()
         if (not refusal and isinstance(capacity, int) and capacity > 0
@@ -5274,8 +5403,9 @@ async def _stream_sse_body(
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
-            err_chunk = ChatChunk.token(refusal, model_id, chunk_id, ts)
-            yield f"data: {err_chunk.model_dump_json()}\n\n"
+            err_chunk = ChatChunk.token(refusal, model_id, chunk_id, ts).model_dump(mode="json")
+            err_chunk["localm_error"] = {"status": refusal_status, "detail": refusal}
+            yield f"data: {json.dumps(err_chunk, ensure_ascii=False, separators=(',', ':'))}\n\n"
             for data in _final_chunks(model_id, chunk_id, ts, "error",
                                       UsageInfo(prompt_tokens=prompt_tokens or 0,
                                                 total_tokens=prompt_tokens or 0,
@@ -5284,6 +5414,7 @@ async def _stream_sse_body(
                 yield data
             return
 
+    _admit_generation(sem, engine)
     if sem.locked():
         waiting_chunk = ChatChunk.status_chunk(
             WAITING_FOR_MODEL_STATUS, model_id, chunk_id, ts)
@@ -5308,6 +5439,7 @@ async def _stream_sse_body(
     # once and refusing.
     cancel_event = threading.Event()
     residency.register_cancel(engine.display_name, cancel_event)
+    call_outcome: dict = {}
 
     def _generate():
         # engine.chat_stream is called INSIDE the try: Engine.chat_stream is not a
@@ -5358,6 +5490,7 @@ async def _stream_sse_body(
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing generation stream failed")
+            _snapshot_outcome(call_outcome, engine)
             # Wake the consumer. If the loop is already gone (server shutdown, or a
             # disconnect whose request-loop has since closed) the consumer is gone
             # too, so dropping the sentinel is correct - don't let it surface as an
@@ -5367,7 +5500,8 @@ async def _stream_sse_body(
             except RuntimeError:
                 pass
 
-    # Serialise inference - only one request runs at a time
+    # Up to the model's parallel slots generate at once.
+    _admit_generation(sem, engine)
     async with sem:
         # The backend reports image encoding itself, only when an image is encoded.
         status_chunk = ChatChunk.status_chunk(PROCESSING_PROMPT_STATUS, model_id, chunk_id, ts)
@@ -5448,7 +5582,8 @@ async def _stream_sse_body(
     # record and the terminal frame all carry the same value. A mid-stream
     # error reports "error", never a clean "stop".
     finish_reason = ("error" if gen_error is not None
-                     else "stop" if router.stopped else _engine_finish_reason(engine))
+                     else "stop" if router.stopped
+                     else _outcome(call_outcome, "finish_reason", engine))
     if router.calls and finish_reason == "stop":
         finish_reason = "tool_calls"
     outcome = _turn_outcome(gen_error, finish_reason)
@@ -5478,23 +5613,28 @@ async def _stream_sse_body(
         tokens_per_sec=_tokens_per_sec(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         context_capacity=engine.context_capacity(),
-        mtp=_mtp_usage(engine),
-        speculation=_speculation_usage(engine),
+        mtp=_outcome(call_outcome, "mtp", engine),
+        speculation=_outcome(call_outcome, "speculation", engine),
     )
     meter.record(usage.prompt_tokens, usage.completion_tokens,
                  usage.ttft_ms, usage.tokens_per_sec)
-    for data in _final_chunks(model_id, chunk_id, ts, finish_reason, usage, include_usage):
+    for data in _final_chunks(model_id, chunk_id, ts, finish_reason, usage, include_usage,
+                              stop_sequence=(router.stop_sequence
+                                             if finish_reason == "stop" else None)):
         yield data
 
 
 def _final_chunks(model_id: str, chunk_id: str, ts: int, finish_reason: str,
-                  usage: UsageInfo, include_usage: bool) -> list:
-    """The SSE lines that end a chat stream: the finish chunk, then with
+                  usage: UsageInfo, include_usage: bool,
+                  stop_sequence: Optional[str] = None) -> list:
+    """The SSE lines that end a chat stream: the finish chunk (carrying the
+    *stop_sequence* that ended the reply, when one did), then with
     *include_usage* a chunk with empty ``choices`` carrying *usage* (otherwise
     the finish chunk carries it), then ``[DONE]``."""
     done = ChatChunk.done(model_id, chunk_id, ts, finish_reason=finish_reason,
-                          usage=None if include_usage else usage)
-    lines = [f"data: {done.model_dump_json()}\n\n"]
+                          usage=None if include_usage else usage).model_dump(mode="json")
+    done["choices"][0]["stop_sequence"] = stop_sequence
+    lines = [f"data: {json.dumps(done, ensure_ascii=False, separators=(',', ':'))}\n\n"]
     if include_usage:
         tail = ChatChunk(id=chunk_id, created=ts, model=model_id, choices=[], usage=usage)
         lines.append(f"data: {tail.model_dump_json()}\n\n")
@@ -5514,7 +5654,7 @@ async def _stream_sse_completion_body(
     engine: Engine,
     messages: list,
     model_id: str,
-    sem: asyncio.Semaphore,
+    sem: InferenceGate | asyncio.Semaphore,
     audit=None,
     transcript=None,
     pipeline=None,
@@ -5607,6 +5747,7 @@ async def _stream_sse_completion_body(
         }
         yield f"data: {json.dumps(echoed)}\n\n"
 
+    _admit_generation(sem, engine)
     async with sem:
         gen_start = time.perf_counter()
         first_token_at: float | None = None
@@ -5930,6 +6071,11 @@ class _ReplyRouter:
             return True
         return self._stop is not None and self._stop.hit
 
+    @property
+    def stop_sequence(self) -> Optional[str]:
+        """The stop sequence that ended the reply, or ``None``."""
+        return self._stop.matched if self._stop is not None else None
+
     def feed(self, token: str) -> list:
         content, reasoning = self._think.feed(token)
         return self._route(content, reasoning, final=False)
@@ -6047,6 +6193,8 @@ async def _generate_full(engine, messages: list, request=None, *,
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing non-stream generation stream failed")
+            if timing is not None:
+                _snapshot_outcome(timing.setdefault("outcome", {}), engine)
         return "".join(parts)
 
     fut = loop.run_in_executor(None, _run)
@@ -6275,7 +6423,7 @@ async def _complete(
     engine: Engine,
     messages: list,
     model_id: str,
-    sem: asyncio.Semaphore,
+    sem: InferenceGate | asyncio.Semaphore,
     audit=None,
     transcript=None,
     pipeline=None,
@@ -6302,9 +6450,10 @@ async def _complete(
                 messages = list(new_messages)
                 prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
-    # Serialise inference - only one request runs at a time
+    # Up to the model's parallel slots generate at once.
     gen_error: Exception | None = None
     timing: dict = {}
+    _admit_generation(sem, engine)
     async with sem:
         gen_start = time.perf_counter()
         # Cancelable on client disconnect so an aborted request releases the
@@ -6352,12 +6501,14 @@ async def _complete(
     stop = gen_kwargs.get("stop")
     tool_names = gen_kwargs.get("tool_names")
     stopped = False
+    stop_sequence: Optional[str] = None
     has_calls = False
     if tool_names and gen_error is None:
         routed = _ReplyRouter(stop, tool_names, gen_kwargs)
         routed.feed(text)
         routed.flush()
         stopped = routed.stopped
+        stop_sequence = routed.stop_sequence
         has_calls = bool(routed.calls)
         if stopped:
             reasoning_text = "".join(routed.reasoning)
@@ -6368,12 +6519,14 @@ async def _complete(
         from localm.textnorm import split_think
         visible, reasoning_text = split_think(text, exit_marker=think_exit_marker(
             gen_kwargs.get("grammar_lazy"), gen_kwargs.get("grammar_triggers")))
-        visible, stopped = apply_stop(visible, stop)
+        visible, stop_sequence = apply_stop_matched(visible, stop)
+        stopped = stop_sequence is not None
         if stopped:
             text = (f"<think>{reasoning_text}</think>" if reasoning_text else "") + visible
 
     finish_reason = ("error" if gen_error is not None
-                     else "stop" if stopped else _engine_finish_reason(engine))
+                     else "stop" if stopped
+                     else _outcome(timing.get("outcome", {}), "finish_reason", engine))
     if has_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
     outcome = _turn_outcome(gen_error, finish_reason)
@@ -6420,8 +6573,8 @@ async def _complete(
         tokens_per_sec=_tokens_per_sec(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
         context_capacity=capacity,
-        mtp=_mtp_usage(engine),
-        speculation=_speculation_usage(engine),
+        mtp=_outcome(timing.get("outcome", {}), "mtp", engine),
+        speculation=_outcome(timing.get("outcome", {}), "speculation", engine),
     )
 
     _record_generation_metrics(usage.prompt_tokens, usage.completion_tokens,
@@ -6437,6 +6590,7 @@ async def _complete(
                                 reasoning_content=reasoning or None,
                                 tool_calls=tool_calls),
                 finish_reason=finish_reason,
+                stop_sequence=stop_sequence if finish_reason == "stop" else None,
             )
         ],
         usage=usage,
