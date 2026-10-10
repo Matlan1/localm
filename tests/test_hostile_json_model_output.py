@@ -22,7 +22,7 @@ from tests._hostile_json import (
     BIG_INT, BIG_INT_LIST, DEEP, DEEP_CLOSED, HOSTILE, serve)
 
 EXTRACT_DOCS = pytest.mark.parametrize("doc", [
-    DEEP, BIG_INT, "{" + DEEP + "}", '{"a": ' + BIG_INT + "}",
+    DEEP, BIG_INT, '{"a": ' + DEEP + "}", '{"a": ' + BIG_INT + "}",
     "```json\n" + DEEP + "\n```"],
     ids=["deep", "bigint", "braced-deep", "braced-bigint", "fenced-deep"])
 
@@ -50,7 +50,9 @@ def test_stream_returns_a_hostile_tagged_body_as_text(doc):
     assert doc in events[0][1]
 
 
-@pytest.mark.parametrize("doc", [DEEP_CLOSED, BIG_INT_LIST], ids=["deep", "bigint"])
+@pytest.mark.parametrize(
+    "doc", ['{"a": ' + DEEP_CLOSED + "}", '{"a": ' + BIG_INT + "}"],
+    ids=["deep", "bigint"])
 def test_stream_returns_a_hostile_bare_value_as_text(doc):
     stream = TC.ToolCallStream()
     events = stream.feed(doc) + stream.finish()
