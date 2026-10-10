@@ -644,7 +644,9 @@ class _ActivityStore:
             except Exception:
                 pass
             return None
-        except json.JSONDecodeError as e:
+        except UnicodeDecodeError:
+            raise
+        except (ValueError, RecursionError) as e:
             self._quarantine(path, raw, e)
             return None
         ops = data.get("operations") if isinstance(data, dict) else None
@@ -1101,7 +1103,9 @@ class JobManager:
                         _, _, payload = line.partition(PROGRESS_SENTINEL)
                         try:
                             data = json.loads(payload)
-                        except ValueError:
+                        except (ValueError, RecursionError):
+                            continue
+                        if not isinstance(data, dict):
                             continue
                         # Popped, not merely read: **data below must never carry
                         # its own "type" key.

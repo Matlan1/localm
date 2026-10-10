@@ -888,7 +888,8 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
         plan = rerank_plan(enabled=req.rerank)
         hits = coll.query(req.query, k=k, embed_fn=self_embed,
                           relevant_only=req.relevant_only, rerank_fn=plan.fn,
-                          rerank_candidates=plan.candidates)
+                          rerank_candidates=plan.candidates,
+                          rerank_min_score=plan.min_score)
         reranked = any("rerank_score" in h for h in hits)
         return (_neutralise_hits(hits), plan.model if reranked else None,
                 coll.rerank_degrade_reason or plan.note)

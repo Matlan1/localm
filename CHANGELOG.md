@@ -12,6 +12,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Structured output and more OpenAI fields on `/v1/chat/completions`.**
+  `response_format` (`json_object`, or `json_schema` with `strict`) constrains the reply,
+  token by token, to JSON or to the schema, also alongside `tools`. `presence_penalty`,
+  `frequency_penalty` and `min_p` are applied by the sampler (GGUF and HuggingFace models),
+  `max_completion_tokens` is read as the reply cap, `stream_options.include_usage` sends the
+  usage in a last chunk, `reasoning_effort: "none"` turns thinking off, and a `developer`
+  message is read as `system`. `/v1/completions` takes the same sampling fields, `echo`, and
+  a prompt list of one. A field localm does not serve (`n` above 1, `logprobs`,
+  `logit_bias`, the deprecated `functions`, audio output) is now a 400 naming it instead of
+  being silently ignored. A grammar, tool choice or response format on an image request to
+  a GGUF vision model is now applied instead of dropped, and a GGUF model whose grammar
+  sampler faulted earlier refuses grammar requests until localm restarts instead of
+  answering without the constraint.
+- **`localm setup-sdcpp` installs a native image generation runtime.** It downloads the
+  stable-diffusion.cpp build that fits this machine (CPU, Vulkan, CUDA, ROCm or Metal) from
+  a pinned upstream release through the network policy, verifies it against a pinned
+  checksum, and checks that it loads and finds a compute device, falling back to Vulkan and
+  then CPU when the preferred build does not load. `--backend` picks a build and `--status`
+  shows what is installed.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the
@@ -20,6 +39,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `--no-rerank`, and the query API reports whether a query was reranked. With no
   reranker installed nothing changes; if the reranker fails, the unreranked order is
   kept and the reason is shown.
+  With the Q8_0 files of bge-reranker-v2-m3 (gpustack) or Qwen3-Reranker-0.6B (ggml-org),
+  the reranker's score also decides which excerpts are relevant enough to reach the
+  chat, so a rephrased question finds its answer where the keyword and similarity check used
+  to drop it, and unrelated questions still bring in nothing.
 - **A loaded reranker can be unloaded from the Models page.** A reranker that is in
   memory now shows as loaded there, and its Unload button (or `localm unload <name>`)
   frees it unless a rerank is running.
@@ -393,6 +416,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `tokenizer.json` or shard index is over-nested, has an enormous number or has the wrong shape is refused or treated
   as having no metadata, and an uploaded workflow, `model_meta.json` or install record that is over-nested is
   rejected or ignored. An over-nested `config.json` no longer stops localm from starting.
+- **Over-nested or enormous-number JSON no longer crashes the feature that reads it.** Memory, coder episode, scheduled job, knowledge collection, conversation, prompt library, gallery index and settings files, the reply of a peer or another localm instance, the coder agent's tool calls, reviews and MCP server output, and a model's tool-call arguments are now handled like any other unreadable JSON: skipped or reported, while the rest of the data still loads.
 - **`localm doctor` recognises the macOS runtime.** On a Mac it reported the Metal build as "no llama library", skipped the native ABI check and the GPU probe, and ended with "CPU mode only"; it now checks the library like on other systems and names the Metal GPU.
 - **A knowledge collection whose `meta.json` is not valid UTF-8 no longer breaks the collection list.** The list, the collection detail view and a model rename now treat that collection as unreadable, flag it as corrupt and carry on with the others, instead of failing for every collection.
 - **Bug reports no longer carry email addresses.** Any email address in a report

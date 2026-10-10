@@ -345,8 +345,10 @@ class EpisodeStore:
             if not line:
                 continue
             try:
-                out.append(Episode.from_dict(json.loads(line)))
-            except (json.JSONDecodeError, TypeError):
+                rec = json.loads(line)
+                if isinstance(rec, dict):
+                    out.append(Episode.from_dict(rec))
+            except (ValueError, TypeError, RecursionError):
                 continue
         return out
 
@@ -446,7 +448,7 @@ class EpisodeStore:
                 continue
             try:
                 rec = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 continue
             if isinstance(rec, dict):
                 out.append(rec)
@@ -629,9 +631,9 @@ class EpisodeStore:
         if vf.is_file():
             try:
                 d = json.loads(vf.read_text(encoding="utf-8"))
-                if d.get("hash") == h and len(d.get("vectors", [])) == len(texts):
+                if isinstance(d, dict) and d.get("hash") == h and len(d.get("vectors", [])) == len(texts):
                     return d["vectors"]
-            except (json.JSONDecodeError, OSError, ValueError):
+            except (json.JSONDecodeError, OSError, ValueError, RecursionError):
                 pass
         try:
             vecs = ef(texts)
@@ -962,14 +964,14 @@ def _extract_json(raw: str) -> dict:
     try:
         obj = json.loads(text)
         return obj if isinstance(obj, dict) else {}
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         pass
     i, j = text.find("{"), text.rfind("}")
     if i != -1 and j > i:
         try:
             obj = json.loads(text[i : j + 1])
             return obj if isinstance(obj, dict) else {}
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             return {}
     return {}
 

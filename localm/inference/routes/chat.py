@@ -20,7 +20,7 @@ import asyncio
 import functools
 import time
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -33,7 +33,14 @@ from localm.inference.backends.base import (
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
+from localm.inference.openai_compat import (
+    UnsupportedFieldError, check_chat_request, check_completion_request, include_usage,
+    max_tokens_of, thinking_of,
+)
 from localm.inference.pretokenizer_guard import count_tokens_or_estimate
+from localm.inference.response_format import (
+    ResponseFormatError, after_think, combine, format_grammar, parse_response_format,
+)
 from localm.inference.stop_sequences import apply_stop
 from localm.inference.tool_calling import (
     ToolChoice, ToolsError, has_tool_history, parse_tool_choice, render_messages,
@@ -73,15 +80,39 @@ def register(app: FastAPI, ctx) -> None:
     def _no_status(_text: str) -> None:
         return None
 
+    _SAMPLING_FIELDS = ("min_p", "presence_penalty", "frequency_penalty")
+
+    def _sampling_kwargs(req) -> dict:
+        """The sampling options *req* sets, by name. A penalty of 0 applies nothing
+        and is left out."""
+        out = {k: getattr(req, k) for k in _SAMPLING_FIELDS if getattr(req, k) is not None}
+        for key in ("presence_penalty", "frequency_penalty"):
+            if out.get(key) == 0:
+                del out[key]
+        return out
+
+    def _check_sampling(engine, sampling: dict) -> None:
+        """400 naming the options in *sampling* the engine cannot apply."""
+        if not sampling:
+            return
+        refused = engine.unsupported_sampling(sampling)
+        if refused:
+            pronoun = "it" if len(refused) == 1 else "them"
+            raise HTTPException(
+                400, f"{', '.join(refused)} cannot be applied by model "
+                     f"{engine.display_name!r}; omit {pronoun}")
+
     async def _prepare_chat(req: ChatRequest, request: Request, messages: list,
                             route, say, tools=(),
-                            choice: Optional[ToolChoice] = None) -> SimpleNamespace:
+                            choice: Optional[ToolChoice] = None,
+                            fmt: Optional[str] = None) -> SimpleNamespace:
         """Resolve (loading if needed) the engine that answers *req*, run the
         inlet hooks and every pre-generation check. Returns the prepared request,
         which holds an engine pin the caller must release; raises HTTPException
         for a refused request, holding no pin. ``say(text)`` is called with the
         status of each phase as it starts, on the event loop thread. *tools* and
-        *choice* are the request's validated tools and tool_choice."""
+        *choice* are the request's validated tools and tool_choice, *fmt* the
+        grammar its response_format compiles to."""
         choice = choice or ToolChoice("none")
         say(LOADING_MODEL_STATUS)
         engine = None
@@ -195,6 +226,9 @@ def register(app: FastAPI, ctx) -> None:
                                    + "; ".join(route.load_errors))
                     raise HTTPException(400, detail)
 
+            sampling = _sampling_kwargs(req)
+            _check_sampling(engine, sampling)
+
             grammar, grammar_lazy, grammar_triggers = (
                 req.grammar, req.grammar_lazy, req.grammar_triggers)
             from_tools = bool(tools) and choice.kind != "none"
@@ -207,8 +241,20 @@ def register(app: FastAPI, ctx) -> None:
                         list(tools), choice, parallel=req.parallel_tool_calls is not False)
                 except ToolsError as e:
                     raise HTTPException(400, str(e)) from e
-            gen_kwargs = dict(
-                max_tokens=req.max_tokens,
+            thinking = thinking_of(req)
+            from_format = fmt is not None and (not from_tools or choice.kind == "auto")
+            if from_format and fmt is not None:
+                format_text = fmt
+                if from_tools and grammar:
+                    format_text = combine(grammar, format_text)
+                    grammar_lazy, grammar_triggers = False, None
+                if thinking is None:
+                    thinking = False
+                elif thinking:
+                    format_text = after_think(format_text)
+                grammar = format_text
+            gen_kwargs: dict[str, Any] = dict(
+                max_tokens=max_tokens_of(req),
                 temperature=req.temperature,
                 top_p=req.top_p,
                 top_k=req.top_k,
@@ -216,9 +262,10 @@ def register(app: FastAPI, ctx) -> None:
                 grammar=grammar,
                 seed=req.seed,
                 stop=req.stop,
-                thinking=(req.chat_template_kwargs or {}).get("enable_thinking"),
+                thinking=thinking,
                 tool_names=tool_names,
                 max_tool_calls=1 if tool_names and req.parallel_tool_calls is False else None,
+                **sampling,
             )
             # Strip None so Engine uses its config defaults
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
@@ -277,6 +324,10 @@ def register(app: FastAPI, ctx) -> None:
                     # InvalidGrammarError arm below, and above the `if req.stream:`
                     # branch so the streaming and non-streaming paths get the same
                     # status and reason.
+                    if from_format:
+                        raise HTTPException(
+                            400, f"response_format needs grammar-constrained sampling, "
+                                 f"which this model cannot do: {e}") from e
                     if from_tools and choice.kind == "auto":
                         for key in ("grammar", "grammar_lazy", "grammar_triggers"):
                             gen_kwargs.pop(key, None)
@@ -290,8 +341,9 @@ def register(app: FastAPI, ctx) -> None:
                     else:
                         raise HTTPException(400, str(e)) from e
                 except InvalidGrammarError as e:
-                    raise HTTPException(
-                        400, f"Invalid {'tool grammar' if from_tools else 'grammar'}: {e}") from e
+                    what = ("response_format grammar" if from_format
+                            else "tool grammar" if from_tools else "grammar")
+                    raise HTTPException(400, f"Invalid {what}: {e}") from e
                 except RuntimeError as e:
                     # A bare RuntimeError means the isolated worker crashed, timed
                     # out, or returned something unexpected while checking the
@@ -362,7 +414,7 @@ def register(app: FastAPI, ctx) -> None:
             sem=sem, pipeline=pipeline, ctx=ctx, gen_kwargs=gen_kwargs,
             prompt_tokens=prompt_tokens, compact_in_stream=compact_in_stream,
             compacted_here=compacted_here, route=route,
-            routed_placement=routed_placement)
+            routed_placement=routed_placement, include_usage=include_usage(req))
 
     def _prepared_engine(prepared) -> object:
         return prepared.engine
@@ -388,6 +440,7 @@ def register(app: FastAPI, ctx) -> None:
             prompt_tokens=prepared.prompt_tokens,
             compact=prepared.compact_in_stream,
             chunk_id=chunk_id, role_sent=chunk_id is not None,
+            include_usage=prepared.include_usage,
             **prepared.gen_kwargs))
 
     async def _respond_complete(prepared, request: Request):
@@ -417,6 +470,11 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest, request: Request):
         from localm import peer_routing
+
+        try:
+            check_chat_request(req)
+        except UnsupportedFieldError as e:
+            raise HTTPException(400, str(e)) from e
 
         # Plain-dict messages for the backend. Hoisted above engine resolution
         # because capability routing reads them to decide which model answers.
@@ -458,10 +516,20 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, str(e)) from e
         if tools and choice.kind != "none" and req.grammar:
             raise HTTPException(400, "tools cannot be combined with a grammar")
+        try:
+            parsed = parse_response_format(req.response_format)
+            fmt, dropped = format_grammar(parsed) if parsed is not None else (None, [])
+        except ResponseFormatError as e:
+            raise HTTPException(400, str(e)) from e
+        if dropped:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("response_format: not enforced: %s", ", ".join(dropped))
+        if fmt is not None and req.grammar:
+            raise HTTPException(400, "response_format cannot be combined with a grammar")
 
         if not req.stream:
             prepared = await _prepare_chat(req, request, messages, route, _no_status,
-                                           tools, choice)
+                                           tools, choice, fmt)
             try:
                 return await _respond_complete(prepared, request)
             finally:
@@ -471,7 +539,7 @@ def register(app: FastAPI, ctx) -> None:
         # stream opens at once and reports each phase until the reply starts.
         progress = _hs.PrepProgress()
         task = asyncio.ensure_future(
-            _prepare_chat(req, request, messages, route, progress.set, tools, choice))
+            _prepare_chat(req, request, messages, route, progress.set, tools, choice, fmt))
         try:
             done, _pending = await asyncio.wait({task}, timeout=_hs.PREP_STATUS_GRACE_S)
         except BaseException:
@@ -690,6 +758,10 @@ def register(app: FastAPI, ctx) -> None:
     async def completions(req: CompletionRequest, request: Request):
         # Same peer-routing short-circuit as /v1/chat/completions above.
         from localm import peer_routing
+        try:
+            prompt = check_completion_request(req)
+        except UnsupportedFieldError as e:
+            raise HTTPException(400, str(e)) from e
         _routed_name = (req.model or "").strip()
         if not _routed_name or _routed_name == "localm":
             _routed_name = _hs._resolve_unnamed_model_name() or ""
@@ -717,7 +789,9 @@ def register(app: FastAPI, ctx) -> None:
             # Wrap the prompt as a single user message so raw completions flow through
             # the same chat-pipeline hooks and audit/transcript as
             # /v1/chat/completions.
-            messages = [{"role": "user", "content": req.prompt}]
+            messages = [{"role": "user", "content": prompt}]
+            sampling = _sampling_kwargs(req)
+            _check_sampling(engine, sampling)
 
             pipeline = getattr(request.app.state, "chat_pipeline", None)
             ctx = None
@@ -748,6 +822,7 @@ def register(app: FastAPI, ctx) -> None:
                 grammar=req.grammar,
                 seed=req.seed,
                 stop=req.stop,
+                **sampling,
             )
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
             if req.grammar_lazy:
@@ -819,9 +894,12 @@ def register(app: FastAPI, ctx) -> None:
             if req.stream:
                 streaming_handoff = True
                 return StreamingResponse(
-                    _pin_engine(engine, _stream_sse_completion(engine, messages, reported_model, sem,
-                                           audit=_audit, transcript=_transcript,
-                                           pipeline=pipeline, ctx=ctx, prompt_tokens=prompt_tokens, **gen_kwargs)),
+                    _pin_engine(engine, _stream_sse_completion(
+                        engine, messages, reported_model, sem,
+                        audit=_audit, transcript=_transcript,
+                        pipeline=pipeline, ctx=ctx, prompt_tokens=prompt_tokens,
+                        include_usage=include_usage(req),
+                        echo=prompt if req.echo else None, **gen_kwargs)),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
@@ -874,7 +952,8 @@ def register(app: FastAPI, ctx) -> None:
                 "model": reported_model,
                 # "error", not "stop", when generation failed, matching the terminal
                 # frame the streaming twin emits.
-                "choices": [{"text": text, "index": 0,
+                "choices": [{"text": (prompt + text) if req.echo and gen_error is None else text,
+                             "index": 0,
                              "finish_reason": "error" if gen_error is not None else "stop"}],
                 "usage": {
                     "prompt_tokens": prompt_tokens,

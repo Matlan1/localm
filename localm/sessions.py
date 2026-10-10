@@ -73,7 +73,10 @@ def _load() -> list:
     key = (st.st_mtime_ns, st.st_size)
     if _CACHE["mtime"] == key and _CACHE["records"] is not None:
         return _CACHE["records"]
-    data = json.loads(path.read_text(encoding="utf-8"))  # ValueError on corrupt
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))  # ValueError on corrupt
+    except RecursionError as e:
+        raise ValueError("sessions file is nested too deeply") from e
     records = data if isinstance(data, list) else []
     _CACHE["mtime"] = key
     _CACHE["records"] = records

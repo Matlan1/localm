@@ -157,8 +157,10 @@ class MCPServer:
                 continue
             try:
                 msg = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 continue   # servers may log junk to stdout - skip it
+            if not isinstance(msg, dict):
+                continue
             if "id" in msg and ("result" in msg or "error" in msg):
                 self._responses.put(msg)
             # Server-initiated requests/notifications are ignored - this

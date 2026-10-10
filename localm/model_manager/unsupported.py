@@ -128,7 +128,7 @@ def legacy_ggml_refusal(path: Path) -> Optional[str]:
 def _read_config(folder: Path) -> Optional[dict]:
     try:
         data = json.loads((folder / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 

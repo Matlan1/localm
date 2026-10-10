@@ -159,7 +159,7 @@ def fetch_status(scheme: str, port: int, timeout: float,
         return None
     try:
         data = r.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -318,7 +318,7 @@ def verify_requester(requester: object, request_id: object, self_instance_id: st
         return False
     try:
         data = r.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
     return isinstance(data, dict) and data.get("vouched") is True
 
@@ -369,6 +369,6 @@ def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
         return False
     try:
         data = r.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
     return isinstance(data, dict) and data.get("status") in ("unloaded", "already_unloaded")

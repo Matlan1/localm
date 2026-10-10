@@ -314,6 +314,12 @@ GRAMMAR_LOAD_FAILED_MESSAGE = (
 # Shown when any grammar, lazy or forced, is requested of a diffusion language
 # model. Contains "would be ignored", which the GUI's web-tool retry matches
 # on. See test_grammar_refusals_carry_the_retry_phrase.
+GRAMMAR_FAULTED_MESSAGE = (
+    "This model's llama.cpp runtime faulted while applying a grammar earlier, so "
+    "grammar-constrained sampling is off for it until localm restarts, and the "
+    "reply would not match the requested grammar. Restart localm, or update the "
+    "runtime with `localm setup-llama`.")
+
 GRAMMAR_DIFFUSION_UNSUPPORTED_MESSAGE = (
     "This model is a diffusion language model: it fills in its whole reply at "
     "once instead of token by token, so the requested grammar would be ignored "
@@ -423,6 +429,13 @@ class BaseBackend(ABC):
         loaded for speculative drafting. Default False."""
         return False
 
+    def unsupported_sampling(self, options: dict) -> list:
+        """The names of the sampling *options* (``{name: value}`` for ``min_p``,
+        ``presence_penalty``, ``frequency_penalty``) this backend cannot apply, in
+        order. Default: all of them, so a backend that never declared support
+        refuses them rather than generating as if they were not set."""
+        return list(options)
+
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Check *grammar* against this backend before generation starts.
 
@@ -503,6 +516,9 @@ class BaseBackend(ABC):
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
         thinking: Optional[bool] = None,
+        min_p: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
     ) -> Iterator[str]:
         """
         Yield text tokens one at a time.
@@ -534,6 +550,12 @@ class BaseBackend(ABC):
             channel (see :func:`no_think_prompt`); ``None`` and ``True`` leave
             the model's default.  A model with no ``<think>`` convention is
             unaffected.
+        min_p, presence_penalty, frequency_penalty:
+            OpenAI sampling options, passed only when the caller set them and
+            only to a backend whose :meth:`unsupported_sampling` does not list
+            them.  ``presence_penalty`` subtracts a fixed amount from the logit
+            of every token already generated, ``frequency_penalty`` that amount
+            times how often it was generated.
         """
 
     @property

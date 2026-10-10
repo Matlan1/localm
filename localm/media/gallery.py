@@ -52,7 +52,7 @@ def _read_index(media_kind: str) -> dict:
         return {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         from localm.debuglog import logger
         logger.warning(
             "gallery ownership index %s exists but is unreadable (%s); failing "

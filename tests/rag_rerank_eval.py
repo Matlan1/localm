@@ -27,6 +27,7 @@ from typing import Callable, Optional
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "rag_rerank_eval"
 CORPUS_DIR = FIXTURE_DIR / "corpus"
 QUERIES_FILE = FIXTURE_DIR / "queries.json"
+OFFTOPIC_FILE = FIXTURE_DIR / "offtopic.json"
 COLLECTION_NAME = "rerank-eval"
 
 _WS = re.compile(r"\s+")
@@ -35,6 +36,11 @@ _WS = re.compile(r"\s+")
 def load_queries() -> list[dict]:
     """The labelled queries: ``{id, doc, query, gold}`` dicts."""
     return json.loads(QUERIES_FILE.read_text(encoding="utf-8"))["queries"]
+
+
+def load_offtopic() -> list[dict]:
+    """Questions the corpus does not answer: ``{id, category, query}`` dicts."""
+    return json.loads(OFFTOPIC_FILE.read_text(encoding="utf-8"))["queries"]
 
 
 def _collapse(text: str) -> str:
@@ -140,6 +146,48 @@ def pool_ceiling(coll, queries: list[dict], *, embed_fn: Optional[Callable] = No
             for n in sizes}
 
 
+def evaluate_gate(coll, queries: list[dict], offtopic: list[dict], *,
+                  embed_fn: Optional[Callable] = None,
+                  rerank_fn: Optional[Callable] = None,
+                  min_score: Optional[float] = None, k: int = 4,
+                  candidates: int = 20) -> dict:
+    """How a ``relevant_only`` configuration treats on-topic and off-topic questions.
+
+    ``recall`` is the share of *queries* with a relevant chunk among the returned
+    hits and ``answered`` the share returning any hit. ``precision`` is the share
+    of *offtopic* questions that return nothing, overall and per category."""
+    def ask(text: str) -> list[dict]:
+        return coll.query(text, k=k, embed_fn=embed_fn, relevant_only=True,
+                          rerank_fn=rerank_fn, rerank_candidates=candidates,
+                          rerank_min_score=min_score)
+
+    on = [(q, ask(q["query"])) for q in queries]
+    off = [(q, ask(q["query"])) for q in offtopic]
+    categories: dict[str, list[bool]] = {}
+    for q, hits in off:
+        categories.setdefault(q["category"], []).append(not hits)
+    return {
+        "recall": sum(any(relevance_vector(h, q)) for q, h in on) / len(on),
+        "answered": sum(1 for _, h in on if h) / len(on),
+        "precision": sum(1 for _, h in off if not h) / len(off),
+        "categories": {c: sum(v) / len(v) for c, v in sorted(categories.items())},
+        "leaks": [q["id"] for q, h in off if h],
+    }
+
+
+def format_gate_table(results: dict[str, dict]) -> str:
+    """A fixed-width comparison of named gates from :func:`evaluate_gate`."""
+    cats = sorted({c for r in results.values() for c in r["categories"]})
+    out = [f"{'gate':<40}{'recall':>8}{'answered':>10}{'precision':>11}"
+           + "".join(f"{c:>14}" for c in cats)]
+    for name, res in results.items():
+        out.append(f"{name:<40}{res['recall']:>8.3f}{res['answered']:>10.3f}"
+                   f"{res['precision']:>11.3f}"
+                   + "".join(f"{res['categories'].get(c, float('nan')):>14.2f}"
+                             for c in cats))
+    return chr(10).join(out)
+
+
 def format_table(results: dict[str, dict]) -> str:
     """A fixed-width comparison of named configurations."""
     any_res = next(iter(results.values()))
@@ -166,6 +214,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--corpus-dir", default=None,
                     help="index this folder of .md files instead of the fixture "
                          "corpus (the labelled documents must be in it)")
+    ap.add_argument("--gate", action="store_true",
+                    help="compare relevant_only gates on the on-topic questions "
+                         "(recall) and the off-topic ones (precision)")
+    ap.add_argument("--min-score", type=float, default=None,
+                    help="reranker score a hit needs under --gate (default: the "
+                         "calibrated value of each --reranker, if any)")
     ap.add_argument("--json", dest="json_out", default=None,
                     help="write the full per-query results to this file")
     args = ap.parse_args(argv)
@@ -187,6 +241,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.reranker:
         from localm.rag.rerank import make_rerank_fn
         rerankers = {name: make_rerank_fn(name)[1] for name in args.reranker}
+    gates: dict[str, dict] = {}
 
     queries = load_queries()
     results: dict[str, dict] = {}
@@ -200,11 +255,36 @@ def main(argv: Optional[list[str]] = None) -> int:
                     coll, queries, embed_fn=embed_fn, rerank_fn=rerank_fn,
                     k=args.k, candidates=c)
         ceiling = pool_ceiling(coll, queries, embed_fn=embed_fn)
+        if args.gate:
+            from localm.rag.rerank import calibrated_min_score
+            offtopic = load_offtopic()
+            gates["floor only"] = evaluate_gate(
+                coll, queries, offtopic, embed_fn=embed_fn, k=args.k)
+            for name, rerank_fn in rerankers.items():
+                c = int(args.candidates.split(",")[0])
+                min_score = (args.min_score if args.min_score is not None
+                             else calibrated_min_score(name))
+                gates[f"{name}: floor, then rerank"] = evaluate_gate(
+                    coll, queries, offtopic, embed_fn=embed_fn,
+                    rerank_fn=rerank_fn, k=args.k, candidates=c)
+                if min_score is not None:
+                    gates[f"{name}: score >= {min_score:g}"] = evaluate_gate(
+                        coll, queries, offtopic, embed_fn=embed_fn,
+                        rerank_fn=rerank_fn, min_score=min_score, k=args.k,
+                        candidates=c)
     print(format_table(results))
     print("unreranked recall within top N: "
           + ", ".join(f"N={n}: {v:.3f}" for n, v in ceiling.items()))
+    if gates:
+        print()
+        print(format_gate_table(gates))
+        for name, res in gates.items():
+            if res["leaks"]:
+                print(f"leaks [{name}]: {', '.join(res['leaks'])}")
     if args.json_out:
-        Path(args.json_out).write_text(json.dumps(results, indent=2), encoding="utf-8")
+        Path(args.json_out).write_text(
+            json.dumps({**results, **({"gates": gates} if gates else {})}, indent=2),
+            encoding="utf-8")
     return 0
 
 

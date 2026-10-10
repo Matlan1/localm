@@ -188,7 +188,9 @@ class HttpEngine:
                 continue
             try:
                 chunk = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(chunk, dict):
                 continue
             if isinstance(chunk.get("model"), str) and chunk["model"]:
                 self.answered_model = chunk["model"]
