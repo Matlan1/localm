@@ -58,6 +58,13 @@ _REVIEWED_OLLAMA_CROSS_ORIGIN_OK = frozenset({
     "/api/show",
 })
 
+# The reviewed contents of _ANTHROPIC_CROSS_ORIGIN_OK: the Anthropic Messages
+# routes, matched by equality on the full path, never by prefix.
+_REVIEWED_ANTHROPIC_CROSS_ORIGIN_OK = frozenset({
+    "/v1/messages",
+    "/v1/messages/count_tokens",
+})
+
 _CROSS_ORIGIN = {"Origin": "http://localhost:9999"}
 
 
@@ -118,6 +125,15 @@ class TestOriginGateExemption:
         live = _live_guard_var(app, "_OLLAMA_CROSS_ORIGIN_OK")
         assert set(live) == _REVIEWED_OLLAMA_CROSS_ORIGIN_OK
 
+    def test_live_anthropic_exempt_set_equals_the_reviewed_set(self, app):
+        live = _live_guard_var(app, "_ANTHROPIC_CROSS_ORIGIN_OK")
+        assert set(live) == _REVIEWED_ANTHROPIC_CROSS_ORIGIN_OK
+
+    def test_a_path_under_an_anthropic_route_is_not_exempt(self, app):
+        with TestClient(app) as c:
+            r = c.post("/v1/messages/batches", json={}, headers=_CROSS_ORIGIN)
+        assert r.status_code == 403 and "cross-origin" in r.text.lower()
+
     def test_every_unsafe_kernel_route_refuses_cross_origin_unless_reviewed(self, app):
         """The behavioural half: a route quietly added to _CROSS_ORIGIN_OK stops
         answering 403 here, whatever the tuple test above says."""
@@ -128,7 +144,8 @@ class TestOriginGateExemption:
         with TestClient(app) as c:
             for method, path in unsafe:
                 if (path in _REVIEWED_CROSS_ORIGIN_OK
-                        or path in _REVIEWED_OLLAMA_CROSS_ORIGIN_OK):
+                        or path in _REVIEWED_OLLAMA_CROSS_ORIGIN_OK
+                        or path in _REVIEWED_ANTHROPIC_CROSS_ORIGIN_OK):
                     continue
                 r = c.request(method, _concrete(path), headers=_CROSS_ORIGIN)
                 detail = r.json().get("detail", "") if r.headers.get("content-type", "").startswith("application/json") else r.text

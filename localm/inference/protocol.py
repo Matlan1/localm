@@ -482,6 +482,8 @@ class FullChoice(BaseModel):
     index: int = 0
     message: Message
     finish_reason: str = "stop"
+    # localm extension: the stop sequence that ended the reply, when one did.
+    stop_sequence: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
