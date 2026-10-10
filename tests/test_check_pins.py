@@ -235,14 +235,84 @@ def test_docker_base_registry_failure_is_unknown_never_current(monkeypatch):
 
 
 class _FakeResp:
-    def __init__(self, headers):
+    def __init__(self, headers, body=b''):
         self.headers = headers
+        self._body = body
+
+    def read(self):
+        return self._body
 
     def __enter__(self):
         return self
 
     def __exit__(self, *a):
         return False
+
+
+def _no_sleep(monkeypatch):
+    waits = []
+    monkeypatch.setattr(cp.time, "sleep", lambda s: waits.append(s))
+    return waits
+
+
+def _http_error(code):
+    return cp.urllib.error.HTTPError("https://x", code, "boom", {}, None)
+
+
+def test_a_server_error_is_retried_and_then_succeeds(monkeypatch):
+    waits = _no_sleep(monkeypatch)
+    calls = []
+
+    def flaky(req, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            raise _http_error(500)
+        return _FakeResp({}, b'{"ok": true}')
+    monkeypatch.setattr(cp.urllib.request, "urlopen", flaky)
+    assert cp._get_json("https://example.org/x") == {"ok": True}
+    assert len(calls) == 3 and waits == list(cp._RETRY_DELAYS)
+
+
+def test_a_server_error_that_never_clears_is_a_fetch_error_after_the_retries(monkeypatch):
+    _no_sleep(monkeypatch)
+    calls = []
+
+    def down(req, timeout=None):
+        calls.append(1)
+        raise _http_error(503)
+    monkeypatch.setattr(cp.urllib.request, "urlopen", down)
+    with pytest.raises(cp.FetchError):
+        cp._get_json("https://example.org/x")
+    assert len(calls) == len(cp._RETRY_DELAYS) + 1
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+def test_a_client_error_is_not_retried(monkeypatch, code):
+    waits = _no_sleep(monkeypatch)
+    calls = []
+
+    def refuse(req, timeout=None):
+        calls.append(1)
+        raise _http_error(code)
+    monkeypatch.setattr(cp.urllib.request, "urlopen", refuse)
+    with pytest.raises(cp.FetchError):
+        cp._get_json("https://example.org/x")
+    assert len(calls) == 1 and waits == []
+
+
+def test_registry_digest_retries_a_transient_registry_error(monkeypatch):
+    _no_sleep(monkeypatch)
+    _router(monkeypatch, {"auth.docker.io/token": {"token": "t"}})
+    calls = []
+
+    def flaky(req, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _http_error(502)
+        return _FakeResp({"Docker-Content-Digest": "sha256:" + "b" * 64})
+    monkeypatch.setattr(cp.urllib.request, "urlopen", flaky)
+    assert cp._registry_digest("ubuntu", "24.04") == "sha256:" + "b" * 64
+    assert len(calls) == 2
 
 
 def test_registry_digest_asks_the_registry_with_a_pull_token_and_reads_the_header(monkeypatch):

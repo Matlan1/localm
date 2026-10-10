@@ -93,6 +93,7 @@ def env(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
     spies = Spies()
+    monkeypatch.setattr(pp, "sync_main_checkout", lambda: None)
     monkeypatch.setattr(pp, "ensure_pipeline_worktree", lambda: worktree)
     monkeypatch.setattr(pp, "prepare_bump_branch",
                         lambda wt, cand, pin: spies.calls.append(("branch", cand, pin)) or "br")
@@ -652,6 +653,65 @@ def test_ensure_github_token_when_gh_is_missing_is_none(monkeypatch):
         raise FileNotFoundError("gh")
     monkeypatch.setattr(pw.subprocess, "run", missing)
     assert pw.ensure_github_token() == "none"
+
+
+def test_script_fingerprint_changes_when_a_script_changes(tmp_path, monkeypatch):
+    for name in pw._SELF_SCRIPTS:
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    monkeypatch.setattr(pw, "SCRIPTS", tmp_path)
+    before = pw.script_fingerprint()
+    (tmp_path / "check_pins.py").write_text("changed", encoding="utf-8")
+    assert pw.script_fingerprint() != before
+
+
+def _stub_main(monkeypatch, *, fingerprint_after):
+    import contextlib
+
+    @contextlib.contextmanager
+    def lock():
+        yield
+    calls = []
+    monkeypatch.setattr(pp, "pipeline_lock", lock)
+    monkeypatch.setattr(pp, "sync_main_checkout", lambda: calls.append("sync"))
+    monkeypatch.setattr(pw, "ensure_github_token", lambda: "env")
+    monkeypatch.setattr(pw, "STARTUP_FINGERPRINT", "before")
+    monkeypatch.setattr(pw, "script_fingerprint", lambda: fingerprint_after)
+    monkeypatch.setattr(pw, "run_weekly", lambda advs, **k: calls.append("ran") or (0, Path("r.md")))
+    execs = []
+    monkeypatch.setattr(pw.os, "execv", lambda exe, argv: execs.append(argv))
+    monkeypatch.delenv(pw.REEXEC_ENV, raising=False)
+    return calls, execs
+
+
+def test_main_restarts_on_the_new_code_when_the_sync_changed_the_scripts(monkeypatch):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="after")
+    pw.main(["--only", "uv"])
+    assert len(execs) == 1 and execs[0][-2:] == ["--only", "uv"]
+    assert pw.os.environ.get(pw.REEXEC_ENV) == "1"
+    monkeypatch.delenv(pw.REEXEC_ENV)
+
+
+def test_main_does_not_restart_twice(monkeypatch):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="after")
+    monkeypatch.setenv(pw.REEXEC_ENV, "1")
+    pw.main(["--only", "uv"])
+    assert execs == [] and "ran" in calls
+
+
+def test_main_does_not_restart_when_the_scripts_are_unchanged(monkeypatch):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="before")
+    assert pw.main(["--only", "uv"]) == 0
+    assert execs == [] and "ran" in calls
+
+
+def test_main_sync_failure_before_the_lock_is_inconclusive(monkeypatch, capsys):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="before")
+
+    def boom():
+        raise pp.InfraError("git fetch failed")
+    monkeypatch.setattr(pp, "sync_main_checkout", boom)
+    assert pw.main(["--only", "uv"]) == 2
+    assert "ran" not in calls and execs == []
 
 
 def test_main_rejects_an_unknown_only_name(capsys):
