@@ -37,7 +37,7 @@ always present; several are conditional (marked below).
 | `embed` | Embedding vectors from the local model (only when the backend can embed) | |
 | `rerank` | Rank documents by relevance to a query with a registered reranker model | |
 | `run_coder_task` | Delegate a whole coding task to the local coder agent (only when the coder plugin is active and not `--no-coder`) | |
-| `generate_image` | Local FLUX via ComfyUI (omit with `--no-images`; needs a reachable ComfyUI) | |
+| `generate_image` | Local image generation through the image plugin's backend: the built-in stable-diffusion.cpp runtime, or ComfyUI (omit with `--no-images`) | |
 | `memory_recall` | Read the owner's durable chat memory (only when the memory plugin is active and not `--no-memory`) | read-only |
 | `memory_append` | Offer one fact for that memory (memory plugin active, and only with `--memory-write`) | |
 
@@ -374,9 +374,13 @@ approve it in the console before it runs.
 
 ### Image generation fails
 
-**Check ComfyUI is running:**
+**Check which backend runs:**
 
-The `generate_image` tool requires ComfyUI. Start it:
+`generate_image` follows the image plugin's backend setting (`auto`, `native` or `comfy`). With `auto` and no ComfyUI set up it uses the built-in stable-diffusion.cpp runtime: `localm setup-sdcpp --status` shows whether that runtime is installed, and a native model must be set up (the Images page offers to download one; see [native-image.md](native-image.md)). The tool's error message names what is missing.
+
+**When the backend is ComfyUI, check it is running:**
+
+Start it:
 
 ```bash
 python main.py
@@ -384,7 +388,7 @@ python main.py
 
 (download from https://github.com/comfyanonymous/ComfyUI). It prints its URL on startup, typically `http://127.0.0.1:8188`.
 
-The `generate_image` tool is already in the menu (it is hidden only by `--no-images`, never by ComfyUI's reachability); once ComfyUI is running, retry the call and it should succeed.
+The `generate_image` tool is already in the menu (it is hidden only by `--no-images`, never by which backend is available); once ComfyUI is running, retry the call and it should succeed.
 
 **Pass the URL if non-standard:**
 
@@ -394,7 +398,7 @@ If ComfyUI runs on a different machine or port, set the environment variable bef
 set FLUX_API_URL=http://192.168.1.100:8188
 ```
 
-(on macOS/Linux, use `export` instead of `set`). To set it persistently, run `localm config comfy_api_url http://192.168.1.100:8188`.
+(on macOS/Linux, use `export` instead of `set`). To set it persistently, run `localm config comfy_api_url http://192.168.1.100:8188`. Either one also makes `auto` choose ComfyUI.
 
 ### Permission errors in MCP tools
 

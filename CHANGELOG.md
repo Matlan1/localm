@@ -34,13 +34,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   first use. With no model set up, the Images page offers to download the recommended one
   (SD-Turbo, about 2 GB); any model stable-diffusion.cpp supports can be set instead (SD
   1.x/2.x, SDXL, SD3, FLUX, Z-Image and more, as GGUF, safetensors or ckpt, with separate
-  text encoders and VAE where the model needs them). The new Image backend setting picks
+  text encoders and VAE where the model needs them). The new Generation backend setting picks
   `auto` (ComfyUI when it is set up, otherwise native), `native` or `comfy`, and the Images
   page, `/api/imagine`, `/v1/images/generations`, `localm image`, the chat
   `/generate-image` command, the coder agent and the MCP `generate_image` tool all follow it.
   The Images page and `/api/imagine` take a size, and `localm image` takes `--size`. A GGUF
   image checkpoint without an architecture tag is now registered as an image model instead
   of a chat model.
+- **Video generates without ComfyUI.** The same native stable-diffusion.cpp backend makes
+  short clips with Wan and the other video models it supports, written as H.264 MP4. With no
+  model set up, the Video page offers to download the recommended Wan2.1 T2V 1.3B (three
+  files, about 6.3 GB). Settings > Video gets the Generation backend setting (`auto`,
+  `native`, `comfy`) and native model fields, and the Video page, `/api/video`,
+  `localm video` and the chat `/generate-video` command all follow it.
 - **The Anthropic Messages API at `/v1/messages`.** Claude Code, the Anthropic SDKs and other
   tools that speak the Messages API can point their base URL at localm and use any chat model:
   text and image blocks, a system prompt, `stop_sequences`, tool use with `tool_use` and
@@ -464,6 +470,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the replies matched MTP off.
 
 ### Fixed
+- **"Delete saved data" now also removes the voices folder.** The named reference voices
+  for text-to-speech were left behind. A legacy data folder with no record of what was in it
+  before LocaLM keeps a voices folder.
 - **ACE-Step music model files are no longer listed as chat models.** A pulled ACE-Step
   diffusion model, VAE or text encoder is registered as that kind of model and the planner
   as a non-chat model, and choosing any of them for chat says it is a music generation
@@ -1674,11 +1683,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tools or skills, and refuses to create or change anything inside a `.localcoder`
   directory at any depth; a `search_replace` sweep leaves those files alone and
   lists them. Owner sessions are unchanged.
-- **`setup.sh` and `setup-gui.sh` install a fixed uv release and check it before running it.**
+- **`setup.sh`, `setup-gui.sh`, `setup.bat` and `setup-gui.bat` install a fixed uv release and check it before running it.**
   They used to run whatever Astral's installer URL returned. They now download the installer
   of one pinned uv release and run it only when its checksum matches; a failed download, a
-  checksum mismatch, or a machine with no `sha256sum`, `shasum` or `openssl` stops the uv
-  install with the reason instead of running unchecked code.
+  checksum mismatch, or (on Linux and macOS) a machine with no `sha256sum`, `shasum` or
+  `openssl` stops the uv install with the reason instead of running unchecked code. On
+  Windows, installing uv from a PowerShell 7 window no longer fails.
 - **Hugging Face models no longer download and run code from the Hugging Face kernel
   hub unless the network policy allows it.** transformers could fetch a compiled kernel
   package from the Hub while a model was loading or replying and import it, even with

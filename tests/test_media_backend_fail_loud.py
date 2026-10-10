@@ -53,12 +53,12 @@ def test_settings_warns_on_unknown_backend(plugin):
 
 
 @pytest.mark.parametrize("plugin,default", [("image", "native"), ("music", "comfy"),
-                                            ("video", "comfy")])
+                                            ("video", "native")])
 def test_settings_no_backend_warning_for_default(plugin, default, monkeypatch):
     import localm.media.comfy_client as cc
     monkeypatch.setattr(cc, "is_comfy_confirmed", lambda api_url=None: False)
     backend = importlib.import_module(f"localm.plugins.builtin.{plugin}.backend")
-    s = backend.settings({})               # image: auto, native with no ComfyUI set up
+    s = backend.settings({})               # image, video: auto, native with no ComfyUI set up
     assert s["backend"] == default
     # The default path carries no unknown-backend note (other config warnings,
     # like share-config, are unaffected - there are none here).

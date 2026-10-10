@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """VRAM-aware model-swap policy for media generation.
 
-Before a media gen (image/music/video via ComfyUI), the chat LLM is unloaded to
+Before a media gen (image, music or video), the chat LLM is unloaded to
 hand VRAM to the media model, then reloaded. On a large card both models fit at
 once, so the swap is pure latency (and a failed/forgotten reload leaves the card
 empty). This module decides whether the swap is actually needed; the unload

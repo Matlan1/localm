@@ -145,6 +145,23 @@ latter would flag these two as violations:
                                  verified endpoint and the credential's
                                  destination are the same one.
 
+  localm/media/koboldcpp/server.py, _Server.request()
+                                 the API password of the music runtime, sent
+                                 to the KoboldCpp child process localm itself
+                                 started. The password is a fresh
+                                 secrets.token_urlsafe(32) per launch, handed
+                                 to that child only through its KCPP_PASSWORD
+                                 environment variable and otherwise held in
+                                 process memory, so it authorises nothing but
+                                 that one child and ends with it. The request
+                                 goes to http://127.0.0.1 on the port localm
+                                 picked for the launch, through an opener
+                                 with proxies disabled, and a listener on that
+                                 port shown to belong to another process stops
+                                 the launch before any request is sent. This
+                                 is not a call to localm's own gated routes,
+                                 so resolve_bearer_headers does not apply.
+
 If you land a new site here, EITHER route it through
 ``auth.resolve_bearer_headers`` (the common case) OR add it to the allowlist
 below with a review comment matching the rigor above - never widen the scan
@@ -172,6 +189,7 @@ _REVIEWED_SITES = {
     ("localm/discover.py", "_hf_auth_headers", "f'Bearer {token}'"),
     ("localm/model_manager/sources.py", "_civitai_get", "f'Bearer {api_key}'"),
     ("localm/peer_routing.py", "_auth_headers", "f'Bearer {api_key}'"),
+    ("localm/media/koboldcpp/server.py", "_Server.request", "'Bearer ' + self.password"),
 }
 
 

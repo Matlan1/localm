@@ -2377,7 +2377,12 @@ export const I18N_EN = {
 
   // ---- Video page ----
   "video.advancedHint": "resolution, seed, steps, CFG",
+  "video.backendComfy": "Backend: ComfyUI.",
+  "video.backendNative": "Backend: native stable-diffusion.cpp, model {model}, runtime {runtime}.",
+  "video.backendNativeNoModel":
+    "Backend: native stable-diffusion.cpp. No video model yet: Generate offers to download {name} ({size}).",
   "video.cfgPlaceholder": "default (5.0)",
+  "video.defaultPlaceholder": "default ({value})",
   "video.empty.hint": "Generate one above; your clips appear here.",
   "video.empty.title": "No clips yet",
   "video.enterPrompt": "Enter a prompt first",
@@ -2390,7 +2395,7 @@ export const I18N_EN = {
   "video.historyHint":
     "Tick a card to select it for bulk actions; click one for details, metadata, and per-clip actions.",
   "video.intro":
-    "Slowest generator here: minutes to hours per clip, so iterate with short durations and fewer steps. Keep the native 1280×704 resolution or quality collapses. Runs Wan 2.2 on your local ComfyUI.",
+    "Slowest generator here: minutes to hours per clip, so iterate with short durations and fewer steps. Keep the model's native resolution (the Width and Height defaults) or quality collapses.",
   "video.item.one": "clip",
   "video.item.other": "clips",
   "video.mediaWhat": "the clip",

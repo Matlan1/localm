@@ -5,7 +5,7 @@
 
 "use strict";
 
-import { MIB, $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { MIB, $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { hideStop, showStop } from "./images.js";
@@ -26,7 +26,10 @@ const videoGallery = createGallery({
   emptyTitleKey: "video.empty.title",
   emptyHintKey: "video.empty.hint",
 
-  beforeRefresh: () => refreshReloadToggle("video", "video-reload-llm"),
+  beforeRefresh: () => {
+    refreshVideoBackend();
+    refreshReloadToggle("video", "video-reload-llm");
+  },
 
   buildPreview: videoPreview,
   buildDetailPreview: playerDetail("video", "clip"),
@@ -56,6 +59,54 @@ export const refreshVideoHistory = videoGallery.refresh;
 
 bindReloadToggle("video", "video-reload-llm");
 
+/* Which backend generates (from /api/video/backend). The native backend takes
+   no workflow model picks; the note under the Generate heading says which
+   backend runs and which model it uses, and the size and CFG placeholders
+   show the defaults of the backend that will run. */
+export const videoBackend = { active: null, choice: null };
+
+const COMFY_PLACEHOLDERS = [["video-width", "video.widthPlaceholder"],
+                            ["video-height", "video.heightPlaceholder"],
+                            ["video-cfg", "video.cfgPlaceholder"]];
+
+export async function refreshVideoBackend() {
+  let data;
+  try {
+    const r = await fetch("/api/video/backend", { headers: authHeaders() });
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+  videoBackend.active = data.active || null;
+  videoBackend.choice = data.choice || null;
+  const native = videoBackend.active === "native";
+  const n = data.native || {};
+  const rec = n.recommended || {};
+  const note = $("video-backend-note");
+  if (note) {
+    let text = "";
+    if (native) {
+      text = n.model
+        ? t("video.backendNative", { model: n.model, runtime: n.runtime || t("images.backendRuntimeOnFirstUse") })
+        : t("video.backendNativeNoModel", { name: rec.name || "", size: fmtBytes(rec.size_bytes || 0) });
+    } else if (videoBackend.active === "comfy") {
+      text = t("video.backendComfy");
+    }
+    note.textContent = text;
+    note.hidden = !text;
+  }
+  for (const [id, key] of COMFY_PLACEHOLDERS) {
+    const input = $(id);
+    if (input) input.placeholder = t(key);
+  }
+  if (native) {
+    $("video-width").placeholder = t("video.defaultPlaceholder", { value: rec.width });
+    $("video-height").placeholder = t("video.defaultPlaceholder", { value: rec.height });
+    if (!n.model || n.model === rec.name) {
+      $("video-cfg").placeholder = t("video.defaultPlaceholder", { value: rec.cfg_scale });
+    }
+  }
+}
+
 /* ================================================================ */
 /*  Generation                                                       */
 /* ================================================================ */
@@ -75,7 +126,8 @@ $("video-generate").onclick = async () => {
     const v = $(id).value.trim();
     if (v !== "" && !Number.isNaN(Number(v))) body[field] = Number(v);
   }
-  if (modelOverrides.video && Object.keys(modelOverrides.video).length) {
+  const native = videoBackend.active === "native";
+  if (!native && modelOverrides.video && Object.keys(modelOverrides.video).length) {
     body.model_overrides = modelOverrides.video;
   }
 
@@ -85,7 +137,9 @@ $("video-generate").onclick = async () => {
   log.textContent = "";
   $("video-result").replaceChildren();
   try {
-    await checkModelsBeforeGenerate("video", log, { model_overrides: modelOverrides.video });
+    await checkModelsBeforeGenerate("video", log,
+      { model_overrides: native ? undefined : modelOverrides.video });
+    if (native) refreshVideoBackend();
     const r = await fetch("/api/video", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });

@@ -106,6 +106,48 @@ def test_a_runtime_without_devices_is_refused(fake_release):
     assert runtime.installed("vulkan") is None
 
 
+def _cpu_only_probe(rt):
+    return {"devices": [["CPU", "AMD Ryzen 5 5600X 6-Core Processor"]]}
+
+
+def test_a_gpu_runtime_that_finds_only_the_cpu_is_refused(fake_release):
+    with pytest.raises(runtime.ProvisionError, match="no vulkan device, only the CPU"):
+        runtime.provision("vulkan", probe=_cpu_only_probe)
+    assert runtime.installed("vulkan") is None
+    assert "no vulkan device" in runtime.load_test_failed("vulkan")
+    assert runtime.installed("cpu") is None
+
+
+def test_the_cpu_runtime_with_only_the_cpu_installs(fake_release):
+    rt = runtime.install("cpu", probe=_cpu_only_probe)
+    assert rt.devices == [["CPU", "AMD Ryzen 5 5600X 6-Core Processor"]]
+    assert runtime.installed("cpu").backend == "cpu"
+
+
+def test_auto_falls_back_to_cpu_when_vulkan_finds_only_the_cpu(fake_release, monkeypatch):
+    monkeypatch.setattr(runtime, "recommended_backend", lambda det=None: "vulkan")
+    said = []
+    rt = runtime.provision("auto", on_progress=said.append, probe=_cpu_only_probe)
+    assert rt.backend == "cpu"
+    assert any("no vulkan device" in m for m in said)
+    assert runtime.resolve("auto").backend == "cpu"
+
+
+@pytest.mark.parametrize("devices, expected", [
+    ([["CPU", "x"]], False),
+    ([["Vulkan0", "AMD Radeon RX 6900 XT"], ["CPU", "x"]], True),
+    ([], False),
+    ([5, "CPU", None, []], False),
+])
+def test_installed_requires_a_gpu_device_for_a_gpu_runtime(fake_release, devices, expected):
+    runtime.install("vulkan", probe=_ok_probe)
+    marker = runtime.runtime_dir("vulkan") / runtime.MARKER
+    meta = json.loads(marker.read_text(encoding="utf-8"))
+    meta["devices"] = devices
+    marker.write_text(json.dumps(meta), encoding="utf-8")
+    assert (runtime.installed("vulkan") is not None) is expected
+
+
 def test_auto_falls_back_to_vulkan_when_the_recommended_backend_fails(fake_release, monkeypatch):
     monkeypatch.setattr(runtime, "recommended_backend", lambda det=None: "rocm")
     said = []

@@ -47,7 +47,7 @@ def test_bat_sets_uv_install_dir_before_the_installer_when_contained():
     # carried only by the real invocation.
     installer_idx = text.index(
         'powershell -NoProfile -ExecutionPolicy Bypass -Command '
-        '"irm https://astral.sh/uv/install.ps1')
+        '"$ProgressPreference')
     assert contained_set_idx < installer_idx, (
         "UV_INSTALL_DIR must be set before invoking Astral's installer, or a "
         "Portable pick has no effect on where uv itself lands")

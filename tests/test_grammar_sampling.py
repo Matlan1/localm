@@ -942,24 +942,53 @@ def _wait_until(predicate, timeout: float = 5.0) -> bool:
 
 
 def test_concurrent_dangerous_patterns_do_not_serialize(monkeypatch):
-    """N patterns that each hang their probe must cost about ceil(N / pool)
-    timeouts of wall clock, not N of them.
+    """N patterns that each hang their probe must run POOL at a time, not one
+    at a time.
 
     Every pattern here is UNIQUE (the cache is keyed on the exact string) and
     shaped to pass the static filter, so each one reaches the daemon and waits
     out the full timeout.
 
-    The assertion is loose relative to the arithmetic (8 patterns over 4 slots
-    = 2 rounds = ~1.0s, allowed up to 2.5s) but still well under the ~4.0s that
-    serial execution costs."""
+    Concurrency is measured directly: each daemon counts itself in flight when
+    a probe is written to it and out when it is killed, and the test asserts
+    the peak. A serialised pool peaks at 1; an unbounded one exceeds the pool
+    size. The wall-clock bound is only a hang guard."""
     import time
 
     import localm.inference.gbnf as gbnf
 
+    pool_size = 4
+    in_flight = 0
+    peak = 0
+    count_lock = threading.Lock()
+
+    def _counting_daemon() -> MagicMock:
+        proc = _hanging_daemon()
+        counted = False
+
+        def _write(_data):
+            nonlocal in_flight, peak, counted
+            with count_lock:
+                if not counted:
+                    counted = True
+                    in_flight += 1
+                    peak = max(peak, in_flight)
+
+        def _kill():
+            nonlocal in_flight, counted
+            with count_lock:
+                if counted:
+                    counted = False
+                    in_flight -= 1
+
+        proc.stdin.write.side_effect = _write
+        proc.kill.side_effect = _kill
+        return proc
+
     monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_TIMEOUT", 0.5)
     monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SPAWN_TIMEOUT", 0.5)
-    monkeypatch.setattr(gbnf, "_spawn_trigger_probe_daemon", _hanging_daemon)
-    _fresh_pool(monkeypatch, 4)
+    monkeypatch.setattr(gbnf, "_spawn_trigger_probe_daemon", _counting_daemon)
+    _fresh_pool(monkeypatch, pool_size)
 
     patterns = [f"^<hang_{i}_{time.time_ns()}>" for i in range(8)]
     verdicts: list = []
@@ -981,10 +1010,12 @@ def test_concurrent_dangerous_patterns_do_not_serialize(monkeypatch):
     # Every one of them was still judged dangerous: the concurrency was not
     # bought by skipping the check.
     assert verdicts == [gbnf._PROBE_UNSAFE] * 8, verdicts
-    assert elapsed < 2.5, (
-        f"8 hanging probes over a 4-slot pool took {elapsed:.2f}s; serial "
-        "execution of 8 x 0.5s is ~4.0s, so they are still queueing behind "
-        "each other")
+    assert peak == pool_size, (
+        f"peak in-flight probes was {peak}, expected exactly the pool size "
+        f"{pool_size}: below it they are queueing behind each other, above it "
+        "the pool bound is not holding")
+    # Hang guard only: serial execution of 8 x 0.5s is ~4.0s.
+    assert elapsed < 8.0, f"8 hanging probes took {elapsed:.2f}s"
 
 
 def test_a_saturated_pool_refuses_fast_instead_of_queueing(monkeypatch):

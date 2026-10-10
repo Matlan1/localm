@@ -1,7 +1,7 @@
 [plugin]
 name = "image"
 version = "1.0.0"
-description = "Image generation (ComfyUI by default) and a gallery for the chat surface."
+description = "Image generation (built in, or ComfyUI) and a gallery for the chat surface."
 scope = "image"
 register = "plug"
 data_subdir = "gui_images"

@@ -23,6 +23,8 @@ from typing import Callable, Optional
 
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
+from localm.media.sdcpp.files import ModelFileError as _ModelError
+from localm.media.sdcpp.files import display_name, registered_file, resolve_model_file
 from localm.media.sdcpp.runner import SdCancelled, SdWorkerError
 
 COMPUTE_ALLOWANCE_BYTES = 2 * 1024 ** 3
@@ -59,10 +61,6 @@ RECOMMENDED_MODELS: tuple[RecommendedModel, ...] = (
 _COMPONENT_FIELDS = (("clip_l", "clip_l_path"), ("clip_g", "clip_g_path"),
                      ("t5xxl", "t5xxl_path"), ("llm", "llm_path"), ("vae", "vae_path"))
 
-class _ModelError(Exception):
-    pass
-
-
 def _native_block(s: dict) -> dict:
     blk = s.get("native")
     return blk if isinstance(blk, dict) else {}
@@ -78,46 +76,16 @@ def _say(on_progress) -> Callable[[str], None]:
     return say
 
 
-def display_name(value: str) -> str:
-    """*value* as shown to users: a registered model name unchanged, a file path
-    reduced to its file name."""
-    return str(value).replace("\\", "/").rsplit("/", 1)[-1]
-
-
 def _resolve_file(value: str, what: str) -> Path:
-    """The file a native model setting names: a registered model, else a local
-    path. UNC and device paths are refused without touching the filesystem.
-    Raises ``_ModelError``; messages name the file, never its directory."""
-    from localm.model_manager.registry import get_model_info
-    from localm.pathsafe import is_unc_or_device_path
-    shown = display_name(value)
-    info = get_model_info(str(value))
-    raw = str(info[0]) if info is not None else str(value)
-    if is_unc_or_device_path(raw):
-        raise _ModelError(f"The native image {what} '{shown}' is a network or device "
-                          "path, which is not allowed.")
-    path = Path(raw).expanduser()
-    try:
-        exists, is_file = path.exists(), path.is_file()
-    except OSError as e:
-        raise _ModelError(f"The native image {what} '{shown}' cannot be read "
-                          f"({type(e).__name__}).") from e
-    if not exists:
-        raise _ModelError(f"The native image {what} '{shown}' is neither a registered "
-                          "model nor a file on this machine.")
-    if not is_file:
-        raise _ModelError(f"The native image {what} '{shown}' is not a single model file.")
-    return path
+    """The file a native image model setting names (``resolve_model_file``)."""
+    return resolve_model_file(value, f"image {what}")
 
 
 def _recommended_in_registry() -> Optional[tuple[str, Path, RecommendedModel]]:
-    from localm.model_manager import load_registry
-    reg = load_registry()
     for rec in RECOMMENDED_MODELS:
-        for name, entry in reg.items():
-            path = entry.get("path") if isinstance(entry, dict) else None
-            if path and Path(path).name == rec.file and Path(path).is_file():
-                return name, Path(path), rec
+        hit = registered_file(rec.file)
+        if hit is not None:
+            return hit[0], hit[1], rec
     return None
 
 
