@@ -217,8 +217,8 @@ def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
     if not (mmproj and is_registered):
         return
     backend = getattr(engine, "_backend", None)
-    if not (getattr(backend, "supports_images", False)
-            or getattr(backend, "supports_audio", False)):
+    if not (getattr(backend, "supports_images", False) is True
+            or getattr(backend, "supports_audio", False) is True):
         return
     from rich.markup import escape
 

@@ -316,8 +316,8 @@ need the voice extra; the clip is converted to mono at the rate the projector
 expects, must be at least 0.1 seconds and at most 10 minutes long and 50 MB
 encoded, and anything else, or audio that cannot be decoded, is a `400`
 saying why. Audio sent to a model that cannot
-take it is routed or refused exactly like an image. A model's row in
-`/v1/models` carries `audio_input` (true or false) next to `vision` when its
+take it is routed or refused exactly like an image.
+`GET /v1/models/{id}` carries `audio_input` (true or false) next to `vision` when its
 files could be inspected.
 
 ### Using a model another instance has loaded

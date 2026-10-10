@@ -68,7 +68,8 @@ class TestLoad:
         assert kwargs.get("cancel_event") is None
         assert kwargs.get("n_gpu_layers") == 99
         assert meta == {"n_layers": 42, "kv_bytes_per_token": 12_345,
-                         "supports_images": True, "supports_mtp": False,
+                         "supports_images": True, "supports_audio": False,
+                         "supports_mtp": False,
                          "weight_placement": [], "moe_skip_reason": None,
                          "mmap": None, "adapters": [], "encoder_decoder": False,
                          "encoder_input_limit": 0, "diffusion": False}
