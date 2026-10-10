@@ -98,8 +98,8 @@ def test_assess_unparseable_pin_and_empty_listing_are_unknown_never_current():
 
 
 def test_sdcpp_key_orders_by_build_number():
-    assert cp._sdcpp_key("master-951-f89d9b1") == (951,)
-    assert cp._sdcpp_key("master-1000-abcdef0") > cp._sdcpp_key("master-951-f89d9b1")
+    assert cp._sdcpp_key("master-123-0a1b2c3") == (123,)
+    assert cp._sdcpp_key("master-1000-abcdef0") > cp._sdcpp_key("master-123-0a1b2c3")
     assert cp._sdcpp_key("v1.0") is None
 
 
@@ -133,7 +133,7 @@ def test_koboldcpp_current_and_stale_against_the_real_pin(monkeypatch):
 def test_sdcpp_stale_when_a_newer_build_number_has_been_out_past_tolerance(monkeypatch):
     spec = next(s for s in cp.build_registry() if s.name == "stable-diffusion.cpp")
     _router(monkeypatch, {"leejet/stable-diffusion.cpp": [
-        _rel("master-951-f89d9b1", 60), _rel("master-2000-aaaaaaa", 45)]})
+        _rel("master-123-0a1b2c3", 60), _rel("master-2000-aaaaaaa", 45)]})
     assert spec.check(NOW).status == cp.STALE
 
 
