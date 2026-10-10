@@ -41,8 +41,7 @@ verdict INCONCLUSIVE, never PASS. Exit 0 PASS, 1 FAIL, 2 INCONCLUSIVE.
 
 Everything runs inside --workdir: LOCALM_HOME, TEMP, TMP and TMPDIR point there
 before localm is imported. Models are fetched once into the persistent cache
-(--cache-dir, else $LOCALM_PIN_CACHE/koboldcpp, else ~/.cache/localm-pin-cache/
-koboldcpp) and verified against the sha256 recorded in MODELS below. Processes
+(--cache-dir, else see default_cache_dir) and verified against the sha256 recorded in MODELS below. Processes
 started are recorded by PID and killed as a tree in a finally block.
 
 GPU work should be wrapped by the caller in the shared GPU lease.
@@ -125,9 +124,9 @@ MODELS = {
             "Qwen3-Embedding-0.6B-Q8_0.gguf": (
                 784144960,
                 "972f23255e46adfe744a0eb9a0039f3c63988f65753b0968d776e8b27168c321"),
-            "acestep-v15-turbo-Q8_0.gguf": (
-                2549528000,
-                "288f708a61cfc241013a98a62f98ba331f83fe34d0d3559acdd9b0f6a2f7cd6b"),
+            "acestep-v15-turbo-Q4_K_M.gguf": (
+                1445710272,
+                "55b4d8514850f3d0f82536f37e99673aaf48df802b5ae5b153eea32a2e2daa5e"),
             "vae-BF16.gguf": (
                 337420928,
                 "0599862ac5d15cd308e1d2e368373aea6c02e25ebd1737ad4a4562a0901b0ef8"),
@@ -446,9 +445,16 @@ def sha256_of(path: Path) -> str:
 
 
 def default_cache_dir() -> Path:
+    """$LOCALM_PIN_CACHE/koboldcpp; else <ancestor of this checkout>/.claude/pin-cache/
+    koboldcpp for the nearest ancestor that has a .claude/pin-cache directory;
+    else ~/.cache/localm-pin-cache/koboldcpp."""
     env = os.environ.get("LOCALM_PIN_CACHE")
-    base = Path(env) if env else Path.home() / ".cache" / "localm-pin-cache"
-    return base / COMPONENT
+    if env:
+        return Path(env) / COMPONENT
+    for parent in REPO.parents:
+        if (parent / ".claude" / "pin-cache").is_dir():
+            return parent / ".claude" / "pin-cache" / COMPONENT
+    return Path.home() / ".cache" / "localm-pin-cache" / COMPONENT
 
 
 def file_matches(path: Path, size: int, sha256: str) -> bool:
@@ -1061,8 +1067,7 @@ def main(argv=None) -> int:
     ap.add_argument("--keep", action="store_true",
                     help="keep <workdir>/home and <workdir>/tmp afterwards")
     ap.add_argument("--cache-dir", default=None,
-                    help="persistent model cache (default: $LOCALM_PIN_CACHE/koboldcpp, "
-                         "else ~/.cache/localm-pin-cache/koboldcpp)")
+                    help="persistent model cache (default: see default_cache_dir)")
     ap.add_argument("--build", default=None, choices=("nocuda", "cuda", "metal"),
                     help="build to install (default: the one this machine would use)")
     ap.add_argument("--backend", default=None, choices=("vulkan", "cuda", "cpu", "metal"),
