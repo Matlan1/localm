@@ -1312,12 +1312,19 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # generation stall, and an unload racing the stream. exception() carries
             # the real message and traceback.
             _dbg.exception("worker failure during generation - dropping model instance")
-            try:
-                self.unload()
-            except Exception:
-                self._runner = None
-                self._llm = None
-                self._loaded = False
+            if self._runner is runner:
+                try:
+                    self.unload()
+                except Exception:
+                    self._runner = None
+                    self._llm = None
+                    self._loaded = False
+            elif runner is not None:
+                try:
+                    runner.shutdown()
+                except Exception as e:
+                    _dbg.debug("gguf worker shutdown failed (%s); its process may "
+                               "not be fully torn down", type(e).__name__)
             raise
         else:
             done = getattr(runner, "last_done", None) or {}

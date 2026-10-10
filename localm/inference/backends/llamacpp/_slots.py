@@ -59,6 +59,13 @@ class _Status:
         self.text = text
 
 
+class _Heartbeat:
+    __slots__ = ()
+
+
+_HEARTBEAT = _Heartbeat()
+
+
 class _End:
     __slots__ = ("reason", "error")
 
@@ -74,7 +81,8 @@ class SlotStream:
     caller requested) or "length" (the budget or the context ran out) once
     iteration ends. Iteration raises the exception that ended the reply when
     one did. Status texts reach *on_status* on the iterating thread; the
-    waiting status repeats every ``WAIT_HEARTBEAT_S`` while the request waits.
+    waiting status repeats every ``WAIT_HEARTBEAT_S`` while the request waits,
+    and the last status repeats while the scheduler rebuilds the cache.
 
     :meth:`close` cancels the reply; it is idempotent and safe from any
     thread. While blocked waiting for an item, the iterator polls
@@ -97,6 +105,7 @@ class SlotStream:
         self._on_status = on_status
         self._stop_requested = stop_requested
         self._finished = False
+        self._last_status: Optional[str] = None
 
     def _put(self, item: Any) -> None:
         self._items.put(item)
@@ -118,8 +127,13 @@ class SlotStream:
             if isinstance(item, int):
                 return item
             if isinstance(item, _Status):
+                self._last_status = item.text
                 if self._on_status is not None:
                     self._on_status(item.text)
+                continue
+            if isinstance(item, _Heartbeat):
+                if self._on_status is not None and self._last_status is not None:
+                    self._on_status(self._last_status)
                 continue
             self._finished = True
             self.finish_reason = item.reason
@@ -145,6 +159,7 @@ class _Slot:
         self.generated = 0
         self.reserve = 0
         self.first = False                # the next sample is the reply's first
+        self.extend = False               # needs more reserved cells before its next decode
         self.order = 0                    # admission order
         self.last_used = 0.0
 
@@ -342,8 +357,11 @@ class SlotScheduler:
             if self._ops.stopped():
                 return False
             self._reap()
+            self._extend_pending()
             with self._cond:
                 admitting = self._admitting()
+                if not admitting:
+                    self._heartbeat_queued()
             if admitting:
                 self._admit()
             plan = self._compose()
@@ -413,7 +431,12 @@ class SlotScheduler:
                     self._heartbeat_queued()
                 return
             with self._cond:
+                if not self._admitting():
+                    self._heartbeat_queued()
+                    return
                 self._queue.popleft()
+                if not isinstance(fit, BaseException):
+                    slot.stream = stream
             if isinstance(fit, BaseException):
                 self._release(stream, _End("error", fit))
                 continue
@@ -498,8 +521,13 @@ class SlotScheduler:
                         f"llama_decode failed while rebuilding the cache (code {rc})"))
                     break
                 slot.kv.extend(chunk)
+                for other in active:
+                    if other.stream is not None:
+                        other.stream._put(_HEARTBEAT)
 
     def _assign(self, slot: _Slot, stream: SlotStream) -> None:
+        """Set up *slot*, already claimed for *stream*, to prefill its prompt:
+        keep the cached prefix the prompt shares, drop the rest."""
         from localm.debuglog import logger
         keep = min(_common_prefix_len(slot.kv, stream.prompt), len(stream.prompt) - 1)
         if keep <= 0:
@@ -515,10 +543,9 @@ class SlotScheduler:
         slot.pending = None
         slot.generated = 0
         slot.first = True
+        slot.extend = False
         slot.reserve = stream.reserve
         slot.order = next(self._admissions)
-        with self._cond:
-            slot.stream = stream
         logger.info("gguf slots: slot %d prefill starting, %d prompt token(s), %d reused",
                     slot.seq, len(stream.prompt), keep)
 
@@ -595,8 +622,19 @@ class SlotScheduler:
                 self._end(slot, "length")
                 continue
             slot.pending = token
-            if len(slot.kv) + 1 > slot.reserve and not self._extend(slot):
-                self._end(slot, "length")
+            if len(slot.kv) + 1 > slot.reserve:
+                slot.extend = True
+
+    def _extend_pending(self) -> None:
+        """Reserve more cells for the replies whose next decode needs them, or
+        end them with "length". Runs before a batch is composed, never while one
+        is being sampled: a growth recreates the context the batch's rows are
+        read from."""
+        for slot in self._active():
+            if slot.extend:
+                slot.extend = False
+                if not self._extend(slot) and slot.stream is not None:
+                    self._end(slot, "length")
 
     def _extend(self, slot: _Slot) -> bool:
         """Reserve ``UNLIMITED_STEP`` more cells for a reply with no budget.
@@ -676,6 +714,7 @@ class SlotScheduler:
         slot.pending = None
         slot.todo = []
         slot.first = False
+        slot.extend = False
         slot.reserve = 0
         slot.last_used = self._clock()
         with self._cond:

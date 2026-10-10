@@ -305,30 +305,43 @@ def _serve_stream(worker, payload: dict, emit: Callable, cancel_event) -> None:
 
 
 def _serve_mux_stream(worker, sid: int, payload: dict, resp_q, cancel_event,
-                      cancels: dict) -> None:
+                      cancels: dict, shutting_down=None) -> None:
     """Child side, one thread per multiplexed stream: :func:`_serve_stream`
     with every envelope wrapped as ``("stream", sid, envelope)`` and
     *cancel_event* published as the thread's stream stop check. An exception
     :func:`_serve_stream` lets through is logged and ends the whole process
-    with exit code 1, as an uncaught fault on the inline path does."""
+    with exit code 1, as an uncaught fault on the inline path does; once
+    *shutting_down* is set (the worker is closing the model) it is sent as an
+    untagged ``error`` envelope instead."""
     from localm.inference.backends.base import stream_stop_check
+
+    def emit(envelope) -> None:
+        resp_q.put(("stream", sid, envelope))
+
     try:
         with stream_stop_check(cancel_event.is_set):
-            _serve_stream(worker, payload,
-                          lambda envelope: resp_q.put(("stream", sid, envelope)),
-                          cancel_event)
+            _serve_stream(worker, payload, emit, cancel_event)
+    except Exception as exc:
+        if shutting_down is None or not shutting_down.is_set():
+            _exit_after_stream_fault(sid)
+        emit(("error", str(exc)))
     except BaseException:
-        from localm.debuglog import attach_child_logging, logger
-        attach_child_logging()
-        logger.critical("gguf worker stream %d crashed", sid, exc_info=True)
-        for handler in logger.handlers:
-            try:
-                handler.flush()
-            except Exception:
-                pass
-        os._exit(1)
+        _exit_after_stream_fault(sid)
     finally:
         cancels.pop(sid, None)
+
+
+def _exit_after_stream_fault(sid: int) -> None:
+    """Log the exception being handled and end the process with exit code 1."""
+    from localm.debuglog import attach_child_logging, logger
+    attach_child_logging()
+    logger.critical("gguf worker stream %d crashed", sid, exc_info=True)
+    for handler in logger.handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    os._exit(1)
 
 
 def _runner_main(req_q, resp_q, ctrl_q) -> None:
@@ -361,8 +374,13 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
 
     load_cancel_event = threading.Event()
     stream_cancel_event = threading.Event()
-    # Cancel events of the multiplexed streams in flight, by stream id.
+    # Cancel events of the multiplexed streams in flight, by stream id, and the
+    # ids cancelled before their stream was started; both under mux_lock.
     mux_cancels: dict = {}
+    early_cancels: set = set()
+    mux_lock = threading.Lock()
+    mux_threads: list = []
+    shutting_down = threading.Event()
 
     def _control_loop() -> None:
         while True:
@@ -374,7 +392,10 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 load_cancel_event.set()
             elif kind == "cancel_stream":
                 if isinstance(msg, tuple) and len(msg) > 1:
-                    event = mux_cancels.get(msg[1])
+                    with mux_lock:
+                        event = mux_cancels.get(msg[1])
+                        if event is None:
+                            early_cancels.add(msg[1])
                     if event is not None:
                         event.set()
                 else:
@@ -396,8 +417,11 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             _simulate_fault(fault)   # test-only; never returns cleanly
 
         if name == "shutdown":
+            shutting_down.set()
             if worker is not None:
                 worker.close()
+            for thread in mux_threads:
+                thread.join(timeout=_SHUTDOWN_STREAM_JOIN_S)
             return
 
         if name == "load":
@@ -437,11 +461,18 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
         if name == "chat_stream_mux":
             sid = payload["sid"]
             event = threading.Event()
-            mux_cancels[sid] = event
-            threading.Thread(
+            with mux_lock:
+                mux_cancels[sid] = event
+                if sid in early_cancels:
+                    early_cancels.discard(sid)
+                    event.set()
+            thread = threading.Thread(
                 target=_serve_mux_stream,
-                args=(worker, sid, payload["kwargs"], resp_q, event, mux_cancels),
-                name=f"localm-gguf-stream-{sid}", daemon=True).start()
+                args=(worker, sid, payload["kwargs"], resp_q, event, mux_cancels,
+                      shutting_down),
+                name=f"localm-gguf-stream-{sid}", daemon=True)
+            mux_threads[:] = [t for t in mux_threads if t.is_alive()] + [thread]
+            thread.start()
             continue
 
         if name == "count_tokens":
@@ -531,6 +562,10 @@ FIRST_TOKEN_TIMEOUT_DEFAULT = 900.0
 
 # Bounded wait for a "done" envelope after requesting a mid-stream cancel.
 _CANCEL_DRAIN_TIMEOUT = 5.0
+
+# Child side: how long a shutdown waits for each multiplexed stream thread to
+# send its last envelope.
+_SHUTDOWN_STREAM_JOIN_S = 2.0
 
 # Bounded wait for a simple request/response command (count_tokens, etc.).
 # These never touch a slow native path, so it is short.
@@ -1268,6 +1303,7 @@ class ModelRunner:
         chunks_received = 0
         last_status = None
         _stream_t0 = time.monotonic()
+        self.last_done = None
         sid = next(self._sids)
         stream_q: _queue.Queue = _queue.Queue()
         with self._streams_lock:

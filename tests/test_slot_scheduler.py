@@ -524,3 +524,87 @@ def test_a_sampler_fault_ends_only_its_own_reply(made):
                   lambda: _collect(sched, PROMPTS[0], 30, results=results, key="ok")])
     assert isinstance(results["fault"], OSError)
     assert results["ok"]["out"] == _reference(PROMPTS[0], 30)[0]
+
+
+def test_growing_for_replies_with_no_budget_keeps_every_reply_correct(made):
+    # Both replies run out of their reservation on the same step; the first one's
+    # extension grows the context, and the second must still sample its own row.
+    ctx = _SimContext(capacity=640, n_ctx_max=4096, base=640, grow=128)
+    sched = made(ctx, 2)
+    statuses = []
+    with ctx.lock():
+        streams = [sched.submit(PROMPTS[0], 0, _Sampler(), on_status=statuses.append),
+                   sched.submit(PROMPTS[2], 0, _Sampler())]
+    results = {}
+    _run_threads([lambda i=i: results.__setitem__(i, _drain(streams[i])) for i in range(2)],
+                 timeout=60)
+    assert ctx.recreated, "the context never grew"
+    for i, prompt in enumerate((PROMPTS[0], PROMPTS[2])):
+        out, reason = results[i]
+        assert reason == "length"
+        assert len(out) > UNLIMITED_STEP
+        assert out == _reference(prompt, len(out))[0]
+    assert statuses.count(_slots.GENERATING_STATUS) >= 2, \
+        "a running reply heard nothing while the cache was rebuilt"
+
+
+def test_no_reply_starts_once_an_exclusive_section_got_in_during_admission(made):
+    ctx = _SimContext()
+    sched = made(ctx, 2)
+    real_capacity = ctx.capacity
+    fired = []
+
+    def capacity_then_exclusive():
+        if not fired:
+            fired.append(1)
+            with sched._cond:
+                sched._exclusive_held = True
+        return real_capacity()
+
+    ctx.capacity = capacity_then_exclusive
+    stream = sched.submit(PROMPTS[1], 5, _Sampler())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not fired:
+        time.sleep(0.01)
+    time.sleep(0.2)
+    assert fired
+    assert sched.counts() == (0, 1), "a reply was admitted inside the exclusive section"
+    assert not any(e[0] == PROMPTS[1][0] and e[1] == 0 for call in ctx.calls for e in call)
+    with sched._cond:
+        sched._exclusive_held = False
+        sched._dirty = True
+        sched._cond.notify_all()
+    out, reason = _drain(stream)
+    assert (out, reason) == _reference(PROMPTS[1], 5)
+
+
+def test_queued_requests_hear_they_wait_while_an_exclusive_section_drains(made, monkeypatch):
+    monkeypatch.setattr(_slots, "WAIT_HEARTBEAT_S", 0.05)
+    ctx = _SimContext()
+    ctx.step_delay = 0.01
+    sched = made(ctx, 1)
+    running = sched.submit(PROMPTS[0], 60, _Sampler())
+    next(running)
+    holder = threading.Thread(target=lambda: sched.exclusive().__enter__(), daemon=True)
+    statuses = []
+    queued = sched.submit(PROMPTS[1], 3, _Sampler(), on_status=statuses.append)
+    holder.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and sched._exclusive_waiting == 0:
+        time.sleep(0.01)
+    seen = threading.Event()
+
+    def watch():
+        for _ in queued:
+            pass
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and WAITING_FOR_MODEL_STATUS not in statuses:
+        time.sleep(0.02)
+    if WAITING_FOR_MODEL_STATUS in statuses:
+        seen.set()
+    queued.close()
+    _drain(running)
+    assert seen.is_set(), "a queued request heard nothing while the exclusive section waited"

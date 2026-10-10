@@ -421,3 +421,69 @@ def test_a_typed_refusal_in_a_stream_thread_is_an_error_envelope(monkeypatch):
     resp_q = queue.Queue()
     runner_mod._serve_mux_stream(_Refusing(), 3, {}, resp_q, threading.Event(), {})
     assert resp_q.get_nowait() == ("stream", 3, ("error", "bad grammar", "InvalidGrammarError"))
+
+
+class _Long(_Worker):
+    """Streams many tokens slowly; ends with the scheduler's unload error once
+    closed. load() takes a moment so a cancel sent first is handled first."""
+
+    def __init__(self, cancel_event=None, **payload):
+        super().__init__(cancel_event=cancel_event, **payload)
+        self.closed = threading.Event()
+
+    def load(self):
+        time.sleep(0.3)
+        return {"parallel_slots": 2}
+
+    def chat_stream(self, on_status=None, **payload):
+        for i in range(400):
+            if self.closed.is_set():
+                raise RuntimeError("Model was unloaded during generation - request aborted.")
+            yield f"t{i}"
+            time.sleep(0.01)
+
+    def close(self):
+        self.closed.set()
+
+
+def test_a_cancel_that_arrives_before_its_stream_still_stops_it(monkeypatch):
+    monkeypatch.setattr("localm.inference.backends.llamacpp._worker.GgufWorker", _Long)
+    req_q, resp_q, ctrl_q = queue.Queue(), queue.Queue(), queue.Queue()
+    ctrl_q.put(("cancel_stream", 9))
+    req_q.put(("load", {}))
+    req_q.put(("chat_stream_mux", {"sid": 9, "kwargs": {}}))
+    req_q.put(None)
+    runner_mod._runner_main(req_q, resp_q, ctrl_q)
+    assert resp_q.get(timeout=5)[0] == "ok"
+    got = _child_envelopes(resp_q, 1, timeout=10)
+    ctrl_q.put(None)
+    chunks = [env for _kind, _sid, env in got if env[0] == "chunk"]
+    assert got and got[-1][2][0] == "done"
+    assert len(chunks) <= 1
+
+
+def test_closing_the_model_ends_running_streams_without_a_crash(monkeypatch):
+    exits = []
+    monkeypatch.setattr(runner_mod.os, "_exit", lambda code: exits.append(code))
+    monkeypatch.setattr("localm.inference.backends.llamacpp._worker.GgufWorker", _Long)
+    req_q, resp_q, ctrl_q = queue.Queue(), queue.Queue(), queue.Queue()
+    req_q.put(("load", {}))
+    req_q.put(("chat_stream_mux", {"sid": 4, "kwargs": {}}))
+    loop = threading.Thread(target=runner_mod._runner_main, args=(req_q, resp_q, ctrl_q),
+                            daemon=True)
+    loop.start()
+    assert resp_q.get(timeout=5)[0] == "ok"
+    first = resp_q.get(timeout=5)
+    assert first[:2] == ("stream", 4)
+    req_q.put(("shutdown", None))
+    loop.join(10)
+    ctrl_q.put(None)
+    rest = []
+    while True:
+        try:
+            rest.append(resp_q.get_nowait())
+        except queue.Empty:
+            break
+    assert exits == []
+    errors = [env for _kind, _sid, env in rest if env[0] == "error"]
+    assert errors and "unloaded" in errors[0][1]

@@ -331,3 +331,32 @@ def test_a_load_payload_names_the_slots_only_when_there_are_several():
     assert "parallel_slots" not in _gpu_placement_fields(_Eng())
     _Eng.parallel_slots = 4
     assert _gpu_placement_fields(_Eng())["parallel_slots"] == 4
+
+
+def test_a_failed_stream_leaves_a_newer_runner_alone(tmp_path):
+    b = _backend(tmp_path)
+    shut = []
+
+    class _Old:
+        def chat_stream(self, **kw):
+            b._runner = new          # another request reloaded meanwhile
+            raise RuntimeError("worker died")
+            yield
+
+        def shutdown(self, grace=5.0):
+            shut.append("old")
+
+    class _New:
+        def shutdown(self, grace=5.0):
+            shut.append("new")
+
+        def is_alive(self):
+            return True
+
+    new = _New()
+    b._runner = _Old()
+    b._loaded = True
+    with pytest.raises(RuntimeError):
+        list(b.chat_stream([{"role": "user", "content": "hi"}]))
+    assert b._runner is new and b._loaded
+    assert shut == ["old"]
