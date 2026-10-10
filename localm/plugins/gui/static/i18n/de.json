@@ -33,6 +33,7 @@
   "chat.audio.notWav": "{name} ist keine gültige WAV-Datei.",
   "chat.audio.readError": "{name} konnte nicht gelesen werden.",
   "chat.audio.rejected": "Der Audioclip wurde nicht akzeptiert ({detail}) und aus dem Chat entfernt. Sie können weiterchatten (nur Text).",
+  "chat.audio.unplayable": "Dieser Audioclip kann nicht abgespielt werden.",
   "chat.audio.tooLarge": "{name} ist {size} MB groß; ein Audioclip darf höchstens {max} MB haben.",
   "chat.audio.tooLong": "{name} ist etwa {minutes} Min. lang; ein Audioclip darf höchstens {max} Min. lang sein.",
   "chat.camera": "Ein Foto mit der Kamera aufnehmen",

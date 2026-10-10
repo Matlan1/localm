@@ -1002,10 +1002,12 @@ export function audioPart(clip) {
  *  are dropped, every other part is passed through. */
 export function wireParts(content) {
   if (!Array.isArray(content)) return content;
-  return content.map((p) => p.type === "input_audio"
-    ? { type: "input_audio",
-        input_audio: { data: p.input_audio.data, format: p.input_audio.format } }
-    : p);
+  return content
+    .filter((p) => p.type !== "input_audio" || p.input_audio?.data)
+    .map((p) => p.type === "input_audio"
+      ? { type: "input_audio",
+          input_audio: { data: p.input_audio.data, format: p.input_audio.format } }
+      : p);
 }
 
 /** Drop every user-attached audio clip from the conversation, leaving a text
@@ -1018,9 +1020,17 @@ export function stripUserAudio(conv) {
     const clips = m.content.filter((p) => p.type === "input_audio");
     if (!clips.length) continue;
     dropped += clips.length;
-    const text = m.content.filter((p) => p.type === "text")
-      .map((p) => p.text).join("");
-    m.content = (text ? text + "\n" : "") + "[Audio removed: the server did not accept it.]";
+    const note = "[Audio removed: the server did not accept it.]";
+    const rest = m.content.filter((p) => p.type !== "input_audio");
+    if (rest.every((p) => p.type === "text")) {
+      const text = rest.map((p) => p.text).join("");
+      m.content = (text ? text + "\n" : "") + note;
+      continue;
+    }
+    const first = rest.find((p) => p.type === "text");
+    if (first) first.text = (first.text ? first.text + "\n" : "") + note;
+    else rest.unshift({ type: "text", text: note });
+    m.content = rest;
   }
   return dropped;
 }
@@ -1518,8 +1528,13 @@ export function addMessageRow(container, role, text, opts = {}) {
     const player = document.createElement("audio");
     player.controls = true;
     player.style.width = "100%";
-    player.src = audioBlobUrl(clip);
-    wrap.appendChild(player);
+    try {
+      player.src = audioBlobUrl(clip);
+      wrap.appendChild(player);
+    } catch (err) {
+      console.error("localm: could not prepare an audio clip for playback:", err);
+      wrap.appendChild(el("div", "msg-clip-name", t("chat.audio.unplayable")));
+    }
     body.appendChild(wrap);
   }
   for (const url of opts.audio || []) {
@@ -1907,6 +1922,7 @@ export function renderChat() {
   const box = $("chat-messages");
   box.innerHTML = "";
   const conv = currentConv();
+  pruneClipUrls(conv);
   syncPinModelToggle(conv);
   // R40: a not-yet-loaded conversation (server index row) hydrates its body on
   // first render, then re-renders. Try once per row (a failed/offline load sets
@@ -2277,29 +2293,33 @@ export function audioMime(format) {
 }
 
 const _clipUrls = new Map();
-const CLIP_URL_CAP = 8;
 
-/** A blob: URL playing *clip*. The page CSP allows media only from 'self' and
- *  blob:, so a data: URL is refused by the browser. The newest CLIP_URL_CAP
- *  URLs are kept; older ones are revoked and re-created on demand. */
+/** A blob: URL playing *clip*, created once per distinct clip and reused by
+ *  every render. The page CSP allows media only from 'self' and blob:, so a
+ *  data: URL is refused by the browser. */
 export function audioBlobUrl(clip) {
   let url = _clipUrls.get(clip.data);
-  if (url) {
-    _clipUrls.delete(clip.data);
-    _clipUrls.set(clip.data, url);
-    return url;
-  }
+  if (url) return url;
   const bin = atob(clip.data);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   url = URL.createObjectURL(new Blob([bytes], { type: audioMime(clip.format) }));
   _clipUrls.set(clip.data, url);
-  while (_clipUrls.size > CLIP_URL_CAP) {
-    const oldest = _clipUrls.keys().next().value;
-    URL.revokeObjectURL(_clipUrls.get(oldest));
-    _clipUrls.delete(oldest);
-  }
   return url;
+}
+
+/** Revoke the blob: URL of every clip that is not in *conv*, so the URLs alive
+ *  are exactly those of the conversation on screen. */
+export function pruneClipUrls(conv) {
+  const keep = new Set();
+  for (const m of (conv && conv.messages) || []) {
+    for (const c of msgAudioClips(m)) keep.add(c.data);
+  }
+  for (const [data, url] of _clipUrls) {
+    if (keep.has(data)) continue;
+    URL.revokeObjectURL(url);
+    _clipUrls.delete(data);
+  }
 }
 
 /** *seconds* as m:ss. */
@@ -2402,9 +2422,9 @@ export async function attachAudio(file) {
   chat.clips.push(clip);
   renderAttachChips();
   const seconds = (await wavSeconds(file)) || (await probeAudioSeconds(file));
+  if (chat.clips.indexOf(clip) === -1) return;
   if (seconds > AUDIO_MAX_SECONDS) {
-    const at = chat.clips.indexOf(clip);
-    if (at !== -1) chat.clips.splice(at, 1);
+    chat.clips.splice(chat.clips.indexOf(clip), 1);
     renderAttachChips();
     throw new Error(t("chat.audio.tooLong", {
       name: file.name, minutes: String(Math.ceil(seconds / 60)),

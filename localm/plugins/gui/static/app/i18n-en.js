@@ -131,6 +131,7 @@ export const I18N_EN = {
   "chat.audio.notWav": "{name} is not a valid WAV file.",
   "chat.audio.readError": "Could not read {name}.",
   "chat.audio.rejected": "The audio clip was not accepted ({detail}) and was removed from the chat. You can keep chatting (text only).",
+  "chat.audio.unplayable": "This audio clip cannot be played.",
   "chat.audio.tooLarge": "{name} is {size} MB; an audio clip can be at most {max} MB.",
   "chat.audio.tooLong": "{name} is about {minutes} min long; an audio clip can be at most {max} min.",
   "chat.camera": "Take a photo with the camera",

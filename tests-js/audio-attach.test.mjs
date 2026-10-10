@@ -21,7 +21,7 @@ function setup({ rejectWith = null } = {}) {
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
     fetchCalls.push({ url: u, opts, body });
     if (u === "/v1/chat/completions" && ctl.rejectWith) {
-      return { ok: false, status: 400, headers: { get: () => null },
+      return { ok: false, status: ctl.rejectStatus || 400, headers: { get: () => null },
         json: async () => ({ detail: ctl.rejectWith }), text: async () => "" };
     }
     if (u === "/v1/chat/completions") {
@@ -40,7 +40,8 @@ function setup({ rejectWith = null } = {}) {
   window.probeAudioSeconds = async () => 4;
   window.__blobs = [];
   window.URL.createObjectURL = (blob) => { window.__blobs.push(blob); return `blob:test/${window.__blobs.length}`; };
-  window.URL.revokeObjectURL = () => {};
+  window.__revoked = [];
+  window.URL.revokeObjectURL = (url) => { window.__revoked.push(url); };
   window.readSSE = async (_r, onData) => {
     onData(JSON.stringify({ choices: [{ delta: { content: "a transcript" } }] }));
     onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
@@ -318,6 +319,112 @@ test("a server refusal is shown as the server wrote it and the clip is not sent 
   assert.equal(resent, false, "the refused clip is gone from the next request");
   assert.ok(conv.messages.some((m) => m.role === "assistant" && m.content === "a transcript"),
     "the chat answers again");
+});
+
+const audioMsg = (text, extra, tag) => ({ role: "user", content: [
+  { type: "text", text },
+  ...extra,
+  { type: "input_audio", input_audio: { data: tag + WAV_B64, format: "wav" }, name: `${tag}.wav`, seconds: 1 },
+] });
+
+test("a refused message with an image and a clip keeps the image and the text", async () => {
+  const detail = "The loaded model cannot hear audio.";
+  const { window } = setup({ rejectWith: detail });
+  const conv = { id: "c1", title: "t", messages: [
+    audioMsg("what is this?", [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }], "AAAA"),
+  ] };
+  activate(window, conv);
+  await window.runCompletion(conv);
+
+  const parts = conv.messages[0].content;
+  assert.ok(Array.isArray(parts), "the message keeps its parts");
+  assert.equal(parts.some((p) => p.type === "input_audio"), false);
+  assert.equal(parts.filter((p) => p.type === "image_url").length, 1, "the image survives");
+  const text = parts.filter((p) => p.type === "text").map((p) => p.text).join("");
+  assert.match(text, /what is this\?/);
+  assert.match(text, /\[Audio removed/);
+  assert.ok(toastText(window).includes(detail));
+});
+
+test("a 413 from a too-large request drops the clips like a 400", async () => {
+  const { window, ctl } = setup({ rejectWith: "Request body too large" });
+  ctl.rejectStatus = 413;
+  const conv = { id: "c1", title: "t", messages: [audioMsg("hi", [], "BBBB")] };
+  activate(window, conv);
+  await window.runCompletion(conv);
+  assert.equal(typeof conv.messages[0].content, "string");
+  assert.match(conv.messages[0].content, /\[Audio removed/);
+  assert.ok(toastText(window).includes("Request body too large"));
+});
+
+test("ten clips in one transcript each keep a live player and are not rebuilt on re-render", async () => {
+  const { window } = setup();
+  const conv = { id: "c1", title: "t", messages: [] };
+  for (let i = 0; i < 10; i++) {
+    conv.messages.push(audioMsg(`clip ${i}`, [], `T${i}`.padEnd(4, "A")));
+  }
+  activate(window, conv);
+  window.renderChat();
+  const srcs = [...window.document.querySelectorAll("#chat-messages audio")].map((a) => a.getAttribute("src"));
+  assert.equal(srcs.length, 10);
+  assert.equal(new Set(srcs).size, 10, "one URL per clip");
+  assert.deepEqual(window.__revoked, [], "no URL is revoked while its player is on screen");
+  assert.equal(window.__blobs.length, 10);
+
+  window.renderChat();
+  assert.equal(window.__blobs.length, 10, "a re-render reuses the blobs");
+  assert.deepEqual(window.__revoked, []);
+
+  const other = { id: "c2", title: "o", messages: [] };
+  window.__testConv = other;
+  runScript(window, "chat.conversations.push(window.__testConv); chat.activeId = 'c2';");
+  window.renderChat();
+  assert.equal(window.__revoked.length, 10, "switching away revokes every clip URL of the old conversation");
+});
+
+test("a stored clip that cannot be decoded does not break the transcript", async () => {
+  const { window } = setup();
+  const conv = { id: "c1", title: "t", messages: [
+    { role: "user", content: [
+      { type: "text", text: "broken" },
+      { type: "input_audio", input_audio: { data: "!!!not base64!!!", format: "wav" }, name: "x.wav" },
+    ] },
+    { role: "user", content: "after" },
+  ] };
+  activate(window, conv);
+  const errors = [];
+  const orig = window.console.error;
+  window.console.error = (...a) => errors.push(a.join(" "));
+  try { window.renderChat(); } finally { window.console.error = orig; }
+  const rows = [...window.document.querySelectorAll("#chat-messages .msg-row")];
+  assert.equal(rows.length, 2, "the later message still renders");
+  assert.match(rows[0].textContent, /cannot be played/);
+  assert.equal(errors.length, 1);
+});
+
+test("wireParts drops an audio part that has no data instead of throwing", () => {
+  const { window } = setup();
+  const out = window.wireParts([
+    { type: "text", text: "a" }, { type: "input_audio" }, { type: "input_audio", input_audio: {} },
+    { type: "input_audio", input_audio: { data: "QQ==", format: "wav" }, name: "n", seconds: 1 },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(out)), [
+    { type: "text", text: "a" },
+    { type: "input_audio", input_audio: { data: "QQ==", format: "wav" } },
+  ]);
+});
+
+test("a length probe that finishes after the clip was sent shows no refusal", async () => {
+  const { window } = setup();
+  let finish;
+  window.probeAudioSeconds = () => new Promise((resolve) => { finish = resolve; });
+  window.addAttachedFiles([wavFile(window)]);
+  await waitFor(() => clipCount(window) === 1, "the clip");
+  runScript(window, "chat.clips = [];");
+  window.document.getElementById("toast").textContent = "";
+  finish(9999);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(toastText(window), "", "no toast for a clip that is already gone");
 });
 
 test("compaction archive counts audio clips as attachments not archived", async () => {

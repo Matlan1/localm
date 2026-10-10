@@ -2655,7 +2655,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       readOk = true;
     } else if (e.name === "AbortError") {
       aborted = true;
-    } else if (sentAudio && e.status === 400 && !full.trim()) {
+    } else if (sentAudio && (e.status === 400 || e.status === 413) && !full.trim()) {
       audioRejected = true;
       const n = stripUserAudio(conv);
       saveConversations(conv);
