@@ -34,6 +34,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a GGUF vision model is now applied instead of dropped, and a GGUF model whose grammar
   sampler faulted earlier refuses grammar requests until localm restarts instead of
   answering without the constraint.
+- **`localm setup-sdcpp` installs a native image generation runtime.** It downloads the
+  stable-diffusion.cpp build that fits this machine (CPU, Vulkan, CUDA, ROCm or Metal) from
+  a pinned upstream release through the network policy, verifies it against a pinned
+  checksum, and checks that it loads and finds a compute device, falling back to Vulkan and
+  then CPU when the preferred build does not load. `--backend` picks a build and `--status`
+  shows what is installed.
 - **Knowledge results can be reranked.** With a reranker model installed (for example
   `localm pull ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF:qwen3-reranker-0.6b-q8_0.gguf`),
   the best 20 matches for a Knowledge question are re-scored by it before they reach the
@@ -1608,6 +1614,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
+- **`setup.sh` and `setup-gui.sh` install a fixed uv release and check it before running it.**
+  They used to run whatever Astral's installer URL returned. They now download the installer
+  of one pinned uv release and run it only when its checksum matches; a failed download, a
+  checksum mismatch, or a machine with no `sha256sum`, `shasum` or `openssl` stops the uv
+  install with the reason instead of running unchecked code.
 - **Hugging Face models no longer download and run code from the Hugging Face kernel
   hub unless the network policy allows it.** transformers could fetch a compiled kernel
   package from the Hub while a model was loading or replying and import it, even with

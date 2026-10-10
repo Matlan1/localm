@@ -437,7 +437,7 @@ def _download_progress_class(label: str, on_progress, every: float = 2.0):
     ``on_progress`` a line naming *label* and the bytes received, at most
     every *every* seconds. A raising ``on_progress`` is logged and ignored."""
     import time as _time
-    from huggingface_hub.utils import tqdm as _hf_tqdm
+    from huggingface_hub.utils.tqdm import tqdm as _hf_tqdm
 
     class _Reporter(_hf_tqdm):
         def __init__(self, *args, **kwargs):

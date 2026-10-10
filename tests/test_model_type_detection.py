@@ -498,6 +498,34 @@ def test_pull_model_auto_upgrades_gguf_to_embedding(tmp_path, isolated_home, mon
     assert mm.load_registry()["auto-embed"]["model_type"] == "embedding"
 
 
+@pytest.mark.parametrize("arch,mtype", [
+    ("acestep-dit", "diffusion-unet"), ("acestep-vae", "vae"),
+    ("acestep-text-enc", "text-encoder"), ("acestep-lm", "unknown"),
+])
+def test_pull_model_types_acestep_components_from_their_header(
+        tmp_path, isolated_home, monkeypatch, arch, mtype):
+    import huggingface_hub
+    import requests
+
+    component_bytes = _build_gguf_bytes(arch)
+
+    def _fake_download(repo_id, filename, local_dir, **kw):
+        p = Path(local_dir) / filename
+        p.write_bytes(component_bytes)
+        return str(p)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
+    monkeypatch.setattr(
+        requests, "head",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+
+    assert mm.pull_model("owner/repo:music-part.gguf") is True
+    entry = mm.load_registry()["music-part"]
+    assert entry["model_type"] == mtype
+    assert entry["architecture"] == arch
+
+
 def test_pull_model_explicit_llm_type_not_overridden(tmp_path, isolated_home, monkeypatch):
     # Companion negative case: the SAME embedding-signal bytes pulled with an
     # explicit model_type="llm" must stay 'llm' - the auto-upgrade in
