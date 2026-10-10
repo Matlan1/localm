@@ -2,7 +2,7 @@
 """The llama.cpp builds ``localm setup-llama`` installs, and the asset tables used to
 find and verify them.
 
-scripts/bump_llama_pin.py, scripts/check_llama_pin.py,
+scripts/bump_llama_pin.py, scripts/bump_rocm_pin.py, scripts/check_llama_pin.py,
 scripts/check_llama_rocm_pin.py and scripts/check_mtp_arch_allowlist.py read and
 rewrite these constants as text, so each keeps its one-assignment shape.
 """
@@ -25,22 +25,20 @@ DEFAULT_URL_SHA256 = (
 )
 
 
-# The lemonade-sdk release tag DEFAULT_URL points at. b1342 is built from
-# llama.cpp 71ad0590f480, which carries the V3 llama_model_params (lazy_mode)
-# and llama_context_params (moe_cache_size) layouts - see
-# inference/backends/llamacpp/_structs.py and _abi.py, which bind every layout
-# from lemonade b1288 on, so an already-provisioned runtime keeps working.
-# (b1xxx here are lemonade-sdk tags, NOT ggml-org ones - the two
-# schemes collide; see inference/backends/llamacpp/_structs.py.)
+# The lemonade-sdk release tag DEFAULT_URL points at. The struct layouts it
+# carries are bound by inference/backends/llamacpp/_structs.py and _abi.py,
+# which bind every layout from lemonade b1288 on, so an already-provisioned
+# runtime keeps working. (b1xxx here are lemonade-sdk tags, NOT ggml-org ones -
+# the two schemes collide; see inference/backends/llamacpp/_structs.py.)
 _ROCM_TAG = "b1342"
 
 
-# The upstream llama.cpp release built from the SAME commit as _ROCM_TAG
-# (71ad0590f480 is upstream b11513). Its Windows CPU archive supplies the
-# SIMD (AVX2/AVX-512) ggml-cpu variants the amd-rocm build lacks: that build
-# compiles its CPU backend with every x86 instruction-set option off. Must name
-# the upstream release of _ROCM_TAG's commit: the variant binds to that build's
-# ggml-base. See localm/setup_llama/rocm_cpu.py.
+# The upstream llama.cpp release built from the SAME commit as _ROCM_TAG. Its
+# Windows CPU archive supplies the SIMD (AVX2/AVX-512) ggml-cpu variants the
+# amd-rocm build lacks: that build compiles its CPU backend with every x86
+# instruction-set option off. The variant binds to that build's ggml-base, so
+# this must name the upstream release of _ROCM_TAG's commit. See
+# localm/setup_llama/rocm_cpu.py.
 _ROCM_CPU_TAG = "b11513"
 _ROCM_CPU_ASSET = f"llama-{_ROCM_CPU_TAG}-bin-win-cpu-x64.zip"
 
