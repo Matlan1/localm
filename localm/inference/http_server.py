@@ -2143,6 +2143,57 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
+async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
+    """If *name* is a registered model whose path matches the resident reranker,
+    release it and report the freed VRAM - the reranker counterpart to
+    ``_unload_embedder_if_matches``. Matched by resolved PATH. Returns None when
+    *name* is not the resident reranker; ``{"status": "in_use"}`` while a rerank
+    request is in flight.
+
+    Every reranker reader runs in an executor: each takes the reranker lock,
+    which a load holds for its whole duration. ``active_requests()`` is checked
+    before the VRAM probe, and ``reset_reranker(force=False)`` re-checks it
+    atomically with the release."""
+    from localm.inference import reranker as _reranker_mod
+    info = await loop.run_in_executor(None, _reranker_mod.reranker_info)
+    if info is None:
+        return None
+    from pathlib import Path
+    from localm.config import load_registry
+    from localm.model_manager import _entry_path
+    entry_path = _entry_path(load_registry().get(name))
+    if entry_path is None:
+        return None
+    try:
+        if Path(entry_path).resolve() != Path(info["path"]).resolve():
+            return None
+    except OSError:
+        return None
+
+    if await loop.run_in_executor(None, _reranker_mod.active_requests) > 0:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
+
+    from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
+                             wait_for_vram_release)
+
+    _free = _live_free_vram_bytes
+
+    before, before_fresh, before_scope = _vram_free_reading()
+    cleared = await loop.run_in_executor(
+        None, functools.partial(_reranker_mod.reset_reranker, force=False))
+    if not cleared:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
+    if before is not None:
+        released, after = await loop.run_in_executor(
+            None, lambda: wait_for_vram_release(_free, before_bytes=before))
+    else:
+        released, after = 0, before
+    result = {"status": "unloaded", "model": name, "was_active": False}
+    _add_vram_fields(result, before=before, released=released, after=after,
+                     before_fresh=before_fresh, before_scope=before_scope)
+    return result
+
+
 async def unload_one_model(name: str, *, force: bool = False) -> dict:
     """Release ONE currently-loaded model from GPU/CPU memory, leaving any
     other loaded models untouched - the targeted counterpart to
@@ -2176,6 +2227,9 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
         embedder_result = await _unload_embedder_if_matches(name, loop)
         if embedder_result is not None:
             return embedder_result
+        reranker_result = await _unload_reranker_if_matches(name, loop)
+        if reranker_result is not None:
+            return reranker_result
         return {"status": "already_unloaded", "model": name}
     # Honor the in-flight-request pin: an engine a request is
     # generating on must not be unloaded out from under it (it would reload it
