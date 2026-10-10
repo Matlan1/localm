@@ -2163,7 +2163,8 @@ class LlamaCpp:
             yield from self._generate_slots(
                 prompt_tokens, max_new_tokens, temperature, top_k, top_p,
                 repeat_penalty, grammar=grammar, grammar_lazy=grammar_lazy,
-                grammar_triggers=grammar_triggers, seed=seed, on_status=on_status)
+                grammar_triggers=grammar_triggers, seed=seed, on_status=on_status,
+                sampling=sampling)
             return
         with self._inference_lock:
             if not self._model_ptr:
@@ -3265,7 +3266,7 @@ class LlamaCpp:
             target = min(target, self._n_ctx_max)
         return target
 
-    def _resolve_parallel(self, requested: int, n_ctx: int) -> Tuple[int, str]:
+    def _resolve_parallel(self, requested: int, n_ctx: int) -> tuple[int, str]:
         """The sequences this model's context holds for *requested* slots, and
         why it holds fewer ("" when it does not).
 
@@ -3341,7 +3342,7 @@ class LlamaCpp:
 
     def _generate_slots(
         self,
-        prompt_tokens: List[int],
+        prompt_tokens: list[int],
         max_new_tokens: int,
         temperature: float,
         top_k: int,
@@ -3349,9 +3350,10 @@ class LlamaCpp:
         repeat_penalty: float,
         grammar: Optional[str] = None,
         grammar_lazy: bool = False,
-        grammar_triggers: Optional[List[str]] = None,
+        grammar_triggers: Optional[list[str]] = None,
         seed: Optional[int] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        sampling: Optional[dict] = None,
     ) -> Iterator[int]:
         """``_generate`` for a model with parallel slots: the reply decodes on
         the slot scheduler beside other replies. Same statuses, budget clamp,
@@ -3376,6 +3378,7 @@ class LlamaCpp:
             grammar=grammar,
             grammar_lazy=grammar_lazy,
             grammar_triggers=grammar_triggers,
+            **(sampling or {}),
         )
         from localm.debuglog import logger
         from localm.inference.backends.base import stream_stop_requested
