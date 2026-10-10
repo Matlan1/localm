@@ -311,19 +311,19 @@ def test_a_streamed_response_can_be_continued(home):
     assert rendered.index("Who is Ada?") < rendered.index("Ada is 36.") < rendered.index("And then?")
 
 
-def test_a_failed_response_is_not_stored(home):
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_failed_response_is_not_stored(home, stream):
     served = Served()
 
     def broken(messages, **kwargs):
+        yield "partial"
         raise RuntimeError("boom")
-        yield ""
     served.engine.chat_stream.side_effect = broken
-    evs = events(served.post(stream=True))
-    assert evs[-1]["type"] == "response.failed"
-    rid = evs[-1]["response"]["id"]
-    served.engine.chat_stream.side_effect = None
-    served.engine.chat_stream.return_value = iter(["x"])
-    assert served.post(previous_response_id=rid).status_code == 404
+    r = served.post(stream=stream)
+    final = events(r)[-1]["response"] if stream else r.json()
+    assert final["status"] == "failed", final
+    assert "boom" in final["error"]["message"]
+    assert served.post(previous_response_id=final["id"]).status_code == 404
 
 
 def test_a_cross_origin_page_reaches_the_route(home):
@@ -358,10 +358,12 @@ class TestStore:
         store.put(None, {"id": "resp_2", "output": []}, big)
         assert store.get(None, "resp_0") is None and store.get(None, "resp_2") is not None
 
-    def test_a_response_larger_than_the_bound_is_not_kept(self):
-        store = R.ResponseStore(max_bytes=100)
-        store.put(None, {"id": "resp_big", "output": []}, [{"role": "user", "content": "x" * 200}])
+    def test_a_response_larger_than_the_bound_is_not_kept_and_evicts_nothing(self):
+        store = R.ResponseStore(max_bytes=200)
+        store.put(None, {"id": "resp_small", "output": []}, [])
+        store.put(None, {"id": "resp_big", "output": []}, [{"role": "user", "content": "x" * 300}])
         assert store.get(None, "resp_big") is None
+        assert store.get(None, "resp_small") is not None
 
     def test_an_expired_response_is_gone(self, monkeypatch):
         now = [1000.0]
