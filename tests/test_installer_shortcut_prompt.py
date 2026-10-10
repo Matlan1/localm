@@ -787,8 +787,11 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         A minimal PATH (just enough to resolve `where`/`powershell`) rules
         out a real, pre-existing system `uv` masking the check."""
         block = _uv_missing_full_sequence(bat)
-        install_target = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
-        assert install_target in block, "the Astral install invocation text moved; update this test"
+        install_target = next(
+            (ln for ln in block.splitlines()
+             if ln.startswith('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference')),
+            None)
+        assert install_target, "the Astral install invocation text moved; update this test"
         stub_install = (
             'powershell -NoProfile -Command '
             '"New-Item -ItemType Directory -Force $env:UV_INSTALL_DIR | Out-Null; '

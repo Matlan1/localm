@@ -154,7 +154,10 @@ localm process's own permissions rather than a sandbox:
 
 - **`coder:full`** runs shell commands and reads/writes files (the `--scope` glob
   narrows *which* files; `run_shell` is intentionally unscoped). The plain **`coder`**
-  scope is restricted - read plus confined file edits within the scope, no shell.
+  scope is restricted - read plus confined file edits within the scope, no shell. A
+  restricted session starts none of the project's MCP servers, plugin tools or
+  skills, and cannot create or change anything inside a `.localcoder` directory,
+  which configures later coder sessions.
 - **`browser`** lets the coding agent drive a real, automated browser session -
   navigate, read, click, fill forms, screenshot, and read the page's console and
   network activity - separate from `coder`/`coder:full`'s shell and file access,

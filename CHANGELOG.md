@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Transcription without Whisper.** `POST /v1/audio/transcriptions` now answers with an
+  installed GGUF model that hears audio (for example Qwen3-ASR) when faster-whisper is not
+  installed, or when `model` names one. Whisper stays the default when it is installed. This
+  path returns `json` and `text`; `srt`, `vtt` and `verbose_json` need timestamps it does not
+  have and are refused with a message saying so.
+- **Attach an audio clip in the chat composer.** The attach button and drag-and-drop now take audio files (WAV, and MP3, FLAC, OGG, M4A or AAC with the voice extra) next to images and documents. The clip appears as its own chip with its length, plays back in the conversation, and is sent as an `input_audio` part, so a model that can hear audio, such as Qwen3-ASR, transcribes it. A file over 50 MB or a WAV over 10 minutes is refused before it is sent, and when the server refuses a clip (for example a model that cannot hear audio) its message is shown and the clip is dropped so the chat stays usable.
 - **Token log probabilities.** For GGUF models, `/v1/chat/completions` returns `logprobs` and
   up to 20 `top_logprobs` for each token of the reply's content, streamed or not, and
   `/v1/completions` returns the legacy `logprobs` object. Reasoning, tool-call text and text
@@ -473,8 +479,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   off for the reply (it does not run on image turns), the chat API reports it
   as `usage.mtp`, and `localm bench-mtp` prints the acceptance rate and whether
   the replies matched MTP off.
+- **The bundled AMD (ROCm) llama.cpp runtime moves to build b1342**, from b1307:
+  two months of upstream llama.cpp and a newer ROCm runtime. Run
+  `localm setup-llama --force` to pick it up; an existing installation keeps
+  working untouched until you do.
 
 ### Fixed
+- **A bad audio clip or image no longer unloads a GGUF model.** An unreadable clip or picture is refused with a
+  `400` and the model stays loaded. Before, the model was dropped and the request got a server error.
 - **"Delete saved data" now also removes the voices folder.** The named reference voices
   for text-to-speech were left behind. A legacy data folder with no record of what was in it
   before LocaLM keeps a voices folder.
@@ -1678,11 +1690,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
-- **`setup.sh` and `setup-gui.sh` install a fixed uv release and check it before running it.**
+- **A plain `coder` API key can no longer run commands through the project's coder
+  configuration.** A restricted coder session (a shared, non-owner key) started any
+  MCP server listed in the project's `.localcoder/config.toml` when it opened, and
+  its file tools could create or change that file. So a key meant for reading and
+  editing could write a server command and run it by opening a second session, and
+  the same file also reached the owner's next session (MCP servers, auto-approve,
+  privacy mode). A restricted session now starts no MCP server, loads no plugin
+  tools or skills, and refuses to create or change anything inside a `.localcoder`
+  directory at any depth; a `search_replace` sweep leaves those files alone and
+  lists them. Owner sessions are unchanged.
+- **`setup.sh`, `setup-gui.sh`, `setup.bat` and `setup-gui.bat` install a fixed uv release and check it before running it.**
   They used to run whatever Astral's installer URL returned. They now download the installer
   of one pinned uv release and run it only when its checksum matches; a failed download, a
-  checksum mismatch, or a machine with no `sha256sum`, `shasum` or `openssl` stops the uv
-  install with the reason instead of running unchecked code.
+  checksum mismatch, or (on Linux and macOS) a machine with no `sha256sum`, `shasum` or
+  `openssl` stops the uv install with the reason instead of running unchecked code. On
+  Windows, installing uv from a PowerShell 7 window no longer fails.
 - **Hugging Face models no longer download and run code from the Hugging Face kernel
   hub unless the network policy allows it.** transformers could fetch a compiled kernel
   package from the Hub while a model was loading or replying and import it, even with

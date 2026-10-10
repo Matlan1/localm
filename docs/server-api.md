@@ -566,8 +566,11 @@ model cannot be loaded or its worker fails.
 
 ### `POST /v1/audio/transcriptions`
 
-Scope: `voice`. Served by the voice plugin (`pip install "localm[voice]"`), so the
-route exists while that plugin is enabled. The official `openai` SDK works against it:
+Scope: `voice`. Served by the voice plugin, so the route exists while that plugin is
+enabled. It answers with Whisper (`pip install "localm[voice]"`), or with an installed
+GGUF model that hears audio (for example `localm pull
+ggml-org/Qwen3-ASR-0.6B-GGUF:Qwen3-ASR-0.6B-Q8_0.gguf`), described below. The official
+`openai` SDK works against it:
 
 ```python
 from openai import OpenAI
@@ -584,18 +587,32 @@ never used as a path.
 | Field | Meaning |
 | --- | --- |
 | `file` | Required. One audio file, any format PyAV decodes (wav, mp3, m4a, ogg, flac, webm). At most 25 MB; larger is a `413` before it is fully read. |
-| `model` | Optional. `whisper-1` or the configured `voice_stt_model`; any other name is a `404` naming the model this server transcribes with. |
+| `model` | Optional. `whisper-1` or the configured `voice_stt_model` for Whisper, or the name of an installed model that hears audio. A registered model that cannot take audio is a `400`; any other name is a `404` naming what this server transcribes with. |
 | `language` | Optional ISO 639-1 code such as `en`. Detected when omitted. An unsupported code is a `400`. |
 | `prompt` | Optional text that biases the transcript (names, jargon). |
 | `response_format` | `json` (default, `{"text": ...}`), `text`, `srt`, `vtt`, or `verbose_json` (task, language name, duration, text, segments with timing and confidence). |
 | `temperature` | Optional, 0 to 1. |
 | `timestamp_granularities[]` | `segment` and/or `word`, with `verbose_json` only. `word` adds a `words` list; asking for `word` alone omits `segments`. |
 
+**Which engine answers.** Whisper answers whenever faster-whisper is installed and `model`
+is left out or is a Whisper name. An installed model that hears audio answers when
+`model` names it (even with faster-whisper installed), and when faster-whisper is not
+installed and `model` is left out or is a Whisper name; with several such models, one
+that is already loaded is used, else the first by name. The response carries
+`X-Localm-Transcription-Model` with the model that answered. That path gives `json` and
+`text` only (the model returns plain text without timestamps; `srt`, `vtt` and
+`verbose_json` are a `400`), takes WAV without any extra and other formats with the voice
+extra (`501` otherwise), accepts clips up to 10 minutes and 25 MB, decodes at 0.0
+temperature unless `temperature` is sent, passes `language` and `prompt` to the model as
+part of its instruction (a dedicated speech model such as Qwen3-ASR ignores them), and answers `413` when the clip does not fit the model's context
+and `502` when the transcript hit the reply limit instead of returning it cut short. The
+audio is not recorded in the audit log or the transcript.
+
 `stream`, `include[]`, `chunking_strategy` and `known_speaker_*` change the output and
 are not implemented, so sending them is a `400`; other unknown fields are ignored. A
 recording with no speech is a `200` with empty text. Failures: `400` an unreadable
 file or bad field, `413` too large, `415` not multipart, `501` the speech package is
-not installed, `409` the first-use model download is blocked by the network policy,
+not installed and no installed model hears audio, `409` the first-use model download is blocked by the network policy,
 `504` the speech engine hung and was restarted.
 
 ### `POST /v1/images/generations`

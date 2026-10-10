@@ -761,8 +761,8 @@ def test_v3_lazy_mode_drift_is_a_diagnostic_not_a_refusal():
 
 # --------------------------------------------------------------------------- #
 #  llama_context_params layout detection (the n_outputs_max_per_seq insertion:
-#  present on ggml-org b10360, absent on the shipped amd-rocm lemonade b1307,
-#  so both layouts are live and one hardcoded struct is wrong for one of them.)
+#  present on ggml-org b10360, absent on amd-rocm lemonade b1307, so both
+#  layouts are installable and one hardcoded struct is wrong for one of them.)
 # --------------------------------------------------------------------------- #
 
 def test_detects_ctx_v1_and_v2_layouts():

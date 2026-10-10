@@ -34,7 +34,8 @@ import localm.setup_llama as _sl
 CPU_OVERLAY_MARKER = ".localm-cpu-overlay"
 
 _CPU_DLL = "ggml-cpu.dll"
-_OPENMP_DLL = "libomp140.x86_64.dll"
+# OpenMP runtime file names upstream CPU archives ship beside the variants.
+_OPENMP_DLLS = ("libomp.dll", "libomp140.x86_64.dll")
 _BACKUP_SUFFIX = ".amd-rocm"
 
 
@@ -89,7 +90,7 @@ def install_rocm_simd_cpu(target: Path) -> Optional[str]:
     Never raises."""
     original = target / _CPU_DLL
     backup = target / (_CPU_DLL + _BACKUP_SUFFIX)
-    omp = target / _OPENMP_DLL
+    omp: list[Path] = []
     try:
         if not original.is_file():
             _warn("this amd-rocm build has no ggml-cpu.dll to replace")
@@ -112,9 +113,11 @@ def install_rocm_simd_cpu(target: Path) -> Optional[str]:
                 return None
             os.replace(original, backup)
             shutil.copy2(winner, original)
-            openmp = winner.parent / _OPENMP_DLL
-            if openmp.is_file():
-                shutil.copy2(openmp, omp)
+            for name in _OPENMP_DLLS:
+                src, dst = winner.parent / name, target / name
+                if src.is_file() and not dst.exists():
+                    omp.append(dst)
+                    shutil.copy2(src, dst)
         loaded, detail = _sl._native_loads_ok()
         if not loaded:
             _restore(original, backup, omp)
@@ -136,14 +139,16 @@ def install_rocm_simd_cpu(target: Path) -> Optional[str]:
     return winner.name
 
 
-def _restore(original: Path, backup: Path, omp: Path) -> None:
+def _restore(original: Path, backup: Path, omp: list[Path]) -> None:
     """Put the amd-rocm build's own ggml-cpu.dll back from *backup* (when one
-    was made) and remove the copied OpenMP runtime and the overlay marker."""
+    was made) and remove the OpenMP runtime files in *omp* (the ones the
+    overlay copied) and the overlay marker."""
     if not backup.is_file():
         return
     os.replace(backup, original)
-    if omp.is_file():
-        omp.unlink()
+    for f in omp:
+        if f.is_file():
+            f.unlink()
     marker = original.parent / CPU_OVERLAY_MARKER
     if marker.is_file():
         marker.unlink()

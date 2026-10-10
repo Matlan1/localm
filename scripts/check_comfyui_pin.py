@@ -32,6 +32,10 @@ Fails soft on the API: unreachable, rate-limited, or a malformed/empty
 response all print a clearly-labelled "could not check" and exit 0 in default
 mode (2 under --gate), never a false "up to date".
 
+Environment:
+    GITHUB_TOKEN          sent as a bearer token so the API calls use the
+                          authenticated quota
+
 Usage:
     python scripts/check_comfyui_pin.py               # compare against the real pin
     python scripts/check_comfyui_pin.py --pinned v0.9.2   # sanity-check a hypothetical pin
@@ -102,16 +106,23 @@ def _pinned_version(path: Path = _CONSTANTS_PATH) -> str:
 #  Fetching upstream releases                                                 #
 # --------------------------------------------------------------------------- #
 
+def _headers() -> dict:
+    """GitHub API request headers, with ``Authorization`` when GITHUB_TOKEN is set."""
+    headers = {"User-Agent": "localm-comfyui-pin-check",
+               "Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _fetch_releases_http(repo: str):
     """Real GitHub API call. Raises on any failure; callers must not let that
     propagate uncaught (see _fetch_releases)."""
     url = f"https://api.github.com/repos/{repo}/releases?per_page={_PER_PAGE}"
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "localm-comfyui-pin-check",
-            "Accept": "application/vnd.github+json",
-        },
+        headers=_headers(),
     )
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
         return json.loads(r.read().decode("utf-8"))
@@ -150,10 +161,7 @@ def _fetch_release_by_tag_http(repo: str, tag: str):
     url = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "localm-comfyui-pin-check",
-            "Accept": "application/vnd.github+json",
-        },
+        headers=_headers(),
     )
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
         return json.loads(r.read().decode("utf-8"))
@@ -188,10 +196,7 @@ def _fetch_tag_ref_http(repo: str, tag: str):
     url = f"https://api.github.com/repos/{repo}/git/ref/tags/{tag}"
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "localm-comfyui-pin-check",
-            "Accept": "application/vnd.github+json",
-        },
+        headers=_headers(),
     )
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
         return json.loads(r.read().decode("utf-8"))
@@ -205,10 +210,7 @@ def _fetch_tag_object_http(repo: str, sha: str):
     url = f"https://api.github.com/repos/{repo}/git/tags/{sha}"
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "localm-comfyui-pin-check",
-            "Accept": "application/vnd.github+json",
-        },
+        headers=_headers(),
     )
     with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
         return json.loads(r.read().decode("utf-8"))
@@ -270,6 +272,48 @@ def resolve_tag_commit(tag: str, repo: str = _REPO, *,
     if isinstance(sha, str) and _COMMIT_SHA_RE.match(sha):
         return sha
     return None
+
+
+def _fetch_commit_http(repo: str, sha: str):
+    """Real GitHub API call: GET one commit by sha. Raises on any failure; see
+    commit_date(), which never lets that propagate."""
+    url = f"https://api.github.com/repos/{repo}/commits/{sha}"
+    req = urllib.request.Request(
+        url,
+        headers=_headers(),
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:  # noqa: S310 - fixed https:// URL
+        return json.loads(r.read().decode("utf-8"))
+
+
+def commit_date(sha: str, repo: str = _REPO, *, opener=None) -> _dt.datetime | None:
+    """The committer date of commit *sha* (``commit.committer.date``), or None
+    when it could not be read for ANY reason. Never raises."""
+    if opener is None:
+        opener = _fetch_commit_http
+    try:
+        body = opener(repo, sha)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    commit = body.get("commit")
+    committer = commit.get("committer") if isinstance(commit, dict) else None
+    if not isinstance(committer, dict):
+        return None
+    return _parse_date(committer.get("date"))
+
+
+def tag_commit_date(tag: str, repo: str = _REPO, *,
+                    ref_opener=None, tag_opener=None,
+                    commit_opener=None) -> _dt.datetime | None:
+    """The committer date of the commit *tag* points at, for a tag that has no
+    GitHub Release object. None when the tag cannot be resolved or the commit
+    date cannot be read. Never raises."""
+    sha = resolve_tag_commit(tag, repo, ref_opener=ref_opener, tag_opener=tag_opener)
+    if sha is None:
+        return None
+    return commit_date(sha, repo, opener=commit_opener)
 
 
 # --------------------------------------------------------------------------- #
@@ -396,6 +440,27 @@ def assess(pinned_tag: str, releases: list, pin_date, max_age_days: int) -> dict
     return result
 
 
+PIN_DATE_RELEASE = "release"
+PIN_DATE_TAG_COMMIT = "tag commit"
+
+
+def resolve_pin_date(releases: list, tag: str,
+                     repo: str = _REPO) -> tuple[_dt.datetime | None, str | None]:
+    """``(date, source)`` for the pinned *tag*. Tries the fetched page, then the
+    per-tag release lookup (source ``PIN_DATE_RELEASE``), then the committer date
+    of the commit the tag points at (source ``PIN_DATE_TAG_COMMIT``, for a tag
+    with no GitHub Release). ``(None, None)`` when no route yields a date."""
+    date = _pin_published_at(releases, tag)
+    if date is None:
+        date = release_date(tag, repo)
+    if date is not None:
+        return date, PIN_DATE_RELEASE
+    date = tag_commit_date(tag, repo)
+    if date is not None:
+        return date, PIN_DATE_TAG_COMMIT
+    return None, None
+
+
 # --------------------------------------------------------------------------- #
 #  Reporting (default mode)                                                   #
 # --------------------------------------------------------------------------- #
@@ -464,14 +529,16 @@ def _report_unknown_gate(pinned: str, reason: str) -> int:
     return EXIT_UNKNOWN
 
 
-def _report_gate(pinned: str, result: dict, pin_date, max_age_days: int) -> int:
+def _report_gate(pinned: str, result: dict, pin_date, max_age_days: int,
+                 pin_source: str | None = None) -> int:
     """Print + annotate + summarise a resolved assess() result, and return the
     --gate exit code. Split out of main() so main() stays a thin arg-parse +
     fetch shell."""
     if result["status"] == "no_data":
         return _report_unknown_gate(pinned, "no usable release data in the API response")
 
-    print(f"ComfyUI bundled pin: {pinned} ({_date_str(pin_date)})")
+    pin_when = _date_str(pin_date) + (f", from its {pin_source}" if pin_source else "")
+    print(f"ComfyUI bundled pin: {pinned} ({pin_when})")
 
     if result["status"] == CURRENT:
         print(f"OK: the pin is current (upstream's latest release is {pinned}).")
@@ -500,7 +567,7 @@ def _report_gate(pinned: str, result: dict, pin_date, max_age_days: int) -> int:
           "localm/media/managed_comfy_fresh.py.")
     summary = [f"## ComfyUI pin currency: {result['status'].upper()}",
                "", "| | |", "|---|---|",
-               f"| pinned | `{pinned}` ({_date_str(pin_date)}) |",
+               f"| pinned | `{pinned}` ({pin_when}) |",
                f"| upstream latest | `{latest}` ({_date_str(result['newest_date'])}) |",
                f"| behind | {days} day(s), {result['behind']} release(s) |",
                f"| tolerance | {max_age_days} day(s) |"]
@@ -560,12 +627,10 @@ def main(argv: list[str] | None = None) -> int:
         return _report_unknown_gate(
             pinned, f"{pinned!r} is not a plain vX.Y[.Z] tag, so it cannot be compared")
 
-    pin_date = _pin_published_at(releases, pinned)
-    if pin_date is None:
-        pin_date = release_date(pinned, args.repo)
+    pin_date, pin_source = resolve_pin_date(releases, pinned, args.repo)
 
     result = assess(pinned, releases, pin_date, args.max_age_days)
-    return _report_gate(pinned, result, pin_date, args.max_age_days)
+    return _report_gate(pinned, result, pin_date, args.max_age_days, pin_source)
 
 
 if __name__ == "__main__":

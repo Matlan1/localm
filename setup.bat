@@ -202,7 +202,14 @@ if "%CONTAINED%"=="1" (
     set "UVDIR=%CD:!=^!%\.uv"
     echo  Portable: installing uv itself under .\.uv
 )
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+set "UV_INSTALLER_VERSION=0.13.0"
+set "UV_INSTALLER_SHA256=6d7ef89ba04838a03d1ebf7f84be4ba2b98b848a0a9ab8c2855658f13106c2c2"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=Join-Path ([IO.Path]::GetTempPath()) ('uv-installer-'+[guid]::NewGuid()+'.ps1'); try { try { Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1') -OutFile $f -ErrorAction Stop } catch { exit 61 }; $h=$null; $fs=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $env:PSModulePath=$null; & powershell -NoProfile -ExecutionPolicy Bypass -File $f; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }"
+set "UVRC=%errorlevel%"
+if "%UVRC%"=="61" echo  [^^!] Could not download the uv %UV_INSTALLER_VERSION% installer.
+if "%UVRC%"=="62" echo  [^^!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.
+if "%UVRC%"=="61" goto uv_refused
+if "%UVRC%"=="62" goto uv_refused
 if not "%CONTAINED%"=="1" set "UVSHARED=--uv-shared-installed"
 rem  Make the freshly installed uv callable for the rest of THIS run (the installer
 rem  updates the persistent USER PATH, not this already-running shell). Prepend every
@@ -232,6 +239,15 @@ echo      Open a NEW terminal (so the updated PATH applies) and run setup.bat ag
 echo      or install uv manually first, then re-run setup.bat:
 call :uv_manual_hint
 call :offer_report "localm setup could not install uv" "setup.bat tried Astral's installer but uv was still not callable afterwards."
+echo.
+pause
+exit /b 1
+
+:uv_refused
+echo.
+echo  uv was not installed. Install it yourself, then re-run setup.bat:
+call :uv_manual_hint
+call :offer_report "localm setup could not install uv" "setup.bat refused the uv installer: it could not be downloaded or did not match its pinned checksum."
 echo.
 pause
 exit /b 1

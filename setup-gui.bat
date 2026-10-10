@@ -39,7 +39,14 @@ rem  UV_UNMANAGED_INSTALL keeps it in .\.uv without adding that folder to
 rem  the user PATH or writing an install receipt under %LOCALAPPDATA%\uv.
 set "UV_INSTALL_DIR=%CD%\.uv"
 set "UV_UNMANAGED_INSTALL=%CD%\.uv"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+set "UV_INSTALLER_VERSION=0.13.0"
+set "UV_INSTALLER_SHA256=6d7ef89ba04838a03d1ebf7f84be4ba2b98b848a0a9ab8c2855658f13106c2c2"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=Join-Path ([IO.Path]::GetTempPath()) ('uv-installer-'+[guid]::NewGuid()+'.ps1'); try { try { Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1') -OutFile $f -ErrorAction Stop } catch { exit 61 }; $h=$null; $fs=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $env:PSModulePath=$null; & powershell -NoProfile -ExecutionPolicy Bypass -File $f; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }"
+set "UVRC=%errorlevel%"
+if "%UVRC%"=="61" echo   [!] Could not download the uv %UV_INSTALLER_VERSION% installer.
+if "%UVRC%"=="62" echo   [!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.
+if "%UVRC%"=="61" goto uv_refused
+if "%UVRC%"=="62" goto uv_refused
 rem  Prepend every directory uv may have been installed to, in setup.bat's own
 rem  order, so the uv just installed is callable in this shell right now.
 set "PATH=%CD%\.uv;%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin;%PATH%"
@@ -50,6 +57,13 @@ if defined UVEXE goto open_window
 echo.
 echo   [!] uv still is not callable, so the graphical setup cannot start.
 echo       Open a NEW terminal and run setup.bat instead.
+pause
+exit /b 1
+
+:uv_refused
+echo.
+echo   uv was not installed, so the graphical setup cannot start.
+echo       Install uv yourself ^(winget install astral-sh.uv^), then run this again.
 pause
 exit /b 1
 

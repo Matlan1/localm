@@ -134,6 +134,7 @@ export const chat = {
   webCall: null,     // the running tool event while a web call is in flight, else null
   attachments: [],   // image attachments: {name, dataUri}
   docs: [],          // document attachments: {name, text, chars, truncated}
+  clips: [],         // audio attachments: {name, data (base64), format, size, seconds}
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
   systemDefault: "", // default system prompt from Settings; a blank drawer inherits it
   toolGrammar: true, // chat_tool_grammar from /v1/config - grammar-constrain web-tool calls
@@ -215,7 +216,8 @@ export function estimateTokens(text) {
 export function estimateConvTokens(conv) {
   let total = estimateTokens($("p-system").value || "");
   for (const m of conv.messages) {
-    total += estimateTokens(msgText(m)) + msgImages(m).length * 750;
+    total += estimateTokens(msgText(m)) + msgImages(m).length * 750 +
+             msgAudioClips(m).length * 750;
   }
   return total;
 }
@@ -238,7 +240,8 @@ export function archiveCopy(m) {
   for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "webUnfinished", "bridge"]) {
     if (m[k] !== undefined) out[k] = m[k];
   }
-  const media = msgImages(m).length + (m.audio ? 1 : 0) + (m.video ? 1 : 0);
+  const media = msgImages(m).length + msgAudioClips(m).length +
+                (m.audio ? 1 : 0) + (m.video ? 1 : 0);
   if (media) out.content += `\n\n*[${media} attachment(s) not archived]*`;
   if (Array.isArray(m.compacted) && m.compacted.length) out.compacted = m.compacted;
   return out;
@@ -295,7 +298,8 @@ export async function compactConversation(conv, signal = null) {
   let keepCount = 0, used = 0;
   for (let i = conv.messages.length - 1; i >= 0; i--) {
     const t = estimateTokens(msgText(conv.messages[i])) +
-              msgImages(conv.messages[i]).length * 750;
+              msgImages(conv.messages[i]).length * 750 +
+              msgAudioClips(conv.messages[i]).length * 750;
     const overBudget = budget > 0 ? (used + t > budget) : true;
     if (keepCount >= COMPACT_KEEP && overBudget) break;
     used += t;
@@ -976,6 +980,61 @@ export function msgImages(m) {
     .map((p) => p.image_url?.url).filter(Boolean);
 }
 
+/** The user-attached audio clips of message *m*: one {data, format, name,
+ *  seconds} per input_audio part that carries data. */
+export function msgAudioClips(m) {
+  if (!m || typeof m.content === "string") return [];
+  return (m.content || [])
+    .filter((p) => p.type === "input_audio" && p.input_audio?.data)
+    .map((p) => ({ data: p.input_audio.data, format: p.input_audio.format || "wav",
+                   name: p.name || "", seconds: p.seconds || 0 }));
+}
+
+/** The input_audio part for an audio attachment. The wire shape is
+ *  {type, input_audio: {data, format}}; name and seconds are display
+ *  metadata that runCompletion drops before sending. */
+export function audioPart(clip) {
+  return { type: "input_audio", input_audio: { data: clip.data, format: clip.format },
+           name: clip.name, seconds: clip.seconds || 0 };
+}
+
+/** The part list sent over the wire: display-only fields of an audio part
+ *  are dropped, every other part is passed through. */
+export function wireParts(content) {
+  if (!Array.isArray(content)) return content;
+  return content
+    .filter((p) => p.type !== "input_audio" || p.input_audio?.data)
+    .map((p) => p.type === "input_audio"
+      ? { type: "input_audio",
+          input_audio: { data: p.input_audio.data, format: p.input_audio.format } }
+      : p);
+}
+
+/** Drop every user-attached audio clip from the conversation, leaving a text
+ *  note, so a clip the server refused is never sent again. Returns the number
+ *  of clips dropped. */
+export function stripUserAudio(conv) {
+  let dropped = 0;
+  for (const m of conv.messages) {
+    if (m.role !== "user" || !Array.isArray(m.content)) continue;
+    const clips = m.content.filter((p) => p.type === "input_audio");
+    if (!clips.length) continue;
+    dropped += clips.length;
+    const note = "[Audio removed: the server did not accept it.]";
+    const rest = m.content.filter((p) => p.type !== "input_audio");
+    if (rest.every((p) => p.type === "text")) {
+      const text = rest.map((p) => p.text).join("");
+      m.content = (text ? text + "\n" : "") + note;
+      continue;
+    }
+    const first = rest.find((p) => p.type === "text");
+    if (first) first.text = (first.text ? first.text + "\n" : "") + note;
+    else rest.unshift({ type: "text", text: note });
+    m.content = rest;
+  }
+  return dropped;
+}
+
 /** VIS-1: replace every user-attached image (a data: URI) in the conversation
  *  with a short text note, so a model that rejected the image is never asked for
  *  it again. Re-sending a rejected image 400s on every turn and wedges the chat
@@ -1463,6 +1522,21 @@ export function addMessageRow(container, role, text, opts = {}) {
     img.addEventListener("click", () => openImageLightbox(img.src, imageFilename(url)));
     body.appendChild(img);
   }
+  for (const clip of opts.clips || []) {
+    const wrap = el("div", "msg-clip");
+    if (clip.name) wrap.appendChild(el("div", "msg-clip-name", clip.name));
+    const player = document.createElement("audio");
+    player.controls = true;
+    player.style.width = "100%";
+    try {
+      player.src = audioBlobUrl(clip);
+      wrap.appendChild(player);
+    } catch (err) {
+      console.error("localm: could not prepare an audio clip for playback:", err);
+      wrap.appendChild(el("div", "msg-clip-name", t("chat.audio.unplayable")));
+    }
+    body.appendChild(wrap);
+  }
   for (const url of opts.audio || []) {
     const player = document.createElement("audio");
     player.controls = true;
@@ -1848,6 +1922,7 @@ export function renderChat() {
   const box = $("chat-messages");
   box.innerHTML = "";
   const conv = currentConv();
+  pruneClipUrls(conv);
   syncPinModelToggle(conv);
   // R40: a not-yet-loaded conversation (server index row) hydrates its body on
   // first render, then re-renders. Try once per row (a failed/offline load sets
@@ -1915,6 +1990,7 @@ export function renderChat() {
       : "";
     addMessageRow(box, m.role, msgText(m) + noteSuffix, {
       images: msgImages(m),
+      clips: msgAudioClips(m),
       audio: m.audio ? [m.audio] : [],
       video: m.video ? [m.video] : [],
       actions,
@@ -2159,6 +2235,16 @@ export function renderAttachChips() {
     chip.appendChild(rm);
     box.appendChild(chip);
   });
+  chat.clips.forEach((clip, i) => {
+    const chip = el("span", "chip");
+    chip.appendChild(iconEl("music", "ic"));
+    chip.appendChild(el("span", "", clip.name +
+      (clip.seconds ? ` (${formatClipTime(clip.seconds)})` : "")));
+    const rm = el("button", "", "×");
+    rm.onclick = () => { chat.clips.splice(i, 1); renderAttachChips(); };
+    chip.appendChild(rm);
+    box.appendChild(chip);
+  });
   chat.docs.forEach((doc, i) => {
     const chip = el("span", "chip");
     chip.appendChild(iconEl("file", "ic"));
@@ -2169,6 +2255,163 @@ export function renderAttachChips() {
     chip.appendChild(rm);
     box.appendChild(chip);
   });
+}
+
+/** The longest and largest audio clip the server accepts
+ *  (AUDIO_MAX_SECONDS / AUDIO_MAX_BYTES in localm/inference/media.py). */
+export const AUDIO_MAX_SECONDS = 600;
+export const AUDIO_MAX_BYTES = 50_000_000;
+const AUDIO_EXTS = ["wav", "mp3", "flac", "ogg", "oga", "opus", "m4a", "aac"];
+
+const fileExt = (name) => {
+  const dot = String(name || "").lastIndexOf(".");
+  return dot < 0 ? "" : name.slice(dot + 1).toLowerCase();
+};
+
+export function isAudioFile(file) {
+  return (file.type || "").startsWith("audio/") || AUDIO_EXTS.includes(fileExt(file.name));
+}
+
+/** The `format` of the input_audio part for *file*: its extension when it is
+ *  a known audio one, else the MIME subtype, else "mp3". */
+export function audioFormat(file) {
+  const ext = fileExt(file.name);
+  if (AUDIO_EXTS.includes(ext)) return ext;
+  const sub = (file.type || "").split(";")[0].split("/")[1] || "";
+  if (sub === "mpeg") return "mp3";
+  if (/^(x-)?(wav|wave|vnd\.wave)$/.test(sub)) return "wav";
+  return sub.replace(/^x-/, "") || "mp3";
+}
+
+/** The MIME type a browser audio element plays an input_audio *format* as. */
+export function audioMime(format) {
+  const f = String(format || "").toLowerCase();
+  if (f === "mp3") return "audio/mpeg";
+  if (f === "m4a") return "audio/mp4";
+  if (f === "ogg" || f === "oga" || f === "opus") return "audio/ogg";
+  return "audio/" + (f || "wav");
+}
+
+const _clipUrls = new Map();
+
+/** A blob: URL playing *clip*, created once per distinct clip and reused by
+ *  every render. The page CSP allows media only from 'self' and blob:, so a
+ *  data: URL is refused by the browser. */
+export function audioBlobUrl(clip) {
+  let url = _clipUrls.get(clip.data);
+  if (url) return url;
+  const bin = atob(clip.data);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  url = URL.createObjectURL(new Blob([bytes], { type: audioMime(clip.format) }));
+  _clipUrls.set(clip.data, url);
+  return url;
+}
+
+/** Revoke the blob: URL of every clip that is not in *conv*, so the URLs alive
+ *  are exactly those of the conversation on screen. */
+export function pruneClipUrls(conv) {
+  const keep = new Set();
+  for (const m of (conv && conv.messages) || []) {
+    for (const c of msgAudioClips(m)) keep.add(c.data);
+  }
+  for (const [data, url] of _clipUrls) {
+    if (keep.has(data)) continue;
+    URL.revokeObjectURL(url);
+    _clipUrls.delete(data);
+  }
+}
+
+/** *seconds* as m:ss. */
+export function formatClipTime(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Whether *blob* starts with a RIFF/WAVE header. */
+export function hasWavHeader(blob) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(false);
+    reader.onload = () => {
+      const b = new Uint8Array(reader.result);
+      const at = (o, s) => [...s].every((ch, i) => b[o + i] === ch.charCodeAt(0));
+      resolve(b.length >= 12 && at(0, "RIFF") && at(8, "WAVE"));
+    };
+    reader.readAsArrayBuffer(blob.slice(0, 12));
+  });
+}
+
+/** The duration in seconds of a RIFF/WAVE file, read from its header (the first
+ *  MiB is enough to reach the fmt and data chunks), or 0 when *blob* is not a
+ *  WAV file it can read. */
+export function wavSeconds(blob) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(0);
+    reader.onload = () => {
+      const buf = reader.result;
+      if (!(buf instanceof ArrayBuffer) || buf.byteLength < 12) { resolve(0); return; }
+      const v = new DataView(buf);
+      const tag = (o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1),
+                                             v.getUint8(o + 2), v.getUint8(o + 3));
+      if (tag(0) !== "RIFF" || tag(8) !== "WAVE") { resolve(0); return; }
+      let byteRate = 0;
+      let off = 12;
+      while (off + 8 <= buf.byteLength) {
+        const id = tag(off);
+        const size = v.getUint32(off + 4, true);
+        if (id === "fmt " && off + 20 <= buf.byteLength) byteRate = v.getUint32(off + 16, true);
+        if (id === "data") {
+          const room = blob.size - (off + 8);
+          const bytes = size === 0 || size === 0xFFFFFFFF || size > room ? room : size;
+          resolve(byteRate > 0 && bytes > 0 ? bytes / byteRate : 0);
+          return;
+        }
+        off += 8 + size + (size % 2);
+      }
+      resolve(0);
+    };
+    reader.readAsArrayBuffer(blob.slice(0, 1 << 20));
+  });
+}
+
+/** Audio attachment: kept in memory as base64 and sent as an input_audio part.
+ *  A file over the server's size limit is refused before it is read. A WAV's
+ *  length is read from its header after the chip appears; a WAV longer than the
+ *  server's limit is removed again. Other formats show no length and the server
+ *  judges them. */
+export async function attachAudio(file) {
+  if (file.size > AUDIO_MAX_BYTES) {
+    throw new Error(t("chat.audio.tooLarge", {
+      name: file.name, size: (file.size / 1e6).toFixed(1),
+      max: String(AUDIO_MAX_BYTES / 1e6) }));
+  }
+  const format = audioFormat(file);
+  if (format === "wav" && !(await hasWavHeader(file))) {
+    throw new Error(t("chat.audio.notWav", { name: file.name }));
+  }
+  const uri = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error(t("chat.audio.readError", { name: file.name })));
+    reader.readAsDataURL(file);
+  });
+  const data = uri.split(",", 2)[1] || "";
+  if (!data) throw new Error(t("chat.audio.readError", { name: file.name }));
+  const clip = { name: file.name, data, format, size: file.size, seconds: 0 };
+  chat.clips.push(clip);
+  renderAttachChips();
+  const seconds = await wavSeconds(file);
+  if (chat.clips.indexOf(clip) === -1) return;
+  if (seconds > AUDIO_MAX_SECONDS) {
+    chat.clips.splice(chat.clips.indexOf(clip), 1);
+    renderAttachChips();
+    throw new Error(t("chat.audio.tooLong", {
+      name: file.name, minutes: String(Math.ceil(seconds / 60)),
+      max: String(AUDIO_MAX_SECONDS / 60) }));
+  }
+  if (seconds > 0) { clip.seconds = seconds; renderAttachChips(); }
 }
 
 /** Document attachment → text via /api/rag/extract. The file is converted
@@ -2193,8 +2436,8 @@ export async function attachDocument(file) {
   renderAttachChips();
 }
 
-/** Ingest files as chat attachments: images inline (data URI), every other
- *  type extracted to text server-side. Shared by the file picker and the
+/** Ingest files as chat attachments: images inline (data URI), audio as
+ *  input_audio clips, every other type extracted to text server-side. Shared by the file picker and the
  *  drag-and-drop zone so both behave identically. */
 export function addAttachedFiles(files) {
   for (const file of files) {
@@ -2205,6 +2448,8 @@ export function addAttachedFiles(files) {
         renderAttachChips();
       };
       reader.readAsDataURL(file);
+    } else if (isAudioFile(file)) {
+      attachAudio(file).catch((err) => toast(err.message, true));
     } else {
       attachDocument(file).catch((err) =>
         toast(`${file.name}: ${err.message}`, true));
