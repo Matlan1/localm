@@ -482,6 +482,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Fixed
 - **A bad audio clip or image no longer unloads a GGUF model.** An unreadable clip or picture is refused with a
   `400` and the model stays loaded. Before, the model was dropped and the request got a server error.
+- **The Seed help no longer promises an identical reply.** A GGUF model computes only the
+  part of a prompt its KV cache does not already hold from earlier requests, and that can
+  change the reply, even at temperature 0. The coder's Seed tooltip, `localcoder --seed` and
+  the docs said the same seed, model, prompt and settings always give the same output; they
+  now say a reply can also depend on what the model answered before.
 - **"Delete saved data" now also removes the voices folder.** The named reference voices
   for text-to-speech were left behind. A legacy data folder with no record of what was in it
   before LocaLM keeps a voices folder.

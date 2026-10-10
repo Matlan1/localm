@@ -100,8 +100,7 @@ class CreateSessionRequest(BaseModel):
     interactive_confirm: bool = False
     temperature: float | None = None
     max_tokens: int | None = None
-    # Pins the sampler's RNG so the same seed, model, prompt and settings
-    # reproduce the same output (the CLI's --seed). A plain generation kwarg
+    # Pins the sampler's RNG (the CLI's --seed). A plain generation kwarg
     # alongside the two above, forwarded the same way.
     seed: int | None = None
     resume: bool = False              # restore this cwd's saved conversation

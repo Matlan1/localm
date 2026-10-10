@@ -374,7 +374,11 @@ family):
 - **Prefix reuse** (default on current DLLs): the common token prefix with
   the previous call stays in the KV cache; diverging cached tokens are
   removed with `llama_memory_seq_rm` and only the new suffix is prefilled.
-  Follow-up chat turns skip re-evaluating the whole history.
+  Follow-up chat turns skip re-evaluating the whole history. The logits of a
+  prompt computed in pieces can differ from the same prompt computed in one
+  batch: llama.cpp picks kernels by batch size, and with layers on the CPU the
+  CUDA and ROCm backends run an op with 32 or more rows on the GPU. A reply
+  can therefore depend on earlier requests, even at temperature 0.
   M-RoPE models (Qwen2-VL, Qwen2.5-VL, Qwen3-VL) reuse the prefix the same
   way; for an image prompt the cut never splits an image.
 - **Full clear**: when the cache refuses to drop a range (a recurrent or
