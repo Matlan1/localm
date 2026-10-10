@@ -182,6 +182,51 @@ def _generate_or_abort(api_url: str, run):
         raise
 
 
+def _image_via_backend(image_backend, s: dict, prompt: str, out_path: Path, *,
+                       negative, guidance, cfg, seed, input_image, denoise, lora_name,
+                       width, height) -> None:
+    """``localm image`` through the image plugin's backend facade (any backend
+    other than the inline ComfyUI path): availability, generation with progress
+    lines, Ctrl-C stops the worker, then the backend's VRAM is released."""
+    import os
+
+    from rich.markup import escape
+
+    from ..audit import SessionMode, effective_mode
+
+    def say(text: str) -> None:
+        console.print(f"[dim]{escape(str(text))}[/dim]")
+
+    for note in (s.get("warning"), s.get("backend_note")):
+        if note:
+            say(note)
+    ok, message = image_backend.ensure_available(s, on_progress=say)
+    if not ok:
+        console.print(f"[red]{escape(str(message))}[/red]")
+        sys.exit(1)
+    say(message)
+    is_privacy = effective_mode("server") == SessionMode.PRIVACY
+    localm_url = os.environ.get("LOCALM_URL") or None
+    try:
+        ok, message = image_backend.generate(
+            s, prompt, out_path,
+            self_url=localm_url, write_sidecar=not is_privacy,
+            negative_prompt=negative, guidance=guidance, cfg=cfg, seed=seed,
+            input_image=Path(input_image) if input_image else None, denoise=denoise,
+            lora_name=lora_name, swap=bool(localm_url), delete_outputs=is_privacy,
+            on_progress=say, width=width, height=height)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted - stopping the image worker...[/yellow]")
+        image_backend.free_vram(s)
+        raise
+    color = "green" if ok else "red"
+    console.print(f"[{color}]{escape(str(message))}[/{color}]")
+    image_backend.free_vram(s)
+    if not ok:
+        sys.exit(1)
+    _offer_open(out_path)
+
+
 @main.command("image")
 @click.argument("prompt")
 @click.option("--negative", default=None,
@@ -198,27 +243,61 @@ def _generate_or_abort(api_url: str, run):
               help="img2img strength 0-1 (lower keeps more of the base image).")
 @click.option("--lora", "lora_name", default=None,
               help="Optional LoRA file name (in ComfyUI's loras dir) to apply.")
+@click.option("--size", default=None, metavar="WIDTHxHEIGHT",
+              help="Image size, e.g. 768x512 (multiples of 8, 64-2048 per side).")
 @click.option("-o", "--out", default=None,
               help="Output .png path [default: ./image_<timestamp>.png]")
 def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
-              lora_name, out):
-    """Generate an image with the local ComfyUI FLUX workflow.
+              lora_name, size, out):
+    """Generate an image with the image plugin's backend: the built-in native
+    one (stable-diffusion.cpp) or ComfyUI, as set in the image settings
+    ('auto' uses ComfyUI when it is set up, else native).
 
     \b
     Examples:
       localm image "a red fox in snow, photographic"
+      localm image "a lighthouse at dusk" --size 768x512
       localm image "make it look like sunset" --image photo.png --denoise 0.6
 
-    ComfyUI must be running (or start it via the GUI, which can auto-launch it
-    when comfy_launch_cmd is configured). The CLI cannot show the image, so it
-    is saved to --out (or ./image_<timestamp>.png) and, in an interactive
+    The native backend installs its runtime on first use and needs an image
+    model (it names the one to download when none is set up). ComfyUI must be
+    running, or startable from comfy_launch_cmd. The CLI cannot show the image,
+    so it is saved to --out (or ./image_<timestamp>.png) and, in an interactive
     terminal, you are offered to open it.
     """
     import time as _time
+    from importlib import import_module
 
     from rich.markup import escape
 
     from ..audit import SessionMode, effective_mode
+    from ..config import load_config
+
+    width = height = None
+    if size:
+        from fastapi import HTTPException
+
+        from ..plugins.builtin.image.plug import parse_image_size
+        try:
+            parsed = parse_image_size(size)
+        except HTTPException as e:
+            console.print(f"[red]{escape(str(e.detail))}[/red]")
+            sys.exit(2)
+        if parsed:
+            width, height = parsed
+
+    out_path = Path(out) if out \
+        else Path(f"image_{_time.strftime('%Y%m%d_%H%M%S')}.png")
+    _cfg = load_config()
+    image_backend = import_module("localm.plugins.builtin.image.backend")
+    s = image_backend.prepare_for_job(image_backend.settings(_cfg), _cfg)
+    if s.get("backend") != "comfy":
+        _image_via_backend(image_backend, s, prompt, out_path, negative=negative,
+                           guidance=guidance, cfg=cfg, seed=seed,
+                           input_image=input_image, denoise=denoise,
+                           lora_name=lora_name, width=width, height=height)
+        return
+
     from ..image_gen.comfy import (free_comfy_vram,
                                   generate_image)
 
@@ -227,14 +306,14 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     # ComfyUI from comfy_launch_cmd/comfy_workdir, or returns a clear error
     # when they are unset.
 
-    out_path = Path(out) if out \
-        else Path(f"image_{_time.strftime('%Y%m%d_%H%M%S')}.png")
     kwargs = {k: v for k, v in (
         ("negative_prompt", negative), ("guidance", guidance), ("cfg", cfg),
         ("seed", seed), ("denoise", denoise), ("lora_name", lora_name),
     ) if v is not None}
     if input_image:
         kwargs["input_image"] = Path(input_image)
+    if width is not None:
+        kwargs["width"], kwargs["height"] = width, height
 
     console.print("[dim]Generating image via ComfyUI (this can take a minute)...[/dim]")
     _is_privacy = effective_mode("server") == SessionMode.PRIVACY
