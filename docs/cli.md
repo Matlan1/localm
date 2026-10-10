@@ -15,6 +15,7 @@ localm mcp [opts]                # MCP stdio server (mcp plugin)
 localm doctor                    # check Python, llama.dll, GPU driver, VRAM, packages
 localm info                      # paths + current config
 localm setup-llama [opts]        # provision native llama.cpp binaries
+localm setup-music [opts]        # install native music generation (ACE-Step 1.5 through KoboldCpp)
 localm setup-sdcpp [opts]        # install the native image runtime (stable-diffusion.cpp)
 localm setup-browser [opts]      # download Chromium for the automated browser
 ```
@@ -908,6 +909,9 @@ localm setup-llama --backend cuda --cuda-line cuda-12   # Linux: CUDA runtime wi
 localm setup-sdcpp                       # install the native image runtime (stable-diffusion.cpp), auto-picking the build
 localm setup-sdcpp --backend vulkan      # or cpu / cuda (Windows) / rocm / metal
 localm setup-sdcpp --status              # which builds are installed, and their devices
+localm setup-music                       # install native music: the KoboldCpp runtime, the default ACE-Step 1.5 models, a test track
+localm setup-music --backend vulkan      # or cpu / cuda / metal
+localm setup-music --status              # installed builds, which backends worked, the default models
 localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
 localm setup-browser                     # download Chromium for the automated browser (coder tool)
 localm setup-browser --force             # reinstall even if already present
