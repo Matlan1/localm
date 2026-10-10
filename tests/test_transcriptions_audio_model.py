@@ -10,6 +10,7 @@ run; only the model engine and the Whisper worker are replaced.
 import base64
 import struct
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -44,7 +45,7 @@ class _Engine:
     supports_images = False
 
     def __init__(self, reply=REPLY, *, audio=True, finish="stop", tokens=10,
-                 capacity=4096, fail=None):
+                 capacity=4096, fail=None, delay=0.0):
         self.supports_audio = audio
         self.last_finish_reason = finish
         self.active_requests = 0
@@ -53,6 +54,10 @@ class _Engine:
         self.tokens = tokens
         self.capacity = capacity
         self.fail = fail
+        self.delay = delay
+        self.running = 0
+        self.peak = 0
+        self.lock = threading.Lock()
         self.calls = []
         self.media = []
         self.pinned_during_call = None
@@ -69,9 +74,17 @@ class _Engine:
         self.pinned_during_call = self.active_requests
         _, media = LlamaCpp._messages_with_markers(messages, "<__media__>", audio_rate=16000)
         self.media.extend(media)
-        if self.fail is not None:
-            raise self.fail
-        yield self.reply
+        with self.lock:
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+        try:
+            time.sleep(self.delay)
+            if self.fail is not None:
+                raise self.fail
+            yield self.reply
+        finally:
+            with self.lock:
+                self.running -= 1
 
 
 @pytest.fixture
@@ -272,6 +285,9 @@ class TestWhatTheModelReceives:
         ("clip", "audio/ogg; codecs=opus", "ogg"),
         ("clip.weird_ext!", "application/octet-stream", "audio"),
         ("", "", "audio"),
+        ("clip.wav", "audio/wav", "audio"),
+        ("clip.mp3", "audio/wav", "mp3"),
+        ("clip", "audio/x-wav", "audio"),
     ])
     def test_format_label_of_a_non_wav_upload(self, name, ctype, expected):
         assert audio_model.format_label(b"ID3....", name, ctype) == expected
@@ -288,6 +304,7 @@ class TestTranscriptCleaning:
         ("  plain words from another model " + chr(10), "plain words from another model"),
         ("language English<asr_text>One.language English<asr_text> Two.", "One. Two."),
         ("the language English is spoken here", "the language English is spoken here"),
+        ("<think>\nhmm, audio\n</think>\nHello there.", "Hello there."),
     ])
     def test_clean_transcript(self, reply, expected):
         assert audio_model.clean_transcript(reply) == expected
@@ -357,6 +374,35 @@ class TestFailures:
         r = _post(client)
         assert r.status_code == 502 and "cut off" in r.json()["detail"]
 
+    def test_a_generation_interrupted_midway_is_an_error_not_a_short_text(
+            self, client, state):
+        state.engine = _Engine(finish="error")
+        r = _post(client)
+        assert r.status_code == 502 and "interrupted" in r.json()["detail"]
+        assert state.engine.active_requests == 0
+
+    def test_the_backend_refusing_a_clip_that_overflows_the_context_is_413(
+            self, client, state):
+        from localm.inference.backends.base import ContextCapacityExceededError
+        state.engine = _Engine(fail=ContextCapacityExceededError("clip is too long"))
+        r = _post(client)
+        assert r.status_code == 413 and "too long" in r.json()["detail"]
+        assert state.engine.active_requests == 0
+
+    def test_a_runtime_failure_does_not_disclose_the_model_path(self, client, state):
+        state.engine = _Engine(fail=RuntimeError(
+            "Failed to load model: C:\\Users\\bob\\models\\asr.gguf (out of memory)"))
+        r = _post(client)
+        assert r.status_code == 502
+        assert "bob" not in r.json()["detail"] and "out of memory" in r.json()["detail"]
+
+    def test_a_model_name_outside_latin1_still_gets_a_header_and_a_200(
+            self, client, state):
+        state.audio = ["\u00e4rzte-asr-\u6a21\u578b"]
+        r = _post(client)
+        assert r.status_code == 200 and r.json() == {"text": REPLY}
+        assert r.headers["X-Localm-Transcription-Model"].isascii()
+
     def test_a_clip_that_does_not_fit_the_context_is_413(self, client, state):
         state.engine = _Engine(tokens=5000, capacity=4096)
         r = _post(client)
@@ -375,13 +421,15 @@ class TestFailures:
         assert r.status_code == 400 and state.asked == []
 
     def test_a_missing_file_is_400(self, client, state):
-        r = client.post(URL, data={"model": MODEL})
-        assert r.status_code == 415 or r.status_code == 400
+        r = client.post(URL, data={"model": MODEL},
+                        files={"note": ("n.txt", b"hello", "text/plain")})
+        assert r.status_code == 400 and "'file' field is required" in r.json()["detail"]
         assert state.asked == []
 
 
 class TestConcurrency:
-    def test_two_requests_at_once_are_both_answered(self, client, state):
+    def test_two_requests_at_once_are_both_answered_one_at_a_time(self, client, state):
+        state.engine = _Engine(delay=0.15)
         results = []
 
         def go():
@@ -393,4 +441,5 @@ class TestConcurrency:
         for t in threads:
             t.join(timeout=30)
         assert results == [{"text": REPLY}, {"text": REPLY}]
+        assert state.engine.peak == 1
         assert state.engine.active_requests == 0

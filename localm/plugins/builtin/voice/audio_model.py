@@ -24,6 +24,7 @@ SUPPORTED_FORMATS = ("json", "text")
 REPLY_TOKEN_CEILING = 8192
 
 _LABEL_RE = re.compile(r"^[a-z0-9]{1,8}$")
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _ASR_TAG = "<asr_text>"
 _ASR_LANGUAGE_RE = re.compile(r"language [^<\n]{0,40}" + re.escape(_ASR_TAG))
 
@@ -54,16 +55,17 @@ def preferred(names: list[str]) -> str:
 
 def format_label(data: bytes, filename: str, content_type: str) -> str:
     """The ``input_audio.format`` for an upload: ``wav`` for a RIFF/WAVE
-    payload, else the file extension or the content type's subtype, else
-    ``audio``."""
+    payload only, else the file extension or the content type's subtype, else
+    ``audio``. A non-WAV payload is never labelled ``wav``."""
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE":
         return "wav"
     suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if _LABEL_RE.match(suffix):
-        return suffix
     subtype = (content_type or "").split(";")[0].rpartition("/")[2].lower()
     subtype = subtype.removeprefix("x-")
-    return subtype if _LABEL_RE.match(subtype) else "audio"
+    for label in (suffix, subtype):
+        if _LABEL_RE.match(label) and label != "wav":
+            return label
+    return "audio"
 
 
 def instruction(language: Optional[str], prompt: Optional[str]) -> str:
@@ -79,7 +81,9 @@ def instruction(language: Optional[str], prompt: Optional[str]) -> str:
 def clean_transcript(reply: str) -> str:
     """The spoken words in a model's *reply*. A Qwen3-ASR model opens each
     transcript with ``language <name>`` and an ``<asr_text>`` marker
-    (``language None`` for a clip with no speech); both are removed."""
+    (``language None`` for a clip with no speech); both are removed, as is any
+    ``<think>`` block."""
+    reply = _THINK_RE.sub("", reply)
     return _ASR_LANGUAGE_RE.sub("", reply).replace(_ASR_TAG, "").strip()
 
 
@@ -140,10 +144,18 @@ async def transcribe(request: Request, model: str, data: bytes, label: str, *,
                     repeat_penalty=1.0)
         except _hs._BACKEND_ERROR_TYPES as e:
             raise HTTPException(_hs.backend_error_status(e) or 500, str(e)) from e
-        if (timing.get("outcome") or {}).get("finish_reason") == "length":
+        except RuntimeError as e:
+            from localm.pathscrub import scrub_paths
+            raise HTTPException(502, f"Transcription failed: {scrub_paths(str(e))}") from e
+        finish = (timing.get("outcome") or {}).get("finish_reason")
+        if finish == "length":
             raise HTTPException(
                 502, f"The transcript from '{engine.display_name}' was cut off at "
                      f"{budget} tokens. Send a shorter clip.")
+        if finish == "error":
+            raise HTTPException(
+                502, f"The transcription by '{engine.display_name}' was interrupted "
+                     "before it finished, so the text is incomplete. Try again.")
         return clean_transcript(text)
     finally:
         _hs._unpin(engine)

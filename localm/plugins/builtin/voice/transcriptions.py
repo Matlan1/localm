@@ -38,6 +38,7 @@ from localm import voice_formats
 from localm.executor import get_plugin_executor
 from localm.inference.errors import route_errors
 from localm.multipartform import Form, MultipartError, read_form
+from localm.pathscrub import scrub_paths
 from localm.voice import VoiceError, transcribe_detailed
 
 from . import audio_model
@@ -145,8 +146,7 @@ def _audio_choices(audio: list[str]) -> str:
 
 
 def parse_params(form: Form) -> TranscriptionParams:
-    """Validate the non-file form fields. Raises ``HTTPException`` (400, or 404
-    for an unknown model)."""
+    """Validate the non-file form fields. Raises ``HTTPException`` (400)."""
     for name in _UNSUPPORTED_FIELDS:
         if name in form.fields:
             raise _bad_request(f"The '{name.rstrip('[]')}' parameter is not supported "
@@ -263,7 +263,7 @@ _OPENAPI_REQUEST_BODY = {"requestBody": {"required": True, "content": {
 @router.post("/v1/audio/transcriptions", openapi_extra=_OPENAPI_REQUEST_BODY)
 @route_errors({
     VoiceError: _error_status,
-    Exception: lambda e: (502, f"Transcription failed: {e}"),
+    Exception: lambda e: (502, f"Transcription failed: {scrub_paths(str(e))}"),
 })
 async def create_transcription(request: Request):
     if not _origin_allowed(request):
@@ -306,7 +306,8 @@ async def create_transcription(request: Request):
             language=params.language, prompt=params.prompt,
             temperature=params.temperature)
         response = render({"text": text}, params)
-        response.headers["X-Localm-Transcription-Model"] = audio_name
+        response.headers["X-Localm-Transcription-Model"] = (
+            audio_name.encode("ascii", "replace").decode("ascii"))
         return response
     detail = await loop.run_in_executor(
         get_plugin_executor(),
