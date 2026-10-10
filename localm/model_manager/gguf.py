@@ -2244,7 +2244,7 @@ def gguf_mmproj_modalities(path: Path) -> Optional[dict]:
             buf = f.read(_GGUF_META_PROBE_BYTES)
     except (OSError, ValueError):
         return None
-    found = {_CLIP_HAS_VISION_KEY: None, _CLIP_HAS_AUDIO_KEY: None}
+    found: dict[str, Optional[bool]] = {_CLIP_HAS_VISION_KEY: None, _CLIP_HAS_AUDIO_KEY: None}
     architecture = None
     try:
         if buf[:4] != b"GGUF":

@@ -49,6 +49,10 @@ _CHUNK_TYPE_TEXT = 0
 # mtmd_input_chunk_type: MTMD_INPUT_CHUNK_TYPE_AUDIO.
 _CHUNK_TYPE_AUDIO = 2
 
+# The exports audio input needs; a runtime without all of them takes no audio.
+_AUDIO_FUNCTIONS = ("mtmd_support_audio", "mtmd_get_audio_sample_rate",
+                    "mtmd_bitmap_init_from_audio")
+
 # Fewest samples mtmd_bitmap_init_from_audio may be given: the runtime aborts the
 # process on an audio bitmap of one sample or fewer.
 _AUDIO_MIN_SAMPLES = 2
@@ -399,9 +403,10 @@ def _load_lib() -> ctypes.CDLL:
         m.mtmd_get_audio_sample_rate.argtypes = [ctypes.c_void_p]
         m.mtmd_bitmap_init_from_audio.restype = ctypes.c_void_p
         m.mtmd_bitmap_init_from_audio.argtypes = [ctypes.c_size_t, ctypes.c_char_p]
-        m.localm_has_audio_api = True
-    except AttributeError:
-        m.localm_has_audio_api = False
+    except AttributeError as e:
+        from localm.debuglog import logger
+        logger.info("mtmd: %s lacks the audio input calls (%s); audio input is "
+                    "unavailable with this runtime", name, e)
     _lib = m
     return m
 
@@ -664,7 +669,7 @@ class MtmdContext:
         self.supports_vision = bool(self._m.mtmd_support_vision(self._ctx))
         self.supports_audio = False
         self.audio_sample_rate = 0
-        if (getattr(self._m, "localm_has_audio_api", False)
+        if (all(hasattr(self._m, name) for name in _AUDIO_FUNCTIONS)
                 and self._m.mtmd_support_audio(self._ctx)):
             rate = int(self._m.mtmd_get_audio_sample_rate(self._ctx))
             if rate > 0:

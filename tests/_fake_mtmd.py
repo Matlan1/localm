@@ -60,7 +60,6 @@ class FakeMtmdLib:
         self.slices = slices
         self.audio_segments = 1
         self.n_embd = n_embd
-        self.localm_has_audio_api = True
         self.audio_bitmaps = []          # (n_samples, pcm bytes) per audio bitmap
         self.rc_tokenize = 0
         self.fail_encode = False

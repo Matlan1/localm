@@ -309,10 +309,10 @@ class TestGenerateDispatch:
 
 
 class _InitLib:
-    """Just enough of the mtmd CDLL for the real MtmdContext.__init__."""
+    """Just enough of the mtmd CDLL for the real MtmdContext.__init__, from a
+    runtime without the audio exports."""
 
-    def __init__(self, *, vision, audio, rate, has_api=True):
-        self.localm_has_audio_api = has_api
+    def __init__(self, *, vision, audio, rate):
         self._vision, self._audio, self._rate = vision, audio, rate
 
     def mtmd_context_params_default(self):
@@ -324,17 +324,24 @@ class _InitLib:
     def mtmd_support_vision(self, ctx):
         return self._vision
 
+    def mtmd_default_marker(self):
+        return MARKER.encode()
+
+    def mtmd_free(self, ctx):
+        pass
+
+
+class _AudioInitLib(_InitLib):
+    """_InitLib from a runtime with the audio exports."""
+
     def mtmd_support_audio(self, ctx):
         return self._audio
 
     def mtmd_get_audio_sample_rate(self, ctx):
         return self._rate
 
-    def mtmd_default_marker(self):
-        return MARKER.encode()
-
-    def mtmd_free(self, ctx):
-        pass
+    def mtmd_bitmap_init_from_audio(self, n, samples):
+        return 0x9999
 
 
 class TestContextInit:
@@ -343,8 +350,9 @@ class TestContextInit:
         monkeypatch.setattr(lmtmd, "_input_text_class", lmtmd._MtmdInputTextV2)
         monkeypatch.setenv("LOCALM_MTMD_CPU", "1")
 
-    def _ctx(self, monkeypatch, **kw):
-        monkeypatch.setattr(lmtmd, "_load_lib", lambda: _InitLib(**kw))
+    def _ctx(self, monkeypatch, has_api=True, **kw):
+        lib = _AudioInitLib(**kw) if has_api else _InitLib(**kw)
+        monkeypatch.setattr(lmtmd, "_load_lib", lambda: lib)
         return lmtmd.MtmdContext("/fake/mmproj.gguf", 0xBEEF)
 
     def test_an_audio_projector_reports_its_rate(self, monkeypatch):
