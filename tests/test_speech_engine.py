@@ -39,6 +39,7 @@ class _FakeEngine:
         self.alive_flag = True
         self.closed = False
         self.outcome = None
+        self.die_on_error = False
         self.broken = False
 
     @property
@@ -53,6 +54,8 @@ class _FakeEngine:
 
     def speak(self, text, **kw):
         if self.outcome is not None:
+            if self.die_on_error:
+                self.alive_flag = False
             raise self.outcome
         return speech.SpeechOutput(wav=b"RIFF", sample_rate=24000, n_samples=24000,
                                    frames=12, seed=1)
@@ -123,7 +126,7 @@ class TestResidency:
         speech.synthesize(m, "hi")
         eng = speech._ENGINE
         eng.outcome = RuntimeError("The speech worker crashed")
-        eng.alive_flag = False
+        eng.die_on_error = True
         with pytest.raises(RuntimeError):
             speech.synthesize(m, "hi")
         assert speech._ENGINE is None

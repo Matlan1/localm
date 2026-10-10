@@ -296,20 +296,35 @@ class TestJobAndPrivacy:
         assert progress[0]["phase"] == "loading the speech model"
         assert progress[-1]["done"] == 3 and progress[-1]["unit"] == "frames"
 
-    def test_nothing_is_written_to_disk(self, client, home):
-        before = sorted(p for p in home.rglob("*"))
-        assert _post(client).status_code == 200
-        assert sorted(p for p in home.rglob("*")) == before
+    @staticmethod
+    def _files_outside_the_activity_record(home):
+        return sorted(p for p in home.rglob("*")
+                      if "activity" not in p.relative_to(home).parts)
 
-    def test_nothing_is_written_to_disk_in_privacy_mode(self, client, home, monkeypatch):
+    @staticmethod
+    def _activity_text(home):
+        return "".join(p.read_text(encoding="utf-8", errors="replace")
+                       for p in (home / "activity").glob("*.json"))
+
+    def test_only_the_contentless_activity_record_is_written(self, client, home):
+        before = self._files_outside_the_activity_record(home)
+        assert _post(client, {"input": "Speak the marker phrase zebra quartz."}).status_code == 200
+        assert self._files_outside_the_activity_record(home) == before
+        record = self._activity_text(home)
+        assert '"kind": "speak"' in record or '"kind":"speak"' in record
+        assert "zebra" not in record
+
+    def test_nothing_else_is_written_in_privacy_mode_with_an_upload(self, client, home,
+                                                                    monkeypatch):
         from localm import audit
         monkeypatch.setattr(audit, "effective_mode",
                             lambda *a, **k: audit.SessionMode.PRIVACY)
-        before = sorted(p for p in home.rglob("*"))
-        r = client.post(URL, data={"input": "hi"},
+        before = self._files_outside_the_activity_record(home)
+        r = client.post(URL, data={"input": "zebra quartz"},
                         files={"voice_file": ("ref.wav", WAV, "audio/wav")})
         assert r.status_code == 200
-        assert sorted(p for p in home.rglob("*")) == before
+        assert self._files_outside_the_activity_record(home) == before
+        assert "zebra" not in self._activity_text(home)
 
     def test_a_client_that_goes_away_cancels_the_synthesis(self, home, monkeypatch):
         from localm.plugins.builtin.tts import speech_route

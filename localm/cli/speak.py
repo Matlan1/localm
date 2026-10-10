@@ -21,7 +21,7 @@ class _Progress:
 
     def __init__(self, status) -> None:
         self._status = status
-        self._last_line = 0.0
+        self._last_line: float | None = None
 
     def __call__(self, event: dict) -> None:
         stage = event.get("stage")
@@ -34,8 +34,11 @@ class _Progress:
         if self._status is not None:
             self._status.update(text)
             return
+        if stage != "speaking":
+            click.echo(text, err=True)
+            return
         now = time.monotonic()
-        if stage != "speaking" or now - self._last_line >= _PLAIN_PROGRESS_EVERY_S:
+        if self._last_line is None or now - self._last_line >= _PLAIN_PROGRESS_EVERY_S:
             self._last_line = now
             click.echo(text, err=True)
 

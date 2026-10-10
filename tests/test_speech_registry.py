@@ -114,9 +114,14 @@ class TestProjectorAttachment:
         assert Path(registry.get_model_mmproj("voice-model")).name == mmproj.name
 
 
-    def test_a_copied_tts_model_records_its_mmproj_on_the_entry(self, home):
+    def test_a_copied_tts_model_records_its_mmproj_on_the_entry(self, home, monkeypatch):
+        import localm.model_manager as mm
         from localm.config import load_registry
         from localm.model_manager import registry
+        models = home / "models"
+        models.mkdir(exist_ok=True)
+        monkeypatch.setattr(mm, "MODELS_DIR", models)
+        monkeypatch.setattr(mm, "ensure_dirs", lambda: models.mkdir(parents=True, exist_ok=True))
         folder = home / "outside"
         folder.mkdir()
         model = folder / "Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf"

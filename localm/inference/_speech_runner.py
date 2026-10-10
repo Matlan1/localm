@@ -315,40 +315,40 @@ class SpeechRunner:
         last_message = time.monotonic()
         cancel_deadline = None
         while True:
+            msg = None
             try:
                 msg = self._resp_q.get(timeout=_POLL_INTERVAL)
-            except _queue.Empty as e:
-                now = time.monotonic()
+            except _queue.Empty:
                 if not self._proc.is_alive():
                     detail = self._crash_detail()
                     reason = self._exit_reason()
                     self.shutdown(grace=0)
                     raise RuntimeError(
                         f"The speech worker crashed (exit code {reason}) while "
-                        f"speaking. The server stayed up.{detail}") from e
-                if cancel_deadline is None and should_cancel is not None and should_cancel():
-                    self._cancel.set()
-                    cancel_deadline = now + CANCEL_GRACE
+                        f"speaking. The server stayed up.{detail}") from None
+            now = time.monotonic()
+            if cancel_deadline is None and should_cancel is not None and should_cancel():
+                self._cancel.set()
+                cancel_deadline = now + CANCEL_GRACE
+            if msg is None or msg[0] == "progress":
                 if cancel_deadline is not None and now > cancel_deadline:
                     self.shutdown(grace=0)
                     from localm.inference.backends.llamacpp.mtmd_gen import SpeechCancelled
                     raise SpeechCancelled(
                         "The speech synthesis was cancelled; the worker did not "
-                        "stop in time and was restarted.") from e
+                        "stop in time and was restarted.")
+            if msg is None:
                 if cancel_deadline is None and now - last_message > stall_timeout:
                     self.shutdown(grace=0)
                     raise SpeechWorkerHung(
                         f"The speech worker made no progress for {stall_timeout:.0f}s "
-                        "and was stopped; retry the request.") from e
+                        "and was stopped; retry the request.")
                 continue
-            last_message = time.monotonic()
+            last_message = now
             kind = msg[0]
             if kind == "progress":
                 if on_progress is not None:
                     on_progress(int(msg[1]))
-                if cancel_deadline is None and should_cancel is not None and should_cancel():
-                    self._cancel.set()
-                    cancel_deadline = last_message + CANCEL_GRACE
                 continue
             if kind == "ok":
                 return msg[1]
