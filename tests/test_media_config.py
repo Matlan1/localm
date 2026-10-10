@@ -171,7 +171,7 @@ def test_a_plugin_sharing_the_image_config_keeps_its_comfyui_backend(monkeypatch
                 "music": {"use_config_from": "image"},
                 "video": {"use_config_from": "image"}})
     s = video_backend.settings(cfg)
-    assert s["backend"] == "comfy"
+    assert s["backend_choice"] == "auto" and s["native"] == {}
     assert s["warning"] is None
     s = music_backend.settings(cfg)
     assert s["backend_choice"] == "auto" and s["native"] == {}

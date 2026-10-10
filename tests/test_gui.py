@@ -5076,6 +5076,8 @@ def video_app(tmp_path, monkeypatch):
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr("localm.media.backend_choice.comfy_is_set_up",
+                        lambda *a, **k: True)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     import localm.config as _cfg
     monkeypatch.setattr(_cfg, "HOME_DIR", home)

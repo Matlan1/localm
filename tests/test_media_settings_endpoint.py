@@ -58,7 +58,7 @@ def test_media_admin_only_fields_is_the_single_source_of_truth():
     assert ss.media_admin_only_fields() == {
         "launch_cmd", "api_url", "workdir", "native_model", "native_vae",
         "native_clip_l", "native_clip_g", "native_t5xxl", "native_llm",
-        "native_dit", "native_text_encoder", "native_lm"}
+        "native_clip_vision", "native_dit", "native_text_encoder", "native_lm"}
 
 
 def test_media_schema_resolves_block_over_global():

@@ -248,29 +248,34 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             cached_comfy_download, curated_comfy_download, search_refusal,
         )
 
-        def _native_image_check():
-            """The preflight answer when the image plugin runs the native
-            backend, or None when it runs ComfyUI."""
+        def _native_check():
+            """The preflight answer when the image or video plugin runs the
+            native backend, or None when it runs ComfyUI. With no model set,
+            ``missing`` lists every recommended file not yet downloaded."""
+            from importlib import import_module
+
             from localm.config import load_config
             from localm.media import backend_choice
-            from localm.plugins.builtin.image import backend as image_backend
-            s = backend_choice.refine_auto(image_backend.settings(load_config()), "Image")
+            plugin_backend = import_module(f"localm.plugins.builtin.{kind}.backend")
+            s = backend_choice.refine_auto(plugin_backend.settings(load_config()),
+                                           kind.capitalize())
             if s.get("backend") != "native":
                 return None
-            from localm.plugins.builtin.image.backends import native
+            native = import_module(f"localm.plugins.builtin.{kind}.backends.native")
             st = native.status(s)
             if not st["missing"]:
                 return {"status": "verified", "missing": [], "warning": None}
-            rec = st["recommended"]
             if (s.get("native") or {}).get("model"):
                 return {"status": "verified", "missing": [], "warning": st["missing"]}
+            rec = st["recommended"]
+            files = rec["parts"] if "parts" in rec else [dict(rec, filename=rec["file"])]
             return {"status": "verified", "warning": None, "missing": [{
-                "filename": rec["file"], "native": True, "searchable": False,
-                "source": {"repo": rec["repo"], "file": rec["file"], "spec": rec["spec"],
-                           "sha256": rec["sha256"], "name": rec["name"],
-                           "size_bytes": rec["size_bytes"],
-                           "model_type": rec["model_type"], "origin": "curated"},
-            }]}
+                "filename": f["filename"], "native": True, "searchable": False,
+                "source": {"repo": f["repo"], "file": f["file"], "spec": f["spec"],
+                           "sha256": f["sha256"], "name": f.get("name"),
+                           "size_bytes": f["size_bytes"],
+                           "model_type": f["model_type"], "origin": "curated"},
+            } for f in files]}
 
         def _native_music_check():
             """The preflight answer when the music plugin runs the native
@@ -298,10 +303,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             } for m in st["missing"]]}
 
         def _check():
-            if kind in ("image", "music"):
+            if kind in ("image", "video", "music"):
                 try:
-                    native_answer = (_native_image_check() if kind == "image"
-                                     else _native_music_check())
+                    native_answer = (_native_music_check() if kind == "music"
+                                     else _native_check())
                 except Exception as e:
                     logger.warning("%s backend preflight failed: %s", kind, e)
                     return {"status": "unavailable", "missing": [],

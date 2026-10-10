@@ -1066,11 +1066,12 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     if not arg:
         console.print(f"[dim]Usage: /{label} <{spec['arg']}>[/dim]")
         return
-    if spec["plugin"] == "image":
+    if spec["plugin"] in ("image", "video"):
         import time as _t
+        from importlib import import_module
 
         from ..audit import SessionMode, effective_mode
-        from ..plugins.builtin.image import backend as image_backend
+        media_backend = import_module(f"localm.plugins.builtin.{spec['plugin']}.backend")
         out_dir = home_dir / spec["subdir"]
         out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
 
@@ -1081,7 +1082,7 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
 
         is_privacy = effective_mode("chat") == SessionMode.PRIVACY
         out_dir.mkdir(parents=True, exist_ok=True)
-        result = image_backend.generate_unless_comfy(
+        result = media_backend.generate_unless_comfy(
             arg, out, before_generate=_unload_chat,
             on_progress=lambda t: console.print(f"[dim]{escape(str(t))}[/dim]"),
             write_sidecar=not is_privacy, delete_outputs=is_privacy)
@@ -1307,9 +1308,9 @@ def _handle_command(
             "/system <text>          set system prompt\n"
             "/save [file]            save conversation to JSON\n"
             "/compact                summarise older turns to free context\n"
-            "/generate-image <prompt> generate an image via ComfyUI FLUX\n"
-            "/generate-music <tags>  generate music (ACE-Step)\n"
-            "/generate-video <prompt> generate a clip via ComfyUI Wan\n"
+            "/generate-image <prompt> generate an image (built in, or ComfyUI)\n"
+            "/generate-music <tags>  generate music (built in, or ComfyUI)\n"
+            "/generate-video <prompt> generate a clip (built in, or ComfyUI)\n"
             "/temp <float>           sampling temperature\n"
             "/tokens <int>           max response tokens"
             "[/dim]"

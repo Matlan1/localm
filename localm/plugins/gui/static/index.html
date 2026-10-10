@@ -617,11 +617,12 @@
       <div class="page">
         <h2 data-i18n="video.title">Video generation</h2>
         <div class="sub" data-i18n="video.intro">Slowest generator here: minutes to hours per clip, so iterate
-        with short durations and fewer steps. Keep the native 1280&times;704 resolution
-        or quality collapses. Runs Wan 2.2 on your local ComfyUI.</div>
+        with short durations and fewer steps. Keep the model's native resolution (the
+        Width and Height defaults) or quality collapses.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="video"></span>
             <div class="card-head-text"><h3 data-i18n="mediaGallery.generate">Generate</h3></div></div>
+          <div class="sub" id="video-backend-note" hidden></div>
           <label data-i18n="video.promptLabel">Prompt - subject, motion, camera, lighting (motion verbs matter)</label>
           <textarea id="video-prompt" rows="2" placeholder="a red fox running through fresh snow, low camera tracking shot, golden hour" data-i18n-placeholder="video.promptPlaceholder"></textarea>
           <label data-i18n="video.negativePromptLabel">Negative prompt (optional - default suppresses blur/distortion/watermarks)</label>
@@ -632,7 +633,7 @@
             <div><label data-i18n="video.startImageLabel">Start image (optional, image-to-video)</label><input type="text" id="video-image" placeholder="path on this machine" spellcheck="false" data-i18n-placeholder="video.startImagePlaceholder"></div>
           </div>
           <!-- Width and Height are folded even though they look load-bearing: the
-               blurb above this form tells you to KEEP the native 1280x704 and
+               blurb above this form tells you to KEEP the model's native resolution and
                iterate on duration and steps instead. A field the page tells you
                not to touch is the definition of rarely touched. -->
           <details class="adv-fold" id="video-advanced">
