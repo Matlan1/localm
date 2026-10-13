@@ -41,7 +41,7 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
    machine falls back to Vulkan, then CPU, and says so.
 
    **Linux with an NVIDIA GPU runs on Vulkan.** The pinned upstream release
-   (`master-951-f89d9b1`) publishes a CUDA build for Windows only; its Linux archives are
+   publishes a CUDA build for Windows only; its Linux archives are
    CPU, Vulkan and ROCm. So on Linux `auto` picks Vulkan for NVIDIA, and
    `localm setup-sdcpp --backend cuda` there fails with "stable-diffusion.cpp publishes
    no 'cuda' build for this platform (available: cpu, vulkan, rocm)".
