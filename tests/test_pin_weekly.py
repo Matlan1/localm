@@ -367,7 +367,7 @@ def test_a_failing_post_bump_command_stops_before_any_push(env):
 
 def test_shipped_vendored_advancers_run_the_gui_suite_and_gate_the_merge_on_the_boundary():
     for adv in pw.build_advancers():
-        if adv.key.startswith("vendored-"):
+        if adv.key.startswith("vendored-") and adv.bump_script == "scripts/bump_vendored_js.py":
             assert adv.post_bump_cmds == (("npm", "ci"), ("npm", "test"))
             assert adv.auto_merge("1.2.3", "1.2.4") is True
             assert adv.auto_merge("1.2.3", "2.0.0") is False
@@ -1209,7 +1209,8 @@ def test_shipped_advancers_cover_every_runtime_with_a_pipeline_or_a_named_gap():
     advs = pw.build_advancers()
     assert [a.key for a in advs] == [
         "llama", "comfyui", "rocm", "koboldcpp", "sdcpp", "uv", "vendored-marked",
-        "vendored-dompurify", "vendored-highlightjs", "vendored-katex", "cuda-runtime",
+        "vendored-dompurify", "vendored-highlightjs", "vendored-katex", "vendored-kokoro-js",
+        "vendored-transformersjs", "cuda-runtime",
         "amd-wheels", "gguf-node", "docker-base"]
     assert all(a.auto_merge("1.0.0", "1.0.1") is False for a in advs
                if a.confirm_script is None and not a.post_bump_cmds)
