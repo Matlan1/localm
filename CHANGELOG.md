@@ -2069,6 +2069,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   whole-repository download is checked. The file metadata and the bytes are read from one
   commit, so a repository that changes during a pull no longer fails the check. When no digest
   can be read, the pull now says so instead of finishing silently.
+- **The starter models are checked against a fixed sha256.** `localm pull llama3.2-1b` and the
+  other ten starter models (also from the Add a model list) refuse a download whose bytes are
+  not the file this release of localm was built with, and say so when Hugging Face now serves a
+  different file: pass `--sha256` with the digest it shows to accept that file. A digest you
+  pass yourself is never replaced.
 
 ## [0.2.0] - 2026-09-04
 

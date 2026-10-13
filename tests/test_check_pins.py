@@ -822,7 +822,7 @@ def test_the_pinned_hf_files_cover_music_comfyui_and_starter_models_and_every_di
 
 def test_a_hub_serving_the_pinned_digests_reads_current(monkeypatch):
     row = _hf_row(monkeypatch, _hub_serving_the_pins())
-    assert row.status == cp.CURRENT and "23 pinned digest(s)" in row.detail
+    assert row.status == cp.CURRENT and f"{len(cp.hf_file_pins())} pinned digest(s)" in row.detail
 
 
 def test_a_reuploaded_file_reads_stale_and_names_it(monkeypatch):
