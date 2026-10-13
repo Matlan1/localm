@@ -341,6 +341,55 @@ class TestBrowserCloseToolWhileItsBrowserStarts:
             results[0], "output", results[0])
         assert "closed while it was starting" in results[0].output
 
+    def test_a_call_after_the_close_starts_a_new_browser(self, tmp_path, fleet):
+        from localm.browser import session as bsession
+        from localm.plugins.coder.tools import browser as bt
+        sid = "coder-" + OWNER
+        first, first_results = _navigate_from_threads(tmp_path, OWNER, [URL_A])
+        assert fleet.entered(sid).wait(WAIT), "the start never began"
+        assert "Cancelled" in bt.tool_browser_close(
+            tmp_path, _session=_Session(OWNER)).output
+        second, second_results = _navigate_from_threads(tmp_path, OWNER, [URL_B])
+        deadline = time.monotonic() + WAIT
+        while len(fleet.built) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        started_while_the_cancelled_one_ran = len(fleet.built) == 2
+        fleet.gate(sid).set()
+        _join(first + second)
+        assert started_while_the_cancelled_one_ran, (
+            "a call made after browser_close waited on the cancelled start")
+        assert getattr(first_results[0], "ok", True) is False
+        assert getattr(second_results[0], "ok", False) is True, getattr(
+            second_results[0], "output", second_results[0])
+        assert fleet.built[0].stopped is True
+        assert fleet.built[1].stopped is False
+        assert bsession.get(sid) is fleet.built[1]
+        assert bt.owned_session_id(OWNER) == sid
+
+    def test_close_of_a_browser_that_just_finished_starting_says_closed(
+            self, tmp_path, fleet, monkeypatch):
+        from localm.plugins.coder.tools import browser as bt
+        sid = "coder-" + OWNER
+        fleet.gate(sid).set()
+        real_start = bt._start_browser
+        registered = threading.Event()
+        proceed = threading.Event()
+
+        def start_then_pause(owner, headless, starting):
+            live = real_start(owner, headless, starting)
+            registered.set()
+            proceed.wait(WAIT)
+            return live
+
+        monkeypatch.setattr(bt, "_start_browser", start_then_pause)
+        threads, _ = _navigate_from_threads(tmp_path, OWNER, [URL_A])
+        assert registered.wait(WAIT)
+        closed = bt.tool_browser_close(tmp_path, _session=_Session(OWNER))
+        proceed.set()
+        _join(threads)
+        assert closed.output == "Closed the browser session.", closed.output
+        assert fleet.built[0].stopped is True
+
     def test_close_with_nothing_open_or_starting_says_so(self, tmp_path, fleet):
         from localm.plugins.coder.tools import browser as bt
         closed = bt.tool_browser_close(tmp_path, _session=_Session(OWNER))
