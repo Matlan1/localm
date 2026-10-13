@@ -2066,6 +2066,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tools or skills, and refuses to create or change anything inside a `.localcoder`
   directory at any depth; a `search_replace` sweep leaves those files alone and
   lists them. Owner sessions are unchanged.
+- **A plain `coder` API key can no longer change the project's git configuration.** A
+  restricted coder session's file tools could create or change files under `.git`, and
+  could write into a folder that a linked `.localcoder` elsewhere in the project pointed
+  at. A restricted session now refuses to write inside a `.git` file or directory at any
+  depth, into any folder a linked `.localcoder` or `.git` (or a `.git` file's `gitdir:`
+  line) points at, and through a file that has another hard link. Owner sessions are
+  unchanged.
 - **`setup.sh`, `setup-gui.sh`, `setup.bat` and `setup-gui.bat` install a fixed uv release and check it before running it.**
   They used to run whatever Astral's installer URL returned. They now download the installer
   of one pinned uv release and run it only when its checksum matches; a failed download, a
