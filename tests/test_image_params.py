@@ -151,7 +151,7 @@ class TestComfyUI:
         g = {"3": {"class_type": "KSampler", "inputs": {"positive": ["8", 0], "seed": 1}},
              "8": {"class_type": "ConditioningCombine", "inputs": {"conditioning": ["9", 0]}},
              "9": {"class_type": "ConditioningCombine", "inputs": {"conditioning": ["8", 0]}}}
-        assert ip.parse_comfy_prompt(g)["prompt"] == ""
+        assert "prompt" not in ip.parse_comfy_prompt(g)
 
     def test_linked_numeric_inputs_are_not_read_as_numbers(self):
         g = json.loads(json.dumps(COMFY_GRAPH))
@@ -211,7 +211,7 @@ class TestHostileInput:
 
     def test_deeply_nested_json_is_refused_not_a_crash(self):
         with pytest.raises(ip.ImageParamsError):
-            ip.params_from_bytes(b"[" * 200000)
+            ip.params_from_bytes(b'{"a":[' * 100000)
         with pytest.raises(ip.ImageParamsError):
             ip.params_from_bytes(b"{" + b'"a":{' * 100000)
 
@@ -229,3 +229,110 @@ class TestHostileInput:
         data = _png([_text("localm", "{broken"), _text("parameters", A1111_SAMPLE)])
         got = ip.params_from_bytes(data)
         assert got["source"] == "a1111" and got["notes"]
+
+
+FLUX_GRAPH = {
+    "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a neon street", "clip": ["11", 0]}},
+    "10": {"class_type": "FluxGuidance", "inputs": {"guidance": 3.5, "conditioning": ["6", 0]}},
+    "13": {"class_type": "BasicGuider", "inputs": {"model": ["12", 0], "conditioning": ["10", 0]}},
+    "14": {"class_type": "RandomNoise", "inputs": {"noise_seed": 42}},
+    "15": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+    "16": {"class_type": "BasicScheduler", "inputs": {"model": ["12", 0], "scheduler": "simple",
+                                                      "steps": 20, "denoise": 1.0}},
+    "17": {"class_type": "EmptySD3LatentImage", "inputs": {"width": 1024, "height": 768, "batch_size": 1}},
+    "12": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux1-dev.safetensors"}},
+    "25": {"class_type": "SamplerCustomAdvanced", "inputs": {
+        "noise": ["14", 0], "guider": ["13", 0], "sampler": ["15", 0], "sigmas": ["16", 0],
+        "latent_image": ["17", 0]}},
+}
+
+
+class TestComfyCustomSamplers:
+    def test_stock_flux_graph_resolves_through_guider_noise_and_sigmas(self):
+        p = ip.parse_comfy_prompt(FLUX_GRAPH)
+        assert p["prompt"] == "a neon street" and p["guidance"] == 3.5
+        assert (p["seed"], p["steps"]) == (42, 20)
+        assert p["sampler"] == "euler" and p["scheduler"] == "simple"
+        assert (p["width"], p["height"]) == (1024, 768)
+        assert p["model"] == "flux1-dev.safetensors"
+
+    def test_a_graph_with_no_prompt_text_says_so_and_has_no_prompt_key(self):
+        g = json.loads(json.dumps(FLUX_GRAPH))
+        g["25"]["inputs"]["guider"] = ["99", 0]
+        got = ip.params_from_bytes(_png([_text("prompt", json.dumps(g))]))
+        assert "prompt" not in got["params"] and "negative_prompt" not in got["params"]
+        assert any("No prompt text" in n for n in got["notes"])
+
+    def test_sampler_custom_reads_its_direct_inputs(self):
+        g = {"1": {"class_type": "SamplerCustom", "inputs": {
+                "positive": ["2", 0], "negative": ["3", 0], "cfg": 4.5, "noise_seed": 8,
+                "sampler": ["4", 0], "sigmas": ["5", 0], "latent_image": ["6", 0]}},
+             "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "pos"}},
+             "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "neg"}},
+             "4": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "dpmpp_2m"}},
+             "5": {"class_type": "BasicScheduler", "inputs": {"scheduler": "karras", "steps": 12, "denoise": 1}},
+             "6": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64}}}
+        p = ip.parse_comfy_prompt(g)
+        assert (p["prompt"], p["negative_prompt"], p["cfg"], p["seed"]) == ("pos", "neg", 4.5, 8)
+        assert (p["steps"], p["sampler"], p["scheduler"]) == (12, "dpmpp_2m", "karras")
+
+
+class TestBoundedWork:
+    def _timed(self, fn):
+        import time
+        t0 = time.perf_counter()
+        try:
+            fn()
+        except ip.ImageParamsError:
+            pass
+        return time.perf_counter() - t0
+
+    def test_a_lora_tag_with_a_long_unclosed_weight_is_linear(self):
+        text = "<lora:a:" + "1" * 200000 + "\nSteps: 20"
+        assert self._timed(lambda: ip.parse_a1111(text)) < 1.0
+
+    def test_a_settings_line_of_colonless_words_is_linear(self):
+        text = "p\nSteps: 20, " + "a " * 400000
+        assert self._timed(lambda: ip.parse_a1111(text)) < 1.0
+
+    def test_many_colons_and_quotes_in_the_settings_line_are_linear(self):
+        text = "p\nSteps: 20, " + 'k: "' * 100000 + ", " + ("a: b, " * 100000)
+        assert self._timed(lambda: ip.parse_a1111(text)) < 1.0
+
+    def test_a_parameters_text_over_the_cap_is_refused(self):
+        with pytest.raises(ip.ImageParamsError, match="too long"):
+            ip.parse_a1111("x" * (ip.MAX_PARAMETERS_CHARS + 1))
+
+    def test_total_decoded_text_is_capped_across_many_chunks(self):
+        zeros = zlib.compress(b"\x00" * (ip.MAX_TEXT_BYTES - 10))
+        chunks = [_chunk(b"zTXt", f"k{i}".encode() + b"\x00\x00" + zeros) for i in range(40)]
+        got = ip.read_png_text(_png(chunks))
+        assert sum(len(v) for v in got.values()) <= ip.MAX_TOTAL_TEXT_BYTES
+        assert 0 < len(got) < 40
+
+    def test_only_wanted_keywords_are_decoded(self):
+        zeros = zlib.compress(b"\x00" * 1000)
+        data = _png([_chunk(b"zTXt", b"junk\x00\x00" + zeros), _text("parameters", "x")])
+        assert ip.read_png_text(data, ip.WANTED_KEYWORDS) == {"parameters": "x"}
+
+    def test_a_duplicate_keyword_is_not_decoded_again(self):
+        zeros = zlib.compress(b"\x00" * (ip.MAX_TEXT_BYTES - 10))
+        chunks = [_text("parameters", "first")] + [
+            _chunk(b"zTXt", b"parameters\x00\x00" + zeros) for _ in range(30)]
+        assert ip.read_png_text(_png(chunks)) == {"parameters": "first"}
+
+
+class TestNumbersStayFinite:
+    def test_huge_or_non_finite_numbers_are_dropped_not_raised(self):
+        blob = (b'{"prompt":"x","seed":' + b"9" * 300 + b',"steps":1e999,"cfg":Infinity,'
+                b'"loras":[{"name":"a","strength":' + b"1" + b"0" * 400 + b"},"
+                b'{"name":"b","strength":NaN},{"name":"c","strength":Infinity}]}')
+        got = ip.params_from_bytes(blob)["params"]
+        assert "seed" not in got and "steps" not in got and "cfg" not in got
+        assert got["loras"] == [{"name": "a", "strength": 1.0}, {"name": "b", "strength": 1.0},
+                                {"name": "c", "strength": 1.0}]
+        json.dumps(got, allow_nan=False)
+
+    def test_a1111_and_comfy_values_pass_the_same_filter(self):
+        got = ip.params_from_bytes(_png([_text("parameters", "p\nSteps: 20, Seed: " + "9" * 300)]))
+        assert "seed" not in got["params"] and got["params"]["steps"] == 20

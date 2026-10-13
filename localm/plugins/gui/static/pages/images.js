@@ -295,29 +295,38 @@ const IMPORT_SOURCES = new Set(["localm", "a1111", "comfyui", "sidecar"]);
 
 /* Fills this page from the `{source, params}` the import route returns:
    prompt, negative prompt, seed, guidance, CFG, denoise and size, then (native
-   backend) the model and LoRAs matched against the registered ones. Returns
-   the names of the parameters it could not apply. */
+   backend) the model and LoRAs matched against the registered ones. A localm
+   image or sidecar holds the whole record, so a field it lacks is cleared; a
+   foreign image holds only what its tool wrote, so a field it lacks is left
+   as it is. Returns the names of the parameters it could not apply. */
 export async function applyImportedParams(result) {
   const p = (result && result.params) || {};
+  const own = result.source === "localm" || result.source === "sidecar";
   const skipped = [];
-  const set = (id, value) => { const node = $(id); if (node) node.value = value ?? ""; return !!node; };
-  set("img-prompt", p.prompt);
-  set("img-negative", p.negative_prompt);
-  set("img-seed", p.seed);
-  set("img-guidance", p.guidance);
-  set("img-cfg", p.cfg);
-  set("img-denoise", p.denoise);
-  set("img-size", p.width && p.height ? `${p.width}x${p.height}` : "");
+  const put = (id, value) => {
+    const node = $(id);
+    if (!node) return false;
+    if (value === undefined || value === null) { if (own) node.value = ""; return true; }
+    node.value = value;
+    return true;
+  };
+  put("img-prompt", p.prompt);
+  put("img-negative", p.negative_prompt);
+  put("img-seed", p.seed);
+  put("img-guidance", p.guidance);
+  put("img-cfg", p.cfg);
+  put("img-denoise", p.denoise);
+  put("img-size", p.width && p.height ? `${p.width}x${p.height}` : null);
+  if (!own && (p.prompt === undefined || p.prompt === null)) skipped.push("prompt");
   for (const [key, id] of [["steps", "img-steps"], ["sampler", "img-sampler"], ["scheduler", "img-scheduler"]]) {
     if (p[key] === undefined || p[key] === null) continue;
-    if (!set(id, p[key])) skipped.push(key);
+    if (!put(id, p[key])) skipped.push(key);
   }
   if (imageBackend.active === "native") {
-    const own = result.source === "localm" || result.source === "sidecar";
     if (p.model) {
-      const name = own ? p.model : await imageModelPicker.matchModel(p.model);
+      const name = await imageModelPicker.matchModel(p.model);
       if (name) {
-        await imageModelPicker.setModels(own ? { model: name, ...(p.components || {}) } : { model: name });
+        await imageModelPicker.setModels(own ? { ...(p.components || {}), model: name } : { model: name });
         if (imageModelPicker.state.models.model !== name) skipped.push(`model ${p.model}`);
       } else {
         skipped.push(`model ${p.model}`);

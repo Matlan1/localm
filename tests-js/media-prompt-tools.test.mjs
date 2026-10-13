@@ -241,3 +241,44 @@ test("the Music picker lists checkpoints it cannot run, with the reason", async 
   assert.match(text, /ace_step_v1_3\.5b\.safetensors: ACE-Step v1: ComfyUI only/);
   assert.equal($("music-native-models").querySelectorAll("select").length, 4);
 });
+
+test("a foreign image without prompt text keeps the user's prompt and says it was not applied", async () => {
+  const app = makeApp({ importResult: { source: "comfyui", params: { seed: 5, width: 64, height: 64 }, notes: [] } });
+  app.$("img-prompt").value = "keep me";
+  app.$("img-negative").value = "keep neg";
+  runScript(app.win, `globalThis.__p = (async () => { await refreshImageBackend(); await imageModelPicker.refresh(); })();`);
+  await app.win.__p;
+  runScript(app.win, `globalThis.__r = importParamsFromFile(new File([new Uint8Array([1])], "x.png"));`);
+  await app.win.__r;
+  assert.equal(app.$("img-prompt").value, "keep me");
+  assert.equal(app.$("img-negative").value, "keep neg");
+  assert.equal(app.$("img-seed").value, "5");
+  assert.match(app.$("toast").textContent, /Not applied: prompt/);
+});
+
+test("a localm record clears the fields it does not hold, and finds its model by file name", async () => {
+  const app = makeApp({ importResult: { source: "localm",
+    params: { prompt: "p", seed: 3, model: "fluxunchained-dev-q8-0-v2.gguf" }, notes: [] } });
+  app.$("img-negative").value = "old negative";
+  app.$("img-cfg").value = "9";
+  runScript(app.win, `globalThis.__p = (async () => { await refreshImageBackend(); await imageModelPicker.refresh(); })();`);
+  await app.win.__p;
+  runScript(app.win, `globalThis.__r = importParamsFromFile(new File([new Uint8Array([1])], "x.png"));`);
+  await app.win.__r;
+  assert.equal(app.$("img-negative").value, "");
+  assert.equal(app.$("img-cfg").value, "");
+  runScript(app.win, "globalThis.__c = JSON.stringify(imageModelPicker.choice());");
+  assert.deepEqual(JSON.parse(app.win.__c), { native_models: { model: "fluxunchained" } });
+  assert.doesNotMatch(app.$("toast").textContent, /Not applied/);
+});
+
+test("an unregistered model of a localm record is reported and does not wipe the picker", async () => {
+  const app = makeApp({ importResult: { source: "localm", params: { prompt: "p", model: "gone-model.gguf" }, notes: [] } });
+  runScript(app.win, `globalThis.__p = (async () => { await refreshImageBackend(); await imageModelPicker.setModels({ model: 'dreamshaper_8' }); })();`);
+  await app.win.__p;
+  runScript(app.win, `globalThis.__r = importParamsFromFile(new File([new Uint8Array([1])], "x.png"));`);
+  await app.win.__r;
+  runScript(app.win, "globalThis.__c = JSON.stringify(imageModelPicker.choice());");
+  assert.deepEqual(JSON.parse(app.win.__c), { native_models: { model: "dreamshaper_8" } });
+  assert.match(app.$("toast").textContent, /model gone-model\.gguf/);
+});
