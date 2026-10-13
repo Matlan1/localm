@@ -879,6 +879,49 @@ def test_reexec_on_windows_runs_a_child_and_returns_its_exit_code(monkeypatch):
     assert seen[0][-2:] == ["--only", "uv"]
 
 
+def _out(verdict, key="kobold", kind="verify-current"):
+    return pw.Outcome(key, "Kobold", kind, verdict, "why not")
+
+
+def test_three_weeks_without_a_result_files_one_issue_and_a_result_resets_the_count(env):
+    for week in range(1, 3):
+        assert pw.record_health([_out(pw.INCONCLUSIVE)], today=f"2026-10-{week:02d}")["kobold|verify-current"] == week
+    assert "UNPROVEN" not in env.issues.read_text(encoding="utf-8")
+    assert pw.record_health([_out(pw.NOT_RUN)], today="2026-10-03")["kobold|verify-current"] == 3
+    text = env.issues.read_text(encoding="utf-8")
+    assert text.count("UNPROVEN-3-WEEKS") == 1 and "since 2026-10-01" in text
+    assert pw.record_health([_out(pw.INCONCLUSIVE)], today="2026-10-04")["kobold|verify-current"] == 4
+    assert env.issues.read_text(encoding="utf-8").count("UNPROVEN-3-WEEKS") == 1
+    assert pw.record_health([_out(pw.PASS)], today="2026-10-05")["kobold|verify-current"] == 0
+    assert pw.record_health([_out(pw.INCONCLUSIVE)], today="2026-10-06")["kobold|verify-current"] == 1
+
+
+def test_a_skipped_candidate_leaves_the_count_alone_and_each_check_counts_on_its_own(env):
+    pw.record_health([_out(pw.INCONCLUSIVE), _out(pw.INCONCLUSIVE, kind="advance")], today="2026-10-01")
+    counts = pw.record_health([_out(pw.SKIPPED), _out(pw.PASS, kind="advance")], today="2026-10-08")
+    assert counts == {"kobold|verify-current": 1, "kobold|advance": 0}
+
+
+def test_an_unreadable_health_file_starts_the_counts_again_and_says_so(env, capsys):
+    pw.health_path().parent.mkdir(parents=True, exist_ok=True)
+    pw.health_path().write_text("{not json", encoding="utf-8")
+    assert pw.record_health([_out(pw.INCONCLUSIVE)], today="2026-10-01") == {"kobold|verify-current": 1}
+    assert "could not be read" in capsys.readouterr().out
+
+
+def test_the_report_lists_the_weeks_without_a_result_and_a_dry_run_counts_nothing(env, monkeypatch):
+    monkeypatch.setattr(pp, "sync_main_checkout", lambda: None)
+    monkeypatch.setattr(cp, "run_checks", lambda specs, now: [])
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    adv = _adv(confirm_script="scripts/confirm_absent_runtime.py")
+    monkeypatch.setenv("FAKE_CONFIRM_RC", "2")
+    pw.run_weekly([_adv()], dry_run=True, verify=False)
+    assert not pw.health_path().exists()
+    _, path = pw.run_weekly([adv], dry_run=False, verify=False)
+    counts = json.loads(pw.health_path().read_text(encoding="utf-8"))
+    assert counts["fake|advance"]["streak"] == 1 and "Weeks in a row without a result" in path.read_text(encoding="utf-8")
+
+
 def test_a_weekly_run_keeps_every_child_process_temp_beside_the_checkout(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
