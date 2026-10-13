@@ -11,8 +11,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from localm.inference.backends.llamacpp._runner import (UnexpectedLoadError,
-                                                        load_error_text)
 
 
 @pytest.mark.parametrize("exc,text", [
@@ -24,6 +22,7 @@ from localm.inference.backends.llamacpp._runner import (UnexpectedLoadError,
     (RuntimeError(""), "RuntimeError"),
 ])
 def test_load_error_text(exc, text):
+    from localm.inference.backends.llamacpp._runner import load_error_text
     assert load_error_text(exc) == text
 
 
@@ -85,6 +84,7 @@ def test_hf_load_error_envelope_keeps_the_type(monkeypatch):
 
 def test_an_unexpected_load_error_is_not_blamed_on_the_runtime():
     from localm.inference.backends.gguf import _load_failure_message
+    from localm.inference.backends.llamacpp._runner import UnexpectedLoadError
     msg = _load_failure_message(UnexpectedLoadError("TypeError: bad arg"))
     assert "unexpected error in localm" in msg and "TypeError: bad arg" in msg
     assert "setup-llama" not in msg
