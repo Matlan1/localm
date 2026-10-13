@@ -263,6 +263,8 @@ class HFBackend(BaseBackend):
         grammar request. The worker child runs the same interpreter out of the
         same environment, so importability here predicts importability there.
         """
+        if getattr(self, "_grammar_unsupported", False):
+            return False
         import importlib.util
         try:
             return importlib.util.find_spec("xgrammar") is not None
@@ -555,6 +557,11 @@ class HFBackend(BaseBackend):
         if grammar and grammar_lazy:
             from .base import GRAMMAR_LAZY_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
             raise GrammarUnsupportedError(GRAMMAR_LAZY_UNSUPPORTED_MESSAGE)
+        if grammar and getattr(self, "_grammar_unsupported", False):
+            from .base import GrammarUnsupportedError
+            raise GrammarUnsupportedError(
+                "grammar constraints failed at generation time for this model "
+                "(the xgrammar runtime raised), so a grammar request is refused")
         if self._runner is None or not self.loaded:
             raise RuntimeError("Model not loaded - call load() first")
         # The isolated worker computes a real finish_reason and reports it in the
@@ -583,3 +590,12 @@ class HFBackend(BaseBackend):
         )
         done = getattr(self._runner, "last_done", None) or {}
         self.last_finish_reason = done.get("finish_reason", "stop")
+        if done.get("grammar_unsupported") and not getattr(self, "_grammar_unsupported", False):
+            self._grammar_unsupported = True
+            logger.warning("the grammar constraint failed during generation; this "
+                           "reply was unconstrained and later grammar requests to "
+                           "this model are refused")
+            console.print(
+                "[yellow]grammar constraints failed at generation time for this "
+                "model (the xgrammar runtime raised); later grammar requests are "
+                "refused.[/yellow]")

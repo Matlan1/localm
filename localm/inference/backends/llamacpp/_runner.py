@@ -376,6 +376,24 @@ def _exit_after_stream_fault(sid: int) -> None:
     os._exit(1)
 
 
+class UnexpectedLoadError(RuntimeError):
+    """The worker's model load raised an exception that is neither a
+    ``RuntimeError`` nor an ``OSError`` (a defect in localm, not a broken
+    runtime). The message names the exception type."""
+
+
+def load_error_text(e: BaseException) -> str:
+    """The text a worker sends for a failed load: ``str(e)`` for a
+    ``RuntimeError``/``OSError`` with a message, otherwise prefixed with the
+    exception type, and the bare type name when the message is empty."""
+    msg = str(e).strip()
+    if not msg:
+        return type(e).__name__
+    if isinstance(e, (RuntimeError, OSError)):
+        return msg
+    return f"{type(e).__name__}: {msg}"
+
+
 def _runner_main(req_q, resp_q, ctrl_q) -> None:
     """Long-lived child: owns one GgufWorker (one loaded model) for its whole
     process lifetime, dispatching one command at a time. A multiplexed stream
@@ -479,7 +497,12 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             except UnsupportedModelRoleError as e:
                 resp_q.put(("error", str(e), "UnsupportedModelRoleError"))
             except Exception as e:
-                resp_q.put(("error", str(e)))
+                from localm.debuglog import logger as _dbg
+                _dbg.error("gguf worker: model load failed", exc_info=True)
+                if isinstance(e, (RuntimeError, OSError)):
+                    resp_q.put(("error", load_error_text(e)))
+                else:
+                    resp_q.put(("error", load_error_text(e), "UnexpectedLoadError"))
             # A hard native abort during worker.load() is NOT caught here -
             # the process dies, and the parent detects that via is_alive().
             continue
@@ -1044,6 +1067,8 @@ class ModelRunner:
                 raise AdapterLoadError(result[1])
             if len(result) > 2 and result[2] == "UnsupportedModelRoleError":
                 raise UnsupportedModelRoleError(result[1])
+            if len(result) > 2 and result[2] == "UnexpectedLoadError":
+                raise UnexpectedLoadError(result[1])
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the model-loading process: {result!r}")
 
@@ -1638,6 +1663,16 @@ class ModelRunner:
             except Exception:
                 pass
             proc.join(timeout=5)
+        if proc.is_alive():
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            proc.join(timeout=5)
+            if proc.is_alive():
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("gguf worker pid %s did not exit after kill; it may "
+                             "still hold memory", proc.pid)
         for q in (self._req_q, self._resp_q, self._ctrl_q):
             if q is not None:
                 try:

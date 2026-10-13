@@ -608,6 +608,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
+  its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
+  localm is reported as such instead of with advice to repair the llama.cpp runtime.
+- **A transformers model whose grammar constraint fails mid-reply is no longer reported as constrained.**
+  The failure is logged and shown, and later grammar requests to that model are refused, as for GGUF
+  models.
+- **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
+  cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
+  dropped. A model worker that does not exit when stopped is killed.
+- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes.
 - **Two command-line hints no longer mislead.** `localm memory list` on an empty store says that
   `localm memory add` does not work in privacy mode, and `localm mcp --help` now names the `rerank`
   tool and each plugin tool.
