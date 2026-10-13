@@ -277,3 +277,19 @@ def test_a_job_write_waits_for_a_lock_held_by_another_process(home, monkeypatch)
     lock.unlink()
     store.update("j1", enabled=False)
     assert JobStore().get("j1").enabled is False
+
+
+def test_a_crash_left_lock_on_either_store_is_reclaimed(home):
+    sid = sessions.create(scopes={"admin"}, key_hash="KH")
+    store = JobStore()
+    _job(store)
+    old = time.time() - cfg._CROSS_LOCK_STALE_AGE - 60
+    for lock in (sessions.sessions_file().with_name("sessions.json.lock"),
+                 store.root / "jobs.json.lock"):
+        lock.write_bytes(b"999999:" + b"e" * 32)
+        os.utime(lock, (old, old))
+
+    assert sessions.revoke_all() == 1
+    assert sessions.lookup(sid) is None
+    store.update("j1", enabled=False)
+    assert JobStore().get("j1").enabled is False
