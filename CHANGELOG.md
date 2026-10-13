@@ -2066,6 +2066,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   small and medium models are downloaded from a pinned commit of their repository, and the
   downloaded `model.bin` is deleted and refused when its sha256 is not the expected one. A
   model already downloaded keeps loading offline as before.
+- **The FP8 kernel that Hugging Face models use is fetched at a fixed version.** Loading an FP8
+  checkpoint that needs the `finegrained-fp8` kernel downloads it from a pinned commit instead
+  of whatever its version name points at when you load. A transformers release that asks for a
+  different kernel version loads no native kernel, so the FP8 weights are expanded to bf16 and
+  the load says why.
 - **Downloads from Hugging Face are checked more completely.** Every part of a split GGUF is
   checked against the digest the hub publishes, not only the first; a vision projector is
   checked and deleted when it does not match; a file already on disk is checked before it is
