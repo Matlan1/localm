@@ -42,7 +42,7 @@ def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
         localm mcp --print-config
 
     \b
-    Exposed tools: chat, rerank, model management (list_models, search_models,
+    Exposed tools: chat, rerank, server_activity, model management (list_models, search_models,
     list_model_files, pull_model, remove_model, setup_embeddings),
     system_stats, run_doctor, plugin management (list_plugins,
     install_plugin, enable_plugin, disable_plugin, uninstall_plugin), and,

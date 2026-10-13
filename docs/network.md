@@ -3,7 +3,7 @@
 > The network policy (`localm/netpolicy.py`) is CORE and governs every
 > model-initiated web request, plugin or not, along with model pulls and
 > HuggingFace search. It is not a gate on every socket localm opens (see
-> [What the policy does NOT govern](#what-the-policy-does-not-govern)). The
+> [the list of ungoverned paths](#what-the-policy-does-not-govern)). The
 > chat "Web access" surface is provided
 > by the `web` plugin and appears only when it is active. The coder's
 > `fetch_url` and `web_search` tools are built into the coder itself and are

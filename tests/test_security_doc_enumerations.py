@@ -71,7 +71,7 @@ def test_security_md_lists_exactly_the_routes_that_take_no_bearer_key():
 
 def test_server_api_md_names_every_keyless_route_except_the_api_landing_root():
     doc = _collapsed("docs/server-api.md")
-    section = _between(doc, "Authentication: open", "CORS is locked")
+    section = _between(doc, "session cookie) except", "Most authenticated")
     documented = set(re.findall(r"`(GET|POST) (/[^`\s]*)`", section))
     assert documented == _keyless_routes() - {("GET", "/")}
 
@@ -114,7 +114,7 @@ def test_a_route_under_an_exempt_path_is_not_exempt_by_inheritance(app):
 # --------------------------------------------------------------------------- #
 
 def _normalise(path: str) -> str:
-    return re.sub(r"/\{[^}]+\}$", "", path)
+    return re.sub(r"\{[^}]+\}", "{id}", path)
 
 
 def _open_mode_exempt_reads(app) -> set[str]:
@@ -244,7 +244,7 @@ def test_cuda_driver_floor_in_docs_matches_setup_llama():
 def test_server_api_md_status_codes_match_the_protocol_map():
     from localm.inference.protocol import STATUS_CODE_BY_TEXT
     doc = _collapsed("docs/server-api.md")
-    section = _between(doc, "`status_code` (a stable id):",
+    section = _between(doc, "(a stable id):",
                        "A streaming request that is compacted")
     documented = set(re.findall(r"`([a-z_]+)`", section))
     assert documented == set(STATUS_CODE_BY_TEXT.values())

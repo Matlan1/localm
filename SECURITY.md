@@ -147,8 +147,9 @@ would otherwise create: without it, any other program on the machine that can re
 the loopback GUI shell's HTML (CORS trusts every `localhost:PORT` origin to read a
 matching response) could lift the embedded token and replay it cross-origin against
 these routes. The exempt read paths (unauthenticated by design, matching
-the inference API's own cross-origin posture) are `GET /v1/models` (including
-`GET /v1/models/{id}`), the Ollama-compatible `GET /api/tags`, `GET /api/ps` and
+the inference API's own cross-origin posture) are every `GET` under `/v1/models`
+(matched as a prefix, so `GET /v1/models`, `GET /v1/models/{id}`,
+`GET /v1/models/{id}/hold` and `GET /v1/models/{id}/peer-offer`), the Ollama-compatible `GET /api/tags`, `GET /api/ps` and
 `GET /api/version`, and `GET /api/session` (the "am I logged in?" check). The
 unauthenticated routes outside the `/api` and `/v1` prefixes (`GET /health`,
 `GET /whoami`, `GET /localm-ca.crt`) never enter this gate, and
