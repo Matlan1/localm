@@ -53,7 +53,8 @@ Notes:
   under `mode = privacy` saves conversations but adds nothing to the server's
   records. Any other client of the server's API is recorded under the global
   mode. The surface's mode applies only to requests made with the owner key (or
-  in open mode); a scoped key's requests are recorded under the global mode.
+  in open mode); a scoped key's requests are recorded under the global mode,
+  and the chat page opened with one follows the global mode too.
 - "Nothing written automatically" is the promise privacy mode makes; anything you
   do explicitly (saving a conversation, filing a bug report, `--debug`) is a
   deliberate action, not an automatic trace.

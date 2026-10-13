@@ -43,15 +43,18 @@ def _error_detail(resp) -> str:
 class HttpEngine:
     """Engine stand-in that routes chat through a remote localm server's ``/v1`` API."""
 
+    # Sent as X-Client-Id and X-Localm-Session-Mode when set: the surface this
+    # engine serves and its resolved session mode, which a localm server records
+    # the exchange no less privately than.
+    _client_id: Optional[str] = None
+    _session_mode: Optional[str] = None
+
     def __init__(self, base_url: str, *, token: Optional[str] = None,
                  model: Optional[str] = None, display_name: Optional[str] = None,
                  pin_model: bool = True, client_id: Optional[str] = None,
                  session_mode: Optional[str] = None):
         self._base = base_url.rstrip("/")
         self._token = token
-        # Sent as X-Client-Id and X-Localm-Session-Mode when set: the surface
-        # this engine serves and its resolved session mode, which a localm
-        # server records the exchange no less privately than.
         self._client_id = client_id
         self._session_mode = session_mode
         self._model = model

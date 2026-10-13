@@ -643,6 +643,22 @@ class TestSurfaceOverridesOnServerTraffic:
         assert ("tagged chat" in text) is recorded
         assert ("tagged coder" in text) is recorded
 
+    @pytest.mark.parametrize("owner,chat_mode", [(True, "privacy"), (False, "full")])
+    def test_config_reports_the_chat_mode_the_server_applies_to_the_caller(
+            self, tmp_path, owner, chat_mode):
+        """A non-owner caller's chat is recorded under the server's mode, so
+        /v1/config gives it that mode as its chat mode."""
+        from localm import scopes
+        held = {scopes.ADMIN} if owner else {"chat"}
+        with _server(tmp_path, "full") as (client, config), \
+             patch("localm.inference.http_server.caller_scopes", return_value=held):
+            config.set(chat_mode="privacy")
+            data = client.get("/v1/config").json()
+            self._post(client, "chat line", {"X-Client-Id": "chat"})
+        assert data["effective_chat_mode"] == chat_mode
+        recorded = "chat line" in _session_text(tmp_path, "*_server.*")
+        assert recorded is (chat_mode != "privacy")
+
     def test_localm_run_attached_to_the_server_records_by_the_chat_mode(self, tmp_path):
         """The headers `localm run`'s HttpEngine sends when attached to a
         server, replayed through the real route."""

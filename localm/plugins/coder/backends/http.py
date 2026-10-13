@@ -202,6 +202,11 @@ class HTTPBackend(BaseLLMBackend):
 
     # Anthropic requires max_tokens on every request; OpenAI-compat does not.
     _ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
+
+    # The coder session's resolved session mode ("privacy" | "log" | "full"),
+    # or None. When set, requests to a localm server carry it in
+    # X-Localm-Session-Mode, and the server records them no less privately.
+    session_mode: Optional[str] = None
     _ANTHROPIC_VERSION = "2023-06-01"
 
     def __init__(
@@ -277,10 +282,6 @@ class HTTPBackend(BaseLLMBackend):
         # called with each new note.
         self.routing_note: Optional[str] = None
         self.on_routing_note: Optional[Callable[[str], None]] = None
-        # The coder session's resolved session mode ("privacy" | "log" |
-        # "full"), or None. When set, requests to a localm server carry it in
-        # X-Localm-Session-Mode, and the server records them no less privately.
-        self.session_mode: Optional[str] = None
 
     @property
     def supports_native_tools(self) -> bool:
@@ -518,7 +519,7 @@ class HTTPBackend(BaseLLMBackend):
             "Content-Type": "application/json",
             "X-Client-Id": "coder",
         }
-        if self._is_local_server and self.session_mode:
+        if self.session_mode and self._is_local_server:
             from localm.audit import SESSION_MODE_HEADER
             headers[SESSION_MODE_HEADER] = str(
                 getattr(self.session_mode, "value", self.session_mode))
