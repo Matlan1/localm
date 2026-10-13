@@ -132,6 +132,7 @@ from .registry import (
     rename_model_with_notes,
     resolve_deletion_target,
     resolve_spec,
+    starter_model_sha256,
     set_model_type,
     show_shortcuts,
     sync_models_dir,
@@ -187,7 +188,7 @@ __all__ = [
     # unsupported
     "explain_unsupported_model", "hf_folder_refusal",
     # registry
-    "MODEL_SHORTCUTS", "_SHORTCUT_SIZES", "resolve_spec", "get_model_path",
+    "MODEL_SHORTCUTS", "_SHORTCUT_SIZES", "resolve_spec", "starter_model_sha256", "get_model_path",
     "get_model_info", "find_sibling_mmproj", "get_model_mmproj", "_hf_is_vision",
     "_pick_mmproj_candidate", "_looks_like_vision_gguf_name",
     "unregistered_model_error",

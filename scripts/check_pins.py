@@ -779,13 +779,23 @@ def _hf_comfy_pins() -> list[tuple[str, str, str, str, str]]:
     return out
 
 
+def _hf_starter_pins() -> list[tuple[str, str, str, str, str]]:
+    rel = "localm/model_manager/registry.py"
+    table = _py_literal(rel, "_STARTER_SHA256")
+    out = []
+    for spec, sha in table.items():
+        repo, path = spec.split(":", 1)
+        out.append((f"starter {path}", repo, path, "main", sha))
+    return out
+
+
 def _hf_whisper_pins() -> list[tuple[str, str, str, str, str]]:
     table = _py_literal("localm/voice.py", "_STT_PINS")
     return [(f"whisper {repo.rsplit('-', 1)[-1]}", repo, "model.bin", commit, sha)
             for repo, (commit, sha) in table.items()]
 
 
-_HF_PIN_PROVIDERS = (_hf_music_pins, _hf_comfy_pins, _hf_whisper_pins)
+_HF_PIN_PROVIDERS = (_hf_music_pins, _hf_comfy_pins, _hf_whisper_pins, _hf_starter_pins)
 
 
 def hf_file_pins() -> list[tuple[str, str, str, str, str]]:
