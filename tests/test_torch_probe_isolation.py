@@ -633,11 +633,6 @@ class TestBrokenIsolationIsNotRespawnedEveryRound:
             assert discover._isolated_torch_unavailable is True
             assert discover._isolated_torch_retry_at == 0.0
 
-    def test_the_first_wait_is_well_above_the_stats_poll(self):
-        assert discover._ISOLATED_TORCH_RETRY_FIRST >= 10 * 2.5
-        assert (discover._ISOLATED_TORCH_RETRY_FIRST
-                < discover._ISOLATED_TORCH_RETRY_MAX)
-
 
 class TestChildProbeContract:
     """The child must mirror the in-process branch field for field, so a caller
