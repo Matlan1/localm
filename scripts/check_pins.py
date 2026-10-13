@@ -766,7 +766,7 @@ def _hf_comfy_pins() -> list[tuple[str, str, str, str, str]]:
     if not isinstance(table, ast.Dict):
         raise LocalReadError(f"{rel}: COMFY_MODEL_SOURCES is not a dict literal")
     out = []
-    for key, call in zip(table.keys, table.values):
+    for key, call in zip(table.keys, table.values, strict=True):
         try:
             filename = ast.literal_eval(key)
             args = [ast.literal_eval(a) for a in call.args]
