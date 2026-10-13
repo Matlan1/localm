@@ -960,7 +960,9 @@ class _DraftPacer:
         else:
             self._plain.append(seconds / max(1, tokens))
             if self.n_spec >= self.min_samples and self.n_plain >= self.min_samples:
-                clear = self.spec_cost <= self.plain_cost * self.clear_margin
+                spec, plain = self.spec_cost, self.plain_cost
+                clear = (spec is not None and plain is not None
+                         and spec <= plain * self.clear_margin)
                 self._probe_now = (min(2 * self._probe_now, self.max_probe_every)
                                    if clear else self.probe_every)
         if (speculative and self.n_spec >= self.min_samples
