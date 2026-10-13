@@ -448,6 +448,12 @@ def test_verify_reports_identical_on_a_consistent_tree(bump, consistent, fakes, 
     assert _snapshot(consistent) == before
 
 
+def test_verify_reads_the_licence_by_the_abbreviated_sha_without_the_github_api(bump, consistent, fakes):
+    assert fakes.run("--verify") == 0
+    assert fakes.urls == [
+        "https://raw.githubusercontent.com/microsoft/onnxruntime/89f8206ba4/LICENSE"]
+
+
 @pytest.mark.parametrize("victim", ["bundle", "wasm", "mjs", "licence", "ort_licence", "notice", "guard"])
 def test_verify_reports_not_identical_when_any_one_file_differs(bump, consistent, fakes, capsys, victim):
     path = {"bundle": bump.BUNDLE_REL, "wasm": f"{bump.RUNTIME_REL}/{_WASM}",

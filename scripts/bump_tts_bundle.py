@@ -277,10 +277,14 @@ def fetch_bytes(url: str, opener=None) -> bytes:
     return raw
 
 
-def ort_license_source(version: str, fetch_json_fn=fetch_json) -> tuple:
+def ort_license_source(version: str, fetch_json_fn=fetch_json, full_sha: bool = True) -> tuple:
     """(kind, ref) naming the microsoft/onnxruntime revision *version* was built from:
-    ("commit", full sha) for a dev build, ("tag", "vX.Y.Z") for a release."""
+    ("commit", sha) for a dev build, ("tag", "vX.Y.Z") for a release. The sha is the full
+    one (resolved through the GitHub API) unless *full_sha* is False, which keeps the
+    abbreviated sha the version string carries and makes no API call."""
     m = _ORT_DEV_RE.search(version)
+    if m and not full_sha:
+        return "commit", m.group(1)
     if m:
         data = fetch_json_fn(f"{GITHUB_API}/repos/{ORT_REPO}/commits/{m.group(1)}")
         sha = data.get("sha") if isinstance(data, dict) else None
@@ -291,9 +295,10 @@ def ort_license_source(version: str, fetch_json_fn=fetch_json) -> tuple:
     return "tag", f"v{version}"
 
 
-def fetch_ort_license(version: str, fetch_json_fn=fetch_json, fetch_bytes_fn=fetch_bytes) -> tuple:
+def fetch_ort_license(version: str, fetch_json_fn=fetch_json, fetch_bytes_fn=fetch_bytes,
+                      full_sha: bool = True) -> tuple:
     """(licence text bytes, kind, ref) from microsoft/onnxruntime at the revision of *version*."""
-    kind, ref = ort_license_source(version, fetch_json_fn)
+    kind, ref = ort_license_source(version, fetch_json_fn, full_sha)
     return fetch_bytes_fn(f"{GITHUB_RAW}/{ORT_REPO}/{ref}/LICENSE"), kind, ref
 
 
@@ -705,7 +710,8 @@ def main(argv=None, *, build_fn=build_bundle, fetch_json_fn=fetch_json,
         plan = build_plan(repo, old, new, built, license_fetch=lambda v: fetch_ort_license(
             v, fetch_json_fn, fetch_bytes_fn))
         if args.verify:
-            ort_license, kind, ref = fetch_ort_license(old.ort, fetch_json_fn, fetch_bytes_fn)
+            ort_license, kind, ref = fetch_ort_license(old.ort, fetch_json_fn, fetch_bytes_fn,
+                                                       full_sha=False)
             extra = _change(repo, LICENSE_RELS["onnxruntime-web"], ort_license, text=True)
             if extra is not None:
                 plan["changes"].append(extra)
