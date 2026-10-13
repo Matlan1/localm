@@ -2056,6 +2056,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   of the eight models offered when a ComfyUI workflow is missing a file now fails and deletes
   the file when its bytes are not the expected ones. The weekly pin report lists these digests
   and flags one the hub no longer serves.
+- **Downloads from Hugging Face are checked more completely.** Every part of a split GGUF is
+  checked against the digest the hub publishes, not only the first; a vision projector is
+  checked and deleted when it does not match; a file already on disk is checked before it is
+  registered under the hub's digest, and refused when it does not match; each weight file of a
+  whole-repository download is checked. The file metadata and the bytes are read from one
+  commit, so a repository that changes during a pull no longer fails the check. When no digest
+  can be read, the pull now says so instead of finishing silently.
 
 ## [0.2.0] - 2026-09-04
 
