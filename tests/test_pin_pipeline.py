@@ -802,6 +802,25 @@ def test_the_default_commit_message_names_the_change_and_no_internal_process(tmp
     assert [w for w in _INTERNAL_WORDS if w in message] == []
 
 
+@pytest.mark.parametrize("failing", ["--show-toplevel", "--abbrev-ref"])
+def test_a_git_failure_reading_the_main_checkout_is_infra_not_a_wrong_branch(monkeypatch, tmp_path, failing):
+    def fake(args, cwd, **k):
+        if failing in args:
+            return _FakeCompleted(returncode=124, stdout="", stderr="git timed out")
+        return _FakeCompleted(stdout=str(tmp_path) if "--show-toplevel" in args else "master\n")
+    monkeypatch.setattr(pipeline, "_run_git", fake)
+    with pytest.raises(pipeline.InfraError, match="git timed out"):
+        pipeline._verify_main_checkout(tmp_path)
+
+
+def test_a_main_checkout_on_another_branch_is_still_refused(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(
+        stdout=str(tmp_path) if "--show-toplevel" in args else "feature\n"))
+    with pytest.raises(pipeline.PipelineError, match="not master") as e:
+        pipeline._verify_main_checkout(tmp_path)
+    assert not isinstance(e.value, pipeline.InfraError)
+
+
 def test_a_git_command_that_hangs_is_stopped_and_reported_as_a_failure(monkeypatch, tmp_path):
     def hang(cmd, **k):
         assert k["timeout"] == pipeline.GIT_TIMEOUT_SECONDS
