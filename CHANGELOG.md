@@ -510,6 +510,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A failed image generation names the real reason.** `/v1/images/generations` answered a failed
+  generation with the chat model's reload note ("Reload deferred to the next message"), which comes
+  after it; the `502` now quotes what the image backend reported.
 - **`localm comfy setup` copies an AMD ROCm or StabilityMatrix ComfyUI.** Replicating a ComfyUI whose PyTorch came from
   AMD's per-GPU ROCm packages (`amd-torch-device-gfx1030` and similar, as StabilityMatrix installs on
   Windows) failed with "pip found no matching version"; those packages now install from AMD's own index.
