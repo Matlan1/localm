@@ -215,6 +215,23 @@ class SdRunner:
         return self._request("generate_image", params, timeout,
                              on_event=on_event, cancel_check=cancel_check)
 
+    def upscale_image(self, params: dict, runtime_dir, extra_dirs=None, *,
+                      timeout: float = GENERATE_TIMEOUT,
+                      on_event: Optional[EventCallback] = None,
+                      cancel_check: Optional[Callable[[], bool]] = None) -> dict:
+        """Upscale one image with an ESRGAN model (*params*: ``model_path``,
+        ``image`` as ``{"width", "height", "channel", "data"}``, optional
+        ``tile_size``). Starts a worker holding no diffusion model when none is
+        running. Returns ``{"width", "height", "channel", "data", "scale"}``;
+        raises :class:`SdCancelled` or :class:`SdWorkerError`."""
+        if not self.is_alive():
+            self.shutdown(grace=0)
+            self._spawn()
+        payload = dict(params, runtime_dir=str(runtime_dir),
+                       extra_dirs=[str(d) for d in extra_dirs or []])
+        return self._request("upscale_image", payload, timeout,
+                             on_event=on_event, cancel_check=cancel_check)
+
     def generate_video(self, params: dict, *, timeout: float = GENERATE_TIMEOUT,
                        on_event: Optional[EventCallback] = None,
                        cancel_check: Optional[Callable[[], bool]] = None) -> dict:

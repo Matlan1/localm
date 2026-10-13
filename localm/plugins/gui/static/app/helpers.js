@@ -1136,7 +1136,7 @@ export async function cancelJob(jobId) {
 export let JOB_RECONNECT_DELAY_MS = 1500;
 export let JOB_RECONNECT_MAX_ATTEMPTS = 20;   // ~30s of reconnect budget
 
-export async function streamJob(jobId, onLine, onProgress, onFrame) {
+export async function streamJob(jobId, onLine, onProgress, onFrame, onEvent) {
   // GET /api/jobs/{id}/events can end WITHOUT an "end" frame (a network
   // blip, laptop sleep/wake, a backgrounded tab) while the job keeps running
   // server-side regardless of whether anyone is subscribed (JobManager.Job.
@@ -1181,6 +1181,7 @@ export async function streamJob(jobId, onLine, onProgress, onFrame) {
         if (!isNew) return;
         if (ev.type === "line" && onLine) onLine(ev.text);
         if (ev.type === "progress" && onProgress) onProgress(ev);
+        if (ev.type !== "line" && ev.type !== "progress" && ev.type !== "end" && onEvent) onEvent(ev);
         if (ev.type === "end") endEvent = ev;
       });
       if (endEvent) return endEvent;

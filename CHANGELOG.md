@@ -54,6 +54,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   fine-tune, a T5 or UMT5 encoder, a matching VAE). A choice you make for a component always wins,
   and a component that is missing is offered as a download before generating. Steps, CFG and size
   follow the model family when you leave them blank.
+- **Batch, hires fix, sampler and upscaling in the native image backend.** The Images page can
+  make several images in one job (each with the next seed, saved as it finishes), add a hires-fix
+  pass (latent, Lanczos, or an ESRGAN upscaler model you registered), and pick a sampler and
+  scheduler by name (the Video page gets the same two dropdowns). A gallery image has an Upscale
+  action that makes a larger copy with a registered upscaler model, and Reuse settings now restores
+  the model, LoRAs, size, sampler, scheduler and hires settings. Upscaler files have their own
+  model type, `upscaler`.
 - **LoRAs in the native backend.** Images and Video take one or more registered LoRAs with a
   strength each; a LoRA made for another model family is applied with a note saying so.
 - **Model pickers on the Images, Video and Music pages.** With the native backend, each page has
@@ -477,6 +484,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **The bundled koboldcpp runtime (native music generation) moved from v1.122.1 to v1.123.** An existing install picks it up the next time music generation starts.
+- **Speculative drafting measures the verification cost of 4, 8 and 16 tokens.** On several MoE and
+  hybrid models a batch of 5, 9 or 17 tokens costs much more than one token fewer, and the load-time
+  measurement used to see only the larger size, so it priced 4- and 8-token drafts too high and drafted
+  shorter than paid. With n-gram drafting, copy-heavy replies decode 5-10% faster on Qwen3-30B-A3B and
+  Qwen3.5-9B.
+- **MTP keeps more of its speedup.** While speculation is clearly faster than plain decoding, MTP
+  now checks plain decoding every 48 to 96 steps instead of every 24, which recovers about 2% of
+  decoding speed on Qwen3.5-4B. It still pauses drafting as soon as speculation stops paying.
 - **A native image, video or music job frees the other native runtime when the card is short.** The music runtime and the image/video worker each stay loaded for ten minutes after a job, so a job of the other kind started with that memory still taken. When the job needs more than the free VRAM, the idle runtime is now stopped first and the job log says so in one line. When another localm instance holds VRAM on the same GPU, the log names it (its port, chat model and loaded media runtimes).
 - **`localm info` says whether the install is portable.** It prints a `mode` line (`portable`
   or `standard`) and a `temp dir` line naming where temporary files go.
@@ -589,6 +605,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **The coder no longer crashes on a project config whose `mcp` key is not a table.** A
+  `.localcoder/config.toml` with, for example, `mcp = "x"` stopped MCP setup with an error; it now
+  means no MCP servers are configured.
+- **A UNet-only SDXL model loads in the native image backend.** Choosing an SDXL file that holds
+  only the UNet (a safetensors file in ComfyUI or diffusers layout) used to fail with "get sd
+  version from file failed"; it now loads with its CLIP-L, CLIP-G and VAE from your registered
+  models.
+- **An external SDXL VAE no longer gives an all-white image.** A VAE picked next to an SDXL
+  checkpoint, or paired with a UNet-only SDXL model, produced a blank white picture that was still
+  reported as a success. The native backend now scales that VAE the way stable-diffusion.cpp does
+  when it uses the checkpoint's own.
+- **A missing SD3 VAE is offered as a download.** An SD3 or SD3.5 UNet without a VAE now names a
+  verified file to pull, registered under a name the automatic pairing recognises.
+- **LoRAs made for SDXL, Qwen-Image or Z-Image are recognised, and Chroma LoRAs are no longer
+  flagged.** An SDXL LoRA was read as Stable Diffusion 1.x and a Chroma LoRA as FLUX.1, so the
+  native backend warned that the LoRA "may have no effect" when it was the right one.
 - **A request cancelled behind an image turn now stops at once.** An image reply, and a
   reply sent with `cache_prompt: false`, wait for every running reply to finish before they
   start. A client that disconnected or cancelled during that wait was not noticed until the
@@ -621,6 +653,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A Diffusers pipeline or a CTranslate2 folder is named instead of rejected as "not a
   model".** Adding one, or finding one in the Hugging Face cache, now says what it is and
   what to use instead.
+- **MTP needs several GB less VRAM.** The MTP draft context now works in 64-token batches. Its
+  compute buffer and the buffers of its on-GPU draft sampler grow with the batch size and the
+  vocabulary, and at the old 2048-token batch took about 6 GB on Qwen3.5-4B once a reply had
+  started; they now take under 0.5 GB. The VRAM estimate charges them from the model's
+  vocabulary instead of a flat amount that undercounted them. Drafting and its output are
+  unchanged.
 - **Zed lists localm's models even when one model's file is gone.** `/api/tags` and `/api/show` gave
   such a model a `null` `modified_at`, and Zed rejects the whole model list on a `null` there; the
   field is now always a date (1970-01-01 when the file's time cannot be read).

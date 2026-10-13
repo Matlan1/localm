@@ -86,6 +86,7 @@ _FOLDER_MODEL_TYPES = {
     "text_encoders": "text-encoder",
     "vae": "vae",
     "loras": "lora",
+    "upscale_models": "upscaler",
 }
 
 _FOUND_TTL = 1800.0

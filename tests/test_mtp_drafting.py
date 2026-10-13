@@ -564,6 +564,39 @@ def test_a_paying_draft_keeps_speculating_apart_from_plain_probes():
     assert plain <= 200 // pacer.probe_every + pacer.min_samples * pacer.bootstrap_every
 
 
+def test_a_clearly_paying_draft_probes_less_often():
+    from localm.inference.backends.llamacpp.llama import _DraftPacer
+    pacer = _DraftPacer()
+
+    decisions = _feed(pacer, spec_cost=1.2, plain_cost=1.0, steps=800)
+
+    assert pacer.pauses == 0
+    assert pacer._probe_now == pacer.max_probe_every == 96
+    assert decisions[-400:].count(False) <= 400 // pacer.max_probe_every + 1
+
+
+def test_a_draft_that_barely_pays_keeps_the_short_probe_interval():
+    from localm.inference.backends.llamacpp.llama import _DraftPacer
+    pacer = _DraftPacer()
+
+    decisions = _feed(pacer, spec_cost=1.8, plain_cost=1.0, steps=800)
+
+    assert pacer.pauses == 0
+    assert pacer._probe_now == pacer.probe_every
+    assert decisions[-400:].count(False) >= 400 // pacer.probe_every - 1
+
+
+def test_the_probe_interval_shortens_again_when_the_margin_narrows():
+    from localm.inference.backends.llamacpp.llama import _DraftPacer
+    pacer = _DraftPacer()
+    _feed(pacer, spec_cost=1.2, plain_cost=1.0, steps=800)
+    assert pacer._probe_now == pacer.max_probe_every
+
+    _feed(pacer, spec_cost=1.8, plain_cost=1.0, steps=800)
+
+    assert pacer._probe_now == pacer.probe_every
+
+
 def test_a_losing_draft_is_paused_and_retried_with_growing_pauses():
     from localm.inference.backends.llamacpp.llama import _DraftPacer
     pacer = _DraftPacer(pause_steps=8, max_pause_steps=32)

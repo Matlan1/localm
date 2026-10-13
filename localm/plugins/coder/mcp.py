@@ -338,7 +338,8 @@ def load_mcp_config(cwd: Path) -> dict[str, dict]:
             raw = tomllib.load(f)
     except Exception:
         return {}
-    servers = raw.get("mcp", {}).get("servers", {})
+    mcp_table = raw.get("mcp", {})
+    servers = mcp_table.get("servers", {}) if isinstance(mcp_table, dict) else {}
     if not isinstance(servers, dict):
         return {}
     out = {}

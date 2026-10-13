@@ -18,7 +18,7 @@ from localm import pathsafe
 from localm.pathsafe import is_unc_or_device_path
 
 from .. import server as _srv
-from ..server import EngineCache, _quiet_stdout, _text_result
+from ..server import EngineCache, ModelLoadSkipped, _quiet_stdout, _text_result
 from ._common import MODEL_PARAM
 
 
@@ -158,19 +158,29 @@ def coder_engine(engines: EngineCache, decision):
     whose engine is returned. Raises what getting that last model raised."""
     names = list(decision.candidates or (decision.resolved,)) if decision.routed else []
     load_errors = []
+    skipped = []
     for name in names:
         try:
             with _quiet_stdout():
-                engine = engines.get_loaded_chat(name)
+                engine = engines.get_loaded_chat(
+                    name, skip_if_latched=name != decision.current)
+        except ModelLoadSkipped as e:
+            skipped.append(e.skipped)
+            _srv._log(f"not loading {name} for a coder task: {e}")
+            continue
         except Exception as e:
             load_errors.append(f"{name}: {e}")
             _srv._log(f"warning: could not load {name} for a coder task: {e}")
             continue
+        if skipped:
+            decision = decision.with_skipped(skipped)
         if name != decision.resolved:
             decision = decision.answered_by(name)
         return engine, name, decision
     with _quiet_stdout():
         engine = engines.get_loaded_chat(decision.current)
+    if skipped:
+        decision = decision.with_skipped(skipped)
     if decision.routed:
         decision = decision.without_route(load_errors)
     return engine, decision.current, decision

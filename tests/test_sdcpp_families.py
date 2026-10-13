@@ -64,6 +64,16 @@ WAN22_5B = dict(WAN21_T2V, **{"model.diffusion_model.patch_embedding.weight": (3
 SD3 = {"model.diffusion_model.joint_blocks.0.x_block.attn.qkv.weight": (4608, 1536)}
 SDXL_UNET = {"model.diffusion_model.input_blocks.0.0.weight": (320, 4, 3, 3),
              "model.diffusion_model.label_emb.0.0.weight": (1280, 2816)}
+SDXL_UNET_DIFFUSERS = {"conv_in.weight": (320, 4, 3, 3),
+                       "time_embedding.linear_1.weight": (1280, 320),
+                       "add_embedding.linear_1.weight": (1280, 2816),
+                       "down_blocks.0.resnets.0.norm1.weight": (320,)}
+SDXL_CKPT = {"model.diffusion_model.input_blocks.0.0.weight": (320, 4, 3, 3),
+             "model.diffusion_model.label_emb.0.0.weight": (1280, 2816),
+             "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight":
+                 (49408, 768),
+             "conditioner.embedders.1.model.ln_final.weight": (1280,),
+             "first_stage_model.decoder.conv_in.weight": (512, 4, 3, 3)}
 QWEN_IMAGE = {"transformer_blocks.0.img_mod.1.weight": (18432, 3072)}
 Z_IMAGE = {"cap_embedder.0.weight": (2560,), "layers.0.attention.qkv.weight": (11520, 3840)}
 SD2_CKPT = {"model.diffusion_model.input_blocks.0.0.weight": (320, 4, 3, 3),
@@ -89,6 +99,24 @@ FLUX_LORA = {"lora_unet_double_blocks_0_img_attn_proj.lora_down.weight": (2, 307
              "lora_unet_double_blocks_0_img_attn_proj.lora_up.weight": (3072, 2)}
 SDXL_LORA = {"lora_te1_text_model_encoder_layers_0_mlp_fc1.lora_down.weight": (4, 768),
              "lora_unet_input_blocks_4_1_proj_in.lora_down.weight": (4, 640)}
+SDXL_UNET_LORA_CROSS_ATTN = {
+    "lora_unet_down_blocks_0_resnets_0_conv1.lora_down.weight": (64, 320, 3, 3),
+    "lora_unet_down_blocks_1_attentions_0_transformer_blocks_0_attn2_to_k.lora_down.weight":
+        (64, 2048)}
+SDXL_UNET_LORA_DEPTH = {
+    "lora_unet_down_blocks_2_attentions_0_transformer_blocks_2_attn1_to_k.lora_down.weight":
+        (64, 1280)}
+SD1_UNET_LORA = {
+    "lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn2_to_k.lora_down.weight":
+        (4, 768)}
+QWEN_IMAGE_LORA = {"transformer_blocks.0.attn.add_k_proj.lora_down.weight": (64, 3072),
+                   "transformer_blocks.0.img_mlp.net.0.proj.lora_down.weight": (64, 3072),
+                   "transformer_blocks.0.txt_mlp.net.0.proj.lora_down.weight": (64, 3072)}
+Z_IMAGE_LORA = {"diffusion_model.layers.0.attention.to_k.lora_A.weight": (32, 3840),
+                "diffusion_model.layers.0.feed_forward.w1.lora_A.weight": (32, 3840),
+                "diffusion_model.layers.0.adaLN_modulation.0.lora_A.weight": (32, 256)}
+WAN22_5B_LORA = {"diffusion_model.blocks.0.cross_attn.k.lora_down.weight": (128, 3072),
+                 "diffusion_model.blocks.0.ffn.0.lora_down.weight": (128, 3072)}
 
 
 @pytest.mark.parametrize("shapes,fmt,arch,kind,family", [
@@ -98,6 +126,9 @@ SDXL_LORA = {"lora_te1_text_model_encoder_layers_0_mlp_fc1.lora_down.weight": (4
     (WAN22_5B, "st", None, "diffusion", "wan2.2"),
     (SD3, "st", None, "diffusion", "sd3"),
     (SDXL_UNET, "st", None, "diffusion", "sdxl"),
+    (SDXL_UNET_DIFFUSERS, "gguf", "stable-diffusion-xl-unet", "unknown", None),
+    (SDXL_UNET_DIFFUSERS, "st", None, "diffusion", "sdxl"),
+    (SDXL_CKPT, "st", None, "checkpoint", "sdxl"),
     (QWEN_IMAGE, "st", None, "diffusion", "qwen-image"),
     (Z_IMAGE, "st", None, "diffusion", "z-image"),
     (SD2_CKPT, "gguf", None, "checkpoint", "sd2"),
@@ -113,6 +144,12 @@ SDXL_LORA = {"lora_te1_text_model_encoder_layers_0_mlp_fc1.lora_down.weight": (4
     (WAN22_VAE, "st", None, "vae", "wan2.2"),
     (FLUX_LORA, "st", None, "lora", "flux"),
     (SDXL_LORA, "st", None, "lora", "sdxl"),
+    (SDXL_UNET_LORA_CROSS_ATTN, "st", None, "lora", "sdxl"),
+    (SDXL_UNET_LORA_DEPTH, "st", None, "lora", "sdxl"),
+    (SD1_UNET_LORA, "st", None, "lora", "sd1"),
+    (QWEN_IMAGE_LORA, "st", None, "lora", "qwen-image"),
+    (Z_IMAGE_LORA, "st", None, "lora", "z-image"),
+    (WAN22_5B_LORA, "st", None, "lora", "wan"),
 ])
 def test_files_are_classified_from_their_headers(tmp_path, shapes, fmt, arch, kind, family):
     if fmt == "gguf":
@@ -137,6 +174,15 @@ def test_unreadable_headers_are_unknown_and_never_raise(tmp_path, data):
         f.write_bytes(data)
         assert families.inspect_file(f) is families.UNKNOWN
     assert families.inspect_file(tmp_path / "absent.gguf") is families.UNKNOWN
+
+
+def test_a_deeply_nested_safetensors_header_is_unreadable_not_a_crash(tmp_path):
+    raw = b"[" * 200_000 + b"]" * 200_000
+    f = tmp_path / "nested.safetensors"
+    f.write_bytes(struct.pack("<Q", len(raw)) + raw)
+    assert families._read_safetensors(f) is None
+    assert families.read_tensors(f) is None
+    assert families.inspect_file(f) is families.UNKNOWN
 
 
 def test_a_rewritten_file_is_classified_again(tmp_path):
@@ -317,6 +363,15 @@ def test_a_lora_for_another_family_is_used_and_noted(flux_set):
     assert len(out) == 1 and "SDXL" in notes[0]
 
 
+def test_a_flux_style_lora_is_not_noted_on_chroma_nor_a_chroma_lora_on_flux(flux_set):
+    out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "chroma")
+    assert len(out) == 1 and notes == []
+    out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "flux")
+    assert notes == []
+    out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "qwen-image")
+    assert len(notes) == 1
+
+
 @pytest.mark.parametrize("name", ["not-registered", "fluxunchained", "../x.safetensors"])
 def test_a_name_that_is_not_a_registered_lora_is_refused(flux_set, name):
     with pytest.raises(ModelFileError, match="not a registered LoRA"):
@@ -346,6 +401,7 @@ def test_the_worker_receives_lora_structs():
 class _Runner:
     def __init__(self):
         self.loads, self.generates, self.alive, self.loaded_key = [], [], False, None
+        self.fill = b"\x10"
 
     def is_alive(self):
         return self.alive
@@ -358,7 +414,7 @@ class _Runner:
     def generate_image(self, params, **kw):
         self.generates.append(params)
         w, h = params["width"], params["height"]
-        return {"width": w, "height": h, "channel": 3, "data": b"\x10" * (w * h * 3),
+        return {"width": w, "height": h, "channel": 3, "data": self.fill * (w * h * 3),
                 "seed": params["seed"]}
 
     def shutdown(self, grace=5.0):
@@ -394,6 +450,19 @@ def test_flux_generates_with_its_family_defaults_loras_and_records_them(flux_set
     side = json.loads(out.with_suffix(".png.json").read_text(encoding="utf-8"))
     assert side["components"] == {"clip_l": "clip_l", "t5xxl": "t5xxl_fp8_e4m3fn", "vae": "ae"}
     assert side["loras"] == [{"name": "aidma-flux", "strength": 0.7}]
+
+
+def test_a_pure_white_result_is_reported_as_a_failure_and_not_saved(flux_set, runner, tmp_path):
+    runner.fill = b"\xff"
+    out = tmp_path / "white.png"
+    ok, msg = image_native.generate({"backend": "native", "native": {"model": "fluxunchained"}},
+                                    "a cat", out, width=64, height=64, seed=7)
+    assert not ok and "pure white" in msg and "VAE" in msg
+    assert not out.exists()
+    runner.fill = b"\x10"
+    ok, msg = image_native.generate({"backend": "native", "native": {"model": "fluxunchained"}},
+                                    "a cat", out, width=64, height=64, seed=7)
+    assert ok and out.exists()
 
 
 def test_an_unregistered_lora_fails_before_any_load(flux_set, runner, tmp_path):
@@ -517,6 +586,63 @@ def test_a_slot_the_family_does_not_use_is_left_out_with_a_note(flux_set):
     assert any("do not use" in n for n in m["notes"])
 
 
+@pytest.fixture
+def sdxl_set(tmp_path):
+    d = tmp_path / "sdxl"
+    d.mkdir()
+    files = {
+        "sdxl-unet": (write_safetensors(d / "sdxl_unet.safetensors", SDXL_UNET), "diffusion-unet"),
+        "sdxl-diffusers": (write_safetensors(d / "sdxl_unet_diffusers.safetensors",
+                                             SDXL_UNET_DIFFUSERS), "diffusion-unet"),
+        "sdxl-full": (write_safetensors(d / "sdxl_full.safetensors", SDXL_CKPT),
+                      "diffusion-unet"),
+        "clip_l": (write_safetensors(d / "clip_l.safetensors", CLIP_L), "text-encoder"),
+        "clip_g": (write_safetensors(d / "clip_g.safetensors", CLIP_G), "text-encoder"),
+        "sdxl_vae": (write_safetensors(d / "sdxl_vae.safetensors", SD_VAE), "vae"),
+    }
+    for name, (path, mtype) in files.items():
+        _register(name, path, mtype)
+    return {k: v[0] for k, v in files.items()}
+
+
+@pytest.mark.parametrize("model", ["sdxl-unet", "sdxl-diffusers"])
+def test_an_sdxl_unet_alone_gets_its_parts_and_the_version_hint(sdxl_set, model):
+    m = image_native.resolve_models({"native": {"model": model}})
+    ctx = m["ctx"]
+    assert ctx["diffusion_model_path"] == str(sdxl_set[model])
+    assert ctx["clip_l_path"] == str(sdxl_set["clip_l"])
+    assert ctx["clip_g_path"] == str(sdxl_set["clip_g"])
+    assert ctx["vae_path"] == str(sdxl_set["sdxl_vae"])
+    assert ctx["force_sdxl_vae_conv_scale"] is True
+    names = families.read_tensors(Path(ctx["model_path"]))[0]
+    assert any("conditioner.embedders.1" in n for n in names)
+    assert any("middle_block.1" in n for n in names)
+
+
+def test_an_sdxl_checkpoint_scales_an_external_vae_and_needs_no_hint(sdxl_set):
+    alone = image_native.resolve_models({"native": {"model": "sdxl-full"}})
+    assert alone["ctx"] == {"model_path": str(sdxl_set["sdxl-full"])}
+    with_vae = image_native.resolve_models({"native": {"model": "sdxl-full",
+                                                       "vae": "sdxl_vae"}})
+    assert with_vae["ctx"] == {"model_path": str(sdxl_set["sdxl-full"]),
+                               "vae_path": str(sdxl_set["sdxl_vae"]),
+                               "force_sdxl_vae_conv_scale": True}
+
+
+def test_the_version_hint_file_is_rewritten_when_it_differs(sdxl_set):
+    from localm.media.sdcpp import versionhint
+    path = versionhint.sdxl_hint_path()
+    assert path.read_bytes() == versionhint.hint_bytes()
+    path.write_bytes(b"damaged")
+    assert versionhint.sdxl_hint_path() == path
+    assert path.read_bytes() == versionhint.hint_bytes()
+
+
+def test_the_worker_accepts_the_sdxl_vae_scale_flag():
+    from localm.media.sdcpp import _child
+    assert "force_sdxl_vae_conv_scale" in _child._CTX_BOOL_FIELDS
+
+
 def test_sd_family_vaes_follow_their_names(tmp_path):
     xl = write_safetensors(tmp_path / "sdxl_vae.safetensors", SD_VAE)
     sd = write_safetensors(tmp_path / "vae-ft-mse.safetensors", SD_VAE)
@@ -526,6 +652,29 @@ def test_sd_family_vaes_follow_their_names(tmp_path):
     ae = write_safetensors(tmp_path / "ae.safetensors", FLUX_AE)
     assert pairing.fitting("vae", "sd3", [pairing.Candidate("ae", ae,
                                                             families.inspect_file(ae), "vae")]) == []
+
+
+def test_an_sd3_unet_without_a_vae_offers_the_sd3_vae_under_a_name_the_pairing_picks(tmp_path):
+    d = tmp_path / "m"
+    d.mkdir()
+    _register("sd3.5_medium-Q4_K_M", write_gguf(d / "sd3.5_medium-Q4_K_M.gguf", SD3, "sd3"),
+              "diffusion-unet")
+    _register("clip_l", write_safetensors(d / "clip_l.safetensors", CLIP_L), "text-encoder")
+    _register("clip_g", write_safetensors(d / "clip_g.safetensors", CLIP_G), "text-encoder")
+    _register("t5xxl", write_safetensors(d / "t5xxl.safetensors", T5XXL), "text-encoder")
+    settings = {"native": {"model": "sd3.5_medium-Q4_K_M"}}
+    with pytest.raises(pairing.MissingComponents) as ei:
+        image_native.resolve_models(settings)
+    assert [m["slot"] for m in ei.value.missing] == ["vae"]
+    dl = ei.value.missing[0]["download"]
+    assert dl["spec"] == "Shio-Koube/SD-3.5-vae:diffusion_pytorch_model.safetensors"
+    assert dl["name"] == "sd3.5_vae" and dl["model_type"] == "vae"
+    assert f"localm pull {dl['spec']} --type vae --name sd3.5_vae" in str(ei.value)
+    vae = write_safetensors(d / dl["filename"], FLUX_AE)
+    _register(dl["name"], vae, "vae")
+    m = image_native.resolve_models(settings)
+    assert m["ctx"]["vae_path"] == str(vae)
+    assert m["components"]["vae"] == {"name": "sd3.5_vae", "auto": True}
 
 
 LLM_LORA = {"base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": (8, 4096),

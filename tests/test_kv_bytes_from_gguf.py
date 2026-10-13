@@ -20,6 +20,7 @@ import pytest
 
 from localm.inference.backends.gguf import GgufBackend
 from localm.model_manager.gguf import (
+    gguf_attention_head_count,
     gguf_kv_bytes_per_token,
     gguf_recurrent_state_bytes,
     gguf_mtp_draft_kv_bytes_per_token,
@@ -1165,3 +1166,30 @@ class TestRecurrentStateIsCharged:
                    side_effect=fake_print):
             b._check_vram()
         assert "Low VRAM" in seen.get("msg", "")
+
+
+# --------------------------------------------------------------------------- #
+#  gguf_attention_head_count                                                  #
+# --------------------------------------------------------------------------- #
+
+class TestAttentionHeadCount:
+    def test_the_architectures_head_count_is_read(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", [("general.architecture", _T_STRING, "qwen35"),
+                                        ("qwen35.attention.head_count", _T_UINT32, 16),
+                                        ("qwen35.attention.head_count_kv", _T_UINT32, 4)])
+        assert gguf_attention_head_count(f) == 16
+
+    def test_another_architectures_key_is_not_read(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", [("general.architecture", _T_STRING, "qwen35"),
+                                        ("llama.attention.head_count", _T_UINT32, 32)])
+        assert gguf_attention_head_count(f) == 0
+
+    def test_no_architecture_is_no_signal(self, tmp_path):
+        f = _gguf(tmp_path / "m.gguf", [("qwen35.attention.head_count", _T_UINT32, 16)])
+        assert gguf_attention_head_count(f) == 0
+
+    def test_a_non_gguf_or_missing_file_is_no_signal(self, tmp_path):
+        bad = tmp_path / "bad.gguf"
+        bad.write_bytes(b"\0" * 64)
+        assert gguf_attention_head_count(bad) == 0
+        assert gguf_attention_head_count(tmp_path / "gone.gguf") == 0

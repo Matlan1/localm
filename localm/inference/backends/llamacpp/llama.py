@@ -556,7 +556,7 @@ def _encoder_untrusted_ranges(messages: list[dict], prompt: str) -> tuple[tuple[
 
     def render(sentinels):
         return _flatten_for_encoder(
-            [dict(m, content=s) for m, s in zip(messages, sentinels, strict=False)])
+            [dict(m, content=s) for m, s in zip(messages, sentinels, strict=True)])
 
     spans = content_spans_via_sentinels(contents, render, prompt)
     if spans is None:
@@ -678,7 +678,7 @@ def _content_spans_in_prompt(
     contents = [_extract_text(m.get("content", "")) for m in messages]
 
     def render(sentinels):
-        probe = [dict(m, content=s) for m, s in zip(messages, sentinels, strict=False)]
+        probe = [dict(m, content=s) for m, s in zip(messages, sentinels, strict=True)]
         skeleton, probe_reason = _render_template(model_ptr, probe)
         if probe_reason != fallback_reason:
             return None
@@ -802,6 +802,11 @@ from localm.textnorm import scrub_stream as _scrub_stream  # noqa: E402
 # Suffix tokens are prefilled in chunks of this size (matches n_batch ceiling)
 _PREFILL_CHUNK = 2048
 
+# n_batch and n_ubatch of the MTP draft context, and the chunk size the draft
+# cache is refilled in. Must stay above _MTP_QUEUED_ROWS_MAX + 1, the most rows
+# one draft decode carries outside a refill.
+_MTP_DRAFT_BATCH = 64
+
 # Coarse decode-progress heartbeat: every N generated tokens, never per token
 # (a per-token line would flood the shared debug log and the bug-report
 # digest's benign-record budget - see debuglog.py's ring-buffer docstring).
@@ -875,7 +880,10 @@ class _DraftPacer:
     does not decide anything and every accepted draft counts. While
     speculating, one step in every ``probe_every`` (every ``bootstrap_every``
     until there are ``min_samples`` plain figures) runs plain so the plain
-    figure stays current. When both sides have ``min_samples`` figures and
+    figure stays current. Each plain figure recorded while speculation costs
+    at most ``clear_margin`` of the plain cost per token doubles that interval,
+    up to ``max_probe_every``; any other plain figure sets it back to
+    ``probe_every``. When both sides have ``min_samples`` figures and
     speculation is the slower one, ``speculate`` answers False for the next
     ``pause_steps`` steps, doubling on each consecutive pause up to
     ``max_pause_steps``; speculation is measured afresh after a pause.
@@ -883,8 +891,12 @@ class _DraftPacer:
 
     def __init__(self, probe_every: int = 24, bootstrap_every: int = 3,
                  min_samples: int = 6, window: int = 16, pause_steps: int = 32,
-                 max_pause_steps: int = 256) -> None:
+                 max_pause_steps: int = 256, max_probe_every: int = 96,
+                 clear_margin: float = 0.85) -> None:
         self.probe_every = probe_every
+        self.max_probe_every = max(probe_every, max_probe_every)
+        self.clear_margin = clear_margin
+        self._probe_now = probe_every
         self.bootstrap_every = bootstrap_every
         self.min_samples = min_samples
         self.first_pause = pause_steps
@@ -932,7 +944,7 @@ class _DraftPacer:
                 self._spec_tokens.clear()
             return False
         every = (self.bootstrap_every if self.n_plain < self.min_samples
-                 else self.probe_every)
+                 else self._probe_now)
         if self._since_plain >= every - 1:
             self._since_plain = 0
             return False
@@ -947,9 +959,16 @@ class _DraftPacer:
             self._spec_tokens.append(max(1, tokens))
         else:
             self._plain.append(seconds / max(1, tokens))
+            if self.n_spec >= self.min_samples and self.n_plain >= self.min_samples:
+                spec, plain = self.spec_cost, self.plain_cost
+                clear = (spec is not None and plain is not None
+                         and spec <= plain * self.clear_margin)
+                self._probe_now = (min(2 * self._probe_now, self.max_probe_every)
+                                   if clear else self.probe_every)
         if (speculative and self.n_spec >= self.min_samples
                 and self.n_plain >= self.min_samples):
             if self.spec_cost > self.plain_cost:
+                self._probe_now = self.probe_every
                 self._pause_left = self._pause_len
                 self._pause_len = min(self._pause_len * 2, self.max_pause_steps)
                 self.pauses += 1
@@ -3732,7 +3751,7 @@ class LlamaCpp:
         queued = list(self._queued_tokens)
         row = self._n_embd * ctypes.sizeof(ctypes.c_float)
         base = ctypes.addressof(self._queued_h)
-        for token, src in zip(tokens, h_rows, strict=False):
+        for token, src in zip(tokens, h_rows, strict=True):
             dst = base + len(queued) * row
             if src:
                 ctypes.memmove(dst, src, row)
@@ -4224,7 +4243,7 @@ class LlamaCpp:
         from ._structs import LLAMA_CONTEXT_TYPE_MTP
         cp_mtp.ctx_type = LLAMA_CONTEXT_TYPE_MTP
         cp_mtp.n_ctx = n_ctx
-        cp_mtp.n_batch = min(n_ctx, _PREFILL_CHUNK)
+        cp_mtp.n_batch = min(n_ctx, _MTP_DRAFT_BATCH)
         cp_mtp.n_ubatch = cp_mtp.n_batch
         cp_mtp.offload_kqv = offload_kqv
         if n_threads is not None:
@@ -4355,11 +4374,11 @@ class LlamaCpp:
             return
         if h_rows is None:
             h_rows = [self._pending_h_addr(base_pos)] + [None] * (len(tokens) - 1)
-        for i in range(0, len(tokens), _PREFILL_CHUNK):
-            piece = tokens[i:i + _PREFILL_CHUNK]
+        for i in range(0, len(tokens), _MTP_DRAFT_BATCH):
+            piece = tokens[i:i + _MTP_DRAFT_BATCH]
             try:
                 ret = self._decode_draft(piece, base_pos + i,
-                                         h_rows[i:i + _PREFILL_CHUNK], output_last=False)
+                                         h_rows[i:i + _MTP_DRAFT_BATCH], output_last=False)
             except Exception as exc:
                 if mid_reply:
                     self._stop_drafting_this_call("draft-catchup-error:%s" % type(exc).__name__)

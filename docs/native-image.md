@@ -115,6 +115,36 @@ set nor read them, and the Images page and job log show only a model's file name
   are refused with a reason rather than ignored. Per-component GPU placement applies to ComfyUI only; with
   it turned on, a native job says so and loads each model on one GPU.
 
+## Batch, sampler, hires fix and upscaling
+
+These controls sit behind the Advanced fold of the Images page (the sampler and
+scheduler also on the Video page); an empty field uses the model's own default.
+
+- **Batch count** makes up to 16 images in one job. Image `i` uses seed `seed + i`
+  and is saved with its own sidecar as soon as it is made, so a Stop part-way keeps
+  the images already finished. `POST /api/imagine` takes `batch`.
+- **Sampler and scheduler** are chosen by the names stable-diffusion.cpp reports
+  (`euler`, `euler_a`, `dpm++2m`, ... and `discrete`, `karras`, `simple`, ...); the
+  request fields are `sample_method` and `scheduler`. A name outside the list is a 400.
+- **Hires fix** generates the image, scales it up, and samples it again. The request
+  field `hires` takes `upscaler` (`latent`, `latent-nearest`, `latent-nearest-exact`,
+  `latent-antialiased`, `latent-bicubic`, `latent-bicubic-antialiased`, `lanczos`,
+  `nearest`, or `model` with `model` naming a registered upscaler), `scale` (1 to 4),
+  `steps` (0 keeps the job's steps) and `denoise` (0.05 to 1, default 0.7). Each side of
+  the final image is limited to 4096 pixels.
+- **Upscale a gallery image** with a registered upscaler model: the detail view of an
+  image has an Upscale action (`POST /api/imagine/file/{name}/upscale` with
+  `{"upscaler": "<registered name>"}`), which saves a new gallery image at the model's
+  scale (4x for RealESRGAN x4) and keeps the original's settings in its sidecar.
+- **Upscaler models** are ESRGAN / RealESRGAN files registered with the type `upscaler`
+  (`localm pull <repo>:<file> --type upscaler`, or `localm set-type <name> upscaler`).
+  Files in a ComfyUI `upscale_models` folder and CivitAI upscalers register with that
+  type.
+- **Reuse settings** on a gallery image restores the model and its components, LoRAs,
+  size, sampler, scheduler and hires settings. **Import parameters from image** does the
+  same from a localm image or sidecar; a sampler or scheduler name from another tool is
+  applied only when it is one of the names above, and is reported otherwise.
+
 ## Parameters in the PNG
 
 By default a generated PNG carries no metadata, so a shared or moved image reveals nothing.

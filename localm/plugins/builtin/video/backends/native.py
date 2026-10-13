@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from localm.media.sdcpp import families, pairing
+from localm.media.sdcpp import families, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
 from localm.media.sdcpp.logrelay import RecoveredWarnings
@@ -310,7 +310,8 @@ def _start_image_refusal(name: str) -> str:
 
 def refusal(*, model_overrides=None, placement=None, width=None, height=None,
             seconds=None, fps=None, input_image=None, s: Optional[dict] = None,
-            unsupported=(), **_ignored) -> Optional[str]:
+            unsupported=(), sample_method=None, scheduler=None,
+            **_ignored) -> Optional[str]:
     """Why the native backend cannot honour a request with these inputs, or
     None. Checked before any download, VRAM handover or load. *unsupported*
     names keyword arguments the backend does not take. With *s* (the plugin
@@ -325,6 +326,11 @@ def refusal(*, model_overrides=None, placement=None, width=None, height=None,
     if placement:
         return ("Per-component GPU placement applies to ComfyUI only; turn it off or "
                 "use the ComfyUI backend.")
+    try:
+        sampling.check_sample_method(sample_method)
+        sampling.check_scheduler(scheduler)
+    except ValueError as e:
+        return str(e)
     if (width is None) != (height is None):
         return "Give both width and height, or neither."
     if width is not None and height is not None:
@@ -474,6 +480,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
               placement: Optional[dict] = None,
               on_progress=None,
               loras: Optional[list] = None,
+              sample_method: Optional[str] = None,
+              scheduler: Optional[str] = None,
               on_preview=None,
               **unsupported) -> tuple[bool, str]:
     """Generate one clip of *prompt* into *out_path* (MP4, H.264, with an AAC
@@ -491,7 +499,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, placement=placement,
                       width=width, height=height, seconds=seconds, fps=fps,
-                      input_image=input_image, s=s, unsupported=tuple(unsupported))
+                      input_image=input_image, s=s, unsupported=tuple(unsupported),
+                      sample_method=sample_method, scheduler=scheduler)
     if refused:
         return False, refused
     started = time.monotonic()
@@ -562,7 +571,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 "width": width, "height": height, "seed": int(seed),
                 "video_frames": frames, "fps": int(fps),
                 "steps": steps, "cfg_scale": cfg_scale, "flow_shift": flow_shift,
-                "sample_method": blk.get("sample_method") or None,
+                "sample_method": sample_method or blk.get("sample_method") or None,
+                "scheduler": scheduler or blk.get("scheduler") or None,
                 "init_image": init, "preview": on_preview is not None,
                 "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
                           for x in lora_files],
@@ -596,6 +606,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 {k: v for k, v in {
                     "prompt": prompt, "negative_prompt": negative or None, "seed": int(seed),
                     "cfg": cfg_scale, "steps": steps, "flow_shift": flow_shift,
+                    "sample_method": params["sample_method"],
+                    "scheduler": params["scheduler"],
                     "width": result["width"], "height": result["height"],
                     "frames": len(result["frames"]), "fps": out_fps,
                     "seconds": round(len(result["frames"]) / out_fps, 2),
