@@ -2062,6 +2062,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   of the eight models offered when a ComfyUI workflow is missing a file now fails and deletes
   the file when its bytes are not the expected ones. The weekly pin report lists these digests
   and flags one the hub no longer serves.
+- **The Whisper speech models are fetched at a fixed version and checked.** The tiny, base,
+  small and medium models are downloaded from a pinned commit of their repository, and the
+  downloaded `model.bin` is deleted and refused when its sha256 is not the expected one. A
+  model already downloaded keeps loading offline as before.
 - **Downloads from Hugging Face are checked more completely.** Every part of a split GGUF is
   checked against the digest the hub publishes, not only the first; a vision projector is
   checked and deleted when it does not match; a file already on disk is checked before it is

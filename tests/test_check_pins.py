@@ -815,13 +815,17 @@ def test_the_pinned_hf_files_cover_music_and_comfyui_and_every_digest_is_64_hex(
     labels = [p[0] for p in pins]
     assert sum(label.startswith("music ") for label in labels) == 4
     assert sum(label.startswith("ComfyUI ") for label in labels) == 8
+    assert sum(label.startswith("whisper ") for label in labels) == 4
+    from localm import voice
+    assert {p[3] for p in pins if p[0].startswith("whisper ")} == {
+        commit for commit, _ in voice._STT_PINS.values()}
     assert all(cp._HEX64_RE.match(p[4]) for p in pins)
     assert len({(p[1], p[2]) for p in pins}) == len(pins)
 
 
 def test_a_hub_serving_the_pinned_digests_reads_current(monkeypatch):
     row = _hf_row(monkeypatch, _hub_serving_the_pins())
-    assert row.status == cp.CURRENT and "12 pinned digest(s)" in row.detail
+    assert row.status == cp.CURRENT and "16 pinned digest(s)" in row.detail
 
 
 def test_a_reuploaded_file_reads_stale_and_names_it(monkeypatch):
