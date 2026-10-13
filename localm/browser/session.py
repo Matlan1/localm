@@ -515,15 +515,16 @@ class BrowserSession:
         makes start() raise BrowserUnavailableError, and waits up to *timeout*
         seconds for the launch to finish and close what it started."""
         with self._start_lock:
-            starting = (self._thread is not None and not self._ready.is_set()
+            launching = self._thread
+            starting = (launching is not None and not self._ready.is_set()
                         and not self._abandoned)
             if starting:
                 self._abandoned = True
                 self._stopped_while_starting = True
                 self._closed = True
                 self._ready.set()
-        if starting:
-            self._thread.join(timeout=timeout)
+        if starting and launching is not None:
+            launching.join(timeout=timeout)
             return
         if self._closed or self._loop is None:
             self._closed = True
