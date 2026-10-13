@@ -484,6 +484,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **MTP keeps more of its speedup.** While speculation is clearly faster than plain decoding, MTP
+  now checks plain decoding every 48 to 96 steps instead of every 24, which recovers about 2% of
+  decoding speed on Qwen3.5-4B. It still pauses drafting as soon as speculation stops paying.
 - **A native image, video or music job frees the other native runtime when the card is short.** The music runtime and the image/video worker each stay loaded for ten minutes after a job, so a job of the other kind started with that memory still taken. When the job needs more than the free VRAM, the idle runtime is now stopped first and the job log says so in one line. When another localm instance holds VRAM on the same GPU, the log names it (its port, chat model and loaded media runtimes).
 - **`localm info` says whether the install is portable.** It prints a `mode` line (`portable`
   or `standard`) and a `temp dir` line naming where temporary files go.
