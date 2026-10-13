@@ -176,9 +176,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # Opt-in MoE expert placement: keep the expert weights of the first N
         # layers in system RAM (llama.cpp's --n-cpu-moe). 0 = off, the default.
         self.n_cpu_moe = n_cpu_moe
-        # The use_mmap mode (auto, on, off). effective_use_mmap and
-        # mmap_forced_by_ram are what the last load did with it: None / False
-        # until a load reports them.
+        # The use_mmap mode (auto, on, off). effective_use_mmap,
+        # mmap_forced_by_ram, mmap_cpu_from_disk and mmap_ram_short_note are
+        # what the last load did with it: None / False / "" until a load
+        # reports them.
         from localm.inference.mmap_setting import coerce_use_mmap
         mode = coerce_use_mmap(use_mmap)
         if mode is None:
@@ -186,6 +187,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.use_mmap = mode
         self.effective_use_mmap: Optional[bool] = None
         self.mmap_forced_by_ram = False
+        self.mmap_cpu_from_disk = False
+        self.mmap_ram_short_note = ""
         # The draft source (off, mtp, ngram); None follows mtp_enabled. MTP is
         # enabled exactly when the source is mtp.
         from .llamacpp._drafting import SPEC_MTP, resolve_spec_source
@@ -740,6 +743,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # Whether the worker memory-maps the model file (VramSizingMixin.
         # _resolve_use_mmap): forced on, forced off, or the build's default.
         mmap_decision = self._resolve_use_mmap(gpu_layers, vram_before)
+        self.mmap_ram_short_note = self._warn_unmapped_weights_exceed_ram(mmap_decision)
 
         # Record what this load applies, for the GUI's loaded-model status: the
         # auto override when computed, else the config ratios, else equal, through
@@ -854,13 +858,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         # Whether the model is memory-mapped: the worker's report from the
         # native load log, else the forced mode, else None (not known).
-        # mmap_forced_by_ram marks an auto load mapped because its host-resident
-        # weights do not fit available system RAM.
+        # mmap_forced_by_ram marks an auto load mapped while the weights it
+        # keeps in system RAM do not fit available RAM; mmap_cpu_from_disk marks
+        # one of those whose CPU layers read those weights on every token.
         reported = meta.get("mmap")
         self.effective_use_mmap = (reported if isinstance(reported, bool)
                                    else mmap_decision.use_mmap)
         self.mmap_forced_by_ram = (self.effective_use_mmap is True
-                                   and mmap_decision.reason == "exceeds_ram")
+                                   and mmap_decision.reason in ("exceeds_ram",
+                                                                "cpu_exceeds_ram"))
+        self.mmap_cpu_from_disk = (self.mmap_forced_by_ram
+                                   and mmap_decision.reason == "cpu_exceeds_ram")
 
         # Record the model's true transformer layer count, reported once by the
         # child, so the next load and the GUI VRAM estimate can size a partial GPU
@@ -1009,9 +1017,27 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         ``mmap_setting.describe_mmap``), or nothing when there is none."""
         from localm.inference.mmap_setting import describe_mmap
         note = describe_mmap(self.use_mmap, self.effective_use_mmap,
-                             self.mmap_forced_by_ram)
+                             self.mmap_forced_by_ram, self.mmap_cpu_from_disk)
         if note:
             console.print(f"[dim]  {note}[/dim]")
+
+    @staticmethod
+    def _warn_unmapped_weights_exceed_ram(decision) -> str:
+        """Before a ``use_mmap`` off load whose weights read into system RAM
+        (``decision.host_bytes``) plus the RAM headroom exceed the available
+        RAM the decision read: print the warning, log it at WARNING and return
+        it. "" otherwise."""
+        from .llamacpp._sizing import HOST_RAM_HEADROOM_BYTES
+        if (decision.reason != "user_off" or decision.host_bytes is None
+                or decision.ram_available is None
+                or decision.host_bytes + HOST_RAM_HEADROOM_BYTES <= decision.ram_available):
+            return ""
+        from localm.inference.mmap_setting import unmapped_exceeds_ram_note
+        note = unmapped_exceeds_ram_note(decision.host_bytes, decision.ram_available)
+        console.print(f"[yellow]  {note}[/yellow]")
+        from localm.debuglog import logger as _dbg
+        _dbg.warning(note)
+        return note
 
     @staticmethod
     def _load_timeout_seconds() -> float:

@@ -316,8 +316,12 @@ def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
     * Some upstream prebuilts ship the backends as real ``GGML_BACKEND_DL``
       plugins that are NOT auto-registered, so a model load aborts with "no
       backends are loaded". Only THEN register them - preferring the build's own
-      ``ggml_backend_load_all`` discovery, falling back to loading each
-      ``ggml-*`` plugin explicitly by absolute path.
+      ``ggml_backend_load_all_from_path`` discovery over *binary_dir* (one
+      registration per backend; for the CPU, the ``ggml-cpu-*`` variant that
+      scores best on this CPU), then the bare ``ggml_backend_load_all``,
+      falling back to loading each ``ggml-*`` plugin explicitly by absolute
+      path (every CPU variant this CPU supports registers; the first in name
+      order is the one llama.cpp uses).
 
     Returns True when backends are registered (already, or by this call)."""
     # Handles that may export the registry-query / loader symbols (they live in
@@ -338,7 +342,21 @@ def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
     if dev_count is not None and dev_count > 0:
         return True
 
-    # Nothing registered. Prefer the build's own backend discovery.
+    # Nothing registered: the build's own discovery over binary_dir first,
+    # then its bare form.
+    for h in candidates:
+        from_path = getattr(h, "ggml_backend_load_all_from_path", None)
+        if from_path is not None:
+            from_path.restype = None
+            from_path.argtypes = [ctypes.c_char_p]
+            try:
+                from_path(str(binary_dir).encode("utf-8"))
+            except Exception:
+                pass
+            after = _ggml_dev_count(candidates)
+            if after is not None and after > 0:
+                return True
+            break
     for h in candidates:
         load_all = getattr(h, "ggml_backend_load_all", None)
         if load_all is not None:

@@ -499,20 +499,28 @@ class Engine:
     def mmap_state(self) -> Optional[dict]:
         """What the last load did with memory-mapping, or None when the backend
         did not report it: ``use_mmap`` (the setting: auto, on or off), ``mmap``
-        (bool, whether the model was memory-mapped) and ``mmap_from_disk`` (bool,
-        True when ``auto`` mapped it because the model may not fit in available
-        RAM). ``mmap_note`` is the one-line description
+        (bool, whether the model was memory-mapped), ``mmap_from_disk`` (bool,
+        True when ``auto`` mapped it while the weights it keeps in system RAM
+        may not fit in available RAM) and ``mmap_cpu_from_disk`` (bool, True
+        when those weights are read by CPU layers on every token). ``mmap_note``
+        is the one-line description
         (``mmap_setting.describe_mmap``), present only when there is something
-        to say."""
+        to say. A ``use_mmap`` off load whose weights did not fit available RAM
+        also carries ``mmap_ram_short`` True, and its warning as ``mmap_note``."""
         effective = getattr(self._backend, "effective_use_mmap", None)
         if effective is None:
             return None
         setting = getattr(self._backend, "use_mmap", "auto")
         forced = (setting == "auto" and bool(effective) and bool(
             getattr(self._backend, "mmap_forced_by_ram", False)))
+        cpu = forced and bool(getattr(self._backend, "mmap_cpu_from_disk", False))
         state = {"use_mmap": setting, "mmap": bool(effective),
-                 "mmap_from_disk": forced}
-        note = describe_mmap(setting, bool(effective), forced)
+                 "mmap_from_disk": forced, "mmap_cpu_from_disk": cpu}
+        note = describe_mmap(setting, bool(effective), forced, cpu)
+        short = getattr(self._backend, "mmap_ram_short_note", "")
+        if setting == "off" and isinstance(short, str) and short:
+            state["mmap_ram_short"] = True
+            note = short
         if note:
             state["mmap_note"] = note
         return state
