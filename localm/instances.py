@@ -544,6 +544,49 @@ def pid_space_id() -> str:
     return _PID_SPACE
 
 
+def legacy_pid_space_id() -> str | None:
+    """The pid-space id localm 0.2.x wrote into download lock and partial owner
+    records on this host: the platform, the Windows MachineGuid, the host name
+    and, on Linux, the pid namespace, hashed. None when none of those but the
+    platform can be read (that version then used an id unique to its process,
+    which nothing can match)."""
+    import hashlib
+    import platform
+    parts = [sys.platform, machine_guid()]
+    try:
+        parts.append(platform.node() or "")
+    except Exception:
+        parts.append("")
+    try:
+        parts.append(str(os.stat("/proc/self/ns/pid").st_ino))
+    except OSError:
+        pass
+    if not any(parts[1:]):
+        return None
+    return hashlib.sha256(
+        "".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def legacy_record_is_this_host(rec: dict) -> bool:
+    """True when owner record *rec*, carrying :func:`legacy_pid_space_id`, was
+    written on this host: on Windows when this install has a MachineGuid (it
+    is part of that id); on Linux when the record's start identity names this
+    boot's boot id. False otherwise, including on every other platform."""
+    if not isinstance(rec, dict):
+        return False
+    if sys.platform == "win32":
+        return bool(machine_guid())
+    if sys.platform.startswith("linux"):
+        start = rec.get("start")
+        recorded = start.get("boot") if isinstance(start, dict) else None
+        try:
+            boot = _LINUX_BOOT_ID.read_text(encoding="ascii").strip() or None
+        except (OSError, ValueError):
+            return False
+        return isinstance(recorded, str) and recorded == boot
+    return False
+
+
 def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:
     """Direct-process fallback for ``localm stop`` when a graceful HTTP shutdown
     (POST /v1/server/shutdown) could not be confirmed - the server did not
