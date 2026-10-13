@@ -8,7 +8,7 @@
 import { MIB, $, authHeaders, checkModelsBeforeGenerate, createJobPreview, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
-import { createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
+import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -50,6 +50,11 @@ const videoGallery = createGallery({
     $("video-seed").value = m.seed ?? "";
     $("video-steps").value = m.steps ?? "";
     $("video-cfg").value = m.cfg ?? "";
+    if (m.backend === "native") {
+      videoModelPicker.setModels({ model: m.model, ...(m.components || {}) });
+      videoModelPicker.setLoras(m.loras || []);
+      videoGen.set(m);
+    }
     // Most of these fields live behind this page's Advanced fold; open it when
     // they are filled.
     revealFilledAdvanced($("view-video"));
@@ -68,6 +73,8 @@ export const videoBackend = { active: null, choice: null };
 
 export const videoModelPicker = createNativeModelPicker(
   { media: "video", prefix: "video", mountId: "video-native-models" });
+
+const videoGen = createNativeGenControls({ prefix: "video" });
 
 mountEnhanceButton({
   media: "video", fieldId: "video-prompt",
@@ -108,7 +115,10 @@ export async function refreshVideoBackend() {
   const picker = $("video-native-models");
   if (picker) {
     picker.hidden = !native;
-    if (native) videoModelPicker.refresh();
+    if (native) videoModelPicker.refresh().then(() => videoGen.populate(videoModelPicker.data));
+  }
+  for (const node of document.querySelectorAll("#view-video .video-native-only")) {
+    node.hidden = !native;
   }
   for (const [id, key] of COMFY_PLACEHOLDERS) {
     const input = $(id);
@@ -148,6 +158,7 @@ $("video-generate").onclick = async () => {
   }
   const nativeChoice = native ? videoModelPicker.choice() : {};
   Object.assign(body, nativeChoice);
+  if (native) Object.assign(body, videoGen.body());
 
   $("video-generate").disabled = true;
   videoLivePreview.clear();

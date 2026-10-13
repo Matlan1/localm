@@ -12,6 +12,9 @@ Routes (mounted by the engine, auto-scoped to the ``image`` capability):
   DELETE /api/imagine/file/{name}           - delete an image (+ sidecar)
   POST   /api/imagine/file/{name}/move      - move an image to a folder
   POST   /api/imagine/file/{name}/rename    - rename an image in place
+  POST   /api/imagine/file/{name}/upscale   - upscale an image with a registered
+                                              ESRGAN model (background job; native
+                                              backend)
 
 Generation runs as a background job streamed through the kernel's /api/jobs/*
 SSE endpoint. It does not require the GUI: the job registry is created by
@@ -45,7 +48,10 @@ from localm.image_gen.comfy import is_safe_lora_name
 from localm.inference.http_server import _resolve_disconnect_poll, principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
-from localm.media.native_models import MAX_LORAS, LoraChoice, apply_choice, check_request
+from localm.media.native_models import (
+    MAX_BATCH, MAX_LORAS, HiresChoice, LoraChoice, apply_choice, check_generation_extras,
+    check_request, validate_upscaler,
+)
 from localm.pathsafe import confined_file, confined_name
 from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
@@ -75,6 +81,12 @@ class ImagineRequest(BaseModel):
     # laid over Settings > Images for this job, and registered LoRAs.
     native_models: dict[str, str] | None = None
     loras: list[LoraChoice] | None = Field(default=None, max_length=MAX_LORAS)
+    # Native backend only: images per job (image i uses seed + i), a sampler and
+    # scheduler by library name, and a hires-fix pass.
+    batch: int = Field(default=1, ge=1, le=MAX_BATCH)
+    sample_method: str | None = None
+    scheduler: str | None = None
+    hires: HiresChoice | None = None
 
 
 class MoveFileRequest(BaseModel):
@@ -83,6 +95,10 @@ class MoveFileRequest(BaseModel):
 
 class RenameFileRequest(BaseModel):
     new_name: str                     # new basename (extension kept)
+
+
+class UpscaleRequest(BaseModel):
+    upscaler: str                     # a registered upscaler model's name
 
 
 def _images_dir() -> Path:
@@ -121,14 +137,18 @@ def _validate_lora_name(raw: str) -> str:
 
 def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                    instance_token, width=None, height=None, in_gallery=True,
-                   native_choice=None, native_loras=None):
+                   native_choice=None, native_loras=None, native_extras=None):
     """The background-job body for one image generation of ``req`` into
     ``out_path``: backend availability, VRAM handover, generation, and the
     chat-model reload on every exit path. ``width``/``height`` are forwarded to
     the backend only when both are set. ``in_gallery=False`` skips recording
     ``out_path`` as a gallery artifact owned by ``owner``. ``native_choice``
-    and ``native_loras`` (from ``native_models.check_request``) apply to the
-    native backend only; a ComfyUI job given LoRAs that way is refused."""
+    and ``native_loras`` (from ``native_models.check_request``) and
+    ``native_extras`` (``native_models.check_generation_extras``) apply to the
+    native backend only; a ComfyUI job given any of them is refused."""
+    extras = native_extras or {}
+    saved_names: list = []
+
     def _generate(job):
         from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
@@ -142,7 +162,8 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
         if s.get("backend") == "native":
             from .backends import native
             refused = native.refusal(model_overrides=req.model_overrides,
-                                     lora_name=lora_name, width=width, height=height)
+                                     lora_name=lora_name, width=width, height=height,
+                                     **extras)
             if refused:
                 job.push({"type": "line", "outcome": True, "text": refused})
                 return False
@@ -151,6 +172,12 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             job.push({"type": "line", "text":
                       "Several LoRAs per job apply to the native backend; with ComfyUI "
                       "use the LoRA picker."})
+            return False
+        elif (extras.get("sample_method") or extras.get("scheduler") or extras.get("hires")
+              or extras.get("batch", 1) > 1):
+            job.push({"type": "line", "text":
+                      "Batch count, sampler, scheduler and hires fix apply to the native "
+                      "backend; with ComfyUI set them in the workflow."})
             return False
         if s.get("backend") != "native" and (req.steps is not None or req.clip_skip is not None):
             job.push({"type": "line", "outcome": True, "text":
@@ -213,6 +240,16 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
         delete_outputs = bool(s.get("delete_outputs")) or is_privacy
         size_kwargs = ({"width": width, "height": height}
                        if width is not None and height is not None else {})
+
+        def _on_saved(path):
+            saved_names.append(path.name)
+            if in_gallery:
+                gallery.stamp_owner("image", path.name, owner)
+            if len(saved_names) == 1:
+                job.result = path.name
+            job.push({"type": "image", "name": path.name})
+        native_kwargs = ({**{k: v for k, v in extras.items() if v is not None},
+                          "on_saved": _on_saved} if s.get("backend") == "native" else {})
         ok, message = _backend.generate(
             s, req.prompt, out_path,
             self_url=self_url,
@@ -237,12 +274,13 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             on_progress=lambda t: job.push({"type": "line", "text": t}),
             **size_kwargs,
             **({"loras": native_loras} if native_loras else {}),
+            **native_kwargs,
             **({"steps": req.steps, "clip_skip": req.clip_skip,
                 "on_preview": lambda p: job.push(frame_event(p))}
                if s.get("backend") == "native" else {}),
         )
         job.push({"type": "line", "outcome": True, "text": message})
-        if ok:
+        if ok and not saved_names:
             job.result = out_path.name
             if in_gallery:
                 gallery.stamp_owner("image", out_path.name, owner)
@@ -273,6 +311,8 @@ async def imagine(req: ImagineRequest, request: Request):
     _validate_sampling(req)
     width, height = parse_image_size(req.size) or (None, None)
     native_choice, native_loras = check_request(req.native_models, req.loras, "image")
+    native_extras = check_generation_extras(req.sample_method, req.scheduler, req.hires,
+                                            req.batch)
 
     # Any app built through attach_engine has a background-job registry, so
     # reaching this branch means the router was mounted on an app that never ran
@@ -305,7 +345,8 @@ async def imagine(req: ImagineRequest, request: Request):
         _make_generate(req, input_image=input_image, lora_name=lora_name,
                        out_path=out_path, owner=owner, self_url=self_url,
                        instance_token=instance_token, width=width, height=height,
-                       native_choice=native_choice, native_loras=native_loras),
+                       native_choice=native_choice, native_loras=native_loras,
+                       native_extras=native_extras),
         result_path=out_path.name, owner=owner)
     return {"job_id": job.id}
 
@@ -657,6 +698,101 @@ async def imagine_rename(name: str, req: RenameFileRequest):
         sidecar.rename(target.with_suffix(target.suffix + ".json"))
     gallery.rename_owner("image", name, target.name)
     return {"status": "renamed", "name": target.name}
+
+
+_UPSCALE_DROPPED_META = ("upscaled", "batch", "elapsed_seconds", "created")
+
+
+def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token, extra_meta):
+    """The background-job body that upscales the gallery image ``source`` into
+    ``out_path``: runtime check, VRAM handover, upscaling, and the chat-model
+    reload on every exit path."""
+    def _upscale(job):
+        from localm.audit import SessionMode, effective_mode
+        from localm.config import load_config
+        _cfg = load_config()
+        s = _backend.prepare_for_job(_backend.settings(_cfg), _cfg)
+        for note in (s.get("warning"), s.get("backend_note")):
+            if note:
+                job.push({"type": "line", "text": note})
+        if s.get("backend") != "native":
+            job.push({"type": "line", "outcome": True, "text":
+                      "Upscaling a gallery image needs the native image backend."})
+            return False
+
+        def say(text):
+            job.push({"type": "line", "text": text})
+        from .backends import native
+        ok, msg = native.ensure_upscaler_available(s, on_progress=say)
+        job.push({"type": "line", "outcome": not ok, "text": msg})
+        if not ok:
+            return False
+        estimate = native.upscaler_vram_estimate_bytes(upscaler)
+        if estimate:
+            s["vram_estimate_bytes"] = estimate
+        from localm.vram import (decide_media_swap, media_single_device_shortfall,
+                                 note_other_vram_holders, release_other_native_media,
+                                 unload_chat_for_media)
+        release_other_native_media(job, s, "image")
+        swap = decide_media_swap(s) or bool(media_single_device_shortfall(s))
+        if swap and not unload_chat_for_media(job, self_url, "image", instance_token):
+            say("Could not unload the chat model - the upscaler may run low on VRAM.")
+        note_other_vram_holders(job, s, "image")
+        is_privacy = effective_mode("server") == SessionMode.PRIVACY
+        ok, message = native.upscale(
+            s, source, upscaler, out_path, extra_meta=extra_meta,
+            write_sidecar=not is_privacy, cancel_check=lambda: job.cancel_requested,
+            on_progress=say,
+            on_saved=lambda p: gallery.stamp_owner("image", p.name, owner))
+        job.push({"type": "line", "outcome": True, "text": message})
+        if ok:
+            job.result = out_path.name
+        job.mark_outcome("done" if ok else "failed")
+        if swap:
+            from localm.vram import reload_chat_after_media
+            reload_chat_after_media(job, self_url, s, _backend, "image", instance_token)
+        return ok
+    return _upscale
+
+
+@_router.post("/api/imagine/file/{name}/upscale",
+              dependencies=[Depends(gallery.require_owner("image"))])
+async def imagine_upscale(name: str, req: UpscaleRequest, request: Request):
+    """Upscale a generated image with a registered ESRGAN model; the result is
+    a new gallery image. Returns ``{"job_id"}``."""
+    source = _image_path(name)
+    try:
+        upscaler = validate_upscaler(req.upscaler)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        raise HTTPException(503, "Upscaling needs this server's background job "
+                                 "registry, which is unavailable.")
+    self_url = resolve_self_url(request.app)
+    if not self_url:
+        raise HTTPException(503, "Upscaling needs this server's own address to free "
+                                 "VRAM first, and it could not be determined.")
+    extra_meta = {}
+    sidecar = source.with_suffix(source.suffix + ".json")
+    if sidecar.is_file():
+        try:
+            loaded = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            extra_meta = {k: v for k, v in loaded.items() if k not in _UPSCALE_DROPPED_META}
+    images_dir = _images_dir()
+    out_path = images_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
+    owner = principal_id(request)
+    job = jobs.start_fn(
+        "imagine",
+        _make_upscale(source=source, upscaler=upscaler, out_path=out_path, owner=owner,
+                      self_url=self_url,
+                      instance_token=getattr(request.app.state, "instance_token", None),
+                      extra_meta=extra_meta),
+        result_path=out_path.name, owner=owner)
+    return {"job_id": job.id}
 
 
 @_router.get("/api/imagine/history")

@@ -348,3 +348,31 @@ class TestImportNotes:
     def test_invalid_comfy_json_says_so(self):
         with pytest.raises(ip.ImageParamsError, match="not valid JSON"):
             ip.params_from_bytes(_png([_text("prompt", "{broken")]))
+
+
+def test_a_localm_sidecar_brings_its_hires_settings_back_with_the_sampler():
+    import json
+
+    from localm.media.image_params import params_from_bytes
+    blob = {"prompt": "p", "sample_method": "euler_a", "scheduler": "karras",
+            "hires": {"upscaler": "model", "model": "real-esrgan", "scale": 1.5, "steps": 4,
+                      "denoise": 0.4}}
+    got = params_from_bytes(json.dumps(blob).encode())
+    assert got["source"] == "sidecar"
+    assert got["params"]["hires"] == blob["hires"]
+    assert (got["params"]["sample_method"], got["params"]["scheduler"]) == ("euler_a", "karras")
+
+
+def test_a_hires_record_with_a_bad_part_is_dropped_whole():
+    import json
+
+    from localm.media.image_params import params_from_bytes
+    good = {"upscaler": "latent", "model": None, "scale": 2.0, "steps": 0, "denoise": 0.7}
+    bad = [dict(good, upscaler="nope"), dict(good, scale=99), dict(good, scale="2"),
+           dict(good, steps=-1), dict(good, denoise=0), dict(good, upscaler="model", model=None),
+           dict(good, denoise=float("nan")), "latent", ["latent"]]
+    for hires in bad:
+        raw = json.dumps({"prompt": "p", "hires": hires}, allow_nan=True).encode()
+        assert "hires" not in params_from_bytes(raw)["params"], hires
+    ok = params_from_bytes(json.dumps({"prompt": "p", "hires": good}).encode())["params"]
+    assert ok["hires"] == good

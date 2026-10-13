@@ -33,7 +33,9 @@ from pydantic import BaseModel, Field
 from localm.inference.http_server import principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
-from localm.media.native_models import MAX_LORAS, LoraChoice, apply_choice, check_request
+from localm.media.native_models import (
+    MAX_LORAS, LoraChoice, apply_choice, check_generation_extras, check_request,
+)
 from localm.pathsafe import confined_file, confined_name
 from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
@@ -60,6 +62,9 @@ class VideoRequest(BaseModel):
     # laid over Settings > Video for this job, and registered LoRAs.
     native_models: dict[str, str] | None = None
     loras: list[LoraChoice] | None = Field(default=None, max_length=MAX_LORAS)
+    # Native backend only: a sampler and scheduler by library name.
+    sample_method: str | None = None
+    scheduler: str | None = None
 
 
 class MoveFileRequest(BaseModel):
@@ -96,6 +101,9 @@ async def video(req: VideoRequest, request: Request):
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)
     native_choice, native_loras = check_request(req.native_models, req.loras, "video")
+    native_extras = check_generation_extras(req.sample_method, req.scheduler, None)
+    native_extras = {k: native_extras[k] for k in ("sample_method", "scheduler")
+                     if native_extras[k]}
 
     # The job registry is kernel-level; the precondition here is knowing this
     # server's own address for the VRAM handover, not the GUI being attached.
@@ -133,7 +141,8 @@ async def video(req: VideoRequest, request: Request):
             refused = native.refusal(model_overrides=req.model_overrides,
                                      width=req.width, height=req.height,
                                      seconds=req.seconds, fps=req.fps,
-                                     input_image=input_image, s=apply_choice(s, native_choice))
+                                     input_image=input_image, s=apply_choice(s, native_choice),
+                                     **native_extras)
             if refused:
                 job.push({"type": "line", "text": refused})
                 return False
@@ -141,6 +150,11 @@ async def video(req: VideoRequest, request: Request):
         elif native_loras:
             job.push({"type": "line", "text":
                       "LoRAs chosen this way apply to the native backend only."})
+            return False
+        elif native_extras:
+            job.push({"type": "line", "text":
+                      "Sampler and scheduler apply to the native backend; with ComfyUI "
+                      "set them in the workflow."})
             return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
@@ -198,6 +212,7 @@ async def video(req: VideoRequest, request: Request):
             kwargs["model_overrides"] = req.model_overrides
         if native_loras:
             kwargs["loras"] = native_loras
+        kwargs.update(native_extras)
         if s.get("backend") == "native":
             kwargs["on_preview"] = lambda p: job.push(frame_event(p))
         is_privacy = effective_mode("server") == SessionMode.PRIVACY

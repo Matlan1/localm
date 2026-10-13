@@ -108,8 +108,7 @@ class HFSource:
 # this table is excluded from search results and refused by resolve_download,
 # rather than mis-filed under a folder ComfyUI does not scan for that role.
 #
-# Controlnet/Upscaler have no registry.MODEL_TYPES value (the frozenset has no
-# "controlnet"/"upscaler" member); they still route to a real ComfyUI
+# Controlnet has no registry.MODEL_TYPES value; it still routes to a real ComfyUI
 # subfolder under model_type="unknown" rather than being excluded outright.
 CIVITAI_TYPE_MAP: dict[str, tuple[str, str]] = {
     "Checkpoint": ("diffusion-unet", "checkpoints"),
@@ -119,7 +118,7 @@ CIVITAI_TYPE_MAP: dict[str, tuple[str, str]] = {
     "TextualInversion": ("embedding", "embeddings"),
     "VAE": ("vae", "vae"),
     "Controlnet": ("unknown", "controlnet"),
-    "Upscaler": ("unknown", "upscale_models"),
+    "Upscaler": ("upscaler", "upscale_models"),
 }
 
 # File formats that cannot execute code on load: safetensors is a plain tensor

@@ -428,6 +428,32 @@ def _str(value: Any) -> Optional[str]:
     return value[:_MAX_STR] if isinstance(value, str) else None
 
 
+def _hires_from(blob: Any) -> Optional[dict]:
+    """The hires-fix record of a localm image with its types and ranges
+    checked, or None when any part is not valid."""
+    from localm.media.sdcpp import sampling
+    if not isinstance(blob, dict):
+        return None
+    upscaler = blob.get("upscaler")
+    model = blob.get("model")
+    scale = _num(blob.get("scale"), float) if isinstance(blob.get("scale"), (int, float)) else None
+    steps = _num(blob.get("steps"), int) if isinstance(blob.get("steps"), (int, float)) else None
+    denoise = (_num(blob.get("denoise"), float)
+               if isinstance(blob.get("denoise"), (int, float)) else None)
+    if upscaler not in sampling.HIRES_UPSCALER_LIBRARY_NAMES:
+        return None
+    if upscaler == sampling.HIRES_MODEL_UPSCALER and not isinstance(model, str):
+        return None
+    if scale is None or not sampling.MIN_HIRES_SCALE <= scale <= sampling.MAX_HIRES_SCALE:
+        return None
+    if steps is None or not 0 <= steps <= sampling.MAX_HIRES_STEPS:
+        return None
+    if denoise is None or not sampling.MIN_HIRES_DENOISE <= denoise <= 1.0:
+        return None
+    return {"upscaler": upscaler, "model": model[:512] if isinstance(model, str) else None,
+            "scale": scale, "steps": steps, "denoise": denoise}
+
+
 def _from_localm(blob: Any) -> dict:
     """The known keys of a record with their types checked; anything else
     (unknown keys, wrong types, non-finite or out-of-range numbers) is
@@ -446,6 +472,9 @@ def _from_localm(blob: Any) -> dict:
         val = _num(blob.get(key), float) if isinstance(blob.get(key), (int, float)) else None
         if val is not None:
             out[key] = val
+    hires = _hires_from(blob.get("hires"))
+    if hires is not None:
+        out["hires"] = hires
     comps = blob.get("components")
     if isinstance(comps, dict):
         out["components"] = {str(k)[:64]: v[:512] for k, v in comps.items() if isinstance(v, str)}

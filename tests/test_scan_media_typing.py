@@ -86,8 +86,8 @@ def test_clip_vision_file_is_a_text_encoder_by_header_and_by_folder(tmp_path):
     ("StableDiffusion", "diffusion-unet"), ("text_encoders", "text-encoder"),
     ("TextEncoders", "text-encoder"), ("clip_vision", "text-encoder"),
     ("ClipVision", "text-encoder"), ("VAE", "vae"), ("ApproxVAE", "vae"),
-    ("Lora", "lora"), ("LyCORIS", "lora"), ("upscale_models", "unknown"),
-    ("ESRGAN", "unknown"), ("embeddings", "unknown"), ("controlnet", "unknown"),
+    ("Lora", "lora"), ("LyCORIS", "lora"), ("upscale_models", "upscaler"),
+    ("ESRGAN", "upscaler"), ("embeddings", "unknown"), ("controlnet", "unknown"),
 ])
 def test_folder_names_are_matched_case_insensitively(tmp_path, folder, expected):
     models = tmp_path / "models"
@@ -156,7 +156,7 @@ EXPECTED_SM = {
     "TextEncoders/textencoders.safetensors": "text-encoder",
     "Lora/lora.safetensors": "lora",
     "ClipVision/clipvision.safetensors": "text-encoder",
-    "ESRGAN/x4.pth": "unknown",
+    "ESRGAN/x4.pth": "upscaler",
 }
 
 

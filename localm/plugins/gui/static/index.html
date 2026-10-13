@@ -529,6 +529,17 @@
               <div class="img-native-only" hidden><label data-i18n="images.clipSkipLabel">Clip skip</label><input type="number" id="img-clip-skip" min="1" max="12" step="1" placeholder="model default (automatic)" data-i18n-placeholder="images.clipSkipPlaceholder"></div>
               <div class="img-comfy-only"><label data-i18n="images.loraStrengthModelLabel">LoRA strength (model)</label><input type="number" id="img-lora-strength-model" step="0.05" placeholder="default (1.0)" data-i18n-placeholder="images.loraStrengthModelPlaceholder"></div>
               <div class="img-comfy-only"><label data-i18n="images.loraStrengthClipLabel">LoRA strength (CLIP)</label><input type="number" id="img-lora-strength-clip" step="0.05" placeholder="default (0.5)" data-i18n-placeholder="images.loraStrengthClipPlaceholder"></div>
+              <div class="img-native-gen" hidden><label data-i18n="images.batchLabel">Batch count</label><input type="number" id="img-batch" min="1" max="16" step="1" placeholder="1" data-i18n-placeholder="images.batchPlaceholder"></div>
+              <div class="img-native-gen" hidden><label data-i18n="nativeModels.sampler">Sampler</label><select id="img-sampler"><option value="" data-i18n="nativeModels.samplerDefault">Model default</option></select></div>
+              <div class="img-native-gen" hidden><label data-i18n="nativeModels.scheduler">Scheduler</label><select id="img-scheduler"><option value="" data-i18n="nativeModels.schedulerDefault">Model default</option></select></div>
+            </div>
+            <div class="adv-fold-body grid2 img-native-gen" hidden>
+              <div><label class="inline-check" title="Generates the image, upscales it, then samples it again for finer detail." data-i18n-title="images.hiresTitle"><input type="checkbox" id="img-hires"> <span data-i18n="images.hiresLabel">Hires fix</span></label></div>
+              <div><label data-i18n="images.hiresUpscalerLabel">Hires upscaler</label><select id="img-hires-upscaler"><option value="" data-i18n="nativeModels.hiresLatent">Latent</option></select></div>
+              <div id="img-hires-model-row" hidden><label data-i18n="images.hiresModelLabel">Upscaler model</label><select id="img-hires-model"><option value="" data-i18n="nativeModels.hiresModelPick">Choose an upscaler</option></select></div>
+              <div><label data-i18n="images.hiresScaleLabel">Hires scale</label><input type="number" id="img-hires-scale" step="0.1" min="1" max="4" placeholder="2" data-i18n-placeholder="images.hiresScalePlaceholder"></div>
+              <div><label data-i18n="images.hiresStepsLabel">Hires steps</label><input type="number" id="img-hires-steps" step="1" min="0" max="150" placeholder="same as the image" data-i18n-placeholder="images.hiresStepsPlaceholder"></div>
+              <div><label data-i18n="images.hiresDenoiseLabel">Hires denoise</label><input type="number" id="img-hires-denoise" step="0.05" min="0.05" max="1" placeholder="0.7" data-i18n-placeholder="images.hiresDenoisePlaceholder"></div>
             </div>
           </details>
           <div class="actions">
@@ -650,6 +661,8 @@
               <div><label data-i18n="chat.seed">Seed</label><input type="number" id="video-seed" placeholder="random" data-i18n-placeholder="mediaGallery.randomPlaceholder"></div>
               <div><label data-i18n="mediaGallery.stepsLabel">Steps</label><input type="number" id="video-steps" placeholder="default (30)" data-i18n-placeholder="video.stepsPlaceholder"></div>
               <div><label data-i18n="mediaGallery.cfgLabel">CFG</label><input type="number" id="video-cfg" step="0.5" placeholder="default (5.0)" data-i18n-placeholder="video.cfgPlaceholder"></div>
+              <div class="video-native-only" hidden><label data-i18n="nativeModels.sampler">Sampler</label><select id="video-sampler"><option value="" data-i18n="nativeModels.samplerDefault">Model default</option></select></div>
+              <div class="video-native-only" hidden><label data-i18n="nativeModels.scheduler">Scheduler</label><select id="video-scheduler"><option value="" data-i18n="nativeModels.schedulerDefault">Model default</option></select></div>
             </div>
           </details>
           <div class="actions">

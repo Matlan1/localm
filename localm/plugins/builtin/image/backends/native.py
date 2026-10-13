@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from localm.media.image_params import png_text_entries
-from localm.media.sdcpp import families, pairing
+from localm.media.sdcpp import families, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
 from localm.media.sdcpp.logrelay import RecoveredWarnings
@@ -34,6 +34,7 @@ COMPUTE_ALLOWANCE_BYTES = 2 * 1024 ** 3
 
 MIN_SIDE = 64
 MAX_SIDE = 2048
+MAX_BATCH = 16
 
 
 @dataclass(frozen=True)
@@ -359,6 +360,8 @@ class _EventRelay:
             secs = info.get("secs") or 0.0
             rate = f" ({secs:.2f} s/step)" if secs else ""
             self._say(f"Step {step}/{steps}{rate}")
+        elif phase == "upscaling":
+            self._say(f"Upscaling {step}/{steps}")
         elif phase != self._phase or (steps and step == steps):
             label = "Decoding" if phase == "decoding" else "Loading weights"
             if steps and step == steps:
@@ -372,8 +375,30 @@ def _event_relay(say, on_preview=None) -> _EventRelay:
     return _EventRelay(say, on_preview)
 
 
+def _batch_path(out_path: Path, index: int) -> Path:
+    """The file image number *index* (from 0) of a batch is saved to: *out_path*
+    for the first, ``<stem>_<n><suffix>`` beside it for the rest."""
+    if index == 0:
+        return out_path
+    return out_path.with_name(f"{out_path.stem}_{index + 1}{out_path.suffix}")
+
+
+def _hires_refusal(hires: dict, width, height) -> Optional[str]:
+    """Why hires settings *hires* (``native_models.validate_hires``) cannot run,
+    or None. The size check applies when *width* and *height* are known."""
+    if hires.get("upscaler") == sampling.HIRES_MODEL_UPSCALER:
+        try:
+            _resolve_file(hires.get("model") or "", "hires upscaler")
+        except _ModelError as e:
+            return str(e)
+    if width is not None and height is not None:
+        return sampling.check_hires_target(int(width), int(height), float(hires["scale"]))
+    return None
+
+
 def refusal(*, model_overrides=None, lora_name=None,
-            width=None, height=None, **_ignored) -> Optional[str]:
+            width=None, height=None, sample_method=None, scheduler=None,
+            hires=None, batch=1, **_ignored) -> Optional[str]:
     """Why the native backend cannot honour a request with these inputs, or
     None. Checked before any download, VRAM handover or load."""
     if model_overrides:
@@ -384,10 +409,21 @@ def refusal(*, model_overrides=None, lora_name=None,
             pairing.resolve_loras([{"name": lora_name}], None)
         except _ModelError as e:
             return str(e)
+    try:
+        sampling.check_sample_method(sample_method)
+        sampling.check_scheduler(scheduler)
+    except ValueError as e:
+        return str(e)
+    if not 1 <= int(batch or 1) <= MAX_BATCH:
+        return f"Batch count must be between 1 and {MAX_BATCH}."
     if (width is None) != (height is None):
         return "Give both width and height, or neither."
     if width is not None and height is not None:
-        return _check_size(int(width), int(height))
+        reason = _check_size(int(width), int(height))
+        if reason:
+            return reason
+    if hires:
+        return _hires_refusal(hires, width, height)
     return None
 
 
@@ -424,13 +460,25 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
              width: Optional[int] = None,
              height: Optional[int] = None,
              loras: Optional[list] = None,
+             sample_method: Optional[str] = None,
+             scheduler: Optional[str] = None,
+             hires: Optional[dict] = None,
+             batch: int = 1,
+             on_saved: Optional[Callable[[Path], None]] = None,
              steps: Optional[int] = None,
              clip_skip: Optional[int] = None,
              on_preview=None) -> tuple[bool, str]:
-    """Generate one image of *prompt* into *out_path* (a PNG without embedded
-    metadata unless the ``embed_params`` setting is on and the session is not in
-    privacy mode). Returns ``(ok, message)``. Writes only
-    *out_path* and, when *write_sidecar*, ``<out_path>.json``.
+    """Generate *batch* images of *prompt* (each a PNG without embedded metadata
+    unless the ``embed_params`` setting is on and the session is not in privacy
+    mode). Returns ``(ok, message)``. Image ``i`` (from 0) is made with seed
+    ``seed + i`` and saved to ``_batch_path(out_path, i)`` with, when
+    *write_sidecar*, a ``.json`` sidecar beside it; *on_saved* is called with
+    each saved path as soon as it is written, so a failure or cancel after
+    the first image keeps the images already made (the message says how many).
+
+    *sample_method* and *scheduler* (``sampling`` names) override the settings'
+    and the model's own defaults. *hires* (``native_models.validate_hires``)
+    adds a hires-fix pass.
 
     *loras* (``[{"name", "strength"}]``) and *lora_name* (with
     *lora_strength_model*) name registered LoRAs (``pairing.resolve_loras``);
@@ -445,10 +493,10 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     in-progress frame the worker makes."""
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, lora_name=lora_name,
-                      width=width, height=height)
+                      width=width, height=height, sample_method=sample_method,
+                      scheduler=scheduler, hires=hires, batch=batch)
     if refused:
         return False, refused
-    started = time.monotonic()
     try:
         models = resolve_models(s)
         rt = _ensure_runtime(s, say)
@@ -479,6 +527,20 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             say("Could not unload the chat model - the image model may run low on VRAM.")
     relay = _event_relay(say, on_preview)
     runner = shared.runner
+    hires_path = None
+    if hires and hires.get("upscaler") == sampling.HIRES_MODEL_UPSCALER:
+        try:
+            hires_path = _resolve_file(hires.get("model") or "", "hires upscaler")
+        except _ModelError as e:
+            return False, str(e)
+    saved: list[Path] = []
+    result: dict = {}
+
+    def partial(text: str) -> str:
+        if not saved:
+            return text
+        return f"{text} {len(saved)} of {batch} images were saved."
+
     with shared.lock:
         shared.cancel_idle_timer()
         try:
@@ -497,6 +559,11 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 width, height = init["width"], init["height"]
             if width is None or height is None:
                 width, height = _default_size(info.get("version", ""), rec, blk, defaults)
+            if hires:
+                reason = sampling.check_hires_target(int(width), int(height),
+                                                     float(hires["scale"]))
+                if reason:
+                    return False, reason
             if seed is None or seed < 0:
                 seed = secrets.randbelow(2 ** 31)
             steps = steps or blk.get("steps") or (rec.steps if rec else None) or (
@@ -504,58 +571,209 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             cfg_scale = cfg if cfg is not None else (
                 blk.get("cfg_scale") if blk.get("cfg_scale") is not None
                 else (rec.cfg_scale if rec else (defaults.cfg_scale if defaults else None)))
-            params = {
-                "prompt": prompt, "negative_prompt": negative_prompt or "",
-                "width": int(width), "height": int(height), "seed": int(seed),
-                "steps": steps, "cfg_scale": cfg_scale, "guidance": guidance,
-                "clip_skip": clip_skip, "preview": on_preview is not None,
-                "sample_method": blk.get("sample_method") or None,
-                "scheduler": blk.get("scheduler") or None,
-                "init_image": init,
-                "strength": (denoise if denoise is not None else 0.75) if init else None,
-                "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
-                          for x in lora_files],
-            }
+            method = sample_method or blk.get("sample_method") or None
+            sched = scheduler or blk.get("scheduler") or None
+            hires_payload = None
+            if hires:
+                hires_payload = {
+                    "upscaler": sampling.HIRES_UPSCALER_LIBRARY_NAMES[hires["upscaler"]],
+                    "model_path": str(hires_path) if hires_path else None,
+                    "scale": float(hires["scale"]), "steps": int(hires["steps"]),
+                    "denoising_strength": float(hires["denoise"]),
+                }
+            components = {k: v["name"] for k, v in (models.get("components") or {}).items()} or None
             if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
                 say(NEGATIVE_AT_CFG_1)
-            say(f"Generating {width}x{height}"
-                + (f", {steps} steps" if steps else "") + f", seed {seed}...")
-            result = runner.generate_image(params, on_event=relay, cancel_check=cancel_check)
+            batch_started = time.monotonic()
+            for index in range(batch):
+                if cancel_check is not None and cancel_check():
+                    raise SdCancelled("Generation cancelled.")
+                image_seed = int(seed) + index
+                params = {
+                    "prompt": prompt, "negative_prompt": negative_prompt or "",
+                    "width": int(width), "height": int(height), "seed": image_seed,
+                    "steps": steps, "cfg_scale": cfg_scale, "guidance": guidance,
+                    "clip_skip": clip_skip, "preview": on_preview is not None,
+                    "sample_method": method, "scheduler": sched,
+                    "init_image": init,
+                    "strength": (denoise if denoise is not None else 0.75) if init else None,
+                    "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
+                              for x in lora_files],
+                    "hires": hires_payload,
+                }
+                label = f"image {index + 1}/{batch}, " if batch > 1 else ""
+                say(f"Generating {label}{width}x{height}"
+                    + (f", {steps} steps" if steps else "")
+                    + (f", hires x{hires['scale']:g}" if hires else "")
+                    + f", seed {image_seed}...")
+                image_started = time.monotonic()
+                result = runner.generate_image(params, on_event=relay, cancel_check=cancel_check)
+                path = _batch_path(Path(out_path), index)
+                record = {
+                    "prompt": prompt, "negative_prompt": negative_prompt or None,
+                    "seed": image_seed, "cfg": cfg_scale, "guidance": guidance,
+                    "steps": steps, "sample_method": method, "scheduler": sched,
+                    "clip_skip": clip_skip,
+                    "width": result["width"], "height": result["height"],
+                    "size": f"{int(width)}x{int(height)}",
+                    "input_image": str(input_image) if input_image else None,
+                    "denoise": params["strength"], "hires": hires,
+                    "batch": {"index": index + 1, "count": batch} if batch > 1 else None,
+                    "backend": "native", "model": models["label"],
+                    "components": components,
+                    "loras": [{"name": x["name"], "strength": x["multiplier"]}
+                              for x in lora_files] or None,
+                    "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
+                }
+                entries = png_text_entries(record) if _embed_params(blk, write_sidecar) else None
+                try:
+                    _write_png(path, result, entries)
+                except (OSError, ValueError) as e:
+                    return False, partial(f"The generated image could not be saved: {e}")
+                saved.append(path)
+                warning = ""
+                if write_sidecar:
+                    warning = _write_sidecar(path, {
+                        **record,
+                        "elapsed_seconds": round(time.monotonic() - image_started, 1),
+                        "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    })
+                if warning:
+                    say(warning)
+                if on_saved is not None:
+                    on_saved(path)
         except SdCancelled:
-            return False, "Cancelled."
+            return False, partial("Cancelled.")
         except SdWorkerError as e:
-            return False, f"Native image generation failed: {e}"
+            return False, partial(f"Native image generation failed: {e}")
         except (OSError, ValueError) as e:
-            return False, f"Native image generation failed: {e}"
+            return False, partial(f"Native image generation failed: {e}")
         finally:
             relay.flush()
             if runner.is_alive():
                 shared.arm_idle_timer()
-    record = {
-        "prompt": prompt, "negative_prompt": negative_prompt or None,
-        "seed": int(seed), "cfg": cfg_scale, "guidance": guidance, "steps": steps,
-        "clip_skip": clip_skip, "width": result["width"], "height": result["height"],
-        "input_image": str(input_image) if input_image else None,
-        "denoise": params["strength"],
-        "backend": "native", "model": models["label"],
-        "components": {k: v["name"] for k, v in (models.get("components") or {}).items()}
-        or None,
-        "loras": [{"name": x["name"], "strength": x["multiplier"]} for x in lora_files]
-        or None,
-        "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
-    }
-    entries = png_text_entries(record) if _embed_params(blk, write_sidecar) else None
+    elapsed = time.monotonic() - batch_started
+    if batch == 1:
+        return True, (f"Saved {saved[0].name} ({result['width']}x{result['height']}, "
+                      f"seed {seed}, {elapsed:.1f} s).")
+    return True, (f"Saved {batch} images ({result['width']}x{result['height']}, seeds "
+                  f"{seed}-{int(seed) + batch - 1}, {elapsed:.1f} s): "
+                  + ", ".join(p.name for p in saved) + ".")
+
+
+MAX_UPSCALE_INPUT_SIDE = 4096
+MAX_UPSCALE_OUTPUT_SIDE = 8192
+
+
+def ensure_upscaler_available(s: dict, on_progress=None) -> tuple[bool, str]:
+    """Install the runtime when needed; an upscale needs no diffusion model.
+    Never raises."""
+    say = _say(on_progress)
     try:
-        _write_png(Path(out_path), result, entries)
+        rt = _ensure_runtime(s, say)
+    except sd_runtime.ProvisionError as e:
+        return False, f"The native image runtime is not available: {e}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"The native image runtime could not be prepared: {e}"
+    return True, f"Native upscaling ready (stable-diffusion.cpp, {rt.backend})."
+
+
+def upscaler_vram_estimate_bytes(upscaler: str) -> Optional[int]:
+    """Peak VRAM estimate for upscaling with registered model *upscaler*, or
+    None when its file cannot be resolved."""
+    try:
+        size = _resolve_file(upscaler, "upscaler").stat().st_size
+    except (OSError, _ModelError):
+        return None
+    return int(size * 1.2) + COMPUTE_ALLOWANCE_BYTES
+
+
+def _load_pixels(path: Path) -> dict:
+    from PIL import Image
+    with Image.open(path) as im:
+        if im.width > MAX_UPSCALE_INPUT_SIDE or im.height > MAX_UPSCALE_INPUT_SIDE:
+            raise ValueError(f"The image is {im.width}x{im.height}; at most "
+                             f"{MAX_UPSCALE_INPUT_SIDE} pixels per side can be upscaled.")
+        im.load()
+        mode = "RGBA" if "A" in im.getbands() else "RGB"
+        im = im.convert(mode)
+        return {"width": im.width, "height": im.height,
+                "channel": 4 if mode == "RGBA" else 3, "data": im.tobytes()}
+
+
+def upscale(s: dict, source: Path, upscaler: str, out_path: Path, *,
+            extra_meta: Optional[dict] = None, write_sidecar: bool = True,
+            cancel_check=None, on_progress=None,
+            on_saved: Optional[Callable[[Path], None]] = None) -> tuple[bool, str]:
+    """Upscale the image *source* with the registered ESRGAN model *upscaler*
+    into the PNG *out_path*. Returns ``(ok, message)``. The sidecar is
+    *extra_meta* (the source's own) with the new size and an ``upscaled``
+    record. Never raises: an unexpected error becomes ``(False, message)``."""
+    try:
+        return _upscale(s, Path(source), upscaler, Path(out_path), extra_meta or {},
+                        write_sidecar, cancel_check, on_progress, on_saved)
+    except Exception as e:  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.warning("native upscale failed: %s: %s", type(e).__name__, e)
+        return False, f"Native upscaling failed: {type(e).__name__}: {e}"
+
+
+def _upscale(s, source, upscaler, out_path, extra_meta, write_sidecar, cancel_check,
+             on_progress, on_saved) -> tuple[bool, str]:
+    say = _say(on_progress)
+    try:
+        model_file = _resolve_file(upscaler, "upscaler")
+        rt = _ensure_runtime(s, say)
+    except sd_runtime.ProvisionError as e:
+        return False, f"The native image runtime is not available: {e}"
+    except _ModelError as e:
+        return False, str(e)
+    try:
+        pixels = _load_pixels(source)
     except (OSError, ValueError) as e:
-        return False, f"The generated image could not be saved: {e}"
+        return False, f"The image could not be read: {e}"
+    relay = _event_relay(say)
+    runner = shared.runner
+    started = time.monotonic()
+    with shared.lock:
+        shared.cancel_idle_timer()
+        try:
+            say(f"Upscaling {pixels['width']}x{pixels['height']} with {display_name(upscaler)} "
+                f"(stable-diffusion.cpp, {rt.backend})...")
+            result = runner.upscale_image(
+                {"model_path": str(model_file), "image": pixels,
+                 "max_output_side": MAX_UPSCALE_OUTPUT_SIDE}, rt.path,
+                extra_dirs=rt.extra_dirs, on_event=relay, cancel_check=cancel_check)
+        except SdCancelled:
+            return False, "Cancelled."
+        except SdWorkerError as e:
+            return False, f"Native upscaling failed: {e}"
+        finally:
+            relay.flush()
+            if runner.is_alive():
+                shared.arm_idle_timer()
+    record = dict(extra_meta)
+    record.update({
+        "width": result["width"], "height": result["height"],
+        "upscaled": {"from": source.name, "model": display_name(upscaler),
+                     "scale": result["scale"]},
+        "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
+    })
+    entries = (png_text_entries(record)
+               if _embed_params(_native_block(s), write_sidecar) else None)
+    try:
+        _write_png(out_path, result, entries)
+    except (OSError, ValueError) as e:
+        return False, f"The upscaled image could not be saved: {e}"
     elapsed = time.monotonic() - started
-    warning = ""
     if write_sidecar:
-        warning = _write_sidecar(Path(out_path), {
+        warning = _write_sidecar(out_path, {
             **record, "elapsed_seconds": round(elapsed, 1),
             "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
-    message = (f"Saved {Path(out_path).name} ({result['width']}x{result['height']}, "
-               f"seed {seed}, {elapsed:.1f} s).")
-    return True, f"{message} {warning}".strip()
+        if warning:
+            say(warning)
+    if on_saved is not None:
+        on_saved(out_path)
+    return True, (f"Saved {out_path.name} ({result['width']}x{result['height']}, "
+                  f"{result['scale']}x, {elapsed:.1f} s).")

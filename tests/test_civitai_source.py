@@ -161,7 +161,7 @@ class TestResolveDownload:
         ("TextualInversion", "embedding", "embeddings"),
         ("VAE", "vae", "vae"),
         ("Controlnet", "unknown", "controlnet"),
-        ("Upscaler", "unknown", "upscale_models"),
+        ("Upscaler", "upscaler", "upscale_models"),
     ])
     def test_type_map_placement(self, monkeypatch, civitai_type, expected_model_type,
                                  expected_subfolder):
