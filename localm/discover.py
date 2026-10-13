@@ -791,10 +791,13 @@ def _reset_gpu_probe_cache() -> None:
     global _gpu_probe_done, _gpu_probe_result, _isolated_torch_unavailable
     global _isolated_torch_broken_warned, _child_stderr_cap_reported
     global _isolated_torch_unanswered
+    global _isolated_torch_retry_wait, _isolated_torch_retry_at
     with _gpu_probe_lock:
         _gpu_last_good = None
         _gpu_probe_inflight = False
         _isolated_torch_unanswered = False
+        _isolated_torch_retry_wait = 0.0
+        _isolated_torch_retry_at = 0.0
         # Cleared with the rest of the probe state: a test (or a caller) resetting
         # the cache must get a clean slate, or one test's simulated spawn failure
         # would silently disable the torch path for every later test in the worker.
@@ -1435,6 +1438,16 @@ _isolated_torch_broken_warned = False
 # Read/written under _gpu_probe_lock.
 _isolated_torch_unanswered = False
 
+# Wait before the isolated probe child is spawned again after it could not
+# answer (spawn failure, nothing printed, unusable reply): the first wait, and
+# the cap it doubles up to. A round inside the wait takes the same path as a
+# round whose child failed. Cleared by an answer and by _reset_gpu_probe_cache.
+# Read/written under _gpu_probe_lock.
+_ISOLATED_TORCH_RETRY_FIRST = 30.0
+_ISOLATED_TORCH_RETRY_MAX = 600.0
+_isolated_torch_retry_wait = 0.0
+_isolated_torch_retry_at = 0.0
+
 
 def _in_process_torch_import_can_freeze() -> bool:
     """True where a cold ``import torch`` in this process can hold the OS loader
@@ -1739,13 +1752,38 @@ def _torch_gpus_isolated_once() -> list:
     + rocm_sdk torch) without touching this latch, so that skip is not detected
     as inconclusive here either. Closing it would need :func:`_list_gpus_probe`
     itself to track conclusiveness across every source it tries, not just this
-    one."""
+    one.
+
+    After a round in which isolation was broken the child is not spawned again
+    until ``_isolated_torch_retry_at``: the wait starts at
+    ``_ISOLATED_TORCH_RETRY_FIRST`` seconds and doubles per further failure up to
+    ``_ISOLATED_TORCH_RETRY_MAX``. A round inside the wait is handled exactly as
+    a round whose child could not answer. Any answer from the child clears the
+    wait."""
     global _isolated_torch_unavailable
+    global _isolated_torch_retry_wait, _isolated_torch_retry_at
     with _gpu_probe_lock:
         if _isolated_torch_unavailable:
             return []
+        waiting = time.monotonic() < _isolated_torch_retry_at
     try:
-        devices = _torch_gpus_isolated()
+        if waiting:
+            logger.debug("list_gpus: isolated probe failed recently; not "
+                         "spawning it again before the retry wait ends")
+            devices = None
+        else:
+            devices = _torch_gpus_isolated()
+            with _gpu_probe_lock:
+                if devices is None:
+                    _isolated_torch_retry_wait = min(
+                        _ISOLATED_TORCH_RETRY_MAX,
+                        _isolated_torch_retry_wait * 2
+                        or _ISOLATED_TORCH_RETRY_FIRST)
+                    _isolated_torch_retry_at = (time.monotonic()
+                                                + _isolated_torch_retry_wait)
+                else:
+                    _isolated_torch_retry_wait = 0.0
+                    _isolated_torch_retry_at = 0.0
     except _IsolatedTorchWedged:
         with _gpu_probe_lock:
             if not _isolated_torch_unavailable:
