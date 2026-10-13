@@ -471,19 +471,38 @@ def messages_contain_audio(messages: list[dict]) -> bool:
 
 
 _EMPTY_THINK_BLOCK = "<think>\n\n</think>\n\n"
+_HARMONY_ASSISTANT = "<|start|>assistant"
+_HARMONY_FINAL = "<|channel|>final<|message|>"
+_GEMMA4_MODEL_TURN = "<|turn>model\n"
+_GEMMA4_THOUGHT_OPEN = "<|channel>thought\n"
+_GEMMA4_THOUGHT_CLOSE = "<channel|>"
 
 
 def no_think_prompt(prompt: str, template: Optional[str]) -> str:
     """Return *prompt* (a rendered chat prompt ending in the assistant
-    generation prefix) with an empty ``<think></think>`` block as the start of
-    the reply, so a ``<think>``-style reasoning model answers directly.
+    generation prefix) with the start of the reply prefilled so a reasoning
+    model answers without its reasoning channel.
+
+    ``<think>``-style models get an empty ``<think></think>`` block:
 
     - A prompt that already ends in an empty think block is returned unchanged.
     - A prompt whose generation prefix opens ``<think>`` has that block closed
       empty.
     - Otherwise the empty block is appended only when *template* (the chat
-      template source) mentions ``<think>``; any other prompt is returned
-      unchanged, so a model with no ``<think>`` convention is never fed one.
+      template source) mentions ``<think>``.
+
+    Channel formats:
+
+    - Harmony (gpt-oss): a prompt ending in the ``<|start|>assistant``
+      generation prefix gets ``<|channel|>final<|message|>``, so the reply is
+      the final-channel answer with no analysis message before it.
+    - Gemma 4: a prompt ending in ``<|turn>model\\n`` gets an empty thought
+      channel (``<|channel>thought\\n<channel|>``) when *template* mentions
+      ``<|channel>``; a prompt ending in an open ``<|channel>thought\\n`` has
+      that channel closed empty.
+
+    Any other prompt is returned unchanged, so a model with none of these
+    conventions is never fed one.
     """
     import re
     if re.search(r"<think>\s*</think>\s*$", prompt):
@@ -491,6 +510,13 @@ def no_think_prompt(prompt: str, template: Optional[str]) -> str:
     m = re.search(r"<think>\s*$", prompt)
     if m:
         return prompt[:m.start()] + _EMPTY_THINK_BLOCK
+    if prompt.endswith(_HARMONY_ASSISTANT):
+        return prompt + _HARMONY_FINAL
+    if prompt.endswith(_GEMMA4_THOUGHT_OPEN):
+        return prompt + _GEMMA4_THOUGHT_CLOSE
+    if (prompt.endswith(_GEMMA4_MODEL_TURN) and template
+            and "<|channel>" in template):
+        return prompt + _GEMMA4_THOUGHT_OPEN + _GEMMA4_THOUGHT_CLOSE
     if template and "<think>" in template:
         return prompt + _EMPTY_THINK_BLOCK
     return prompt
@@ -665,8 +691,8 @@ class BaseBackend(ABC):
         thinking:
             ``False`` asks a reasoning model to answer without its reasoning
             channel (see :func:`no_think_prompt`); ``None`` and ``True`` leave
-            the model's default.  A model with no ``<think>`` convention is
-            unaffected.
+            the model's default.  A model with no ``<think>``, harmony or
+            Gemma 4 channel convention is unaffected.
         min_p, presence_penalty, frequency_penalty:
             OpenAI sampling options, passed only when the caller set them and
             only to a backend whose :meth:`unsupported_sampling` does not list
