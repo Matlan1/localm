@@ -658,6 +658,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A share inbox that cannot be listed says so.** If the folder holding items shared from a
   phone cannot be read, the 15-minute clean-up now logs that it could not run instead of
   leaving expired items on disk unreported.
+- **Switching models no longer freezes the server while the model folder is measured.** Reading
+  the model registry, measuring a model's size on disk and building its engine ran on the
+  server's main loop, so a load of a large model folder on a slow or network disk stalled every
+  other request, including the status poll, until the disk answered.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
@@ -2090,6 +2094,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   skipped the cross-origin refusal and the open-mode shell-token check without anyone listing it.
   Each now matches only its own path. A trailing-slash spelling of one of those paths is no longer
   exempt.
+- **An unreadable `config.json` no longer switches the network policy or the sign-in requirement
+  off.** When `config.json` (and its backup) exists but cannot be read, localm used to fall back
+  to the defaults for everything: `net_mode = off` read as `ask`, the `net_deny` list was empty,
+  and an empty `net_allow` list lifted a strict allow-list entirely. Scheduled jobs then got the
+  web tool back. Now an unreadable config is treated as `net_mode = off`: every policy-routed
+  request is refused and scheduled jobs get no web tool, with a warning in the log. A configured
+  `require_auth` is kept in force the same way, and the server asks for a key until the file is
+  readable again.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move

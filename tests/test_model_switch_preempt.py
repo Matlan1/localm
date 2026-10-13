@@ -326,3 +326,42 @@ def test_switching_models_does_not_evict_the_new_one_via_the_old_ones_staleness(
 
     b_loaded = asyncio.run(scenario())
     assert b_loaded is True, "freshly switched-to model B must not be evicted"
+
+def test_a_switch_superseded_before_its_load_begins_never_loads():
+    """A newer explicit selection arriving between a switch's supersession
+    check and the point its load publishes a cancel event has nothing to
+    cancel, so the older switch must stop at the start of its load rather than
+    run it to completion."""
+
+    async def scenario():
+        _reset_switch_state()
+        never = threading.Event()
+        engine = FakeEngine("B", load_gate=never)
+        hs._switch_desired = "C"
+        loop = asyncio.get_running_loop()
+        res = await asyncio.wait_for(
+            hs._switch_load(loop, "B", engine, preempt=True), timeout=5)
+        return res, engine, hs._switch_cancel, hs._switch_loading
+
+    res, engine, published_cancel, loading = asyncio.run(scenario())
+    assert res == {"status": "superseded", "model": "B", "by": "C"}
+    assert not engine.load_started.is_set(), "the superseded load ran anyway"
+    assert published_cancel is None and loading is None
+
+
+def test_a_non_preempting_load_ignores_the_desired_name():
+    """An API-routed load (preempt False) is not part of the supersession
+    protocol, so a different _switch_desired does not stop it."""
+
+    async def scenario():
+        _reset_switch_state()
+        ready = threading.Event(); ready.set()
+        engine = FakeEngine("B", load_gate=ready)
+        hs._switch_desired = "C"
+        loop = asyncio.get_running_loop()
+        res = await hs._switch_load(loop, "B", engine, preempt=False)
+        return res, engine
+
+    res, engine = asyncio.run(scenario())
+    assert res is None
+    assert engine.loaded

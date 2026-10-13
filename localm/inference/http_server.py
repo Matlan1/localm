@@ -1341,9 +1341,10 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
     """Run ``engine.load()`` off the event loop with a fresh cancel event.
 
     Returns None when the load succeeded, a ``superseded`` result when a newer
-    explicit switch cancelled it, or a ``cancelled`` result for any other
-    ``ModelLoadCancelled``. Raises HTTPException 503 with the backend's message
-    when ``load()`` raises RuntimeError.
+    explicit switch cancelled it or was selected before the load began, or a
+    ``cancelled`` result for any other ``ModelLoadCancelled``. Raises
+    HTTPException 503 with the backend's message when ``load()`` raises
+    RuntimeError.
 
     Every load installs a new event on the engine, which may still hold the
     set event of an earlier superseded switch. See
@@ -1364,6 +1365,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
         _switch_cancel = cancel
         _switch_loading = name
     try:
+        if preempt and _switch_desired != name:
+            return {"status": "superseded", "model": name, "by": _switch_desired}
         fingerprint = await loop.run_in_executor(
             None, _routing_latch.fingerprint, name)
         await loop.run_in_executor(None, engine.load)
