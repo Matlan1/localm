@@ -12,8 +12,8 @@ it is the on-disk ``share_inbox`` directory. Either way an entry expires after
 ``_SHARE_TTL_SECONDS``: expired entries are dropped whenever the inbox is
 touched, and stale disk entries are swept once at startup.
 
-The multipart parser and the inbox helpers stay in ``web.py`` and are imported
-by name.
+The form is read with ``localm.multipartform.read_form``; the inbox helpers
+stay in ``web.py`` and are imported by name.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from fastapi.responses import RedirectResponse
 import localm.plugins.gui.web as _web
 from localm.debuglog import logger
 from localm.inference.http_server import _require_auth, job_owner_ok, principal_id
+from localm.multipartform import MultipartError, read_form
 from localm.plugins.gui.web import ShareClearRequest
 
 # How long a shared entry waits for the app to ingest it.
@@ -35,6 +36,8 @@ _SHARE_TTL_SECONDS = 15 * 60
 # inbox holds at once across every owner.
 _SHARE_MAX_BYTES = _web._MAX_UPLOAD_BYTES
 _SHARE_MEMORY_MAX_BYTES = _web._MAX_UPLOAD_BYTES
+# Multipart framing and text fields allowed on top of ``_SHARE_MAX_BYTES``.
+_SHARE_FORM_OVERHEAD_BYTES = 1024 * 1024
 
 
 def _memory_inbox(app) -> dict:
@@ -97,17 +100,20 @@ def register(app: FastAPI, ctx) -> None:
         share exceeds ``_SHARE_MAX_BYTES`` or, in privacy mode, when the memory
         inbox would exceed ``_SHARE_MEMORY_MAX_BYTES`` with it."""
         import uuid as _uuid
-        boundary = _web._multipart_boundary(request.headers.get("content-type", ""))
-        if boundary is None:
-            raise HTTPException(400, "Expected a multipart/form-data share")
-        body = await request.body()
-        fields, files = _web._parse_multipart(body, boundary)
+        try:
+            form = await read_form(
+                request, max_bytes=_SHARE_MAX_BYTES + _SHARE_FORM_OVERHEAD_BYTES,
+                too_large="Shared content is too large.",
+                max_field_bytes=_SHARE_MAX_BYTES)
+        except MultipartError as e:
+            raise HTTPException(e.status, e.message) from e
         _sweep_expired(app, _web._share_inbox(create=False))
         owner = principal_id(request)
         # Names are all checked BEFORE anything is written, so a refused share
         # never leaves a partial inbox entry behind.
         accepted = []
-        for filename, _ctype, data in files:
+        for upload in (u for group in form.files.values() for u in group):
+            filename, data = upload.filename, upload.data
             if not data:
                 continue
             # Only images are ingested (the chat vision path); ignore other types.
@@ -116,15 +122,14 @@ def register(app: FastAPI, ctx) -> None:
             safe = Path(filename or "shared").name[:80] or "shared"
             # Path().name alone is NOT a sufficient sanitizer: it leaves
             # "photo:stream.png" intact, which on NTFS writes into an alternate
-            # data stream that /api/share/pending cannot list, and leaves an
-            # embedded NUL intact, which raises ValueError out of write_bytes as
-            # a bare 500. Reuses /api/upload's guard. This route REFUSES where
+            # data stream that /api/share/pending cannot list. Reuses
+            # /api/upload's guard. This route REFUSES where
             # /api/upload skips: it returns only a redirect carrying a count, so
             # a silent skip would be invisible to the caller.
             if not _web._name_is_safe(safe):
                 raise HTTPException(400, "Invalid file name.")
             accepted.append((safe, data))
-        shared_text = (fields.get("text") or fields.get("url") or "").strip()
+        shared_text = (form.first("text") or form.first("url") or "").strip()
         if shared_text:
             accepted.append(("shared.txt", shared_text[:20000].encode("utf-8")))
         total = sum(len(data) for _safe, data in accepted)

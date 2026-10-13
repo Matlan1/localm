@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """PWA Web Share Target: a phone shares an image into localm via the OS share
-sheet; it lands server-side and the app ingests it. Parsed without
-python-multipart (localm stays self-contained), so this also guards the
-hand-rolled multipart parser."""
+sheet; it lands server-side and the app ingests it. Parsed with
+localm.multipartform (localm stays self-contained, no python-multipart)."""
 
 from pathlib import Path
 
@@ -163,10 +162,13 @@ class TestShareFilenameGuard:
         assert list(_inbox().iterdir()) == []
         assert share_client.get("/api/share/pending").json()["items"] == []
 
-    def test_rejects_embedded_nul_name(self, share_client):
+    def test_embedded_nul_is_stripped_never_written(self, share_client):
         r = _post_raw(share_client, "photo\x00.png")
-        assert r.status_code == 400          # not a bare 500 out of write_bytes
-        assert list(_inbox().iterdir()) == []
+        assert r.status_code == 303          # not a bare 500 out of write_bytes
+        names = [p.name for p in _inbox().iterdir()]
+        assert len(names) == 1 and "\x00" not in names[0]
+        items = share_client.get("/api/share/pending").json()["items"]
+        assert [i["name"] for i in items] == ["photo.png"]
 
     def test_still_accepts_a_legitimate_name(self, share_client):
         """A guard that refused everything would look exactly as green as a
@@ -536,3 +538,76 @@ def test_the_memory_inbox_is_bounded_across_shares(privacy_client, monkeypatch, 
     r = privacy_client.post("/share-target", files={"files": ("c.png", _PNG, "image/png")},
                             follow_redirects=False)
     assert r.status_code == 303
+
+
+# ---------------------------------------------------------------------------
+#  Hostile multipart bodies are refused by the shared bounded reader
+# ---------------------------------------------------------------------------
+
+def _post_body(client, body, content_type="multipart/form-data; boundary=BOUND"):
+    return client.post("/share-target", content=body,
+                       headers={"Content-Type": content_type},
+                       follow_redirects=False)
+
+
+def test_share_refuses_a_body_with_more_parts_than_the_form_cap(share_client, tmp_path):
+    from localm.multipartform import MAX_FIELDS
+    part = (b"--BOUND\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nx\r\n")
+    body = part * (MAX_FIELDS + 1) + b"--BOUND--\r\n"
+    r = _post_body(share_client, body)
+    assert r.status_code == 413
+    assert _disk_entries(tmp_path) == []
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param(b"--BOUND\r\n" * 5000, id="delimiter-flood"),
+    pytest.param(b"--BOUND\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nx",
+                 id="no-closing-boundary"),
+    pytest.param(b"not multipart at all", id="no-delimiter"),
+])
+def test_share_refuses_a_malformed_body_with_a_400(share_client, tmp_path, body):
+    r = _post_body(share_client, body)
+    assert r.status_code == 400
+    assert _disk_entries(tmp_path) == []
+
+
+def test_share_refuses_an_illegal_boundary(share_client):
+    r = _post_body(share_client, b"--\r\n", "multipart/form-data; boundary=" + "B" * 71)
+    assert r.status_code == 400
+
+
+def test_share_refuses_a_non_multipart_post(share_client):
+    r = _post_body(share_client, b"x", "text/plain")
+    assert r.status_code == 415
+
+
+def test_share_body_is_capped_before_it_is_parsed(share_client, monkeypatch, tmp_path):
+    share = _share_module()
+    monkeypatch.setattr(share, "_SHARE_MAX_BYTES", 8)
+    monkeypatch.setattr(share, "_SHARE_FORM_OVERHEAD_BYTES", 0)
+    r = share_client.post("/share-target",
+                          files={"files": ("big.png", _PNG * 4, "image/png")},
+                          follow_redirects=False)
+    assert r.status_code == 413
+    assert _disk_entries(tmp_path) == []
+
+
+def test_the_gui_carries_no_second_multipart_parser():
+    from localm.plugins.gui import web
+    assert not hasattr(web, "_parse_multipart")
+    assert not hasattr(web, "_multipart_boundary")
+
+
+def test_a_long_shared_text_is_accepted_and_truncated(share_client):
+    from localm.multipartform import MAX_FIELD_BYTES
+    text = "t" * (MAX_FIELD_BYTES + 6000)
+    r = share_client.post(
+        "/share-target", data={"text": text},
+        files={"_": ("", b"", "application/octet-stream")},
+        follow_redirects=False)
+    assert r.status_code == 303
+    items = share_client.get("/api/share/pending").json()["items"]
+    assert [i["name"] for i in items] == ["shared.txt"]
+    import base64
+    payload = items[0]["data_uri"].split(",", 1)[1]
+    assert len(base64.b64decode(payload)) == 20000
