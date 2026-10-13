@@ -412,10 +412,9 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                                           on_status=_worker_status, **payload)
                 for token in gen:
                     resp_q.put(("chunk", token))
-                resp_q.put(("done", {
-                    "finish_reason": worker.last_finish_reason,
-                    "grammar_unsupported": bool(getattr(worker, "grammar_dropped", False)),
-                }))
+                resp_q.put(("done", {"finish_reason": worker.last_finish_reason,
+                                     "grammar_unsupported": bool(getattr(worker, "grammar_dropped",
+                                                                         False))}))
             except ContextCapacityExceededError as e:
                 # An oversized prompt exceeding the model's context capacity.
                 # Raised in pure Python before native generation - the loaded model
