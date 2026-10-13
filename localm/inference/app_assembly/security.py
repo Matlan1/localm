@@ -336,7 +336,7 @@ def add_security_headers(app: FastAPI) -> None:
     #
     # NO CDN ORIGIN IS LISTED, AND NOTHING NEEDS ONE. The tts plugin's Kokoro
     # bundle pulls the onnxruntime-web backend with a dynamic import()
-    # (ort-wasm-simd-threaded.jsep.mjs), and a dynamic import is a MODULE SCRIPT,
+    # (ort-wasm-simd-threaded.asyncify.mjs), and a dynamic import is a MODULE SCRIPT,
     # so it is governed by script-src rather than connect-src. That runtime is
     # vendored and served from 'self'
     # (localm/plugins/builtin/tts/static/vendor/onnxruntime/, pointed at by the

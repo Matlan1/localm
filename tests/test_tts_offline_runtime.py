@@ -26,10 +26,10 @@ _PLUGIN = Path(tts_settings.__file__).resolve().parent
 _STATIC = _PLUGIN / "static"
 _VENDOR = _STATIC / "vendor"
 
-# The two artefacts @huggingface/transformers ships in dist/, and the only two
-# the bundle names. Read back out of kokoro.min.js rather than trusted.
-_RUNTIME_MJS = "ort-wasm-simd-threaded.jsep.mjs"
-_RUNTIME_WASM = "ort-wasm-simd-threaded.jsep.wasm"
+# The glue and binary the bundle names, and the only two it names. Read back out
+# of kokoro.min.js by test_every_runtime_file_the_bundle_asks_for_is_vendored.
+_RUNTIME_MJS = "ort-wasm-simd-threaded.asyncify.mjs"
+_RUNTIME_WASM = "ort-wasm-simd-threaded.asyncify.wasm"
 
 
 def _shipped_wasm_paths() -> str:
@@ -73,8 +73,8 @@ def test_the_vendored_wasm_is_a_real_webassembly_module():
         f"vendored runtime carries no WebAssembly magic, got {blob[:8]!r}")
     assert blob[4:8] == b"\x01\x00\x00\x00", f"unexpected wasm version {blob[4:8]!r}"
     assert len(blob) > 1_000_000, (
-        f"vendored runtime is only {len(blob)} bytes; the real onnxruntime jsep "
-        "build is roughly 21 MB, so this looks truncated")
+        f"vendored runtime is only {len(blob)} bytes; the real onnxruntime "
+        "build is tens of megabytes, so this looks truncated")
 
 
 def test_the_js_fallback_and_the_shipped_default_agree():
@@ -109,8 +109,7 @@ def test_every_runtime_file_the_bundle_asks_for_is_vendored():
     missing = sorted(n for n in asked if not (root / n).is_file())
     assert not missing, (
         f"the bundle requests {missing} but they are not vendored under {root}. "
-        "Re-vendor from the matching @huggingface/transformers release; see "
-        "vendor/NOTICE.md.")
+        "Re-vendor the runtime that matches the bundle; see vendor/NOTICE.md.")
 
 
 def test_the_shipped_default_is_a_value_the_settings_validator_accepts():
