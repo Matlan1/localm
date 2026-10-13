@@ -99,11 +99,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(pp, "ensure_pipeline_worktree", lambda: worktree)
     monkeypatch.setattr(pp, "prepare_bump_branch",
                         lambda wt, cand, pin: spies.calls.append(("branch", cand, pin)) or "br")
+    spies.texts = []
     monkeypatch.setattr(pp, "commit_and_push",
-                        lambda wt, br, cand, old, message=None: spies.calls.append(("push", cand)))
+                        lambda wt, br, cand, old, message=None:
+                        spies.texts.append(message) or spies.calls.append(("push", cand)))
     monkeypatch.setattr(pp, "open_pr",
                         lambda wt, br, cand, old, title=None, body=None:
-                        spies.calls.append(("pr", title)) or 77)
+                        spies.texts.extend([title, body]) or spies.calls.append(("pr", title)) or 77)
     monkeypatch.setattr(pw, "close_superseded_prs",
                         lambda wt, key, keep: spies.calls.append(("supersede", key, keep)) or [])
     monkeypatch.setattr(pp, "wait_for_ci", lambda wt: spies.calls.append(("ci",)) or spies.ci)
@@ -226,6 +228,16 @@ def test_an_ordinary_fail_is_still_a_build_fail(env, monkeypatch):
     monkeypatch.setenv("FAKE_CONFIRM_RC", "1")
     out = pw.advance(_adv(), dry_run=False)
     assert out.verdict == pw.FAIL
+
+
+@pytest.mark.parametrize("kw", [{}, {"auto_merge": lambda old, new: False}, {"confirm_script": None}])
+def test_the_commit_and_pull_request_text_names_the_change_and_no_internal_process(env, kw):
+    pw.advance(_adv(**kw), dry_run=False)
+    assert len(env.texts) == 3 and all(env.texts)
+    joined = "\n".join(env.texts)
+    assert "v2" in joined and "Fake runtime" in joined
+    internal = ("real hardware", "this machine", "confirm_", "bump_", "receipt", "Automated:", "GUI test suite")
+    assert [w for w in internal if w in joined] == []
 
 
 def test_red_ci_is_a_fail_and_never_merges(env):
