@@ -44,7 +44,7 @@ class _FakeFn:
 
 class _FakeLib:
     def __init__(self, with_loader: bool = False, dev_count=None,
-                 load_all_registers: bool = False):
+                 load_all_registers: bool = False, from_path: str = ""):
         if with_loader:
             self.ggml_backend_load = _RecordingLoad()
         # When dev_count is given, expose ggml_backend_dev_count. If
@@ -59,6 +59,15 @@ class _FakeLib:
             def _load_all():
                 self._registered = True
             self.ggml_backend_load_all = _FakeFn(_load_all)
+        # from_path: "registers" registers on ggml_backend_load_all_from_path,
+        # "empty" exports it but it finds nothing; the dirs it was given are kept.
+        self.from_path_dirs = []
+        if from_path:
+            def _from_path(d):
+                self.from_path_dirs.append(d.decode())
+                if from_path == "registers":
+                    self._registered = True
+            self.ggml_backend_load_all_from_path = _FakeFn(_from_path)
 
 
 def _touch(d, names):
@@ -143,3 +152,38 @@ def test_compute_backends_available_reflects_flag(monkeypatch):
     assert _loader.compute_backends_available() is False
     monkeypatch.setattr(_loader, "_compute_backends_ok", None)
     assert _loader.compute_backends_available() is False
+
+
+def test_load_all_from_path_is_pointed_at_the_runtime_dir_first(tmp_path, monkeypatch):
+    # The build's discovery is run over binary_dir, so it scores the ggml-cpu-*
+    # variants there and registers one; nothing else runs after it succeeds.
+    monkeypatch.setattr(sys, "platform", "win32")
+    _touch(tmp_path, ["ggml-base.dll", "ggml.dll", "ggml-cpu-haswell.dll",
+                      "ggml-cpu-x64.dll", "ggml-vulkan.dll", "llama.dll"])
+    lib = _FakeLib(with_loader=True, dev_count=2, load_all_registers=True,
+                   from_path="registers")
+    assert _loader._register_ggml_backends(tmp_path, lib) is True
+    assert lib.from_path_dirs == [str(tmp_path)]
+    assert lib.ggml_backend_load_all.calls == 0
+    assert lib.ggml_backend_load.calls == []
+
+
+def test_an_empty_load_all_from_path_falls_back_to_the_bare_discovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    _touch(tmp_path, ["ggml-base.dll", "ggml.dll", "ggml-cpu.dll", "llama.dll"])
+    lib = _FakeLib(with_loader=True, dev_count=2, load_all_registers=True,
+                   from_path="empty")
+    assert _loader._register_ggml_backends(tmp_path, lib) is True
+    assert lib.from_path_dirs == [str(tmp_path)]
+    assert lib.ggml_backend_load_all.calls == 1
+    assert lib.ggml_backend_load.calls == []
+
+
+def test_a_failing_discovery_still_loads_each_plugin_by_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    _touch(tmp_path, ["ggml-base.dll", "ggml.dll", "ggml-cpu.dll", "ggml-vulkan.dll",
+                      "llama.dll"])
+    lib = _FakeLib(with_loader=True, dev_count=0, from_path="empty")
+    assert _loader._register_ggml_backends(tmp_path, lib) is False
+    assert lib.from_path_dirs == [str(tmp_path)]
+    assert any(c.endswith("ggml-vulkan.dll") for c in lib.ggml_backend_load.calls)

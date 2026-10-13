@@ -1848,26 +1848,32 @@ export async function refreshSettingsPage() {
   // sections; fields is passed through so the two managed-ComfyUI schema
   // fields (group="Media", skipped from the flat loop above) can be rendered
   // here instead.
-  await buildMediaSection(form, fields);
-  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+  const tailLoading = el("div", "sub settings-loading", t("settings.loadingMore"));
+  form.appendChild(tailLoading);
+  try {
+    await buildMediaSection(form, fields);
+    if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
-  // user_avatar / model_avatar_default / model_avatar_overrides: HIDDEN
-  // schema fields (skipped from the flat loop above, same as Media's own
-  // fields), rendered here with their own picker UI instead.
-  await buildAvatarsSection(form, fields);
-  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+    // user_avatar / model_avatar_default / model_avatar_overrides: HIDDEN
+    // schema fields (skipped from the flat loop above, same as Media's own
+    // fields), rendered here with their own picker UI instead.
+    await buildAvatarsSection(form, fields);
+    if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
-  // The tts plugin's own settings block (its own section in the Plugins group).
-  // Not part of the core schema: those keys live under config["plugins"]["tts"]
-  // and are edited through /v1/tts/config, like the media blocks above.
-  await buildTtsSection(form);
-  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+    // The tts plugin's own settings block (its own section in the Plugins group).
+    // Not part of the core schema: those keys live under config["plugins"]["tts"]
+    // and are edited through /v1/tts/config, like the media blocks above.
+    await buildTtsSection(form);
+    if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
-  // Any OTHER active plugin's own contributed fields (host.add_settings()),
-  // one section per plugin - the generic counterpart to the tts block above
-  // for a plugin the core has no bespoke schema for.
-  await buildPluginSettingsSections(form);
-  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+    // Any OTHER active plugin's own contributed fields (host.add_settings()),
+    // one section per plugin - the generic counterpart to the tts block above
+    // for a plugin the core has no bespoke schema for.
+    await buildPluginSettingsSections(form);
+    if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+  } finally {
+    tailLoading.remove();
+  }
 
   // Build the nav now that the schema sections exist, so the first config
   // section (not a static card) is the default tab. The owner-gated panels then
