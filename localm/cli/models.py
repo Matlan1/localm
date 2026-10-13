@@ -555,7 +555,13 @@ def bench_spec(model, source, draft_model, gen_tokens, rounds, ctx, gpu_layers,
     draft_path = None
     if source == "draft":
         from ..inference.engine import resolve_spec_draft_model
-        draft_path = resolve_spec_draft_model(load_config(), draft_model)
+        cfg = load_config()
+        draft_path = resolve_spec_draft_model(cfg, draft_model)
+        draft_name = str(draft_model if draft_model is not None
+                         else cfg.get("spec_draft_model") or "").strip()
+        if not draft_path and draft_name:
+            console.print(f"[red]Draft model not found:[/red] {escape(draft_name)}")
+            sys.exit(1)
         if not draft_path:
             console.print("[red]No draft model:[/red] pass --draft-model or set "
                           "spec_draft_model. `localm spec-drafts "

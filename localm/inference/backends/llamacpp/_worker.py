@@ -321,6 +321,7 @@ class GgufWorker(VramSizingMixin):
             "diffusion": bool(getattr(self._llm, "is_diffusion", False)),
             "parallel_slots": self.parallel_slots,
             "parallel_note": str(getattr(self._llm, "parallel_note", "") or ""),
+            "speculation": self.spec_report,
         }
         if meta["diffusion"]:
             meta["diffusion_capacity"] = int(getattr(self._llm, "_diffusion_capacity", 0) or 0)

@@ -78,7 +78,8 @@ def _load_failure_message(exc: BaseException, hint: str = "") -> str:
     *exc*, plus *hint* (extra sentences, may be empty).
 
     Advice to provision or repair the runtime is added only when nothing shows
-    the runtime works: a crash the runner placed in context creation, or a
+    the runtime works: a crash the runner placed in context creation or in the
+    draft-model load, or a
     context the runtime created as NULL after loading the weights, is about the
     model's context size, split or memory instead. A crash report from the
     runner already carries its own advice, so none is appended to it."""
@@ -88,7 +89,7 @@ def _load_failure_message(exc: BaseException, hint: str = "") -> str:
     if reason and reason[-1] not in ".!?":
         reason += "."
     if isinstance(exc, NativeLoadCrashError):
-        prefix = ("The model failed to load" if exc.phase == "context"
+        prefix = ("The model failed to load" if exc.phase in ("context", "draft")
                   else "Native llama runtime failed to load")
         return f"{prefix}: {reason}{hint}"
     unknown_arch = _UNKNOWN_ARCH_RE.search(reason)
@@ -143,6 +144,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     parallel_copies = 1
     parallel_slots = 1
     parallel_note = ""
+    draft_status = ""
 
     def __init__(
         self,
@@ -831,6 +833,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         slots = meta.get("parallel_slots")
         self.parallel_slots = slots if isinstance(slots, int) and slots > 0 else 1
         self.parallel_note = str(meta.get("parallel_note") or "")
+        self._apply_speculation_report(meta.get("speculation"))
         reported = meta.get("adapters")
         self.applied_adapters = list(reported) if isinstance(reported, list) else []
         if meta.get("diffusion") is True:
@@ -956,11 +959,38 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         self._print_mmap_note()
         self._print_parallel_note()
+        self._print_draft_note()
         if self.encoder_decoder:
             console.print(
                 f"[dim]  encoder-decoder model: each request reads its messages "
                 f"as plain text, up to {self.effective_ctx_max} tokens[/dim]")
         console.print("[green]✓[/green] Model loaded")
+
+    def _apply_speculation_report(self, report) -> None:
+        """Record the loaded model's draft-model status from the worker's
+        speculation report in ``draft_status`` ("" without a draft source),
+        and set ``draft_model_on_gpu`` False when no draft model stayed
+        loaded. A status other than "ok" / "ok-cpu" is logged as a warning."""
+        self.draft_status = ""
+        if not isinstance(report, dict) or report.get("source") != "draft":
+            return
+        status = str(report.get("status") or "")
+        self.draft_status = status
+        if status not in ("ok", "ok-cpu"):
+            self.draft_model_on_gpu = False
+            from localm.debuglog import logger
+
+            from .llamacpp._draftmodel import draft_status_message
+            logger.warning("draft model is off for %s: %s (%s)", Path(self.model_path).name,
+                           draft_status_message(status), status)
+
+    def _print_draft_note(self) -> None:
+        """Print why the configured draft model is not drafting, or nothing."""
+        status = self.draft_status
+        if status and status not in ("ok", "ok-cpu"):
+            from .llamacpp._draftmodel import draft_status_message
+            console.print(f"[yellow]  drafting :[/yellow] draft model off: "
+                          f"{draft_status_message(status)} ({status})")
 
     def _print_parallel_note(self) -> None:
         """Print how many requests the loaded model answers at once, when more

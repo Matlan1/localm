@@ -154,15 +154,15 @@ def _resolve_spec_draft_tokens(cfg: dict, override: Optional[int]) -> Optional[i
 def resolve_spec_draft_model(cfg: dict, override: Optional[str] = None) -> Optional[str]:
     """The draft GGUF path for the draft source: *override* when given, else
     the ``spec_draft_model`` config key, as a registered model name or a path
-    (``get_operator_model_info``). None when unset; a name that resolves to
-    nothing is returned as given, so the load reports the draft model missing."""
+    (``get_operator_model_info``), made absolute. None when unset or when the
+    name resolves to nothing, so the load reports the draft model missing."""
     raw = override if override is not None else cfg.get("spec_draft_model")
     name = str(raw or "").strip()
     if not name:
         return None
     from localm.model_manager.registry import get_operator_model_info
     info = get_operator_model_info(name)
-    return str(info[0]) if info is not None else name
+    return os.path.abspath(str(info[0])) if info is not None else None
 
 
 def create_backend(
