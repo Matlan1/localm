@@ -1,0 +1,291 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Hugging Face cross-encoders (``*ForSequenceClassification`` with one output) as rerankers.
+
+``localm add`` registers such a folder as an embedding model flagged as a reranker;
+``/v1/rerank`` and ``localm rerank`` then score pairs through an isolated HF worker
+and return the head's raw logit. The real-model tests save a tiny random
+BertForSequenceClassification and compare the scores with a forward pass computed
+here.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+
+import pytest
+
+from localm.config import load_registry
+from localm.inference import reranker
+from localm.inference.backends.base import RerankerHeadMissingError, RerankInputError
+from localm.inference.hf_head_check import classifier_head_present
+from localm.model_manager import add_local
+from localm.model_manager.registry import (
+    _detect_local_model_type,
+    entry_is_reranker,
+    hf_reranker_state,
+)
+
+needs_stack = pytest.mark.skipif(
+    importlib.util.find_spec("transformers") is None
+    or importlib.util.find_spec("torch") is None
+    or importlib.util.find_spec("tokenizers") is None,
+    reason="needs torch, transformers and tokenizers")
+
+
+@pytest.fixture
+def isolated_home(tmp_path, monkeypatch):
+    import localm.config as cfg
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    import localm.model_manager as mm
+    (home / "models").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(mm, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(mm, "ensure_dirs", lambda: (home / "models").mkdir(parents=True, exist_ok=True))
+    return home
+
+
+@pytest.fixture(autouse=True)
+def _release_reranker():
+    """Every test scores on the CPU (``embedding_gpu_layers`` 0), in a fresh worker."""
+    from localm.config import update_config
+    update_config(lambda c: c.__setitem__("embedding_gpu_layers", 0))
+    reranker.reset_reranker()
+    yield
+    reranker.reset_reranker()
+
+
+def _config(folder, **fields):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "config.json").write_text(json.dumps(fields), encoding="utf-8")
+    return folder
+
+
+class TestConfigState:
+    def test_single_score_head_is_a_reranker(self, tmp_path):
+        folder = _config(tmp_path / "m", architectures=["XLMRobertaForSequenceClassification"],
+                         id2label={"0": "LABEL_0"})
+        assert hf_reranker_state(folder) is True
+
+    def test_num_labels_one_without_id2label_is_a_reranker(self, tmp_path):
+        folder = _config(tmp_path / "m", architectures=["BertForSequenceClassification"],
+                         num_labels=1)
+        assert hf_reranker_state(folder) is True
+
+    def test_a_multi_label_classifier_is_not(self, tmp_path):
+        folder = _config(tmp_path / "m", architectures=["BertForSequenceClassification"],
+                         id2label={"0": "neg", "1": "neu", "2": "pos"})
+        assert hf_reranker_state(folder) is False
+
+    def test_a_plain_encoder_is_not(self, tmp_path):
+        assert hf_reranker_state(_config(tmp_path / "m", architectures=["BertModel"])) is False
+
+    def test_an_unreadable_config_is_unknown(self, tmp_path):
+        assert hf_reranker_state(tmp_path) is None
+        (tmp_path / "config.json").write_text("[1]", encoding="utf-8")
+        assert hf_reranker_state(tmp_path) is None
+
+    def test_the_registry_types_a_cross_encoder_as_embedding(self, tmp_path):
+        folder = _config(tmp_path / "m", architectures=["BertForSequenceClassification"],
+                         id2label={"0": "LABEL_0"})
+        assert _detect_local_model_type(folder, is_gguf=False, is_hf=True)[0] == "embedding"
+
+    def test_the_registry_leaves_a_multi_label_classifier_unknown(self, tmp_path):
+        folder = _config(tmp_path / "m", architectures=["BertForSequenceClassification"],
+                         id2label={"0": "a", "1": "b"})
+        assert _detect_local_model_type(folder, is_gguf=False, is_hf=True)[0] == "unknown"
+
+
+class TestHeadCheck:
+    @staticmethod
+    def _safetensors(path, names):
+        import struct
+        header = {n: {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]} for n in names}
+        raw = json.dumps(header).encode()
+        path.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\0" * 4 * max(1, len(names)))
+        return path
+
+    def test_classifier_and_score_tensors_count_as_a_head(self, tmp_path):
+        a = self._safetensors(tmp_path / "a.safetensors", ["bert.x", "classifier.weight"])
+        b = self._safetensors(tmp_path / "b.safetensors", ["model.x", "score.weight"])
+        assert classifier_head_present([a]) is True
+        assert classifier_head_present([b]) is True
+
+    def test_a_listing_without_one_is_reported_missing(self, tmp_path):
+        a = self._safetensors(tmp_path / "a.safetensors", ["bert.x"])
+        assert classifier_head_present([a]) is False
+
+    def test_the_head_may_sit_in_any_shard(self, tmp_path):
+        a = self._safetensors(tmp_path / "a.safetensors", ["bert.x"])
+        b = self._safetensors(tmp_path / "b.safetensors", ["classifier.bias"])
+        assert classifier_head_present([a, b]) is True
+
+    @pytest.mark.parametrize("name", ["classification_head.out_proj.weight", "logits_proj.weight"])
+    def test_other_families_name_their_head_differently(self, tmp_path, name):
+        a = self._safetensors(tmp_path / "a.safetensors", ["model.x", name])
+        assert classifier_head_present([a]) is True
+
+    def test_no_files_or_an_unreadable_one_is_unknown(self, tmp_path):
+        assert classifier_head_present([]) is None
+        bad = tmp_path / "bad.safetensors"
+        bad.write_bytes(b"xx")
+        assert classifier_head_present([bad]) is None
+
+
+def _build_cross_encoder(folder, *, num_labels=1):
+    """A tiny random BertForSequenceClassification with a word-level tokenizer."""
+    import torch
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from tokenizers.processors import TemplateProcessing
+    from transformers import BertConfig, BertForSequenceClassification, PreTrainedTokenizerFast
+
+    torch.manual_seed(0)
+    cfg = BertConfig(vocab_size=64, hidden_size=32, num_hidden_layers=2, num_attention_heads=4,
+                     intermediate_size=64, max_position_embeddings=32, num_labels=num_labels)
+    BertForSequenceClassification(cfg).save_pretrained(folder)
+    vocab = {"[PAD]": 0, "[UNK]": 1, "[CLS]": 2, "[SEP]": 3}
+    vocab.update({f"w{i}": 4 + i for i in range(60)})
+    tok = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    tok.post_processor = TemplateProcessing(
+        single="[CLS] $A [SEP]", pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[("[CLS]", 2), ("[SEP]", 3)])
+    PreTrainedTokenizerFast(
+        tokenizer_object=tok, unk_token="[UNK]", pad_token="[PAD]", cls_token="[CLS]",
+        sep_token="[SEP]", model_max_length=32).save_pretrained(folder)
+
+
+def _reference_scores(folder, query, documents):
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(folder)
+    model = AutoModelForSequenceClassification.from_pretrained(folder).eval()
+    out = []
+    with torch.no_grad():
+        for doc in documents:
+            enc = tok(query, doc, return_tensors="pt")
+            out.append(model(**enc).logits[0].tolist())
+    return out
+
+
+@pytest.fixture(scope="module")
+def cross_encoder(tmp_path_factory):
+    folder = tmp_path_factory.mktemp("rr") / "ce"
+    _build_cross_encoder(folder)
+    return folder
+
+
+_QUERY = "w1 w2"
+_DOCS = ["w1 w2 w3", "w9 w8 w7 w6", "w1"]
+
+
+class TestResidentModelKey:
+    def test_a_folder_model_has_a_new_key_when_a_file_in_it_changes(self, tmp_path):
+        folder = tmp_path / "m"
+        folder.mkdir()
+        (folder / "model.safetensors").write_bytes(b"a" * 10)
+        (folder / "config.json").write_text("{}")
+        before = reranker._file_key(str(folder))
+        (folder / "model.safetensors").write_bytes(b"b" * 25)
+        assert reranker._file_key(str(folder)) != before
+
+
+@needs_stack
+class TestRealCrossEncoder:
+    def test_registered_as_a_reranker_and_resolved_by_name(self, cross_encoder, isolated_home):
+        assert add_local(str(cross_encoder), name="ce") is True
+        entry = load_registry()["ce"]
+        assert entry["model_type"] == "embedding" and entry["reranker"] is True
+        assert entry_is_reranker("ce", entry) is True
+        assert reranker.registered_rerankers() == ["ce"]
+        name, path = reranker.resolve_reranker(None)
+        assert name == "ce" and path == str(cross_encoder.resolve())
+
+    def test_scores_match_a_forward_pass_computed_here(self, cross_encoder):
+        outcome = reranker.rerank(str(cross_encoder), _QUERY, _DOCS)
+        expected = _reference_scores(cross_encoder, _QUERY, _DOCS)
+        assert len(outcome.scored) == len(_DOCS)
+        for got, want in zip(outcome.scored, expected, strict=True):
+            assert got["scores"] == pytest.approx(want, abs=1e-5)
+            assert got["truncated"] is False
+        assert outcome.labels == []
+
+    def test_results_rank_best_first_by_the_raw_score(self, cross_encoder):
+        outcome = reranker.rerank(str(cross_encoder), _QUERY, _DOCS)
+        rows = reranker.rank_results(outcome.scored)
+        raw = [item["scores"][0] for item in outcome.scored]
+        assert [r["index"] for r in rows] == sorted(range(3), key=lambda i: (-raw[i], i))
+
+    def test_a_document_beyond_the_window_is_cut_and_flagged(self, cross_encoder):
+        long = " ".join(f"w{i}" for i in range(1, 50))
+        outcome = reranker.rerank(str(cross_encoder), _QUERY, [long, "w3"])
+        assert outcome.scored[0]["truncated"] is True
+        assert outcome.scored[0]["tokens"] <= 32
+        assert outcome.scored[1]["truncated"] is False
+
+    def test_a_query_that_fills_the_window_is_refused_and_the_worker_survives(
+            self, cross_encoder):
+        query = " ".join(f"w{i}" for i in range(1, 40))
+        with pytest.raises(RerankInputError):
+            reranker.rerank(str(cross_encoder), query, ["w3"])
+        again = reranker.rerank(str(cross_encoder), _QUERY, ["w3"])
+        assert len(again.scored) == 1
+
+    def test_a_second_call_reuses_the_resident_worker(self, cross_encoder):
+        reranker.rerank(str(cross_encoder), _QUERY, ["w3"])
+        resident, pid = reranker._RERANKER, reranker._RERANKER._runner._proc.pid
+        reranker.rerank(str(cross_encoder), _QUERY, ["w4"])
+        assert reranker._RERANKER is resident
+        assert resident._runner._proc.pid == pid
+        assert reranker.reranker_info()["path"] == str(cross_encoder)
+
+    def test_a_dead_worker_is_started_again_on_the_next_call(self, cross_encoder):
+        before = reranker.rerank(str(cross_encoder), _QUERY, _DOCS)
+        resident = reranker._RERANKER
+        old = resident._runner._proc
+        old.kill()
+        old.join(10)
+        after = reranker.rerank(str(cross_encoder), _QUERY, _DOCS)
+        assert reranker._RERANKER is resident
+        assert resident._runner._proc.pid != old.pid
+        assert after.scored == before.scored
+
+    def test_more_than_one_chunk_of_documents_keeps_the_request_order(self, cross_encoder):
+        docs = [f"w{i} w{i + 1}" for i in range(1, 41)]
+        outcome = reranker.rerank(str(cross_encoder), _QUERY, docs)
+        expected = _reference_scores(cross_encoder, _QUERY, docs)
+        got = [item["scores"][0] for item in outcome.scored]
+        assert got == pytest.approx([e[0] for e in expected], abs=1e-5)
+
+    def test_a_checkpoint_without_its_head_is_refused_by_name(self, cross_encoder, tmp_path):
+        import shutil
+        from safetensors.torch import load_file, save_file
+        folder = tmp_path / "headless"
+        shutil.copytree(cross_encoder, folder)
+        tensors = {k: v.contiguous() for k, v in load_file(str(folder / "model.safetensors")).items()
+                   if not k.startswith("classifier.")}
+        save_file(tensors, str(folder / "model.safetensors"))
+        with pytest.raises(RerankerHeadMissingError, match="classification head"):
+            reranker.rerank(str(folder), _QUERY, ["w3"])
+
+
+@needs_stack
+class TestMultiLabelHead:
+    def test_the_label_names_come_back_with_every_output(self, tmp_path):
+        folder = tmp_path / "ce3"
+        _build_cross_encoder(folder, num_labels=3)
+        outcome = reranker.rerank(str(folder), _QUERY, ["w3"])
+        assert len(outcome.scored[0]["scores"]) == 3
+        assert outcome.labels == ["LABEL_0", "LABEL_1", "LABEL_2"]
+
+
+@needs_stack
+def test_a_backend_not_built_for_reranking_refuses():
+    from localm.inference.backends.hf import HFBackend
+    with pytest.raises(RuntimeError, match="not loaded for reranking"):
+        HFBackend("nowhere").rerank([("q", "d")])
