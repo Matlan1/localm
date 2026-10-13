@@ -600,6 +600,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **The coder's browser_close stops a browser that is still starting.** Closing the browser
+  while it was still starting used to report that no browser was open and leave it to finish
+  starting; it now cancels the start, the browser is closed as soon as it is up, and the calls
+  waiting for it get an error.
 - **A UNet-only SDXL model loads in the native image backend.** Choosing an SDXL file that holds
   only the UNet (a safetensors file in ComfyUI or diffusers layout) used to fail with "get sd
   version from file failed"; it now loads with its CLIP-L, CLIP-G and VAE from your registered
