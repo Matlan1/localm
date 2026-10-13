@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A reply that depends only on the request.** `cache_prompt: false` on
+  `/v1/chat/completions`, `/v1/completions`, `/v1/messages` and `/v1/responses` makes a GGUF
+  model empty its prompt cache, process the whole prompt and answer on its own, after the
+  replies already running. The same request then gets the same reply whatever was asked
+  before it, even where the prompt cache would have changed a temperature-0 reply (unless
+  speculative drafting is on, or the context window grew in between).
 - **Transcription without Whisper.** `POST /v1/audio/transcriptions` now answers with an
   installed GGUF model that hears audio (for example Qwen3-ASR) when faster-whisper is not
   installed, or when `model` names one. Whisper stays the default when it is installed. This

@@ -33,6 +33,10 @@ _ERROR_TEXT_PREFIX = "[inference error"
 # Routes a cross-origin page may call (matched exactly, like the inference API).
 CROSS_ORIGIN_OK_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens"})
 
+# localm chat fields a Messages request may carry; they are passed to the chat
+# route unchanged.
+CHAT_EXTRAS = ("cache_prompt",)
+
 
 class AnthropicError(Exception):
     """A request the Messages layer refuses, rendered as an Anthropic error body."""
@@ -342,6 +346,10 @@ def plan_messages(req: MessagesRequest, model: Optional[str]) -> dict[str, Any]:
         value = getattr(req, key)
         if value is not None:
             body[key] = value
+    extra = req.model_extra or {}
+    for key in CHAT_EXTRAS:
+        if extra.get(key) is not None:
+            body[key] = extra[key]
     try:
         stop = normalize_stop(req.stop_sequences)
     except ValueError as exc:

@@ -410,6 +410,7 @@ class GgufWorker(VramSizingMixin):
         frequency_penalty: Optional[float] = None,
         logprobs: Optional[int] = None,
         logprob_sink: Optional[list] = None,
+        cache_prompt: bool = True,
     ):
         """Yield text tokens one at a time. With *logprobs* and *logprob_sink*,
         each generated token's record is appended to *logprob_sink* before its
@@ -459,6 +460,8 @@ class GgufWorker(VramSizingMixin):
             if logprobs is not None:
                 kw["logprobs"] = logprobs
                 kw["logprob_sink"] = logprob_sink
+            if not cache_prompt:
+                kw["cache_prompt"] = False
             return kw
 
         def _stream(g: Optional[str]):
