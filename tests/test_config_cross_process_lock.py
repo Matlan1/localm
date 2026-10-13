@@ -459,13 +459,16 @@ def test_an_unreadable_stale_lock_is_still_reclaimed(home, monkeypatch):
 
 
 def test_a_stale_lock_touched_since_it_was_judged_is_not_reclaimed(home, monkeypatch):
-    """The mtime check alone must decide this one: the bytes are unchanged, only
-    the timestamp moved, which is a holder that is alive after all."""
+    """The mtime check alone must decide this one. The bytes are unchanged and
+    the file is still older than the staleness age, so neither of the other two
+    checks can refuse it; only the timestamp differs from the one it was judged
+    by, which means the holder wrote to it after the judgement."""
     monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
-    token, mtime = _stale(lockpath)
-    now = cfg.time.time()
-    os.utime(lockpath, (now, now))
+    token, mtime = _stale(lockpath, age=10.0)
+    moved = cfg.time.time() - 5.0
+    os.utime(lockpath, (moved, moved))
+    assert cfg.time.time() - moved > cfg._CROSS_LOCK_STALE_AGE
     assert cfg._reclaim_stale_lock(lockpath, token, mtime) is False
     assert lockpath.read_bytes() == token
 
