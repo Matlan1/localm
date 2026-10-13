@@ -244,7 +244,8 @@ def test_a_missing_companion_names_a_download(flux_set):
     assert [m["slot"] for m in ei.value.missing] == ["t5xxl"]
     dl = ei.value.missing[0]["download"]
     assert dl["spec"] == "comfyanonymous/flux_text_encoders:t5xxl_fp8_e4m3fn.safetensors"
-    assert f"localm pull {dl['spec']} --type text-encoder" in str(ei.value)
+    assert (f"localm pull {dl['spec']} --type text-encoder --sha256 {dl['sha256']}"
+            in str(ei.value))
     st = image_native.status({"native": {"model": "fluxunchained"}})
     assert st["missing_components"][0]["slot"] == "t5xxl" and st["family"] == "flux"
 

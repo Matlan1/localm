@@ -84,6 +84,7 @@ def test_no_model_lists_every_recommended_download():
         native.resolve_models({"native": {}})
     for part in native.RECOMMENDED_VIDEO_MODELS[0].parts:
         assert f"localm pull {part.spec}" in str(ei.value)
+        assert f"--sha256 {part.sha256}" in str(ei.value)
 
 
 def test_the_recommended_set_resolves_once_every_part_is_registered(tmp_path):
