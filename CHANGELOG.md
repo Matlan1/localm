@@ -23,6 +23,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   reranking with the head's raw logit, on the CPU or the GPU like the GGUF rerankers. A
   checkpoint saved without its classification head is refused, and a classifier with several
   labels is not offered as a reranker.
+- **Models quantized with compressed-tensors load.** A Hugging Face checkpoint whose
+  `config.json` declares `quant_method: compressed-tensors` is expanded to full precision
+  when it loads, the way FP8 checkpoints are, and the load output says so. The `hf` and `gpu`
+  extras now include the compressed-tensors package, and a torch built without
+  `torch.distributed` (the ROCm build for Windows) can import it.
 - **Your own image and video models in the native backend.** The built-in stable-diffusion.cpp
   backend now runs a diffusion model you pick, not only the ones localm downloads for you: a
   FLUX.1, Chroma, SD3, SDXL, Qwen-Image, Z-Image or Wan model file is recognised from its
@@ -162,6 +167,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the reranker's score also decides which excerpts are relevant enough to reach the
   chat, so a rephrased question finds its answer where the keyword and similarity check used
   to drop it, and unrelated questions still bring in nothing.
+- **Chat follow-ups find what the conversation was about.** With a Knowledge collection
+  selected, a message that points back at the previous one ("what does that resync do?",
+  "the thing you said about ports") is now searched together with your previous message
+  instead of finding nothing, and more such phrasings are recognised. `localm rag query`
+  takes `--context`, and the query API takes `context` and reports `context_used`.
+- **Set the reranker's minimum score.** Settings > Knowledge > Reranker minimum score
+  (`rag_rerank_min_score`) chooses how high a reranker scores an excerpt before chat adds it, in
+  that reranker's own scale, so any reranker can gate Knowledge excerpts by its score and not only
+  the two measured Q8_0 files. Blank keeps the measured value, or the keyword and similarity check.
 - **A loaded reranker can be unloaded from the Models page.** A reranker that is in
   memory now shows as loaded there, and its Unload button (or `localm unload <name>`)
   frees it unless a rerank is running.
@@ -431,6 +445,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **Knowledge chat injects less off-topic text without embeddings.** Where the check can only compare
+  words (no embedding model, or a passage without a vector), an excerpt now needs at least two of the
+  message's words, unless the message is a single word, so a greeting that shares one word with the
+  collection no longer brings in an excerpt.
 - **The chat's Markdown renderer moved from marked 12 to marked 18.** Messages render the same; the visible differences are a half-typed list marker (`- `, `1. `) showing as an empty list while a reply streams in, and no stray blank line between consecutive HTML blocks.
 - **localm's managed ComfyUI now installs v0.39.0, up from v0.31.1.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **The bundled llama.cpp runtime moved from b11118 to b11541.** An existing install picks it up with `localm setup-llama --force`.

@@ -248,6 +248,8 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         # Why the last query() asked to rerank did not: None when it reranked or
         # was not asked to.
         self.rerank_degrade_reason: Optional[str] = None
+        # True when the last query() searched with its context argument.
+        self.context_applied: bool = False
         # True when _load() found a vectors.json on disk and REFUSED to use it;
         # _save() then sets that file aside instead of deleting it. Distinct from
         # vector_degrade_reason, which is also set by query-time degrades (a

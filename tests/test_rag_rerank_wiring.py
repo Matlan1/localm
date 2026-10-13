@@ -293,9 +293,9 @@ def _patch_query(monkeypatch):
     monkeypatch.setattr(
         store.Collection, "query",
         lambda self, text, k=4, embed_fn=None, relevant_only=False,
-        rerank_fn=None, rerank_candidates=20, rerank_min_score=None:
+        rerank_fn=None, rerank_candidates=20, rerank_min_score=None, context=None:
         captured.update(rerank_fn=rerank_fn, candidates=rerank_candidates,
-                        min_score=rerank_min_score) or [])
+                        min_score=rerank_min_score, context=context) or [])
     return captured
 
 
@@ -422,3 +422,94 @@ class TestCalibratedScoreGate:
         assert _sources(body)[0] == "first.md"
         assert all("rerank_score" not in h for h in body["hits"])
         assert "reranking failed (RuntimeError)" in body["rerank_note"]
+
+
+class TestMinScoreSetting:
+    def test_the_setting_gives_an_uncalibrated_reranker_a_score_gate(
+            self, home, fake_reranker):
+        assert rr.rerank_plan().min_score is None
+        _set(home, rag_rerank_min_score=0.3)
+        assert rr.rerank_plan().min_score == 0.3
+
+    def test_the_setting_overrides_the_measured_value(
+            self, home, fake_reranker, monkeypatch):
+        TestCalibratedScoreGate()._qwen(monkeypatch, fake_reranker)
+        assert rr.rerank_plan().min_score == 0.5
+        _set(home, rag_rerank_min_score=-2.0)
+        assert rr.rerank_plan().min_score == -2.0
+        _set(home, rag_rerank_min_score=0)
+        assert rr.rerank_plan().min_score == 0.0
+
+    @pytest.mark.parametrize("raw", ["not a number", True, float("nan"),
+                                     float("inf"), [], {}])
+    def test_an_unusable_value_is_ignored_and_logged_once(
+            self, home, fake_reranker, monkeypatch, raw):
+        TestCalibratedScoreGate()._qwen(monkeypatch, fake_reranker)
+        rr._WARNED_MIN_SCORES.clear()
+        warnings = []
+        monkeypatch.setattr(rr._log, "warning",
+                            lambda *a, **k: warnings.append(a))
+        _set(home, rag_rerank_min_score=raw)
+        assert rr.rerank_plan().min_score == 0.5
+        assert rr.rerank_plan().min_score == 0.5
+        assert len(warnings) == 1
+
+    def test_the_setting_is_validated_and_blank_clears_it(self):
+        from localm.settings_schema import validate_update
+        assert validate_update({"rag_rerank_min_score": "0.25"}) == {
+            "rag_rerank_min_score": 0.25}
+        assert validate_update({"rag_rerank_min_score": -3}) == {
+            "rag_rerank_min_score": -3.0}
+        assert validate_update({"rag_rerank_min_score": ""}) == {
+            "rag_rerank_min_score": None}
+        assert validate_update({"rag_rerank_min_score": None}) == {
+            "rag_rerank_min_score": None}
+        for bad in ("high", True, "nan", "inf"):
+            with pytest.raises(ValueError):
+                validate_update({"rag_rerank_min_score": bad})
+
+    def test_the_route_gates_on_the_users_score(self, rag_app, fake_reranker, home):
+        from fastapi.testclient import TestClient
+        _set(home, rag_rerank_min_score=0.5)
+        with TestClient(rag_app) as c:
+            _index(c)
+            gated = _query(c, relevant_only=True)
+        assert _sources(gated) == ["third.md"]
+        assert gated["reranked"] is True
+
+
+class TestConcurrentQueries:
+    def test_simultaneous_reranked_queries_all_succeed(self, rag_app, fake_reranker,
+                                                       monkeypatch):
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+        from fastapi.testclient import TestClient
+        module = sys.modules["localm.inference.reranker"]
+        inner = module.rerank
+        gauge = SimpleNamespace(active=0, peak=0)
+        lock = threading.Lock()
+
+        def slow(path, query, documents):
+            with lock:
+                gauge.active += 1
+                gauge.peak = max(gauge.peak, gauge.active)
+            try:
+                time.sleep(0.03)
+                return inner(path, query, documents)
+            finally:
+                with lock:
+                    gauge.active -= 1
+
+        monkeypatch.setattr(module, "rerank", slow)
+        with TestClient(rag_app) as c:
+            _index(c)
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                bodies = list(pool.map(lambda _: _query(c, relevant_only=True),
+                                       range(24)))
+        assert len(bodies) == 24
+        assert all(b["reranked"] is True and b["rerank_note"] is None for b in bodies)
+        assert all(_sources(b)[0] == "third.md" for b in bodies)
+        assert len(fake_reranker.calls) == 24
+        assert gauge.active == 0
+        assert gauge.peak >= 2, 'the queries never overlapped'
