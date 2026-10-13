@@ -53,6 +53,21 @@ Vendoring removes the network dependency and the CSP grant together.
 `tts.example.json` ships `"wasm_paths": "vendor/onnxruntime/"` and `tts.js` falls
 back to the same value, so an out-of-the-box install never reaches a CDN.
 
+### How `kokoro.min.js` is built
+
+The bundle is reproducible. `esbuild` 0.28.2 bundles this entry file:
+
+    export * from 'kokoro-js';
+    export { env } from '@huggingface/transformers';
+
+with `--bundle --minify --format=esm --platform=browser --legal-comments=eof`, from
+the exact npm releases in the table above (`onnxruntime-web` is the version
+transformers.js pins). esbuild names minified identifiers from the character
+frequency of its inputs, so the entry text and the esbuild version are part of the
+pin: a different one renames identifiers throughout the file.
+`python scripts/bump_tts_bundle.py --verify` rebuilds the pinned versions and
+reports whether every vendored file is byte-identical.
+
 ### `kokoro.min.js` carries one appended line
 
 The bundle keeps no export for its eSpeak NG engine, so one line is APPENDED to
@@ -61,10 +76,11 @@ the end of the upstream artefact, changing no existing byte:
     export{Y8 as espeakWorker,te as espeakFS};
 
 `g2p.js` needs those two to select a language and to install a dictionary. The
-names are minifier output and will differ in any rebuilt bundle: re-locate them
-by content (the `new ne.eSpeakNGWorker` promise, and the object carrying
-`createDataFile`/`unlink`) rather than by name. A re-vendor that drops the line
-fails `tests-js/tts-g2p.test.mjs` rather than breaking speech at runtime.
+names are minifier output and differ in every rebuilt bundle, so
+`scripts/bump_tts_bundle.py` locates them by content (the promise that constructs
+`eSpeakNGWorker`, and the object whose `createDataFile` the module re-exports). A
+bundle that drops the line fails `tests-js/tts-g2p.test.mjs` rather than breaking
+speech at runtime.
 
 ### `kokoro.min.js` fetches the voices at the pinned commit
 
@@ -85,19 +101,15 @@ weekly pin report's "Kokoro voice model commit" row fail when it is missing.
 
 ### Re-vendoring
 
-npm verifies the registry integrity hash during `npm pack`, so take the artefact
-from there and copy it unmodified. Do not hand-edit or re-minify.
+    python scripts/bump_tts_bundle.py --lib transformers.js --tag <version>
+    python scripts/bump_tts_bundle.py --lib transformers.js --tag <version> --write
+    npm test
 
-```
-npm pack @huggingface/transformers@<version>
-tar -xzf huggingface-transformers-<version>.tgz
-cp package/dist/ort-wasm-simd-threaded.jsep.mjs \
-   localm/plugins/builtin/tts/static/vendor/onnxruntime/
-cp package/dist/ort-wasm-simd-threaded.jsep.wasm \
-   localm/plugins/builtin/tts/static/vendor/onnxruntime/
-cp package/LICENSE localm/plugins/builtin/tts/static/vendor/LICENSE.transformers-js
-npm test    # then update the pins in tests-js/vendor-onnxruntime.test.mjs
-```
+That command (`--lib kokoro-js` for the other package) rebuilds the bundle, copies
+the runtime pair and the licence texts from npm unmodified (npm verifies the
+registry integrity hash on install), refreshes this file and
+`tests-js/vendor-onnxruntime.test.mjs`, and prints what is left for a person. The
+first form only reports. Do not hand-edit or re-minify.
 
 **The version MUST match the transformers.js compiled into `kokoro.min.js`.** The
 emscripten glue and the JS that drives it are one build; pairing a newer runtime

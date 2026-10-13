@@ -8,7 +8,7 @@
 import { MIB, $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
-import { createNativeModelPicker } from "../app/native-models.js";
+import { createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -68,6 +68,11 @@ export const videoBackend = { active: null, choice: null };
 
 export const videoModelPicker = createNativeModelPicker(
   { media: "video", prefix: "video", mountId: "video-native-models" });
+
+mountEnhanceButton({
+  media: "video", fieldId: "video-prompt",
+  familyOf: () => ({ family: videoModelPicker.family(), label: videoModelPicker.familyLabel() }),
+});
 
 const COMFY_PLACEHOLDERS = [["video-width", "video.widthPlaceholder"],
                             ["video-height", "video.heightPlaceholder"],

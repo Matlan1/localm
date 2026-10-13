@@ -3160,6 +3160,8 @@ div:has(> .data-table) { overflow-x: auto; }
 .native-models { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin: 6px 0 10px; }
 .native-models > .sub, .native-models > .native-loras { grid-column: 1 / -1; }
 .native-lora-row { display: grid; grid-template-columns: 1fr 90px auto; gap: 8px; margin-bottom: 6px; }
+.enhance-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
+.native-models-unsupported > div + div { margin-top: 2px; }
 @media (max-width: 640px) {
   .native-models { grid-template-columns: 1fr; }
 }
