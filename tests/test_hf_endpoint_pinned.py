@@ -210,6 +210,10 @@ class TestHfHubDownloadEndpointPinned:
         import huggingface_hub
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
         monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "allow")
+        import hashlib
+        monkeypatch.setattr(embedder_mod, "_EMBEDDING_PINS", {
+            key: (revision, hashlib.sha256(b"gguf-bytes").hexdigest())
+            for key, (revision, _) in embedder_mod._EMBEDDING_PINS.items()})
 
         dest = tmp_path / "bge-small-en-v1.5-q4_k_m.gguf"
         result = embedder_mod._download_known(

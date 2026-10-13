@@ -121,6 +121,14 @@ class _DocstringLeakFilter:
     def fileno(self):
         return getattr(self._target, "fileno", lambda: 1)()
 
+    def isatty(self) -> bool:
+        return bool(getattr(self._target, "isatty", lambda: False)())
+
+    def __getattr__(self, name: str):
+        if name == "_target":
+            raise AttributeError(name)
+        return getattr(self._target, name)
+
 
 @contextlib.contextmanager
 def _filter_docstring_leak():
@@ -263,6 +271,24 @@ def _open_gate_for_quant_method(model_path: str) -> Optional[tuple]:
         return None
     logger.debug("hf load: %s checkpoint, Hub kernels stay blocked (%s)", method, refusal)
     return method, refusal
+
+
+_OFFSET_POSITION_MODELS = frozenset(
+    {"roberta", "xlm-roberta", "xlm-roberta-xl", "camembert", "longformer", "xmod"})
+_RERANK_CHARS_PER_TOKEN = 32
+_RERANK_WINDOW_CEILING = 2048
+
+
+def _head_label_names(model) -> list[str]:
+    """The names of the sequence-classification head's outputs, in output order,
+    when it has more than one; [] for a single-score head or when the model
+    declares none."""
+    config = getattr(model, "config", None)
+    id2label = getattr(config, "id2label", None)
+    count = getattr(config, "num_labels", 0)
+    if not isinstance(id2label, dict) or not isinstance(count, int) or count < 2:
+        return []
+    return [str(id2label.get(i, id2label.get(str(i), ""))) for i in range(count)]
 
 
 def _is_compressed_tensors(model_path: str) -> bool:
@@ -532,6 +558,19 @@ def _require_chat_template(*templated) -> None:
     if any(getattr(obj, "chat_template", None) for obj in templated):
         raise ChatTemplateMissingError(CHAT_TEMPLATE_NO_DEFAULT_MESSAGE)
     raise ChatTemplateMissingError(CHAT_TEMPLATE_MISSING_MESSAGE)
+
+
+def _render_processor_prompt(processor, template_messages, *,
+                             add_generation_prompt: bool = True) -> str:
+    """The prompt text *processor* renders for *template_messages* (not tokenized).
+
+    Passes a non-empty ``processor_kwargs`` (unused while ``tokenize`` is False),
+    so SmolVLM's ``apply_chat_template`` does not put its default frame-sampling
+    arguments in ``**kwargs``, which makes transformers log a warning. See
+    test_render_logs_no_kwargs_warning."""
+    return processor.apply_chat_template(
+        template_messages, processor_kwargs={"add_special_tokens": False},
+        tokenize=False, add_generation_prompt=add_generation_prompt)
 
 
 def _untrusted_prompt_ranges(tokenizer, template_messages, text,
@@ -1145,9 +1184,15 @@ class HFWorker:
     # actually see images is only known after load() (see supports_images).
     can_be_multimodal = True
 
-    def __init__(self, model_path: str, device: Optional[str] = None) -> None:
+    def __init__(self, model_path: str, device: Optional[str] = None,
+                 task: str = "chat") -> None:
         self.model_path = str(Path(model_path).resolve())
         self._device = device      # None = auto-detect
+        # "chat" for every ordinary model; "rerank" loads the checkpoint's
+        # sequence-classification head for rerank() instead.
+        self.task = task
+        # Names of the classification head's outputs when it has several.
+        self.rerank_labels: list[str] = []
         self._model = None
         self._processor = None     # AutoProcessor (multimodal)
         self._tokenizer = None     # AutoTokenizer fallback
@@ -1158,6 +1203,10 @@ class HFWorker:
         # to its tokenizer; None when the processor loaded or none exists.
         self.processor_error: Optional[str] = None
         self._loaded = False
+        # Post-transformer stages of a sentence-transformers folder (None for any
+        # other model) and the Dense weights already read for them.
+        self._st_plan = None
+        self._st_cache: dict = {}
         self._vision_cache: Optional[_VisionFeatureCache] = None
         # The RESOLVED device ("cuda"/"xpu"/"cpu"), set once load() picks
         # one - None beforehand ("auto" was requested and not decided yet).
@@ -1193,6 +1242,9 @@ class HFWorker:
         # below.
         trust_remote_code = _trust_remote_code_enabled()
         torch = _require_torch()
+        from localm.inference.backends import _st_plan
+        self._st_plan = (_st_plan.load_plan(self.model_path)
+                         if self.task == "chat" else None)
 
         device = _auto_device(torch, self._device)
         self.resolved_device = device
@@ -1303,12 +1355,17 @@ class HFWorker:
         # getattr-with-default skips a class that this transformers version does
         # not expose (the names drift between major releases) instead of raising.
         errors: list[str] = []
-        for cls_name in (
+        classes = (
             "AutoModelForImageTextToText",   # modern multimodal, transformers 5+
             "AutoModelForSeq2SeqLM",         # encoder-decoder
             "AutoModelForCausalLM",          # text-only decoder
             "AutoModel",                     # generic fallback
-        ):
+        )
+        if self._st_plan is not None:
+            classes = ("AutoModel",)         # a sentence-transformers encoder
+        if self.task == "rerank":
+            classes = ("AutoModelForSequenceClassification",)
+        for cls_name in classes:
             cls = getattr(tr, cls_name, None)
             if cls is None:
                 continue
@@ -1359,6 +1416,8 @@ class HFWorker:
         self._loaded = True
         self._vision_cache = (_install_vision_feature_cache(self._model)
                               if self._supports_image else None)
+        if self.task == "rerank":
+            self.rerank_labels = _head_label_names(self._model)
 
         config = getattr(self._model, "config", None)
         self.context_capacity = None
@@ -1469,9 +1528,7 @@ class HFWorker:
                         template_messages.append(msg)
 
                 if self._processor and self._is_multimodal:
-                    text = self._processor.apply_chat_template(
-                        template_messages, tokenize=False, add_generation_prompt=True
-                    )
+                    text = _render_processor_prompt(self._processor, template_messages)
                 else:
                     text = self._tokenizer.apply_chat_template(
                         template_messages, tokenize=False, add_generation_prompt=True
@@ -1505,9 +1562,9 @@ class HFWorker:
         """Each image in *wanted* (keys into *keys*/*images*) processed on its
         own, as the processor output of a one-image user turn, moved to
         *device*. Text-only outputs are left out."""
-        text = self._processor.apply_chat_template(
-            [{"role": "user", "content": [{"type": "image"}]}],
-            tokenize=False, add_generation_prompt=False)
+        text = _render_processor_prompt(
+            self._processor, [{"role": "user", "content": [{"type": "image"}]}],
+            add_generation_prompt=False)
         out: dict[str, Mapping] = {}
         for key in wanted:
             image = images[keys.index(key)]
@@ -1565,7 +1622,7 @@ class HFWorker:
         model = self._model
         if model is None:
             return True                      # unknown until loaded; the load decides
-        if hasattr(model, "encode"):
+        if hasattr(model, "encode") or self._st_plan is not None:
             return True                      # sentence-transformer: purpose-built
         declared = self._declared_generative()
         if declared is not None:
@@ -1594,7 +1651,9 @@ class HFWorker:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """
-        Return embedding vectors via mean-pooling of the last hidden states.
+        Return embedding vectors: the pooling, Dense and Normalize stages of a
+        sentence-transformers folder when it has them, else mean-pooling of the
+        last hidden states.
 
         Works for any AutoModel-style ENCODER that outputs hidden states; for
         dedicated sentence-transformer models that expose `.encode()`, that
@@ -1614,6 +1673,13 @@ class HFWorker:
             return [v.tolist() for v in vecs]
 
         embeddings: list[list[float]] = []
+        plan = self._st_plan
+        max_length = 512
+        if plan is not None:
+            max_length = plan.max_seq_length
+            positions = self._usable_positions()
+            if positions:
+                max_length = min(max_length, positions)
         model.train(False)
         with torch.no_grad():
             for text in texts:
@@ -1621,15 +1687,90 @@ class HFWorker:
                     text,
                     return_tensors="pt",
                     truncation=True,
-                    max_length=512,
+                    max_length=max_length,
                 ).to(model.device)
                 out = model(**enc, output_hidden_states=True)
-                # Mean-pool the last hidden state over non-padding tokens
                 hidden = out.hidden_states[-1]          # (1, seq, dim)
-                mask   = enc["attention_mask"].unsqueeze(-1).float()
-                vec    = (hidden * mask).sum(1) / mask.sum(1)
+                if plan is not None:
+                    from localm.inference.backends import _st_plan
+                    vec = _st_plan.apply_plan(
+                        torch, plan, hidden, enc["attention_mask"], self._st_cache)
+                else:
+                    # Mean-pool the last hidden state over non-padding tokens
+                    mask = enc["attention_mask"].unsqueeze(-1).float()
+                    vec = (hidden * mask).sum(1) / mask.sum(1)
                 embeddings.append(vec[0].cpu().tolist())
         return embeddings
+
+    def _usable_positions(self) -> Optional[int]:
+        """The most tokens the model's position table holds (less the two positions
+        a RoBERTa-style model reserves), or None when the model declares none."""
+        if not self.context_capacity:
+            return None
+        config = getattr(self._model, "config", None)
+        reserved = 2 if getattr(config, "model_type", "") in _OFFSET_POSITION_MODELS else 0
+        return self.context_capacity - reserved
+
+    def _rerank_window(self) -> int:
+        """The most tokens one query and document pair may take: the smallest of
+        the tokenizer's maximum length, the model's position table (less the two
+        positions a RoBERTa-style model reserves) and ``_RERANK_WINDOW_CEILING``,
+        the window the GGUF reranker also caps at."""
+        config = getattr(self._model, "config", None)
+        limits = []
+        declared = getattr(self._tokenizer, "model_max_length", None)
+        if isinstance(declared, int) and 0 < declared < 1_000_000:
+            limits.append(declared)
+        positions = getattr(config, "max_position_embeddings", None)
+        if isinstance(positions, int) and positions > 0:
+            reserved = 2 if getattr(config, "model_type", "") in _OFFSET_POSITION_MODELS else 0
+            limits.append(positions - reserved)
+        return max(8, min([*limits, _RERANK_WINDOW_CEILING]))
+
+    def rerank(self, pairs: list[tuple[str, str]]) -> list[dict]:
+        """Score each ``(query, document)`` pair with the classification head
+        (aligned 1:1 with *pairs*).
+
+        Each result is ``{"scores": [...], "tokens": N, "truncated": bool}``: the
+        head's raw outputs in label order, the pair's token count, and whether
+        its document was cut to fit the window. The score a ranking uses is
+        ``scores[0]``. Raises ``RerankInputError`` for a query that leaves no room
+        for a document, and RuntimeError when the model was not loaded for
+        reranking."""
+        import torch
+        from .base import RerankInputError
+        tokenizer, model = self._tokenizer, self._model
+        if tokenizer is None or model is None:
+            raise RuntimeError("Model not loaded - call load() first")
+        if self.task != "rerank":
+            raise RuntimeError("this model was not loaded for reranking")
+        window = self._rerank_window()
+        reach = window * _RERANK_CHARS_PER_TOKEN
+        model.train(False)
+        results = []
+        with torch.no_grad():
+            for query, document in pairs:
+                if len(query) > reach:
+                    raise RerankInputError(
+                        f"the query is {len(query)} characters, far beyond this model's "
+                        f"{window}-token window; shorten the query")
+                clipped = document[:reach]
+                full = tokenizer(query, clipped, truncation=False)["input_ids"]
+                truncated = len(clipped) < len(document) or len(full) > window
+                if len(full) > window:
+                    overhead = tokenizer.num_special_tokens_to_add(pair=True)
+                    query_tokens = len(tokenizer(query, add_special_tokens=False)["input_ids"])
+                    if query_tokens + overhead >= window:
+                        raise RerankInputError(
+                            f"the query takes {query_tokens + overhead} tokens, which leaves "
+                            f"no room for a document in this model's {window}-token window; "
+                            "shorten the query")
+                enc = tokenizer(query, clipped, truncation="only_second",
+                                max_length=window, return_tensors="pt").to(model.device)
+                logits = model(**enc).logits[0].float().cpu().tolist()
+                results.append({"scores": logits, "tokens": int(enc["input_ids"].shape[1]),
+                                "truncated": bool(truncated)})
+        return results
 
     # ------------------------------------------------------------------ #
     #  Inference                                                           #
@@ -1738,9 +1879,7 @@ class HFWorker:
         if self._processor and (images or audios):
             # Full multimodal path
             _require_chat_template(self._processor, tokenizer)
-            text = self._processor.apply_chat_template(
-                template_messages, tokenize=False, add_generation_prompt=True
-            )
+            text = _render_processor_prompt(self._processor, template_messages)
             # add_special_tokens=False: the template already emitted the model's
             # BOS, so re-tokenizing with the default would prepend a SECOND one
             # (see the text-path note below). Standard processors forward this to
