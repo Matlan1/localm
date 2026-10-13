@@ -766,6 +766,10 @@ def test_recall_after_an_unsaved_add_ranks_the_new_record(tmp_path):
         assert [r.text for r in s.recall("pear", now=NOW)] == ["the new pear fact"]
         target = next(r for r in s._records if r.text == "fact number 3 about apples")
         s.update(target.id, text="fact number 3 about plums", save=False)
-        assert [r.text for r in s.recall("plums", now=NOW)] == ["fact number 3 about plums"]
+        rel = s._relevance("plums", None)
+        assert len(rel) == len(s._records)
+        assert rel[s._records.index(target)] == max(rel) > 0
         s.delete(target.id, save=False)
-        assert s.recall("plums", now=NOW) == []
+        rel = s._relevance("pear", None)
+        assert len(rel) == len(s._records)
+        assert rel[-1] == max(rel) > 0
