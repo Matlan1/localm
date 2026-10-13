@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Models quantized with compressed-tensors load.** A Hugging Face checkpoint whose
+  `config.json` declares `quant_method: compressed-tensors` is expanded to full precision
+  when it loads, the way FP8 checkpoints are, and the load output says so. The `hf` and `gpu`
+  extras now include the compressed-tensors package, and a torch built without
+  `torch.distributed` (the ROCm build for Windows) can import it.
 - **Your own image and video models in the native backend.** The built-in stable-diffusion.cpp
   backend now runs a diffusion model you pick, not only the ones localm downloads for you: a
   FLUX.1, Chroma, SD3, SDXL, Qwen-Image, Z-Image or Wan model file is recognised from its

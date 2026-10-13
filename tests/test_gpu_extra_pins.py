@@ -76,7 +76,7 @@ def test_pyproject_transformers_spec_excludes_the_fsdp_breaking_line(extra):
 
 def test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins():
     """[hf] and [gpu] must never drift apart on the pins they share
-    (transformers, tokenizers, accelerate, psutil, num2words) - [hf] exists so a
+    (transformers, tokenizers, accelerate, psutil, num2words, compressed-tensors) - [hf] exists so a
     non-ROCm install gets the identical HF stack [gpu] gives a ROCm/Windows
     one."""
     packaging_requirements = pytest.importorskip("packaging.requirements")
@@ -87,7 +87,8 @@ def test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins():
 
     gpu_specs = _specifiers("gpu")
     hf_specs = _specifiers("hf")
-    for name in ("transformers", "tokenizers", "accelerate", "psutil", "num2words"):
+    for name in ("transformers", "tokenizers", "accelerate", "psutil", "num2words",
+                 "compressed-tensors"):
         assert name in hf_specs, f"[hf] is missing {name}"
         assert hf_specs[name] == gpu_specs[name], (
             f"[hf] pins {name} as '{hf_specs[name]}' but [gpu] pins it as "
@@ -103,6 +104,16 @@ def test_num2words_is_declared_and_locked_for_the_smolvlm_processor():
         names = {packaging_requirements.Requirement(r).name for r in _extra_requirements(extra)}
         assert "num2words" in names, f"[{extra}] must declare num2words"
     assert _locked_version("num2words"), "num2words must be present in uv.lock"
+
+
+def test_compressed_tensors_is_declared_and_locked_for_quantized_checkpoints():
+    """A checkpoint quantized with compressed-tensors loads (dequantized) only when
+    that package is importable; both HF extras declare it and uv.lock holds it."""
+    packaging_requirements = pytest.importorskip("packaging.requirements")
+    for extra in ("gpu", "hf"):
+        names = {packaging_requirements.Requirement(r).name for r in _extra_requirements(extra)}
+        assert "compressed-tensors" in names, f"[{extra}] must declare compressed-tensors"
+    assert _locked_version("compressed-tensors"), "compressed-tensors must be present in uv.lock"
 
 
 def test_locked_transformers_cannot_break_the_hf_backend():
