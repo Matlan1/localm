@@ -36,7 +36,7 @@ def test_bomb_schema_is_refused_with_bounded_allocation():
     tracemalloc.start()
     t0 = time.perf_counter()
     try:
-        with pytest.raises(jsg.SchemaGrammarError, match="byte") as ei:
+        with pytest.raises(jsg.SchemaGrammarError, match="compiles to a grammar") as ei:
             jsg.schema_to_grammar(schema)
         _, peak = tracemalloc.get_traced_memory()
     finally:
@@ -63,13 +63,12 @@ def test_loosen_schema_stops_at_the_size_refusal(monkeypatch):
 
 
 @pytest.mark.parametrize("n_props,name_len", [
-    (10, 10), (100, 40), (200, 60), (300, 60), (400, 60), (600, 60), (1000, 60),
+    (10, 10), (100, 40), (200, 60), (250, 60), (300, 60), (400, 60),
 ])
 def test_budget_refuses_only_grammars_the_structure_check_would_refuse(
         monkeypatch, n_props, name_len):
     schema = _wide_schema(n_props, name_len)
-    if len(json.dumps(schema)) > jsg.MAX_SCHEMA_BYTES:
-        pytest.skip("over the input cap")
+    assert len(json.dumps(schema)) <= jsg.MAX_SCHEMA_BYTES
     monkeypatch.setattr(jsg, "MAX_GRAMMAR_BYTES", 10 ** 9)
     unbounded = jsg.schema_to_grammar(schema)
     monkeypatch.undo()
@@ -82,13 +81,12 @@ def test_budget_refuses_only_grammars_the_structure_check_would_refuse(
         gbnf.check_grammar_structure(bounded)
 
 
-def test_ladder_crosses_the_limit():
-    sizes = []
-    for n in (300, 400, 600, 1000):
-        schema = _wide_schema(n, 60)
-        try:
-            sizes.append(len(jsg.schema_to_grammar(schema)))
-        except jsg.SchemaGrammarError:
-            sizes.append(None)
-    assert sizes[0] is not None and sizes[0] <= gbnf.MAX_GRAMMAR_BYTES
-    assert sizes[-1] is None
+def test_wide_schema_under_the_limit_compiles_and_one_over_is_refused_by_the_budget():
+    fits = _wide_schema(200, 60)
+    over = _wide_schema(300, 60)
+    assert len(json.dumps(over)) <= jsg.MAX_SCHEMA_BYTES
+    grammar = jsg.schema_to_grammar(fits)
+    assert len(grammar) <= gbnf.MAX_GRAMMAR_BYTES
+    gbnf.check_grammar_structure(grammar)
+    with pytest.raises(jsg.SchemaGrammarError, match="compiles to a grammar"):
+        jsg.schema_to_grammar(over)
