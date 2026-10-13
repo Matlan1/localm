@@ -502,9 +502,9 @@ def params_from_bytes(data: bytes) -> dict:
             if "prompt" not in params:
                 notes.append("No prompt text could be found in the ComfyUI graph.")
             return {"source": "comfyui", "params": params, "notes": notes}
-        except (ValueError, RecursionError) as e:
-            notes.append(f"The ComfyUI prompt is not valid JSON: {e}.")
         except ImageParamsError as e:
             notes.append(str(e) + ".")
+        except (ValueError, RecursionError) as e:
+            notes.append(f"The ComfyUI prompt is not valid JSON: {e}.")
     detail = (" " + " ".join(notes)) if notes else ""
     raise ImageParamsError("this image carries no generation parameters." + detail)

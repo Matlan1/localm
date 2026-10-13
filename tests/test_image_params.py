@@ -336,3 +336,15 @@ class TestNumbersStayFinite:
     def test_a1111_and_comfy_values_pass_the_same_filter(self):
         got = ip.params_from_bytes(_png([_text("parameters", "p\nSteps: 20, Seed: " + "9" * 300)]))
         assert "seed" not in got["params"] and got["params"]["steps"] == 20
+
+
+class TestImportNotes:
+    def test_a_comfy_graph_without_a_sampler_names_that_not_invalid_json(self):
+        data = _png([_text("prompt", json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}))])
+        with pytest.raises(ip.ImageParamsError) as e:
+            ip.params_from_bytes(data)
+        assert "no sampler node" in str(e.value) and "not valid JSON" not in str(e.value)
+
+    def test_invalid_comfy_json_says_so(self):
+        with pytest.raises(ip.ImageParamsError, match="not valid JSON"):
+            ip.params_from_bytes(_png([_text("prompt", "{broken")]))
