@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from rich.console import Console
+from localm.console import SafeConsole as Console
 
 
 console = Console(highlight=False)

@@ -913,10 +913,11 @@ class _ExecutionMixin:
                 # "does not exist yet", showing the whole write as an addition and
                 # nothing as deleted. Say so, so the user is not approving an
                 # overwrite whose destructive half is invisible.
+                from localm.console import markup_safe
                 from ..display import console as _con
                 _con.print(
                     f"[yellow]![/yellow] Could not read the current contents of "
-                    f"{path_arg or 'the file'}. The diff below CANNOT show what "
+                    f"{markup_safe(path_arg) if path_arg else 'the file'}. The diff below CANNOT show what "
                     f"would be replaced - treat it as an overwrite of unknown "
                     f"content.")
             new_content = resolve_new_content(call.name, call.args, old_content)

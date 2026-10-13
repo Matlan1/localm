@@ -72,7 +72,7 @@ def _print_wide_table(table) -> None:
     if console.is_terminal:
         console.print(table)
         return
-    from rich.console import Console as _Console
+    from localm.console import SafeConsole as _Console
     _Console(width=max(console.size.width, 120)).print(table)
 
 
