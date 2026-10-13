@@ -625,6 +625,7 @@ class PluginManager:
         self._discover_errors: dict[str, str] = {}   # bad manifests (reset each discover)
         self._provision_errors: dict[str, str] = {}  # first-run copy / upgrade refresh
         self._store_errors: dict[str, str] = {}      # unparsable bundled manifests
+        self.last_refresh_failures: dict[str, str] = {}
         self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
         self._dep_tasks_lock = threading.Lock()
         # (plugin name, callback) queued by Host.on_startup before the event
@@ -1127,6 +1128,9 @@ class PluginManager:
         """Re-copy an installed builtin from the bundled store when the shipped
         source changed since it was installed. Returns True if a refresh ran.
 
+        Raises RuntimeError when a refresh was due but the fresh copy could not
+        be swapped in (the installed copy is left in place; the log says why).
+
         Safe by construction:
           - Only plugins WITH a bundled-store source are considered; a third-party
             plugin (no store dir, or a marker recording ``source != "store"``) is
@@ -1155,7 +1159,9 @@ class PluginManager:
                 _write_marker(dest, "store", cur)
             return False
         if not self._swap_in_store_copy(name, store_src, dest, cur):
-            return False
+            raise RuntimeError(
+                f"the bundled copy of {name} could not be swapped in; the installed "
+                f"copy is unchanged (the log says why)")
         # If the plugin is live on an app, reload it so the new code takes effect.
         if self.app is not None and name in self._loaded:
             self._unload(name)
@@ -1239,7 +1245,11 @@ class PluginManager:
         """Re-sync installed builtin plugins with the bundled store, re-copying
         any whose shipped source changed since install. With *name*, refresh just
         that plugin (KeyError if it is not an installed builtin). Returns the
-        names actually refreshed. A live, active plugin is reloaded in place."""
+        names actually refreshed. A live, active plugin is reloaded in place.
+        Without *name*, a plugin whose refresh failed is left out of the result
+        and listed in ``last_refresh_failures`` (name to error); with *name*, the
+        failure raises."""
+        self.last_refresh_failures: dict[str, str] = {}
         self.discover()
         if name is not None:
             if self._store_dir(name) is None:
@@ -1253,7 +1263,9 @@ class PluginManager:
                 if self._maybe_refresh_builtin(n):
                     refreshed.append(n)
             except Exception as e:
+                _log.warning("plugin %s: refresh failed: %s", n, e)
                 self._errors[n] = f"refresh: {e}"
+                self.last_refresh_failures[n] = str(e)
         return refreshed
 
     def _is_protected(self, name: str) -> bool:
@@ -1866,7 +1878,10 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     @app.post("/api/plugins/refresh",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def refresh_all_plugins_engine():
-        return {"status": "ok", "refreshed": manager.refresh()}
+        refreshed = manager.refresh()
+        failed = dict(getattr(manager, "last_refresh_failures", {}) or {})
+        return {"status": "partial" if failed else "ok", "refreshed": refreshed,
+                "failed": failed}
 
     @app.post("/api/plugins/{name}/refresh",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
@@ -1877,7 +1892,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         except KeyError as exc:
             raise HTTPException(404, f"No such installed builtin plugin: {name}") from exc
         except Exception as e:
-            raise HTTPException(400, f"Refresh failed: {e}") from e
+            raise HTTPException(500, f"Refresh failed: {e}") from e
         return {"status": "refreshed" if refreshed else "up-to-date", "name": name}
 
     @app.post("/api/plugins/{name}/enable",
