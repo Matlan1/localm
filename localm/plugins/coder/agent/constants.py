@@ -349,6 +349,36 @@ _IMPERATIVE_LEADS: frozenset[str] = frozenset({
     "simply", "actually", "well", "alright", "cool", "good", "perfect", "right",
 })
 
+# Words that, directly after a clause-initial action word, make it the subject of
+# a statement rather than an imperative ("Build is red", "Search fails", "Test
+# didn't run").
+_STATEMENT_PREDICATES: frozenset[str] = frozenset({
+    "is", "are", "was", "were", "has", "have", "had", "does", "did", "will",
+    "would", "can", "could", "should", "might", "may", "must", "cannot",
+    "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't",
+    "doesn't", "didn't", "won't", "wouldn't", "can't", "couldn't", "shouldn't",
+    "mustn't", "fails", "breaks", "broke", "crashes", "hangs", "throws",
+    "threw", "exits", "passes", "works", "worked", "keeps", "kept", "stops",
+    "timed", "ran", "got", "became", "seems", "looks",
+})
+
+# Participles that make the preceding action word a statement subject only when
+# they end the clause or are followed by a linking word ("Build failed.",
+# "Test failed on CI"); "fix failed tests" stays an imperative.
+_STATEMENT_PARTICIPLES: frozenset[str] = frozenset({
+    "failed", "broken", "stopped", "crashed", "errored", "passed", "hung",
+    "returned", "finished", "completed",
+})
+
+# Words that may follow a statement participle without making it a modifier of
+# an object.
+_STATEMENT_LINKS: frozenset[str] = frozenset({
+    "with", "because", "on", "at", "due", "again", "after", "when", "while",
+    "in", "for", "since", "during", "but", "and", "so", "to", "if", "as",
+    "once", "before", "twice", "again", "yesterday", "today", "just", "too",
+    "already", "completely", "silently", "unexpectedly", "randomly", "here",
+})
+
 # Suffixes that make a dotted token a domain name, not a file name.
 _NON_FILE_SUFFIXES: frozenset[str] = frozenset({
     "com", "org", "net", "io", "dev", "edu", "gov", "co", "uk", "de", "eu",

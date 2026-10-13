@@ -1547,3 +1547,166 @@ test("the web tool prompt tells the model when NOT to search", async () => {
   assert.match(p, /current or uncertain/i,
     "the reason TO search must remain");
 });
+
+// ---------------------------------------------------------------------------
+//  The bracket tool-call tag ([tool_call] ... [/tool_call]) is a web call in
+//  every place the angle-bracket wrapper is.
+// ---------------------------------------------------------------------------
+
+const BRACKET = '[tool_call]{"name": "web_search", "args": {"query": "q1"}}[/tool_call]';
+
+test("parseWebCalls reads the bracket tag, a mixed closer and any letter case as ONE call", () => {
+  const { window: w } = loadApp();
+  for (const text of [
+    BRACKET,
+    '[tool_call]\n{"name": "web_search", "args": {"query": "q1"}}\n</tool_call>',
+    '[TOOL_CALL]{"name": "web_search", "args": {"query": "q1"}}[/TOOL_CALL]',
+    'Let me check.\n' + BRACKET,
+  ]) {
+    const calls = w.parseWebCalls(text);
+    assert.equal(calls.length, 1, text);
+    assert.equal(calls[0].name, "web_search");
+    assert.equal(calls[0].args.query, "q1");
+  }
+  eq(w.parseWebCalls('[tool_call]call:fetch_url{"url": "https://e/"}[/tool_call]'),
+     [{ name: "fetch_url", args: { url: "https://e/" } }]);
+  assert.equal(w.parseWebCalls("the [tool_call] tag marks a call").length, 0);
+});
+
+test("a malformed bracket tag is recognised as a botched attempt, never as prose", () => {
+  const { window: w } = loadApp();
+  assert.equal(w.looksLikeWebToolAttempt("[tool_call]{name: web_search}[/tool_call]"), true);
+  assert.equal(w.looksLikeWebToolAttempt("[tool_call] I will search"), true);
+  assert.equal(w.looksLikeWebToolAttempt("a [tool_calls] list and [1]"), false);
+});
+
+test("stripWebCallText and formatToolCalls remove the bracket tag, closed or not", () => {
+  const { window: w } = loadApp();
+  assert.equal(w.stripWebCallText("Intro.\n" + BRACKET + "\nOutro."), "Intro.\n\nOutro.");
+  assert.equal(w.stripWebCallText('Intro.\n[tool_call]{"name": "web_search", "args": {"que'),
+               "Intro.");
+  assert.equal(w.stripWebCallText("stray [/tool_call] closer"), "stray  closer");
+  const shown = w.formatToolCalls("a " + BRACKET + " b");
+  assert.doesNotMatch(shown, /tool_call/);
+  assert.match(shown, /web search: "q1"/);
+});
+
+test("web ON: a bracket-tag call runs once and the next completion answers from it", async () => {
+  const { conv, calls, completions } = await runChat({
+    web: true, webResults: freshResults,
+    rounds: [content(BRACKET), content("Answer from the lookup.")],
+  });
+  assert.equal(retrieves(calls), 1);
+  assert.equal(calls.find((c) => c.url === "/api/web/retrieve").body.query, "q1");
+  assert.equal(completions.length, 2);
+  const first = conv.messages.find((m) => m.role === "assistant");
+  assert.equal(first.content, BRACKET);
+  assert.ok(!first.webUnfinished);
+  const resent = completions[1].body.messages.map((m) => m.content).join("\n");
+  assert.doesNotMatch(resent, /\[tool_call\]|\[\/tool_call\]/,
+    "the model is not shown its own bracket tag again");
+  assert.match(resent, /<tool_call>\{"name":"web_search","args":\{"query":"q1"\}\}<\/tool_call>/);
+  assert.equal(conv.messages[conv.messages.length - 1].content, "Answer from the lookup.");
+});
+
+test("a reply that keeps emitting bracket tags is cut after the first and the request is aborted", async () => {
+  const block = (q) => `[tool_call]{"name": "web_search", "args": {"query": "${q}"}}[/tool_call]`;
+  const runaway = [];
+  for (let i = 0; i < 40; i++) {
+    runaway.push({ choices: [{ delta: { content: block("Matlan1 LocalM " + i) + "\n" } }] });
+  }
+  const { conv, calls, completions } = await runChat({
+    web: true, webResults: freshResults,
+    rounds: [runaway, content("Here is what I found [S1].")],
+  });
+  const first = conv.messages.find((m) => m.role === "assistant");
+  assert.equal((first.content.match(/\[tool_call\]/g) || []).length, 1, "only the first block is kept");
+  assert.equal(retrieves(calls), 1);
+  assert.equal(completions[0].signal.aborted, true);
+});
+
+test("a bracket call on the tool-free last completion ends on text and is flagged unfinished", async () => {
+  const { conv, calls } = await runChat({
+    web: true, webResults: freshResults,
+    setup: (w) => runScript(w, "chat.webMaxLookups = 1;"),
+    rounds: [searchCall("q1"), searchCall("q2"),
+             content("I will look further.\n" + BRACKET.replace("q1", "q3"))],
+  });
+  assert.equal(retrieves(calls), 1);
+  const last = conv.messages[conv.messages.length - 1];
+  assert.equal(last.content, "I will look further.");
+  assert.equal(last.webUnfinished, true);
+});
+
+// ---------------------------------------------------------------------------
+//  An answer that follows a web lookup which produced no evidence says so.
+// ---------------------------------------------------------------------------
+
+const failingRetrieve = (rec) => async (url, opts = {}) => {
+  if (String(url) === "/api/web/retrieve") {
+    rec.calls.push({ url: String(url) });
+    return { ok: false, status: 502, statusText: "Bad Gateway",
+             json: async () => ({ detail: "connection reset" }) };
+  }
+  return rec.impl(url, opts);
+};
+const chatText = (window) => window.document.getElementById("chat-messages").textContent;
+
+test("a failed lookup followed by an answer marks that answer as having no web evidence", async () => {
+  const { window, conv } = await runChat({
+    web: true, fetchImpl: failingRetrieve,
+    rounds: [searchCall("q1"), content("The repository is small and experimental.")],
+  });
+  const last = conv.messages[conv.messages.length - 1];
+  assert.equal(last.role, "assistant");
+  assert.equal(last.content, "The repository is small and experimental.");
+  assert.equal(last.noWebEvidence, true);
+  assert.match(chatText(window), /no web evidence was available for this answer/);
+  assert.ok(!conv.messages.slice(0, -1).some((m) => m.noWebEvidence),
+    "the call-carrying reply is not marked");
+});
+
+test("an empty search (grounding failed) is no evidence; a snippet-only search is", async () => {
+  const empty = await runChat({
+    web: true, webResults: (q) => bundleOf(q, []),
+    rounds: [searchCall("q1"), content("I found nothing.")],
+  });
+  assert.equal(empty.conv.messages.at(-1).noWebEvidence, true);
+  const snippet = await runChat({
+    web: true, webResults: freshResults,
+    rounds: [searchCall("q1"), content("From the snippet [S1].")],
+  });
+  assert.ok(!snippet.conv.messages.at(-1).noWebEvidence);
+  assert.doesNotMatch(chatText(snippet.window), /no web evidence/);
+});
+
+test("one successful lookup among failed ones keeps the answer unmarked; no lookup at all too", async () => {
+  let n = 0;
+  const flaky = (rec) => async (url, opts = {}) => {
+    if (String(url) === "/api/web/retrieve" && n++ === 0) return failingRetrieve(rec)(url, opts);
+    return rec.impl(url, opts);
+  };
+  const mixed = await runChat({
+    web: true, webResults: freshResults, fetchImpl: flaky,
+    rounds: [searchCall("q1"), searchCall("q2"), content("Answer [S1].")],
+  });
+  assert.equal(retrieves(mixed.calls), 2);
+  assert.ok(!mixed.conv.messages.at(-1).noWebEvidence);
+  const none = await runChat({ web: true, rounds: [content("Hello there.")] });
+  assert.ok(!none.conv.messages.at(-1).noWebEvidence);
+  const off = await runChat({ web: false, rounds: [content("Offline answer.")] });
+  assert.ok(!off.conv.messages.at(-1).noWebEvidence);
+});
+
+test("noWebEvidence is neither sent to the model nor lost in a compaction archive copy", async () => {
+  const { window: w } = loadApp();
+  assert.equal(w.archiveCopy({ role: "assistant", content: "x", noWebEvidence: true }).noWebEvidence, true);
+  const { completions } = await runChat({
+    web: true,
+    history: [{ role: "user", content: "hi" },
+              { role: "assistant", content: "earlier", noWebEvidence: true },
+              { role: "user", content: "again" }],
+    rounds: [content("ok")],
+  });
+  assert.doesNotMatch(JSON.stringify(completions[0].body), /noWebEvidence|no web evidence/);
+});

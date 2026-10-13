@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast } from "../app/helpers.js";
+import { $, GIB, authHeaders, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
@@ -401,6 +401,7 @@ export async function refreshModelsPage() {
 
   const box = $("models-table");
   if (myGen !== _modelsRenderGen) return;
+  if (!box.firstChild) box.replaceChildren(el("div", "sub", t("models.loading")));
   // `box` is NOT cleared here: every write below REPLACES its content in one
   // call, so the scroll container never sits empty across the fetch.
 
@@ -765,7 +766,8 @@ export async function refreshModelsPage() {
         const rm = el("button", "danger", t("models.action.remove"));
         rm.onclick = () => {
           confirmDanger(t("models.remove.confirmTitle", { name: m.name }),
-            t("models.remove.confirmBody"), t("models.remove.confirmLabel"), async () => {
+            t("models.remove.confirmBody"), t("models.remove.confirmLabel"),
+            () => whileBusy(rm, t("models.remove.working"), async () => {
               const r = await fetch("/api/models/remove", {
                 method: "POST", headers: authHeaders(),
                 body: JSON.stringify({ model: m.name }),
@@ -785,7 +787,7 @@ export async function refreshModelsPage() {
                 toast(t("models.remove.failed"), true);
               }
               refreshModelsPage();
-            });
+            }));
         };
         actions.appendChild(rm);
       }
@@ -1857,6 +1859,9 @@ if ($("bug-download")) $("bug-download").onclick = () => downloadBugReport();
 // that click; the server rolls back and reports on failure.
 export async function updateCheck() {
   const out = $("update-status"), applyBtn = $("update-apply");
+  const checkBtn = $("update-check");
+  if (out) { out.hidden = false; out.textContent = t("settings.update.checking"); }
+  if (checkBtn) checkBtn.disabled = true;
   try {
     const r = await fetch("/api/update/check", { headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
@@ -1887,6 +1892,8 @@ export async function updateCheck() {
     }
   } catch (e) {
     if (out) { out.hidden = false; out.textContent = t("settings.update.checkFailed", { message: e.message }); }
+  } finally {
+    if (checkBtn) checkBtn.disabled = false;
   }
 }
 window.__localmUpdateCheck = updateCheck;
