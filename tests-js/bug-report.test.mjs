@@ -125,37 +125,109 @@ test("R47: the POST carries a browser client context (UA, page, viewport, consol
     "the captured console error is included");
 });
 
-test("R47: Send to maintainer POSTs upload:true and shows the tracking issue URL", async () => {
-  const posts = [];
-  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
-    saved: true, uploaded: true, path: "/home/bug-reports/bug-y.md",
-    issue_url: "https://github.com/Matlan1/localm/issues/42",
-    maintainer: "owner@example.com",
-  }) });
+const SAVED = {
+  saved: true, filename: "bug-y.md", path: "/home/bug-reports/bug-y.md",
+  maintainer: "owner@example.com",
+  report_markdown: "# localm bug report: studio froze\n\nthe whole text",
+  report_sha256: "a".repeat(64),
+};
+
+function makeSendFetch(calls, sendResponses) {
+  const queue = [...sendResponses];
+  return async (url, opts = {}) => {
+    const u = String(url);
+    if (u === "/api/bug-report" || u === "/api/bug-report/send") {
+      calls.push({ url: u, body: JSON.parse(opts.body || "{}") });
+      const data = u === "/api/bug-report" ? SAVED : (queue.shift() || {});
+      return { ok: true, status: 200, text: async () => "", json: async () => data };
+    }
+    return { ok: true, status: 200, text: async () => "",
+      json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+}
+
+test("Send to maintainer saves and shows the whole report; nothing is sent until confirmed", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [
+    { uploaded: true, issue_url: "https://github.com/Matlan1/localm/issues/42",
+      maintainer: "owner@example.com" },
+  ]) });
   const doc = window.document;
+  doc.getElementById("bug-upload").hidden = false;
   doc.getElementById("bug-desc").value = "studio froze";
-  // the app reveals this button via capabilities; click it directly
   doc.getElementById("bug-upload").click();
   await flush();
-  assert.equal(posts.length, 1, "one bug-report POST");
-  assert.equal(posts[0].upload, true, "upload flag set");
+  assert.deepEqual(calls.map((c) => c.url), ["/api/bug-report"], "only the save was posted");
+  assert.equal("upload" in calls[0].body, false, "the save carries no upload flag");
+  assert.equal(doc.getElementById("bug-review").hidden, false, "review panel shown");
+  assert.equal(doc.getElementById("bug-preview").value, SAVED.report_markdown,
+    "the preview is the saved text");
+  assert.equal(doc.getElementById("bug-upload").hidden, true,
+    "Send to maintainer is hidden while the confirm button is on screen");
+  assert.equal(doc.getElementById("bug-desc").value, "studio froze", "text kept until sent");
+
+  doc.getElementById("bug-confirm-send").click();
+  await flush();
+  assert.deepEqual(calls.map((c) => c.url), ["/api/bug-report", "/api/bug-report/send"]);
+  assert.deepEqual(calls[1].body, { filename: "bug-y.md", sha256: SAVED.report_sha256 },
+    "the send names the reviewed file by its digest");
   const out = doc.getElementById("bug-result");
-  assert.equal(out.hidden, false);
   assert.match(out.textContent, /issues\/42/);
+  assert.equal(doc.getElementById("bug-review").hidden, true, "review panel closed");
+  assert.equal(doc.getElementById("bug-upload").hidden, false, "Send to maintainer restored");
+  assert.equal(doc.getElementById("bug-desc").value, "", "cleared once sent");
 });
 
-test("R47: a failed upload shows WHERE it failed, reveals Retry + Download, keeps the text", async () => {
-  const posts = [];
-  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
-    saved: true, uploaded: false,
-    upload_stage: "offline_or_dns", upload_message: "You may be offline.",
+test("Don't send closes the review without sending", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, []) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "never mind";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  doc.getElementById("bug-cancel-send").click();
+  await flush();
+  assert.deepEqual(calls.map((c) => c.url), ["/api/bug-report"], "no send was posted");
+  assert.equal(doc.getElementById("bug-review").hidden, true);
+  assert.match(doc.getElementById("bug-result").textContent, /Not sent\..*bug-y\.md/);
+  doc.getElementById("bug-retry").click();
+  await flush();
+  assert.equal(calls.length, 1, "nothing left to retry after Don't send");
+});
+
+test("a report that cannot be loaded for review is not offered for sending", async () => {
+  const calls = [];
+  const unreadable = { saved: true, filename: "bug-n.md", path: "/p/bug-n.md",
+    maintainer: "owner@example.com" };
+  const { window } = loadAppWithPages({ fetchImpl: async (url, opts = {}) => {
+    if (String(url).startsWith("/api/bug-report")) {
+      calls.push(String(url));
+      return { ok: true, status: 200, text: async () => "", json: async () => unreadable };
+    }
+    return { ok: true, status: 200, text: async () => "",
+      json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  } });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "x";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  assert.deepEqual(calls, ["/api/bug-report"]);
+  assert.equal(doc.getElementById("bug-review").hidden, true);
+  assert.match(doc.getElementById("bug-result").textContent, /was not sent/);
+});
+
+test("R47: a failed send shows WHERE it failed, reveals Retry + Download, keeps the text", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [{
+    uploaded: false, upload_stage: "offline_or_dns", upload_message: "You may be offline.",
     upload_error: "could not reach the bug-report server: dns",
-    report_markdown: "# localm bug report\nbody", filename: "bug-f.md",
-    path: "/home/bug-reports/bug-f.md", maintainer: "owner@example.com",
-  }) });
+    maintainer: "owner@example.com",
+  }]) });
   const doc = window.document;
   doc.getElementById("bug-desc").value = "it will not send";
   doc.getElementById("bug-upload").click();
+  await flush();
+  doc.getElementById("bug-confirm-send").click();
   await flush();
   const out = doc.getElementById("bug-result");
   assert.match(out.textContent, /Could not send: You may be offline\./,
@@ -163,16 +235,15 @@ test("R47: a failed upload shows WHERE it failed, reveals Retry + Download, keep
   assert.equal(doc.getElementById("bug-retry").hidden, false, "Retry revealed");
   assert.equal(doc.getElementById("bug-download").hidden, false, "Download revealed");
   assert.equal(doc.getElementById("bug-desc").value, "it will not send",
-    "the description is kept so Retry can re-use it");
+    "the description is kept");
 });
 
-test("R47: Retry re-sends the report and Download hands back the saved markdown", async () => {
-  const posts = [];
-  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
-    saved: true, uploaded: false, upload_message: "The server may be down.",
-    upload_error: "unreachable", report_markdown: "# report\nbody",
-    filename: "bug-g.md", path: "/p/bug-g.md", maintainer: "owner@example.com",
-  }) });
+test("R47: Retry re-sends the SAME reviewed report and Download hands back its markdown", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [
+    { uploaded: false, upload_message: "The server may be down.", upload_error: "unreachable" },
+    { uploaded: true },
+  ]) });
   const doc = window.document;
   const blobs = [];
   window.URL.createObjectURL = (b) => { blobs.push(b); return "blob:x"; };
@@ -182,25 +253,47 @@ test("R47: Retry re-sends the report and Download hands back the saved markdown"
   doc.getElementById("bug-desc").value = "please send";
   doc.getElementById("bug-upload").click();
   await flush();
-  assert.equal(posts.length, 1);
-  doc.getElementById("bug-retry").click();          // retry re-attempts the send
+  doc.getElementById("bug-confirm-send").click();
   await flush();
-  assert.equal(posts.length, 2, "Retry re-POSTed the report");
-  assert.equal(posts[1].upload, true, "retry keeps the upload flag");
-  doc.getElementById("bug-download").click();        // download the saved report
-  assert.equal(blobs.length, 1, "download built a blob from the saved report");
+  doc.getElementById("bug-retry").click();
+  await flush();
+  assert.deepEqual(calls.map((c) => c.url),
+    ["/api/bug-report", "/api/bug-report/send", "/api/bug-report/send"],
+    "Retry re-sent without saving a fresh report");
+  assert.deepEqual(calls[2].body, calls[1].body, "the retry names the same reviewed file");
+  assert.match(doc.getElementById("bug-result").textContent, /^Sent\./);
+  doc.getElementById("bug-download").click();
+  assert.equal(blobs.length, 0, "Download is hidden once sent");
 });
 
-test("R47: a 2xx upload with no issue_url still reports 'Sent' (matches the toast)", async () => {
-  const posts = [];
-  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
-    saved: true, uploaded: true, path: "/home/bug-reports/bug-z.md",
-    maintainer: "owner@example.com",  // proxy returned no issue_url
-  }) });
+test("R47: a 2xx send with no issue_url still reports 'Sent' (matches the toast)", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [
+    { uploaded: true, maintainer: "owner@example.com" },
+  ]) });
   const doc = window.document;
   doc.getElementById("bug-desc").value = "no url returned";
   doc.getElementById("bug-upload").click();
   await flush();
-  const out = doc.getElementById("bug-result");
-  assert.match(out.textContent, /^Sent\./, "shows Sent, not the Saved fallback");
+  doc.getElementById("bug-confirm-send").click();
+  await flush();
+  assert.match(doc.getElementById("bug-result").textContent, /^Sent\./,
+    "shows Sent, not the Saved fallback");
+});
+
+test("Download after a plain Save hands back the saved markdown", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, []) });
+  const doc = window.document;
+  const blobs = [];
+  window.URL.createObjectURL = (b) => { blobs.push(b); return "blob:x"; };
+  window.URL.revokeObjectURL = () => {};
+  window.HTMLAnchorElement.prototype.click = function () {};
+  doc.getElementById("bug-desc").value = "keep it local";
+  doc.getElementById("bug-send").click();
+  await flush();
+  assert.deepEqual(calls.map((c) => c.url), ["/api/bug-report"]);
+  assert.equal(doc.getElementById("bug-review").hidden, true, "Save shows no send prompt");
+  doc.getElementById("bug-download").click();
+  assert.equal(blobs.length, 1);
 });

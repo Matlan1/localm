@@ -127,8 +127,13 @@ report needs, even in privacy mode:
 
 - the hang watchdog trace,
 - the crash/restart breadcrumb log (`pre_restart.log` + the in-memory activity
-  ring), and
+  ring),
+- the bug report localm saves on its own when it hits an unexpected error, and
 - a debug log (operational lines only).
+
+Without it, privacy mode saves no such bug report: a command that fails at a
+terminal asks whether to save one (the default is no), and an error with no
+terminal to ask (a background task, a server) saves nothing.
 
 Set it in **Settings > Privacy** (in-app, persistent), with the **desktop
 launcher** checkbox, with `--keep-diagnostics` on `localm gui` (`serve` and
@@ -157,8 +162,10 @@ localm will not start at all on a pip install, file an
 `localm bug-report` itself needs a working localm to run.
 
 **You always see the full report before anything is sent, and sending needs
-your explicit OK.** The GUI shows the assembled text and requires you to
-press Send. The standalone reporter and `localm bug-report` preview the
+your explicit OK.** In the GUI, "Send to maintainer" saves the report and
+shows its whole text; nothing is uploaded until you press "Send this
+report", and what is uploaded is that saved text, unchanged. The standalone
+reporter and `localm bug-report` preview the
 same text at a terminal prompt - and when there is no terminal to prompt
 (piped/redirected stdin, or run non-interactively), both the Python and
 PowerShell standalone reporters now treat that exactly like you said no: the

@@ -195,6 +195,7 @@ _KERNEL_ROUTES = {
     ("api", "POST", "/v1/server/shutdown"): ("scope:config:write",),
     ("api", "POST", "/v1/server/restart"): ("scope:config:write",),
     ("api", "POST", "/api/bug-report"): ("scope:config:write",),
+    ("api", "POST", "/api/bug-report/send"): ("scope:config:write",),
     ("api", "GET", "/api/issues"): ("scope:config:read",),
     ("api", "GET", "/api/update/check"): ("scope:config:read",),
     ("api", "GET", "/api/changelog"): ("scope:config:read",),

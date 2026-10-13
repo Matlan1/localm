@@ -5,6 +5,7 @@ user-initiated report.
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 from typing import Optional
@@ -46,6 +47,32 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         return path
     except Exception:
         return None
+
+
+_SAVED_REPORT_NAME = re.compile(r"bug-[A-Za-z0-9_-]+\.md")
+
+
+def read_saved_report(filename: str) -> str:
+    """The text of the saved report *filename* in ``<data dir>/bug-reports``.
+
+    *filename* must be a bare ``bug-<stamp>.md`` name as ``save_report``
+    writes it. Raises ValueError for any other name (a path, a separator, a
+    different extension) and OSError when the file cannot be read."""
+    if not isinstance(filename, str) or not _SAVED_REPORT_NAME.fullmatch(filename):
+        raise ValueError("not a saved bug-report file name")
+    from localm.config import home_dir
+    base = (home_dir() / "bug-reports").resolve()
+    path = (base / filename).resolve()
+    if path.parent != base:
+        raise ValueError("not a saved bug-report file name")
+    return path.read_text(encoding="utf-8")
+
+
+def report_digest(text: str) -> str:
+    """Hex SHA-256 of *text* encoded as UTF-8: the identity the GUI echoes back
+    to send exactly the report it showed."""
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # The GUI route offloads save_user_report() to a real worker thread (it does

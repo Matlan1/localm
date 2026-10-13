@@ -839,7 +839,8 @@ present on a headless `localm serve` with no plugins installed, not only under
 | `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. |
 | `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. |
 | `POST /api/update/rollback` | `admin` | Restore the previous build from the last update's local backup and restart into it. No signature check and no network request - it restores files, not a download. Requires `admin` specifically (not merely `config:write`), and restores files only, not a deps-class update's package installs. |
-| `POST /api/bug-report` | `config:write` | Generate a bug report, and optionally file it. |
+| `POST /api/bug-report` | `config:write` | Generate and save a bug report for review. |
+| `POST /api/bug-report/send` | `config:write` | File a saved, reviewed bug report. |
 
 **A proxy failure is reported in the body, not the status.** `GET /api/issues`
 and `GET /api/update/check` answer `200` with an `error` string when the proxy
@@ -905,25 +906,40 @@ scrape_configs:
 Scope: `config:write`.
 
 Takes a JSON object. Recognised fields are `description` (alias `message`),
-`what_i_expected`, `what_happened`, `include_log`, `client` and `upload`.
+`what_i_expected`, `what_happened`, `include_log` and `client`. It saves the
+report and never files it anywhere.
 
 - At least one of `description`/`message` or `what_happened` must be non-empty,
   otherwise `400`. `what_i_expected` on its own does NOT satisfy that check.
+- A body that sets `upload` is refused with `400` and nothing is saved: filing
+  goes through `POST /api/bug-report/send` with a report the user has seen.
 - An absent or non-object body is a FastAPI validation `422`, not the `400`.
 - A report that cannot be written to disk returns `500`. A failed save is never
   reported as success.
-- Filing to the issue tracker happens ONLY when the request sets `upload`. It is
-  never automatic.
 
 On success the response carries `saved`, `filename`, `path`, `maintainer`, and,
-best-effort, `report_markdown` (the saved text, so a browser client can offer a
-download; omitted if it cannot be read back).
+when the saved file can be read back, `report_markdown` (its full text, for
+review and download) and `report_sha256` (the hex SHA-256 of that text).
 
-When `upload` was requested and failed, the report is still saved and the
-response is still `200`, carrying `uploaded: false` plus `upload_stage`,
-`upload_message` and `upload_error`. A rate-limited upload additionally sets
-`rate_limited: true` and `retry_after` in seconds. A successful upload sets
-`uploaded: true` and, when the proxy returned one, `issue_url`.
+### `POST /api/bug-report/send`
+
+Scope: `config:write`.
+
+Takes `{"filename": ..., "sha256": ...}`: a report saved by `POST
+/api/bug-report`, and the `report_sha256` that route returned for it. The saved
+file is filed as an issue through the configured proxy only when its current
+text still has that digest, so what is filed is exactly the text that was
+shown. The issue title is the report's own heading.
+
+- A missing digest, or a filename that is not a bare saved-report name
+  (`bug-<stamp>.md`), returns `400`. A file that cannot be read returns `404`.
+  A file whose text no longer matches the digest returns `409`, and nothing is
+  sent.
+- A failed upload returns `200` with `uploaded: false` plus `upload_stage`,
+  `upload_message` and `upload_error`; the file stays saved. A rate-limited
+  upload additionally sets `rate_limited: true` and `retry_after` in seconds. A
+  successful upload sets `uploaded: true` and, when the proxy returned one,
+  `issue_url`.
 
 The optional `client` object is reduced server-side before it is written into
 the report, so a client cannot inflate a report with arbitrary content.

@@ -24,6 +24,14 @@ from click.testing import CliRunner
 from localm import bugreport
 
 
+@pytest.fixture(autouse=True)
+def _keep_diagnostics(monkeypatch):
+    """These tests exercise the saved-report flow, which an automatic report
+    reaches only when diagnostics are kept; privacy mode's own behaviour is in
+    tests/test_bugreport_contract.py."""
+    monkeypatch.setenv("LOCALM_KEEP_DIAGNOSTICS", "1")
+
+
 # --------------------------- the typed error ------------------------------ #
 
 def test_localm_error_carries_summary_reason_context():

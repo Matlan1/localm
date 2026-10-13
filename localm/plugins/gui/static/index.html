@@ -1057,8 +1057,8 @@
               <div class="sub" data-i18n="settings.bug.help">Describe what went wrong. We save an editable report to your
               data folder with a safe diagnostic snapshot (OS, GPU, backend, loaded model,
               settings subset, dependency versions, recent activity, and any browser console
-              errors) - never your API key, config secrets, or chat content. You can review
-              and send it to the maintainer.</div>
+              errors) - never your API key, config secrets, or chat content. Before anything
+              is sent to the maintainer you see the whole report and confirm it.</div>
               <textarea id="bug-desc" rows="3" placeholder="What were you doing?" data-i18n-placeholder="settings.bug.descPlaceholder"></textarea>
               <textarea id="bug-expected" rows="2" placeholder="What did you expect to happen? (optional)" data-i18n-placeholder="settings.bug.expectedPlaceholder"></textarea>
               <textarea id="bug-happened" rows="3" placeholder="What actually happened?" data-i18n-placeholder="settings.bug.happenedPlaceholder"></textarea>
@@ -1081,6 +1081,16 @@
                 <button class="btn-secondary" id="bug-download" hidden data-i18n="settings.bug.downloadButton">Download report</button>
               </div>
               <div id="bug-result" class="sub" hidden></div>
+              <!-- Shown by "Send to maintainer": the saved report's full text.
+                   Nothing is sent until bug-confirm-send is pressed. -->
+              <div id="bug-review" hidden>
+                <div class="sub" data-i18n="settings.bug.reviewHelp">This is the whole report, exactly as it will be sent. It becomes a public GitHub issue. Nothing has been sent yet.</div>
+                <textarea id="bug-preview" rows="14" readonly aria-label="Bug report to send" data-i18n-aria-label="settings.bug.previewLabel"></textarea>
+                <div class="actions">
+                  <button class="btn-primary" id="bug-confirm-send" data-i18n="settings.bug.confirmSendButton">Send this report</button>
+                  <button class="btn-secondary" id="bug-cancel-send" data-i18n="settings.bug.cancelSendButton">Don't send</button>
+                </div>
+              </div>
             </section>
 
             <!-- Changelog: always available (it ships in every build), so it is NOT

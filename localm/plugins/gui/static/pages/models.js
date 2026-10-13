@@ -1723,15 +1723,46 @@ window.refreshInstancesCard = refreshInstancesCard;
 // File a bug report from Settings. "Save report" writes an editable markdown
 // report to the data folder (safe snapshot, optional log tail - never secrets or
 // chat). "Send to maintainer", shown only when capabilities.bugreport_upload
-// names an upload endpoint, ALSO files it as a GitHub issue through the proxy. A
-// failed upload is reported as a failure; the file is still saved.
+// names an upload endpoint, saves the report the same way and shows its full
+// text; nothing is sent until "Send this report" is pressed, and what is sent
+// is that saved text, checked by its digest. A failed upload is reported as a
+// failure; the file is still saved.
 // The most recent saved report's markdown + filename, for "Download report".
 let _lastBugReport = null;
+// The saved report on review: { filename, sha256, where }.
+let _reviewedBugReport = null;
+// Whether bug-upload was hidden before the review panel hid it.
+let _bugUploadWasHidden = null;
 
 function _showBugActions({ retry, download }) {
   const r = $("bug-retry"), d = $("bug-download");
   if (r) r.hidden = !retry;
   if (d) d.hidden = !download;
+}
+
+// Show (markdown) or close (null) the review panel. While it is open the
+// "Send to maintainer" button is hidden, so the card has one primary button.
+function _showBugReview(markdown) {
+  const panel = $("bug-review"), preview = $("bug-preview"), upBtn = $("bug-upload");
+  if (markdown != null) {
+    if (preview) preview.value = markdown;
+    if (panel) panel.hidden = false;
+    if (upBtn && _bugUploadWasHidden === null) {
+      _bugUploadWasHidden = upBtn.hidden;
+      upBtn.hidden = true;
+    }
+  } else {
+    if (panel) panel.hidden = true;
+    if (preview) preview.value = "";
+    if (upBtn && _bugUploadWasHidden !== null) upBtn.hidden = _bugUploadWasHidden;
+    _bugUploadWasHidden = null;
+  }
+}
+
+function _clearBugFields() {
+  $("bug-desc").value = "";
+  if ($("bug-expected")) $("bug-expected").value = "";
+  if ($("bug-happened")) $("bug-happened").value = "";
 }
 
 // Download the last saved report as a .md.
@@ -1748,11 +1779,13 @@ function downloadBugReport() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export async function submitBugReport(upload, isRetry = false) {
+// Save a report. With review true, show its full text with a "Send this
+// report" button; it is never uploaded here.
+export async function submitBugReport(review) {
   const desc = ($("bug-desc").value || "").trim();
   const expected = (($("bug-expected") && $("bug-expected").value) || "").trim();
   const happened = (($("bug-happened") && $("bug-happened").value) || "").trim();
-  // Either "what were you doing" or "what happened" alone is enough to send,
+  // Either "what were you doing" or "what happened" alone is enough to save,
   // mirroring the server's own "description or what_happened" check.
   if (!desc && !happened) { toast(t("settings.bug.describeFirst"), true); return; }
   const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
@@ -1760,6 +1793,8 @@ export async function submitBugReport(upload, isRetry = false) {
   if (saveBtn) saveBtn.disabled = true;
   if (upBtn) upBtn.disabled = true;
   _showBugActions({ retry: false, download: false });   // fresh attempt: reset
+  _showBugReview(null);
+  _reviewedBugReport = null;
   // Browser context; the env snapshot and server state are added server-side.
   // Sanitized + capped on the server; rendered as plain text, never executed.
   const client = {
@@ -1774,63 +1809,37 @@ export async function submitBugReport(upload, isRetry = false) {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ description: desc, what_i_expected: expected,
-        what_happened: happened, include_log: includeLog, client,
-        upload: !!upload }),
+        what_happened: happened, include_log: includeLog, client }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    // Rate limited: with auto-retry on (the default), keep the user's text,
-    // count down, and retry the send ONCE; with it off, fall through to a plain
-    // notice.
-    const autoRetry = !$("bug-autoretry") || $("bug-autoretry").checked;
-    if (upload && data.rate_limited && !isRetry && autoRetry) {
-      const secs = Math.max(1, parseInt(data.retry_after, 10) || 30);
-      await countdownRetryBugReport(secs, out);
-      return;   // the retry (and the finally below) re-enable the buttons
-    }
     const where = data.path || data.filename || t("settings.bug.unnamedReport");
-    const sent = upload && data.uploaded;
-    const uploadFailed = upload && data.upload_error && !data.rate_limited;
     // Stash the saved report so "Download report" can hand it to the tester.
     _lastBugReport = data.report_markdown
       ? { markdown: data.report_markdown, filename: data.filename || "bug-report.md" }
       : null;
-    // On a failed send, offer Retry (re-file the issue) and Download; on
-    // success, keep them hidden.
-    _showBugActions({ retry: uploadFailed, download: !sent && !!_lastBugReport });
+    _showBugActions({ retry: false, download: !!_lastBugReport });
+    if (review && data.report_markdown && data.report_sha256 && data.filename) {
+      _reviewedBugReport = { filename: data.filename, sha256: data.report_sha256, where };
+      _showBugReview(data.report_markdown);
+      if (out) {
+        out.hidden = false;
+        out.textContent = t("settings.bug.reviewPrompt", { where });
+      }
+      return;
+    }
     if (out) {
       out.hidden = false;
-      if (sent) {
-        out.textContent = t("settings.bug.sent") +
-          (data.issue_url ? t("settings.bug.trackingIssue", { url: data.issue_url }) : "");
-      } else if (data.rate_limited) {
-        out.textContent = t("settings.bug.savedRateLimited", { where });
-      } else if (uploadFailed) {
-        // Name where it failed (the diagnosed message) and that the report is
-        // kept, so it can be retried, downloaded or emailed.
-        const message = data.upload_message || data.upload_error;
-        const whereSuffix = where ? t("settings.bug.whereSuffix", { where }) : "";
-        const maintainer = data.maintainer || t("settings.bug.defaultMaintainer");
-        out.textContent = t("settings.bug.couldNotSend", { message, whereSuffix, maintainer });
+      if (review) {
+        out.textContent = t("settings.bug.reviewUnavailable", { where });
       } else {
         const maintainerSuffix = data.maintainer
           ? t("settings.bug.maintainerSuffix", { maintainer: data.maintainer }) : "";
         out.textContent = t("settings.bug.saved", { where }) + maintainerSuffix;
       }
     }
-    // Keep the description on ANY failed send so Retry re-uses it; clear it once
-    // the report is done with (sent, or a plain save with no upload attempt).
-    if (sent || (!upload && data.saved)) {
-      $("bug-desc").value = "";
-      if ($("bug-expected")) $("bug-expected").value = "";
-      if ($("bug-happened")) $("bug-happened").value = "";
-    }
-    if (sent) toast(t("settings.bug.sentToast"));
-    else if (data.rate_limited) toast(t("settings.bug.rateLimitedToast"), true);
-    else if (uploadFailed) {
-      toast(t("settings.bug.couldNotSendToast",
-        { message: data.upload_message || data.upload_error }), true);
-    } else toast(t("settings.bug.savedToast"));
+    if (!review && data.saved) _clearBugFields();
+    toast(t("settings.bug.savedToast"));
   } catch (e) {
     toast(t("settings.bug.fileFailed", { message: e.message }), true);
   } finally {
@@ -1839,9 +1848,87 @@ export async function submitBugReport(upload, isRetry = false) {
   }
 }
 
+// Send the report on review: exactly the saved file that was shown, named by
+// its filename and digest. isRetry marks the one automatic rate-limit retry.
+export async function sendReviewedBugReport(isRetry = false) {
+  const rep = _reviewedBugReport;
+  if (!rep) return;
+  const confirmBtn = $("bug-confirm-send"), cancelBtn = $("bug-cancel-send");
+  const retryBtn = $("bug-retry");
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (cancelBtn) cancelBtn.disabled = true;
+  if (retryBtn) retryBtn.disabled = true;
+  const out = $("bug-result");
+  try {
+    const r = await fetch("/api/bug-report/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ filename: rep.filename, sha256: rep.sha256 }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    // Rate limited: with auto-retry on (the default), count down and retry the
+    // send ONCE; with it off, fall through to a plain notice.
+    const autoRetry = !$("bug-autoretry") || $("bug-autoretry").checked;
+    if (data.rate_limited && !isRetry && autoRetry) {
+      const secs = Math.max(1, parseInt(data.retry_after, 10) || 30);
+      await countdownRetryBugReport(secs, out);
+      return;
+    }
+    const sent = !!data.uploaded;
+    const uploadFailed = !sent && data.upload_error && !data.rate_limited;
+    _showBugActions({ retry: !sent, download: !sent && !!_lastBugReport });
+    if (out) {
+      out.hidden = false;
+      if (sent) {
+        out.textContent = t("settings.bug.sent") +
+          (data.issue_url ? t("settings.bug.trackingIssue", { url: data.issue_url }) : "");
+      } else if (data.rate_limited) {
+        out.textContent = t("settings.bug.savedRateLimited", { where: rep.where });
+      } else {
+        // Name where it failed (the diagnosed message) and that the report is
+        // kept, so it can be retried, downloaded or emailed.
+        const message = data.upload_message || data.upload_error;
+        const whereSuffix = rep.where ? t("settings.bug.whereSuffix", { where: rep.where }) : "";
+        const maintainer = data.maintainer || t("settings.bug.defaultMaintainer");
+        out.textContent = t("settings.bug.couldNotSend", { message, whereSuffix, maintainer });
+      }
+    }
+    if (sent) {
+      _reviewedBugReport = null;
+      _showBugReview(null);
+      _clearBugFields();
+      toast(t("settings.bug.sentToast"));
+    } else if (data.rate_limited) {
+      toast(t("settings.bug.rateLimitedToast"), true);
+    } else if (uploadFailed) {
+      toast(t("settings.bug.couldNotSendToast",
+        { message: data.upload_message || data.upload_error }), true);
+    }
+  } catch (e) {
+    toast(t("settings.bug.fileFailed", { message: e.message }), true);
+  } finally {
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (cancelBtn) cancelBtn.disabled = false;
+    if (retryBtn) retryBtn.disabled = false;
+  }
+}
+
+// Close the review panel without sending. The saved report stays on disk.
+function cancelBugReview() {
+  const rep = _reviewedBugReport;
+  _reviewedBugReport = null;
+  _showBugReview(null);
+  _showBugActions({ retry: false, download: !!_lastBugReport });
+  const out = $("bug-result");
+  if (out && rep) {
+    out.hidden = false;
+    out.textContent = t("settings.bug.notSent", { where: rep.where });
+  }
+}
+
 // Show a live countdown in the bug-report result line, then auto-retry the send
-// once (isRetry=true, so it never loops). The caller's buttons stay disabled
-// throughout.
+// once (isRetry=true, so it never loops).
 async function countdownRetryBugReport(secs, out) {
   for (let s = secs; s > 0; s--) {
     if (out) {
@@ -1851,12 +1938,14 @@ async function countdownRetryBugReport(secs, out) {
     await new Promise((res) => setTimeout(res, 1000));
   }
   if (out) out.textContent = t("settings.bug.retrying");
-  await submitBugReport(true, true);
+  await sendReviewedBugReport(true);
 }
 
 if ($("bug-send")) $("bug-send").onclick = () => submitBugReport(false);
 if ($("bug-upload")) $("bug-upload").onclick = () => submitBugReport(true);
-if ($("bug-retry")) $("bug-retry").onclick = () => submitBugReport(true);
+if ($("bug-confirm-send")) $("bug-confirm-send").onclick = () => sendReviewedBugReport();
+if ($("bug-cancel-send")) $("bug-cancel-send").onclick = () => cancelBugReview();
+if ($("bug-retry")) $("bug-retry").onclick = () => sendReviewedBugReport();
 if ($("bug-download")) $("bug-download").onclick = () => downloadBugReport();
 
 // Updates: a check-only auto-surface (a throttled startup check in app.js calls
