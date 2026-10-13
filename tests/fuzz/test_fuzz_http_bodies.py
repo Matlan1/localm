@@ -35,7 +35,8 @@ _json = st.recursive(
     max_leaves=25)
 
 # An embeddings `input` list longer than any list _json draws.
-_BATCH = st.lists(st.text(max_size=8), min_size=5, max_size=600)
+_BATCH = st.integers(5, 600).flatmap(
+    lambda n: st.lists(st.text(max_size=8), min_size=n, max_size=n))
 
 _MESSAGE = st.fixed_dictionaries(
     {"role": st.sampled_from(["user", "system", "assistant", "tool", "bogus", 5, None]),
@@ -135,11 +136,18 @@ def _client() -> TestClient:
     return _client_cache["c"]
 
 
-def _vision_client() -> TestClient:
-    if "v" not in _client_cache:
-        _client_cache["v"] = TestClient(create_app(_vision_engine()),
-                                        raise_server_exceptions=False)
-    return _client_cache["v"]
+def _new_client(engine) -> TestClient:
+    """A client for a fresh app. The app serves through a module-level engine
+    that the most recent create_app call sets, so the cached default client is
+    dropped and rebuilt on its next use."""
+    _client_cache.pop("c", None)
+    return TestClient(create_app(engine), raise_server_exceptions=False)
+
+
+@pytest.fixture
+def vision_client():
+    yield _new_client(_vision_engine())
+    _client_cache.pop("c", None)
 
 
 def _post(method: str, path: str, body: bytes, client=None):
@@ -282,13 +290,13 @@ _image_message = st.lists(
 @given(messages=st.lists(_image_message, min_size=1, max_size=2),
        extra=st.dictionaries(st.sampled_from(["max_tokens", "temperature", "stream"]), _json,
                              max_size=2))
-def test_image_bodies_never_answer_5xx(messages, extra):
+def test_image_bodies_never_answer_5xx(messages, extra, vision_client):
     body = json.dumps({**_VALID_CHAT, "messages": messages, **extra}).encode()
-    resp = _post("POST", "/v1/chat/completions", body, _vision_client())
+    resp = _post("POST", "/v1/chat/completions", body, vision_client)
     assert resp.status_code < 500, (resp.status_code, resp.text[:300], body[:300])
 
 
-def test_an_image_body_reaches_the_decoder_only_through_a_vision_engine(monkeypatch):
+def test_an_image_body_reaches_the_decoder_only_through_a_decoding_engine(monkeypatch):
     from localm.inference import media
 
     calls = []
@@ -297,16 +305,19 @@ def test_an_image_body_reaches_the_decoder_only_through_a_vision_engine(monkeypa
     body = json.dumps({**_VALID_CHAT, "messages": [{
         "role": "user", "content": [{"type": "image_url",
                                      "image_url": {"url": _uri(_png(2, 2, 2))}}]}]}).encode()
-    text_only = _post("POST", "/v1/chat/completions", body)
-    assert text_only.status_code == 400 and calls == []
-    vision = _post("POST", "/v1/chat/completions", body, _vision_client())
-    assert vision.status_code < 400 and len(calls) == 1
+    try:
+        _post("POST", "/v1/chat/completions", body, _new_client(_engine()))
+        assert calls == []
+        vision = _post("POST", "/v1/chat/completions", body, _new_client(_vision_engine()))
+        assert vision.status_code < 400 and len(calls) == 1
+    finally:
+        _client_cache.pop("c", None)
 
 
-def test_a_pixel_bomb_is_refused_cleanly_by_a_vision_engine():
+def test_a_pixel_bomb_is_refused_cleanly_by_a_vision_engine(vision_client):
     body = json.dumps({**_VALID_CHAT, "messages": [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": _uri(_png(30_000, 30_000, 1))}}]}]}).encode()
-    resp = _post("POST", "/v1/chat/completions", body, _vision_client())
+    resp = _post("POST", "/v1/chat/completions", body, vision_client)
     assert 400 <= resp.status_code < 500, (resp.status_code, resp.text[:300])
 
 

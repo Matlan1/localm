@@ -495,24 +495,13 @@ def _marker_end(buf: str, at: int) -> int:
     return at if m is None else m.end()
 
 
-# A turn-open marker, then inert markers and the start of a role word, up to the
-# end of the text: the rest of the role word may still arrive.
-_ROLE_WORDS = ("user", "model", "assistant", "system", "tool", "ipython")
-_ROLE_PREFIXES = "|".join(sorted(
-    {w[:n] for w in _ROLE_WORDS for n in range(1, len(w) + 1)}, key=len, reverse=True))
-_PENDING_ROLE_RE = re.compile(
-    r"(?:<start_of_turn>|<\|im_start\|>|<\|turn>|<\|start\|>)(?:" + _INERT_AHEAD
-    + r")*(?:" + _ROLE_PREFIXES + r")?\n?\Z")
-
-
 def _commit_point(buf: str) -> int:
     """How much of *buf* scrub_stream can scrub and release now.
 
     Holds from the first marker-start character whose text so far could still
     grow into a marker (only possible within the last ``_MARKER_HOLD``
     characters), then backs up to the start of any complete marker that would
-    straddle the cut and of any turn-open marker whose role word may still
-    follow. Everything else is released."""
+    straddle the cut. Everything else is released."""
     n = len(buf)
     cut = n
     for i in range(max(0, n - _MARKER_HOLD), n):
@@ -527,10 +516,6 @@ def _commit_point(buf: str) -> int:
                 cut = q
                 moved = True
                 break
-        pending = _PENDING_ROLE_RE.search(buf, 0, cut)
-        if pending is not None and pending.start() < cut:
-            cut = pending.start()
-            moved = True
     return cut
 
 

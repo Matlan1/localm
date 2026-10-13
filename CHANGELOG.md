@@ -658,6 +658,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A share inbox that cannot be listed says so.** If the folder holding items shared from a
   phone cannot be read, the 15-minute clean-up now logs that it could not run instead of
   leaving expired items on disk unreported.
+- **Model control markers hidden inside other markers no longer reach the reply.** A model
+  that wrote a header or turn marker with another control marker inside it (for example a
+  Llama 3 role header split by `<|message|>`, or `<start_of_turn>` followed by a marker and
+  then `model`) left half of the header or a bare `model` / `assistant` at the start of the
+  reply. The whole group is now removed, however the reply is streamed. Asking for token
+  probabilities on a reply like that now fails with an alignment error instead of being
+  matched against the wrong text.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
