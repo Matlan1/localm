@@ -929,6 +929,11 @@ DEFAULT_CONFIG: dict = {
     "rag_rerank": True,
     "rag_rerank_model": "",
     "rag_rerank_candidates": 20,
+    # The reranker score a hit needs to count as relevant when chat asks for
+    # relevant hits only, in the reranker's own scale. None = the measured value
+    # for the reranker files in localm.rag.rerank.CALIBRATED_MIN_SCORES, and the
+    # cosine/keyword floor for any other reranker.
+    "rag_rerank_min_score": None,
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,
