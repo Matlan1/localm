@@ -4264,14 +4264,6 @@
                 }
             },
             {
-                "code": "reportGeneralTypeIssues",
-                "range": {
-                    "startColumn": 37,
-                    "endColumn": 43,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportIndexIssue",
                 "range": {
                     "startColumn": 58,
