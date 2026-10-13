@@ -124,11 +124,13 @@ class HttpEngine:
                     seed: Optional[int] = None,
                     min_context: Optional[int] = None,
                     on_status: Optional[Callable[[str], None]] = None,
-                    thinking: Optional[bool] = None) -> Iterator[str]:
+                    thinking: Optional[bool] = None,
+                    cache_prompt: Optional[bool] = None) -> Iterator[str]:
         """Stream assistant tokens from the server's ``/v1/chat/completions``.
         *min_context* asks for a model whose trained window holds that many
         tokens; it only has an effect when ``pin_model`` is False.
         ``thinking=False`` is sent as ``chat_template_kwargs.enable_thinking``.
+        ``cache_prompt`` is sent when set.
 
         Raises :class:`UnsupportedInputError` when the server refuses image input on
         a text-only model (so the REPL shows the same vision guidance as in-process),
@@ -145,12 +147,12 @@ class HttpEngine:
             "stream": True,
         }
         # Only send params the caller set, so server defaults apply otherwise. top_k /
-        # repeat_penalty / seed / grammar are localm /v1 extensions; a stricter server
-        # ignores unknown fields.
+        # repeat_penalty / seed / grammar / cache_prompt are localm /v1 extensions; a
+        # stricter server ignores unknown fields.
         for key, val in (("max_tokens", max_tokens), ("temperature", temperature),
                          ("top_p", top_p), ("top_k", top_k),
                          ("repeat_penalty", repeat_penalty), ("seed", seed),
-                         ("grammar", grammar)):
+                         ("grammar", grammar), ("cache_prompt", cache_prompt)):
             if val is not None:
                 body[key] = val
         if thinking is not None:
