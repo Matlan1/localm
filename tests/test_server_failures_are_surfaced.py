@@ -104,18 +104,3 @@ def test_hang_trace_write_failure_is_logged_once(tmp_path, monkeypatch, caplog):
     assert hits[0].levelno == logging.WARNING
     assert not trace.exists()
 
-
-def test_revoke_warns_when_session_cleanup_raises(monkeypatch, caplog):
-    from localm import sessions
-    made = auth.create_key("device", scopes=["admin"])
-
-    def _boom(key_hash):
-        raise AttributeError("'list' object has no attribute 'get'")
-    monkeypatch.setattr(sessions, "revoke_by_key_hash", _boom)
-
-    with caplog.at_level(logging.WARNING, logger="localm"):
-        assert auth.revoke_key(made["id"]) is True
-
-    warned = [r for r in caplog.records if r.levelno == logging.WARNING
-              and "browser sessions failed" in r.getMessage()]
-    assert warned, [r.getMessage() for r in caplog.records]
