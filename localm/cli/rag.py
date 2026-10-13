@@ -43,7 +43,7 @@ def rag_group():
 @rag_group.command("list")
 def rag_list():
     """List collections with document and chunk counts."""
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     from ..rag import Collection, collection_names
@@ -89,7 +89,7 @@ def rag_add(collection, paths, force, embed, url):
       localm rag add manuals path/to/printer-manual.pdf
       localm rag add project path/to/myapp --embed
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     from ..rag import Collection
@@ -145,7 +145,7 @@ def rag_repair(collection, embed, url, yes):
     them silently or refusing to run; pass --yes to accept the drop, or --embed
     to recompute them explicitly.
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     from ..rag import Collection
@@ -264,7 +264,7 @@ def rag_resync(collection, embed, url, prune_missing):
     Schedule this instead of running it by hand:
     `localm job add sync-docs --rag --collection COLLECTION --cron "0 3 * * *"`.
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     from ..rag import Collection
@@ -348,7 +348,7 @@ def rag_reembed(collection, url, yes):
     `rag repair --embed`, that re-indexes from the source files and cannot help
     when they have moved or the documents arrived as uploads.
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
     from localm.config import load_config
     from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
@@ -471,7 +471,7 @@ def rag_query(collection, text, k, embed, url, relevant_only, rerank, context):
     Every top-K hit is shown however weak it is, unless --relevant-only drops
     those below the relevance floor.
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     from ..rag import Collection
@@ -520,7 +520,7 @@ def rag_docs(collection):
     flagged (uploaded) was added via the GUI/API upload path rather than from
     a file path, so 'rag repair'/'rag resync' cannot re-read it from disk.
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     from ..rag import Collection
@@ -554,7 +554,7 @@ def rag_rm_doc(collection, path):
     original file on disk is untouched. Use 'rag rm' to delete the whole
     collection instead.
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     from ..rag import Collection
@@ -577,7 +577,7 @@ def rag_rm_doc(collection, path):
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
 def rag_rm(collection, yes):
     """Delete a collection (the index only - original files are untouched)."""
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     from ..rag import delete_collection

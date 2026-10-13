@@ -8,7 +8,7 @@ from localm.stdio import force_utf8_stdio
 force_utf8_stdio()
 
 import click
-from rich.console import Console
+from localm.console import SafeConsole as Console
 from ..bindhost import self_connect_host, url_host
 
 

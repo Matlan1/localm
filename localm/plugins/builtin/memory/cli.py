@@ -40,6 +40,12 @@ import time
 import click
 
 
+def _echo(message: object = "", **kwargs) -> None:
+    """``click.echo`` of text localm did not author, without terminal control characters."""
+    from localm.console import strip_controls
+    click.echo(strip_controls(str(message)), **kwargs)
+
+
 @contextlib.contextmanager
 def _refuse_if_locked():
     """Turn a cross-process write-lock refusal into a clear message and exit 1.
@@ -153,7 +159,7 @@ def memory_list(show_all: bool, as_json: bool) -> None:
         return
     click.echo(f"{len(records)} remembered fact(s):")
     for r in records:
-        click.echo(f"  {r.id}  [{r.kind}] {_short(r.text)}")
+        _echo(f"  {r.id}  [{r.kind}] {_short(r.text)}")
         if show_all:
             click.echo(f"      importance {r.importance} - used {r.uses}x - "
                        f"created {_age(r.created)} - source {r.source or '?'}")
@@ -166,7 +172,7 @@ def memory_show(mem_id: str) -> None:
     rec = _store().get(mem_id)
     if rec is None:
         _fail(f"No memory with id {mem_id}.")
-    click.echo(rec.text)
+    _echo(rec.text)
     click.echo("")
     click.echo(f"id         {rec.id}")
     click.echo(f"kind       {rec.kind}")
@@ -198,7 +204,7 @@ def memory_forgotten() -> None:
         # Rows are the record's own fields plus `forgotten_at`. There is no
         # `reason` key here - that belongs to the coder's episode archive, which
         # is a different store; printing one would render "?" forever.
-        click.echo(f"  {row.get('id', '?')}  {_age(row.get('forgotten_at', 0))}"
+        _echo(f"  {row.get('id', '?')}  {_age(row.get('forgotten_at', 0))}"
                    f"  {_short(row.get('text', ''))}")
 
 
@@ -262,7 +268,7 @@ def memory_forget(mem_id: str, yes: bool) -> None:
     if rec is None:
         _fail(f"No memory with id {mem_id}.")
     if not yes:
-        click.echo(f"Forget: {_short(rec.text)}")
+        _echo(f"Forget: {_short(rec.text)}")
         click.confirm("This deletes it outright and cannot be undone. Continue?",
                       abort=True)
     if not store.delete(mem_id):
@@ -282,7 +288,7 @@ def memory_restore(mem_id: str) -> None:
     if rec is None:
         _fail(f"No forgotten memory with id {mem_id}. "
               "`localm memory forgotten` lists what can be restored.")
-    click.echo(f"Restored {rec.id}: {_short(rec.text)}")
+    _echo(f"Restored {rec.id}: {_short(rec.text)}")
 
 
 @main.command("clear")
@@ -346,9 +352,9 @@ def memory_corrections(as_json: bool) -> None:
     for c in rows:
         click.echo(f"  {c.id}  [{c.action}] confidence {c.confidence}")
         if c.target_text:
-            click.echo(f"      was:  {_short(c.target_text)}")
+            _echo(f"      was:  {_short(c.target_text)}")
         if c.proposed_text:
-            click.echo(f"      now:  {_short(c.proposed_text)}")
+            _echo(f"      now:  {_short(c.proposed_text)}")
 
 
 def _resolve(correction_id: str, accept: bool) -> None:

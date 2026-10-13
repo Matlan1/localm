@@ -423,7 +423,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     auto-launch it when comfy_launch_cmd is configured).
     """
     import time as _time
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
     from ..audit import SessionMode, effective_mode
     from ..config import load_config
@@ -515,7 +515,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     import time as _time
     from importlib import import_module
 
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     from ..audit import SessionMode, effective_mode

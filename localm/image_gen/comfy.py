@@ -638,7 +638,7 @@ def generate_image(
     (ok, message)
         ``ok=True`` and a success description, or ``ok=False`` and an error.
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
     from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 

@@ -684,15 +684,17 @@ class _ThinkPrinter:
     def __init__(self) -> None:
         import sys as _sys
         from localm.textnorm import ThinkSplitter
+        from localm.console import strip_controls
         tty = _sys.stdout.isatty()
         self._dim, self._reset = ("\033[2m", "\033[22m") if tty else ("", "")
+        self._clean = strip_controls if tty else str
         self._think = ThinkSplitter()
 
     def _emit(self, content: str, reasoning: str) -> None:
         if reasoning:
-            print(f"{self._dim}{reasoning}{self._reset}", end="", flush=True)
+            print(f"{self._dim}{self._clean(reasoning)}{self._reset}", end="", flush=True)
         if content:
-            print(content, end="", flush=True)
+            print(self._clean(content), end="", flush=True)
 
     def feed(self, token: str) -> None:
         self._emit(*self._think.feed(token))

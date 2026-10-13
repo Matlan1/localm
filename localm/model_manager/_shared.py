@@ -21,7 +21,7 @@ from localm.stdio import force_utf8_stdio
 
 force_utf8_stdio()
 
-from rich.console import Console
+from localm.console import SafeConsole as Console
 
 console = Console()
 

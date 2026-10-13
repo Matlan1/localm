@@ -334,7 +334,8 @@ def _hash_with_progress(path: Path,
         transient=True,
         console=console,
     ) as prog:
-        task = prog.add_task(path.name, total=size)
+        from rich.markup import escape
+        task = prog.add_task(escape(path.name), total=size)
         worker = threading.Thread(
             target=_worker,
             args=(lambda done, total: prog.update(task, completed=done),),

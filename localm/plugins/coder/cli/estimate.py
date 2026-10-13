@@ -30,7 +30,8 @@ def _run_estimate(agent: Agent, task: str, output_format: str) -> None:
         sys.stdout.write(_json.dumps(result, indent=2) + "\n")
         return
 
-    console.print(result["estimate"])
+    from rich.text import Text
+    console.print(Text(str(result["estimate"])))
     if result.get("total_tokens"):
         print_info(
             f"Planning turn used {result['total_tokens']} tokens "

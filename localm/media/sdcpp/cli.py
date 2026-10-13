@@ -20,7 +20,7 @@ from . import pins, runtime
 @click.option("--status", is_flag=True, help="Show what is installed and exit.")
 def main(backend: str, force: bool, status: bool) -> None:
     """Install the native image generation runtime (stable-diffusion.cpp)."""
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
     console = Console()
     if status:

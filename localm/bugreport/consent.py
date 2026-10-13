@@ -36,15 +36,16 @@ def report_failure(*, summary: str, reason: str = "",
     ``--send`` flag) stands in for picking option [1] interactively, so this is
     still an explicit user action, not automatic reporting. ``open_browser`` and
     ``prompt`` are injectable for tests."""
+    from localm.console import markup_safe
     console.print()
     if as_failure:
-        console.print(f"[bold red]Sorry - {summary}.[/bold red]")
+        console.print(f"[bold red]Sorry - {markup_safe(summary)}.[/bold red]")
         if reason:
-            console.print(f"[red]Reason:[/red] {reason}")
+            console.print(f"[red]Reason:[/red] {markup_safe(reason)}")
     else:
-        console.print(f"[bold]Filing a bug report:[/bold] {summary}")
+        console.print(f"[bold]Filing a bug report:[/bold] {markup_safe(summary)}")
         if reason:
-            console.print(f"[dim]{reason}[/dim]")
+            console.print(f"[dim]{markup_safe(reason)}[/dim]")
 
     text = build_report(summary, reason=reason, error=error, context=context)
     path = _br.save_report(text)
@@ -173,14 +174,21 @@ def _auto_send(summary: str, path: Optional[Path], text: str,
                           f"{MAINTAINER_EMAIL} instead.[/dim]")
             return
     except LocalmError as e:
-        console.print(f"[yellow]Could not send it.[/yellow] {e.hint or e.reason}")
+        from localm.console import markup_safe
+        console.print(f"[yellow]Could not send it.[/yellow] {markup_safe(e.hint or e.reason)}")
         console.print(f"[dim]The report is at {where} - email it to "
                       f"{MAINTAINER_EMAIL} instead.[/dim]")
         return
+    _print_sent(res)
+    return
+
+
+def _print_sent(res) -> None:
+    """Confirm an upload, with the tracking link the proxy returned when there is one."""
+    from localm.console import markup_safe
     link = res.get("url") if isinstance(res, dict) else None
     console.print("[green]Sent to the maintainer.[/green]"
-                  + (f" Tracking issue: {link}" if link else ""))
-    return
+                  + (f" Tracking issue: {markup_safe(link)}" if link else ""))
 
 
 def _upload_with_retries(summary: str, body: str, up_url, up_token, ask,
@@ -193,9 +201,7 @@ def _upload_with_retries(summary: str, body: str, up_url, up_token, ask,
         attempt += 1
         try:
             res = _br.upload_report(summary, body, url=up_url, token=up_token)
-            link = res.get("url") if isinstance(res, dict) else None
-            console.print("[green]Sent to the maintainer.[/green]"
-                          + (f" Tracking issue: {link}" if link else ""))
+            _print_sent(res)
             break
         except RateLimitedError as e:
             # Rate limited: wait the server-advised delay and retry ONCE

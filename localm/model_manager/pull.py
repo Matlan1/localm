@@ -2935,7 +2935,9 @@ def _pull_url_locked(
             TimeRemainingColumn(),
             console=console,
         ) as prog:
-            task = prog.add_task(filename, total=total_display, completed=already_have)
+            from rich.markup import escape
+            task = prog.add_task(escape(filename), total=total_display,
+                                 completed=already_have)
             _write_chunks(lambda n: prog.update(task, advance=n))
 
     if stream_error:
