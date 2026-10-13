@@ -76,7 +76,7 @@ test("a failed catalog load replaces the loading line with the error", async () 
   assert.doesNotMatch(text, /Loading plugins/);
 });
 
-for (const [label, workingLabel, cls] of [
+for (const [label, workingLabel] of [
   ["Disable", "Disabling…"],
   ["Refresh", "Refreshing…"],
 ]) {

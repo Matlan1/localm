@@ -375,7 +375,7 @@ _STATEMENT_PARTICIPLES: frozenset[str] = frozenset({
 _STATEMENT_LINKS: frozenset[str] = frozenset({
     "with", "because", "on", "at", "due", "again", "after", "when", "while",
     "in", "for", "since", "during", "but", "and", "so", "to", "if", "as",
-    "once", "before", "twice", "again", "yesterday", "today", "just", "too",
+    "once", "before", "twice", "yesterday", "today", "just", "too",
     "already", "completely", "silently", "unexpectedly", "randomly", "here",
 })
 
