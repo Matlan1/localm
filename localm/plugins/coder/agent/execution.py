@@ -27,7 +27,7 @@ from ..confirm import invoke_confirm
 from .. import shell_guard
 from ..parser import ToolCall
 from ..tools import ToolResult
-from ..tools.base import RESTRICTED_UNWRITABLE_MESSAGE, restricted_unwritable
+from ..tools.base import restricted_write_refusal
 from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
@@ -411,10 +411,10 @@ class _ExecutionMixin:
         # intercept, so such a write is not captured as a diff either.
         if self.restricted and call.name in _RESTRICTED_PATH_WRITE_TOOLS:
             for value in _call_target_paths(call.name, call.args):
-                if restricted_unwritable(self.cwd, value):
+                refusal = restricted_write_refusal(self.cwd, value)
+                if refusal is not None:
                     result = ToolResult.error(
-                        f"'{value}' was not written: "
-                        f"{RESTRICTED_UNWRITABLE_MESSAGE}.")
+                        f"'{value}' was not written: {refusal}.")
                     self._audit.notice("restricted_config_write_refused",
                                        result.output)
                     if interactive:

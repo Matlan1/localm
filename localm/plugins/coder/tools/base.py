@@ -152,8 +152,8 @@ RESTRICTED_UNWRITABLE_MESSAGE = (
     "configuration, and a restricted session cannot create or change anything "
     "inside one, through a link to one, or through a hard link to any file")
 
-# Largest .git file / commondir file read when following a gitdir pointer.
-_GIT_POINTER_MAX_BYTES = 4096
+# Largest .git or commondir file followed; git accepts the same size.
+_GIT_POINTER_MAX_BYTES = 1 << 20
 
 
 def unwritable_component(parts) -> Optional[str]:
@@ -167,35 +167,90 @@ def unwritable_component(parts) -> Optional[str]:
     return None
 
 
-def _is_dir_link(entry: os.DirEntry) -> bool:
-    """Whether *entry* is a symlink or an NTFS junction."""
-    if entry.is_symlink():
+def _is_link(path) -> bool:
+    """Whether *path* is a symlink or an NTFS junction (not followed)."""
+    if os.path.islink(path):
         return True
     isjunction = getattr(os.path, "isjunction", None)
-    return bool(isjunction and isjunction(entry.path))
+    return bool(isjunction and isjunction(path))
 
 
-def _gitdir_pointer(base: Path, pointer_file: Path, prefix: str) -> Optional[Path]:
-    """The folder *pointer_file* names, resolved against *base*, or None.
+def _local_target(base: Path, named: str) -> Optional[Path]:
+    """*named* joined onto *base* when relative, then resolved.
 
-    *prefix* is the text before the path on the first line (``"gitdir:"`` for
-    a ``.git`` file, ``""`` for a ``commondir`` file). None when the file is
-    missing, unreadable, larger than ``_GIT_POINTER_MAX_BYTES`` or not in that
-    form."""
-    try:
-        with open(pointer_file, "rb") as fh:
-            data = fh.read(_GIT_POINTER_MAX_BYTES + 1)
-    except OSError:
-        return None
-    if len(data) > _GIT_POINTER_MAX_BYTES:
-        return None
-    lines = data.decode("utf-8", errors="replace").splitlines()
-    if not lines or not lines[0].startswith(prefix):
-        return None
-    named = lines[0][len(prefix):].strip()
-    if not named:
+    None when *named* is empty or a UNC, device or mapped network drive path;
+    such a path is never resolved. A ``\\\\?\\X:`` prefix is read as the plain
+    drive path ``X:``."""
+    if named[:4] in ("\\\\?\\", "//?/") and named[5:6] == ":":
+        named = named[4:]
+    if (not named or pathsafe.is_unc_or_device_path(named)
+            or pathsafe.is_mapped_network_drive(named)):
         return None
     return (base / named).resolve()
+
+
+def _read_pointer(pointer_file: Path, prefix: str) -> Optional[str]:
+    """The path *pointer_file* names after *prefix* (``"gitdir:"`` for a
+    ``.git`` file, ``""`` for a ``commondir`` file), read the way git reads it:
+    the whole file, trailing whitespace removed.
+
+    None when *pointer_file* is not a regular file, is larger than
+    ``_GIT_POINTER_MAX_BYTES`` or does not start with *prefix*. Raises
+    ``OSError`` when it is a file that cannot be read."""
+    if not pointer_file.is_file():
+        return None
+    with open(pointer_file, "rb") as fh:
+        data = fh.read(_GIT_POINTER_MAX_BYTES + 1)
+    if len(data) > _GIT_POINTER_MAX_BYTES:
+        return None
+    text = data.decode("utf-8", errors="replace").rstrip()
+    if not text.startswith(prefix):
+        return None
+    return text[len(prefix):].strip()
+
+
+def _protected_entry_targets(entry: Path) -> list[Path]:
+    """The folders *entry*, a path named like a ``RESTRICTED_UNWRITABLE_DIRS``
+    entry, redirects to.
+
+    For a link: what it points at. For a ``.git`` file: the folder its
+    ``gitdir:`` line names. Then the folder named by the ``commondir`` file of
+    that folder, or of *entry* itself when it is a directory. UNC, device and
+    mapped network drive targets are left out (see :func:`_local_target`).
+    Raises ``OSError`` when *entry* cannot be inspected."""
+    found: list[Path] = []
+    gitdir: Optional[Path] = None
+    if _is_link(entry):
+        gitdir = _local_target(entry.parent, os.readlink(entry))
+        if gitdir is not None:
+            found.append(gitdir)
+    elif entry.is_file():
+        named = _read_pointer(entry, "gitdir:")
+        gitdir = _local_target(entry.parent, named) if named else None
+        if gitdir is not None:
+            found.append(gitdir)
+    elif entry.is_dir():
+        gitdir = entry
+    if gitdir is not None:
+        named = _read_pointer(gitdir / "commondir", "")
+        common = _local_target(gitdir, named) if named else None
+        if common is not None:
+            found.append(common)
+    return found
+
+
+def _reachable_by_name(directory: Path) -> bool:
+    """Whether an entry of *directory* can be looked up by name (the directory
+    can be traversed even when it cannot be listed)."""
+    for name in sorted(RESTRICTED_UNWRITABLE_DIRS):
+        try:
+            os.lstat(directory / name)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        return True
+    return True
 
 
 def unwritable_redirects(cwd_resolved: Path) -> tuple[Path, ...]:
@@ -203,44 +258,33 @@ def unwritable_redirects(cwd_resolved: Path) -> tuple[Path, ...]:
     *cwd_resolved* redirects to, at any depth.
 
     Walks the project without following links and without entering a matching
-    entry. Collects what a matching entry that is a symlink or junction
-    resolves to, and for a ``.git`` file, the folder its ``gitdir:`` line names
-    plus the folder that folder's ``commondir`` file names. A directory that
-    cannot be listed is skipped and logged at debug level.
+    entry, collecting :func:`_protected_entry_targets` of each matching entry.
+    A subdirectory that cannot be listed is skipped, and logged at debug
+    level, only when its entries cannot be looked up by name either.
 
-    Raises ``OSError`` when the project root itself cannot be listed.
+    Raises ``OSError`` when the project root cannot be listed, a matching entry
+    cannot be inspected, or a subdirectory cannot be listed but its entries can
+    still be looked up by name.
     """
+    isjunction = getattr(os.path, "isjunction", None)
     found: list[Path] = []
     stack = [cwd_resolved]
-    first = True
     while stack:
         current = stack.pop()
         try:
-            entries = list(os.scandir(current))
+            with os.scandir(current) as it:
+                entries = list(it)
         except OSError as e:
-            if first:
+            if current == cwd_resolved or _reachable_by_name(current):
                 raise
-            log.debug("restricted write check could not list %s: %s", current, e)
+            log.debug("restricted write check skipped unreachable %s: %s", current, e)
             continue
-        first = False
         for entry in entries:
-            try:
-                if str(entry.name).rstrip(" .").casefold() in RESTRICTED_UNWRITABLE_DIRS:
-                    path = Path(entry.path)
-                    if _is_dir_link(entry):
-                        found.append(path.resolve())
-                    elif entry.is_file(follow_symlinks=False):
-                        gitdir = _gitdir_pointer(path.parent, path, "gitdir:")
-                        if gitdir is not None:
-                            found.append(gitdir)
-                            common = _gitdir_pointer(gitdir, gitdir / "commondir", "")
-                            if common is not None:
-                                found.append(common)
-                elif entry.is_dir(follow_symlinks=False) and not _is_dir_link(entry):
-                    stack.append(Path(entry.path))
-            except OSError as e:
-                log.debug("restricted write check could not inspect %s: %s",
-                          entry.path, e)
+            if entry.name.rstrip(" .").casefold() in RESTRICTED_UNWRITABLE_DIRS:
+                found.extend(_protected_entry_targets(Path(entry.path)))
+            elif (entry.is_dir(follow_symlinks=False) and not entry.is_symlink()
+                    and not (isjunction and isjunction(entry.path))):
+                stack.append(Path(entry.path))
     return tuple(found)
 
 
@@ -252,7 +296,7 @@ def inside_unwritable_dir(cwd_resolved: Path, resolved: Path,
     True when a component below the project root names one, or when *resolved*
     lies inside a folder such an entry anywhere in the project redirects to
     (:func:`unwritable_redirects`; pass *redirects* to reuse one walk across
-    many checks). An ``OSError`` while checking counts as inside. False for a
+    many checks). An ``OSError`` from the walk counts as inside. False for a
     path outside the project.
     """
     try:
@@ -282,17 +326,17 @@ def has_other_hard_link(resolved: Path) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
 
 
-def restricted_unwritable(cwd: Path, path: str) -> bool:
-    """Whether a restricted session must refuse to write the model-named *path*.
+def restricted_write_refusal(cwd: Path, path: str) -> Optional[str]:
+    """Why a restricted session must refuse to write the model-named *path*,
+    or None when it may.
 
-    Checked on *path*'s own components relative to *cwd* (so
-    ``a/../.localcoder/x`` and a backslash-separated spelling are caught before
-    anything collapses them), then on the location :func:`_confine` resolves it
-    to, with :func:`inside_unwritable_dir` (so a file link into such a
-    directory, or a write into the folder a linked ``.localcoder`` points at, is
-    caught). Also True for an existing file with another hard link
-    (:func:`has_other_hard_link`). A path ``_confine`` refuses is not reported
-    here: the write tool refuses it on its own.
+    Refused: a path whose own components relative to *cwd* name a
+    ``RESTRICTED_UNWRITABLE_DIRS`` entry (checked before anything collapses
+    ``a/../.localcoder/x`` or a backslash-separated spelling); a location
+    :func:`_confine` resolves inside one, or inside a folder such an entry
+    anywhere in the project redirects to; an existing file with another hard
+    link; and any path when the project walk itself fails. A path ``_confine``
+    refuses is not reported here: the write tool refuses it on its own.
     """
     raw = Path(str(path).replace("\\", "/"))
     lexical: tuple = raw.parts
@@ -305,13 +349,27 @@ def restricted_unwritable(cwd: Path, path: str) -> bool:
             except ValueError:
                 continue
     if unwritable_component(lexical) is not None:
-        return True
+        return RESTRICTED_UNWRITABLE_MESSAGE
     try:
         resolved = _confine(cwd, str(path))
     except PermissionError:
-        return False
-    return (inside_unwritable_dir(cwd.resolve(), resolved)
-            or has_other_hard_link(resolved))
+        return None
+    cwd_resolved = cwd.resolve()
+    try:
+        redirects = unwritable_redirects(cwd_resolved)
+    except OSError as e:
+        return ("the project could not be checked for .localcoder or .git links "
+                f"({e}), and a restricted session cannot write until it can")
+    if (inside_unwritable_dir(cwd_resolved, resolved, redirects)
+            or has_other_hard_link(resolved)):
+        return RESTRICTED_UNWRITABLE_MESSAGE
+    return None
+
+
+def restricted_unwritable(cwd: Path, path: str) -> bool:
+    """Whether a restricted session must refuse to write the model-named *path*
+    (:func:`restricted_write_refusal` returns a reason)."""
+    return restricted_write_refusal(cwd, path) is not None
 
 
 @dataclass
