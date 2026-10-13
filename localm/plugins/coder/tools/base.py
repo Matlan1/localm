@@ -5,6 +5,9 @@ subprocess-execution primitive (``run_subprocess``, CODER-2)."""
 
 from __future__ import annotations
 
+import logging
+import os
+import stat
 import subprocess
 import sys
 import time
@@ -13,6 +16,8 @@ from pathlib import Path
 from typing import Callable, Optional, Union
 
 from localm import pathsafe
+
+log = logging.getLogger(__name__)
 
 @dataclass
 class ToolResult:
@@ -140,11 +145,15 @@ def _confine(cwd: Path, path: str) -> Path:
 
 # Directory names a restricted (scoped-key) coder session may not create, or
 # create or change anything inside, at any depth of the project.
-RESTRICTED_UNWRITABLE_DIRS: frozenset[str] = frozenset({".localcoder"})
+RESTRICTED_UNWRITABLE_DIRS: frozenset[str] = frozenset({".localcoder", ".git"})
 
 RESTRICTED_UNWRITABLE_MESSAGE = (
-    "a .localcoder directory holds this project's coder configuration, and a "
-    "restricted session cannot create or change anything inside it")
+    "a .localcoder or .git directory holds this project's coder or repository "
+    "configuration, and a restricted session cannot create or change anything "
+    "inside one, through a link to one, or through a hard link to any file")
+
+# Largest .git file / commondir file read when following a gitdir pointer.
+_GIT_POINTER_MAX_BYTES = 4096
 
 
 def unwritable_component(parts) -> Optional[str]:
@@ -158,15 +167,93 @@ def unwritable_component(parts) -> Optional[str]:
     return None
 
 
-def inside_unwritable_dir(cwd_resolved: Path, resolved: Path) -> bool:
+def _is_dir_link(entry: os.DirEntry) -> bool:
+    """Whether *entry* is a symlink or an NTFS junction."""
+    if entry.is_symlink():
+        return True
+    isjunction = getattr(os.path, "isjunction", None)
+    return bool(isjunction and isjunction(entry.path))
+
+
+def _gitdir_pointer(base: Path, pointer_file: Path, prefix: str) -> Optional[Path]:
+    """The folder *pointer_file* names, resolved against *base*, or None.
+
+    *prefix* is the text before the path on the first line (``"gitdir:"`` for
+    a ``.git`` file, ``""`` for a ``commondir`` file). None when the file is
+    missing, unreadable, larger than ``_GIT_POINTER_MAX_BYTES`` or not in that
+    form."""
+    try:
+        with open(pointer_file, "rb") as fh:
+            data = fh.read(_GIT_POINTER_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > _GIT_POINTER_MAX_BYTES:
+        return None
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if not lines or not lines[0].startswith(prefix):
+        return None
+    named = lines[0][len(prefix):].strip()
+    if not named:
+        return None
+    return (base / named).resolve()
+
+
+def unwritable_redirects(cwd_resolved: Path) -> tuple[Path, ...]:
+    """Every folder a ``RESTRICTED_UNWRITABLE_DIRS`` entry of the project at
+    *cwd_resolved* redirects to, at any depth.
+
+    Walks the project without following links and without entering a matching
+    entry. Collects what a matching entry that is a symlink or junction
+    resolves to, and for a ``.git`` file, the folder its ``gitdir:`` line names
+    plus the folder that folder's ``commondir`` file names. A directory that
+    cannot be listed is skipped and logged at debug level.
+
+    Raises ``OSError`` when the project root itself cannot be listed.
+    """
+    found: list[Path] = []
+    stack = [cwd_resolved]
+    first = True
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError as e:
+            if first:
+                raise
+            log.debug("restricted write check could not list %s: %s", current, e)
+            continue
+        first = False
+        for entry in entries:
+            try:
+                if str(entry.name).rstrip(" .").casefold() in RESTRICTED_UNWRITABLE_DIRS:
+                    path = Path(entry.path)
+                    if _is_dir_link(entry):
+                        found.append(path.resolve())
+                    elif entry.is_file(follow_symlinks=False):
+                        gitdir = _gitdir_pointer(path.parent, path, "gitdir:")
+                        if gitdir is not None:
+                            found.append(gitdir)
+                            common = _gitdir_pointer(gitdir, gitdir / "commondir", "")
+                            if common is not None:
+                                found.append(common)
+                elif entry.is_dir(follow_symlinks=False) and not _is_dir_link(entry):
+                    stack.append(Path(entry.path))
+            except OSError as e:
+                log.debug("restricted write check could not inspect %s: %s",
+                          entry.path, e)
+    return tuple(found)
+
+
+def inside_unwritable_dir(cwd_resolved: Path, resolved: Path,
+                          redirects: Optional[tuple[Path, ...]] = None) -> bool:
     """Whether the already-resolved *resolved* lies inside a
     ``RESTRICTED_UNWRITABLE_DIRS`` directory of the project at *cwd_resolved*.
 
     True when a component below the project root names one, or when *resolved*
-    lies inside what such a directory resolves to (one that is a link to a
-    differently named folder), checked at the project root and at every
-    directory on the way down to *resolved*. An ``OSError`` while checking
-    counts as inside. False for a path outside the project.
+    lies inside a folder such an entry anywhere in the project redirects to
+    (:func:`unwritable_redirects`; pass *redirects* to reuse one walk across
+    many checks). An ``OSError`` while checking counts as inside. False for a
+    path outside the project.
     """
     try:
         rel = resolved.relative_to(cwd_resolved).parts
@@ -174,18 +261,25 @@ def inside_unwritable_dir(cwd_resolved: Path, resolved: Path) -> bool:
         return False
     if unwritable_component(rel) is not None:
         return True
-    anchor = cwd_resolved
-    for depth in range(len(rel)):
-        if depth:
-            anchor = anchor / rel[depth - 1]
-        for name in RESTRICTED_UNWRITABLE_DIRS:
-            entry = anchor / name
-            try:
-                if entry.exists() and resolved.is_relative_to(entry.resolve()):
-                    return True
-            except OSError:
-                return True
-    return False
+    if redirects is None:
+        try:
+            redirects = unwritable_redirects(cwd_resolved)
+        except OSError:
+            return True
+    return any(resolved.is_relative_to(target) for target in redirects)
+
+
+def has_other_hard_link(resolved: Path) -> bool:
+    """Whether *resolved* is an existing file that has another name (a hard
+    link). False when it does not exist; an ``OSError`` while checking counts
+    as True."""
+    try:
+        st = os.stat(resolved, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
 
 
 def restricted_unwritable(cwd: Path, path: str) -> bool:
@@ -196,8 +290,9 @@ def restricted_unwritable(cwd: Path, path: str) -> bool:
     anything collapses them), then on the location :func:`_confine` resolves it
     to, with :func:`inside_unwritable_dir` (so a file link into such a
     directory, or a write into the folder a linked ``.localcoder`` points at, is
-    caught). A path ``_confine`` refuses is not reported here: the write tool
-    refuses it on its own.
+    caught). Also True for an existing file with another hard link
+    (:func:`has_other_hard_link`). A path ``_confine`` refuses is not reported
+    here: the write tool refuses it on its own.
     """
     raw = Path(str(path).replace("\\", "/"))
     lexical: tuple = raw.parts
@@ -215,7 +310,8 @@ def restricted_unwritable(cwd: Path, path: str) -> bool:
         resolved = _confine(cwd, str(path))
     except PermissionError:
         return False
-    return inside_unwritable_dir(cwd.resolve(), resolved)
+    return (inside_unwritable_dir(cwd.resolve(), resolved)
+            or has_other_hard_link(resolved))
 
 
 @dataclass

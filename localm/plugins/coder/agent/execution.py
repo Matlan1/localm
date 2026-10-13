@@ -406,7 +406,8 @@ class _ExecutionMixin:
         self._emit("tool_call", tool=call.name, args=call.args)
 
         # A restricted session cannot create or change anything inside a
-        # RESTRICTED_UNWRITABLE_DIRS directory. Checked ahead of the patch-mode
+        # RESTRICTED_UNWRITABLE_DIRS directory, a folder one redirects to, or a
+        # file with another hard link. Checked ahead of the patch-mode
         # intercept, so such a write is not captured as a diff either.
         if self.restricted and call.name in _RESTRICTED_PATH_WRITE_TOOLS:
             for value in _call_target_paths(call.name, call.args):
@@ -420,7 +421,7 @@ class _ExecutionMixin:
                         print_tool_error(call.name, result.output)
                     # No duration_s: never reached tool_def.fn.
                     self._emit("tool_result", tool=call.name, ok=False,
-                               summary="refused: inside .localcoder")
+                               summary="refused: protected .localcoder/.git target")
                     return result
 
         # Patch-mode: intercept write tools, accumulate diffs, do not touch disk.
