@@ -63,6 +63,7 @@ _INERT_AHEAD = (
     r"|<\|think\|>|<think\|>"
     r"|<unused\d{1,8}>?"
     r"|\[TOOL_CALLS\]"
+    r"|<\|start_header_id\|>(?:user|model|assistant|system|tool|ipython)?<\|end_header_id\|>"
 )
 
 _MARKER_RE = re.compile(
@@ -122,6 +123,11 @@ _SCRUB_RE = re.compile("|".join(
 _SCRUB_REPLACEMENTS = {f"s{i}": replacement
                        for i, (_rx, replacement) in enumerate(_SCRUB_SUBS)}
 
+# The same alternation with every turn-open marker matched bare, as one marker
+# pass matched it before a turn-open marker waited out the inert markers after
+# it. ScrubMap maps this one pass.
+_ONE_PASS_RE = re.compile(_SCRUB_RE.pattern.replace("(?!" + _INERT_AHEAD + ")", ""))
+
 
 _MAX_SCRUB_PASSES = 32
 
@@ -154,10 +160,12 @@ class ScrubMap:
     """Where each part of :func:`scrub_text`'s output came from, for a text
     that only grows.
 
-    Maps one marker pass. For a text that needs a second pass (a marker nested
-    inside another marker) the spans rebuild the first pass's output, which
-    differs from :func:`scrub_text`'s; LogprobAligner then refuses the reply
-    with LogprobAlignmentError instead of aligning against the wrong text.
+    Maps one marker pass in which a turn-open marker is matched bare. For a text
+    that needs another pass (a marker nested inside another marker, or a
+    turn-open marker followed by inert markers and then its role word) the
+    spans rebuild the first pass's output, which differs from
+    :func:`scrub_text`'s; LogprobAligner then refuses the reply with
+    LogprobAlignmentError instead of aligning against the wrong text.
 
     :meth:`spans` takes the text so far (each call's text must extend the
     previous call's) and returns ``(src_start, src_end, out_start, out_end,
@@ -180,7 +188,7 @@ class ScrubMap:
             return self._spans
         tail: list[tuple[int, int, int, int, Optional[str]]] = []
         src, out = self._src, self._out
-        for m in _SCRUB_RE.finditer(text, src):
+        for m in _ONE_PASS_RE.finditer(text, src):
             if m.start() > src:
                 tail.append((src, m.start(), out, out + m.start() - src, None))
                 out += m.start() - src

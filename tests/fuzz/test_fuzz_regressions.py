@@ -404,6 +404,12 @@ class TestScrubTextRoleWordLeak:
     def test_the_turn_open_still_takes_its_role_word_when_adjacent(self):
         assert textnorm.scrub_text("<start_of_turn>model") == ""
 
+    @pytest.mark.parametrize("opener,role", _TURN_OPEN_ROLES)
+    def test_an_empty_role_header_between_the_turn_open_and_its_role_is_removed_with_it(
+            self, opener, role):
+        for header in (f"{_HEADER_OPEN}{_HEADER_CLOSE}", f"{_HEADER_OPEN}user{_HEADER_CLOSE}"):
+            assert textnorm.scrub_text(f"{opener}{header}{role}") == ""
+
     def test_a_turn_open_followed_by_a_marker_but_no_role_is_still_removed(self):
         assert textnorm.scrub_text("<start_of_turn><|message|>hello") == "hello"
 
@@ -428,3 +434,14 @@ class TestScrubMapOnANestedMarker:
         aligner.received(textnorm.scrub_text(text))
         with pytest.raises(LogprobAlignmentError):
             aligner.take([(0, 2)])
+
+    @pytest.mark.parametrize("raw", ["<|turn><|message|>xy", "<|start|><|channel|>xy",
+                                     "<start_of_turn><|end|>xy"])
+    def test_the_aligner_still_aligns_a_turn_open_followed_by_an_inert_marker(self, raw):
+        from localm.inference.logprobs import LogprobAligner
+
+        aligner = LogprobAligner()
+        aligner.add([(raw.encode("utf-8"), -0.1, ())])
+        aligner.received(textnorm.scrub_text(raw))
+        assert textnorm.scrub_text(raw) == "xy"
+        assert len(aligner.take([(0, 2)])) == 1
