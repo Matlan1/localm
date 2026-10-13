@@ -319,3 +319,16 @@ test("a job that only reports its result (ComfyUI) still shows that image", asyn
   for (let i = 0; i < 8; i++) await tick();
   assert.equal($("img-result").querySelectorAll("img").length, 1);
 });
+
+test("the image detail view offers Upscale for the native backend only", async () => {
+  const labels = async (active) => {
+    const { win } = setup({ active });
+    await settle(win, "await refreshImageBackend();");
+    await tick(); await tick();
+    runScript(win, `showImageDetail({ name: "a.png", path: "a.png", meta: {} });`);
+    for (let i = 0; i < 4; i++) await tick();
+    return [...win.document.querySelectorAll("#modal button")].map((b) => b.textContent);
+  };
+  assert.ok((await labels("native")).includes("Upscale"));
+  assert.ok(!(await labels("comfy")).includes("Upscale"));
+});
