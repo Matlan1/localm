@@ -57,26 +57,19 @@ the main thread for every `pre code` block, and the language comes straight
 off a model-emitted fenced code block, so this was a real, reachable
 main-thread freeze from ordinary model output, not a theoretical one.
 
-`tests-js/vendor-marked.test.mjs` closes the last gap: marked used to be the one
-library with no guard at all. It is pinned differently from the others out of
-necessity - MEASURED, `window.marked.version` is undefined on this build, so
-there is no runtime version to assert and no banner-vs-runtime cross-check to
-make. It pins the banner plus a content hash instead (the same treatment
-auto-render.min.js, katex.min.css and jsQR.js get), asserts marked still parses
-real markdown, and asserts the option set helpers.js applies at load. One test
-asserts the version field is still ABSENT, so if upstream ever adds one the
-guard fails and gets upgraded to a real floor rather than quietly pinning bytes
-forever.
+`tests-js/vendor-marked.test.mjs` guards marked. `window.marked.version` is
+undefined on this build, so there is no runtime version to assert and no
+banner-vs-runtime cross-check: the guard pins the banner plus a content hash
+(the same treatment auto-render.min.js, katex.min.css and jsQR.js get), asserts
+marked still parses real markdown, and asserts the option set `app/helpers.js`
+applies at load. One test asserts the version field is still ABSENT, so if
+upstream ever adds one the guard fails and gets upgraded to a real floor.
 
-It also pins the pipeline's actual contract: marked does NOT sanitize. Its own
-`sanitize` option was removed upstream in v7 and it passes raw HTML through by
-design, which is precisely why DOMPurify has to run on its OUTPUT. Advisory
-status for 12.0.2 was established from affected-VERSION RANGES rather than by
-reading upstream code for a quoted function, against two independent sources
-each with a control query that returned a known-positive: OSV reports 0 vulns,
-and all 18 marked advisories in the GitHub advisory database were range-tested
-against 12.0.2 with none matching (every one is bounded above by 4.0.10 or
-lower, except GHSA-6v9c-7cg6-27q7 which is >= 18.0.0).
+It also pins the pipeline's actual contract: marked does NOT sanitize. It passes
+raw HTML through by design, which is why DOMPurify has to run on its OUTPUT.
+Advisory status for 18.1.1 was established from OSV (0 vulns; control queries
+18.0.1 and 4.0.0 return their known advisories) and the repository's advisory
+list (no range contains 18.1.1; GHSA-6v9c-7cg6-27q7 covers 18.0.0 to 18.0.1).
 
 ### Two things the KaTeX guard had to do differently
 
@@ -166,14 +159,15 @@ npm test    # then update VENDORED_VERSION + PINNED_HASH in tests-js/vendor-high
 ```
 npm pack marked@<version>             # npm verifies the registry integrity hash
 tar -xzf marked-<version>.tgz
-cp package/marked.min.js localm/plugins/gui/static/vendor/marked.min.js
+cp package/lib/marked.umd.js localm/plugins/gui/static/vendor/marked.min.js
 npm test    # then update VENDORED_VERSION + PINNED_HASH in tests-js/vendor-marked.test.mjs
 ```
 
-`marked.min.js` ships from the PACKAGE ROOT of `marked`, NOT from `lib/`.
-`lib/marked.umd.js` is a different artefact of the same version and is not what
-`index.html` loads. Re-check the advisory ranges when you bump: the guard pins
-bytes, which cannot tell you a newer version is safe.
+marked 16 removed `package/marked.min.js`; the vendored `marked.min.js` is the
+release's `lib/marked.umd.js` (minified UMD build, a classic-script global
+`window.marked`) stored under the name `index.html` loads. Re-check the advisory
+ranges when you bump: the guard pins bytes, which cannot tell you a newer
+version is safe.
 
 `highlight.min.js` ships from the PACKAGE ROOT of `@highlightjs/cdn-assets`, not
 from `es/`, which is a separate ES-module build of the same version and is NOT
