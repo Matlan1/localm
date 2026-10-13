@@ -11,8 +11,8 @@ from localm import settings_schema as ss
 from localm.config import DEFAULT_CONFIG
 from localm.inference.backends.gguf import GgufBackend
 from localm.inference.mmap_setting import (
-    MMAP_FROM_DISK_NOTE, USE_MMAP_MODES, coerce_use_mmap, describe_mmap,
-    resolve_use_mmap)
+    MMAP_CPU_FROM_DISK_NOTE, MMAP_FROM_DISK_NOTE, USE_MMAP_MODES, coerce_use_mmap,
+    describe_mmap, resolve_use_mmap, unmapped_exceeds_ram_note)
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +172,29 @@ def test_describe_mmap(setting, effective, forced, expected):
     assert describe_mmap(setting, effective, forced) == expected
 
 
+@pytest.mark.parametrize("setting,effective,forced,expected", [
+    ("auto", True, True, "mmap on: " + MMAP_CPU_FROM_DISK_NOTE),
+    ("auto", True, False, None),
+    ("auto", False, True, None),
+    ("on", True, True, "mmap on"),
+])
+def test_describe_mmap_for_cpu_layers(setting, effective, forced, expected):
+    assert describe_mmap(setting, effective, forced, cpu_layers=True) == expected
+
+
+def test_the_cpu_layer_hint_says_every_token_is_slower():
+    assert "may not fit in available RAM" in MMAP_CPU_FROM_DISK_NOTE
+    assert "disk-backed memory" in MMAP_CPU_FROM_DISK_NOTE
+    assert "every token slower" in MMAP_CPU_FROM_DISK_NOTE
+    assert "first tokens" not in MMAP_CPU_FROM_DISK_NOTE
+
+
+def test_the_unmapped_warning_names_both_sizes_and_the_way_out():
+    note = unmapped_exceeds_ram_note(12 * 1024 ** 3, 3 * 1024 ** 3)
+    assert "12.0 GB" in note and "3.0 GB" in note
+    assert "use_mmap to auto" in note
+
+
 def test_the_hint_names_what_happened_and_what_it_costs():
     assert "may not fit in available RAM" in MMAP_FROM_DISK_NOTE
     assert "disk-backed memory" in MMAP_FROM_DISK_NOTE
@@ -239,12 +262,45 @@ def _engine(backend):
 def test_engine_mmap_state_carries_setting_effect_and_hint():
     state = _engine(_backend("auto", True, True)).mmap_state
     assert state == {"use_mmap": "auto", "mmap": True, "mmap_from_disk": True,
+                     "mmap_cpu_from_disk": False,
                      "mmap_note": "mmap on: " + MMAP_FROM_DISK_NOTE}
+
+
+def test_engine_mmap_state_names_cpu_layers_reading_from_disk():
+    b = _backend("auto", True, True)
+    b.mmap_cpu_from_disk = True
+    state = _engine(b).mmap_state
+    assert state["mmap_cpu_from_disk"] is True
+    assert state["mmap_note"] == "mmap on: " + MMAP_CPU_FROM_DISK_NOTE
+
+
+def test_engine_mmap_state_carries_the_unmapped_ram_warning():
+    b = _backend("off", False, False)
+    b.mmap_ram_short_note = "use_mmap is off and this load reads 12.0 GB ..."
+    state = _engine(b).mmap_state
+    assert state["mmap_ram_short"] is True
+    assert state["mmap_note"] == b.mmap_ram_short_note
+
+
+def test_engine_mmap_state_ignores_a_stale_warning_once_the_setting_is_not_off():
+    b = _backend("auto", True, False)
+    b.mmap_ram_short_note = "stale"
+    state = _engine(b).mmap_state
+    assert "mmap_ram_short" not in state and "mmap_note" not in state
+
+
+def test_engine_mmap_state_never_names_cpu_layers_without_a_forced_map():
+    b = _backend("auto", True, False)
+    b.mmap_cpu_from_disk = True
+    state = _engine(b).mmap_state
+    assert state["mmap_cpu_from_disk"] is False
+    assert "mmap_note" not in state
 
 
 def test_engine_mmap_state_for_a_default_mapped_load_has_no_note():
     state = _engine(_backend("auto", True, False)).mmap_state
-    assert state == {"use_mmap": "auto", "mmap": True, "mmap_from_disk": False}
+    assert state == {"use_mmap": "auto", "mmap": True, "mmap_from_disk": False,
+                     "mmap_cpu_from_disk": False}
 
 
 def test_engine_mmap_state_is_none_until_a_load_reports_it():

@@ -694,7 +694,7 @@ export const I18N_EN = {
   "coder.setup.seedLabel": "Seed (reproducible runs)",
   "coder.setup.seedPlaceholder": "random",
   "coder.setup.seedTitle":
-    "Pins the sampler's random choices. A reply can still depend on what the model answered before, so the same seed, model, prompt and settings do not always give the same output. Leave blank for a fresh random seed each run.",
+    "Pins the sampler's random choices. A reply can still depend on what the model answered before or on n-gram speculative drafting, so the same seed, model, prompt and settings do not always give the same output. Leave blank for a fresh random seed each run.",
   "coder.setup.startBtn": "Start session",
   "coder.setup.systemLabel": "Custom instructions (optional - conventions, style, constraints)",
   "coder.setup.systemPlaceholder": "e.g. Always run pytest before finishing. Prefer guard clauses.",
@@ -1356,6 +1356,7 @@ export const I18N_EN = {
   "models.switch.confirmLabel": "Switch anyway",
   "models.switch.confirmTitle": "Confirm model switch",
   "models.switch.mmapFromDisk": "running from disk-backed memory, first tokens slower",
+  "models.switch.mmapCpuFromDisk": "CPU layers read from disk-backed memory, every token slower",
   "models.tab.all": "All",
   "models.tab.diffusionUnet": "Diffusion",
   "models.tab.embedding": "Embedding",

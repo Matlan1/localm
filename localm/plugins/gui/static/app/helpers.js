@@ -223,7 +223,7 @@ export function toast(msg, isError = false) {
   el._t = setTimeout(() => (el.className = ""), 3500);
 }
 
-marked.setOptions({ breaks: true, mangle: false, headerIds: false });
+marked.setOptions({ breaks: true });
 
 /** Split leading <think>…</think> reasoning from the visible reply.
  *  Handles a still-open block during streaming. */
