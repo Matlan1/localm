@@ -382,6 +382,7 @@ class TestPullComfySourceFromASearch:
             "pull", "--type", "diffusion-unet", "--comfy-dest-dir",
             str(workdir / "models" / "unet"), "--no-register", "--",
             f"Comfy-Org/Wan_2.1_ComfyUI_repackaged:{WAN_PATH}"]
+        assert "--sha256" not in captured["args"]
         assert r.status_code == 200, r.text
 
     def test_without_the_slot_an_unknown_file_is_still_400(
@@ -444,6 +445,8 @@ class TestPullComfySourceFromASearch:
         assert captured["args"][-1] == (
             "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors")
         assert captured["args"][4] == str(workdir / "models" / "checkpoints")
+        assert captured["args"][-4:-2] == [
+            "--sha256", "f07cad74c4adce52ca14ca1bdf74cf3c14cbafb0823b95eca4459467fa369f40"]
         assert r.status_code == 200, r.text
 
 
@@ -462,8 +465,9 @@ class TestPullComfySourceRoute:
                        json={"filename": "flux1-dev-Q8_0.gguf"})
         assert r.status_code == 400
 
-    def test_curated_filename_with_workdir_starts_a_job(self, scoped_app, tmp_path):
+    def test_curated_filename_with_workdir_starts_a_job(self, scoped_app, tmp_path, monkeypatch):
         import localm.config as _cfg
+        captured = _capture_start_cli(monkeypatch)
         cfg = _cfg.load_config()
         cfg["comfy_workdir"] = str(tmp_path / "external-comfy")
         _cfg.save_config(cfg)
@@ -472,9 +476,10 @@ class TestPullComfySourceRoute:
                        json={"filename": "ae.safetensors"})
         assert r.status_code == 200
         assert "job_id" in r.json()
+        assert captured["args"][0] == "pull"
 
     def test_curated_filename_with_plugin_only_workdir_and_plugin_hint_starts_a_job(
-            self, scoped_app, tmp_path):
+            self, scoped_app, tmp_path, monkeypatch):
         """End to end through the real route and request model: a workdir set
         ONLY via the per-plugin comfy.workdir field (no global comfy_workdir at
         all, the shape the Settings UI produces) resolves correctly when the
@@ -482,6 +487,7 @@ class TestPullComfySourceRoute:
         sends (helpers.js's checkModelsBeforeGenerate ->
         _offerModelDownload)."""
         import localm.config as _cfg
+        captured = _capture_start_cli(monkeypatch)
         cfg = _cfg.load_config()
         cfg["plugins"] = {"image": {"comfy": {"workdir": str(tmp_path / "per-plugin-comfy")}}}
         _cfg.save_config(cfg)
@@ -490,6 +496,7 @@ class TestPullComfySourceRoute:
                        json={"filename": "ae.safetensors", "plugin": "image"})
         assert r.status_code == 200, r.text
         assert "job_id" in r.json()
+        assert str(tmp_path / "per-plugin-comfy" / "models" / "vae") in captured["args"]
 
     def test_curated_filename_with_plugin_only_workdir_and_no_plugin_hint_is_400(
             self, scoped_app, tmp_path):
@@ -506,12 +513,14 @@ class TestPullComfySourceRoute:
                        json={"filename": "ae.safetensors"})
         assert r.status_code == 400
 
-    def test_unrecognized_plugin_value_falls_back_gracefully(self, scoped_app, tmp_path):
+    def test_unrecognized_plugin_value_falls_back_gracefully(self, scoped_app, tmp_path,
+                                                             monkeypatch):
         """req.plugin is a SELECTOR into trusted server config, validated
         against MEDIA_PLUGINS (web.py's own contract comment) - an
         unrecognized value must not error, just fall back to no plugin
         context, same as omitting it entirely."""
         import localm.config as _cfg
+        captured = _capture_start_cli(monkeypatch)
         cfg = _cfg.load_config()
         cfg["comfy_workdir"] = str(tmp_path / "external-comfy")
         _cfg.save_config(cfg)
@@ -519,6 +528,7 @@ class TestPullComfySourceRoute:
             r = c.post("/api/models/pull-comfy-source",
                        json={"filename": "ae.safetensors", "plugin": "not-a-real-plugin"})
         assert r.status_code == 200, r.text
+        assert str(tmp_path / "external-comfy" / "models" / "vae") in captured["args"]
 
 
 class TestComfyRoutesAreScoped:
