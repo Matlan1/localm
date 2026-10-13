@@ -329,39 +329,47 @@ def _write_sidecar(out_path: Path, record: dict) -> str:
     return ""
 
 
-def _event_relay(say, on_preview=None):
+class _EventRelay:
     """The worker-event handler for one job: status lines to *say*, preview
-    frames to *on_preview*. Its ``flush`` shows any held warning lines and must
-    be called when the job ends."""
-    state: dict = {"phase": None}
-    warnings = RecoveredWarnings(say)
+    frames to *on_preview*. ``flush`` shows any held warning lines and must be
+    called when the job ends."""
 
-    def on_event(event) -> None:
+    def __init__(self, say, on_preview=None):
+        self._say = say
+        self._on_preview = on_preview
+        self._phase = None
+        self._warnings = RecoveredWarnings(say)
+
+    def flush(self) -> None:
+        self._warnings.flush()
+
+    def __call__(self, event) -> None:
         kind = event[0]
         if kind == "log":
-            warnings.line(event[2])
+            self._warnings.line(event[2])
             return
         if kind == "preview":
-            if on_preview is not None:
-                on_preview(event[1])
+            if self._on_preview is not None:
+                self._on_preview(event[1])
             return
         info = event[1]
         phase, step, steps = info.get("phase"), info.get("step", 0), info.get("steps", 0)
         if phase == "sampling":
-            warnings.sampling()
+            self._warnings.sampling()
             secs = info.get("secs") or 0.0
             rate = f" ({secs:.2f} s/step)" if secs else ""
-            say(f"Step {step}/{steps}{rate}")
-        elif phase != state["phase"] or (steps and step == steps):
+            self._say(f"Step {step}/{steps}{rate}")
+        elif phase != self._phase or (steps and step == steps):
             label = "Decoding" if phase == "decoding" else "Loading weights"
             if steps and step == steps:
-                say(f"{label}: done")
-            elif phase != state["phase"]:
-                say(f"{label}...")
-        state["phase"] = phase
+                self._say(f"{label}: done")
+            elif phase != self._phase:
+                self._say(f"{label}...")
+        self._phase = phase
 
-    on_event.flush = warnings.flush
-    return on_event
+
+def _event_relay(say, on_preview=None) -> _EventRelay:
+    return _EventRelay(say, on_preview)
 
 
 def refusal(*, model_overrides=None, lora_name=None,

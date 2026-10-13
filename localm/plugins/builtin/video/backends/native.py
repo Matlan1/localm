@@ -404,35 +404,43 @@ def _load_init_image(path: Path, width: int, height: int) -> dict:
         return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
 
 
-def _event_relay(say, on_preview=None):
+class _EventRelay:
     """The worker-event handler for one job: status lines to *say*, preview
-    frames to *on_preview*. Its ``flush`` shows any held warning lines and must
-    be called when the job ends."""
-    state: dict = {"phase": None}
-    warnings = RecoveredWarnings(say)
+    frames to *on_preview*. ``flush`` shows any held warning lines and must be
+    called when the job ends."""
 
-    def on_event(event) -> None:
+    def __init__(self, say, on_preview=None):
+        self._say = say
+        self._on_preview = on_preview
+        self._phase = None
+        self._warnings = RecoveredWarnings(say)
+
+    def flush(self) -> None:
+        self._warnings.flush()
+
+    def __call__(self, event) -> None:
         kind = event[0]
         if kind == "log":
-            warnings.line(event[2])
+            self._warnings.line(event[2])
             return
         if kind == "preview":
-            if on_preview is not None:
-                on_preview(event[1])
+            if self._on_preview is not None:
+                self._on_preview(event[1])
             return
         info = event[1]
         phase, step, steps = info.get("phase"), info.get("step", 0), info.get("steps", 0)
         if phase == "sampling":
-            warnings.sampling()
+            self._warnings.sampling()
             secs = info.get("secs") or 0.0
             rate = f" ({secs:.1f} s/step)" if secs else ""
-            say(f"Step {step}/{steps}{rate}")
-        elif phase != state["phase"]:
-            say("Decoding frames..." if phase == "decoding" else "Loading weights...")
-        state["phase"] = phase
+            self._say(f"Step {step}/{steps}{rate}")
+        elif phase != self._phase:
+            self._say("Decoding frames..." if phase == "decoding" else "Loading weights...")
+        self._phase = phase
 
-    on_event.flush = warnings.flush
-    return on_event
+
+def _event_relay(say, on_preview=None) -> _EventRelay:
+    return _EventRelay(say, on_preview)
 
 
 def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:

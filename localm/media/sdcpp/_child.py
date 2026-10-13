@@ -37,7 +37,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Any, Optional, TextIO
 
 _FAULT_ENV = "LOCALM_SDCPP_FAULT_FOR_TEST"
 
@@ -58,7 +58,7 @@ class _State:
     sample_steps = 0
     decoding = False
     redact: tuple = ()
-    preview_cb = None
+    preview_cb: Any = None
     preview_failed = False
     paths: tuple = ()
     model_desc = ""

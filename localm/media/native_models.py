@@ -253,8 +253,8 @@ def make_router(media: str, prefix: str, plugin_backend) -> APIRouter:
                     if blk.get(key) is not None:
                         preview["defaults"][key] = blk[key]
             out = pairing.native_options(
-                media, cands, family=preview and preview["family"],
-                variant=preview and preview["variant"])
+                media, cands, family=preview["family"] if preview else None,
+                variant=preview["variant"] if preview else None)
             out["current"] = {k: display_name(v) if v else "" for k, v in configured.items()}
             out["preview"] = preview
             return out
