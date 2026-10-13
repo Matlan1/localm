@@ -779,7 +779,13 @@ def _hf_comfy_pins() -> list[tuple[str, str, str, str, str]]:
     return out
 
 
-_HF_PIN_PROVIDERS = (_hf_music_pins, _hf_comfy_pins)
+def _hf_whisper_pins() -> list[tuple[str, str, str, str, str]]:
+    table = _py_literal("localm/voice.py", "_STT_PINS")
+    return [(f"whisper {repo.rsplit('-', 1)[-1]}", repo, "model.bin", commit, sha)
+            for repo, (commit, sha) in table.items()]
+
+
+_HF_PIN_PROVIDERS = (_hf_music_pins, _hf_comfy_pins, _hf_whisper_pins)
 
 
 def hf_file_pins() -> list[tuple[str, str, str, str, str]]:

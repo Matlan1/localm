@@ -2061,6 +2061,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   of the eight models offered when a ComfyUI workflow is missing a file now fails and deletes
   the file when its bytes are not the expected ones. The weekly pin report lists these digests
   and flags one the hub no longer serves.
+- **The Whisper speech models are fetched at a fixed version and checked.** The tiny, base,
+  small and medium models are downloaded from a pinned commit of their repository, and the
+  downloaded `model.bin` is deleted and refused when its sha256 is not the expected one. A
+  model already downloaded keeps loading offline as before.
 
 ## [0.2.0] - 2026-09-04
 
