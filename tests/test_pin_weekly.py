@@ -1411,7 +1411,7 @@ def test_every_advancer_script_that_exists_follows_the_contract_cli():
 
 
 _BANNED_IN_TRACKED_TEXT = tuple("".join(parts) for parts in (
-    ("dev-", "notes/"), ("issues/", "issues.txt"), ("q", "a/"), ("AGENTS", ".md"), ("CLAUDE", ".md"),
+    ("dev-", "notes/"), ("issue", "s/issues.txt"), ("q", "a/"), ("AGENTS", ".md"), ("CLAUDE", ".md"),
     ("RELEASE", ".md")))
 
 
