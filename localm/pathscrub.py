@@ -89,6 +89,10 @@ def scrub_user_paths(text: str) -> str:
     return re.sub(_USER_ROOT_PATTERN, r"\1<redacted>", text, flags=flags)
 
 
+# The placeholder scrub_paths writes in place of the localm data dir.
+DATA_DIR_LABEL = "<data>"
+
+
 def _machine_prefixes() -> list[tuple[str, str]]:
     """(prefix, replacement) for every directory that names THIS machine's
     layout, longest first.
@@ -128,7 +132,7 @@ def _machine_prefixes() -> list[tuple[str, str]]:
 
     try:
         from localm.config import home_dir
-        add(home_dir(), "<data>")
+        add(home_dir(), DATA_DIR_LABEL)
     except Exception:
         pass
     try:
@@ -162,6 +166,19 @@ def path_scrubber() -> Callable[[str], str]:
         return scrub_user_paths(text)
 
     return scrub
+
+
+def map_strings(value, fn: Callable[[str], str]):
+    """*value* with *fn* applied to every string inside it, through nested
+    dicts, lists and tuples (tuples come back as lists); dict keys and other
+    values are returned unchanged."""
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, dict):
+        return {k: map_strings(v, fn) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [map_strings(v, fn) for v in value]
+    return value
 
 
 def scrub_paths(text: str) -> str:

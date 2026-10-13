@@ -227,7 +227,7 @@ class TestMessagesWithMarkers:
         from localm.netpolicy import NetworkPolicyError
         media_mod = importlib.import_module("localm.inference.media")
 
-        def refuse(url):
+        def refuse(url, budget=None):
             raise NetworkPolicyError("private addresses are blocked")
         monkeypatch.setattr(media_mod, "decode_image_url", refuse)
         part = {"type": "image_url", "image_url": {"url": "http://10.0.0.1/a.png"}}

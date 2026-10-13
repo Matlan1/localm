@@ -34,10 +34,22 @@ def available() -> bool:
     return endpoint()[0] is not None
 
 
+def _refuse_when_network_off() -> None:
+    """Raise LocalmError when ``net_mode`` is ``off``. An unreadable config
+    resolves to ``off`` (``netpolicy.network_mode``), so it refuses too."""
+    from localm.bugreport import LocalmError
+    from localm.netpolicy import network_mode
+    if network_mode() == "off":
+        raise LocalmError("network access is disabled (net_mode = off)",
+                          reason="the issues list needs the network; set "
+                                 "net_mode to ask or allow to see it")
+
+
 def list_issues(state: str = "all", *, per_page: int = 30, opener=None) -> list:
     """Return a list of trimmed issue dicts (``{number, title, state, created_at,
     closed_at, html_url, labels}``), newest-updated first. *state* is open/closed/all.
-    Raises LocalmError when not configured or the proxy fails."""
+    Raises LocalmError when not configured, when ``net_mode`` is ``off`` (no
+    request is made), or when the proxy fails."""
     from localm import _proxy
     from localm.bugreport import LocalmError
     base, token = endpoint()
@@ -46,6 +58,7 @@ def list_issues(state: str = "all", *, per_page: int = 30, opener=None) -> list:
                           reason="set bugreport_upload_url to enable it")
     st = state if state in ("open", "closed", "all") else "all"
     per = max(1, min(int(per_page or 30), 100))
+    _refuse_when_network_off()
     data = _proxy.request(base, f"/issues?state={st}&per_page={per}",
                           token=token, opener=opener)
     issues = data.get("issues") if isinstance(data, dict) else None
@@ -53,7 +66,8 @@ def list_issues(state: str = "all", *, per_page: int = 30, opener=None) -> list:
 
 
 def get_issue(number: int, *, opener=None) -> Optional[dict]:
-    """Return one issue's trimmed dict, or None if not found. Raises LocalmError on
+    """Return one issue's trimmed dict, or None if not found. Raises LocalmError
+    when not configured, when ``net_mode`` is ``off`` (no request is made), or on
     a transport failure."""
     from localm import _proxy
     from localm.bugreport import LocalmError
@@ -65,6 +79,7 @@ def get_issue(number: int, *, opener=None) -> Optional[dict]:
         n = int(number)
     except (TypeError, ValueError):
         raise LocalmError("bad issue number", reason=str(number)) from None
+    _refuse_when_network_off()
     data = _proxy.request(base, f"/issues?number={n}", token=token, opener=opener)
     issue = data.get("issue") if isinstance(data, dict) else None
     return issue if isinstance(issue, dict) else None

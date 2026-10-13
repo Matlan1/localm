@@ -111,7 +111,8 @@ def _mock_engine(*, images=False, audio=False, can_be_multimodal=False, loaded=T
 
 class TestWorkerKeepsTheErrorType:
     @pytest.mark.parametrize("name", ["AudioInputError", "AudioDecodeUnavailable",
-                                      "VisionInputError", "ImageDecodeUnavailable"])
+                                      "VisionInputError", "ImageDecodeUnavailable",
+                                      "ImageLimitError"])
     def test_typed_input_errors_cross_the_worker_boundary(self, name):
         from localm.inference.backends import base
         from localm.inference.backends.llamacpp import _runner
@@ -121,7 +122,7 @@ class TestWorkerKeepsTheErrorType:
 
     @pytest.mark.parametrize("name", ["AudioInputError", "AudioDecodeUnavailable",
                                       "VisionInputError", "ImageDecodeUnavailable",
-                                      "UnsupportedInputError"])
+                                      "ImageLimitError", "UnsupportedInputError"])
     def test_the_parent_raises_the_tagged_type_from_a_multiplexed_stream(self, name):
         from localm.inference.backends import base
         from localm.inference.backends.llamacpp import _runner

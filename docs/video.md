@@ -1,6 +1,6 @@
 # Video generation
 
-localm generates short video clips (MP4, h264) with one of two backends: its built-in native backend (stable-diffusion.cpp, see [Native backend](#native-backend-no-comfyui)) or the same local ComfyUI server it uses for images and music, described in the rest of this page. The committed workflow template runs the public **Wan 2.2 TI2V 5B** stack - text-to-video by default, image-to-video when you provide a start picture. Nothing leaves your machine: ComfyUI runs locally, and the one-time model download is the only network access.
+localm generates short video clips (MP4, h264) with one of two backends: its built-in native backend (stable-diffusion.cpp, see [Native backend](#native-backend-no-comfyui)) or the same local ComfyUI server it uses for images and music, described in the rest of this page. The committed workflow template runs the public **Wan 2.2 TI2V 5B** stack - text-to-video by default, image-to-video when you provide a start picture. With ComfyUI on this machine (the default `http://127.0.0.1:8188`), nothing leaves it and the one-time model download is the only network access. If you point `comfy_api_url` at another host, every request goes there over plain HTTP: the prompt, the negative prompt and any start picture.
 
 ## What you get
 

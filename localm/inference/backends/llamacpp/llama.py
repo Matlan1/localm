@@ -3034,12 +3034,14 @@ class LlamaCpp:
         cannot be decoded or fetched."""
         from localm.inference.backends.base import (
             AUDIO_UNSUPPORTED_MESSAGE, UnsupportedInputError, VisionInputError)
-        from localm.inference.media import decode_audio_clip, decode_image_url
+        from localm.inference.media import (
+            ImageBudget, decode_audio_clip, decode_image_url)
         from localm.netpolicy import NetworkPolicyError
 
         from .mtmd import AudioClip
         out: list[dict] = []
         media: list = []
+        budget = ImageBudget()
         for msg in messages:
             content = msg.get("content")
             if not isinstance(content, list):
@@ -3052,7 +3054,7 @@ class LlamaCpp:
                 if part.get("type") == "image_url":
                     url = (part.get("image_url") or {}).get("url", "")
                     try:
-                        pil = decode_image_url(url).convert("RGB")
+                        pil = decode_image_url(url, budget=budget).convert("RGB")
                     except UnsupportedInputError:
                         raise
                     except NetworkPolicyError as e:

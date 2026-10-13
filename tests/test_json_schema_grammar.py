@@ -351,15 +351,24 @@ def test_limits():
         deep = {"type": "array", "items": deep}
     with pytest.raises(SchemaGrammarError, match="levels deep"):
         schema_to_grammar(deep)
-    wide = {"type": "object", "properties": {f"p{i}": {"enum": [1]} for i in range(1500)}}
+    many = {"anyOf": [{"$ref": f"#/$defs/a{i}"} for i in range(1100)],
+            "$defs": {f"a{i}": {"enum": [i]} for i in range(1100)}}
     with pytest.raises(SchemaGrammarError, match="grammar rules"):
+        schema_to_grammar(many)
+    wide = {"type": "object", "properties": {f"p{i}": {"enum": [1]} for i in range(1500)}}
+    with pytest.raises(SchemaGrammarError, match="compiles to a grammar"):
         schema_to_grammar(wide)
     with pytest.raises(SchemaGrammarError, match="not valid JSON"):
         schema_to_grammar({"x": object()})
 
 
-def test_a_compiled_grammar_that_is_too_large_is_caught_by_the_server_check():
+def test_a_grammar_too_large_for_the_server_check_is_refused_while_compiling(monkeypatch):
+    from localm.inference import json_schema_grammar
+
     schema = {"type": "object", "properties": {f"property_number_{i}_with_a_long_name": {"type": "string", "format": "date-time"} for i in range(250)}}
+    with pytest.raises(SchemaGrammarError, match="compiles to a grammar"):
+        schema_to_grammar(schema)
+    monkeypatch.setattr(json_schema_grammar, "MAX_GRAMMAR_BYTES", 10 ** 9)
     with pytest.raises(InvalidGrammarError):
         check_grammar_structure(schema_to_grammar(schema))
 

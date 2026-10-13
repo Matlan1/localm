@@ -658,6 +658,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A share inbox that cannot be listed says so.** If the folder holding items shared from a
   phone cannot be read, the 15-minute clean-up now logs that it could not run instead of
   leaving expired items on disk unreported.
+- **Model control markers hidden inside other markers no longer reach the reply.** A model
+  that wrote a header or turn marker with another control marker inside it (for example a
+  Llama 3 role header split by `<|message|>`, or `<start_of_turn>` followed by a marker and
+  then `model`) left half of the header or a bare `model` / `assistant` at the start of the
+  reply. The whole group is now removed, however the reply is streamed. Asking for token
+  probabilities on a reply like that now fails with an alignment error instead of being
+  matched against the wrong text.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
@@ -2084,6 +2091,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
+  value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
+  password in it, or an API key under an ordinary name, reached the model as is (an online model
+  included) while the terminal said "secrets redacted". It now also removes URL passwords,
+  credential query parameters, bearer tokens and common API key and token formats from every value,
+  removes the home directory and the account name (as a path segment, and in the variables that name
+  the account or the machine) from every value, and its summary says how
+  many values it redacted instead of claiming every secret was.
+- **`net_mode = off` now stops the issues list.** Opening the issues list in Settings, or running
+  `localm issues`, contacted the bug-report proxy even with the network switched off. It now says the
+  network is off and sends nothing. The security notes now list everything that still reaches the
+  network under `off`: the two admin-only exemptions, the bug-report upload (sent only when you press
+  Send), requests to your configured ComfyUI, and the native runtime downloads.
+- **A scoped API key no longer receives this machine's absolute paths.** The memory page, the
+  image, music and video galleries (file paths and the saved generation settings, such as the source
+  image of an img2img), a gallery move, the uploads list, the managed ComfyUI status,
+  a saved bug report and the diagnostics report returned full paths, carrying the account name and
+  data directory, to any key that could reach them. A key other than the owner's now gets those paths
+  with the data directory, home and install folders replaced by placeholders such as `<data>`; "Use
+  as input" and "Reuse settings" accept that form, so img2img from the gallery keeps working.
 - **The cross-origin exemptions match exact paths only.** The inference routes that browsers may
   call cross-origin (chat completions, embeddings, rerank, speech, images and the surface and
   instance routes) were matched as path prefixes, so a route added under one of them would have
@@ -2104,6 +2131,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and remove credential values from JSON keys such as `"api_key"`, as the in-app report already
   did. The report's settings section now removes bearer tokens and API keys, and scrubs values
   stored as a list or object, not only plain text.
+- **One request can no longer tie up the server with an oversized input.** A scheduled job's cron
+  expression is limited to 512 characters (a longer one used to stop every scheduled job from firing
+  while reporting the scheduler healthy, and the Jobs page now says when the scheduler is stuck); a
+  JSON schema `format` or `response_format` whose grammar would exceed 64 KB is refused while it is
+  being built instead of after hundreds of megabytes of work; a lazy grammar takes at most 64
+  `grammar_triggers` and stops validating them after 10 seconds; and an attached image is refused,
+  before it is decoded, above 50 megapixels, past 64 images or 800 megapixels in one request
+  (earlier images in the conversation included), or when it is not a PNG, JPEG, WebP, GIF, BMP,
+  TIFF or AVIF. These refusals answer 413 with the reason, and the chat page keeps the conversation's
+  images.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move

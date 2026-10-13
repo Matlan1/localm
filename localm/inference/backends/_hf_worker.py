@@ -1942,6 +1942,8 @@ class HFWorker:
         model = self._model
 
         # --- Extract and decode media, rebuild messages for the chat template ---
+        from localm.inference.media import ImageBudget
+        image_budget = ImageBudget()
         images = []
         audios = []
         template_messages = []
@@ -1955,7 +1957,8 @@ class HFWorker:
                         parts.append({"type": "text", "text": part["text"]})
                     elif ptype == "image_url" and self._supports_image:
                         from localm.inference.media import decode_image_url
-                        img = decode_image_url(part["image_url"]["url"])
+                        img = decode_image_url(part["image_url"]["url"],
+                                               budget=image_budget)
                         images.append(img)
                         parts.append({"type": "image"})
                     elif ptype == "input_audio" and self._supports_audio:

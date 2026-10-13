@@ -25,6 +25,8 @@ import math
 import re
 from typing import Any
 
+from localm.inference.gbnf import MAX_GRAMMAR_BYTES
+
 MAX_SCHEMA_BYTES = 65536
 MAX_RULES = 2000
 MAX_REPEAT = 1000
@@ -145,6 +147,20 @@ class _Compiler:
         self.refs: dict[str, str] = {}
         self.used: set[str] = set()
         self.depth = 0
+        self.size = 0
+
+    def charge(self, chars: int) -> None:
+        """Count *chars* characters of grammar output, raising
+        :class:`SchemaGrammarError` once the running total passes
+        ``MAX_GRAMMAR_BYTES``. The total never exceeds the length of the rendered
+        grammar, so anything refused here would also fail
+        ``check_grammar_structure``."""
+        self.size += chars
+        if self.size > MAX_GRAMMAR_BYTES:
+            raise SchemaGrammarError(
+                f"the schema compiles to a grammar over the {MAX_GRAMMAR_BYTES}-byte "
+                "limit; simplify it (shorter property names, fewer nested levels "
+                "or fewer alternatives)")
 
     # ------------------------------------------------------------ rules
 
@@ -158,11 +174,13 @@ class _Compiler:
         if len(self.rules) >= MAX_RULES:
             raise SchemaGrammarError(
                 f"the schema needs more than {MAX_RULES} grammar rules; simplify it")
+        self.charge(len(base) + len(" ::= \n"))
         self.rules[base] = ""
         return base
 
     def add(self, hint: str, body: str) -> str:
         name = self.name_for(hint)
+        self.charge(len(body))
         self.rules[name] = body
         return name
 
@@ -314,7 +332,9 @@ class _Compiler:
         target = self._resolve(ref)
         name = self.name_for(str(ref).rsplit("/", 1)[-1] or "ref")
         self.refs[ref] = name
-        self.rules[name] = self.visit(target, name + "-body")
+        body = self.visit(target, name + "-body")
+        self.charge(len(body))
+        self.rules[name] = body
         return name
 
     # ------------------------------------------------------------ primitives

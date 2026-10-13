@@ -105,7 +105,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/bug-report",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    async def file_bug_report_ep(body: dict):
+    async def file_bug_report_ep(body: dict, request: Request):
         """Save a bug report from the GUI and return it for review. Never sends.
 
         Saves an editable markdown report (a safe environment snapshot plus the
@@ -114,7 +114,9 @@ def register(app: FastAPI, ctx) -> None:
         ``path``, ``report_markdown`` (the saved text) and ``report_sha256``
         (its digest). Sending is ``POST /api/bug-report/send`` with that
         filename and digest. A body carrying ``upload`` is refused with 400
-        before anything is saved.
+        before anything is saved. The ``path`` field is scrubbed
+        (``http_server.path_formatter``) for a caller other than the local
+        operator.
         Owner / config-write scoped and same-origin gated like the other management
         routes (a report can carry local diagnostics)."""
         from localm import bugreport
@@ -153,7 +155,8 @@ def register(app: FastAPI, ctx) -> None:
         if path is None:
             # A failed save must not report success.
             raise HTTPException(500, "Could not save the bug report to disk.")
-        result = {"saved": True, "filename": path.name, "path": str(path),
+        result = {"saved": True, "filename": path.name,
+                  "path": _hs.path_formatter(request)(path),
                   "maintainer": bugreport.MAINTAINER_EMAIL}
         # The saved text for review and download, with the digest the send route
         # checks. When it cannot be read back, neither is returned: the file is on
