@@ -176,6 +176,15 @@ def test_unreadable_headers_are_unknown_and_never_raise(tmp_path, data):
     assert families.inspect_file(tmp_path / "absent.gguf") is families.UNKNOWN
 
 
+def test_a_deeply_nested_safetensors_header_is_unreadable_not_a_crash(tmp_path):
+    raw = b"[" * 200_000 + b"]" * 200_000
+    f = tmp_path / "nested.safetensors"
+    f.write_bytes(struct.pack("<Q", len(raw)) + raw)
+    assert families._read_safetensors(f) is None
+    assert families.read_tensors(f) is None
+    assert families.inspect_file(f) is families.UNKNOWN
+
+
 def test_a_rewritten_file_is_classified_again(tmp_path):
     f = write_safetensors(tmp_path / "x.safetensors", CLIP_L)
     assert families.inspect_file(f).kind == "clip_l"
