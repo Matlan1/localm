@@ -154,15 +154,18 @@ def _resolve_spec_draft_tokens(cfg: dict, override: Optional[int]) -> Optional[i
 def resolve_spec_draft_model(cfg: dict, override: Optional[str] = None) -> Optional[str]:
     """The draft GGUF path for the draft source: *override* when given, else
     the ``spec_draft_model`` config key, as a registered model name or a path
-    (``get_operator_model_info``). None when unset; a name that resolves to
-    nothing is returned as given, so the load reports the draft model missing."""
+    (``get_operator_model_info``), else an existing path on disk as given,
+    made absolute. None when unset or when the name resolves to nothing, so the
+    load reports the draft model missing."""
     raw = override if override is not None else cfg.get("spec_draft_model")
     name = str(raw or "").strip()
     if not name:
         return None
     from localm.model_manager.registry import get_operator_model_info
     info = get_operator_model_info(name)
-    return str(info[0]) if info is not None else name
+    if info is not None:
+        return os.path.abspath(str(info[0]))
+    return os.path.abspath(name) if os.path.exists(name) else None
 
 
 def create_backend(
@@ -568,9 +571,16 @@ class Engine:
 
     def draft_model_on_gpu(self) -> Optional[bool]:
         """Where the loaded backend placed its draft model: True on the GPU,
-        False on the CPU, None when the backend has no draft placement."""
+        False on the CPU or when no draft model stayed loaded, None when the
+        backend has no draft placement."""
         placed = getattr(self._backend, "draft_model_on_gpu", None)
         return placed if isinstance(placed, bool) else None
+
+    def draft_model_status(self) -> str:
+        """The loaded backend's draft-model source status ("ok", "ok-cpu" or
+        why the draft model is off), "" without a draft source."""
+        status = getattr(self._backend, "draft_status", "")
+        return status if isinstance(status, str) else ""
 
     def draft_step_costs(self) -> Optional[dict]:
         """The step costs the loaded backend measured for its n-gram or

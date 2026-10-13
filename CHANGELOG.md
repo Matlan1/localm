@@ -532,6 +532,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **MTP leaves room for its draft cache at the automatic context ceiling.** With MTP or a draft model on
   the GPU, the automatic context ceiling now counts the draft context's cache, which grows with the
   context, so a reply that fills the window no longer moves the cache to system RAM and slows down.
+- **Draft-model drafting says when it is off, and loads more safely.** When the configured
+  draft model (`spec_draft_model`) cannot draft for the loaded model (not found, not a GGUF
+  file, a different vocabulary, recurrent layers, failed to load, or slower than decoding
+  without it), loading prints why. A draft model whose file already shows it cannot draft
+  is no longer loaded onto the GPU first, a compatible one is no longer left out of the VRAM
+  plan when its tokenizer flags are not written in the file, a draft model on the CPU keeps
+  its cache on the CPU when the context grows, and an unexpected error while setting it up
+  leaves the model loaded without drafting. A crash while loading the draft model now names
+  the draft model and `spec_source` instead of advising a smaller context, and replacing the
+  draft model file clears the retry back-off.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's
