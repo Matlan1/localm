@@ -282,6 +282,17 @@ def _load_init_image(path: Path, width: Optional[int], height: Optional[int]) ->
         return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
 
 
+BLANK_IMAGE = ("The model returned a pure white image: its numbers overflowed, usually because "
+               "the VAE does not suit the model. Choose a different VAE, or none for a "
+               "checkpoint that has its own.")
+
+
+def _is_blank_white(result: dict) -> bool:
+    """Whether the generated image *result* is one flat white (every byte 255)."""
+    data = result["data"]
+    return len(data) > 0 and data.count(b"\xff") == len(data)
+
+
 def _write_png(out_path: Path, result: dict,
                text_entries: Optional[list] = None) -> None:
     """Save *result* as a PNG at *out_path*. The file carries no metadata
@@ -608,6 +619,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     + f", seed {image_seed}...")
                 image_started = time.monotonic()
                 result = runner.generate_image(params, on_event=relay, cancel_check=cancel_check)
+                if _is_blank_white(result):
+                    raise SdWorkerError(BLANK_IMAGE)
                 path = _batch_path(Path(out_path), index)
                 record = {
                     "prompt": prompt, "negative_prompt": negative_prompt or None,
