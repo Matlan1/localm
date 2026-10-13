@@ -239,3 +239,12 @@ def test_cuda_driver_floor_in_docs_matches_setup_llama():
     for rel in ("README.md", "docs/gpu-setup.md", "docs/docker.md"):
         stated |= set(re.findall(r"CUDA (?:>= )?(13\.\d+)", _collapsed(rel)))
     assert stated == {f"{major}.{minor}"}
+
+
+def test_server_api_md_status_codes_match_the_protocol_map():
+    from localm.inference.protocol import STATUS_CODE_BY_TEXT
+    doc = _collapsed("docs/server-api.md")
+    section = _between(doc, "`status_code` (a stable id):",
+                       "A streaming request that is compacted")
+    documented = set(re.findall(r"`([a-z_]+)`", section))
+    assert documented == set(STATUS_CODE_BY_TEXT.values())

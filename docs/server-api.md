@@ -60,7 +60,10 @@ stable id): `waiting` (another request is running on this model), `compacting`
 (older messages are being summarised to fit the context window), `processing`,
 `encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
 `vision_cpu_retry`, `encoding_audio_gpu`, `encoding_audio_cpu`,
-`audio_cpu_retry` and `generating`. A streaming request that is compacted
+`audio_cpu_retry`, `loading_model`, `recalling_memory`,
+`downloading_embedder` (the embedding model memory recall needs, on its first
+download), `chat_hooks` (chat plugins' inlet hooks are running),
+`checking_grammar` and `generating`. A streaming request that is compacted
 carries `X-Localm-Context-Compacted: 1`; if the conversation still does not fit
 after compaction, the refusal arrives in the stream as the reply text with
 `finish_reason: "error"` instead of an HTTP 413.

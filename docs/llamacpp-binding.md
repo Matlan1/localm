@@ -552,7 +552,10 @@ relatively expensive), on how often drafts are accepted (lower when sampling
 with a temperature) and on how busy the machine is. Each loaded model keeps a
 `_DraftPacer` that measures the time per emitted token of speculative steps and
 of plain one-token steps as the reply runs (one step in 24 runs plain to keep
-that figure current, one in 3 until there are 6 plain figures). Over the last 16 steps of each kind, speculation costs the
+that figure current, one in 3 until there are 6 plain figures; each plain
+figure that shows speculation costing at most 85% of the plain cost per token
+doubles that interval, up to one step in 96, and any other plain figure sets it
+back to one in 24). Over the last 16 steps of each kind, speculation costs the
 median time of a speculative step divided by the mean number of tokens one
 made available, and plain decoding the median time of a plain step. When
 speculation is the slower of the two it is paused for 32 steps, doubling on

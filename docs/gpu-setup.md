@@ -23,12 +23,12 @@ See the table below for what each backend needs and when to pick it.
 | `amd-rocm` | AMD RX 6000/7000/9000 (gfx103X/110X/120X), Windows only | self-contained ROCm build matched to your card's family (bundles its runtime, no toolkit needed); auto-picked for RX 6000 (gfx103X), the best-tested family - request it explicitly (`--backend amd-rocm`) on RX 7000/9000 too, since auto-detect still defaults those to `hip`/`vulkan`; on Linux use `hip` or `--from` instead |
 | `hip` | AMD (any gfx) | upstream ROCm build; auto-picked when a system ROCm/HIP toolkit is detected present, else `vulkan` |
 | `sycl` | Intel GPU (Arc/Battlemage, or an 11th-gen+ Core integrated GPU) | self-contained on Windows (bundles the oneAPI runtime) and auto-picked there; needs a system oneAPI install on Linux, so it stays opt-in there |
-| `metal` | Apple Silicon | auto-picked on macOS; experimental and unverified - see the note below |
+| `metal` | Apple Silicon | auto-picked on macOS; experimental, Metal inference unverified - see the note below |
 | `cpu` | no GPU | always works |
 
 Binaries come from official [llama.cpp](https://github.com/ggml-org/llama.cpp)
 releases (AMD uses a self-contained build); the loader auto-detects the GPU at
-runtime. **macOS/Metal is experimental and unverified - treat it as best-effort.
+runtime. **macOS/Metal is experimental and its inference is unverified - treat it as best-effort.
 If inference fails or hangs on macOS, fall back to CPU:
 `localm setup-llama --backend cpu --force`.**
 

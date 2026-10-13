@@ -42,10 +42,11 @@ def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
         localm mcp --print-config
 
     \b
-    Exposed tools: chat, model management (list_models, search_models,
+    Exposed tools: chat, rerank, model management (list_models, search_models,
     list_model_files, pull_model, remove_model, setup_embeddings),
-    system_stats, run_doctor, plugin management (list/install/enable/
-    disable/uninstall_plugin), and, conditionally, embed, generate_image
+    system_stats, run_doctor, plugin management (list_plugins,
+    install_plugin, enable_plugin, disable_plugin, uninstall_plugin), and,
+    conditionally, embed, generate_image
     (unless --no-images), run_coder_task (coder plugin active, unless
     --no-coder), and memory_recall (memory plugin active, unless --no-memory).
     remove_model and uninstall_plugin are marked destructive.

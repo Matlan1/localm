@@ -3,11 +3,13 @@
 localm runs natively on Linux. The app code is platform-agnostic; only the
 native llama.cpp library and a few setup scripts differ from Windows.
 
-> **macOS is experimental and unverified.** `setup.sh` auto-detects Apple
-> Silicon and defaults to the Metal llama.cpp build (the interactive picker
-> also offers it as its own numbered choice); Intel Macs default to CPU-only,
-> since no Metal build targets them. Detection itself has not been tested on
-> real hardware - treat it as best-effort and expect rough edges.
+> **macOS is experimental.** `setup.sh` auto-detects Apple Silicon and
+> defaults to the Metal llama.cpp build (the interactive picker also offers it
+> as its own numbered choice); Intel Macs default to CPU-only, since no Metal
+> build targets them. A scheduled CI job runs the install, `localm doctor`, the
+> backend pick and a CPU model load on an Apple Silicon runner, but Metal
+> inference itself is unverified - treat it as best-effort and expect rough
+> edges.
 
 ## One-click install (the lazy path)
 
