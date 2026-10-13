@@ -37,7 +37,7 @@ from localm.textguard import (
 from . import _api as api
 from . import _diffusion
 from ._drafting import (
-    SPEC_DRAFT, SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource,
+    SPEC_DRAFT, SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource, counted_source,
     resolve_spec_source)
 from ._ngram import NgramSource, ngram_draft_cap, ngram_rs_seq
 from ._structs import (
@@ -1345,6 +1345,7 @@ class LlamaCpp:
         self._draft_pos   = 0       # the draft cache holds positions [0, _draft_pos)
         self._queued_tokens = []    # tokens at _draft_pos.. not yet in the draft cache
         self._mmproj_path = mmproj_path
+        self._model_path  = model_path
         self._mtmd        = None   # MtmdContext (vision) when an mmproj is loaded
         self._tokenizer   = None   # type: ignore[assignment]
         # Serialize native calls (prefill/decode/free) against unload. Without
@@ -1693,7 +1694,7 @@ class LlamaCpp:
                 self.mtp_status = f"error:{type(exc).__name__}"
         from localm.debuglog import logger as _mtp_log
         _mtp_log.info("MTP: active=%s status=%s", self.supports_mtp, self.mtp_status)
-        if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
+        if counted_source(self._spec_source_name):
             self._set_up_spec_source(spec_draft_model, n_threads, verbose, spec_draft_gpu)
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
@@ -2157,6 +2158,7 @@ class LlamaCpp:
         on_status: Optional[Callable[[str], None]] = None,
         sampling: Optional[dict] = None,
         logprobs: Optional[int] = None,
+        cache_prompt: bool = True,
     ) -> Iterator[int]:
         """
         Yield generated token ids one at a time. *sampling* holds extra
@@ -2171,16 +2173,29 @@ class LlamaCpp:
         a chat).  Otherwise the context is recreated from scratch - the
         behaviour of older builds without KV-management functions.
 
-        A model with parallel slots generates through ``_generate_slots``.
+        With ``cache_prompt=False`` nothing is kept: the KV cache is emptied
+        and the whole prompt is prefilled from position 0.
+
+        A model with parallel slots generates through ``_generate_slots``,
+        except with ``cache_prompt=False``: the reply then runs on sequence 0
+        inside the slot scheduler's exclusive section, so it starts once the
+        replies in flight have ended and shares no decode with another reply.
+        *on_status* receives the waiting status while it waits.
         """
         if self._slots is not None:
-            yield from self._generate_slots(
-                prompt_tokens, max_new_tokens, temperature, top_k, top_p,
-                repeat_penalty, grammar=grammar, grammar_lazy=grammar_lazy,
-                grammar_triggers=grammar_triggers, seed=seed, on_status=on_status,
-                sampling=sampling, logprobs=logprobs)
-            return
-        with self._inference_lock:
+            if cache_prompt:
+                yield from self._generate_slots(
+                    prompt_tokens, max_new_tokens, temperature, top_k, top_p,
+                    repeat_penalty, grammar=grammar, grammar_lazy=grammar_lazy,
+                    grammar_triggers=grammar_triggers, seed=seed, on_status=on_status,
+                    sampling=sampling, logprobs=logprobs)
+                return
+            from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
+            exclusive = self._slots.exclusive(
+                on_wait=(lambda: on_status(WAITING_FOR_MODEL_STATUS)) if on_status else None)
+        else:
+            exclusive = contextlib.nullcontext()
+        with exclusive, self._inference_lock:
             if not self._model_ptr:
                 raise RuntimeError("Model not loaded")
 
@@ -2240,12 +2255,12 @@ class LlamaCpp:
                     reuse = self._can_reuse_kv(needed)
                     with _ctx():
                         if reuse:
-                            self._prefill_with_reuse(prompt_tokens)
+                            self._prefill_with_reuse(prompt_tokens, keep_prefix=cache_prompt)
                         else:
                             self._prefill_fresh_context(prompt_tokens, needed)
 
                 logger.info("gguf generate: prefill complete in %.2fs (kv_reuse=%s)",
-                            time.monotonic() - _t0, reuse)
+                            time.monotonic() - _t0, reuse and cache_prompt)
 
                 # Build sampler
                 sampler = _build_sampler(
@@ -3007,13 +3022,15 @@ class LlamaCpp:
         grammar_lazy: bool = False,
         grammar_triggers: Optional[list[str]] = None,
         logprobs: Optional[int] = None,
+        cache_prompt: bool = True,
     ) -> Iterator[int]:
         """Yield generated token ids for a chat whose prompt includes image(s)
         or audio clip(s).
 
         The media+text prompt is evaluated into the KV cache by
         :meth:`_prefill_vision`, which keeps the part of the cache an earlier
-        image turn left that still matches; sampling then continues exactly like
+        image turn left that still matches (nothing with ``cache_prompt=False``:
+        the cache is emptied first); sampling then continues exactly like
         the text loop, with the same grammar handling. The text path's
         KV record (``_cached_tokens``) is left empty, so the next text turn
         prefills from scratch.
@@ -3108,6 +3125,8 @@ class LlamaCpp:
                             initial_budget = max_new_tokens if max_new_tokens > 0 else 512
                             needed = n_prompt + initial_budget + 64
                             from .mtmd import MtmdGpuEncodeFailed
+                            if not cache_prompt:
+                                self._vision_kv = None
                             try:
                                 pos, reused = self._prefill_vision(vprompt, needed, on_status)
                             except MtmdGpuEncodeFailed:
@@ -3772,19 +3791,19 @@ class LlamaCpp:
     def _spec_rollback_wanted(self) -> bool:
         """Whether contexts keep recurrent-state snapshots for rejected drafts:
         True while the configured source drafts (mtp, ngram or draft)."""
-        return self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT) or self._mtp_enabled
+        return counted_source(self._spec_source_name) or self._mtp_enabled
 
     def _spec_rollback_snapshots(self, cp) -> int:
         """Recurrent-state snapshots a context keeps so a step whose drafts are
         all rejected can still be rolled back, for the configured source."""
-        if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
+        if counted_source(self._spec_source_name):
             return ngram_rs_seq(getattr(cp, "n_rs_seq", 0), self._spec_draft_max)
         return self._mtp_rollback_snapshots(cp)
 
     def _apply_initial_spec_params(self, cp, spec_draft_tokens: Optional[int]) -> None:
         """Set the draft cap of an ngram or draft source for the loaded model,
         then the recurrent snapshots the first context keeps for the source."""
-        if self._spec_source_name in (SPEC_NGRAM, SPEC_DRAFT):
+        if counted_source(self._spec_source_name):
             from ._draftmodel import DRAFT_MODEL_DRAFT_TOKENS_DEFAULT
             from ._ngram import NGRAM_DRAFT_TOKENS_DEFAULT
             self._spec_draft_max = ngram_draft_cap(
@@ -3885,10 +3904,11 @@ class LlamaCpp:
         ``source.draft_max + 1`` tokens, with the sizes and repetitions
         ``measure_plan`` sets from a first one-token decode, and for a
         draft-model source the draft model's one-token and batched decodes;
-        each after a short shared prefix of tokens spread over the vocabulary.
-        The main cache and any draft cache are left empty. None when a decode
-        fails, a target figure is not above 0, or the vocabulary has fewer than
-        256 tokens."""
+        each after a short prefix of tokens spread over the vocabulary, the
+        draft model's within the smaller of the two vocabularies. The main
+        cache and any draft cache are left empty. None when a decode fails, a
+        target figure is not above 0, or a vocabulary probed has fewer than 256
+        tokens."""
         from localm.debuglog import logger
 
         from ._stepcosts import StepCosts, measure_plan
@@ -3902,8 +3922,8 @@ class LlamaCpp:
             if n_vocab < 256:
                 return None
 
-            def spread(n: int, offset: int) -> list[int]:
-                return [16 + (offset + 7919 * i) % (n_vocab - 32) for i in range(n)]
+            def spread(n: int, offset: int, size: int = n_vocab) -> list[int]:
+                return [16 + (offset + 7919 * i) % (size - 32) for i in range(n)]
 
             prefix = spread(32, 1)
             probe = self._time_decode(self._ctx_ptr, prefix, spread(1, 5), False, 1, 1)
@@ -3913,10 +3933,16 @@ class LlamaCpp:
                       for n in sizes}
             draft = draft_prefill = 0.0
             if draft_ctx is not None:
-                draft = self._time_decode(draft_ctx, prefix, spread(1, 5), False, 3, 5)
+                draft_vocab = api.llama_model_get_vocab(source._model)
+                size = min(n_vocab, int(api.llama_vocab_n_tokens(draft_vocab)))
+                if size < 256:
+                    return None
+                draft_prefix = spread(32, 1, size)
+                draft = self._time_decode(draft_ctx, draft_prefix, spread(1, 5, size),
+                                          False, 3, 5)
                 batch = 64
-                draft_prefill = self._time_decode(draft_ctx, prefix, spread(batch, 9),
-                                                  False, 1, 3) / batch
+                draft_prefill = self._time_decode(draft_ctx, draft_prefix,
+                                                  spread(batch, 9, size), False, 1, 3) / batch
                 source._reset_cache()
             if min([target, *verify.values()]) <= 0.0:
                 return None
@@ -3940,29 +3966,62 @@ class LlamaCpp:
         "ok-cpu".
 
         Any failure leaves the model working without drafting, with the
-        source's status naming why: "draft-model-missing",
-        "draft-unsupported-role" (a file whose metadata shows it is not a
-        causal chat model, ``draft_role_refusal``; nothing is loaded),
-        "draft-load-failed", "draft-vocab-mismatch", "draft-rewind-unsupported"
-        (a draft with recurrent layers) or "draft-context-refused". A load the cancel event
-        stopped frees everything this instance loaded and raises
-        ModelLoadCancelled. Unless *verbose*, llama.cpp's output while the draft
-        context is created or anything is freed goes where ``_quiet_stderr``
-        sends it."""
+        source's status naming why: "draft-model-missing", "draft-not-gguf"
+        (a path that is not a GGUF file, such as a HuggingFace directory),
+        "draft-unsupported-role", "draft-rewind-unsupported" or
+        "draft-vocab-mismatch" when the GGUF metadata already shows it
+        (``draft_metadata_refusal``; nothing is loaded), "draft-load-failed",
+        "draft-vocab-mismatch" or "draft-rewind-unsupported" from the loaded
+        model, "draft-context-refused", or "draft-error:<exception type>" for
+        any other exception. A load the cancel event stopped frees everything
+        this instance loaded and raises ModelLoadCancelled. Unless *verbose*,
+        llama.cpp's output while the draft context is created or anything is
+        freed goes where ``_quiet_stderr`` sends it."""
+        from localm.debuglog import logger
+        from localm.inference.backends.base import ModelLoadCancelled
+        quiet = _quiet_stderr if not verbose else contextlib.nullcontext
+
+        from ._draftmodel import DraftModelSource, is_gguf_file
+        source = DraftModelSource(self, None, self._spec_draft_max or 1, n_threads,
+                                  on_gpu=on_gpu)
+        self._source = source
+        if not path or not os.path.exists(path):
+            source.disable("draft-model-missing")
+            return
+        if not is_gguf_file(path):
+            source.disable("draft-not-gguf")
+            return
+        from ._draftmodel import native_vocab_view
+        try:
+            target_vocab = native_vocab_view(api, self._model_ptr)
+            self._attach_draft_model(source, path, verbose, on_gpu, target_vocab)
+        except ModelLoadCancelled:
+            with quiet():
+                self._free_native()
+            raise
+        except Exception as exc:
+            logger.warning("draft model %s could not be set up (%s: %s)",
+                           os.path.basename(path), type(exc).__name__, exc)
+            with quiet():
+                source.close()
+            source.disable("draft-error:%s" % type(exc).__name__)
+
+    def _attach_draft_model(self, source, path: str, verbose: bool, on_gpu: bool,
+                            target_vocab) -> None:
+        """Load the draft GGUF at *path* into *source* and create its context,
+        or disable *source* with the status ``_load_draft_model`` names.
+        *target_vocab* is the loaded model's ``native_vocab_view``. Makes no
+        native call on the loaded model. Raises ModelLoadCancelled, freeing
+        nothing, when the cancel event stopped the draft load."""
         from localm.debuglog import logger
         quiet = _quiet_stderr if not verbose else contextlib.nullcontext
 
-        from ._draftmodel import DraftModelSource, draft_vocab_mismatch, native_vocab_view
-        source = DraftModelSource(self, None, self._spec_draft_max or 1, n_threads)
-        self._source = source
-        if not path or not os.path.isfile(path):
-            source.disable("draft-model-missing")
-            return
-        from ._draftmodel import draft_role_refusal
-        role = draft_role_refusal(path)
-        if role is not None:
-            logger.warning("draft model %s cannot draft: %s", os.path.basename(path), role)
-            source.disable("draft-unsupported-role")
+        from ._draftmodel import draft_metadata_refusal, draft_vocab_mismatch, native_vocab_view
+        refusal = draft_metadata_refusal(getattr(self, "_model_path", None), path)
+        if refusal is not None:
+            status, detail = refusal
+            logger.warning("draft model %s cannot draft: %s", os.path.basename(path), detail)
+            source.disable(status)
             return
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = 99 if on_gpu else 0
@@ -3989,16 +4048,13 @@ class LlamaCpp:
                 detail = captured.tail()
         if not model:
             if self._cancel_event is not None and self._cancel_event.is_set():
-                with quiet():
-                    self._free_native()
                 from localm.inference.backends.base import ModelLoadCancelled
                 raise ModelLoadCancelled(f"Model load aborted (superseded): {path}")
             logger.warning("draft model failed to load: %s %s", os.path.basename(path), detail)
             source.disable("draft-load-failed")
             return
         source._model = model
-        mismatch = draft_vocab_mismatch(native_vocab_view(api, self._model_ptr),
-                                        native_vocab_view(api, model))
+        mismatch = draft_vocab_mismatch(target_vocab, native_vocab_view(api, model))
         if mismatch:
             logger.warning("draft model %s does not share this model's vocabulary (%s)",
                            os.path.basename(path), mismatch)
@@ -4017,7 +4073,7 @@ class LlamaCpp:
             source.disable("draft-rewind-unsupported")
             return
         with quiet():
-            failure = source.create_context(self._ctx_capacity, self._offload_kqv and on_gpu)
+            failure = source.create_context(self._ctx_capacity, self._offload_kqv)
             if failure:
                 source.close()
         if failure:
@@ -4353,15 +4409,17 @@ class LlamaCpp:
             return False
         return True
 
-    def _prefill_with_reuse(self, prompt_tokens: list[int]) -> None:
+    def _prefill_with_reuse(self, prompt_tokens: list[int], keep_prefix: bool = True) -> None:
         """
         Prefill keeping the common prefix with the previous call in the KV
         cache: remove diverging cached tokens, decode only the new suffix.
+        With *keep_prefix* False the cache is emptied and the whole prompt is
+        decoded from position 0.
         """
         self._vision_kv = None
         mem = api.llama_get_memory(self._ctx_ptr)
 
-        prefix = _common_prefix_len(self._cached_tokens, prompt_tokens)
+        prefix = _common_prefix_len(self._cached_tokens, prompt_tokens) if keep_prefix else 0
         # The model must decode at least the final prompt token so the
         # logits for sampling position -1 are fresh.
         if prefix == len(prompt_tokens):
@@ -4570,6 +4628,7 @@ class LlamaCpp:
         frequency_penalty: Optional[float] = None,
         logprobs: Optional[int] = None,
         logprob_sink: Optional[list] = None,
+        cache_prompt: bool = True,
         **_ignored,
     ):
         """
@@ -4599,6 +4658,11 @@ class LlamaCpp:
         appended to *logprob_sink* before that token's text is produced, with
         *logprobs* alternatives per token. Pass both or neither. A diffusion
         language model refuses *logprobs* with :class:`UnsupportedInputError`.
+
+        ``cache_prompt=False`` keeps no prefix of an earlier prompt in the KV
+        cache: the reply is computed from a full prefill into an emptied cache,
+        alone (see :meth:`_generate`). Encoder-decoder and diffusion models never
+        keep one.
         """
         if (logprobs is None) != (logprob_sink is None):
             raise ValueError("logprobs and logprob_sink must be passed together")
@@ -4703,6 +4767,7 @@ class LlamaCpp:
                 grammar_lazy=grammar_lazy,
                 grammar_triggers=grammar_triggers,
                 logprobs=logprobs,
+                cache_prompt=cache_prompt,
             )
         else:
             gen = self._generate(
@@ -4719,6 +4784,7 @@ class LlamaCpp:
                 on_status=on_status,
                 sampling=sampling,
                 logprobs=logprobs,
+                cache_prompt=cache_prompt,
             )
 
         return self._completion_result(gen, stream, logprob_sink)

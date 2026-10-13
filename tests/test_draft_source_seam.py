@@ -169,7 +169,6 @@ def test_the_base_source_never_drafts():
     assert src.begin_call() is False
     assert src.drafting() is False
     assert src.propose(1, 0, 4) == []
-    assert src.extra_vram_bytes() == 0
 
 
 def test_a_model_holding_its_mtp_source_is_finalized_when_dropped():

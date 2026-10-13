@@ -40,6 +40,12 @@ SPEC_DRAFT = "draft"
 SPEC_SOURCES = (SPEC_OFF, SPEC_MTP, SPEC_NGRAM, SPEC_DRAFT)
 
 
+def counted_source(spec_source: str) -> bool:
+    """Whether *spec_source* drafts through a ``CountedSource`` of its own
+    (ngram or draft), rather than through MTP or not at all."""
+    return spec_source in (SPEC_NGRAM, SPEC_DRAFT)
+
+
 def resolve_spec_source(spec_source: Optional[str], mtp_enabled: bool) -> str:
     """The draft source a model uses: *spec_source* when it names one of
     ``SPEC_SOURCES``, else ``mtp`` when *mtp_enabled* and ``off`` otherwise.
@@ -61,7 +67,6 @@ class DraftSource:
     """
 
     name = "off"
-    needs_rewind = True
     free_miss = False
     # Whether the loop times the steps the pacer does not, for on_step_seconds.
     observes_steps = False
@@ -114,10 +119,6 @@ class DraftSource:
 
     def rewind_unsupported(self) -> None:
         pass
-
-    def extra_vram_bytes(self) -> int:
-        """Bytes of VRAM this source needs beyond the main model and context."""
-        return 0
 
     def skip_call(self, reason: str) -> None:
         """Record that the reply about to run cannot draft, and why."""
