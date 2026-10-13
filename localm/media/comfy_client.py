@@ -2337,50 +2337,74 @@ def interrupt_comfy(api_url: str) -> bool:
     return ok
 
 
-def cancel_comfy_prompt(api_url: str, prompt_id: str) -> bool:
-    """Stop ComfyUI's work on *prompt_id* only: interrupt it when ``GET /queue``
-    lists it as running, and remove it from the pending queue (POST ``/queue
-    {"delete": [prompt_id]}``). Other jobs, running or queued, are left alone.
-    Best-effort; returns True when the prompt was found running or pending and
-    the matching request was accepted."""
+def _comfy_queue_lists(api_url: str, prompt_id: str) -> Optional[tuple[bool, bool]]:
+    """``(running, pending)``: whether ``GET /queue`` lists *prompt_id* as
+    running and as pending, or None when the queue cannot be read."""
     try:
         req = urllib.request.Request(f"{api_url}/queue")
         with _comfy_urlopen(req, timeout=10) as response:
             queue = json.loads(response.read().decode("utf-8"))
     except Exception as e:
         from localm.debuglog import logger
-        logger.debug("reading the ComfyUI queue to cancel %s failed: %s", prompt_id, e)
-        return False
+        logger.debug("reading the ComfyUI queue for %s failed: %s", prompt_id, e)
+        return None
 
     def _listed(key: str) -> bool:
         return any(len(item) > 1 and item[1] == prompt_id
                    for item in (queue.get(key) or []))
 
-    running, pending = _listed("queue_running"), _listed("queue_pending")
+    return _listed("queue_running"), _listed("queue_pending")
+
+
+def _comfy_post(api_url: str, path: str, body: dict) -> bool:
+    try:
+        req = urllib.request.Request(
+            f"{api_url}{path}", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with _comfy_urlopen(req, timeout=10):
+            return True
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("ComfyUI POST %s failed: %s", path, e)
+        return False
+
+
+def cancel_comfy_prompt(api_url: str, prompt_id: str) -> bool:
+    """Stop ComfyUI's work on *prompt_id* only; other jobs, running or queued,
+    are left alone. Best-effort; returns True when ComfyUI reports the prompt
+    was running or pending and was cancelled.
+
+    Uses ComfyUI's ``POST /api/jobs/{prompt_id}/cancel`` when it has one (it
+    dequeues or interrupts that prompt in one step). A ComfyUI without that
+    route gets ``GET /queue`` then a targeted ``POST /interrupt {"prompt_id"}``
+    when it is running, or ``POST /queue {"delete": [...]}`` when it is pending,
+    after which the queue is read again and a prompt that started meanwhile is
+    interrupted."""
+    try:
+        req = urllib.request.Request(
+            f"{api_url}/api/jobs/{urllib.parse.quote(prompt_id, safe='')}/cancel",
+            data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+        with _comfy_urlopen(req, timeout=10) as response:
+            reply = json.loads(response.read().decode("utf-8") or "{}")
+        if isinstance(reply, dict) and isinstance(reply.get("cancelled"), bool):
+            return reply["cancelled"]
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("ComfyUI job cancel route for %s unavailable (%s); "
+                     "using the queue", prompt_id, e)
+
+    lists = _comfy_queue_lists(api_url, prompt_id)
+    if lists is None:
+        return False
+    running, pending = lists
     done = False
     if running:
-        try:
-            body = json.dumps({"prompt_id": prompt_id}).encode()
-            req = urllib.request.Request(
-                f"{api_url}/interrupt", data=body,
-                headers={"Content-Type": "application/json"}, method="POST")
-            with _comfy_urlopen(req, timeout=10):
-                done = True
-        except Exception as e:
-            from localm.debuglog import logger
-            logger.debug("interrupting ComfyUI prompt %s failed: %s", prompt_id, e)
+        done = _comfy_post(api_url, "/interrupt", {"prompt_id": prompt_id})
     if pending:
-        try:
-            body = json.dumps({"delete": [prompt_id]}).encode()
-            req = urllib.request.Request(
-                f"{api_url}/queue", data=body,
-                headers={"Content-Type": "application/json"}, method="POST")
-            with _comfy_urlopen(req, timeout=10):
-                done = True
-        except Exception as e:
-            from localm.debuglog import logger
-            logger.debug("removing ComfyUI prompt %s from the queue failed: %s",
-                         prompt_id, e)
+        done = _comfy_post(api_url, "/queue", {"delete": [prompt_id]})
+        again = _comfy_queue_lists(api_url, prompt_id)
+        if again is not None and again[0]:
+            done = _comfy_post(api_url, "/interrupt", {"prompt_id": prompt_id})
     return done
 
 

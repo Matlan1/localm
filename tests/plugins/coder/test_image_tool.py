@@ -245,3 +245,47 @@ def test_repl_generate_image_logmode_keeps_sidecar(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_agent_hands_generate_image_its_cancel_check(tmp_path):
+    """A cancelled coder run stops its image render: the agent injects its own
+    cancel check, and the tool passes it to the ComfyUI generation."""
+    from localm.plugins.coder.agent import Agent
+    from localm.audit import NullAuditLog
+    from localm.plugins.coder.parser import ToolCall
+    from localm.plugins.coder import tools as T
+
+    backend = MagicMock()
+    backend.model_id = "test-model"
+    backend.last_usage = {}
+    with patch("localm.plugins.coder.agent.make_audit_log", return_value=NullAuditLog()), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""), \
+         patch("localm.plugins.coder.agent.ProjectMap") as mock_pm:
+        mock_pm.build.return_value.file_count.return_value = 0
+        agent = Agent(backend=backend, cwd=tmp_path)
+
+    captured = {}
+
+    def spy(cwd, **kwargs):
+        captured.update(kwargs)
+        return T.ToolResult.success("ok")
+
+    call = ToolCall(name="generate_image", args={"prompt": "p"}, raw="", start=0, end=0)
+    with patch.object(T.TOOL_REGISTRY["generate_image"], "fn", spy):
+        agent._execute_tool(call, interactive=False)
+    cancel = captured.get("_cancel")
+    assert callable(cancel) and cancel() is False
+    agent.cancel("stop")
+    assert cancel() is True
+
+
+def test_the_tool_passes_its_cancel_check_to_comfyui(tmp_path):
+    def stop():
+        return True
+
+    with patch("localm.plugins.builtin.image.backend.generate_unless_comfy",
+               return_value=None), \
+         patch("localm.image_gen.comfy.generate_image",
+               return_value=(True, "Image saved to x")) as gen:
+        tool_generate_image(tmp_path, "p", "out.png", _cancel=stop)
+    assert gen.call_args.kwargs.get("cancel_check") is stop
