@@ -399,6 +399,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **`localm info` says whether the install is portable.** It prints a `mode` line (`portable`
+  or `standard`) and a `temp dir` line naming where temporary files go.
 - **localm's managed ComfyUI now installs v0.39.0, up from v0.31.1.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **The bundled llama.cpp runtime moved from b11118 to b11541.** An existing install picks it up with `localm setup-llama --force`.
 - **Linux CUDA setup installs fixed NVIDIA runtime libraries.** `localm setup-llama` on Linux now fetches a pinned, checksum-verified version of the CUDA runtime and cuBLAS libraries instead of whichever version PyPI lists as newest.
@@ -1731,6 +1733,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   commands; with `--output-format json` it also printed a second JSON document.
 
 ### Security
+- **The default embedding models are downloaded from a fixed version and checked.** The
+  first use of semantic search, `localm setup-embeddings` and the Knowledge page fetch
+  bge-small (or nomic-embed) from a pinned commit, delete the file and report the failure
+  when its sha256 is not the expected one, and register it with that digest. The commands
+  printed for the recommended image and video models now include `--sha256`.
 - **A plain `coder` API key can no longer run commands through the project's coder
   configuration.** A restricted coder session (a shared, non-owner key) started any
   MCP server listed in the project's `.localcoder/config.toml` when it opened, and

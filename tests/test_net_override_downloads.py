@@ -97,6 +97,17 @@ def _snapshot_spy(monkeypatch, *, create: bool = False):
 #  1. prefetch_stt_model: bypass-ask-respect-off, one call = one authorization #
 # --------------------------------------------------------------------------- #
 
+def _pin_known_models_to_fake_bytes(monkeypatch, content=b"GGUF"):
+    """The known embedding models are pinned to the sha256 of the real file; these
+    tests download fake bytes, so pin each to the digest of *content*."""
+    import hashlib
+
+    from localm.inference import embedder
+    digest = hashlib.sha256(content).hexdigest()
+    monkeypatch.setattr(embedder, "_EMBEDDING_PINS", {
+        key: (revision, digest) for key, (revision, _) in embedder._EMBEDDING_PINS.items()})
+
+
 class TestPrefetchPolicy:
     def test_off_beats_explicit_consent(self, monkeypatch, tmp_path):
         """THE property: net_mode=off refuses even allow_download=True, by
@@ -568,6 +579,7 @@ class TestEmbeddingRoutes:
             return str(target)
 
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hf_download)
+        _pin_known_models_to_fake_bytes(monkeypatch)
         from localm.config import update_config
         update_config(lambda c: c.__setitem__("net_mode", "off"))
         update_config(lambda c: c.__setitem__("net_allow_model_downloads", True))
@@ -606,6 +618,7 @@ class TestEmbeddingRoutes:
             return str(target)
 
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hf_download)
+        _pin_known_models_to_fake_bytes(monkeypatch)
         cfg_file = rag_client.home / "config.json"
         before = cfg_file.read_bytes()
 
@@ -682,6 +695,7 @@ class TestEmbeddingRoutes:
             return str(target)
 
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+        _pin_known_models_to_fake_bytes(monkeypatch)
         try:
             path = emb.resolve_embedding_model_path(allow_download=True)
             assert len(fetched) == 1, "the override must let the real fetch through"

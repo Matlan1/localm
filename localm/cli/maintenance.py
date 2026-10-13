@@ -187,13 +187,15 @@ def setup_embeddings(model, yes=False):
         # embeddings dir) - never a user-pointed external GGUF or an already
         # registered model, which keep whatever registration/type they already
         # have (never silently override an existing choice).
-        from ..inference.embedder import _embeddings_dir
+        from ..inference.embedder import _EMBEDDING_PINS, _embeddings_dir
         if p.parent == _embeddings_dir().resolve():
             from localm.config import load_registry
             from ..model_manager import find_aliases_by_path, _register, _sanitize_name
             if not find_aliases_by_path(p, load_registry()):
                 reg_name = _sanitize_name(f"embedding-{name}")
-                _register(reg_name, p, source="setup-embeddings", model_type="embedding")
+                pin = _EMBEDDING_PINS.get(KNOWN_EMBEDDING_MODELS.get(name))
+                _register(reg_name, p, source="setup-embeddings", model_type="embedding",
+                          sha256=pin[1] if pin else None)
                 synced_note = (f"\nRegistered as [bold]{escape(reg_name)}[/bold] "
                                "(type 'embedding') - visible in `localm list` / the GUI.")
     except Exception as e:

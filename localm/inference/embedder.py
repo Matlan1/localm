@@ -62,6 +62,18 @@ KNOWN_EMBEDDING_MODELS = {
 }
 DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 
+# (repo, filename) -> (commit, sha256) of the file a known embedding model is
+# downloaded as: the download is made from that commit and the file is deleted and
+# refused when its sha256 differs.
+_EMBEDDING_PINS = {
+    ("CompendiumLabs/bge-small-en-v1.5-gguf", "bge-small-en-v1.5-q4_k_m.gguf"): (
+        "d32f8c040ea3b516330eeb75b72bcc2d3a780ab7",
+        "363a0a4855dff6c653e06efe3209157debcf7f74e52d0d7c71e2747cd523043e"),
+    ("nomic-ai/nomic-embed-text-v1.5-GGUF", "nomic-embed-text-v1.5.Q4_K_M.gguf"): (
+        "0188c9bf409793f810680a5a431e7b899c46104c",
+        "d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac"),
+}
+
 # HF endpoint for embedding-model downloads. The ambient HF_ENDPOINT /
 # HF_HUB_ENDPOINT env vars are not read.
 _HF_ENDPOINT = "https://huggingface.co"
@@ -477,6 +489,26 @@ def download_progress_line(label: str, done: int, total: Optional[int]) -> str:
     return f"Downloading {label}: {done // mb} MB..."
 
 
+def _require_sha256(path: Path, expected: str, what: str) -> None:
+    """Return when the sha256 of *path* is *expected*; otherwise delete *path* and
+    raise RuntimeError."""
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    actual = digest.hexdigest()
+    if actual == expected.lower():
+        return
+    try:
+        path.unlink()
+    except OSError as e:
+        logger.warning("could not delete the file that failed its sha256 check: %s", e)
+    raise RuntimeError(
+        f"the downloaded {what} has sha256 {actual}, not the pinned {expected}; "
+        "the file was deleted")
+
+
 def _download_known(name: str, repo: str, filename: str, dest: Path,
                     allow_download: Optional[bool], *,
                     on_progress=None) -> Optional[str]:
@@ -522,8 +554,13 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         extra = ({"tqdm_class": _download_progress_class(
                      f"the embedding model {name}", on_progress)}
                  if on_progress is not None else {})
+        pin = _EMBEDDING_PINS.get((repo, filename))
+        if pin is not None:
+            extra["revision"] = pin[0]
         got = hf_hub_download(repo, filename, local_dir=str(dest.parent),
                               endpoint=_HF_ENDPOINT, **extra)
+        if pin is not None:
+            _require_sha256(Path(got), pin[1], f"embedding model {name!r}")
         # hf may nest under the repo dir; normalise to dest.
         got_p = Path(got)
         if got_p.resolve() != dest.resolve() and got_p.is_file():

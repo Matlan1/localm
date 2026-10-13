@@ -1307,6 +1307,13 @@ def info():
     console.print(f"  [bold]config     [/bold]   {escape(str(HOME_DIR / 'config.json'))}")
     binaries_s = escape(str(binary_dir)) if binary_dir else "[dim]not found[/dim]"
     console.print(f"  [bold]binaries   [/bold]   {binaries_s}")
+    from ..config import _is_portable_home, temp_dir
+    mode_s = ("portable (data folder inside the install)"
+              if _is_portable_home(HOME_DIR) else "standard")
+    temp_path = temp_dir(HOME_DIR)
+    temp_s = escape(str(temp_path)) if temp_path else "system temp folder"
+    console.print(f"  [bold]mode       [/bold]   {mode_s}")
+    console.print(f"  [bold]temp dir   [/bold]   {temp_s}")
     console.print()
     for k, v in sorted(cfg.items()):
         # `cfg` is DEFAULT_CONFIG overlaid with the raw contents of
