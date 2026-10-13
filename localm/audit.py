@@ -591,6 +591,26 @@ SESSION_MODE_HEADER = "X-Localm-Session-Mode"
 _CALLER_SURFACES = ("chat", "coder")
 
 
+def caller_cap(client_id: Optional[str] = None,
+               caller_mode: Optional[str] = None) -> Optional[SessionMode]:
+    """The most private of a caller's surface mode (``effective_mode("chat")`` or
+    ``effective_mode("coder")`` when *client_id* is ``"chat"`` or ``"coder"``) and
+    *caller_mode*, the session mode the caller resolved for itself; None when
+    neither applies. An empty or absent *caller_mode* adds no cap; an unknown one
+    caps at ``privacy``."""
+    caps = []
+    cid = (client_id or "").strip().lower()
+    if cid in _CALLER_SURFACES:
+        caps.append(effective_mode(cid))
+    asserted = (caller_mode or "").strip()
+    if asserted:
+        try:
+            caps.append(parse_mode(asserted))
+        except ValueError:
+            caps.append(SessionMode.PRIVACY)
+    return most_private(*caps) if caps else None
+
+
 class CallerRecorder:
     """A :class:`SessionRecorder` capped for one caller's traffic.
 
@@ -606,21 +626,12 @@ class CallerRecorder:
     def __init__(self, recorder: SessionRecorder, client_id: Optional[str] = None,
                  caller_mode: Optional[str] = None) -> None:
         self._recorder = recorder
-        cid = (client_id or "").strip().lower()
-        self._surface = cid if cid in _CALLER_SURFACES else None
-        self._caller_mode = (caller_mode or "").strip()
+        self._client_id = client_id
+        self._caller_mode = caller_mode
 
     def cap(self) -> Optional[SessionMode]:
-        """The caller's own limit (surface and asserted mode), or None for none."""
-        caps = []
-        if self._surface is not None:
-            caps.append(effective_mode(self._surface))
-        if self._caller_mode:
-            try:
-                caps.append(parse_mode(self._caller_mode))
-            except ValueError:
-                caps.append(SessionMode.PRIVACY)
-        return most_private(*caps) if caps else None
+        """The caller's own limit (see :func:`caller_cap`), or None for none."""
+        return caller_cap(self._client_id, self._caller_mode)
 
     def current(self) -> tuple[AuditLogT, Optional[MarkdownTranscript], SessionMode]:
         """``(audit, transcript, mode)`` this caller's exchange is recorded with."""

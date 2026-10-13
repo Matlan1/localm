@@ -659,6 +659,25 @@ class TestSurfaceOverridesOnServerTraffic:
         recorded = "chat line" in _session_text(tmp_path, "*_server.*")
         assert recorded is (chat_mode != "privacy")
 
+    @pytest.mark.parametrize("headers,held,expected", [
+        ({}, None, SessionMode.FULL),
+        ({"X-Client-Id": "coder"}, None, SessionMode.PRIVACY),
+        ({"X-Localm-Session-Mode": "log"}, None, SessionMode.LOG),
+        ({"X-Client-Id": "coder"}, {"chat"}, SessionMode.FULL),
+    ])
+    def test_request_session_mode_answers_what_the_server_records_under(
+            self, headers, held, expected):
+        from starlette.requests import Request
+
+        from localm.inference.http_server import request_session_mode
+        config = _Config("full")
+        config.set(coder_mode="privacy")
+        request = Request({"type": "http", "method": "POST", "path": "/",
+                           "headers": [(k.lower().encode(), v.encode())
+                                       for k, v in headers.items()]})
+        with patch("localm.config.load_config", side_effect=config.load),              patch("localm.inference.http_server.caller_scopes", return_value=held):
+            assert request_session_mode(request) == expected
+
     def test_localm_run_attached_to_the_server_records_by_the_chat_mode(self, tmp_path):
         """The headers `localm run`'s HttpEngine sends when attached to a
         server, replayed through the real route."""

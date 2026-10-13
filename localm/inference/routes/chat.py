@@ -64,17 +64,9 @@ def register(app: FastAPI, ctx) -> None:
     _recorder = ctx.recorder
 
     def _caller_recorder(request: Request):
-        """The server's recorder capped for this request's caller (its
-        X-Client-Id surface and X-Localm-Session-Mode). The cap applies only to
-        an owner caller (open mode or an ADMIN key or session); any other
-        caller's exchange is recorded under the server's mode."""
-        from localm import scopes
-        from localm.audit import CLIENT_ID_HEADER, SESSION_MODE_HEADER
-        held = _hs.caller_scopes(request)
-        if held is not None and scopes.ADMIN not in held:
-            return _recorder.for_caller()
-        return _recorder.for_caller(request.headers.get(CLIENT_ID_HEADER),
-                                    request.headers.get(SESSION_MODE_HEADER))
+        """The server's recorder capped for this request's caller (see
+        http_server.caller_recorder)."""
+        return _hs.caller_recorder(_recorder, request)
     _require_auth = _hs._require_auth
     _touch_activity = _hs._touch_activity
     _protocol_messages_to_dicts = _hs._protocol_messages_to_dicts
