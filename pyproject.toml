@@ -241,8 +241,8 @@ monitor = [
 # brings the same capability to transformers models through xgrammar. Optional:
 # chat works without it, and the HF backend falls back to unconstrained output
 # if a grammar is requested while this is not installed. Layers on top of [gpu].
-# The HF backend applies xgrammar's token mask with plain torch ops on the
-# model's device (xgrammar's bundled kernel for CPU logits), so constrained
+# The HF backend applies xgrammar's token mask with plain torch ops on a CUDA
+# or ROCm GPU and with xgrammar's bundled CPU kernel otherwise, so constrained
 # decoding needs no C compiler, Triton build or CUDA toolkit. On Windows this
 # extra also pulls triton-windows (upstream Triton ships no Windows wheels),
 # which the native FP8 path imports; grammar masking does not use it.

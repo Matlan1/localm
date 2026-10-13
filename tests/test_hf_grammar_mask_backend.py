@@ -19,16 +19,13 @@ _GRAMMAR = 'root ::= "red" | "green" | "blue"'
 _COMPILER_BACKENDS = {"auto", "triton", "torch_compile", "cuda"}
 
 
-@pytest.mark.parametrize("device_type", ["cuda", "xpu", "mps", "npu", "hpu",
-                                         "privateuseone", "meta"])
-def test_bitmask_backend_never_needs_a_compiler(device_type):
+@pytest.mark.parametrize("device_type,expected", [
+    ("cuda", "torch_native"), ("cpu", "cpu"), ("xpu", "cpu"), ("mps", "cpu"),
+    ("npu", "cpu"), ("hpu", "cpu"), ("privateuseone", "cpu"), ("meta", "cpu")])
+def test_bitmask_backend_never_needs_a_compiler(device_type, expected):
     backend = _hf_worker._bitmask_backend(device_type)
-    assert backend == "torch_native"
+    assert backend == expected
     assert backend not in _COMPILER_BACKENDS
-
-
-def test_bitmask_backend_uses_the_bundled_kernel_on_cpu():
-    assert _hf_worker._bitmask_backend("cpu") == "cpu"
 
 
 class _Device:
@@ -37,8 +34,13 @@ class _Device:
 
 
 class _Scores:
-    def __init__(self, device_type):
+    def __init__(self, device_type, moves=None):
         self.device = _Device(device_type)
+        self.moves = [] if moves is None else moves
+
+    def to(self, device):
+        self.moves.append(device)
+        return _Scores(device.type if isinstance(device, _Device) else device, self.moves)
 
 
 class _InputIds:
@@ -133,6 +135,16 @@ def test_cpu_logits_are_masked_with_the_bundled_kernel(fake_xgrammar):
     proc = _processor()
     proc(_InputIds([[1]]), _Scores("cpu"))
     assert [b for _, b in fake_xgrammar.applied] == ["cpu"]
+
+
+def test_other_device_logits_are_masked_on_a_cpu_copy(fake_xgrammar):
+    proc = _processor()
+    scores = _Scores("xpu")
+    out = proc(_InputIds([[1]]), scores)
+    (masked, backend), = fake_xgrammar.applied
+    assert (masked.device.type, backend) == ("cpu", "cpu")
+    assert scores.moves == ["cpu", scores.device]
+    assert out.device.type == "xpu"
 
 
 def test_sampled_tokens_reach_the_matcher_after_the_first_call(fake_xgrammar):

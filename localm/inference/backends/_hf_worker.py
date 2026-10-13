@@ -517,12 +517,13 @@ def _auto_device(torch, override: Optional[str] = None) -> str:
 
 def _bitmask_backend(device_type: str) -> str:
     """The ``xgrammar.apply_token_bitmask_inplace`` backend for logits on
-    *device_type*: ``"cpu"`` (xgrammar's bundled native kernel) for CPU logits and
-    ``"torch_native"`` (plain torch tensor ops on the logits' own device) for every
-    other device. Neither compiles code at run time, so masking needs no C
-    compiler, Triton build or CUDA toolkit on the host. See
+    *device_type*: ``"torch_native"`` (plain torch tensor ops on the GPU) for
+    ``"cuda"`` logits, which covers AMD ROCm, and ``"cpu"`` (xgrammar's bundled
+    native kernel) for everything else, which ``_XgrammarProcessor`` masks on a
+    CPU copy. Neither compiles code at run time, so masking needs no C compiler,
+    Triton build or CUDA toolkit on the host. See
     test_bitmask_backend_never_needs_a_compiler."""
-    return "cpu" if device_type == "cpu" else "torch_native"
+    return "torch_native" if device_type == "cuda" else "cpu"
 
 
 class _XgrammarProcessor:
@@ -531,8 +532,9 @@ class _XgrammarProcessor:
 
     Same token protocol as ``xgrammar.contrib.hf.LogitsProcessor``: the first call
     only fills the mask, every later call first feeds the previously sampled token
-    to each row's matcher. The mask is applied in place through
-    ``_bitmask_backend``. Raises RuntimeError when the batch size changes between
+    to each row's matcher. The mask is applied through ``_bitmask_backend``: in
+    place for CPU and ``"cuda"`` logits, on a CPU copy moved back to the device for
+    any other device. Raises RuntimeError when the batch size changes between
     calls or a sampled token is rejected by the grammar. Single use: build a fresh
     one per generate() call.
     """
@@ -563,9 +565,15 @@ class _XgrammarProcessor:
         for i, matcher in enumerate(self._matchers):
             if not matcher.is_terminated():
                 matcher.fill_next_token_bitmask(self._bitmask, i)
-        xgr.apply_token_bitmask_inplace(scores, self._bitmask.to(scores.device),
-                                        backend=_bitmask_backend(scores.device.type))
-        return scores
+        device_type = scores.device.type
+        backend = _bitmask_backend(device_type)
+        if device_type in ("cpu", "cuda"):
+            xgr.apply_token_bitmask_inplace(scores, self._bitmask.to(scores.device),
+                                            backend=backend)
+            return scores
+        cpu_scores = scores.to("cpu")
+        xgr.apply_token_bitmask_inplace(cpu_scores, self._bitmask, backend=backend)
+        return cpu_scores.to(scores.device)
 
 
 class _SafeGrammarProcessor:

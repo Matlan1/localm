@@ -630,6 +630,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A transformers model whose grammar constraint fails mid-reply is no longer reported as constrained.**
   The failure is logged and shown, and later grammar requests to that model are refused, as for GGUF
   models.
+- **Grammar-constrained replies from transformers models on a GPU now follow the grammar on Windows.**
+  The constraint used to be dropped on the first token on a machine without a C compiler, such as a
+  typical Windows install with an AMD ROCm GPU. It is now applied without compiling anything.
 - **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
   cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
   dropped. A model worker that does not exit when stopped is killed.
