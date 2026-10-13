@@ -604,6 +604,198 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str,
         return False
 
 
+# --------------------------------------------------------------------------- #
+#  Other native media runtimes and other localm instances                      #
+# --------------------------------------------------------------------------- #
+#
+# The native image and video backends share one stable-diffusion.cpp worker; the
+# native music backend runs a KoboldCpp server. Each stays loaded after its job
+# (idle timeout, 10 minutes), so a job of the other kind starts with that VRAM
+# still taken.
+
+_NATIVE_RUNTIME_OF = {"image": "sdcpp", "video": "sdcpp", "music": "koboldcpp"}
+_NATIVE_RUNTIME_NAME = {"sdcpp": "native image/video worker",
+                        "koboldcpp": "native music runtime"}
+
+
+def _native_runtime_loaded(key: str) -> bool:
+    """Whether this process currently holds the native runtime *key* loaded."""
+    if key == "sdcpp":
+        from localm.media.sdcpp import shared
+        return shared.worker_pid() is not None
+    from localm.media.koboldcpp import server
+    return server.running_pid() is not None
+
+
+def _native_runtime_free(key: str) -> bool:
+    """Stop the native runtime *key* (the same call its backend's ``free_vram``
+    makes). True once it is no longer running."""
+    if key == "sdcpp":
+        from localm.media.sdcpp import shared
+        return shared.free()
+    from localm.media.koboldcpp import server
+    server.stop()
+    return True
+
+
+def loaded_native_media_runtimes() -> list:
+    """Display names of the native media runtimes this process holds loaded.
+    Never raises."""
+    names = []
+    for key, name in _NATIVE_RUNTIME_NAME.items():
+        try:
+            if _native_runtime_loaded(key):
+                names.append(name)
+        except Exception:
+            continue
+    return names
+
+
+def _short_of(free: Optional[int], need: int) -> Optional[bool]:
+    """True when *free* cannot hold *need* plus the standard headroom, False
+    when it can, None when there is no reading."""
+    if free is None:
+        return None
+    return free < need + _DEFAULT_HEADROOM
+
+
+def release_other_native_media(
+    job: Any, settings: dict, media_label: str, *,
+    read_reading: Optional[Callable[[], tuple]] = None,
+    read_free: Optional[Callable[[], Optional[int]]] = None,
+) -> list:
+    """Before a native *media_label* job ("image" / "music" / "video"): stop this
+    process's OTHER loaded native media runtimes when the job's
+    ``vram_estimate_bytes`` plus headroom exceeds live free VRAM, one job-log line
+    per runtime stopped. Returns the list of runtimes stopped (empty when none).
+
+    Does nothing for a ComfyUI job, a job with no estimate, or when free VRAM
+    covers the job. A reading that is stale, unmeasurable or process-scoped cannot
+    see another process's memory, so it counts as short whenever such a runtime is
+    loaded - the same "unknown means act" rule the chat swap follows.
+
+    Stopping a runtime waits for the job it is running to finish; it never kills
+    one. After a stop, waits for free VRAM to rise so the next load does not race
+    the driver's release. *read_reading* / *read_free* are injectable for tests."""
+    if settings.get("backend") != "native":
+        return []
+    need = settings.get("vram_estimate_bytes")
+    if not isinstance(need, int) or isinstance(need, bool) or need <= 0:
+        return []
+    own = _NATIVE_RUNTIME_OF.get(media_label)
+    others = []
+    for key in _NATIVE_RUNTIME_NAME:
+        if key == own:
+            continue
+        try:
+            if _native_runtime_loaded(key):
+                others.append(key)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("media: could not tell whether the %s is loaded (%s)",
+                         _NATIVE_RUNTIME_NAME[key], e)
+    if not others:
+        return []
+    from localm.discover import FREE_SCOPE_DEVICE
+    try:
+        free, fresh, scope = (read_reading or _vram_free_reading)()
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("media: free VRAM reading failed (%s)", e)
+        free, fresh, scope = None, False, None
+    measured = free if (fresh and scope == FREE_SCOPE_DEVICE) else None
+    if _short_of(measured, need) is False:
+        return []
+    if read_free is None:
+        read_free = _live_free_vram_bytes
+    released = []
+    for key in others:
+        name = _NATIVE_RUNTIME_NAME[key]
+        if measured is None:
+            why = "free VRAM could not be read"
+        else:
+            why = (f"this job needs about {need / 1024 ** 3:.1f} GB and "
+                   f"{measured / 1024 ** 3:.1f} GB is free")
+        job.push({"type": "line", "text":
+                  f"Freeing VRAM: stopping the idle {name} ({why})."})
+        try:
+            stopped = _native_runtime_free(key)
+        except Exception as e:
+            job.push({"type": "line", "text":
+                      f"Could not stop the {name} ({e}) - the {media_label} "
+                      "backend may run low on VRAM."})
+            continue
+        if not stopped:
+            job.push({"type": "line", "text":
+                      f"The {name} kept its models in VRAM - the {media_label} "
+                      "backend may run low on VRAM."})
+            continue
+        released.append(key)
+        wait_for_vram_release(read_free, before_bytes=measured)
+    return released
+
+
+def note_other_vram_holders(
+    job: Any, settings: dict, media_label: str, *,
+    read_reading: Optional[Callable[[], tuple]] = None,
+    list_peers: Optional[Callable[[], list]] = None,
+    gpu_index: Optional[int] = None,
+) -> list:
+    """After the chat handover, before a native *media_label* job loads: when free
+    VRAM is still short of the job's estimate, name in the job log each OTHER
+    localm instance on this machine that holds VRAM on the same GPU (its port, its
+    chat model, its loaded native media runtimes). Returns the peers named.
+
+    Only informs; it never asks a peer to unload. Silent when the reading is
+    unusable, free VRAM covers the job, or no peer holds anything - the
+    peer scan probes loopback ports, so it runs only on a shortfall. Never
+    raises. *gpu_index* is the device this job loads on (resolved from the
+    config when None; a peer on another device is not named)."""
+    try:
+        if settings.get("backend") != "native":
+            return []
+        need = settings.get("vram_estimate_bytes")
+        if not isinstance(need, int) or isinstance(need, bool) or need <= 0:
+            return []
+        from localm.discover import FREE_SCOPE_DEVICE
+        free, fresh, scope = (read_reading or _vram_free_reading)()
+        if not fresh or scope != FREE_SCOPE_DEVICE or _short_of(free, need) is not True:
+            return []
+        if list_peers is None:
+            from localm import gpu_registry
+            list_peers = gpu_registry.list_gpu_peers
+        if gpu_index is None:
+            try:
+                from localm.config import load_config
+                from localm.discover import last_gpu_reading, resolve_load_gpu_index
+                gpu_index = resolve_load_gpu_index(
+                    load_config(), gpus=last_gpu_reading() or [], quiet=True)
+            except Exception:
+                gpu_index = None
+        named = []
+        for p in list_peers():
+            what = []
+            if p.get("model"):
+                what.append(f"chat model '{p['model']}'")
+            media = [str(m) for m in (p.get("media") or [])]
+            what.extend(f"the {m}" for m in media)
+            if not what:
+                continue
+            if gpu_index is not None and int(p.get("gpu_index") or 0) != gpu_index:
+                continue
+            named.append(p)
+            job.push({"type": "line", "text":
+                      f"Another localm instance (port {p.get('port')}) is holding "
+                      f"VRAM on this GPU ({', '.join(what)}); this {media_label} job "
+                      f"needs about {need / 1024 ** 3:.1f} GB and "
+                      f"{free / 1024 ** 3:.1f} GB is free. Unload it there to make room."})
+        return named
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("media: could not look for other VRAM holders (%s)", e)
+        return []
+
+
 def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
                             media_label: str,
                             instance_token: Optional[str] = None) -> None:
