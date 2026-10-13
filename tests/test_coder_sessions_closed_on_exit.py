@@ -38,7 +38,9 @@ def _coder_app(tmp_path: Path, monkeypatch) -> tuple[FastAPI, Path]:
     monkeypatch.setattr(audit, "_SESSIONS_DIR", home / "sessions")
     from localm.plugins.engine import PluginManager
     app = FastAPI()
-    PluginManager(app, external_root=tmp_path / "noplugins").install("coder")
+    app.state.test_plugin_manager = PluginManager(
+        app, external_root=tmp_path / "noplugins")
+    app.state.test_plugin_manager.install("coder")
 
     async def switch_model(name):
         pass
@@ -169,3 +171,65 @@ def test_a_failure_closing_sessions_does_not_block_the_stop(monkeypatch):
     except SystemExit as e:
         exited = e
     assert exited is not None, "a failure closing coder sessions blocked the stop"
+
+
+def test_disabling_the_coder_plugin_ends_its_live_sessions(tmp_path, monkeypatch):
+    app, home = _coder_app(tmp_path, monkeypatch)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setattr(hs, "_engine", None)
+
+    with TestClient(app) as client:
+        sess = _open_session(client, app, proj)
+        app.state.test_plugin_manager.disable("coder")
+
+        assert app.state.coder_sessions.snapshot() == [], (
+            "a live coder session survived the coder plugin being disabled")
+        deadline = time.monotonic() + 30
+        while not sess.closed and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert sess.closed, "the disabled plugin's session was never closed"
+        records = _audit_records(home, sess.checkpoint_id)
+        deadline = time.monotonic() + 30
+        while '"session ended"' not in records[-1] and time.monotonic() < deadline:
+            time.sleep(0.05)
+            records = _audit_records(home, sess.checkpoint_id)
+        assert '"session ended"' in records[-1], records[-1]
+        r = client.post(f"/api/coder/sessions/{sess.id}/stop", headers=_OWNER)
+        assert r.status_code in (404, 405), r.status_code
+
+
+def test_stopping_all_live_sessions_survives_one_that_fails():
+    class _Boom:
+        id = "boom"
+
+        def stop(self):
+            raise RuntimeError("boom")
+
+        def close(self):
+            raise RuntimeError("boom")
+
+    class _Recording:
+        id = "recording"
+
+        def __init__(self):
+            self.stopped = False
+            self.closed = threading.Event()
+
+        def stop(self):
+            self.stopped = True
+
+        def close(self):
+            self.closed.set()
+
+    recording = _Recording()
+    manager = coder_sessions.SessionManager()
+    manager._sessions["boom"] = _Boom()
+    manager._sessions["recording"] = recording
+
+    removed = coder_sessions.stop_all_live_sessions()
+
+    assert removed >= 2
+    assert recording.stopped, "a session after one whose stop raised was not stopped"
+    assert manager.snapshot() == []
+    assert recording.closed.wait(10), "the background close never reached the session"

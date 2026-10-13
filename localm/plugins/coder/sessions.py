@@ -60,7 +60,8 @@ _IDLE_REAP_SECONDS = 24 * 3600
 # The longest close_all_for_exit() waits for live sessions to close.
 _EXIT_CLOSE_BUDGET_S = 5.0
 
-# Every SessionManager created in this process, for close_all_for_exit().
+# Every SessionManager created in this process, for close_all_for_exit() and
+# stop_all_live_sessions().
 _live_managers: weakref.WeakSet[SessionManager] = weakref.WeakSet()
 _live_managers_lock = threading.Lock()
 
@@ -1102,6 +1103,44 @@ class SessionManager:
                 logger.warning("coder: closing session %s failed",
                                getattr(s, "id", "?"), exc_info=True)
         return closed
+
+
+def stop_all_live_sessions() -> int:
+    """End every live session of every SessionManager in this process, for the
+    coder plugin's ``unregister()`` (plugin disable / uninstall).
+
+    Each session is removed from its manager and its agent is told to stop
+    before this returns; the rest of ``close()`` (checkpoint, audit close, the
+    session's browser) finishes on a daemon thread, so the caller never waits
+    on it. A session whose stop or close raises is logged at WARNING and the
+    others still end. Returns how many sessions were removed."""
+    from localm.debuglog import logger
+    with _live_managers_lock:
+        managers = list(_live_managers)
+    sessions: list[CoderSession] = []
+    for manager in managers:
+        with manager._lock:
+            sessions.extend(manager._sessions.values())
+            manager._sessions.clear()
+    for s in sessions:
+        try:
+            s.stop()
+        except Exception:
+            logger.warning("coder: stopping session %s failed",
+                           getattr(s, "id", "?"), exc_info=True)
+
+    def _close() -> None:
+        for s in sessions:
+            try:
+                s.close()
+            except Exception:
+                logger.warning("coder: closing session %s failed",
+                               getattr(s, "id", "?"), exc_info=True)
+
+    if sessions:
+        threading.Thread(target=_close, name="coder-sessions-disable-close",
+                         daemon=True).start()
+    return len(sessions)
 
 
 def close_all_for_exit(timeout_s: Optional[float] = None) -> int:

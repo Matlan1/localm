@@ -712,6 +712,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if interrupted is not None:
             return interrupted
 
+        if healing is not None:
+            healing.unloading = False
         _switch_commit(name, new_engine, sem, activate=activate or was_active,
                        on_active=on_active)
         _log_switch_placement(name, new_engine, evictions)
@@ -1470,8 +1472,11 @@ async def _switch_free_for_reload(loop, name: str, engine,
     semaphore kept) so switch_engine can load it again at a better placement.
     Logs why at INFO, frees it like an eviction victim (``_switch_free_victim``
     against *probe*, the VRAM reading taken before the detach, for a load that
-    needs *needed* bytes) and clears its ``unloading`` flag and
-    ``placement_heal``. Returns the ``VictimRelease``."""
+    needs *needed* bytes) and clears its ``placement_heal``. Its ``unloading``
+    flag stays set until switch_engine commits it as resident again, so a
+    heal that never reaches the commit leaves an engine outside ``_engines``
+    that no ``try_pin_engine`` accepts. Returns the ``VictimRelease``.
+    See test_a_heal_that_never_recommits_leaves_the_engine_unpinnable."""
     from localm.debuglog import logger as _dbg
     heal = getattr(engine, "placement_heal", None)
     placement = getattr(engine, "gpu_placement", None) or {}
@@ -1484,7 +1489,6 @@ async def _switch_free_for_reload(loop, name: str, engine,
     try:
         return await _switch_free_victim(loop, name, engine, probe, needed=needed)
     finally:
-        engine.unloading = False
         engine.placement_heal = None
 
 
@@ -5230,10 +5234,20 @@ def driving_engine(engine):
     nothing re-touches it between rounds unless every round does so itself.
     Touching the clock again on exit resets the idle countdown to "now" the
     moment the task genuinely finishes, so the model is not instantly eligible
-    for eviction the second a long task ends."""
+    for eviction the second a long task ends.
+
+    The pin is taken with ``residency.try_pin_engine``: an engine flagged
+    ``unloading`` (being freed, or evicted out of ``_engines``) is refused with
+    HTTPException 503 asking the caller to retry, and nothing is pinned or
+    touched. An engine evicted out of ``_engines`` keeps that flag, so it is
+    never loaded again here behind the server's back.
+    See test_driving_engine_refuses_an_evicted_engine."""
     name = getattr(engine, "display_name", None)
+    if not residency.try_pin_engine(engine):
+        raise HTTPException(
+            503, f"The model '{name}' is being unloaded and cannot run this "
+            "task now; retry once it has finished unloading.")
     _touch_activity(name)
-    _pin(engine)
     try:
         yield engine
     finally:

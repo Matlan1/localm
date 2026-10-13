@@ -8,13 +8,18 @@ cookie. Rolling the owner key does not touch sessions, the key never lives in a
 cookie, and each session can expire or be revoked on its own.
 
 Mirrors auth.py's keystore discipline: a home-dir JSON file, atomic writes,
-owner-only perms, sha256 of the secret stored and compared constant-time, and a lock
-serialising the read-modify-write. A present-but-unreadable/corrupt store fails
-CLOSED: it verifies no session.
+owner-only perms, sha256 of the secret stored and compared constant-time. Every
+read-modify-write holds the in-process ``_LOCK`` and then the cross-process
+``sessions.json.lock`` (``config._cross_process_lock``), so a writer in another
+process (``localm key recover`` / ``key clear`` against a running server) cannot
+undo it. A present-but-unreadable/corrupt store fails CLOSED: it verifies no
+session.
 """
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import hashlib
 import json
 import secrets
@@ -32,8 +37,13 @@ from localm.debuglog import logger
 _ABS_TTL_S = 400 * 24 * 3600
 _IDLE_TTL_S = 30 * 24 * 3600
 
-# Serialises the read-modify-write of the store (create/revoke/last_used).
+# Serialises the read-modify-write of the store (create/revoke/last_used) within
+# this process. LOCK ORDER: _LOCK (outer) -> sessions.json.lock (inner).
 _LOCK = threading.Lock()
+
+# Wait budget, in seconds, for the cross-process lock on the best-effort writes
+# made on the request path (the last_used stamp, the owner-key back-fill).
+_BEST_EFFORT_LOCK_TIMEOUT_S = 0.5
 
 # mtime-keyed cache for the hot lookup path; invalidated whenever the file is
 # written.
@@ -81,6 +91,35 @@ def _load() -> list:
     _CACHE["mtime"] = key
     _CACHE["records"] = records
     return records
+
+
+def _load_for_update() -> list:
+    """A private copy of the store's records for a read-modify-write, so a save
+    that fails leaves the mtime cache holding only what is on disk."""
+    return copy.deepcopy(_load())
+
+
+@contextlib.contextmanager
+def _store_lock(*, create_dirs: bool = False, timeout: Optional[float] = None):
+    """Hold ``_LOCK`` and the cross-process lock on the session store for a
+    read-modify-write.
+
+    With *create_dirs* the data dir is created first. Without it, a data dir that
+    does not exist means there is no store to change, so only ``_LOCK`` is taken.
+    *timeout* is the cross-process wait budget (None: the config default).
+    Raises ``TimeoutError`` (an ``OSError``) when another process holds the lock
+    past it."""
+    from localm.config import _cross_process_lock, ensure_dirs
+    path = sessions_file()
+    if create_dirs:
+        ensure_dirs()
+        path.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK:
+        if not path.parent.is_dir():
+            yield
+            return
+        with _cross_process_lock(path, timeout=timeout):
+            yield
 
 
 def _save(records: list) -> None:
@@ -175,8 +214,8 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
         "expires": now + float(ttl),
         "idle_ttl": float(idle_ttl),
     }
-    with _LOCK:
-        records = _load()
+    with _store_lock(create_dirs=True):
+        records = _load_for_update()
         records.append(rec)
         # Opportunistically drop expired rows so the store cannot grow without
         # bound as sessions come and go.
@@ -234,8 +273,8 @@ def _touch_last_used(id_hash: str) -> None:
         return
     _last_used_writes[id_hash] = now
     try:
-        with _LOCK:
-            records = _load()
+        with _store_lock(timeout=_BEST_EFFORT_LOCK_TIMEOUT_S):
+            records = _load_for_update()
             changed = False
             for r in records:
                 if r.get("id_hash") == id_hash:
@@ -266,8 +305,8 @@ def revoke(sid: Optional[str]) -> Optional[bool]:
         return False               # nothing presented: a real answer, not a failure
     h = _hash(sid.strip())
     try:
-        with _LOCK:
-            records = _load()
+        with _store_lock():
+            records = _load_for_update()
             remaining = [r for r in records if r.get("id_hash") != h]
             if len(remaining) == len(records):
                 return False
@@ -293,8 +332,8 @@ def revoke_by_key_hash(key_hash: Optional[str]) -> Optional[int]:
     if not key_hash:
         return 0
     try:
-        with _LOCK:
-            records = _load()
+        with _store_lock():
+            records = _load_for_update()
             keep = [r for r in records if r.get("key_hash") != key_hash]
             removed = len(records) - len(keep)
             if removed:
@@ -322,8 +361,8 @@ def relink_key_hash(old_hash: Optional[str], new_hash: Optional[str]) -> int:
     if not old_hash or not new_hash or old_hash == new_hash:
         return 0
     try:
-        with _LOCK:
-            records = _load()
+        with _store_lock():
+            records = _load_for_update()
             changed = 0
             for r in records:
                 if r.get("key_hash") == old_hash:
@@ -359,8 +398,8 @@ def remember_owner_key_minted(sid: Optional[str]) -> bool:
         return False
     h = _hash(sid.strip())
     try:
-        with _LOCK:
-            records = _load()
+        with _store_lock(timeout=_BEST_EFFORT_LOCK_TIMEOUT_S):
+            records = _load_for_update()
             for r in records:
                 if r.get("id_hash") == h:
                     if r.get("owner_key_minted") is True:
@@ -391,8 +430,8 @@ def revoke_all() -> Optional[int]:
     devices were signed out); a caller must ask ``is None`` to distinguish a failure
     from an empty store."""
     try:
-        with _LOCK:
-            records = _load()
+        with _store_lock():
+            records = _load_for_update()
             n = len(records)
             if n:
                 _save([])
@@ -407,8 +446,8 @@ def sweep() -> int:
     """Prune expired sessions (called on startup). Returns the count removed."""
     now = time.time()
     try:
-        with _LOCK:
-            records = _load()
+        with _store_lock():
+            records = _load_for_update()
             keep = [r for r in records if not _expired(r, now)]
             removed = len(records) - len(keep)
             if removed:
