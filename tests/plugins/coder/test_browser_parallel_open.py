@@ -318,3 +318,46 @@ class TestSessionClosedWhileItsBrowserStarts:
         assert bsession.get(sid) is fleet.built[1]
         assert fleet.built[1].stopped is False
         assert bt.owned_session_id(OWNER) == sid
+
+
+class TestBrowserCloseToolWhileItsBrowserStarts:
+    def test_close_cancels_the_start_and_says_so(self, tmp_path, fleet):
+        from localm.browser import session as bsession
+        from localm.plugins.coder.tools import browser as bt
+        sid = "coder-" + OWNER
+        before = set(bsession.active_ids())
+        threads, results = _navigate_from_threads(tmp_path, OWNER, [URL_A])
+        assert fleet.entered(sid).wait(WAIT), "the start never began"
+        closed = bt.tool_browser_close(tmp_path, _session=_Session(OWNER))
+        fleet.gate(sid).set()
+        _join(threads)
+        assert closed.ok is True, closed.output
+        assert "Cancelled" in closed.output, closed.output
+        assert set(bsession.active_ids()) == before, (
+            "the browser browser_close cancelled was registered")
+        assert fleet.built[0].stopped is True, "the browser was left running"
+        assert bt.owned_session_id(OWNER) is None
+        assert getattr(results[0], "ok", True) is False, getattr(
+            results[0], "output", results[0])
+        assert "closed while it was starting" in results[0].output
+
+    def test_close_with_nothing_open_or_starting_says_so(self, tmp_path, fleet):
+        from localm.plugins.coder.tools import browser as bt
+        closed = bt.tool_browser_close(tmp_path, _session=_Session(OWNER))
+        assert closed.ok is True
+        assert closed.output == "No browser session was open."
+
+    def test_close_of_another_session_leaves_this_start_alone(self, tmp_path, fleet):
+        from localm.browser import session as bsession
+        from localm.plugins.coder.tools import browser as bt
+        sid = "coder-" + OWNER
+        threads, results = _navigate_from_threads(tmp_path, OWNER, [URL_A])
+        assert fleet.entered(sid).wait(WAIT), "the start never began"
+        other = bt.tool_browser_close(tmp_path, _session=_Session(OTHER))
+        fleet.gate(sid).set()
+        _join(threads)
+        assert other.output == "No browser session was open."
+        assert getattr(results[0], "ok", False) is True, getattr(
+            results[0], "output", results[0])
+        assert bsession.get(sid) is fleet.built[0]
+        assert fleet.built[0].stopped is False

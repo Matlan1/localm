@@ -111,8 +111,7 @@ def _start_browser(owner: str, headless: bool):
             _OWNED[owner] = sid
     if aborted:
         live.stop()
-        raise RuntimeError(
-            "The coder session closed while its browser was starting.")
+        raise RuntimeError("The browser was closed while it was starting.")
     return live
 
 
@@ -256,17 +255,34 @@ def tool_browser_network(cwd: Path, _session=None) -> ToolResult:
 
 
 def tool_browser_close(cwd: Path, _session=None) -> ToolResult:
-    """Close this session's browser and forget its state."""
+    """Close this session's browser and forget its state. A browser still
+    starting is stopped when its start finishes, and the calls waiting on that
+    start get an error."""
     if not _enabled(_session):
         return _disabled()
-    from localm.browser import session as bsession
-    owner = _owner_of(_session)
-    sid = _OWNED.pop(owner, None)
-    if sid is None:
+    closed, cancelled = _close(_owner_of(_session))
+    if cancelled:
+        return ToolResult.success("Cancelled the browser that was starting.",
+                                  summary="cancelled start")
+    if not closed:
         return ToolResult.success("No browser session was open.",
                                   summary="nothing to close")
-    bsession.close(sid)
     return ToolResult.success("Closed the browser session.", summary="closed")
+
+
+def _close(owner: str) -> tuple:
+    """Close *owner*'s browser and cancel its start, if one is running.
+
+    Returns (closed, cancelled): whether an open browser was closed, and
+    whether a start in flight was marked to stop its browser when it finishes."""
+    from localm.browser import session as bsession
+    with _STARTING_LOCK:
+        sid = _OWNED.pop(owner, None)
+        cancelled = owner in _STARTING
+        if cancelled:
+            _ABORTED.add(owner)
+    closed = bsession.close(sid) if sid is not None else False
+    return bool(closed), cancelled
 
 
 def close_for_owner(owner: str) -> bool:
@@ -274,16 +290,8 @@ def close_for_owner(owner: str) -> bool:
     so a browser never outlives the coder session that opened it. A browser still
     starting is stopped when its start finishes. True when a browser was closed
     or a start was cancelled."""
-    from localm.browser import session as bsession
-    owner = str(owner)
-    with _STARTING_LOCK:
-        sid = _OWNED.pop(owner, None)
-        starting = owner in _STARTING
-        if starting:
-            _ABORTED.add(owner)
-    if sid is None:
-        return starting
-    return bsession.close(sid) or starting
+    closed, cancelled = _close(str(owner))
+    return closed or cancelled
 
 
 def owned_session_id(owner: str) -> Optional[str]:

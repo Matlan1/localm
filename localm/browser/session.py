@@ -137,8 +137,11 @@ class BrowserSession:
         #: Held while start() gives up on a launch and while the launch reports
         #: that it has finished, so exactly one of the two happens first.
         self._start_lock = threading.Lock()
-        #: True once start() has given up on a launch that was still running.
+        #: True once start() has given up on a launch that was still running,
+        #: or stop() was called while it ran.
         self._abandoned = False
+        #: True once stop() was called while the launch was still running.
+        self._stopped_while_starting = False
         self._pw = None
         self._browser = None
         self._ctx = None
@@ -161,9 +164,10 @@ class BrowserSession:
         """Launch the browser and block until it is ready to drive.
 
         Raises the launch's own error when it fails, and BrowserUnavailableError
-        when it is not ready within *timeout* seconds. A launch still running
-        after that closes the browser it started as soon as it finishes, and the
-        session is closed."""
+        when it is not ready within *timeout* seconds or stop() is called from
+        another thread before it is ready. A launch still running after that
+        closes the browser it started as soon as it finishes, and the session is
+        closed."""
         _require_playwright()
         self._thread = threading.Thread(
             target=self._run_loop, name="browser-" + self.session_id, daemon=True)
@@ -175,6 +179,9 @@ class BrowserSession:
                     self._closed = True
                     raise BrowserUnavailableError(
                         "the browser did not start in time")
+        if self._stopped_while_starting:
+            raise BrowserUnavailableError(
+                "the browser was stopped while it was starting")
         if self._start_error is not None:
             raise self._start_error
 
@@ -190,7 +197,9 @@ class BrowserSession:
                 self._closed = True
                 self._close_started(loop)
                 if not self._finish_start():
-                    logger.warning(
+                    logger.log(
+                        logging.DEBUG if self._stopped_while_starting
+                        else logging.WARNING,
                         "browser %s: the launch failed after start() gave up: %s",
                         self.session_id, exc)
                 return
@@ -498,10 +507,24 @@ class BrowserSession:
             pass
 
     def stop(self, timeout: float = 30.0) -> None:
-        """Close the browser and stop the loop. Safe to call more than once.
+        """Close the browser and stop the loop. Safe to call more than once, and
+        from another thread while start() is still waiting.
 
         A session whose start() failed or gave up is already closed, so this
-        returns at once for it."""
+        returns at once for it. Called while the launch is still running, it
+        makes start() raise BrowserUnavailableError, and waits up to *timeout*
+        seconds for the launch to finish and close what it started."""
+        with self._start_lock:
+            starting = (self._thread is not None and not self._ready.is_set()
+                        and not self._abandoned)
+            if starting:
+                self._abandoned = True
+                self._stopped_while_starting = True
+                self._closed = True
+                self._ready.set()
+        if starting:
+            self._thread.join(timeout=timeout)
+            return
         if self._closed or self._loop is None:
             self._closed = True
             return
