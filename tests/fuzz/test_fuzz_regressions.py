@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from localm import install_manifest, media_workflows, model_meta
+from localm import install_manifest, media_workflows, model_meta, textnorm
 from localm.inference import gbnf
 from localm.inference.backends.base import InvalidGrammarError
 from localm.inference import hf_shard_index_safety, hf_tokenizer_safety
@@ -335,3 +335,96 @@ class TestGgufArrayCountPastTheBuffer:
         assert gguf.gguf_architecture(path) is None
         assert gguf.gguf_kv_bytes_per_token(path) == 0
         assert gguf.gguf_expert_count(path) == 0
+
+
+_HEADER_OPEN, _HEADER_CLOSE = "<|start_header_id|>", "<|end_header_id|>"
+_INERT = ["<|message|>", "[TOOL_CALLS]", "<unused7>", "<|channel|>", "<|end|>",
+          "<|return|>", "<turn|>", "<|tool>", "<tool|>", "<think|>", "<|think|>"]
+_TURN_OPEN_ROLES = [("<start_of_turn>", "model"), ("<start_of_turn>", "assistant"),
+                    ("<|im_start|>", "assistant"), ("<|im_start|>", "system"),
+                    ("<|turn>", "model"), ("<|start|>", "assistant")]
+
+
+def _streamed(text: str, size: int) -> str:
+    pieces = [text[i:i + size] for i in range(0, len(text), size)]
+    return "".join(textnorm.scrub_stream(iter(pieces)))
+
+
+class TestScrubTextFixedPoint:
+    @pytest.mark.parametrize("inner", _INERT)
+    def test_a_marker_between_the_header_halves_does_not_leak_the_halves(self, inner):
+        once = textnorm.scrub_text(f"{_HEADER_OPEN}{inner}{_HEADER_CLOSE}")
+        assert once == ""
+        assert textnorm.scrub_text(once) == once
+
+    def test_a_plain_role_header_is_still_removed(self):
+        assert textnorm.scrub_text(f"{_HEADER_OPEN}user{_HEADER_CLOSE}") == ""
+
+    def test_the_minimized_nightly_input_reaches_a_fixed_point(self):
+        text = f"{_HEADER_OPEN}<|message|>{_HEADER_CLOSE}"
+        assert textnorm.scrub_text(text) == ""
+
+    def test_nested_headers_reach_a_fixed_point(self):
+        text = _HEADER_OPEN * 3 + _HEADER_CLOSE * 3
+        assert textnorm.scrub_text(text) == ""
+
+    def test_a_marker_split_by_another_marker_is_removed(self):
+        assert textnorm.scrub_text("a<|mes<|end|>sage|>b") == "ab"
+        assert textnorm.scrub_text("a<unused<|end|>7>b") == "ab"
+
+    def test_a_lone_header_half_still_survives_as_text(self):
+        for safe in (f"{_HEADER_OPEN}nobody", f"x{_HEADER_CLOSE}"):
+            assert textnorm.scrub_text(safe) == safe
+
+    @pytest.mark.parametrize("size", [1, 2, 3, 7, 1000])
+    def test_streaming_agrees_with_one_shot_on_an_interposed_marker(self, size):
+        for text in (f"hi {_HEADER_OPEN}<|message|>{_HEADER_CLOSE}\nok",
+                     "hi <|mes<|end|>sage|>ok",
+                     "<start_of_turn><|message|>model\nok"):
+            assert _streamed(text, size) == textnorm.scrub_text(text)
+
+    def test_passes_are_capped_and_the_cap_is_logged(self, monkeypatch, caplog):
+        monkeypatch.setattr(textnorm, "_MAX_SCRUB_PASSES", 2)
+        text = _HEADER_OPEN * 5 + _HEADER_CLOSE * 5
+        with caplog.at_level("WARNING"):
+            out = textnorm.scrub_text(text)
+        assert _HEADER_OPEN in out
+        assert any("scrub_text still changed" in r.getMessage() for r in caplog.records)
+
+
+class TestScrubTextRoleWordLeak:
+    @pytest.mark.parametrize("opener,role", _TURN_OPEN_ROLES)
+    @pytest.mark.parametrize("inner", ["<|message|>", "[TOOL_CALLS]", "<unused7>",
+                                       "<|message|><|end|>", "<|channel|>"])
+    def test_a_marker_between_the_turn_open_and_its_role_does_not_leak_the_role(
+            self, opener, role, inner):
+        assert textnorm.scrub_text(f"{opener}{inner}{role}") == ""
+        assert textnorm.scrub_text(f"{opener}{inner}{role}tail") == "tail"
+
+    def test_the_turn_open_still_takes_its_role_word_when_adjacent(self):
+        assert textnorm.scrub_text("<start_of_turn>model") == ""
+
+    def test_a_turn_open_followed_by_a_marker_but_no_role_is_still_removed(self):
+        assert textnorm.scrub_text("<start_of_turn><|message|>hello") == "hello"
+
+    def test_a_turn_open_before_a_think_marker_is_still_removed_alone(self):
+        assert textnorm.scrub_text("<|turn><|channel|>thought\nx") == "<think>\nx"
+        assert textnorm.scrub_text("<|turn><channel|>xx") == "\n</think>\nxx"
+
+    @pytest.mark.parametrize("size", [1, 2, 3, 5, 1000])
+    def test_streaming_agrees_with_one_shot_when_the_role_arrives_late(self, size):
+        for text in ("<start_of_turn><|message|><|end|>model\nhi",
+                     "ab<|im_start|>[TOOL_CALLS]assistant cd"):
+            assert _streamed(text, size) == textnorm.scrub_text(text)
+
+
+class TestScrubMapOnANestedMarker:
+    def test_the_aligner_refuses_a_reply_that_needs_a_second_pass(self):
+        from localm.inference.logprobs import LogprobAligner, LogprobAlignmentError
+
+        text = f"{_HEADER_OPEN}<|message|>{_HEADER_CLOSE}ok"
+        aligner = LogprobAligner()
+        aligner.add([(text.encode("utf-8"), -0.1, ())])
+        aligner.received(textnorm.scrub_text(text))
+        with pytest.raises(LogprobAlignmentError):
+            aligner.take([(0, 2)])
