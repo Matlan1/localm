@@ -471,10 +471,18 @@ def plugin_refresh(name):
         console.print(f"[red]No such installed first-party plugin: "
                       f"{escape(str(name))}[/red]")
         sys.exit(1)
-    if refreshed:
-        for n in refreshed:
-            console.print(f"[green]Refreshed[/green] plugin [bold]{escape(n)}[/bold]")
-    else:
+    except RuntimeError as e:
+        console.print(f"[red]Could not refresh {escape(str(name))}:[/red] {escape(str(e))}")
+        sys.exit(1)
+    failed = dict(getattr(mgr, "last_refresh_failures", {}) or {})
+    for n in refreshed:
+        console.print(f"[green]Refreshed[/green] plugin [bold]{escape(n)}[/bold]")
+    for n, err in failed.items():
+        console.print(f"[red]Could not refresh[/red] plugin [bold]{escape(n)}[/bold]: "
+                      f"{escape(err)}")
+    if failed:
+        sys.exit(1)
+    if not refreshed:
         console.print("[dim]All first-party plugins are up to date.[/dim]")
 
 

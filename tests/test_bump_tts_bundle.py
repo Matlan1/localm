@@ -30,10 +30,16 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _ROOT / "scripts" / "bump_tts_bundle.py"
-_MJS = "ort-wasm-simd-threaded.jsep.mjs"
-_WASM = "ort-wasm-simd-threaded.jsep.wasm"
-_DEV_ORT = "1.22.0-dev.20250409-89f8206ba4"
-_NEW_DEV_ORT = "1.23.0-dev.20251101-abcdef1234"
+_MJS = "ort-wasm-simd-threaded.asyncify.mjs"
+_WASM = "ort-wasm-simd-threaded.asyncify.wasm"
+_NOTICE = (_ROOT / "localm/plugins/builtin/tts/static/vendor/NOTICE.md").read_text(encoding="utf-8")
+_DEV_ORT = re.search(r"^\| `onnxruntime-web` \| ([^ |]+) \|", _NOTICE, re.M).group(1)
+_DEV_ORT_SHA = _DEV_ORT.rsplit("-", 1)[1]
+_NEW_DEV_ORT = "1.99.0-dev.20991101-abcdef1234"
+_TF_MAJOR = int(re.search(r"^\| `@huggingface/transformers` \(transformers\.js\) \| (\d+)\.", _NOTICE,
+                          re.M).group(1))
+_PEER = f"^{_TF_MAJOR}.0.0"
+_NEXT_PEER = f"^{_TF_MAJOR + 1}.0.0"
 
 
 def _load():
@@ -79,14 +85,15 @@ def _shipped_voices(bump) -> set:
     return set(json.loads((_ROOT / bump.VOICES_REL).read_text(encoding="utf-8")))
 
 
-def _built(bump, *, ort=_DEV_ORT, runtime=None, bundle=b"new bundle\n", peer="^3.5.1", voices=None):
+def _built(bump, *, ort=_DEV_ORT, runtime=None, bundle=b"new bundle\n", peer=_PEER, voices=None,
+           runtime_package="onnxruntime-web"):
     voices = voices if voices is not None else _shipped_voices(bump)
     return bump.Built(
         bundle=bundle,
         runtime=runtime if runtime is not None else {_MJS: b"new mjs\n", _WASM: b"\0asm new wasm!"},
         licenses={"kokoro-js": b"kokoro licence\n", "transformers": b"transformers licence\n"},
         versions={"onnxruntime-web": ort}, kokoro_peer_range=peer,
-        voices=voices)
+        voices=voices, runtime_package=runtime_package)
 
 
 class Fakes:
@@ -150,8 +157,8 @@ def test_the_pins_are_read_from_the_real_notice(bump):
 def test_every_region_the_script_edits_matches_the_real_files_exactly_once(bump):
     notice, _ = bump._read_text(_ROOT / bump.NOTICE_REL)
     test_text, _ = bump._read_text(_ROOT / bump.TEST_REL)
-    for rx in (*bump._ROW_RES.values(), bump._ESBUILD_RE, bump._COPIES_RE, bump._ENV_VERSION_RE,
-               bump._ORT_SOURCE_RE, *bump._SIZE_RES.values()):
+    for rx in (*bump._ROW_RES.values(), bump._ESBUILD_RE, bump._PROVENANCE_RE, bump._SIZES_RE,
+               bump._ORT_SOURCE_RE):
         assert len(rx.findall(notice)) == 1, rx.pattern
     for key, rx in bump._TEST_RES.items():
         assert len(rx.findall(test_text)) == 1, key
@@ -164,6 +171,37 @@ def test_rewriting_notice_with_the_pinned_versions_is_a_no_op_once_sizes_match(b
     notice, _ = bump._read_text(_ROOT / bump.NOTICE_REL)
     built = _built(bump, runtime=runtime)
     assert bump.rewrite_notice(notice, pins, pins, built, None) == notice
+
+
+def test_the_stand_in_runtime_names_are_the_ones_the_tree_ships(bump):
+    shipped = sorted(p.name for p in (_ROOT / bump.RUNTIME_REL).iterdir())
+    assert shipped == sorted([_MJS, _WASM])
+
+
+def test_the_notice_provenance_names_the_package_the_files_were_copied_from(bump):
+    pins = _real_pins(bump)
+    notice, _ = bump._read_text(_ROOT / bump.NOTICE_REL)
+    from_ort = bump.rewrite_notice(notice, pins, pins, _built(bump), None)
+    assert f"from `onnxruntime-web@{pins.ort}`" in from_ort
+    assert "does not ship these files in its own `dist/`" in from_ort
+    from_transformers = bump.rewrite_notice(
+        notice, pins, pins, _built(bump, runtime_package="@huggingface/transformers"), None)
+    assert f"from `@huggingface/transformers@{pins.transformers}`" in from_transformers
+    assert "onnxruntime-web@" not in bump._PROVENANCE_RE.search(from_transformers).group(0)
+    assert bump.rewrite_notice(from_transformers, pins, pins, _built(bump), None) == from_ort
+
+
+def test_the_notice_size_listing_follows_the_runtime_files_and_keeps_its_columns(bump):
+    pins = _real_pins(bump)
+    notice, _ = bump._read_text(_ROOT / bump.NOTICE_REL)
+    built = _built(bump, runtime={"ort-wasm-simd-threaded.mjs": b"x" * 5,
+                                  "ort-wasm-simd-threaded.wasm": b"y" * 1234567})
+    out = bump.rewrite_notice(notice, pins, pins, built, None)
+    listing = [line for line in out.splitlines() if line.startswith("    onnxruntime/ort-wasm")]
+    assert len(listing) == 2 and len(listing[0]) == len(listing[1])
+    assert listing[0].startswith("    onnxruntime/ort-wasm-simd-threaded.mjs ") and listing[0].endswith(" 5 B")
+    assert listing[1].endswith("wasm  1234567 B")
+    assert f"onnxruntime/{_MJS}" not in out
 
 
 def test_the_notice_documents_the_entry_and_the_flags_the_script_builds_with(bump):
@@ -182,6 +220,20 @@ def test_the_guard_test_pins_follow_the_runtime_bytes(bump):
     assert bump._sha256_b64(built.runtime[_WASM]) in out
     assert bump._sha256_b64(built.runtime[_MJS]) in out
     assert f"const EXPECTED_WASM_BYTES = {len(built.runtime[_WASM])};" in out
+
+
+def test_the_guard_test_follows_the_runtime_names_and_the_package_they_came_from(bump):
+    pins = _real_pins(bump)
+    pins.ort = _NEW_DEV_ORT
+    built = _built(bump, ort=_NEW_DEV_ORT, runtime={"a.mjs": b"m\n", "b.wasm": b"\0asm"})
+    text, _ = bump._read_text(_ROOT / bump.TEST_REL)
+    out = bump.rewrite_guard_test(text, pins, built)
+    assert 'const MJS = "a.mjs";' in out and 'const WASM = "b.wasm";' in out
+    assert f'const VENDORED_ORT = "{_NEW_DEV_ORT}";' in out
+    assert f"npm pack onnxruntime-web@{_NEW_DEV_ORT}  ->  package/dist/" in out
+    via_transformers = _built(bump, runtime=built.runtime, runtime_package="@huggingface/transformers")
+    out = bump.rewrite_guard_test(text, pins, via_transformers)
+    assert f"npm pack @huggingface/transformers@{pins.transformers}  ->  package/dist/" in out
 
 
 def test_a_region_found_twice_is_refused_by_the_rewrite(bump):
@@ -208,8 +260,11 @@ def test_a_notice_missing_a_region_is_refused_by_name(bump):
 # --------------------------------------------------------------------------- #
 
 def test_the_export_names_are_located_on_the_real_shipped_bundle(bump):
-    text = (_ROOT / bump.BUNDLE_REL).read_bytes().decode("utf-8")
-    assert bump.locate_espeak_exports(text) == ("Y8", "te")
+    text = bump._lf((_ROOT / bump.BUNDLE_REL).read_bytes()).decode("utf-8")
+    appended = re.search(r"\nexport\{([\w$]+) as espeakWorker,([\w$]+) as espeakFS\};\n$", text)
+    assert appended
+    upstream = text[:appended.start() + 1]
+    assert bump.locate_espeak_exports(upstream) == appended.groups()
 
 
 _SNIPPET = ("var A1=new Promise((s=>{n.calledRun?s(new n.eSpeakNGWorker):n.onRuntimeInitialized=()=>"
@@ -367,18 +422,54 @@ def test_an_ambiguous_notice_region_writes_nothing(bump, repo, fakes):
 
 
 def test_a_changed_runtime_file_set_is_refused_as_needing_a_code_update(bump, repo, fakes, capsys):
-    fakes.built = _built(bump, runtime={_MJS: b"m", "ort-wasm-simd-threaded.asyncify.mjs": b"a"})
+    argv, _ = _bump_argv(bump)
+    for runtime in ({_MJS: b"m", "other.mjs": b"a"}, {_MJS: b"m", _WASM: b"\0asm", "extra.wasm": b"\0asm"},
+                    {_MJS: b"m"}):
+        fakes.built = _built(bump, runtime=runtime)
+        before = _snapshot(repo)
+        assert fakes.run(*argv, "--write") == 1
+        assert _snapshot(repo) == before
+        assert "needs a code update" in capsys.readouterr().out
+
+
+def test_a_runtime_file_missing_from_the_tree_is_created_by_the_write(bump, repo, fakes):
+    (repo / bump.RUNTIME_REL / _WASM).unlink()
+    argv, _ = _bump_argv(bump)
+    assert fakes.run(*argv, "--write") == 0
+    assert (repo / bump.RUNTIME_REL / _WASM).read_bytes() == b"\0asm new wasm!"
+
+
+def test_a_renamed_runtime_replaces_the_old_files_and_a_dry_run_only_reports_it(
+        bump, repo, fakes, capsys):
+    old_names = ("ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm")
+    for name in old_names:
+        (repo / bump.RUNTIME_REL / name).write_bytes(b"stale " + name.encode())
+    argv, _ = _bump_argv(bump)
     before = _snapshot(repo)
+    assert fakes.run(*argv) == 0
+    out = capsys.readouterr().out
+    assert all(f"remove  {bump.RUNTIME_REL}/{name}" in out for name in old_names)
+    assert _snapshot(repo) == before
+    assert fakes.run(*argv, "--write") == 0
+    assert sorted(p.name for p in (repo / bump.RUNTIME_REL).iterdir()) == sorted([_MJS, _WASM])
+
+
+def test_a_write_that_fails_after_removing_a_stale_file_brings_it_back(bump, repo, fakes, monkeypatch):
+    stale = repo / bump.RUNTIME_REL / "ort-wasm-simd-threaded.jsep.wasm"
+    stale.write_bytes(b"\0asm stale")
+    before = _snapshot(repo)
+    real_unlink = Path.unlink
+
+    def failing_unlink(self, *args, **kwargs):
+        if self.name == stale.name:
+            real_unlink(self, *args, **kwargs)
+            raise OSError("late failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
     argv, _ = _bump_argv(bump)
     assert fakes.run(*argv, "--write") == 1
     assert _snapshot(repo) == before
-    assert "needs a code update" in capsys.readouterr().out
-
-
-def test_a_runtime_file_missing_from_the_tree_is_refused(bump, repo, fakes):
-    (repo / bump.RUNTIME_REL / _WASM).unlink()
-    argv, _ = _bump_argv(bump)
-    assert fakes.run(*argv, "--write") == 1
 
 
 def test_a_write_that_fails_part_way_restores_the_files_already_written(bump, repo, fakes, monkeypatch):
@@ -417,7 +508,7 @@ def test_a_kokoro_bump_moves_the_kokoro_row_only(bump, repo, fakes):
 
 
 def test_a_major_move_is_called_out_when_kokoro_js_accepts_it(bump, repo, fakes, capsys):
-    fakes.built = _built(bump, peer="^4.0.0")
+    fakes.built = _built(bump, peer=_NEXT_PEER)
     argv, _ = _bump_argv(bump, bump_part=(1, 0, 0))
     assert fakes.run(*argv) == 0
     assert "MAJOR BOUNDARY in transformers.js" in capsys.readouterr().out
@@ -429,8 +520,21 @@ def test_a_move_outside_the_range_kokoro_js_declares_is_refused_and_writes_nothi
     argv, _ = _bump_argv(bump, bump_part=(1, 0, 0))
     assert fakes.run(*argv, "--write") == 1
     out = capsys.readouterr().out
-    assert "declares @huggingface/transformers ^3.5.1" in out and "needs a code update" in out
+    assert f"declares @huggingface/transformers {_PEER}" in out and "needs a code update" in out
     assert _snapshot(repo) == before
+
+
+def test_a_kokoro_js_and_transformers_major_pair_verified_in_a_browser_is_not_reported(bump):
+    ((kokoro, major),) = bump.VERIFIED_BEYOND_PEER_RANGE
+    built = _built(bump, peer=f"^{major - 1}.5.1")
+    pins = bump.Pins(kokoro=kokoro, transformers=f"{major}.0.0", ort=_DEV_ORT, phonemizer="1.2.1",
+                     esbuild="0.28.2")
+    assert bump.peer_mismatch(built, pins) is None
+    pins.kokoro = "9.9.9"
+    assert "declares @huggingface/transformers" in bump.peer_mismatch(built, pins)
+    pins.kokoro = kokoro
+    pins.transformers = f"{major + 1}.0.0"
+    assert "declares @huggingface/transformers" in bump.peer_mismatch(built, pins)
 
 
 def test_a_voice_the_package_adds_is_listed_but_does_not_block(bump, repo, fakes, capsys):
@@ -487,7 +591,7 @@ def test_verify_reports_identical_on_a_consistent_tree(bump, consistent, fakes, 
 def test_verify_reads_the_licence_by_the_abbreviated_sha_without_the_github_api(bump, consistent, fakes):
     assert fakes.run("--verify") == 0
     assert fakes.urls == [
-        "https://raw.githubusercontent.com/microsoft/onnxruntime/89f8206ba4/LICENSE"]
+        f"https://raw.githubusercontent.com/microsoft/onnxruntime/{_DEV_ORT_SHA}/LICENSE"]
 
 
 @pytest.mark.parametrize("victim", ["bundle", "wasm", "mjs", "licence", "ort_licence", "notice", "guard",
@@ -499,14 +603,22 @@ def test_verify_reports_not_identical_when_any_one_file_differs(bump, consistent
             "guard": bump.TEST_REL, "ort_source": bump.NOTICE_REL}[victim]
     target = consistent / path
     data = target.read_bytes()
-    owned = {"notice": (rb"(jsep\.mjs +)(\d+)", rb"\g<1>1"),
+    owned = {"notice": (rb"(asyncify\.mjs +)(\d+)", rb"\g<1>1"),
              "guard": (rb"(EXPECTED_WASM_BYTES = )(\d+)", rb"\g<1>7"),
-             "ort_source": (rb"(repository at commit `)89f8", rb"\g<1>00f8")}
+             "ort_source": (rb"(repository at commit `)([0-9a-f]{4})", rb"\g<1>zzzz")}
     tampered = re.sub(*owned[victim], data, count=1) if victim in owned else data + b"x"
     assert tampered != data
     target.write_bytes(tampered)
     assert fakes.run("--verify") == 1
     assert "NOT IDENTICAL" in capsys.readouterr().out
+
+
+def test_verify_reports_not_identical_when_a_stale_runtime_file_sits_in_the_tree(
+        bump, consistent, fakes, capsys):
+    (consistent / bump.RUNTIME_REL / "ort-wasm-simd-threaded.jsep.wasm").write_bytes(b"\0asm stale")
+    assert fakes.run("--verify") == 1
+    out = capsys.readouterr().out
+    assert "NOT IDENTICAL" in out and "remove  " in out
 
 
 def test_verify_refuses_a_tree_whose_recorded_runtime_version_is_not_what_transformers_pins(
@@ -538,8 +650,7 @@ def test_the_pin_report_names_the_advancer_of_each_bundle_row():
     assert "rebuilds the TTS bundle" in cp._vendored_advancer("transformers.js")
     assert "transformers.js" in cp._vendored_advancer("onnxruntime-web")
     for name in ("vendored transformers.js", "vendored onnxruntime-web"):
-        assert "by hand" not in cp.ACCEPTED_BLOCKERS[name][1]
-        assert "no automation" not in cp.ACCEPTED_BLOCKERS[name][1]
+        assert name not in cp.ACCEPTED_BLOCKERS
 
 
 # --------------------------------------------------------------------------- #
@@ -574,9 +685,10 @@ def test_a_bundle_without_exactly_one_voices_fetch_is_refused(bump, upstream):
 def test_the_shipped_bundle_is_the_unpinned_one_with_the_voices_pin_applied(bump):
     shipped = (_ROOT / bump.BUNDLE_REL).read_bytes()
     revision = bump.pinned_kokoro_revision()
-    pinned_call = f'fetch(d.replace("/resolve/main/","/resolve/{revision}/"))'.encode()
-    assert shipped.count(pinned_call) == 1
-    assert bump.pin_voices_fetch(shipped.replace(pinned_call, b"fetch(d)"), revision) == shipped
+    pinned_call = re.compile(
+        rb'fetch\((\w+)\.replace\("/resolve/main/","/resolve/' + revision.encode() + rb'/"\)\)')
+    assert len(pinned_call.findall(shipped)) == 1
+    assert bump.pin_voices_fetch(pinned_call.sub(rb"fetch(\1)", shipped), revision) == shipped
 
 
 def test_the_pinned_revision_is_read_from_tts_util(bump, tmp_path):
@@ -607,7 +719,7 @@ def test_rebuilding_the_pinned_versions_reproduces_the_shipped_files(bump, tmp_p
 #  The install checks and the helpers around the build                        #
 # --------------------------------------------------------------------------- #
 
-_BUNDLE = b'var a="3.8.1";const u="ort-wasm-simd-threaded.jsep.mjs",w="ort-wasm-simd-threaded.jsep.wasm";\n'
+_BUNDLE = (b'var a="3.8.1";const u="' + _MJS.encode() + b'",w="' + _WASM.encode() + b'";\n')
 
 
 def _pins(bump):
@@ -699,8 +811,43 @@ def test_a_bundle_naming_no_runtime_file_is_refused(bump, installed):
 
 def test_a_runtime_file_the_package_does_not_ship_is_refused_as_needing_a_code_update(bump, installed):
     (installed / "node_modules" / "@huggingface" / "transformers" / "dist" / _WASM).unlink()
-    with pytest.raises(bump.Refused, match="does not ship it in dist/; this release needs a code update"):
+    with pytest.raises(bump.Refused, match="ships it in dist/; this release needs a code update"):
         _collect(bump, installed)
+
+
+def _move_runtime_to_onnxruntime_web(installed):
+    transformers = installed / "node_modules" / "@huggingface" / "transformers" / "dist"
+    ort = installed / "node_modules" / "onnxruntime-web" / "dist"
+    ort.mkdir()
+    for name in (_MJS, _WASM):
+        (ort / name).write_bytes((transformers / name).read_bytes() + b" from ort")
+        (transformers / name).unlink()
+    return ort
+
+
+def test_runtime_files_the_transformers_package_lacks_come_from_onnxruntime_web(bump, installed):
+    _move_runtime_to_onnxruntime_web(installed)
+    built = _collect(bump, installed, _BUNDLE + _DEV_ORT.encode())
+    assert built.runtime == {_MJS: b"mjs bytes\n from ort", _WASM: b"\0asm wasm bytes from ort"}
+    assert built.runtime_package == "onnxruntime-web"
+
+
+def test_runtime_files_present_in_transformers_dist_are_taken_from_there(bump, installed):
+    assert _collect(bump, installed).runtime_package == "@huggingface/transformers"
+
+
+def test_runtime_files_taken_from_onnxruntime_web_need_its_version_string_in_the_bundle(bump, installed):
+    _move_runtime_to_onnxruntime_web(installed)
+    with pytest.raises(bump.Refused, match="does not contain the onnxruntime-web version string"):
+        _collect(bump, installed, _BUNDLE)
+
+
+def test_runtime_files_split_between_two_packages_are_refused(bump, installed):
+    ort = _move_runtime_to_onnxruntime_web(installed)
+    (installed / "node_modules" / "@huggingface" / "transformers" / "dist" / _MJS).write_bytes(b"x")
+    with pytest.raises(bump.Refused, match="more than one package"):
+        _collect(bump, installed, _BUNDLE + _DEV_ORT.encode())
+    assert ort.is_dir()
 
 
 @pytest.mark.parametrize("package", ["kokoro-js", "@huggingface/transformers"])
@@ -765,7 +912,8 @@ def test_a_rollback_removes_a_file_the_failed_write_had_created(bump, tmp_path, 
 def test_the_licence_source_in_notice_must_agree_with_the_pinned_version(bump):
     notice, _ = bump._read_text(_ROOT / bump.NOTICE_REL)
     assert bump.ort_source_problem(notice, _real_pins(bump).ort) is None
-    assert "names onnxruntime commit" in bump.ort_source_problem(notice, "1.22.0-dev.20250409-0000000000")
+    assert "names onnxruntime commit" in bump.ort_source_problem(
+        notice, _DEV_ORT.rsplit("-", 1)[0] + "-0000000000")
     assert "names onnxruntime commit" in bump.ort_source_problem(notice, "1.23.1")
     assert "no onnxruntime licence source" in bump.ort_source_problem("nothing here", "1.23.1")
     tagged = bump._ORT_REF_RE.sub("microsoft/onnxruntime repository at tag `v1.23.1`", notice)

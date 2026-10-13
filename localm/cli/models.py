@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import click
 
@@ -1826,6 +1826,28 @@ def unload_cmd(model):
                       f"{', '.join(escape(str(u)) for u in unloaded)}")
 
 
+def _restarted_as(instances, entry: dict, entries: list) -> Optional[str]:
+    """The instance id *entry*'s process serves now, when it restarted in place:
+    its port answers /whoami as another registered instance with the same pid.
+    None otherwise, including when nothing answers."""
+    port = entry.get("port")
+    if not port:
+        return None
+    try:
+        data = instances.fetch_any_whoami(entry.get("scheme", "http"), int(port),
+                                          2.0, entry.get("host"))
+    except Exception:
+        return None
+    answering = (data or {}).get("instance_id")
+    if not answering or answering == entry.get("instance_id"):
+        return None
+    for other in entries:
+        if (other.get("instance_id") == answering
+                and other.get("pid") == entry.get("pid")):
+            return str(answering)
+    return None
+
+
 @main.command("stop")
 @click.argument("instance_id", required=False)
 @click.option("--all", "stop_all", is_flag=True,
@@ -1908,6 +1930,16 @@ def stop_cmd(instance_id, stop_all, timeout):
 
         stopped = False
         graceful_denied = False
+        replaced_by = _restarted_as(instances, entry, entries) if is_own_address(dial) else None
+        if replaced_by is not None:
+            path = entry.get("_path")
+            if path:
+                instances.unregister_instance(path)
+            console.print(f"[yellow]{escape(iid)}:[/yellow] this entry is left over "
+                          f"from a restart; the process now serves instance "
+                          f"{escape(replaced_by[:8])}. Removed the entry and "
+                          f"stopped nothing.")
+            continue
         if is_own_address(dial):
             try:
                 resp = requests.post(f"{url}/v1/server/shutdown", headers=headers,

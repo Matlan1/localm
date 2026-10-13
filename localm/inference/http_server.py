@@ -312,7 +312,10 @@ def _current_gpu_index() -> int:
         from localm.discover import last_gpu_reading, resolve_load_gpu_index
         return resolve_load_gpu_index(load_config(), gpus=last_gpu_reading() or [],
                                       quiet=True)
-    except Exception:
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("could not resolve the load GPU index, assuming device 0: %s",
+                     e, exc_info=True)
         return 0
 
 
@@ -2717,6 +2720,7 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
     def _run() -> None:
         fh = None
         last_dump = None
+        write_failed = False
         try:
             while not stop.wait(poll):
                 if _hb_monotonic is None:
@@ -2763,9 +2767,16 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
                             fh.write(f"\n--- thread {tid} ---\n")
                             fh.write("".join(traceback.format_stack(frame)))
                     fh.flush()
-                except Exception:
+                except Exception as e:
                     # The watchdog must never crash the process it is diagnosing.
-                    pass
+                    if not write_failed:
+                        write_failed = True
+                        try:
+                            from localm.debuglog import logger as _dbg
+                            _dbg.warning("hang watchdog: could not write the stall "
+                                         "trace to %s: %s", trace_path, e)
+                        except Exception:
+                            pass
         finally:
             if fh is not None:
                 try:
@@ -2955,7 +2966,7 @@ def _hang_restart_action(app) -> None:
         pass
     _mark_fds_noninheritable()
     _set_restart_env()
-    os.execv(sys.executable, _execv_argv(_restart_argv(port)))
+    _execv_restart(port, instance_id)
 
 
 def _diagnostics_allowed() -> bool:
@@ -3785,7 +3796,15 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
     the crash-marker clear to THIS instance only - see
     localm/bugreport/crash_guard.py's per-instance-scoping note; omitting it
     falls back to the legacy shared marker name rather than silently skipping
-    the clear."""
+    the clear. The registry entry advertise() wrote for *instance_id* is removed
+    first, so the stopping instance is no longer listed or attached to."""
+    try:
+        from localm import instances
+        instances.unregister_own(instance_id)
+    except Exception:
+        _dbg_swallow("removing this instance's registry entry during shutdown "
+                     "failed (non-fatal); it is reaped once the process is gone",
+                     level="warning")
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os._exit below bypasses atexit, the job worker
@@ -4296,9 +4315,6 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         # means the next boot has fewer diagnostics, so log rather than swallow.
         _dbg_swallow("pre-restart breadcrumb dump / log flush failed (non-fatal)")
 
-    import os
-    import sys
-
     _mark_fds_noninheritable()
 
     if update_watchdog:
@@ -4322,7 +4338,33 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
                 pass
 
     _set_restart_env()
-    os.execv(sys.executable, _execv_argv(_restart_argv(port)))
+    _execv_restart(port, instance_id)
+
+
+def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:
+    """Remove this instance's own registry entry, then re-exec this server with
+    os.execv. The re-exec'd process registers under a new instance id. When
+    os.execv raises, the entry is written back and the error re-raised."""
+    import os
+    import sys
+
+    from localm import instances
+    removed = None
+    try:
+        removed = instances.unregister_own(instance_id)
+    except Exception:
+        _dbg_swallow("removing this instance's registry entry before the restart "
+                     "failed (non-fatal); `localm ps` may list it until it is "
+                     "reaped", level="warning")
+    try:
+        os.execv(sys.executable, _execv_argv(_restart_argv(port)))
+    except BaseException:
+        try:
+            instances.restore_own(removed)
+        except Exception:
+            _dbg_swallow("writing back this instance's registry entry after a "
+                         "failed re-exec failed", level="warning")
+        raise
 
 
 def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None,

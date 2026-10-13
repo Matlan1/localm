@@ -1845,6 +1845,45 @@ def _unlink_lock_file(lockpath: Path) -> None:
                    "old and reclaimed", lockpath.name, last, _CROSS_LOCK_STALE_AGE)
 
 
+def _reclaim_stale_lock(lockpath: Path, judged: bytes, judged_mtime: float) -> bool:
+    """Remove a lock file judged stale, and report whether it was removed.
+
+    Re-stats and re-reads the file immediately before the unlink and leaves it
+    alone when its mtime or its bytes are no longer the ones it was judged by, or
+    when the staleness test no longer holds: between the judgement and here, the
+    holder may have released it and a new holder may have created its own. Two
+    waiters that both reach the stale branch therefore cannot both unlink and both
+    create. True when the file is already gone, so the caller retries its create.
+    A file that cannot be read falls back to the mtime test alone, so an
+    unreadable stale lock is still reclaimed rather than wedging every writer.
+    The residual window (a lock created between this re-read and the unlink)
+    cannot be closed with plain files; the fencing token stops it from cascading,
+    since the wrongly-removed holder's release will not then delete a third
+    party's lock. Mirrors ``rag.collection_lock._reclaim``.
+    See test_a_stale_lock_is_not_reclaimed_after_a_new_holder_took_it."""
+    try:
+        current_mtime = lockpath.stat().st_mtime
+    except OSError:
+        return True
+    if current_mtime != judged_mtime:
+        return False
+    if time.time() - current_mtime <= _CROSS_LOCK_STALE_AGE:
+        return False
+    try:
+        current = lockpath.read_bytes()
+    except OSError:
+        current = judged
+    if current != judged:
+        return False
+    try:
+        lockpath.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 @contextlib.contextmanager
 def _cross_process_lock(target: Path):
     """Hold an exclusive, cross-process lock on *target* (a sibling ``<name>.lock``
@@ -1903,20 +1942,17 @@ def _cross_process_lock(target: Path):
                     "(the cross-process lock is not reentrant); make both changes "
                     "in one mutator instead of nesting the calls.") from None
             try:
-                age = time.time() - lockpath.stat().st_mtime
+                mtime = lockpath.stat().st_mtime
             except OSError:
                 # The lock vanished between our failed create and this stat (the
                 # holder just released it) - retry the create immediately rather
                 # than waiting out a backoff for a lock that is already gone.
                 continue
-            if age > _CROSS_LOCK_STALE_AGE:
+            age = time.time() - mtime
+            if age > _CROSS_LOCK_STALE_AGE and _reclaim_stale_lock(lockpath, held, mtime):
                 print(f"[localm] note: reclaiming stale lock {lockpath.name} "
                       f"({age:.0f}s old) - the process that held it appears to "
                       "have crashed without releasing it.", file=sys.stderr)
-                try:
-                    lockpath.unlink()
-                except OSError:
-                    pass
                 continue
             if time.time() >= deadline:
                 raise TimeoutError(
