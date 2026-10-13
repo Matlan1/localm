@@ -61,6 +61,20 @@ def _pid_space_id() -> str:
     return instances.pid_space_id()
 
 
+def _same_pid_space(rec: dict) -> bool:
+    """True when owner record *rec* was written in this process's pid space:
+    its id is this one (see :func:`_pid_space_id`), or it is the id an earlier
+    localm wrote on this host (see
+    :func:`localm.instances.legacy_pid_space_id` and
+    :func:`localm.instances.legacy_record_is_this_host`). A record naming no
+    pid space is not judged here."""
+    space = rec.get("space")
+    if space == _pid_space_id():
+        return True
+    return (space is not None and space == instances.legacy_pid_space_id()
+            and instances.legacy_record_is_this_host(rec))
+
+
 def _write_partial_owner(partial: Path) -> None:
     """Record this process (pid, pid space and start identity) as the owner of
     *partial*."""
@@ -113,7 +127,7 @@ def _partial_owner_is_gone(partial: Path) -> bool:
     if pid <= 0:
         return False
     space = rec.get("space")
-    if space is not None and space != _pid_space_id():
+    if space is not None and not _same_pid_space(rec):
         return False
     if pid == os.getpid():
         return not _partial_in_flight(partial)
@@ -1536,7 +1550,6 @@ def _pull_gguf_file(
 
     missing = [p for p in all_parts if not (base_dir / p).exists()]
     if not missing:
-        console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         # If the user asserted a hash, verify the file actually on disk before
         # treating it as the requested model.
         if want:
@@ -1559,6 +1572,22 @@ def _pull_gguf_file(
             on_disk = _verify_digest(base_dir / part,
                                      purpose="to check the file already here")
             if on_disk.lower() != published.lower():
+                taken = _hf_file_name_taken_by(base_dir / part, repo_id)
+                if taken:
+                    console.print(
+                        f"[red]File name already in use:[/red] {escape(part)} in "
+                        f"the models folder is a different file "
+                        f"({escape(on_disk[:16])}…) from the one {escape(repo_id)} "
+                        f"publishes ({escape(published[:16])}…). It is registered "
+                        f"as {_civitai_registered_as(taken)} and was left as it is.\n"
+                        "A file name holds one file, and --name only sets the "
+                        "registry name. To keep both, pull a file of this "
+                        "repository that has another name. To use this one "
+                        "instead, remove the other first, which deletes its file "
+                        f"({' and '.join('localm rm ' + escape(n) for n, _ in taken)}), "
+                        "then pull again."
+                    )
+                    return False
                 console.print(
                     f"[red]SHA256 mismatch![/red] The file already at "
                     f"{escape(part)} ({escape(on_disk[:16])}…) does not match the "
@@ -1566,6 +1595,7 @@ def _pull_gguf_file(
                     "incomplete, damaged or another version. Delete it and pull again."
                 )
                 return False
+        console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         if register:
             unusable = _mm.gguf_unusable_reason(dest)
             if unusable is not None:
@@ -2255,7 +2285,7 @@ def _record_holder_is_gone(rec) -> bool:
     except (TypeError, ValueError):
         return False
     space = rec.get("space")
-    if space is not None and space != _pid_space_id():
+    if space is not None and not _same_pid_space(rec):
         return False
     if pid == os.getpid():
         return False
@@ -3211,6 +3241,12 @@ def _civitai_owners(dest: Path) -> "list[tuple[str, str]]":
     reg = _mm.load_registry()
     return [(n, str(reg[n].get("source") or ""))
             for n in find_aliases_by_path(dest, reg)]
+
+
+def _hf_file_name_taken_by(dest: Path, repo_id: str) -> "list[tuple[str, str]]":
+    """``(name, source)`` of every registry entry whose path is *dest* and whose
+    source is not ``hf:<repo_id>``."""
+    return [(n, s) for n, s in _civitai_owners(dest) if s != f"hf:{repo_id}"]
 
 
 def _civitai_registry_unreadable() -> bool:

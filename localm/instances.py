@@ -188,6 +188,41 @@ def unregister_instance(path) -> None:
         pass
 
 
+#: Registry files written by advertise() in this process, by instance id.
+_OWN_PATHS: dict = {}
+
+
+def unregister_own(instance_id: Optional[str]) -> Optional[dict]:
+    """Remove the registry entry advertise() wrote in this process for
+    *instance_id*. For a process that leaves without advertise()'s exit
+    (``os._exit``, ``os.execv``). Returns the removed entry, for
+    :func:`restore_own`, or None when this process wrote none for that id.
+    Never touches a file another process wrote."""
+    if not instance_id:
+        return None
+    path = _OWN_PATHS.pop(instance_id, None)
+    if path is None:
+        return None
+    entry = read_entry(path)
+    if entry is not None:
+        entry["_path"] = str(path)
+    unregister_instance(path)
+    return entry
+
+
+def restore_own(entry: Optional[dict]) -> None:
+    """Write back, at the path it was removed from, an entry
+    :func:`unregister_own` removed, for a process that is still serving after
+    all. No-op for None."""
+    if not entry or not entry.get("_path") or not entry.get("instance_id"):
+        return
+    path = Path(entry["_path"])
+    body = {k: v for k, v in entry.items() if k != "_path"}
+    from localm.config import atomic_write_private
+    atomic_write_private(path, json.dumps(body, indent=2))
+    _OWN_PATHS[entry["instance_id"]] = path
+
+
 def set_mode(home: Path, instance_id: str, mode: str) -> bool:
     """Update the SURFACE mode of this instance's registry entry in place
     (e.g. ``api`` -> ``full`` after an on-demand GUI mount), atomically.
@@ -542,6 +577,49 @@ def pid_space_id() -> str:
         _PID_SPACE = hashlib.sha256(
             "".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
     return _PID_SPACE
+
+
+def legacy_pid_space_id() -> str | None:
+    """The pid-space id that owner records written before the Linux machine-id
+    was part of :func:`pid_space_id` carry on this host: the platform, the
+    Windows MachineGuid, the host name and, on Linux, the pid namespace,
+    hashed. None when none of those but the platform can be read (such a
+    record then carries an id unique to its process, which nothing matches)."""
+    import hashlib
+    import platform
+    parts = [sys.platform, machine_guid()]
+    try:
+        parts.append(platform.node() or "")
+    except Exception:
+        parts.append("")
+    try:
+        parts.append(str(os.stat("/proc/self/ns/pid").st_ino))
+    except OSError:
+        pass
+    if not any(parts[1:]):
+        return None
+    return hashlib.sha256(
+        "".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def legacy_record_is_this_host(rec: dict) -> bool:
+    """True when owner record *rec*, carrying :func:`legacy_pid_space_id`, was
+    written on this host: on Windows when this install has a MachineGuid (it
+    is part of that id); on Linux when the record's start identity names this
+    boot's boot id. False otherwise, including on every other platform."""
+    if not isinstance(rec, dict):
+        return False
+    if sys.platform == "win32":
+        return bool(machine_guid())
+    if sys.platform.startswith("linux"):
+        start = rec.get("start")
+        recorded = start.get("boot") if isinstance(start, dict) else None
+        try:
+            boot = _LINUX_BOOT_ID.read_text(encoding="ascii").strip() or None
+        except (OSError, ValueError):
+            return False
+        return isinstance(recorded, str) and recorded == boot
+    return False
 
 
 def kill_pid(pid: int, *, timeout: float = 10.0) -> bool:
@@ -937,9 +1015,11 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
             home, instance_id=instance_id, port=port, host=host,
             root_dir=root_dir, mode=mode, token=token, scheme=scheme,
         )
+        _OWN_PATHS[instance_id] = path
     try:
         yield {"instance_id": instance_id, "root_dir": root_dir, "port": port,
                "token": token, "path": str(path) if path else None}
     finally:
         if path is not None:
+            _OWN_PATHS.pop(instance_id, None)
             unregister_instance(path)

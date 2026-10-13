@@ -613,6 +613,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   failed first-run setup, it is enabled again.
 - **Uninstalling a plugin with "delete its data" reports when the plugin's own cleanup failed.**
   The uninstall still completes, but it no longer claims the data is gone.
+- **`localm ps` no longer lists a stopped or restarted server.** Stopping a server, or
+  restarting it from Settings, used to leave its entry behind, so after a restart `localm ps`
+  showed the same process twice and `localm stop <old id>` stopped the running server. The
+  entry is now removed on stop and restart, and `localm stop` on an entry a restart left behind
+  only removes the entry.
+- **Pulling a file whose name another repository's model already uses no longer calls it
+  damaged.** The pull is still refused, since the models folder keeps one file per name, but the
+  message now says the name is in use, names the registered model that holds it and how to
+  proceed, and leaves that file alone.
+- **Rotating the owner key with a malformed request no longer replaces it with a random key.** `POST
+  /api/auth/key/rotate` with a body that is not empty and not a JSON object (for example a form-encoded
+  `key=...`) now answers 400 and leaves the key unchanged, instead of generating a new key the caller
+  never learns.
+- **Creating a key says when plugin readiness could not be checked.** If checking whether the plugins
+  behind the granted scopes are installed fails, the reply now carries a warning saying so instead of
+  reading as "all ready".
 - **The coder's browser_close stops a browser that is still starting.** Closing the browser
   while it was still starting used to report that no browser was open and leave it to finish
   starting; it now cancels the start, the browser is closed as soon as it is up, and the calls
