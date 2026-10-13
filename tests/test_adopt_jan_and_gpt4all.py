@@ -136,8 +136,8 @@ class TestJanStore:
         _jan_unit(data, "gone/Linked", yml=f"model_path: {target}\n")
         assert add_local(str(data)) is True
         assert "gone-Linked" not in load_registry()
-        out = " ".join(capsys.readouterr().out.split())
-        assert "linked file is missing" in out and "nowhere.gguf" in out
+        out = "".join(capsys.readouterr().out.split())
+        assert "linkedfileismissing" in out and "nowhere.gguf" in out
 
     def test_a_model_path_climbing_out_of_the_data_folder_is_not_followed(
             self, tmp_path, isolated_home, capsys):
