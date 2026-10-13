@@ -663,6 +663,48 @@ def test_wait_for_ci_resets_the_stable_count_when_a_check_starts_running(monkeyp
     assert len(seen) == 4
 
 
+def _expire_after_two_polls(monkeypatch):
+    calls = {"n": 0}
+    start = pipeline.time.monotonic()
+
+    def fake_monotonic():
+        calls["n"] += 1
+        return start + (pipeline.CI_WAIT_TIMEOUT_SECONDS + 1 if calls["n"] > 3 else 0)
+    monkeypatch.setattr(pipeline.time, "monotonic", fake_monotonic)
+
+
+def test_a_pending_wait_says_which_checks_never_completed(monkeypatch, tmp_path, capsys):
+    _poll_script(monkeypatch, [_named(("a", "completed", "success"), ("build", "in_progress", None),
+                                      ("lint", "queued", None), ("docs", "completed", "skipped"))])
+    _expire_after_two_polls(monkeypatch)
+    assert pipeline.wait_for_ci(tmp_path) == "PENDING"
+    assert "build, lint" in pipeline.CI_WAIT_NOTE and "4 check-runs" in pipeline.CI_WAIT_NOTE
+    assert pipeline.CI_WAIT_NOTE in capsys.readouterr().out
+
+
+def test_a_pending_wait_says_when_the_query_itself_kept_failing(monkeypatch, tmp_path):
+    _poll_script(monkeypatch, [_FakeCompleted(returncode=1, stderr="HTTP 502")])
+    _expire_after_two_polls(monkeypatch)
+    assert pipeline.wait_for_ci(tmp_path) == "PENDING"
+    assert "query" in pipeline.CI_WAIT_NOTE and "failed" in pipeline.CI_WAIT_NOTE
+
+
+def test_a_pending_wait_says_when_no_checks_ever_attached(monkeypatch, tmp_path):
+    _poll_script(monkeypatch, [_checks_response([])])
+    _expire_after_two_polls(monkeypatch)
+    assert pipeline.wait_for_ci(tmp_path) == "PENDING"
+    assert "no check-runs" in pipeline.CI_WAIT_NOTE
+
+
+def test_wait_for_ci_refuses_when_the_worktree_head_cannot_be_read(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "_run_git",
+                        lambda args, cwd, **k: _FakeCompleted(returncode=124, stderr="git timed out"))
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("no query may be made without a head")))
+    with pytest.raises(pipeline.InfraError, match="git timed out"):
+        pipeline.wait_for_ci(tmp_path)
+
+
 def test_wait_for_ci_treats_an_unreadable_listing_as_pending_not_green(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout="deadbeef\n"))
     monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)

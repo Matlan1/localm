@@ -97,6 +97,9 @@ SHORT_TOOL_TIMEOUT_SECONDS = 1800
 # Consecutive polls that must show the same completed set of checks before CI reads GREEN.
 CI_STABLE_POLLS = 2
 
+# What the last poll of the most recent wait_for_ci that returned "PENDING" saw.
+CI_WAIT_NOTE = ""
+
 # gpu_lease.py's own EX_TEMPFAIL - the card was busy and the wait elapsed.
 # This is NOT the confirm script's own verdict: it means confirm never ran at
 # all, so the candidate must not be recorded as tried.
@@ -888,12 +891,28 @@ def wait_for_ci(worktree: Path) -> str:
     only after CI_STABLE_POLLS consecutive polls show the same set of runs, all of them
     completed and none failed (a set still registering is never GREEN), "RED" on any
     failure, or "PENDING" (checks still running when the deadline passes; the caller
-    leaves the PR open rather than force-merging)."""
+    leaves the PR open rather than force-merging). Raises InfraError when the worktree's
+    HEAD cannot be read. After a "PENDING" result CI_WAIT_NOTE says what the last poll saw
+    and the same text is printed."""
+    global CI_WAIT_NOTE
     deadline = time.monotonic() + CI_WAIT_TIMEOUT_SECONDS
-    head_sha = _run_git(["rev-parse", "HEAD"], cwd=worktree).stdout.strip()
-    stable, last_ids = 0, None
+    head = _run_git(["rev-parse", "HEAD"], cwd=worktree)
+    head_sha = head.stdout.strip()
+    if head.returncode != 0 or not head_sha:
+        raise InfraError(f"could not read the pipeline worktree's HEAD: {head.stderr.strip()}")
+    stable, last_ids, polls, seen = 0, None, 0, "no poll ran"
     while time.monotonic() < deadline:
         runs = _check_runs(head_sha, worktree)
+        polls += 1
+        if runs is None:
+            seen = f"the check-run query for {head_sha[:12]} failed"
+        elif not runs:
+            seen = f"no check-runs are attached to {head_sha[:12]}"
+        else:
+            waiting = sorted({str(r.get("name")) for r in runs
+                              if r.get("conclusion") != "skipped" and r.get("status") != "completed"})
+            seen = (f"{len(runs)} check-runs on {head_sha[:12]}, "
+                    + (f"not completed: {', '.join(waiting[:5])}" if waiting else "all completed"))
         if runs:
             if any(r.get("conclusion") == "failure" for r in runs):
                 return "RED"
@@ -909,6 +928,8 @@ def wait_for_ci(worktree: Path) -> str:
             else:
                 stable, last_ids = 0, None
         time.sleep(CI_POLL_INTERVAL_SECONDS)
+    CI_WAIT_NOTE = f"{polls} polls; last: {seen}"
+    print(f"CI wait ended without a result: {CI_WAIT_NOTE}")
     return "PENDING"
 
 

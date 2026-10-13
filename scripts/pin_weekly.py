@@ -507,7 +507,7 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
         return out
     if ci == "PENDING":
         pp._record_inconclusive(new, receipt, pin=adv.key, open_pr=pr)
-        out.verdict, out.detail = INCONCLUSIVE, f"CI still pending on PR #{pr}"
+        out.verdict, out.detail = INCONCLUSIVE, f"CI still pending on PR #{pr} ({pp.CI_WAIT_NOTE})"
         return out
     reason = f"CI red on PR #{pr}; left open, not merged"
     pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
