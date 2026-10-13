@@ -510,6 +510,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **`localm comfy setup` copies an AMD ROCm or StabilityMatrix ComfyUI.** Replicating a ComfyUI whose PyTorch came from
+  AMD's per-GPU ROCm packages (`amd-torch-device-gfx1030` and similar, as StabilityMatrix installs on
+  Windows) failed with "pip found no matching version"; those packages now install from AMD's own index.
+  The copy also finds the models your ComfyUI finds through its own `extra_model_paths.yaml` (such as
+  StabilityMatrix's shared models folder), not only those under its `models` folder.
 - **Document attachments without the Knowledge plugin.** Attaching a text document, PDF or code file in
   Chat or the Coder no longer fails with "Method Not Allowed" when the Knowledge plugin is not
   installed: attachments are now converted to text by the built-in chat plugin
@@ -527,6 +532,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **MTP leaves room for its draft cache at the automatic context ceiling.** With MTP or a draft model on
   the GPU, the automatic context ceiling now counts the draft context's cache, which grows with the
   context, so a reply that fills the window no longer moves the cache to system RAM and slows down.
+- **Draft-model drafting says when it is off, and loads more safely.** When the configured
+  draft model (`spec_draft_model`) cannot draft for the loaded model (not found, not a GGUF
+  file, a different vocabulary, recurrent layers, failed to load, or slower than decoding
+  without it), loading prints why. A draft model whose file already shows it cannot draft
+  is no longer loaded onto the GPU first, a compatible one is no longer left out of the VRAM
+  plan when its tokenizer flags are not written in the file, a draft model on the CPU keeps
+  its cache on the CPU when the context grows, and an unexpected error while setting it up
+  leaves the model loaded without drafting. A crash while loading the draft model now names
+  the draft model and `spec_source` instead of advising a smaller context, and replacing the
+  draft model file clears the retry back-off.
 - **gpt-oss replies reach their answer.** A gpt-oss reply stopped at the end of its
   reasoning, so the answer came back empty; it now continues into the answer.
 - **Thinking off on gpt-oss.** Asking a model to answer without reasoning
@@ -1765,6 +1780,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`localm coder --estimate` stops after printing the plan.** It used to print the
   plan and then run the task anyway, writing files and, with `--yes`, running shell
   commands; with `--output-format json` it also printed a second JSON document.
+- **Chat says when an answer had no web evidence.** With web access on, an answer that follows a
+  web lookup that failed, found nothing, or was refused now carries a visible "no web evidence
+  was available for this answer" line, so an answer written from the model's own knowledge is not
+  mistaken for one backed by a search.
+- **Web calls written as `[tool_call]...[/tool_call]` now run in chat.** A model that wraps its web
+  search or page read in bracket tags (also with a mismatched closing tag, or in capitals) gets the
+  lookup run, and the raw tag no longer shows in the reply.
+- **The Coder no longer forces tools on a status report.** A message like "Build failed." or "Search
+  fails with a timeout" is treated as a statement rather than an order, while "fix failed tests"
+  still counts as one.
+- **Plugins, Models and Settings show what they are waiting for.** The plugin catalog and external
+  list show "Loading plugins", install, enable, disable, refresh, uninstall and remove buttons show
+  their working state, "Check for updates" says it is checking, removing a model shows "Removing",
+  a model's info and relocate buttons show that they are working, the Models page and the
+  instances card show a loading line on first open, and Settings shows that its remaining
+  sections are still loading.
 
 ### Security
 - **A plain `coder` API key can no longer run commands through the project's coder

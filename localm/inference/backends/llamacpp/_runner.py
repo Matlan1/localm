@@ -666,8 +666,9 @@ class NativeLoadCrashError(RuntimeError):
 
     ``phase`` names the native call that was running when it died, read from
     the captured fault trace: ``"context"`` (``llama_init_from_model``, after
-    the weights loaded), ``"weights"`` (``llama_load_model_from_file``), or
-    ``None`` when no trace was captured or the trace names neither."""
+    the weights loaded), ``"weights"`` (``llama_load_model_from_file``),
+    ``"draft"`` (loading the draft model for speculative drafting), or
+    ``None`` when no trace was captured or the trace names none of these."""
 
     def __init__(self, message: str, phase: Optional[str] = None) -> None:
         super().__init__(message)
@@ -681,6 +682,9 @@ _CRASH_PHASE_BY_FRAME = {
     "llama_load_model_from_file": "weights",
 }
 
+# Frames that put any crash below them in the draft-model load.
+_DRAFT_LOAD_FRAMES = frozenset({"_attach_draft_model"})
+
 _TRACE_CURRENT_THREAD_RE = re.compile(r"^Current thread\b")
 _TRACE_FRAME_RE = re.compile(
     r'^\s+File "[^"\n]*", line \d+ in ([A-Za-z_][A-Za-z0-9_]*)\s*$')
@@ -689,9 +693,11 @@ _TRACE_FRAME_RE = re.compile(
 def crash_phase_from_trace(trace: str) -> Optional[str]:
     """The load phase whose native call was running on the crashing thread of
     a faulthandler *trace*, or ``None`` when the trace has no "Current thread"
-    block or none of its frames is a known entry point. Frames are read from
-    the innermost outward and the first known entry point wins."""
+    block or none of its frames is a known entry point. ``"draft"`` when any
+    frame of that block is a draft-model load frame; otherwise frames are read
+    from the innermost outward and the first known entry point wins."""
     in_current = False
+    phase = None
     for line in (trace or "").splitlines():
         if not in_current:
             in_current = bool(_TRACE_CURRENT_THREAD_RE.match(line))
@@ -701,14 +707,19 @@ def crash_phase_from_trace(trace: str) -> Optional[str]:
             if line.strip():
                 break
             continue
-        phase = _CRASH_PHASE_BY_FRAME.get(m.group(1))
-        if phase is not None:
-            return phase
-    return None
+        if m.group(1) in _DRAFT_LOAD_FRAMES:
+            return "draft"
+        if phase is None:
+            phase = _CRASH_PHASE_BY_FRAME.get(m.group(1))
+    return phase
 
 
 def _load_crash_advice(phase: Optional[str]) -> str:
     """What to try after a worker died loading a model, for the phase it died in."""
+    if phase == "draft":
+        return (" It crashed while loading the draft model for speculative "
+                "drafting (spec_draft_model). Try a different draft model, or "
+                "turn draft-model drafting off (spec_source).")
     if phase == "context":
         return (" It crashed while creating the context, after the weights had "
                 "loaded, so the runtime itself works. Creating the context "

@@ -76,8 +76,8 @@ def test_the_vocabulary_is_read_from_gguf_metadata(tmp_path):
     assert sig == {"model": "gpt2", "tokens": tokens, "add_bos": True, "add_eos": None,
                    "bos": 0, "eos": None}
     view = gguf_vocab_view(sig)
-    assert (view.n_tokens, view.add_bos, view.bos, view.eos, view.text(6)) == (
-        8, True, 0, -1, b"f")
+    assert (view.n_tokens, view.add_bos, view.add_eos, view.bos, view.eos, view.text(6)) == (
+        8, None, None, 0, -1, b"f")
 
 
 def test_two_gguf_files_compare_by_their_metadata(tmp_path):
@@ -1643,7 +1643,7 @@ def test_the_draft_model_name_resolves_through_the_registry(tmp_path):
     with patch("localm.model_manager.registry.get_operator_model_info",
                side_effect=lambda n: (path, None) if n == "small" else None):
         assert engine.resolve_spec_draft_model({"spec_draft_model": "small"}) == str(path)
-        assert engine.resolve_spec_draft_model({"spec_draft_model": "gone"}) == "gone"
+        assert engine.resolve_spec_draft_model({"spec_draft_model": "gone"}) is None
         assert engine.resolve_spec_draft_model({}, "small") == str(path)
     assert engine.resolve_spec_draft_model({"spec_draft_model": "  "}) is None
 
@@ -1665,3 +1665,265 @@ def test_create_backend_passes_the_draft_model_only_for_the_draft_source():
         assert captured["spec_draft_model"] == "/m/small.gguf"
         engine_mod.create_backend("model.gguf", spec_source="ngram")
         assert captured["spec_draft_model"] is None
+
+
+# --------------------------------------------------------------------------- #
+#  Design-audit fixes of the draft-model load path                            #
+# --------------------------------------------------------------------------- #
+
+def test_an_unknown_add_bos_or_add_eos_flag_skips_that_comparison():
+    assert draft_vocab_mismatch(_view(add_bos=None, bos=1),
+                                _view(add_bos=True, bos=9)) is None
+    assert draft_vocab_mismatch(_view(add_eos=True, eos=2),
+                                _view(add_eos=None, eos=9)) is None
+    assert draft_vocab_mismatch(_view(add_bos=None), _view(vocab_type=1)) is not None
+
+
+def test_files_differing_only_in_add_bos_presence_are_not_rejected_by_metadata(tmp_path):
+    from localm.inference.backends.gguf import GgufBackend
+    tokens = ["x%d" % i for i in range(40)]
+    target = _vocab_gguf(tmp_path / "t.gguf", tokens)
+    draft = _vocab_gguf(tmp_path / "d.gguf", tokens, add_bos=False, bos=0)
+    b = GgufBackend(str(target), spec_source="draft", spec_draft_model=str(draft), n_ctx=512)
+    with patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=0):
+        assert b._draft_model_rejected_by_metadata(draft) is False
+        assert b._draft_model_charge_bytes() > 0
+
+
+def test_a_draft_the_metadata_rejects_is_never_loaded(tmp_path):
+    llm, _path, llama_mod = _loading_llama(tmp_path)
+    tokens = ["x%d" % i for i in range(40)]
+    llm._model_path = str(_vocab_gguf(tmp_path / "t.gguf", tokens))
+    draft = _vocab_gguf(tmp_path / "d.gguf", tokens, model="llama")
+    with patch.object(llama_mod, "api") as api, \
+         patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=0):
+        llm._load_draft_model(str(draft), None, True)
+    assert (llm._source.status, llm._source.usable) == ("draft-vocab-mismatch", False)
+    api.llama_load_model_from_file.assert_not_called()
+
+
+def test_a_recurrent_draft_the_metadata_shows_is_never_loaded(tmp_path):
+    llm, _path, llama_mod = _loading_llama(tmp_path)
+    draft = _vocab_gguf(tmp_path / "d.gguf", ["x%d" % i for i in range(40)])
+    with patch.object(llama_mod, "api") as api, \
+         patch("localm.model_manager.gguf.gguf_recurrent_state_bytes", return_value=1000):
+        llm._load_draft_model(str(draft), None, True)
+    assert llm._source.status == "draft-rewind-unsupported"
+    api.llama_load_model_from_file.assert_not_called()
+
+
+@pytest.mark.parametrize("on_gpu,offload", [(True, True), (False, False)])
+def test_a_regrown_draft_context_keeps_the_load_placement(on_gpu, offload):
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
+    src = DraftModelSource(llm, ctypes.c_void_p(5), 4, on_gpu=on_gpu)
+    params = []
+
+    def default_params():
+        params.append(SimpleNamespace())
+        return params[-1]
+    with patch.object(llama_mod, "api") as api:
+        api.llama_context_default_params.side_effect = default_params
+        api.llama_init_from_model.return_value = ctypes.c_void_p(6)
+        assert src.create_context(1024, True) == ""
+    assert params[-1].offload_kqv is offload
+
+
+def test_draft_probe_tokens_stay_inside_a_smaller_draft_vocabulary():
+    from localm.inference.backends.llamacpp import llama as llama_mod
+    llm = _llama(4)
+    fake = DraftFake(llm, main_cost=1.0, row_cost=0.1, draft_cost=0.2)
+    with patch.object(llama_mod, "api") as api:
+        fake.install(api)
+        api.llama_model_get_vocab.side_effect = lambda model: model
+        api.llama_vocab_n_tokens.side_effect = (
+            lambda vocab: 1000 if vocab.value == 1 else 900)
+        costs = llm._measure_step_costs(llm._source)
+    drafted = [t for _pos, toks, _h, _logits in fake.draft_decodes for t in toks]
+    assert drafted and max(drafted) < 900
+    assert costs is not None and costs.draft == pytest.approx(0.2)
+
+
+def _raise_for_the_draft_view(api, model):
+    if model.value == 5:
+        raise AttributeError("llama_vocab_get_text")
+    return _view()
+
+
+def test_an_unexpected_error_after_the_draft_load_leaves_the_target_loaded(tmp_path):
+    llm, path, llama_mod = _loading_llama(tmp_path)
+    with patch.object(llama_mod, "api") as api, \
+         patch.object(llama_mod, "set_use_mmap"), \
+         patch("localm.inference.backends.llamacpp._draftmodel.native_vocab_view",
+               side_effect=_raise_for_the_draft_view):
+        api.llama_load_model_from_file.return_value = ctypes.c_void_p(5)
+        llm._load_draft_model(path, None, True)
+        freed = [c.args[0].value for c in api.llama_free_model.call_args_list]
+    assert llm._source.status == "draft-error:AttributeError"
+    assert llm._source.usable is False
+    assert freed == [5] and llm._source._model is None
+    assert llm._model_ptr.value == 1
+
+
+def test_a_draft_path_that_is_not_a_gguf_file_says_so(tmp_path):
+    llm, _path, llama_mod = _loading_llama(tmp_path)
+    hf_dir = tmp_path / "hf-model"
+    hf_dir.mkdir()
+    with patch.object(llama_mod, "api") as api:
+        llm._load_draft_model(str(hf_dir), None, True)
+        llm2, _p, _m = _loading_llama(tmp_path)
+        llm2._load_draft_model(str(tmp_path / "absent.gguf"), None, True)
+    assert llm._source.status == "draft-not-gguf"
+    assert llm2._source.status == "draft-model-missing"
+    api.llama_load_model_from_file.assert_not_called()
+
+
+@pytest.mark.parametrize("status,on_gpu,printed", [
+    ("ok", True, False), ("ok-cpu", True, False),
+    ("draft-vocab-mismatch", False, True), ("draft-error:OSError", False, True)])
+def test_the_load_reports_a_draft_model_that_is_off(tmp_path, status, on_gpu, printed):
+    from localm.inference.backends import gguf as gguf_mod
+    b = gguf_mod.GgufBackend(str(tmp_path / "m.gguf"), spec_source="draft",
+                             spec_draft_model=str(tmp_path / "d.gguf"))
+    b.draft_model_on_gpu = True
+    b._apply_speculation_report({"source": "draft", "status": status})
+    with patch.object(gguf_mod, "console") as console:
+        b._print_draft_note()
+    assert (b.draft_status, b.draft_model_on_gpu) == (status, on_gpu)
+    assert console.print.called is printed
+    if printed:
+        assert status in console.print.call_args.args[0]
+
+
+def test_no_draft_note_without_the_draft_source(tmp_path):
+    from localm.inference.backends import gguf as gguf_mod
+    b = gguf_mod.GgufBackend(str(tmp_path / "m.gguf"), spec_source="ngram")
+    b._apply_speculation_report({"source": "ngram", "status": "ngram-cannot-pay"})
+    assert b.draft_status == ""
+
+
+def test_a_crash_inside_the_draft_load_is_attributed_to_the_draft():
+    from localm.inference.backends.llamacpp._runner import (
+        _load_crash_advice, crash_phase_from_trace)
+    trace = (
+        "Fatal Python error: Segmentation fault\n\n"
+        "Current thread 0x00001234 (most recent call first):\n"
+        '  File "x/_api.py", line 10 in llama_init_from_model\n'
+        '  File "x/_draftmodel.py", line 20 in create_context\n'
+        '  File "x/llama.py", line 30 in _attach_draft_model\n'
+        '  File "x/llama.py", line 40 in _load_draft_model\n'
+        '  File "x/llama.py", line 50 in __init__\n')
+    assert crash_phase_from_trace(trace) == "draft"
+    assert "spec_source" in _load_crash_advice("draft")
+    target = trace.replace("_attach_draft_model", "_set_up_context")
+    assert crash_phase_from_trace(target) == "context"
+
+
+def test_replacing_the_draft_file_changes_the_load_fingerprint(tmp_path):
+    from localm.inference import routing_latch
+    draft = tmp_path / "d.gguf"
+    draft.write_bytes(b"GGUF1")
+    cfg = {"spec_source": "draft", "spec_draft_model": str(draft)}
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch("localm.model_manager.registry.get_operator_model_info",
+               side_effect=lambda n: (draft, None)):
+        before = routing_latch.load_fingerprint("m")
+        draft.write_bytes(b"GGUF22")
+        after = routing_latch.load_fingerprint("m")
+    assert before != after
+
+
+def test_an_existing_unregistered_draft_path_resolves_to_itself(tmp_path):
+    from localm.inference import engine
+    upper = tmp_path / "draft.GGUF"
+    upper.write_bytes(b"GGUF")
+    with patch("localm.model_manager.registry.get_operator_model_info", return_value=None):
+        assert engine.resolve_spec_draft_model({"spec_draft_model": str(upper)}) == str(upper)
+        assert engine.resolve_spec_draft_model(
+            {"spec_draft_model": str(tmp_path / "gone.gguf")}) is None
+
+
+@pytest.mark.parametrize("status,printed", [
+    ("ok-cpu", True), ("ok", False), ("draft-vocab-mismatch", False)])
+def test_bench_spec_says_the_draft_runs_on_the_cpu_only_when_it_does(status, printed):
+    from localm.cli import models as models_mod
+    from localm.inference import engine as engine_mod
+    eng = MagicMock()
+    eng.chat_stream.return_value = iter(())
+    eng.speculation_usage.return_value = {"state": "unavailable", "reason": status}
+    eng.draft_model_on_gpu.return_value = False
+    eng.draft_model_status.return_value = status
+    eng.draft_step_costs.return_value = None
+    with patch.object(engine_mod, "Engine", return_value=eng), \
+         patch.object(models_mod, "console") as console:
+        models_mod._spec_probe_arm("m.gguf", "m", "draft", 8, 512, 99, draft_model="d.gguf")
+    said_cpu = any("runs on the CPU" in str(c.args[0]) for c in console.print.call_args_list)
+    assert said_cpu is printed
+
+
+def test_the_engine_reports_the_draft_status():
+    from localm.inference import engine as engine_mod
+    eng = object.__new__(engine_mod.Engine)
+    eng._backend = SimpleNamespace(draft_status="ok-cpu")
+    assert eng.draft_model_status() == "ok-cpu"
+    eng._backend = SimpleNamespace()
+    assert eng.draft_model_status() == ""
+
+
+def test_a_cancelled_draft_load_is_freed_outside_the_draft_frame(tmp_path):
+    import threading
+
+    from localm.inference.backends.base import ModelLoadCancelled
+    llm, path, llama_mod = _loading_llama(tmp_path)
+    llm._cancel_event = threading.Event()
+    llm._cancel_event.set()
+    seen = []
+    llm._free_native = lambda: seen.append("free")
+    with patch.object(llama_mod, "api") as api, \
+         patch.object(llama_mod, "set_use_mmap"):
+        api.llama_load_model_from_file.return_value = None
+        with pytest.raises(ModelLoadCancelled):
+            llm._load_draft_model(path, None, True)
+    assert seen == ["free"]
+    import inspect
+    assert "_free_native" not in inspect.getsource(llama_mod.LlamaCpp._attach_draft_model)
+
+
+def test_a_failed_target_free_after_a_cancel_is_not_reported_as_a_draft_error(tmp_path):
+    import threading
+
+    llm, path, llama_mod = _loading_llama(tmp_path)
+    llm._cancel_event = threading.Event()
+    llm._cancel_event.set()
+
+    def fail():
+        raise RuntimeError("free failed")
+    llm._free_native = fail
+    with patch.object(llama_mod, "api") as api, \
+         patch.object(llama_mod, "set_use_mmap"):
+        api.llama_load_model_from_file.return_value = None
+        with pytest.raises(RuntimeError, match="free failed"):
+            llm._load_draft_model(path, None, True)
+
+
+def test_metadata_without_a_tokenizer_model_or_with_text_after_nul_is_not_refused():
+    assert draft_vocab_mismatch(_view(vocab_type=None), _view(vocab_type=2)) is None
+    nul = VocabView("gpt2", 300, None, None, 1, 2,
+                    lambda i: (b"t%d" % i) if i != 7 else b"t7")
+    view = gguf_vocab_view({"model": "gpt2", "tokens": ["t%d" % i if i != 7 else "t7\x00x"
+                                                        for i in range(300)]})
+    assert view.text(7) == b"t7"
+    assert draft_vocab_mismatch(nul, view) is None
+
+
+def test_a_hand_edited_draft_source_still_fingerprints_the_draft_file(tmp_path):
+    from localm.inference import routing_latch
+    draft = tmp_path / "d.gguf"
+    draft.write_bytes(b"GGUF1")
+    cfg = {"spec_source": " Draft ", "spec_draft_model": str(draft)}
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch("localm.model_manager.registry.get_operator_model_info",
+               side_effect=lambda n: (draft, None)):
+        before = routing_latch.load_fingerprint("m")
+        draft.write_bytes(b"GGUF22")
+        assert routing_latch.load_fingerprint("m") != before
