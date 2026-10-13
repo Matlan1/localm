@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from localm.inference.http_server import principal_id
+from localm.inference.http_server import path_formatter, principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import apply_choice, check_request
@@ -324,7 +324,7 @@ async def music_move(name: str, req: MoveFileRequest, request: Request):
     if sidecar.is_file():
         shutil.move(str(sidecar), str(dest_dir / sidecar.name))
     gallery.forget_owner("music", name)     # left the gallery dir
-    return {"status": "moved", "path": str(target)}
+    return {"status": "moved", "path": path_formatter(request)(target)}
 
 
 @_router.post("/api/music/file/{name}/rename",
@@ -359,6 +359,7 @@ async def music_history(request: Request):
     the caller's own (an admin/owner sees all; unowned/legacy entries stay
     visible to everyone, matching gallery.require_owner)."""
     music_dir = _music_dir()
+    show_path = path_formatter(request)
     items = []
     if music_dir.is_dir():
         files = [p for p in music_dir.iterdir()
@@ -373,7 +374,7 @@ async def music_history(request: Request):
                 except Exception:
                     pass
             items.append({"name": p.name, "meta": meta,
-                          "path": str(p),
+                          "path": show_path(p),
                           "size_bytes": p.stat().st_size,
                           "mtime": p.stat().st_mtime})
     allowed = set(gallery.owned_names(request, "music", [it["name"] for it in items]))

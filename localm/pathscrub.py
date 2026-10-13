@@ -89,6 +89,10 @@ def scrub_user_paths(text: str) -> str:
     return re.sub(_USER_ROOT_PATTERN, r"\1<redacted>", text, flags=flags)
 
 
+# The placeholder scrub_paths writes in place of the localm data dir.
+DATA_DIR_LABEL = "<data>"
+
+
 def _machine_prefixes() -> list[tuple[str, str]]:
     """(prefix, replacement) for every directory that names THIS machine's
     layout, longest first.
@@ -128,7 +132,7 @@ def _machine_prefixes() -> list[tuple[str, str]]:
 
     try:
         from localm.config import home_dir
-        add(home_dir(), "<data>")
+        add(home_dir(), DATA_DIR_LABEL)
     except Exception:
         pass
     try:

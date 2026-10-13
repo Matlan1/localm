@@ -2043,6 +2043,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
+  value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
+  password in it, or an API key under an ordinary name, reached the model as is (an online model
+  included) while the terminal said "secrets redacted". It now also removes URL passwords,
+  credential query parameters, bearer tokens and common API key and token formats from every value,
+  removes the home directory and account name from the process environment, and its summary says how
+  many values it redacted instead of claiming every secret was.
+- **`net_mode = off` now stops the issues list.** Opening the issues list in Settings, or running
+  `localm issues`, contacted the bug-report proxy even with the network switched off. It now says the
+  network is off and sends nothing. The bug-report upload (sent only when you press Send) and requests
+  to your configured ComfyUI never consult `net_mode`, and the security notes now say so.
+- **A scoped API key no longer receives this machine's absolute paths.** The memory page, the
+  image, music and video galleries (and a gallery move), the uploads list, the managed ComfyUI status,
+  a saved bug report and the diagnostics report returned full paths, carrying the account name and
+  data directory, to any key that could reach them. A key other than the owner's now gets those paths
+  with the data directory, home and install folders replaced by placeholders such as `<data>`; "Use
+  as input" accepts that form, so img2img from the gallery keeps working.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move

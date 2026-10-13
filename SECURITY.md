@@ -296,7 +296,10 @@ this section states the security properties and, more importantly, their edges.
   friction, never `off`'s kill switch.
 - **`off` has one documented exception, and it is not the one above.** An
   admin-only setting (`update_ignore_net_policy`, off by default) lets the
-  update check run regardless of `off`. Nothing else opts out of `off`.
+  update check run regardless of `off`. Two paths never consult `net_mode`
+  at all (see *What it does not cover* above): the bug-report upload, which
+  is sent only when you press Send, and requests to your configured ComfyUI.
+  Nothing else opts out of `off`; the issues list is refused under it.
 - **Private-address guard.** Requests to loopback, link-local, CGNAT and
   private ranges are refused, and the check is re-applied to the resolved
   address rather than the name. It classifies by ADDRESS TYPE, so a service

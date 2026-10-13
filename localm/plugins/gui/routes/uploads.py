@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 import localm.plugins.gui.web as _web
 from localm import scopes
-from localm.inference.http_server import require_scope
+from localm.inference.http_server import path_formatter, require_scope
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -58,10 +58,10 @@ def register(app: FastAPI, ctx) -> None:
             saved.append({"name": target.name, "bytes": len(data)})
         if not saved:
             raise HTTPException(400, "No files were uploaded.")
-        return {"uploaded": saved, "dir": str(base)}
+        return {"uploaded": saved, "dir": path_formatter(request)(base)}
 
     @app.get("/api/uploads", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    async def list_uploads():
+    async def list_uploads(request: Request):
         """R37: list files in <home>/uploads/ (name, size, mtime) for the Settings
         'Uploaded files' list."""
         base = _web._uploads_dir()
@@ -75,7 +75,7 @@ def register(app: FastAPI, ctx) -> None:
                 continue
             items.append({"name": p.name, "bytes": st.st_size,
                           "mtime": int(st.st_mtime)})
-        return {"items": items, "dir": str(base)}
+        return {"items": items, "dir": path_formatter(request)(base)}
 
     @app.delete("/api/uploads/{name}",
                 dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])

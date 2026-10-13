@@ -405,6 +405,7 @@ def _rendered_text(store) -> str:
 
 @_router.get("/api/memory")
 async def memory_get(request: Request = None):
+    from localm.inference.http_server import path_formatter as _path_formatter
     store = _request_store(request)
     writable = _persist_enabled()
     if writable:
@@ -417,7 +418,7 @@ async def memory_get(request: Request = None):
     return {"text": _rendered_text(store), "writable": writable,
             "items": [_item(r) for r in store.all()],
             "corrections": _corrections_payload(store) if writable else [],
-            "path": str(store.path),
+            "path": _path_formatter(request)(store.path),
             **_embedder_download_status(request)}
 
 
