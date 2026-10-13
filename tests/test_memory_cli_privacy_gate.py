@@ -223,3 +223,10 @@ def test_the_gate_did_not_spread_to_the_deletion_verbs(home):
     res2 = _run("clear", "--yes")
     assert res2.exit_code == 0
     assert _cli_store().all() == []
+
+
+def test_empty_list_hint_does_not_offer_add_as_available_in_privacy_mode(home):
+    _assert_privacy_mode()
+    out = " ".join(_run("list").output.split())
+    assert "Privacy mode saves and adds nothing" in out
+    assert "Outside privacy mode" in out
