@@ -669,7 +669,7 @@ drafts greedily, decoding each before sampling the next.
 
 Once the draft model has loaded, its costs on this machine are measured
 (`LlamaCpp._measure_step_costs`, a few dozen decodes): the target's one-token
-decode, its verification batches of 2, 3, 5, 9 and 17 tokens up to
+decode, its verification batches of 2, 3, 4, 5, 8, 9, 16 and 17 tokens up to
 `spec_draft_tokens + 1` (others interpolated, the curve taken as never falling
 as the batch grows), the draft model's one-token decode and its batched decode
 per token. Each target figure is the median of 5 timed decodes after 3 warm-up
