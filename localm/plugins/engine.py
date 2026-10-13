@@ -1254,7 +1254,7 @@ class PluginManager:
         Without *name*, a plugin whose refresh failed is left out of the result
         and listed in ``last_refresh_failures`` (name to error); with *name*, the
         failure raises."""
-        self.last_refresh_failures: dict[str, str] = {}
+        self.last_refresh_failures = {}
         self.discover()
         if name is not None:
             if self._store_dir(name) is None:
