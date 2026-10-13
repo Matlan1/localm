@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import server as _srv
-from ..server import EngineCache, _quiet_stdout, _text_result
+from ..server import EngineCache, ModelLoadSkipped, _quiet_stdout, _text_result
 from ._common import MODEL_PARAM
 
 # Largest image file the chat tool reads from disk.
@@ -82,12 +82,14 @@ def answer_with(engines: EngineCache, decision, run):
         names = list(decision.candidates or (decision.resolved,))
     names.append(decision.current)
     errors: list[str] = []
+    skipped = []
     for name in names:
         try:
             # A load prints native sizing diagnostics straight to stdout, the
             # stream the JSON-RPC frames travel on.
             with _quiet_stdout():
-                engine = engines.get_loaded_chat(name)
+                engine = engines.get_loaded_chat(
+                    name, skip_if_latched=name != decision.current)
             try:
                 result = run(engine, name)
             except RuntimeError as e:
@@ -98,12 +100,18 @@ def answer_with(engines: EngineCache, decision, run):
                 with _quiet_stdout():
                     engine = engines.get_loaded(name)
                 result = run(engine, name)
+        except ModelLoadSkipped as e:
+            skipped.append(e.skipped)
+            _srv._log(f"not loading {name}: {e}")
+            continue
         except Exception as e:
             if name == decision.current:
                 raise
             errors.append(f"{name}: {e}")
             _srv._log(f"warning: could not answer with {name}: {e}")
             continue
+        if skipped:
+            decision = decision.with_skipped(skipped)
         if name == decision.resolved:
             return result, decision
         if name == decision.current:
