@@ -340,7 +340,7 @@ async def imagine_import_params(request: Request):
         return await run_in_threadpool_bounded(
             image_params.params_from_bytes, b"".join(chunks), timeout=20.0)
     except image_params.ImageParamsError as e:
-        raise HTTPException(422, f"Cannot import parameters: {e}") from e
+        raise HTTPException(422, str(e)[:1].upper() + str(e)[1:]) from e
     except ThreadCallTimeout as e:
         raise HTTPException(504, f"Reading the file timed out: {e}") from e
 
