@@ -171,3 +171,10 @@ class TestContainTempDir:
         for var in ("TMP", "TEMP", "TMPDIR"):
             assert os.environ[var] == os.path.abspath(str(target))
         assert tempfile.tempdir == os.path.abspath(str(target))
+
+    def test_an_existing_folder_is_accepted(self, tmp_path, monkeypatch):
+        target = tmp_path / "already" / "tmp"
+        target.mkdir(parents=True)
+        monkeypatch.setattr(config, "temp_dir", lambda: target)
+        config.contain_temp_dir()
+        assert tempfile.tempdir == os.path.abspath(str(target))

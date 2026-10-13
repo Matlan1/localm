@@ -104,6 +104,21 @@ def test_ensure_cert_creates_ca_and_leaf(tmp_path):
     assert {"127.0.0.1", "::1", "192.168.1.50"}.issubset(ips)
 
 
+def test_ensure_cert_reusing_the_leaf_returns_the_same_paths(tmp_path):
+    first = tls.ensure_cert(tmp_path, ips=["192.168.1.50"])
+    again = tls.ensure_cert(tmp_path, ips=["192.168.1.50"])
+    assert again == first
+    assert again == (str(tls._leaf_cert_path(tmp_path)), str(tls._leaf_key_path(tmp_path)))
+
+
+def test_the_ca_basic_constraints_extension_is_marked_critical(tmp_path):
+    tls.ensure_cert(tmp_path)
+    ca = _load(tls.ca_cert_path(tmp_path))
+    ext = ca.extensions.get_extension_for_class(x509.BasicConstraints)
+    assert ext.critical is True
+    assert ext.value.path_length == 0
+
+
 def test_ensure_cert_covers_a_hostname_and_an_ip_given_together(tmp_path):
     cert_path, _ = tls.ensure_cert(
         tmp_path, hostnames=["box.example.test"], ips=["192.168.1.50"])
