@@ -621,6 +621,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Two command-line hints no longer mislead.** `localm memory list` on an empty store says that
   `localm memory add` does not work in privacy mode, and `localm mcp --help` now names the `rerank`
   tool and each plugin tool.
+- **A broken coder config no longer hides your MCP servers or skills silently.** When
+  `.localcoder/config.toml` cannot be parsed, or a skill folder or `SKILL.md` cannot be read,
+  the coder now prints a warning at start-up naming the file instead of starting with no MCP
+  tools or a shorter skill list and saying nothing.
+- **An unreadable saved conversation is reported instead of vanishing from the sidebar.** A chat
+  file that is corrupt or locked used to be left out of the list with no message. The list now
+  names how many were skipped, the Chat page shows a notice, and the log records which one.
+- **A share inbox that cannot be listed says so.** If the folder holding items shared from a
+  phone cannot be read, the 15-minute clean-up now logs that it could not run instead of
+  leaving expired items on disk unreported.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A

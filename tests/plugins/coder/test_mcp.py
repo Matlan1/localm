@@ -218,8 +218,35 @@ class TestConfigLoading:
         (cfg_dir / "config.toml").write_text(body, encoding="utf-8")
         assert load_mcp_config(tmp_path) == {}
 
+    def test_unparseable_config_raises_not_empty(self, tmp_path):
+        from localm.plugins.coder.project_config import ProjectConfigUnreadable
+        cfg_dir = tmp_path / ".localcoder"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.toml").write_text(
+            '[mcp.servers.calc]\ncommand = "python\n', encoding="utf-8")
+        with pytest.raises(ProjectConfigUnreadable) as exc:
+            load_mcp_config(tmp_path)
+        assert exc.value.path is not None and exc.value.path.name == "config.toml"
+
 
 class TestRegistration:
+    def test_unparseable_config_is_reported_as_a_warning(self, tmp_path):
+        cfg_dir = tmp_path / ".localcoder"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.toml").write_text(
+            '[mcp.servers.calc]\ncommand = "python\n', encoding="utf-8")
+        registered, warnings = register_mcp_tools(tmp_path)
+        assert registered == []
+        assert len(warnings) == 1
+        assert "unreadable" in warnings[0] and "config.toml" in warnings[0]
+
+    def test_absent_and_serverless_configs_produce_no_warning(self, tmp_path):
+        assert register_mcp_tools(tmp_path) == ([], [])
+        cfg_dir = tmp_path / ".localcoder"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.toml").write_text('model = "x"\n', encoding="utf-8")
+        assert register_mcp_tools(tmp_path) == ([], [])
+
     def test_end_to_end_register_and_call(self, tmp_path, fake_server_path):
         cfg_dir = tmp_path / ".localcoder"
         cfg_dir.mkdir()

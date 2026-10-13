@@ -106,17 +106,21 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, body.lstrip("\n")
 
 
-def discover_skills(cwd: Path) -> list[Skill]:
+def discover_skills(cwd: Path, problems: Optional[list[str]] = None) -> list[Skill]:
     """Every valid ``SKILL.md`` folder under the skill roots, sorted by name.
     Project skills override global ones on a name clash. Best-effort: unreadable
-    or invalid entries are skipped, never raised."""
+    or invalid entries are skipped, never raised. When *problems* is given, one
+    line is appended to it for each skill root or ``SKILL.md`` that exists but
+    could not be read."""
     found: dict[str, Skill] = {}
     for root in _skill_roots(cwd):
         if not root.is_dir():
             continue
         try:
             children = sorted(root.iterdir())
-        except OSError:
+        except OSError as e:
+            if problems is not None:
+                problems.append(f"skill folder {root} could not be listed: {e}")
             continue
         for child in children:
             sm = child / "SKILL.md"
@@ -125,7 +129,9 @@ def discover_skills(cwd: Path) -> list[Skill]:
             try:
                 meta, _ = _parse_frontmatter(
                     sm.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
+            except OSError as e:
+                if problems is not None:
+                    problems.append(f"skill {child.name} could not be read: {e}")
                 continue
             name = (meta.get("name") or child.name).strip()
             if not _NAME_RE.match(name):
@@ -253,7 +259,7 @@ def register_skill_tools(cwd: Path) -> tuple[list[str], list[str]]:
     """
     warnings: list[str] = []
     try:
-        skills = discover_skills(cwd)
+        skills = discover_skills(cwd, warnings)
     except Exception as e:                       # discovery must not break the agent
         return [], [f"Skill discovery failed: {e}"]
     if not skills:

@@ -327,17 +327,16 @@ def stop_pooled_servers() -> None:
 
 
 def load_mcp_config(cwd: Path) -> dict[str, dict]:
-    """Read the [mcp.servers.*] tables from the nearest project config."""
-    from .project_config import find_project_config
+    """Read the [mcp.servers.*] tables from the nearest project config.
+
+    Returns an empty dict when there is no project config or it declares no
+    servers. Raises ProjectConfigUnreadable when the config file exists but
+    cannot be read or parsed."""
+    from .project_config import find_project_config, read_project_config_file
     path = find_project_config(cwd)
     if path is None:
         return {}
-    try:
-        import tomllib
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
-    except Exception:
-        return {}
+    raw = read_project_config_file(path)
     mcp_table = raw.get("mcp", {})
     servers = mcp_table.get("servers", {}) if isinstance(mcp_table, dict) else {}
     if not isinstance(servers, dict):
@@ -356,10 +355,17 @@ def register_mcp_tools(cwd: Path) -> tuple[list[str], list[str]]:
     Returns (registered_tool_names, warnings). A failing server produces a
     warning, never an exception - MCP problems must not break the agent.
     """
+    from .project_config import ProjectConfigUnreadable
+
     registered: list[str] = []
     warnings: list[str] = []
 
-    for name, spec in load_mcp_config(cwd).items():
+    try:
+        configured = load_mcp_config(cwd)
+    except ProjectConfigUnreadable as e:
+        return registered, [f"MCP servers not loaded: project config unreadable ({e})"]
+
+    for name, spec in configured.items():
         try:
             server = pooled_server(name, spec)
         except MCPError as e:

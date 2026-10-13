@@ -471,6 +471,33 @@ def test_stale_disk_entries_are_swept_at_startup(tmp_path, monkeypatch, caplog):
     assert [i["name"] for i in client.get("/api/share/pending").json()["items"]] == ["recent.png"]
 
 
+def test_sweep_that_cannot_list_the_inbox_says_so(share_client, tmp_path, monkeypatch, caplog):
+    """An inbox that cannot be enumerated must not read as a clean sweep."""
+    import logging
+
+    from localm.plugins.gui.routes import share as share_routes
+    inbox = tmp_path / ".localm" / "share_inbox"
+    share_client.post("/share-target", files={"files": ("old.png", _PNG, "image/png")})
+    old = next(inbox.glob("*__old.png"))
+    _age(old, 16)
+
+    real_glob = Path.glob
+
+    def glob(self, pattern, *a, **k):
+        if self == inbox:
+            raise PermissionError("inbox locked")
+        return real_glob(self, pattern, *a, **k)
+
+    monkeypatch.setattr(Path, "glob", glob)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        share_routes._sweep_expired(share_client.app, inbox)
+
+    assert old.exists(), "nothing could be listed, so nothing was removed"
+    assert any("could not list the inbox" in r.getMessage()
+               and "inbox locked" in r.getMessage() for r in caplog.records), \
+        f"the failed sweep was not logged: {[r.getMessage() for r in caplog.records]}"
+
+
 def test_memory_entry_older_than_the_ttl_is_dropped_on_access(privacy_client):
     import time
     privacy_client.post("/share-target", files={"files": ("old.png", _PNG, "image/png")})

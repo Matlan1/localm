@@ -58,8 +58,8 @@ def _memory_inbox_bytes(store: dict) -> int:
 
 def _sweep_expired(app, inbox: Path, *, startup: bool = False) -> None:
     """Drop memory entries past their expiry and unlink disk entries older than
-    the TTL. Never raises: a disk entry that cannot be removed is logged and
-    left for the next sweep."""
+    the TTL. Never raises: an inbox that cannot be listed, or a disk entry that
+    cannot be removed, is logged and left for the next sweep."""
     now = time.time()
     store = _memory_inbox(app)
     for name in [n for n, (_, exp) in store.items() if exp <= now]:
@@ -68,7 +68,9 @@ def _sweep_expired(app, inbox: Path, *, startup: bool = False) -> None:
     try:
         stale = [p for p in inbox.glob("*__*")
                  if p.is_file() and p.stat().st_mtime <= cutoff]
-    except OSError:
+    except OSError as e:
+        logger.warning("share-inbox: could not list the inbox to remove expired "
+                       "entries: %s", e)
         return
     for p in stale:
         fid = _web._parse_share_entry(p)[0]
