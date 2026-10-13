@@ -257,8 +257,7 @@ def _text_key(text: str) -> str:
 
 
 def _call_key(query: str, texts: list[str]) -> str:
-    """Identity of one reranker call: its query and the texts in order (a
-    quantised reranker's scores depend on the batch it scored with)."""
+    """Identity of one reranker call: its query and the texts in order."""
     body = "\x00".join([query, *map(_text_key, texts)])
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:24]
 
@@ -284,8 +283,7 @@ class Replay:
     def __init__(self, data: dict) -> None:
         self.data = data
         self.vectors = {k: _unpack(v) for k, v in data["vectors"].items()}
-        #: Every embedding or reranker call the recording did not hold. A
-        #: query degrades past a miss, so a test reads this list to see one.
+        #: Every embedding or reranker call the recording did not hold.
         self.misses: list[str] = []
 
     def embed_fn(self, texts: list[str]) -> list[list[float]]:
@@ -344,8 +342,7 @@ def record_replay(path: Path, embed_fn: Callable, rerankers: dict, *,
     """Record the real *embed_fn* and *rerankers* (``{name: (fn, sha256,
     min_score)}``) over every question and chunk the gates ask about, and write
     them to *path* with the gate results they reproduce. Vectors are stored as
-    half-precision floats and the collection is built from those same values, so
-    the recording and the replay see identical retrieval."""
+    half-precision floats and the recorded collection is built from those values."""
     queries, offtopic, followups = load_queries(), load_offtopic(), load_followups()
     with tempfile.TemporaryDirectory(prefix="rerank-record-") as tmp:
         lexical = build_collection(Path(tmp) / "lexical", None)
