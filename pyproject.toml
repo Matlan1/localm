@@ -326,8 +326,9 @@ exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-librarie
 # Linux wheel does (CVE-2026-59890, sdist MANIFEST.in exclusion bypass, fixed in
 # 83.0.0) even though ctranslate2 itself declares no upper bound - force the floor
 # on every platform rather than only where the wheel metadata already allows it.
-# The override also replaces the win32 ROCm torch pin's declared `setuptools<82`, so
-# `pip check` reports that one conflict in a [gpu] install on Windows.
+# The override also replaces the `setuptools<82` that torch 2.11 and 2.12 declare, so
+# `pip check` reports that one conflict where torch resolves to one of them: the
+# win32 ROCm [gpu] pin, and the PyPI torch an install for macOS 13 or older resolves.
 override-dependencies = ["setuptools>=83.0.0"]
 
 [[tool.uv.index]]

@@ -2337,6 +2337,77 @@ def interrupt_comfy(api_url: str) -> bool:
     return ok
 
 
+def _comfy_queue_lists(api_url: str, prompt_id: str) -> Optional[tuple[bool, bool]]:
+    """``(running, pending)``: whether ``GET /queue`` lists *prompt_id* as
+    running and as pending, or None when the queue cannot be read."""
+    try:
+        req = urllib.request.Request(f"{api_url}/queue")
+        with _comfy_urlopen(req, timeout=10) as response:
+            queue = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("reading the ComfyUI queue for %s failed: %s", prompt_id, e)
+        return None
+
+    def _listed(key: str) -> bool:
+        return any(len(item) > 1 and item[1] == prompt_id
+                   for item in (queue.get(key) or []))
+
+    return _listed("queue_running"), _listed("queue_pending")
+
+
+def _comfy_post(api_url: str, path: str, body: dict) -> bool:
+    try:
+        req = urllib.request.Request(
+            f"{api_url}{path}", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with _comfy_urlopen(req, timeout=10):
+            return True
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("ComfyUI POST %s failed: %s", path, e)
+        return False
+
+
+def cancel_comfy_prompt(api_url: str, prompt_id: str) -> bool:
+    """Stop ComfyUI's work on *prompt_id* only; other jobs, running or queued,
+    are left alone. Best-effort; returns True when ComfyUI reports the prompt
+    was running or pending and was cancelled.
+
+    Uses ComfyUI's ``POST /api/jobs/{prompt_id}/cancel`` when it has one (it
+    dequeues or interrupts that prompt in one step). A ComfyUI without that
+    route gets ``GET /queue`` then a targeted ``POST /interrupt {"prompt_id"}``
+    when it is running, or ``POST /queue {"delete": [...]}`` when it is pending,
+    after which the queue is read again and a prompt that started meanwhile is
+    interrupted."""
+    try:
+        req = urllib.request.Request(
+            f"{api_url}/api/jobs/{urllib.parse.quote(prompt_id, safe='')}/cancel",
+            data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+        with _comfy_urlopen(req, timeout=10) as response:
+            reply = json.loads(response.read().decode("utf-8") or "{}")
+        if isinstance(reply, dict) and isinstance(reply.get("cancelled"), bool):
+            return reply["cancelled"]
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("ComfyUI job cancel route for %s unavailable (%s); "
+                     "using the queue", prompt_id, e)
+
+    lists = _comfy_queue_lists(api_url, prompt_id)
+    if lists is None:
+        return False
+    running, pending = lists
+    done = False
+    if running:
+        done = _comfy_post(api_url, "/interrupt", {"prompt_id": prompt_id})
+    if pending:
+        done = _comfy_post(api_url, "/queue", {"delete": [prompt_id]})
+        again = _comfy_queue_lists(api_url, prompt_id)
+        if again is not None and again[0]:
+            done = _comfy_post(api_url, "/interrupt", {"prompt_id": prompt_id})
+    return done
+
+
 def _with_warning(message: str, warning: str) -> str:
     """Append a containment warning to a success message when present."""
     return f"{message}\n{warning}" if warning else message
@@ -2481,11 +2552,12 @@ def comfy_poll_until_done(
     errors, or times out. Returns ``(status, value)``:
 
       - ``POLL_CANCELLED``  -> value None. ``cancel_check()`` returned truthy; this
-        helper has already issued ``interrupt_comfy`` + ``clear_comfy_history``.
+        helper has already issued ``cancel_comfy_prompt`` + ``clear_comfy_history``.
       - ``POLL_EXEC_ERROR`` -> value is the ``history_execution_error`` detail (str).
       - ``POLL_FINISHED``   -> value is the finished ``history[prompt_id]`` entry
         (dict); the caller reads its ``"outputs"`` for the medium's artifact.
-      - ``POLL_TIMEOUT``    -> value is the last poll Exception (or None if none).
+      - ``POLL_TIMEOUT``    -> value is the last poll Exception (or None if none);
+        this helper has already issued ``cancel_comfy_prompt``.
 
     ``on_tick(elapsed_seconds)`` is called once per iteration BEFORE the /history
     request (``elapsed_seconds`` is ``time.time() - start_time``), so the caller can
@@ -2495,7 +2567,7 @@ def comfy_poll_until_done(
     last_poll_err: Optional[Exception] = None
     while time.time() - start_time < max_poll_seconds:
         if cancel_check and cancel_check():
-            interrupt_comfy(api_url)
+            cancel_comfy_prompt(api_url, prompt_id)
             clear_comfy_history(api_url, prompt_id)
             return POLL_CANCELLED, None
         if on_tick is not None:
@@ -2516,6 +2588,7 @@ def comfy_poll_until_done(
             # distinguishable from a merely slow one if we time out below.
             last_poll_err = e
         time.sleep(sleep_seconds)
+    cancel_comfy_prompt(api_url, prompt_id)
     return POLL_TIMEOUT, last_poll_err
 
 

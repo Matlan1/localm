@@ -165,10 +165,11 @@ _MAX_SHELL_SCOPE_FLAGS = 3
 # gates.
 _SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"run_shell", "run_shell_background"})
 
-# Tools that block on a child process of their own and are handed the run's
-# cancel token (``_cancel``), so a cancelled run kills the process instead of
-# waiting out a model-supplied timeout.
-_CANCELLABLE_SUBPROCESS_TOOLS: frozenset[str] = frozenset({"run_shell", "run_tests"})
+# Tools that block on a child process or a render of their own and are handed
+# the run's cancel token (``_cancel``), so a cancelled run stops that work
+# instead of waiting it out.
+_CANCELLABLE_SUBPROCESS_TOOLS: frozenset[str] = frozenset(
+    {"run_shell", "run_tests", "generate_image"})
 
 # Tools the shell reject-list inspects before anything else can run them. The
 # shell pair takes a command line; git_push takes argv parts and appends its
