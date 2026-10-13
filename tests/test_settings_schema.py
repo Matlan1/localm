@@ -665,25 +665,74 @@ def test_secret_credential_keys_ignore_values_override(tmp_path, monkeypatch):
     assert "default" not in fields["hf_token"]
 
 
-def test_the_gui_shows_the_schema_help_text_for_every_setting():
-    """The settings page renders its help from app/i18n-en.js, not from the
-    schema, so the two must say the same thing."""
+def _gui_catalog():
     import re
     from pathlib import Path
 
     js = (Path(ss.__file__).parent / "plugins" / "gui" / "static" / "app"
           / "i18n-en.js").read_text(encoding="utf-8")
-    shown = {
+    return {
         key: json.loads('"' + raw + '"')
         for key, raw in re.findall(
-            r'"settings\.field\.(\w+)\.help": "((?:[^"\\]|\\.)*)"', js)
+            r'"(settings\.field\.[\w.]+)": "((?:[^"\\]|\\.)*)"', js)
     }
 
-    def camel(key):
-        head, *rest = key.split("_")
-        return head + "".join(part.capitalize() for part in rest)
 
-    compared = [f for f in ss.CORE_FIELDS if camel(f.key) in shown]
-    assert len(compared) > 50, "the GUI help strings were not found"
-    drifted = [f.key for f in compared if shown[camel(f.key)] != f.help]
-    assert not drifted, f"GUI help differs from the schema help for: {drifted}"
+def _camel(key):
+    head, *rest = key.split("_")
+    return head + "".join(part.capitalize() for part in rest)
+
+
+def _is_hidden(field):
+    return getattr(field.widget, "value", field.widget) == "hidden"
+
+
+def _gui_text_mismatches(fields, scopes_for):
+    """(field key, part) pairs where the catalog entry the settings page
+    resolves is absent or differs from the schema text. *scopes_for* gives the
+    catalog scopes tried in order for a field and plugin (None = unscoped), the
+    same rule as fieldCatalogText in pages/settings.js."""
+    catalog = _gui_catalog()
+    bad = []
+    for field in fields:
+        if _is_hidden(field):
+            continue
+        for scopes in scopes_for(field):
+            for part in ("label", "help"):
+                want = field.label if part == "label" else field.help
+                if not want:
+                    continue
+                keys = ([f"settings.field.{s}.{_camel(field.key)}.{part}"
+                         for s in scopes] if scopes
+                        else [f"settings.field.{_camel(field.key)}.{part}"])
+                found = next((catalog[k] for k in keys if k in catalog), None)
+                if found != want:
+                    bad.append((field.key, part, scopes))
+    return bad
+
+
+def test_the_gui_shows_the_schema_text_for_every_core_setting():
+    """The settings page renders label and help from app/i18n-en.js, so every
+    visible core field needs an entry that says what the schema says."""
+    bad = _gui_text_mismatches(ss.CORE_FIELDS, lambda f: [None])
+    assert not bad, f"GUI label/help missing or different from the schema: {bad}"
+
+
+def test_the_gui_shows_the_schema_text_for_every_media_plugin_setting():
+    bad = _gui_text_mismatches(
+        ss.MEDIA_PLUGIN_FIELDS, lambda f: [(plugin, "media") for plugin in f.plugins])
+    assert not bad, f"GUI label/help missing or different from the schema: {bad}"
+
+
+def test_the_gui_shows_the_schema_text_for_every_tts_setting():
+    bad = _gui_text_mismatches(ss.TTS_FIELDS, lambda f: [("tts",)])
+    assert not bad, f"GUI label/help missing or different from the schema: {bad}"
+
+
+def test_every_settings_field_entry_has_a_german_translation():
+    from pathlib import Path
+
+    de = json.loads((Path(ss.__file__).parent / "plugins" / "gui" / "static"
+                     / "i18n" / "de.json").read_text(encoding="utf-8"))
+    missing = sorted(k for k in _gui_catalog() if not de.get(k))
+    assert not missing, f"no German text for: {missing}"
