@@ -10,7 +10,7 @@ import { chat, renderAttachChips } from "../app/chat.js";
 import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
-import { createNativeModelPicker } from "../app/native-models.js";
+import { createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -286,3 +286,106 @@ $("img-generate").onclick = async () => {
     hideStop("img-stop");
   }
 };
+
+/* ================================================================ */
+/*  Prompt helpers: enhance, import parameters from an image         */
+/* ================================================================ */
+
+const IMPORT_SOURCES = new Set(["localm", "a1111", "comfyui", "sidecar"]);
+
+/* Fills this page from the `{source, params}` the import route returns:
+   prompt, negative prompt, seed, guidance, CFG, denoise and size, then (native
+   backend) the model and LoRAs matched against the registered ones. A localm
+   image or sidecar holds the whole record, so a field it lacks is cleared; a
+   foreign image holds only what its tool wrote, so a field it lacks is left
+   as it is. Returns the names of the parameters it could not apply. */
+export async function applyImportedParams(result) {
+  const p = (result && result.params) || {};
+  const own = result.source === "localm" || result.source === "sidecar";
+  const skipped = [];
+  const put = (id, value) => {
+    const node = $(id);
+    if (!node) return false;
+    if (value === undefined || value === null) { if (own) node.value = ""; return true; }
+    node.value = value;
+    return true;
+  };
+  put("img-prompt", p.prompt);
+  put("img-negative", p.negative_prompt);
+  put("img-seed", p.seed);
+  put("img-guidance", p.guidance);
+  put("img-cfg", p.cfg);
+  put("img-denoise", p.denoise);
+  put("img-size", p.width && p.height ? `${p.width}x${p.height}` : null);
+  if (!own && (p.prompt === undefined || p.prompt === null)) skipped.push("prompt");
+  for (const [key, id] of [["steps", "img-steps"], ["sampler", "img-sampler"], ["scheduler", "img-scheduler"]]) {
+    if (p[key] === undefined || p[key] === null) continue;
+    if (!put(id, p[key])) skipped.push(key);
+  }
+  if (imageBackend.active === "native") {
+    if (p.model) {
+      const name = await imageModelPicker.matchModel(p.model);
+      if (name) {
+        await imageModelPicker.setModels(own ? { ...(p.components || {}), model: name } : { model: name });
+        if (imageModelPicker.state.models.model !== name) skipped.push(`model ${p.model}`);
+      } else {
+        skipped.push(`model ${p.model}`);
+      }
+    }
+    if (p.loras && p.loras.length) {
+      const kept = [];
+      for (const item of p.loras) {
+        const name = await imageModelPicker.matchLora(item.name);
+        if (name) kept.push({ name, strength: item.strength }); else skipped.push(`LoRA ${item.name}`);
+      }
+      imageModelPicker.setLoras(kept);
+    }
+  } else if (p.model || (p.loras && p.loras.length)) {
+    skipped.push("model", "LoRA");
+  }
+  revealFilledAdvanced($("view-images"));
+  return skipped;
+}
+
+export async function importParamsFromFile(file) {
+  const r = await fetch("/api/imagine/import-params", {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/octet-stream" }),
+    body: file,
+  });
+  let data = null;
+  try { data = await r.json(); } catch { /* reported below by status */ }
+  if (!r.ok) throw new Error((data && data.detail) || r.statusText);
+  const skipped = await applyImportedParams(data);
+  const source = IMPORT_SOURCES.has(data.source) ? t(`images.import.source.${data.source}`) : data.source;
+  toast(skipped.length
+    ? t("images.import.doneSkipped", { source, items: skipped.join(", ") })
+    : t("images.import.done", { source }));
+  return data;
+}
+
+const imageHelperRow = mountEnhanceButton({
+  media: "image", fieldId: "img-prompt",
+  familyOf: () => ({ family: imageModelPicker.family(), label: imageModelPicker.familyLabel() }),
+});
+if (imageHelperRow) {
+  const picker = el("input");
+  picker.type = "file";
+  picker.accept = ".png,image/png,.json,application/json";
+  picker.hidden = true;
+  const importBtn = el("button", "btn-secondary btn-sm", t("images.import.button"));
+  importBtn.type = "button";
+  importBtn.title = t("images.import.title");
+  importBtn.onclick = () => picker.click();
+  picker.onchange = async () => {
+    const file = picker.files && picker.files[0];
+    picker.value = "";
+    if (!file) return;
+    try {
+      await importParamsFromFile(file);
+    } catch (e) {
+      toast(t("images.import.failed", { message: e.message }), true);
+    }
+  };
+  imageHelperRow.append(importBtn, picker);
+}

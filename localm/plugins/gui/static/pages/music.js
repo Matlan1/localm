@@ -8,7 +8,7 @@
 import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
-import { createMusicModelPicker } from "../app/native-models.js";
+import { createMusicModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -62,6 +62,8 @@ bindReloadToggle("music", "music-reload-llm");
 export const musicBackend = { active: null, choice: null };
 
 export const musicModelPicker = createMusicModelPicker({ mountId: "music-native-models" });
+
+mountEnhanceButton({ media: "music", fieldId: "music-tags" });
 
 export async function refreshMusicBackend() {
   let data;

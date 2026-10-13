@@ -47,6 +47,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a model dropdown plus the components and LoRAs that model uses, remembered per page and applied
   to the next generation only. In Settings, the native model fields are dropdowns of your
   registered models, with a custom path still possible.
+- **Parameters travel with a native image, and come back from any image.** A new Settings >
+  Images switch, **Embed generation parameters in the PNG** (off by default, never in privacy
+  mode), writes the prompt, seed and settings into each native image. **Import parameters from
+  image** on the Images page fills the prompt, seed, size, model and LoRAs from a localm image or
+  sidecar, an A1111/Forge image or a ComfyUI image, and names anything it could not apply.
+- **Enhance prompt.** The Images, Video and Music pages have a button that asks the loaded chat
+  model to expand your prompt for the model that will generate it (tags for Stable Diffusion 1.x,
+  2.x and SDXL, sentences for the newer image models, motion and camera wording for video, style
+  tags for music). The result stays editable and can be undone; with no chat model loaded the
+  button says so.
+- **Music checkpoints the native backend cannot run are listed.** An ACE-Step v1 file such as
+  `ace_step_v1_3.5b.safetensors` now shows in the Music page's model picker with the reason
+  (ComfyUI only) instead of being invisible.
 - **Register a single image model file.** `localm pull <file>.safetensors` now registers a lone diffusion model, text encoder, VAE or LoRA file, detecting its type,
   instead of asking for a HuggingFace folder.
 - **A reply that depends only on the request.** `cache_prompt: false` on

@@ -1066,3 +1066,132 @@ def test_generations_wait_for_the_worker_in_turn(timed_native, tmp_path):
         assert t.is_alive() and runner.loads == []
     t.join(10.0)
     assert not t.is_alive() and results[0][0] is True
+
+
+# --------------------------------------------------------------------------- #
+#  opt-in parameters in the PNG, and importing them back                      #
+# --------------------------------------------------------------------------- #
+
+def _text_keys(path: Path) -> set:
+    from localm.media import image_params
+    return set(image_params.read_png_text(path.read_bytes()))
+
+
+def test_embed_setting_is_off_by_default_and_the_png_stays_bare(fake_native, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    _runner, s = fake_native
+    out = tmp_path / "bare.png"
+    ok, msg = native.generate(s, "a fox", out, write_sidecar=True, seed=5)
+    assert ok, msg
+    assert _text_keys(out) == set()
+    assert set(_png_chunks(out)) <= {b"IHDR", b"IDAT", b"IEND"}
+
+
+def test_embed_setting_writes_parameters_that_import_back(fake_native, tmp_path, monkeypatch):
+    from localm.media import image_params
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    _runner, s = fake_native
+    s["native"]["embed_params"] = True
+    src = tmp_path / "private-dir" / "init.png"
+    src.parent.mkdir()
+    from PIL import Image
+    Image.new("RGB", (64, 64), "blue").save(src)
+    out = tmp_path / "emb.png"
+    ok, msg = native.generate(s, "a fox", out, write_sidecar=True, seed=5,
+                              negative_prompt="blurry", input_image=src, cfg=4.0)
+    assert ok, msg
+    assert _text_keys(out) == {"parameters", "localm"}
+    data = out.read_bytes()
+    assert b"private-dir" not in data
+    got = image_params.params_from_bytes(data)
+    assert got["source"] == "localm"
+    assert got["params"]["prompt"] == "a fox" and got["params"]["seed"] == 5
+    assert got["params"]["negative_prompt"] == "blurry"
+    assert "input_image" not in got["params"] and got["params"]["model"]
+    side = json.loads(out.with_suffix(".png.json").read_text(encoding="utf-8"))
+    assert side["prompt"] == got["params"]["prompt"] and side["seed"] == got["params"]["seed"]
+
+
+def test_embed_is_never_applied_in_privacy_mode(fake_native, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "privacy")
+    _runner, s = fake_native
+    s["native"]["embed_params"] = True
+    out = tmp_path / "priv.png"
+    ok, msg = native.generate(s, "a secret fox", out, write_sidecar=True, seed=5)
+    assert ok, msg
+    assert _text_keys(out) == set()
+    assert b"secret fox" not in out.read_bytes()
+
+
+def test_embed_is_skipped_when_the_caller_allows_no_sidecar(fake_native, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    _runner, s = fake_native
+    s["native"]["embed_params"] = True
+    out = tmp_path / "nosidecar.png"
+    ok, msg = native.generate(s, "a fox", out, write_sidecar=False, seed=5)
+    assert ok, msg
+    assert _text_keys(out) == set()
+
+
+def test_embed_params_is_an_image_only_toggle_in_the_media_schema():
+    from localm.settings_schema import validate_media_block
+    assert validate_media_block("image", {"native_embed_params": True}) == {
+        "native": {"embed_params": True}}
+    with pytest.raises(ValueError):
+        validate_media_block("video", {"native_embed_params": True})
+    with pytest.raises(ValueError):
+        validate_media_block("music", {"native_embed_params": True})
+
+
+def test_import_route_reads_a_png_a_sidecar_and_refuses_the_rest(native_app, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.media import image_params
+    app, _runner = native_app
+    png = _png_with_text("parameters", "a cat\nSteps: 8, Seed: 3, Size: 64x96, Model: m1")
+    with TestClient(app) as c:
+        r = c.post("/api/imagine/import-params", content=png)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["source"] == "a1111"
+        assert body["params"]["seed"] == 3 and body["params"]["width"] == 64
+        r = c.post("/api/imagine/import-params",
+                   content=json.dumps({"prompt": "p", "seed": 9}).encode())
+        assert r.json()["source"] == "sidecar" and r.json()["params"]["seed"] == 9
+        assert c.post("/api/imagine/import-params", content=b"GIF89a").status_code == 422
+        assert c.post("/api/imagine/import-params", content=b"").status_code == 400
+        monkeypatch.setattr(image_params, "MAX_IMPORT_BYTES", 16)
+        assert c.post("/api/imagine/import-params", content=png).status_code == 413
+
+
+def _png_with_text(key: str, text: str) -> bytes:
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    info = PngInfo()
+    info.add_text(key, text)
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), "red").save(buf, format="PNG", pnginfo=info)
+    return buf.getvalue()
+
+
+def test_a_generation_through_the_route_embeds_and_imports_back(native_app, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    from localm.media import paths as media_paths
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    app, _runner = native_app
+    update_config(lambda cfg: cfg["plugins"]["image"]["native"].update({"embed_params": True}))
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "a harbour at dusk", "seed": 77,
+                                         "size": "128x96"})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+        assert job.status == "done"
+        out = media_paths.gallery_dir(media_paths.IMAGE_DIR_NAME) / job.result
+        back = c.post("/api/imagine/import-params", content=out.read_bytes())
+    assert back.status_code == 200, back.text
+    assert back.json()["source"] == "localm"
+    assert back.json()["params"]["prompt"] == "a harbour at dusk"
+    assert back.json()["params"]["seed"] == 77
+    assert (back.json()["params"]["width"], back.json()["params"]["height"]) == (128, 96)
