@@ -8,7 +8,7 @@ from __future__ import annotations
 import string
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TypeGuard
 
 from localm.bugreport.logs import _recent_hang_traces, _recent_log_tail_result
 from localm.bugreport.assembly import build_report, report_title
@@ -53,7 +53,7 @@ _SAVED_REPORT_STAMP_CHARS = frozenset(string.ascii_letters + string.digits + "_-
 _SAVED_REPORT_NAME_MAX = 128
 
 
-def _is_saved_report_name(name: object) -> bool:
+def _is_saved_report_name(name: object) -> TypeGuard[str]:
     """True for ``bug-<stamp>.md`` where <stamp> is one or more ASCII letters,
     digits, ``_`` or ``-``, and the whole name is at most 128 characters."""
     if not isinstance(name, str) or len(name) > _SAVED_REPORT_NAME_MAX:
