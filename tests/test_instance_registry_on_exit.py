@@ -220,7 +220,14 @@ class TestWatchdogRetiresWhenItsMarkerIsCleared:
         relaunched = []
         monkeypatch.setattr(wd, "relaunch",
                             lambda *a, **kw: relaunched.append(a) or None)
-        monkeypatch.setattr(wd, "pid_alive", lambda pid: True)
+        checks = []
+
+        def alive(pid):
+            checks.append(pid)
+            return len(checks) < 50
+
+        monkeypatch.setattr(wd, "pid_alive", alive)
+        monkeypatch.setattr(wd, "poll_for_new_instance", lambda *a, **kw: None)
         code = wd.run(pid=os.getpid(), host="127.0.0.1", port=1, scheme="http",
                       instance_id="restarted", crash_dir=tmp_path,
                       relaunch_argv=["x"], restart_history=[],
@@ -228,6 +235,8 @@ class TestWatchdogRetiresWhenItsMarkerIsCleared:
                       log_path=None)
         assert code == wd.EXIT_OK
         assert relaunched == []
+        assert len(checks) == 1, (
+            f"the watch went on for {len(checks)} checks after the marker was gone")
 
     def test_a_present_marker_keeps_the_watch(self, tmp_path, monkeypatch):
         wd = self._module()
