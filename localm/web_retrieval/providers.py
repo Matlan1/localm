@@ -532,7 +532,7 @@ class BraveSearchProvider:
             return resp.text
         text = _with_retries(send, finish_by=finish_by)
         items = _parse(_BraveParser(), text)
-        if not items and _BRAVE_CAPTCHA_RE.search(text):
+        if not items and _BRAVE_CAPTCHA_RE.search(str(text)):
             raise BotCheckError(
                 f"{self.label} answered with a bot check instead of results")
         return _checked_results(items, text, max_results, self.name,
