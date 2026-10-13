@@ -141,8 +141,9 @@ instant and clean.
 All four hooks are best-effort: a hook that raises never blocks the
 install/enable/uninstall it was called from. `on_install` and `on_first_use`
 failures are logged at WARNING (so they show up in a bug report's activity log,
-not just a debug file); an `on_uninstall` failure stays silent, since uninstall
-must proceed regardless.
+not just a debug file). An `on_uninstall` failure is logged at WARNING too and
+uninstall proceeds; when the user asked for the plugin's data to be deleted, the
+uninstall then reports that the data may not be fully gone.
 
 `on_install` fires only from the HTTP/GUI install routes (`PluginManager.install`
 / `install_external`). The CLI's `localm plugin install <name>` (and `install

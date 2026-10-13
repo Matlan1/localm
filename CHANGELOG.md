@@ -605,6 +605,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
+  that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
+  plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
+  refresh that could not replace the old copy is reported as failed (not "up to date"), and
+  `localm plugin refresh` exits with an error for it. If chat was left installed but disabled by a
+  failed first-run setup, it is enabled again.
+- **Uninstalling a plugin with "delete its data" reports when the plugin's own cleanup failed.**
+  The uninstall still completes, but it no longer claims the data is gone.
 - **`localm ps` no longer lists a stopped or restarted server.** Stopping a server, or
   restarting it from Settings, used to leave its entry behind, so after a restart `localm ps`
   showed the same process twice and `localm stop <old id>` stopped the running server. The
