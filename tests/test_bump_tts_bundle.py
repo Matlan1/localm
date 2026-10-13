@@ -260,7 +260,7 @@ def test_a_notice_missing_a_region_is_refused_by_name(bump):
 # --------------------------------------------------------------------------- #
 
 def test_the_export_names_are_located_on_the_real_shipped_bundle(bump):
-    text = (_ROOT / bump.BUNDLE_REL).read_bytes().decode("utf-8")
+    text = bump._lf((_ROOT / bump.BUNDLE_REL).read_bytes()).decode("utf-8")
     appended = re.search(r"\nexport\{([\w$]+) as espeakWorker,([\w$]+) as espeakFS\};\n$", text)
     assert appended
     upstream = text[:appended.start() + 1]
