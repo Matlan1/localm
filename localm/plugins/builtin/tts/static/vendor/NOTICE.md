@@ -66,6 +66,23 @@ by content (the `new ne.eSpeakNGWorker` promise, and the object carrying
 `createDataFile`/`unlink`) rather than by name. A re-vendor that drops the line
 fails `tests-js/tts-g2p.test.mjs` rather than breaking speech at runtime.
 
+### `kokoro.min.js` fetches the voices at the pinned commit
+
+The upstream bundle fetches a voice from `.../Kokoro-82M-v1.0-ONNX/resolve/main/voices/<voice>.bin`
+and caches the response under that same URL. One call in that function is changed to request the
+URL with `/resolve/main/` replaced by `/resolve/<KOKORO_PINNED_REVISION>/` (the commit in
+`tts-util.js`), so the voices are fetched at the pinned commit while the cache key, and so every
+voice already cached in a browser, stays the same:
+
+    let C=await fetch(d),b=await C.arrayBuffer();
+    let C=await fetch(d.replace("/resolve/main/","/resolve/<commit>/")),b=await C.arrayBuffer();
+
+The model files need no patch: `tts.js` sets transformers.js's `env.remotePathTemplate` to the
+pinned commit, and first moves any file the browser cached under `/resolve/main/` to the pinned
+URL (transformers.js keys its cache by URL) so a model already downloaded is not fetched again. A rebuilt bundle needs the voices change re-applied (the variable names differ in
+minifier output; find it by the `resolve/main/voices/` string). `tests-js/tts-pin.test.mjs` and the
+weekly pin report's "Kokoro voice model commit" row fail when it is missing.
+
 ### Re-vendoring
 
 npm verifies the registry integrity hash during `npm pack`, so take the artefact

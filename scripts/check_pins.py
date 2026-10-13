@@ -881,6 +881,47 @@ def _check_hf_kernel(now):
                advancer=advancer, group=group, detail=f"v{version} of {repo} is the pinned commit")
 
 
+_KOKORO_NAME = "Kokoro voice model commit"
+_KOKORO_FILES = ("config.json", "tokenizer.json", "onnx/model.onnx", "onnx/model_fp16.onnx",
+                 "onnx/model_quantized.onnx", "voices/af_heart.bin")
+
+
+def _check_kokoro_pin(now):
+    """The commit the browser fetches the default Kokoro model and voices at: it
+    must be the commit the vendored bundle fetches the voices at, still serve the
+    model files, and be the repository's current head (else BEHIND)."""
+    name, group = _KOKORO_NAME, "models"
+    advancer = "by hand: update KOKORO_PINNED_REVISION and the voices fetch in the vendored bundle"
+    util = "localm/plugins/builtin/tts/static/tts-util.js"
+    try:
+        repo = _read_const(util, r'^export const KOKORO_DEFAULT_MODEL = "([^"]+)"')
+        pinned = _read_const(util, r'^export const KOKORO_PINNED_REVISION = "([0-9a-f]{40})"')
+        bundle = _read_text("localm/plugins/builtin/tts/static/vendor/kokoro.min.js")
+        if f'.replace("/resolve/main/","/resolve/{pinned}/")' not in bundle:
+            return Row(name=name, status=INCONSISTENT, pinned=pinned[:12], advancer=advancer, group=group,
+                       detail="the vendored bundle does not fetch the voices at the pinned commit")
+        missing = []
+        for path in _KOKORO_FILES:
+            try:
+                _hf_linked_sha256(repo, path, pinned)
+            except FetchError as e:
+                if e.status in (401, 403, 404):
+                    missing.append(path)
+                else:
+                    raise
+        head = _get_json(f"https://huggingface.co/api/models/{repo}").get("sha")
+    except FetchError as e:
+        return _unknown(name, group, advancer, e)
+    if missing:
+        return Row(name=name, status=INCONSISTENT, pinned=pinned[:12], advancer=advancer, group=group,
+                   detail=f"the pinned commit no longer serves: {', '.join(missing)}")
+    if isinstance(head, str) and head != pinned:
+        return Row(name=name, status=BEHIND, pinned=pinned[:12], latest=head[:12], advancer=advancer,
+                   group=group, detail=f"{repo} now has a newer commit, {head[:12]}")
+    return Row(name=name, status=CURRENT, pinned=pinned[:12], latest=pinned[:12], days=0, advancer=advancer,
+               group=group, detail=f"{repo} is at the pinned commit and serves its files")
+
+
 # A pin that is stale for a known reason no automation can fix is reported as BLOCKED, with
 # the reason, until the expiry date; after it the row reads STALE again and has to be
 # decided afresh. name -> (expiry ISO date, reason).
@@ -955,6 +996,9 @@ def build_registry() -> list[PinSpec]:
         PinSpec("Linux CUDA runtime wheels", "cuda", "pin_weekly.py (review PR)", _check_cuda_runtime_wheels),
         PinSpec(_HF_PINS_NAME, "models", "by hand: re-read the digest on the hub and update the table",
                 _check_hf_file_digests),
+        PinSpec(_KOKORO_NAME, "models",
+                "by hand: update KOKORO_PINNED_REVISION and the voices fetch in the vendored bundle",
+                _check_kokoro_pin),
         PinSpec(_HF_KERNEL_NAME, "models", "by hand: read the version's commit from the kernel hub and update the pin",
                 _check_hf_kernel),
     ]

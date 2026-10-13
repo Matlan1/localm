@@ -2071,6 +2071,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   of whatever its version name points at when you load. A transformers release that asks for a
   different kernel version loads no native kernel, so the FP8 weights are expanded to bf16 and
   the load says why.
+- **The Kokoro voice model is fetched at a fixed version.** The browser now downloads the
+  default Kokoro model and its voices from a pinned commit of their Hugging Face repository,
+  not from whatever the repository's default branch holds that day. A model already downloaded
+  and cached in the browser is still found. The weekly pin report flags the repository moving
+  past the pinned commit.
 - **Downloads from Hugging Face are checked more completely.** Every part of a split GGUF is
   checked against the digest the hub publishes, not only the first; a vision projector is
   checked and deleted when it does not match; a file already on disk is checked before it is
