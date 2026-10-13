@@ -134,12 +134,30 @@ class TestParsers:
         query = urllib.parse.parse_qs(urllib.parse.urlparse(t.urls("GET")[0]).query)
         assert query["q"] == ["localm repo"]
 
-    def test_brave_captcha_page_is_a_bot_check(self, monkeypatch):
+    @pytest.mark.parametrize("page", [
+        '<html><body><script>__data={page:"/captcha",searchPage:"/search"}'
+        '</script></body></html>',
+        "<html><body><noscript>Your request has been flagged as being "
+        "suspicious and Brave Search decided to schedule a captcha for you."
+        "</noscript></body></html>",
+    ])
+    def test_brave_captcha_page_is_a_bot_check(self, monkeypatch, page):
+        allow_public(monkeypatch)
+        Transport().install(monkeypatch).route(
+            "GET", BRAVE_SEARCH + "*", _ok(page))
+        with pytest.raises(BotCheckError):
+            BraveSearchProvider().search("q", 5)
+
+    def test_brave_results_page_naming_captcha_in_its_strings_is_unreadable(
+            self, monkeypatch):
         allow_public(monkeypatch)
         Transport().install(monkeypatch).route(
             "GET", BRAVE_SEARCH + "*",
-            _ok("<html><body>Please solve the captcha</body></html>"))
-        with pytest.raises(BotCheckError):
+            _ok('<html><body><script>__data={page:"/search",i18n:{'
+                '"Switch to traditional captcha":"Switch to traditional '
+                'CAPTCHA"}}</script><section id="changed"></section>'
+                "</body></html>"))
+        with pytest.raises(providers.UnreadableResultsError):
             BraveSearchProvider().search("q", 5)
 
 

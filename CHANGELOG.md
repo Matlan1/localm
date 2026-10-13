@@ -510,6 +510,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Brave Search failures named correctly.** When web search falls back to Brave and localm cannot read
+  the page Brave sends, the message now says so instead of calling it a bot check (Brave's normal
+  results page mentions captchas in its interface text).
 - **A failed image generation names the real reason.** `/v1/images/generations` answered a failed
   generation with the chat model's reload note ("Reload deferred to the next message"), which comes
   after it; the `502` now quotes what the image backend reported.
