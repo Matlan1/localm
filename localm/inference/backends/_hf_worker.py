@@ -448,7 +448,10 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     def _free_minus_headroom(idx: int) -> Optional[int]:
         try:
             free, _total = torch.cuda.mem_get_info(idx)
-        except Exception:
+        except Exception as e:
+            logger.warning("gpu_split_indices: free VRAM of device %s could not be "
+                           "read (%s: %s); it is left out of the split", idx,
+                           type(e).__name__, e)
             return None
         return max(0, int(free) - headroom)
 
@@ -527,6 +530,11 @@ class _SafeGrammarProcessor:
     def __init__(self, inner):
         self._inner = inner
         self._failed = False
+
+    @property
+    def failed(self) -> bool:
+        """True once the constraint was dropped for the rest of this generation."""
+        return self._failed
 
     def __call__(self, input_ids, scores):
         if self._failed:
@@ -2015,6 +2023,7 @@ class HFWorker:
             _torch.manual_seed(seed)
 
         self.last_finish_reason = "stop"
+        self.grammar_dropped = False
         finish_observer = _FinishReasonObserver(_eos_token_ids(model, tokenizer))
 
         gen_kwargs: dict = {
@@ -2041,6 +2050,8 @@ class HFWorker:
         # then picks only from the still-legal tokens. Soft-degrades to
         # unconstrained generation if xgrammar is absent or the grammar is bad.
         lp = _grammar_processor(grammar, tokenizer, model)
+        grammar_guard = next((p for p in (lp or []) if isinstance(p, _SafeGrammarProcessor)),
+                             None)
         penalty = None
         if presence_penalty or frequency_penalty:
             penalty = _penalty_processor(
@@ -2116,6 +2127,7 @@ class HFWorker:
         # EOS wins over the length budget whenever both are true at once
         # (mirrors llama.py's _generate - see _FinishReasonObserver above);
         # "length" only when the budget ran out with no EOS ever produced.
+        self.grammar_dropped = bool(grammar_guard is not None and grammar_guard.failed)
         if finish_observer.ended_on_eos:
             self.last_finish_reason = "stop"
         elif finish_observer.generated >= effective_max_new_tokens:

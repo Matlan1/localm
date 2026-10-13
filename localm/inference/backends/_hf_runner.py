@@ -388,7 +388,10 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     "rerank_labels": list(getattr(worker, "rerank_labels", None) or []),
                 }))
             except Exception as e:
-                resp_q.put(("error", str(e)))
+                from localm.debuglog import logger as _dbg
+                from localm.inference.backends.llamacpp._runner import load_error_text
+                _dbg.error("hf worker: model load failed", exc_info=True)
+                resp_q.put(("error", load_error_text(e)))
             # A hard native abort during worker.load() is NOT caught here -
             # the process dies, and the parent detects that via is_alive().
             continue
@@ -409,7 +412,10 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                                           on_status=_worker_status, **payload)
                 for token in gen:
                     resp_q.put(("chunk", token))
-                resp_q.put(("done", {"finish_reason": worker.last_finish_reason}))
+                resp_q.put(("done", {
+                    "finish_reason": worker.last_finish_reason,
+                    "grammar_unsupported": bool(getattr(worker, "grammar_dropped", False)),
+                }))
             except ContextCapacityExceededError as e:
                 # An oversized prompt exceeding the model's context capacity.
                 # Raised in pure Python before native generation - the loaded model
@@ -1024,6 +1030,16 @@ class HFRunner:
             except Exception:
                 pass
             proc.join(timeout=5)
+        if proc.is_alive():
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            proc.join(timeout=5)
+            if proc.is_alive():
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("hf worker pid %s did not exit after kill; it may "
+                             "still hold memory", proc.pid)
         for q in (self._req_q, self._resp_q, self._ctrl_q):
             if q is not None:
                 try:
