@@ -371,6 +371,8 @@ def _lora_fits(lora_family: Optional[str], family: Optional[str]) -> bool:
         return family.startswith("wan")
     if lora_family == "sd1":
         return family in ("sd1", "sd2")
+    if lora_family in ("flux", "chroma"):
+        return family in ("flux", "chroma")
     return lora_family == family
 
 

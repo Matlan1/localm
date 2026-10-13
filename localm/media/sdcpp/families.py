@@ -25,6 +25,7 @@ stable-diffusion.cpp, applied to names normalised to its
 from __future__ import annotations
 
 import json
+import re
 import struct
 import threading
 from dataclasses import dataclass, field
@@ -422,15 +423,34 @@ def _lora_info(t: dict) -> Optional[FileInfo]:
         fam = "flux"
     elif "joint_blocks" in flat:
         fam = "sd3"
-    elif "img_mod" in flat and "transformer_blocks" in flat:
+    elif ("img_mod" in flat or "img_mlp" in flat) and "transformer_blocks" in flat:
         fam = "qwen-image"
+    elif ("layers_0_attention_to_" in flat and "feed_forward_w1" in flat
+          and "adaLN_modulation" in flat):
+        fam = "z-image"
     elif "cross_attn" in flat and "blocks_" in flat and "ffn" in flat:
         fam = "wan"
-    elif "lora_te2" in flat or "lora_te1" in flat:
+    elif "lora_te2" in flat or "lora_te1" in flat or _unet_lora_is_sdxl(t):
         fam = "sdxl"
     elif "input_blocks" in flat or "down_blocks" in flat or "lora_te_" in flat:
         fam = "sd1"
     return FileInfo("lora", fam)
+
+
+_SDXL_TRANSFORMER_DEPTH = re.compile(r"transformer_blocks[._](?:[2-9]|[1-9]\d)[._]")
+
+
+def _unet_lora_is_sdxl(t: dict) -> bool:
+    """Whether the UNet LoRA tensors *t* are SDXL's: a transformer stack more
+    than one block deep (SD 1.x/2.x have exactly one), or cross-attention
+    keys that read a 2048-wide text embedding."""
+    for name, shape in t.items():
+        if _SDXL_TRANSFORMER_DEPTH.search(name):
+            return True
+        if ("attn2" in name and "to_k" in name and len(shape) >= 2
+                and (".lora_down." in name or ".lora_A." in name) and shape[-1] == 2048):
+            return True
+    return False
 
 
 def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:

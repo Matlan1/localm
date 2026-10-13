@@ -89,6 +89,24 @@ FLUX_LORA = {"lora_unet_double_blocks_0_img_attn_proj.lora_down.weight": (2, 307
              "lora_unet_double_blocks_0_img_attn_proj.lora_up.weight": (3072, 2)}
 SDXL_LORA = {"lora_te1_text_model_encoder_layers_0_mlp_fc1.lora_down.weight": (4, 768),
              "lora_unet_input_blocks_4_1_proj_in.lora_down.weight": (4, 640)}
+SDXL_UNET_LORA_CROSS_ATTN = {
+    "lora_unet_down_blocks_0_resnets_0_conv1.lora_down.weight": (64, 320, 3, 3),
+    "lora_unet_down_blocks_1_attentions_0_transformer_blocks_0_attn2_to_k.lora_down.weight":
+        (64, 2048)}
+SDXL_UNET_LORA_DEPTH = {
+    "lora_unet_down_blocks_2_attentions_0_transformer_blocks_2_attn1_to_k.lora_down.weight":
+        (64, 1280)}
+SD1_UNET_LORA = {
+    "lora_unet_down_blocks_0_attentions_0_transformer_blocks_0_attn2_to_k.lora_down.weight":
+        (4, 768)}
+QWEN_IMAGE_LORA = {"transformer_blocks.0.attn.add_k_proj.lora_down.weight": (64, 3072),
+                   "transformer_blocks.0.img_mlp.net.0.proj.lora_down.weight": (64, 3072),
+                   "transformer_blocks.0.txt_mlp.net.0.proj.lora_down.weight": (64, 3072)}
+Z_IMAGE_LORA = {"diffusion_model.layers.0.attention.to_k.lora_A.weight": (32, 3840),
+                "diffusion_model.layers.0.feed_forward.w1.lora_A.weight": (32, 3840),
+                "diffusion_model.layers.0.adaLN_modulation.0.lora_A.weight": (32, 256)}
+WAN22_5B_LORA = {"diffusion_model.blocks.0.cross_attn.k.lora_down.weight": (128, 3072),
+                 "diffusion_model.blocks.0.ffn.0.lora_down.weight": (128, 3072)}
 
 
 @pytest.mark.parametrize("shapes,fmt,arch,kind,family", [
@@ -113,6 +131,12 @@ SDXL_LORA = {"lora_te1_text_model_encoder_layers_0_mlp_fc1.lora_down.weight": (4
     (WAN22_VAE, "st", None, "vae", "wan2.2"),
     (FLUX_LORA, "st", None, "lora", "flux"),
     (SDXL_LORA, "st", None, "lora", "sdxl"),
+    (SDXL_UNET_LORA_CROSS_ATTN, "st", None, "lora", "sdxl"),
+    (SDXL_UNET_LORA_DEPTH, "st", None, "lora", "sdxl"),
+    (SD1_UNET_LORA, "st", None, "lora", "sd1"),
+    (QWEN_IMAGE_LORA, "st", None, "lora", "qwen-image"),
+    (Z_IMAGE_LORA, "st", None, "lora", "z-image"),
+    (WAN22_5B_LORA, "st", None, "lora", "wan"),
 ])
 def test_files_are_classified_from_their_headers(tmp_path, shapes, fmt, arch, kind, family):
     if fmt == "gguf":
@@ -315,6 +339,15 @@ def test_loras_resolve_by_registry_name_and_by_file_name(flux_set):
 def test_a_lora_for_another_family_is_used_and_noted(flux_set):
     out, notes = pairing.resolve_loras([{"name": "sdxl-style"}], "flux")
     assert len(out) == 1 and "SDXL" in notes[0]
+
+
+def test_a_flux_style_lora_is_not_noted_on_chroma_nor_a_chroma_lora_on_flux(flux_set):
+    out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "chroma")
+    assert len(out) == 1 and notes == []
+    out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "flux")
+    assert notes == []
+    out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "qwen-image")
+    assert len(notes) == 1
 
 
 @pytest.mark.parametrize("name", ["not-registered", "fluxunchained", "../x.safetensors"])
