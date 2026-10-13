@@ -95,6 +95,7 @@ def env(tmp_path, monkeypatch):
                  "FAKE_CONFIRM_WHY", "FAKE_CONFIRM_CRASH"):
         monkeypatch.delenv(name, raising=False)
 
+    monkeypatch.setattr(pw, "redirect_temp", lambda: None)
     spies = Spies()
     spies.resets = []
     monkeypatch.setattr(pp, "reset_pipeline_worktree", lambda wt: spies.resets.append(wt))
@@ -598,7 +599,7 @@ def test_verify_current_uses_a_custom_command_when_given(env, tmp_path):
     def cmd(work, receipt):
         return [sys.executable, "-c",
                 f"import json; open({str(marker)!r}, 'w').write('x'); "
-                f"json.dump({{'checks': {{'a': {{'status': 'PASS'}}}}}}, open({str(receipt)!r}, 'w'))"]
+                f"json.dump({{'verdict': 'PASS', 'checks': {{'a': {{'status': 'PASS'}}}}}}, open({str(receipt)!r}, 'w'))"]
     out = pw.verify_current(_adv(verify_current_cmd=cmd))
     assert out.verdict == pw.PASS and marker.exists() and "a=PASS" in out.detail
 
