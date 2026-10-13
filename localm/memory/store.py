@@ -607,6 +607,7 @@ class MemoryStore:
                 self._load()
             record.text = record.text[:MAX_TEXT_LEN]
             self._records.append(record)
+            self._bm25 = None
             vec = self._embed_one(record.text, embed_fn)
             if vec is not None:
                 self._vectors[record.id] = vec
@@ -628,6 +629,7 @@ class MemoryStore:
                     val = val.strip()[:MAX_TEXT_LEN]
                     text_changed = val != rec.text
                     rec.text = val
+                    self._bm25 = None
                 elif key == "importance":
                     from .record import _clamp01
                     rec.importance = _clamp01(val)
@@ -650,6 +652,7 @@ class MemoryStore:
                 self._load()
             before = len(self._records)
             self._records = [r for r in self._records if r.id != mem_id]
+            self._bm25 = None
             self._vectors.pop(mem_id, None)
             removed = len(self._records) != before
             if removed and save:
@@ -855,7 +858,7 @@ class MemoryStore:
         rel = _maxnorm(self._bm25.scores(query))
         if vec_rel is not None:
             rel = [REL_LEX_SHARE * a + (1.0 - REL_LEX_SHARE) * b
-                   for a, b in zip(rel, vec_rel, strict=False)]
+                   for a, b in zip(rel, vec_rel, strict=True)]
         return rel
 
     def _vector_relevance(self, query: str, embed_fn: Optional[EmbedFn],

@@ -132,7 +132,7 @@ def charge_devices(devices: Sequence[dict], shares: Sequence[float], *,
     positions, out_pos = layer_devices(shares, n_layer_all, n_gpu_layers)
     charges = [DeviceCharge(index=int(d["index"]), free=int(d["free"]),
                             share=float(s))
-               for d, s in zip(devices, shares, strict=False)]
+               for d, s in zip(devices, shares, strict=True)]
     for il, pos in enumerate(positions):
         if pos is None:
             continue
@@ -202,7 +202,7 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
         charges = charge_devices(devices, shares, **kw)
         if remaining == 1 and not all(c.fits for c in charges):
             return SplitFitPlan(tensor_split=None, excluded=[], default=default)
-    kept = {int(d["index"]): s for d, s in zip(devices, shares, strict=False) if s > 0}
-    excluded = [int(d["index"]) for d, s in zip(devices, shares, strict=False) if s <= 0]
+    kept = {int(d["index"]): s for d, s in zip(devices, shares, strict=True) if s > 0}
+    excluded = [int(d["index"]) for d, s in zip(devices, shares, strict=True) if s <= 0]
     return SplitFitPlan(tensor_split=kept, excluded=excluded, default=default,
                         chosen=charges)
