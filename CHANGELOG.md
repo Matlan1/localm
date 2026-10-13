@@ -608,6 +608,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Settings labels and help translate for every field.** Forty-six settings had no German text and
+  showed English in the German interface: the reranker, diffusion, parallel-request and metrics
+  settings, every image, music and video generation setting, and the text-to-speech settings.
 - **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
   its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
   localm is reported as such instead of with advice to repair the llama.cpp runtime.
