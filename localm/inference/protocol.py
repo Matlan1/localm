@@ -6,7 +6,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from localm.inference.backends.base import (
     AUDIO_CPU_FALLBACK_STATUS, LOADING_MODEL_STATUS, VISION_CPU_FALLBACK_STATUS,
@@ -204,8 +204,9 @@ class CompletionRequest(SamplingFields):
     grammar_triggers: Optional[list[str]] = None
     seed: Optional[int] = None
     # False: the reply is computed from a full prefill into an emptied KV cache,
-    # alone, so it depends only on this request (GGUF models).
-    cache_prompt: bool = True
+    # alone, so it depends only on this request (GGUF models). Only a JSON boolean
+    # is accepted.
+    cache_prompt: StrictBool = True
     # Text that ends the reply when generated: one string or a list. The reply
     # is cut before the first match and finish_reason is "stop".
     stop: Optional[list[str]] = None
@@ -255,8 +256,9 @@ class ChatRequest(SamplingFields):
     grammar_triggers: Optional[list[str]] = None
     seed: Optional[int] = None     # RNG seed for reproducible generation
     # False: the reply is computed from a full prefill into an emptied KV cache,
-    # alone, so it depends only on this request (GGUF models).
-    cache_prompt: bool = True
+    # alone, so it depends only on this request (GGUF models). Only a JSON boolean
+    # is accepted.
+    cache_prompt: StrictBool = True
     # Text that ends the reply when generated: one string or a list. The reply
     # is cut before the first match and finish_reason is "stop".
     stop: Optional[list[str]] = None

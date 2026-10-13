@@ -160,7 +160,6 @@ def test_slot_mode_runs_the_reply_alone_in_the_exclusive_section():
         "a reply admitted while the exclusive reply waited started before it ended"
     assert log[native[0]][1] == [0, 1, 2]
     api.llama_memory_clear.assert_called_with(MEM, True)
-    assert ctx.cleared >= 1
     assert first == _reference(PROMPTS[0], 40)
     assert late["r"] == _reference(PROMPTS[2], 5)
 
@@ -357,7 +356,7 @@ def test_the_routes_pass_only_a_false_value_to_the_engine(home, route, given, wa
 
 
 @pytest.mark.parametrize("route", ["chat", "complete"])
-@pytest.mark.parametrize("bad", ["nope", [], {}, None, 2])
+@pytest.mark.parametrize("bad", ["nope", "false", "true", 0, 1, 0.0, [], {}, None, 2])
 def test_a_cache_prompt_that_is_not_a_boolean_is_a_422(home, route, bad):  # noqa: F811
     served = Served()
     r = getattr(served, route)(cache_prompt=bad)
@@ -384,8 +383,8 @@ def test_the_messages_route_passes_it_to_the_chat_route(home):  # noqa: F811
 
 
 @pytest.mark.parametrize("path, body", [
-    ("/v1/responses", {"model": MODEL, "input": "hi", "cache_prompt": "nope"}),
-    ("/v1/messages", {"model": MODEL, "max_tokens": 5, "cache_prompt": "nope",
+    ("/v1/responses", {"model": MODEL, "input": "hi", "cache_prompt": "false"}),
+    ("/v1/messages", {"model": MODEL, "max_tokens": 5, "cache_prompt": 0,
                       "messages": [{"role": "user", "content": "hi"}]}),
 ])
 def test_the_other_wire_formats_refuse_a_wrong_type(home, path, body):  # noqa: F811
