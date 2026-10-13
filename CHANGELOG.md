@@ -525,6 +525,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **`localm pull` of a Qwen3-TTS model fetches a projector that works.** In a repo that ships both a
+  Q8_0 and an f16 projector (such as `mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF`), the pull took the
+  f16 one, and speaking with it crashed the speech worker on the CPU and on AMD ROCm. A text-to-speech
+  pull now takes the Q8_0 projector, then bf16, and f16 only when nothing else is there.
 - **Brave Search failures named correctly.** When web search falls back to Brave and localm cannot read
   the page Brave sends, the message now says so instead of calling it a bot check (Brave's normal
   results page mentions captchas in its interface text).
