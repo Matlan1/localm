@@ -428,8 +428,13 @@ def _do_upscale_image(payload):
     w, h, c, data = int(img["width"]), int(img["height"]), int(img["channel"]), img["data"]
     if len(data) != w * h * c:
         raise ValueError("input image buffer does not match its size")
+    max_side = int(payload.get("max_output_side") or 0)
+    if max_side and max(w, h) * scale > max_side:
+        raise ValueError(f"upscaling {w}x{h} by {scale}x would make a {w * scale}x{h * scale} "
+                         f"image; each side is limited to {max_side} pixels")
     _State.last_errors = []
-    _State.paths = (path,)
+    if path not in _State.paths:
+        _State.paths = _State.paths + (path,)
     keep = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
     src = b.sd_image_t(w, h, c, ctypes.cast(keep, ctypes.POINTER(ctypes.c_uint8)))
     uctx = lib.new_upscaler_ctx(path.encode("utf-8"), False, 0,

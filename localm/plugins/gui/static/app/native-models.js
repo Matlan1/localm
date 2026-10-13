@@ -297,14 +297,15 @@ export function createNativeGenControls({ prefix }) {
   }
 
   function populate(data) {
-    const s = (data && data.sampling) || {};
+    if (!data) return;
+    const s = data.sampling || {};
     const asItems = (names) => names.map((n) => ({ value: n, label: n }));
     ngcFillSelect(node("sampler"), asItems(s.sample_methods || []), t("nativeModels.samplerDefault"));
     ngcFillSelect(node("scheduler"), asItems(s.schedulers || []), t("nativeModels.schedulerDefault"));
     const ups = (s.hires_upscalers || []).filter((u) => u.id !== "latent");
     ngcFillSelect(node("hires-upscaler"),
       ups.map((u) => ({ value: u.id, label: u.label })), t("nativeModels.hiresLatent"));
-    const models = ((data && data.upscalers) || []).map((u) => ({
+    const models = (data.upscalers || []).map((u) => ({
       value: u.name, label: u.file && u.file !== u.name ? `${u.name} (${u.file})` : u.name }));
     ngcFillSelect(node("hires-model"), models, t("nativeModels.hiresModelPick"));
     syncHires();

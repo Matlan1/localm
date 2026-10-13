@@ -55,6 +55,7 @@ class HiresChoice(BaseModel):
 def upscaler_options(reg: Optional[dict] = None) -> list:
     """``[{"name", "file"}]``: the registered upscaler models whose file exists."""
     from localm.model_manager.registry import _entry_path
+    from localm.pathsafe import is_unc_or_device_path
     if reg is None:
         from localm.config import load_registry
         reg = load_registry()
@@ -63,7 +64,7 @@ def upscaler_options(reg: Optional[dict] = None) -> list:
         if not isinstance(entry, dict) or entry.get("model_type") != UPSCALER_TYPE:
             continue
         raw = _entry_path(entry)
-        if not raw:
+        if not raw or is_unc_or_device_path(raw):
             continue
         try:
             if not Path(raw).is_file():

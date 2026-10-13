@@ -612,3 +612,93 @@ def test_batch_images_and_upscales_belong_to_the_key_that_made_them(tmp_path, mo
         assert c.get(f"/api/imagine/file/{end['result']}", headers=_h(b)).status_code == 404
         assert all(i["name"] not in {*names, end["result"]} for i in
                    c.get("/api/imagine/history", headers=_h(b)).json()["images"])
+
+
+def test_a_stop_between_batch_images_ends_the_batch_before_the_next_image(qol, tmp_path):
+    runner, s = qol
+    saved = []
+    stop_after_first = lambda: len(saved) >= 1  # noqa: E731
+    ok, msg = native.generate(s, "p", tmp_path / "w.png", seed=1, batch=3, width=64, height=64,
+                              on_saved=saved.append, cancel_check=stop_after_first)
+    assert not ok and msg == "Cancelled. 1 of 3 images were saved."
+    assert len(runner.generates) == 1
+    assert not (tmp_path / "w_2.png").exists()
+
+
+def test_upscaler_options_never_touches_a_network_path(tmp_path, monkeypatch):
+    seen = []
+    real = Path.is_file
+
+    def spy(self, *a, **k):
+        seen.append(str(self))
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "is_file", spy)
+    unc = r"\\fileserver\models\up.safetensors"
+    local = tmp_path / "local.safetensors"
+    local.write_bytes(b"x")
+    reg = {"net": {"path": unc, "model_type": "upscaler"},
+           "dev": {"path": r"\\.\pipe\x", "model_type": "upscaler"},
+           "ok": {"path": str(local), "model_type": "upscaler"}}
+    assert [o["name"] for o in native_models.upscaler_options(reg)] == ["ok"]
+    assert not any(p.startswith("\\\\") for p in seen)
+
+
+class _UpscaleLib:
+    def __init__(self, scale=4):
+        self.scale = scale
+        self.contexts = 0
+
+    def get_upscaler_model_scale(self, path):
+        return self.scale
+
+    def new_upscaler_ctx(self, *args):
+        self.contexts += 1
+        return None
+
+
+@pytest.fixture
+def child_state(monkeypatch):
+    from localm.media.sdcpp import _child
+    monkeypatch.setattr(_child._State, "lib", _UpscaleLib())
+    monkeypatch.setattr(_child._State, "paths", ("D:/models/main.gguf",))
+    monkeypatch.setattr(_child._State, "last_errors", [])
+    return _child
+
+
+def _upscale_payload(side, **extra):
+    return {"model_path": "D:/models/up.safetensors", "runtime_dir": "x",
+            "image": {"width": side, "height": side, "channel": 3, "data": bytes(side * side * 3)},
+            **extra}
+
+
+def test_an_upscale_keeps_the_loaded_models_paths_in_the_redaction_list(child_state):
+    with pytest.raises(RuntimeError, match="could not load the upscaler"):
+        child_state._do_upscale_image(_upscale_payload(8))
+    assert child_state._State.paths == ("D:/models/main.gguf", "D:/models/up.safetensors")
+
+
+def test_an_upscale_past_the_output_limit_is_refused_before_loading_the_model(child_state):
+    lib = child_state._State.lib
+    with pytest.raises(ValueError, match="limited to 8192"):
+        child_state._do_upscale_image(_upscale_payload(2100, max_output_side=8192))
+    assert lib.contexts == 0
+    with pytest.raises(RuntimeError):
+        child_state._do_upscale_image(_upscale_payload(2048, max_output_side=8192))
+    assert lib.contexts == 1
+
+
+def test_a_file_that_is_not_an_esrgan_model_is_refused(child_state):
+    child_state._State.lib.scale = 0
+    with pytest.raises(ValueError, match="is not an RGB ESRGAN"):
+        child_state._do_upscale_image(_upscale_payload(8))
+    assert child_state._State.lib.contexts == 0
+
+
+def test_the_backend_hands_the_worker_the_output_limit(qol, tmp_path):
+    runner, s = qol
+    up = tmp_path / "up.safetensors"
+    up.write_bytes(b"x")
+    _register("up4x", up, "upscaler")
+    ok, msg = native.upscale(s, _png(tmp_path / "s.png"), "up4x", tmp_path / "o.png")
+    assert ok, msg
+    assert runner.upscales[0]["max_output_side"] == native.MAX_UPSCALE_OUTPUT_SIDE

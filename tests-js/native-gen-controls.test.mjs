@@ -332,3 +332,13 @@ test("the image detail view offers Upscale for the native backend only", async (
   assert.ok((await labels("native")).includes("Upscale"));
   assert.ok(!(await labels("comfy")).includes("Upscale"));
 });
+
+test("a failed or superseded options fetch leaves the filled dropdowns alone", async () => {
+  const { win, $ } = setup();
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  const before = $("img-sampler").options.length;
+  assert.ok(before > 1);
+  runScript(win, "imageGen.populate(null);");
+  assert.equal($("img-sampler").options.length, before);
+});

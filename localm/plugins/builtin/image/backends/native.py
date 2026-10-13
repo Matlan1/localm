@@ -531,6 +531,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             components = {k: v["name"] for k, v in (models.get("components") or {}).items()} or None
             batch_started = time.monotonic()
             for index in range(batch):
+                if cancel_check is not None and cancel_check():
+                    raise SdCancelled("Generation cancelled.")
                 image_seed = int(seed) + index
                 params = {
                     "prompt": prompt, "negative_prompt": negative_prompt or "",
@@ -598,6 +600,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
 
 
 MAX_UPSCALE_INPUT_SIDE = 4096
+MAX_UPSCALE_OUTPUT_SIDE = 8192
 
 
 def ensure_upscaler_available(s: dict, on_progress=None) -> tuple[bool, str]:
@@ -626,10 +629,10 @@ def upscaler_vram_estimate_bytes(upscaler: str) -> Optional[int]:
 def _load_pixels(path: Path) -> dict:
     from PIL import Image
     with Image.open(path) as im:
-        im.load()
         if im.width > MAX_UPSCALE_INPUT_SIDE or im.height > MAX_UPSCALE_INPUT_SIDE:
             raise ValueError(f"The image is {im.width}x{im.height}; at most "
                              f"{MAX_UPSCALE_INPUT_SIDE} pixels per side can be upscaled.")
+        im.load()
         mode = "RGBA" if "A" in im.getbands() else "RGB"
         im = im.convert(mode)
         return {"width": im.width, "height": im.height,
@@ -676,7 +679,8 @@ def _upscale(s, source, upscaler, out_path, extra_meta, write_sidecar, cancel_ch
             say(f"Upscaling {pixels['width']}x{pixels['height']} with {display_name(upscaler)} "
                 f"(stable-diffusion.cpp, {rt.backend})...")
             result = runner.upscale_image(
-                {"model_path": str(model_file), "image": pixels}, rt.path,
+                {"model_path": str(model_file), "image": pixels,
+                 "max_output_side": MAX_UPSCALE_OUTPUT_SIDE}, rt.path,
                 extra_dirs=rt.extra_dirs, on_event=relay, cancel_check=cancel_check)
         except SdCancelled:
             return False, "Cancelled."
