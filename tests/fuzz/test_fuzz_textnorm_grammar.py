@@ -28,6 +28,7 @@ _FRAGMENTS = [
     "<|end_header_id|>", "<tool_call>", "<reasoning>", "</reasoning>", "<|\"|>",
     "<|think|>", "<|start|>", "<|return|>", "é", "\x00",
     "user", "system", "<|end|>", "<unused7>", "<think|>", "<|tool>", "<tool|>", "<|turn",
+    "<|call|>", "commentary", " to=functions.f", "<|constrain|>", "json", "{", "}",
 ]
 
 _INERT_MARKERS = ["<|message|>", "[TOOL_CALLS]", "<unused7>", "<|channel|>", "<|end|>",
