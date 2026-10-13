@@ -143,6 +143,40 @@ test("disk-backed memory is named after the placement when the load is also part
     /12\/32 layers on GPU, rest on CPU - slower; running from disk-backed memory, first tokens slower/);
 });
 
+test("CPU layers reading from disk-backed memory say every token is slower", async () => {
+  const { window } = loadApp();
+  stubLoad(window, {
+    status: "loaded", model: "huge-model",
+    gpu_layers_offloaded: 12, gpu_layers_total: 32, degraded: true,
+    use_mmap: "auto", mmap: true, mmap_from_disk: true, mmap_cpu_from_disk: true,
+  });
+
+  await selectAndLoad(window, "huge-model");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.match(toastEl.textContent,
+    /12\/32 layers on GPU, rest on CPU - slower; CPU layers read from disk-backed memory, every token slower/);
+  assert.ok(!/first tokens/.test(toastEl.textContent));
+  assert.ok(toastEl.className.includes("error"));
+});
+
+test("a use_mmap off load larger than available RAM warns with the server's note", async () => {
+  const { window } = loadApp();
+  const note = "use_mmap is off and this load reads 12.0 GB of weights into system RAM with 3.0 GB available: the load may fail or swap. Set use_mmap to auto to map them from disk instead.";
+  stubLoad(window, {
+    status: "loaded", model: "big-model",
+    gpu_layers_offloaded: 32, gpu_layers_total: 32, degraded: false,
+    use_mmap: "off", mmap: false, mmap_from_disk: false, mmap_cpu_from_disk: false,
+    mmap_ram_short: true, mmap_note: note,
+  });
+
+  await selectAndLoad(window, "big-model");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.ok(toastEl.textContent.includes(note));
+  assert.ok(toastEl.className.includes("error"));
+});
+
 test("a mapped load that is not from disk toasts plain success", async () => {
   const { window } = loadApp();
   stubLoad(window, {
