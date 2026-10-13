@@ -810,18 +810,23 @@ def _hub_serving_the_pins():
     return lambda repo, path, revision="main": pins[(repo, path)]
 
 
-def test_the_pinned_hf_files_cover_music_and_comfyui_and_every_digest_is_64_hex():
+def test_the_pinned_hf_files_cover_music_comfyui_and_starter_models_and_every_digest_is_64_hex():
     pins = cp.hf_file_pins()
     labels = [p[0] for p in pins]
     assert sum(label.startswith("music ") for label in labels) == 4
     assert sum(label.startswith("ComfyUI ") for label in labels) == 8
+    assert sum(label.startswith("starter ") for label in labels) == 11
+    assert sum(label.startswith("whisper ") for label in labels) == 4
+    from localm import voice
+    assert {p[3] for p in pins if p[0].startswith("whisper ")} == {
+        commit for commit, _ in voice._STT_PINS.values()}
     assert all(cp._HEX64_RE.match(p[4]) for p in pins)
     assert len({(p[1], p[2]) for p in pins}) == len(pins)
 
 
 def test_a_hub_serving_the_pinned_digests_reads_current(monkeypatch):
     row = _hf_row(monkeypatch, _hub_serving_the_pins())
-    assert row.status == cp.CURRENT and "12 pinned digest(s)" in row.detail
+    assert row.status == cp.CURRENT and f"{len(cp.hf_file_pins())} pinned digest(s)" in row.detail
 
 
 def test_a_reuploaded_file_reads_stale_and_names_it(monkeypatch):
@@ -899,3 +904,106 @@ def test_a_missing_file_raises_with_the_status(monkeypatch):
     with pytest.raises(cp.FetchError) as caught:
         cp._hf_linked_sha256("o/r", "f")
     assert caught.value.status == 404
+
+
+# ---- the finegrained-fp8 Hub kernel pin ---------------------------------------
+
+
+def _kernel_pin():
+    worker = "localm/inference/backends/_hf_worker.py"
+    return (cp._read_const(worker, r'^FP8_KERNEL_VERSION = (\d+)'),
+            cp._read_const(worker, r'^FP8_KERNEL_REVISION = "([0-9a-f]{40})"'))
+
+
+def _kernel_row(monkeypatch, routes):
+    _router(monkeypatch, routes)
+    spec = next(s for s in cp.build_registry() if s.name == cp._HF_KERNEL_NAME)
+    return cp.run_checks([spec], NOW)[0]
+
+
+def _refs(version, commit):
+    return {"branches": [{"name": "main", "targetCommit": "f" * 40},
+                         {"name": f"v{version}", "targetCommit": commit}]}
+
+
+def test_the_kernel_pin_is_current_when_its_version_points_at_the_pinned_commit(monkeypatch):
+    version, pinned = _kernel_pin()
+    row = _kernel_row(monkeypatch, {"/refs": _refs(version, pinned), "/tree/": []})
+    assert row.status == cp.CURRENT
+
+
+def test_a_kernel_version_that_moved_on_reads_behind(monkeypatch):
+    version, _pinned = _kernel_pin()
+    row = _kernel_row(monkeypatch, {"/refs": _refs(version, "a" * 40), "/tree/": []})
+    assert row.status == cp.BEHIND and "now points at" in row.detail
+
+
+def test_a_pinned_commit_the_kernel_hub_no_longer_has_reads_inconsistent(monkeypatch):
+    version, pinned = _kernel_pin()
+    row = _kernel_row(monkeypatch, {"/refs": _refs(version, pinned),
+                                    "/tree/": cp.FetchError("gone", status=404)})
+    assert row.status == cp.INCONSISTENT and "no longer exists" in row.detail
+
+
+def test_a_retired_kernel_version_reads_inconsistent(monkeypatch):
+    _version, pinned = _kernel_pin()
+    row = _kernel_row(monkeypatch, {"/refs": {"branches": [{"name": "main", "targetCommit": "f" * 40}]},
+                                    "/tree/": []})
+    assert row.status == cp.INCONSISTENT
+
+
+def test_an_unreachable_kernel_hub_reads_unknown(monkeypatch):
+    row = _kernel_row(monkeypatch, {"/refs": cp.FetchError("timed out")})
+    assert row.status == cp.UNKNOWN
+
+
+# ---- the Kokoro voice model commit ---------------------------------------------
+
+
+def _kokoro_commit():
+    return cp._read_const("localm/plugins/builtin/tts/static/tts-util.js",
+                          r'^export const KOKORO_PINNED_REVISION = "([0-9a-f]{40})"')
+
+
+def _kokoro_row(monkeypatch, head, *, files=None):
+    _router(monkeypatch, {"/api/models/": {"sha": head}})
+    monkeypatch.setattr(cp, "_hf_linked_sha256", files or (lambda repo, path, revision="main": None))
+    spec = next(s for s in cp.build_registry() if s.name == cp._KOKORO_NAME)
+    return cp.run_checks([spec], NOW)[0]
+
+
+def test_kokoro_commit_is_current_when_the_repository_is_still_there(monkeypatch):
+    assert _kokoro_row(monkeypatch, _kokoro_commit()).status == cp.CURRENT
+
+
+def test_a_newer_kokoro_commit_reads_behind(monkeypatch):
+    row = _kokoro_row(monkeypatch, "b" * 40)
+    assert row.status == cp.BEHIND and "newer commit" in row.detail
+
+
+def test_a_kokoro_file_the_pinned_commit_no_longer_serves_reads_inconsistent(monkeypatch):
+    def files(repo, path, revision="main"):
+        if path == "onnx/model.onnx":
+            raise cp.FetchError("gone", status=404)
+    row = _kokoro_row(monkeypatch, _kokoro_commit(), files=files)
+    assert row.status == cp.INCONSISTENT and "onnx/model.onnx" in row.detail
+
+
+def test_a_bundle_that_does_not_fetch_the_voices_at_the_pin_reads_inconsistent(monkeypatch, tmp_path):
+    _router(monkeypatch, {"/api/models/": {"sha": _kokoro_commit()}})
+    spec = next(s for s in cp.build_registry() if s.name == cp._KOKORO_NAME)
+    real = cp._read_text
+
+    def text(rel):
+        return "unpatched bundle" if rel.endswith("kokoro.min.js") else real(rel)
+
+    monkeypatch.setattr(cp, "_read_text", text)
+    row = cp.run_checks([spec], NOW)[0]
+    assert row.status == cp.INCONSISTENT and "voices" in row.detail
+
+
+def test_an_unreachable_hub_reads_unknown_for_the_kokoro_commit(monkeypatch):
+    _router(monkeypatch, {"/api/models/": cp.FetchError("timed out")})
+    monkeypatch.setattr(cp, "_hf_linked_sha256", lambda repo, path, revision="main": None)
+    spec = next(s for s in cp.build_registry() if s.name == cp._KOKORO_NAME)
+    assert cp.run_checks([spec], NOW)[0].status == cp.UNKNOWN

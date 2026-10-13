@@ -145,7 +145,7 @@ class SdRunner:
                         "was stopped. The server stayed up.") from None
                 continue
             kind = msg[0]
-            if kind in ("progress", "log"):
+            if kind in ("progress", "log", "preview"):
                 if on_event is not None:
                     try:
                         on_event(msg)

@@ -369,6 +369,40 @@ MODEL_SHORTCUTS: dict[str, str] = {
 
 
 
+# starter model spec (a MODEL_SHORTCUTS value) -> sha256 of the file a pull of it
+# must produce. A pull that downloads anything else is refused.
+_STARTER_SHA256: dict[str, str] = {
+    "bartowski/Llama-3.2-1B-Instruct-GGUF:Llama-3.2-1B-Instruct-Q4_K_M.gguf":
+        "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
+    "bartowski/Llama-3.2-3B-Instruct-GGUF:Llama-3.2-3B-Instruct-Q4_K_M.gguf":
+        "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+    "bartowski/microsoft_Phi-4-mini-instruct-GGUF:microsoft_Phi-4-mini-instruct-Q4_K_M.gguf":
+        "01999f17c39cc3074afae5e9c539bc82d45f2dd7faa3917c66cbef76fce8c0c2",
+    "bartowski/Mistral-7B-Instruct-v0.3-GGUF:Mistral-7B-Instruct-v0.3-Q4_K_M.gguf":
+        "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
+    "bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf":
+        "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423",
+    "bartowski/Qwen2.5-14B-Instruct-GGUF:Qwen2.5-14B-Instruct-Q4_K_M.gguf":
+        "e47ad95dad6ff848b431053b375adb5d39321290ea2c638682577dafca87c008",
+    "bartowski/google_gemma-3-4b-it-GGUF:google_gemma-3-4b-it-Q4_K_M.gguf":
+        "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+    "bartowski/google_gemma-3-12b-it-GGUF:google_gemma-3-12b-it-Q4_K_M.gguf":
+        "fc57f67efa46d711c346e587cbef7d049e95f3df8db2eb2271153343ef0acc7b",
+    "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF:DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf":
+        "731ece8d06dc7eda6f6572997feb9ee1258db0784827e642909d9b565641937b",
+    "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf":
+        "0b319bd0572f2730bfe11cc751defe82045fad5085b4e60591ac2cd2d9633181",
+    "bartowski/SmolLM2-1.7B-Instruct-GGUF:SmolLM2-1.7B-Instruct-Q4_K_M.gguf":
+        "77665ea4815999596525c636fbeb56ba8b080b46ae85efef4f0d986a139834d7",
+}
+
+
+def starter_model_sha256(spec: str) -> Optional[str]:
+    """The sha256 pinned for the starter model *spec* (``owner/repo:file``), or
+    None when *spec* is not one of the starter models."""
+    return _STARTER_SHA256.get(spec)
+
+
 _SHORTCUT_SIZES: dict[str, str] = {
     "llama3.2-1b": "~0.7 GB", "llama3.2-3b": "~2 GB",
     "phi4-mini": "~2.5 GB",   "mistral-7b": "~4.1 GB",

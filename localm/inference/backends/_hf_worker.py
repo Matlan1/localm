@@ -31,7 +31,7 @@ import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 from localm.debuglog import logger
 
@@ -200,6 +200,43 @@ def _plan_fp8(model_path: str, torch, device: str, device_map_kwargs: dict):
 
 FP8_KERNEL_REPO = "kernels-community/finegrained-fp8"
 
+# The kernel version transformers requests, and the commit of FP8_KERNEL_REPO
+# that version points at. The kernel is fetched at that commit; a transformers
+# that requests another version gets no native FP8 kernel until this is moved.
+FP8_KERNEL_VERSION = 4
+FP8_KERNEL_REVISION = "8c178950e8710e26a2210e4e909cd02dc16c8715"
+
+
+def _fp8_kernel_cached() -> bool:
+    """Whether the pinned commit of the kernel is in the Hub cache."""
+    try:
+        from huggingface_hub import constants
+        name = "kernels--" + FP8_KERNEL_REPO.replace("/", "--")
+        return (Path(constants.HF_HUB_CACHE) / name / "snapshots" / FP8_KERNEL_REVISION).is_dir()
+    except Exception as e:
+        logger.debug("hf load: could not look for the cached finegrained-fp8 kernel: %s", e)
+        return False
+
+
+def _set_fp8_kernel_request(pinned: bool) -> Optional[str]:
+    """Make transformers request the finegrained-fp8 kernel at the pinned commit
+    (*pinned*) or as the kernel version that commit belongs to. None when the
+    request was set, else why it was not (transformers requests something else)."""
+    try:
+        from transformers.integrations.hub_kernels import _HUB_KERNEL_MAPPING
+        requests: dict[str, Any] = _HUB_KERNEL_MAPPING  # type: ignore[assignment]
+        entry = requests["finegrained-fp8"]
+        if (entry.get("repo_id") != FP8_KERNEL_REPO
+                or entry.get("version", FP8_KERNEL_VERSION) != FP8_KERNEL_VERSION):
+            return (f"transformers requests {entry!r}, not version {FP8_KERNEL_VERSION} of "
+                    f"{FP8_KERNEL_REPO}, which is the one localm pins")
+        requests["finegrained-fp8"] = (
+            {"repo_id": FP8_KERNEL_REPO, "revision": FP8_KERNEL_REVISION} if pinned
+            else {"repo_id": FP8_KERNEL_REPO, "version": FP8_KERNEL_VERSION})
+    except Exception as e:
+        return f"transformers does not expose the finegrained-fp8 kernel request ({type(e).__name__}: {e})"
+    return None
+
 
 def _try_fp8_kernel() -> Optional[str]:
     """Load the finegrained-fp8 kernel through transformers. None on success,
@@ -212,34 +249,38 @@ def _try_fp8_kernel() -> Optional[str]:
     return None
 
 
-def _fp8_kernel_version():
-    """The finegrained-fp8 kernel version transformers requests, or None."""
-    try:
-        from transformers.integrations.hub_kernels import _HUB_KERNEL_MAPPING
-        return _HUB_KERNEL_MAPPING["finegrained-fp8"].get("version")
-    except Exception as e:
-        logger.debug("hf load: could not read the finegrained-fp8 kernel version: %s", e)
-        return None
-
-
 def _load_fp8_kernel(model_path: str, plan):
-    """Load the finegrained-fp8 Hub kernel for a native *plan*.
+    """Load the finegrained-fp8 Hub kernel for a native *plan*, at the commit
+    ``FP8_KERNEL_REVISION``.
 
-    An online plan whose fetch fails retries once from the local cache with
-    huggingface_hub offline (the plan becomes ``offline``). After an online
-    load, records the kernel version's commit in the Hub cache
+    An offline plan whose Hub cache lacks that commit loads the cached kernel
+    version instead, as does an online plan whose fetch fails and whose cache
+    lacks it (the plan becomes ``offline``). After an online load, records the
+    kernel version's commit in the Hub cache
     (``_hf_hub_gate.record_kernel_version_ref``) so a later offline load finds
     it. Returns *plan*, or a bf16-expansion plan naming the error when the
-    kernel cannot load."""
+    kernel cannot load or transformers requests another kernel version."""
     from localm.inference.backends import _hf_fp8, _hf_hub_gate
+    unpinnable = _set_fp8_kernel_request(pinned=not plan.offline or _fp8_kernel_cached())
+    if unpinnable is not None:
+        logger.warning("hf load: the finegrained-fp8 kernel is not loaded (%s); expanding "
+                       "the FP8 weights to bf16", unpinnable)
+        return _hf_fp8.expanded_plan(
+            model_path, f"the finegrained-fp8 kernel could not be pinned ({unpinnable})")
     error = _try_fp8_kernel()
     if error is not None and not plan.offline:
         logger.debug("hf load: finegrained-fp8 fetch failed (%s); trying the local cache",
                      error)
         _hf_hub_gate.set_hub_offline()
+        unpinned = not _fp8_kernel_cached()
+        if unpinned:
+            _set_fp8_kernel_request(pinned=False)
         if _try_fp8_kernel() is None:
             plan.offline = True
             error = None
+            if unpinned:
+                logger.warning("hf load: loaded the cached finegrained-fp8 kernel version %s, "
+                               "which is not the pinned commit", FP8_KERNEL_VERSION)
     if error is not None:
         logger.warning("hf load: the finegrained-fp8 kernel could not be loaded "
                        "(%s); expanding the FP8 weights to bf16", error)
@@ -247,7 +288,7 @@ def _load_fp8_kernel(model_path: str, plan):
             model_path, f"the finegrained-fp8 kernel could not be loaded ({error})")
     if not plan.offline:
         try:
-            _hf_hub_gate.record_kernel_version_ref(FP8_KERNEL_REPO, _fp8_kernel_version())
+            _hf_hub_gate.record_kernel_version_ref(FP8_KERNEL_REPO, FP8_KERNEL_VERSION)
         except Exception as e:
             logger.debug("hf load: could not record the finegrained-fp8 kernel "
                          "version for offline use: %s", e)

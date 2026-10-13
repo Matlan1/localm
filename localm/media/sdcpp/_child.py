@@ -20,6 +20,10 @@ command at a time:
 ``resp_q``: zero or more events, then exactly one final reply per command:
     ("progress", {"phase", "step", "steps", "secs"})   event
     ("log", level, text)                                event, WARN and ERROR only
+    ("preview", {"step", "steps", "width", "height", "png"})
+                                                        event, a small PNG of the
+                                                        in-progress image; only when
+                                                        the request sets "preview"
     ("ok", value) | ("cancelled", message) | ("error", message)   final
 
 A native abort produces no reply; the parent sees the dead process.
@@ -28,6 +32,7 @@ A native abort produces no reply; the parent sees the dead process.
 from __future__ import annotations
 
 import ctypes
+import io
 import os
 import queue as _queue
 import re
@@ -35,11 +40,14 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Any, Optional, TextIO
 
 _FAULT_ENV = "LOCALM_SDCPP_FAULT_FOR_TEST"
 
 _PROGRESS_MIN_INTERVAL = 0.5
+
+_PREVIEW_MAX_SIDE = 256
+_PREVIEW_TARGET_COUNT = 8
 
 _HOST_VIS_VAR = "GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM"
 _HOST_VIS_OPT_OUT = frozenset({"0", "false", "off", "no", ""})
@@ -55,6 +63,8 @@ class _State:
     upscaling = False
     decoding = False
     redact: tuple = ()
+    preview_cb: Any = None
+    preview_failed = False
     paths: tuple = ()
     model_desc = ""
     last_errors: list = []
@@ -126,6 +136,26 @@ def _redacted(text: str) -> str:
     return text
 
 
+def preview_interval(steps: int) -> int:
+    """Denoiser steps between previews: about ``_PREVIEW_TARGET_COUNT`` per
+    sampling pass, at least every step."""
+    return max(1, -(-int(steps) // _PREVIEW_TARGET_COUNT))
+
+
+def preview_png(width: int, height: int, channel: int, data: bytes) -> bytes:
+    """*data* (interleaved 8-bit pixels) as a PNG no larger than
+    ``_PREVIEW_MAX_SIDE`` on a side, aspect ratio kept."""
+    from PIL import Image
+    mode = {1: "L", 3: "RGB", 4: "RGBA"}.get(channel)
+    if mode is None:
+        raise ValueError(f"a preview with {channel} channels")
+    im = Image.frombytes(mode, (width, height), data)
+    im.thumbnail((_PREVIEW_MAX_SIDE, _PREVIEW_MAX_SIDE), Image.Resampling.BILINEAR)
+    out = io.BytesIO()
+    im.save(out, format="PNG", compress_level=1)
+    return out.getvalue()
+
+
 def _make_callbacks(resp_q):
     from . import _binding as b
 
@@ -170,7 +200,43 @@ def _make_callbacks(resp_q):
         except Exception:
             pass
 
-    return b.SD_LOG_CB(_log), b.SD_PROGRESS_CB(_progress)
+    def _preview(step, frame_count, frames, _is_noisy, _data):
+        if not _State.generating or frame_count < 1 or not frames:
+            return
+        try:
+            img = frames[frame_count // 2]
+            w, h, c = int(img.width), int(img.height), int(img.channel)
+            if not img.data or w < 1 or h < 1:
+                return
+            png = preview_png(w, h, c, ctypes.string_at(img.data, w * h * c))
+            resp_q.put(("preview", {"step": abs(int(step)), "steps": int(_State.sample_steps),
+                                    "width": w, "height": h, "png": png}))
+        except Exception as e:  # noqa: BLE001
+            if not _State.preview_failed:
+                _State.preview_failed = True
+                from localm.debuglog import logger
+                logger.warning("sd.cpp worker: a live preview frame could not be made "
+                               "(%s: %s); further failures are not logged",
+                               type(e).__name__, e)
+
+    return b.SD_LOG_CB(_log), b.SD_PROGRESS_CB(_progress), b.SD_PREVIEW_CB(_preview)
+
+
+def _arm_preview(lib, payload, steps: int) -> bool:
+    """Ask the library for in-progress frames every ``preview_interval(steps)``
+    denoiser steps when the request sets ``"preview"``. True when armed."""
+    if not payload.get("preview") or _State.preview_cb is None:
+        return False
+    from . import _binding as b
+    _State.preview_failed = False
+    lib.sd_set_preview_callback(_State.preview_cb, b.PREVIEW_PROJ, preview_interval(steps),
+                                True, False, None)
+    return True
+
+
+def _disarm_preview(lib) -> None:
+    from . import _binding as b
+    lib.sd_set_preview_callback(b.SD_PREVIEW_CB(), b.PREVIEW_NONE, 0, False, False, None)
 
 
 def _cancel_watcher(cancel_event) -> None:
@@ -386,11 +452,14 @@ def _do_generate_image(payload, cancel_event):
     _State.sample_steps = int(p.sample_params.sample_steps)
     _State.hires_steps = (int(p.hires.steps) or _State.sample_steps) if p.hires.enabled else 0
     _State.decoding = False
+    previewing = _arm_preview(lib, payload, _State.sample_steps)
     _State.generating = True
     try:
         ok = lib.generate_image(ctx, ctypes.byref(p), ctypes.byref(out), ctypes.byref(count))
     finally:
         _State.generating = False
+        if previewing:
+            _disarm_preview(lib)
         _State.redact = ()
         del keep, lora_refs, hires_refs
     cancelled = cancel_event.is_set()
@@ -517,12 +586,15 @@ def _do_generate_video(payload, cancel_event):
     _State.sample_steps = int(p.sample_params.sample_steps)
     _State.hires_steps = 0
     _State.decoding = False
+    previewing = _arm_preview(lib, payload, _State.sample_steps)
     _State.generating = True
     try:
         ok = lib.generate_video(ctx, ctypes.byref(p), ctypes.byref(frames), ctypes.byref(count),
                                 ctypes.byref(audio), ctypes.byref(fps_out))
     finally:
         _State.generating = False
+        if previewing:
+            _disarm_preview(lib)
         _State.redact = ()
         del keep, lora_refs
     cancelled = cancel_event.is_set()
@@ -570,7 +642,7 @@ def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
     ignore_interrupt_signals()
     suppress_native_error_dialogs()
 
-    log_cb, progress_cb = _make_callbacks(resp_q)
+    log_cb, progress_cb, _State.preview_cb = _make_callbacks(resp_q)
     callbacks_set = False
     threading.Thread(target=_cancel_watcher, args=(cancel_event,),
                      name="localm-sdcpp-cancel", daemon=True).start()

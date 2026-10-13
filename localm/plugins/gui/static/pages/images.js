@@ -7,10 +7,10 @@
 "use strict";
 
 import { chat, renderAttachChips } from "../app/chat.js";
-import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
-import { createNativeGenControls, createNativeModelPicker } from "../app/native-models.js";
+import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -111,6 +111,8 @@ function reuseImageSettings(item) {
   $("img-guidance").value = m.guidance ?? "";
   $("img-denoise").value = m.denoise ?? "";
   $("img-cfg").value = m.cfg ?? "";
+  $("img-steps").value = m.backend === "native" ? (m.steps ?? "") : "";
+  $("img-clip-skip").value = m.clip_skip ?? "";
   $("img-input").value = m.input_image || "";
   $("img-lora").value = m.lora_name || "";
   $("img-lora-strength-model").value = m.lora_strength_model ?? "";
@@ -139,8 +141,20 @@ bindReloadToggle("image", "img-reload-llm");
    which backend runs and which model it uses. */
 export const imageBackend = { active: null, choice: null };
 
+/* The steps box shows the picked model family's step count as its placeholder. */
+function showImageStepDefault(data) {
+  const input = $("img-steps");
+  if (!input) return;
+  const steps = data && data.preview && data.preview.defaults && data.preview.defaults.steps;
+  input.placeholder = steps ? t("images.stepsPlaceholderValue", { value: steps })
+    : t("images.stepsPlaceholder");
+}
+
 export const imageModelPicker = createNativeModelPicker(
-  { media: "image", prefix: "imagine", mountId: "img-native-models" });
+  { media: "image", prefix: "imagine", mountId: "img-native-models",
+    onData: showImageStepDefault });
+
+const imageLivePreview = createJobPreview("img-preview");
 
 const imageGen = createNativeGenControls({ prefix: "img" });
 
@@ -282,9 +296,10 @@ async function followImageJob(jobId, log) {
   const end = await streamJob(jobId, (line) => {
     log.textContent += line + "\n";
     log.scrollTop = log.scrollHeight;
-  }, undefined, (ev) => {
+  }, undefined, imageLivePreview.show, (ev) => {
     if (ev.type === "image" && ev.name) addResultImage(ev.name, shown);
   });
+  imageLivePreview.clear();
   if (end.status === "done" && end.result) addResultImage(end.result, shown);
   refreshImageHistory();
   return end;
@@ -344,8 +359,13 @@ $("img-generate").onclick = async () => {
   }
   const nativeChoice = native ? imageModelPicker.choice() : {};
   Object.assign(body, nativeChoice);
-  if (native) Object.assign(body, imageGen.body());
+  if (native) {
+    body.steps = num("img-steps");
+    body.clip_skip = num("img-clip-skip");
+    Object.assign(body, imageGen.body());
+  }
   $("img-generate").disabled = true;
+  imageLivePreview.clear();
   const log = $("img-log");
   log.style.display = "block";
   log.textContent = "";
@@ -367,6 +387,119 @@ $("img-generate").onclick = async () => {
     toast(t("images.generationFailed", { message: e.message }), true);
   } finally {
     $("img-generate").disabled = false;
+    imageLivePreview.clear();
     hideStop("img-stop");
   }
 };
+
+/* ================================================================ */
+/*  Prompt helpers: enhance, import parameters from an image         */
+/* ================================================================ */
+
+const IMPORT_SOURCES = new Set(["localm", "a1111", "comfyui", "sidecar"]);
+
+/* Fills this page from the `{source, params}` the import route returns:
+   prompt, negative prompt, seed, guidance, CFG, denoise and size, then (native
+   backend) the model and LoRAs matched against the registered ones. A localm
+   image or sidecar holds the whole record, so a field it lacks is cleared; a
+   foreign image holds only what its tool wrote, so a field it lacks is left
+   as it is. Returns the names of the parameters it could not apply. */
+export async function applyImportedParams(result) {
+  const p = (result && result.params) || {};
+  const own = result.source === "localm" || result.source === "sidecar";
+  const skipped = [];
+  const put = (id, value) => {
+    const node = $(id);
+    if (!node) return false;
+    if (value === undefined || value === null) { if (own) node.value = ""; return true; }
+    node.value = value;
+    return true;
+  };
+  put("img-prompt", p.prompt);
+  put("img-negative", p.negative_prompt);
+  put("img-seed", p.seed);
+  put("img-guidance", p.guidance);
+  put("img-cfg", p.cfg);
+  put("img-denoise", p.denoise);
+  put("img-size", p.width && p.height ? `${p.width}x${p.height}` : null);
+  if (!own && (p.prompt === undefined || p.prompt === null)) skipped.push("prompt");
+  if (p.steps !== undefined && p.steps !== null && !put("img-steps", p.steps)) skipped.push("steps");
+  if (own) {
+    imageGen.set(p);
+  } else {
+    /* A foreign tool names samplers its own way; only a name this build offers is applied. */
+    for (const [value, id, key] of [[p.sample_method || p.sampler, "img-sampler", "sampler"],
+                                    [p.scheduler, "img-scheduler", "scheduler"]]) {
+      if (!value) continue;
+      const node = $(id);
+      if (node && [...node.options].some((o) => o.value === value)) node.value = value;
+      else skipped.push(key);
+    }
+  }
+  if (imageBackend.active === "native") {
+    if (p.model) {
+      const name = await imageModelPicker.matchModel(p.model);
+      if (name) {
+        await imageModelPicker.setModels(own ? { ...(p.components || {}), model: name } : { model: name });
+        if (imageModelPicker.state.models.model !== name) skipped.push(`model ${p.model}`);
+      } else {
+        skipped.push(`model ${p.model}`);
+      }
+    }
+    if (p.loras && p.loras.length) {
+      const kept = [];
+      for (const item of p.loras) {
+        const name = await imageModelPicker.matchLora(item.name);
+        if (name) kept.push({ name, strength: item.strength }); else skipped.push(`LoRA ${item.name}`);
+      }
+      imageModelPicker.setLoras(kept);
+    }
+  } else if (p.model || (p.loras && p.loras.length)) {
+    skipped.push("model", "LoRA");
+  }
+  revealFilledAdvanced($("view-images"));
+  return skipped;
+}
+
+export async function importParamsFromFile(file) {
+  const r = await fetch("/api/imagine/import-params", {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/octet-stream" }),
+    body: file,
+  });
+  let data = null;
+  try { data = await r.json(); } catch { /* reported below by status */ }
+  if (!r.ok) throw new Error((data && data.detail) || r.statusText);
+  const skipped = await applyImportedParams(data);
+  const source = IMPORT_SOURCES.has(data.source) ? t(`images.import.source.${data.source}`) : data.source;
+  toast(skipped.length
+    ? t("images.import.doneSkipped", { source, items: skipped.join(", ") })
+    : t("images.import.done", { source }));
+  return data;
+}
+
+const imageHelperRow = mountEnhanceButton({
+  media: "image", fieldId: "img-prompt",
+  familyOf: () => ({ family: imageModelPicker.family(), label: imageModelPicker.familyLabel() }),
+});
+if (imageHelperRow) {
+  const picker = el("input");
+  picker.type = "file";
+  picker.accept = ".png,image/png,.json,application/json";
+  picker.hidden = true;
+  const importBtn = el("button", "btn-secondary btn-sm", t("images.import.button"));
+  importBtn.type = "button";
+  importBtn.title = t("images.import.title");
+  importBtn.onclick = () => picker.click();
+  picker.onchange = async () => {
+    const file = picker.files && picker.files[0];
+    picker.value = "";
+    if (!file) return;
+    try {
+      await importParamsFromFile(file);
+    } catch (e) {
+      toast(t("images.import.failed", { message: e.message }), true);
+    }
+  };
+  imageHelperRow.append(importBtn, picker);
+}

@@ -60,6 +60,11 @@ Paths and model names are owner-only settings. Network (UNC) and device paths ar
 
 ## What it does and does not do
 
+- Only ACE-Step 1.5 GGUF parts run. An ACE-Step v1 checkpoint such as
+  `ace_step_v1_3.5b.safetensors` (the single-file ComfyUI checkpoint) cannot: the pinned
+  KoboldCpp takes the four 1.5 GGUF parts (planner, text encoder, diffusion model, VAE) and
+  has no ACE-Step v1 model. The Music page's model picker lists such registered files with that
+  reason instead of hiding them; they still work with ComfyUI.
 - Style tags, optional lyrics, duration, seed, steps, CFG and shift. ComfyUI-only inputs
   (workflow model picks, sampler, scheduler, lyrics strength) are refused with a reason
   rather than ignored. Per-component GPU placement applies to ComfyUI only; with it turned

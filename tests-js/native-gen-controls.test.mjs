@@ -343,3 +343,26 @@ test("a failed or superseded options fetch leaves the filled dropdowns alone", a
   assert.equal(win.__err, "", "populate(null) must not throw");
   assert.equal($("img-sampler").options.length, before);
 });
+
+test("importing a localm image restores sampler, scheduler and hires; a foreign sampler name is reported", async () => {
+  const { win, $ } = setup();
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  const own = { source: "localm", params: { prompt: "p", sample_method: "dpm++2m", scheduler: "karras",
+    hires: { upscaler: "model", model: "real-esrgan", scale: 1.5, steps: 4, denoise: 0.4 } } };
+  runScript(win, `globalThis.__sk = applyImportedParams(${JSON.stringify(own)});`);
+  await win.__sk;
+  assert.equal($("img-sampler").value, "dpm++2m");
+  assert.equal($("img-scheduler").value, "karras");
+  assert.equal($("img-hires").checked, true);
+  assert.equal($("img-hires-model").value, "real-esrgan");
+  const foreign = { source: "a1111", params: { prompt: "q", sampler: "Euler a", scheduler: "Karras" } };
+  runScript(win, `globalThis.__sk = applyImportedParams(${JSON.stringify(foreign)});`);
+  const skipped = await win.__sk;
+  assert.deepEqual([...skipped].sort(), ["sampler", "scheduler"]);
+  assert.equal($("img-sampler").value, "dpm++2m", "an unmatched foreign name leaves the dropdown alone");
+  const exact = { source: "a1111", params: { prompt: "q", sampler: "euler_a" } };
+  runScript(win, `globalThis.__sk = applyImportedParams(${JSON.stringify(exact)});`);
+  assert.deepEqual([...(await win.__sk)], []);
+  assert.equal($("img-sampler").value, "euler_a");
+});

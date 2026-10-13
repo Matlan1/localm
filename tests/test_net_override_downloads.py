@@ -67,13 +67,28 @@ def _voice_cfg(monkeypatch, tmp_path, net_mode: str, model: str = "base"):
         lambda: {"voice_stt_model": model, "net_mode": net_mode})
 
 
+_FAKE_MODEL_BYTES = b"\x00"
+
+
+@pytest.fixture(autouse=True)
+def _pin_whisper_to_fake_bytes(monkeypatch):
+    """The Whisper models are pinned to the sha256 of the real model.bin; these
+    tests lay down fake bytes, so pin each to the digest of those."""
+    import hashlib
+    digest = hashlib.sha256(_FAKE_MODEL_BYTES).hexdigest()
+    monkeypatch.setattr(voice, "_STT_PINS", {
+        repo: (commit, digest) for repo, (commit, _) in voice._STT_PINS.items()})
+
+
 def _lay_whisper_snapshot(name: str = "base") -> None:
-    """Materialise the cached-model layout the probe (and the worker) read.
-    Reads stt_cache_dir() live, so it follows the test's LOCALM_HOME."""
+    """Materialise the cached-model layout the probe (and the worker) read, at
+    the pinned commit. Reads stt_cache_dir() live, so it follows the test's
+    LOCALM_HOME."""
+    commit = voice._STT_PINS[f"Systran/faster-whisper-{name}"][0]
     snap = (voice.stt_cache_dir()
-            / f"models--Systran--faster-whisper-{name}" / "snapshots" / "rev0")
+            / f"models--Systran--faster-whisper-{name}" / "snapshots" / commit)
     snap.mkdir(parents=True, exist_ok=True)
-    (snap / "model.bin").write_bytes(b"\x00")
+    (snap / "model.bin").write_bytes(_FAKE_MODEL_BYTES)
 
 
 def _snapshot_spy(monkeypatch, *, create: bool = False):

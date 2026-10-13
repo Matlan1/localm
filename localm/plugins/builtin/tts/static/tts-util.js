@@ -88,6 +88,45 @@ export function classifyLoadError(err, { cached = false, online = true } = {}) {
   };
 }
 
+// The default Kokoro model repository, and the commit of it that is fetched.
+// The model files and the voices are requested at that commit, never at the
+// repository's moving default branch. The browser cache keys of a model already
+// downloaded do not change.
+export const KOKORO_DEFAULT_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
+export const KOKORO_PINNED_REVISION = "1939ad2a8e416c0acfeecc08a694d14ef25f2231";
+
+// The transformers.js remote path template that fetches *model* at the pinned
+// commit, or null for any model other than the default one (an admin's own
+// choice is fetched as they named it).
+export function pinnedRemotePathTemplate(model) {
+  return model === KOKORO_DEFAULT_MODEL
+    ? "{model}/resolve/" + KOKORO_PINNED_REVISION + "/"
+    : null;
+}
+
+// transformers.js keys a cached file by the URL it was fetched from, so a model
+// downloaded before the pin sits under ".../resolve/main/<file>". Move each such
+// entry of *cache* to the same file at the pinned commit, so the model already in
+// the browser is found and not downloaded again. Returns how many entries moved.
+export async function rekeyCachedModel(cache, model, revision) {
+  const from = `https://huggingface.co/${model}/resolve/main/`;
+  const to = `https://huggingface.co/${model}/resolve/${revision}/`;
+  let moved = 0;
+  for (const req of await cache.keys()) {
+    if (!req.url || !req.url.startsWith(from)) continue;
+    const target = to + req.url.slice(from.length);
+    if (!(await cache.match(target))) {
+      const res = await cache.match(req);
+      if (res) {
+        await cache.put(target, res.clone());
+        moved++;
+      }
+    }
+    await cache.delete(req);
+  }
+  return moved;
+}
+
 // Resolves whether to allow the model fetch immediately or prompt the user.
 export function planModelFetch(mode, cached, allowDownloadsWhenOff) {
   if (cached) return "allow";

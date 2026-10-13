@@ -5,10 +5,10 @@
 
 "use strict";
 
-import { MIB, $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { MIB, $, authHeaders, checkModelsBeforeGenerate, createJobPreview, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
-import { createNativeGenControls, createNativeModelPicker } from "../app/native-models.js";
+import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -75,6 +75,13 @@ export const videoModelPicker = createNativeModelPicker(
   { media: "video", prefix: "video", mountId: "video-native-models" });
 
 const videoGen = createNativeGenControls({ prefix: "video" });
+
+mountEnhanceButton({
+  media: "video", fieldId: "video-prompt",
+  familyOf: () => ({ family: videoModelPicker.family(), label: videoModelPicker.familyLabel() }),
+});
+
+const videoLivePreview = createJobPreview("video-preview");
 
 const COMFY_PLACEHOLDERS = [["video-width", "video.widthPlaceholder"],
                             ["video-height", "video.heightPlaceholder"],
@@ -154,6 +161,7 @@ $("video-generate").onclick = async () => {
   if (native) Object.assign(body, videoGen.body());
 
   $("video-generate").disabled = true;
+  videoLivePreview.clear();
   const log = $("video-log");
   log.style.display = "block";
   log.textContent = "";
@@ -172,7 +180,8 @@ $("video-generate").onclick = async () => {
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
-    });
+    }, undefined, videoLivePreview.show);
+    videoLivePreview.clear();
     if (end.status === "done" && end.result) {
       toast(t("video.generatedToast"));
       const player = document.createElement("video");
@@ -190,6 +199,7 @@ $("video-generate").onclick = async () => {
     toast(t("video.generationFailed", { message: e.message }), true);
   } finally {
     $("video-generate").disabled = false;
+    videoLivePreview.clear();
     hideStop("video-stop");
   }
 };

@@ -707,7 +707,7 @@ def test_the_backend_hands_the_worker_the_output_limit(qol, tmp_path):
 def test_progress_during_an_upscale_is_labelled_upscaling_not_the_last_job_phase(child_state):
     import queue
     q = queue.Queue()
-    _log_cb, progress_cb = child_state._make_callbacks(q)
+    _log_cb, progress_cb, *_rest = child_state._make_callbacks(q)
     child_state._State.decoding = True
     child_state._State.sample_steps = 4
     child_state._State.upscaling = True

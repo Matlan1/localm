@@ -3,6 +3,8 @@
 
 Routes (mounted by the engine, auto-scoped to the ``image`` capability):
   POST   /api/imagine                       - generate an image (background job)
+  POST   /api/imagine/import-params         - read generation parameters out of an
+                                              uploaded PNG or sidecar (nothing saved)
   POST   /v1/images/generations             - OpenAI-compatible: generate and
                                               return the image(s) in the response
   GET    /api/imagine/history               - generated images, newest first
@@ -51,6 +53,7 @@ from localm.media.native_models import (
     check_request, validate_upscaler,
 )
 from localm.pathsafe import confined_file, confined_name
+from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
 from . import backend as _backend
 
@@ -65,6 +68,8 @@ class ImagineRequest(BaseModel):
     cfg: float | None = Field(None, allow_inf_nan=False)          # negative-prompt CFG scale; no effect without one
     input_image: str | None = None    # path on this machine (img2img)
     denoise: float | None = Field(None, allow_inf_nan=False)
+    steps: int | None = None                  # native backend only; None keeps the model default
+    clip_skip: int | None = None              # native backend only; None keeps the model default
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
     # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
     model_overrides: dict[str, dict[str, str]] | None = None
@@ -102,6 +107,18 @@ def _images_dir() -> Path:
 
 def _image_path(name: str) -> Path:
     return confined_file(_images_dir(), name, "image")
+
+
+MAX_STEPS = 200
+MAX_CLIP_SKIP = 12
+
+
+def _validate_sampling(req: ImagineRequest) -> None:
+    """A 400 for steps or clip skip outside ``1..MAX_STEPS`` / ``1..MAX_CLIP_SKIP``."""
+    if req.steps is not None and not (1 <= req.steps <= MAX_STEPS):
+        raise HTTPException(400, f"Steps must be between 1 and {MAX_STEPS}")
+    if req.clip_skip is not None and not (1 <= req.clip_skip <= MAX_CLIP_SKIP):
+        raise HTTPException(400, f"Clip skip must be between 1 and {MAX_CLIP_SKIP}")
 
 
 def _validate_lora_name(raw: str) -> str:
@@ -161,6 +178,11 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             job.push({"type": "line", "text":
                       "Batch count, sampler, scheduler and hires fix apply to the native "
                       "backend; with ComfyUI set them in the workflow."})
+            return False
+        if s.get("backend") != "native" and (req.steps is not None or req.clip_skip is not None):
+            job.push({"type": "line", "outcome": True, "text":
+                      "Steps and clip skip apply to the native backend; ComfyUI uses the "
+                      "values in its workflow."})
             return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
@@ -253,6 +275,9 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             **size_kwargs,
             **({"loras": native_loras} if native_loras else {}),
             **native_kwargs,
+            **({"steps": req.steps, "clip_skip": req.clip_skip,
+                "on_preview": lambda p: job.push(frame_event(p))}
+               if s.get("backend") == "native" else {}),
         )
         job.push({"type": "line", "outcome": True, "text": message})
         if ok and not saved_names:
@@ -283,6 +308,7 @@ async def imagine(req: ImagineRequest, request: Request):
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)
     lora_name = _validate_lora_name(req.lora_name) if req.lora_name else None
+    _validate_sampling(req)
     width, height = parse_image_size(req.size) or (None, None)
     native_choice, native_loras = check_request(req.native_models, req.loras, "image")
     native_extras = check_generation_extras(req.sample_method, req.scheduler, req.hires,
@@ -351,6 +377,37 @@ async def imagine_backend():
         return await run_in_threadpool_bounded(_read, timeout=20.0)
     except ThreadCallTimeout as e:
         raise HTTPException(504, f"Reading the image backend settings timed out: {e}") from e
+
+
+@_router.post("/api/imagine/import-params")
+async def imagine_import_params(request: Request):
+    """Generation parameters read from the request body: a PNG (localm,
+    A1111 or ComfyUI text chunks) or a localm ``.json`` sidecar. Returns
+    ``{"source", "params", "notes"}``; the upload is parsed in memory and not
+    stored."""
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+    from localm.media import image_params
+    limit = image_params.MAX_IMPORT_BYTES
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise HTTPException(413, "The file is too large to read parameters from.")
+    chunks, size = [], 0
+    async for part in request.stream():
+        size += len(part)
+        if size > limit:
+            raise HTTPException(413, "The file is too large to read parameters from.")
+        chunks.append(part)
+    if not size:
+        raise HTTPException(400, "Send the image or sidecar file as the request body.")
+    try:
+        return await run_in_threadpool_bounded(
+            image_params.params_from_bytes, b"".join(chunks), timeout=20.0)
+    except image_params.ImageParamsError as e:
+        raise HTTPException(422, str(e)[:1].upper() + str(e)[1:]) from e
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading the file timed out: {e}") from e
 
 
 MAX_IMAGES_PER_REQUEST = 4

@@ -34,6 +34,12 @@ SD_CANCEL_RESET = 2
 # enum sd_log_level_t
 SD_LOG_DEBUG, SD_LOG_VERBOSE, SD_LOG_INFO, SD_LOG_WARN, SD_LOG_ERROR = range(5)
 
+# enum preview_t
+PREVIEW_NONE = 0
+PREVIEW_PROJ = 1
+PREVIEW_TAE = 2
+PREVIEW_VAE = 3
+
 # Sentinel counts the library's *_init functions write, used by verify_abi.
 _SD_TYPE_COUNT = 45
 _RNG_TYPE_COUNT = 3
@@ -323,6 +329,7 @@ class sd_vid_gen_params_t(Structure):
 
 SD_LOG_CB = ctypes.CFUNCTYPE(None, c_int, c_char_p, c_void_p)
 SD_PROGRESS_CB = ctypes.CFUNCTYPE(None, c_int, c_int, c_float, c_void_p)
+SD_PREVIEW_CB = ctypes.CFUNCTYPE(None, c_int, c_int, POINTER(sd_image_t), c_bool, c_void_p)
 
 # Bytes reserved past ctypes' sizeof for every struct the library initialises,
 # so a library whose struct grew writes into padding instead of past the buffer
@@ -352,6 +359,7 @@ def _declare(lib: ctypes.CDLL) -> None:
 
     fn("sd_set_log_callback", None, SD_LOG_CB, c_void_p)
     fn("sd_set_progress_callback", None, SD_PROGRESS_CB, c_void_p)
+    fn("sd_set_preview_callback", None, SD_PREVIEW_CB, _enum, c_int, c_bool, c_bool, c_void_p)
     fn("sd_commit", c_char_p)
     fn("sd_version", c_char_p)
     fn("sd_get_system_info", c_char_p)

@@ -216,10 +216,72 @@ def music_options(reg: Optional[dict] = None) -> dict:
     return out
 
 
+ACESTEP_V1_REASON = ("ACE-Step v1: the native music backend runs ACE-Step 1.5 GGUF parts "
+                     "only, so this checkpoint works in ComfyUI only")
+
+_ACESTEP_V1_MARKERS = (b"genre_embedder", b"lyric_embs", b"umt5base")
+_MAX_HEADER_BYTES = 64 * 1024 * 1024
+_V1_CACHE: dict = {}
+_V1_CACHE_MAX = 512
+
+
+def is_acestep_v1_checkpoint(path) -> bool:
+    """True when the ``.safetensors`` file at *path* has an ACE-Step v1 tensor
+    layout (the all-in-one ComfyUI checkpoint: ``genre_embedder``,
+    ``lyric_embs`` and a UMT5 text encoder in one file). Reads only the
+    header; False for any other file or an unreadable one. Never raises."""
+    import struct
+    from pathlib import Path
+    p = Path(path)
+    try:
+        st = p.stat()
+        key = (str(p), st.st_size, st.st_mtime_ns)
+        if key in _V1_CACHE:
+            return _V1_CACHE[key]
+        with open(p, "rb") as f:
+            raw = f.read(8)
+            n = struct.unpack("<Q", raw)[0] if len(raw) == 8 else 0
+            header = f.read(n) if 0 < n <= _MAX_HEADER_BYTES else b""
+    except (OSError, struct.error):
+        return False
+    found = bool(header) and all(m in header for m in _ACESTEP_V1_MARKERS)
+    if len(_V1_CACHE) >= _V1_CACHE_MAX:
+        _V1_CACHE.clear()
+    _V1_CACHE[key] = found
+    return found
+
+
+def unsupported_music(reg: Optional[dict] = None) -> list:
+    """``[{"name", "file", "reason"}]``: registered music checkpoints the native
+    music backend cannot run (today: ACE-Step v1 ``.safetensors`` files), so
+    the picker can say why they are not offered."""
+    from pathlib import Path
+
+    from localm.pathsafe import is_unc_or_device_path
+    if reg is None:
+        from localm.config import load_registry
+        reg = load_registry()
+    out = []
+    for name, entry in sorted(reg.items()):
+        if not isinstance(entry, dict) or entry.get("model_type") == "lora":
+            continue
+        raw = str(entry.get("path") or "")
+        if Path(raw).suffix.lower() not in (".safetensors", ".sft"):
+            continue
+        if is_unc_or_device_path(raw):
+            continue
+        if is_acestep_v1_checkpoint(raw):
+            out.append({"name": name, "file": raw.replace("\\", "/").rsplit("/", 1)[-1],
+                        "reason": ACESTEP_V1_REASON})
+    return out
+
+
 def make_music_router(plugin_backend) -> APIRouter:
-    """``GET /api/music/native-models``: ``{"components", "current"}`` - the
-    registered files for each ACE-Step component (``music_options``) and the
-    settings' current choice (file names only)."""
+    """``GET /api/music/native-models``: ``{"components", "unsupported",
+    "current"}`` - the registered files for each ACE-Step component
+    (``music_options``), the registered music checkpoints the native backend
+    cannot run with a reason (``unsupported_music``), and the settings' current
+    choice (file names only)."""
     router = APIRouter()
 
     @router.get("/api/music/native-models")
@@ -234,6 +296,7 @@ def make_music_router(plugin_backend) -> APIRouter:
             s = plugin_backend.settings(load_config())
             blk = s.get("native") if isinstance(s.get("native"), dict) else {}
             return {"components": music_options(),
+                    "unsupported": unsupported_music(),
                     "current": {k: shown_name(str(blk.get(k) or "")) for k in MUSIC_KEYS}}
         try:
             return await run_in_threadpool_bounded(_read, timeout=30.0)
@@ -270,17 +333,26 @@ def make_router(media: str, prefix: str, plugin_backend) -> APIRouter:
             blk = s.get("native") if isinstance(s.get("native"), dict) else {}
             configured = {k: str(blk.get(k) or "").strip() for k in keys}
             cands = pairing.registry_candidates()
-            out = pairing.native_options(media, cands)
-            out["sampling"] = sampling_options()
-            if media == "image":
-                out["upscalers"] = upscaler_options()
-            out["current"] = {k: display_name(v) if v else "" for k, v in configured.items()}
             other_model = "model" in query and query["model"] != configured["model"]
             picked = {k: query.get(k, "" if other_model and k != "model" else configured[k])
                       for k in keys}
             model = picked.pop("model", "")
-            out["preview"] = (pairing.preview(media, model, picked, cands) if model
-                              else None)
+            recommended = getattr(plugin_backend, "recommended_defaults", None)
+            preview = (pairing.preview(media, model, picked, cands,
+                                       recommended() if recommended else None)
+                       if model else None)
+            if preview and preview["defaults"]:
+                for key in ("steps", "cfg_scale"):
+                    if blk.get(key) is not None:
+                        preview["defaults"][key] = blk[key]
+            out = pairing.native_options(
+                media, cands, family=preview["family"] if preview else None,
+                variant=preview["variant"] if preview else None)
+            out["sampling"] = sampling_options()
+            if media == "image":
+                out["upscalers"] = upscaler_options()
+            out["current"] = {k: display_name(v) if v else "" for k, v in configured.items()}
+            out["preview"] = preview
             return out
         try:
             return await run_in_threadpool_bounded(_read, timeout=30.0)

@@ -190,6 +190,9 @@ class _FakeRunner:
             raise self.raise_on_generate
         if on_event:
             on_event(("progress", {"phase": "sampling", "step": 1, "steps": 2, "secs": 1.5}))
+            if params.get("preview"):
+                on_event(("preview", {"step": 1, "steps": 2, "width": 4, "height": 4,
+                                      "png": b"fake-png"}))
         w, h, n = params["width"], params["height"], params["video_frames"]
         frames = [bytes([(i * 20) % 256, 80, 160]) * (w * h) for i in range(n)]
         return {"width": w, "height": h, "channel": 3, "frames": frames,
@@ -388,6 +391,22 @@ def test_video_route_generates_natively(video_app):
     assert any("native stable-diffusion.cpp" in ln for ln in _lines(job))
     assert not any("Submitting Wan workflow" in ln for ln in _lines(job))
     assert runner.generates[0]["prompt"] == "a lighthouse"
+
+
+def test_a_native_video_job_streams_its_previews_as_frames_kept_only_in_memory(video_app):
+    import base64
+
+    from fastapi.testclient import TestClient
+    app, runner = video_app
+    with TestClient(app) as c:
+        r = c.post("/api/video", json={"prompt": "p", "seconds": 1, "fps": 8,
+                                       "width": 96, "height": 64})
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "done", _lines(job)
+    assert runner.generates[0]["preview"] is True
+    assert job._last_frame["type"] == "frame"
+    assert base64.b64decode(job._last_frame["data"]) == b"fake-png"
+    assert all(e.get("type") != "frame" for e in job._history)
 
 
 def test_a_native_refusal_fails_the_job_before_any_vram_handover(video_app, monkeypatch):
@@ -781,7 +800,7 @@ def test_relayed_native_lines_name_model_files_only(child_state):
     _child = child_state
     _child._State.paths = ("D:\\models\\private\\wan.safetensors", "/srv/private/umt5.gguf")
     q = queue.Queue()
-    log_cb, _progress = _child._make_callbacks(q)
+    log_cb, _progress, _preview = _child._make_callbacks(q)
     log_cb(3, b"loading diffusion model from 'D:\\models\\private\\wan.safetensors' failed"
               b" --- diffusion_engine.cpp:736", None)
     log_cb(4, b"failed to open 'D:/models/private/wan.safetensors' --- safetensors_io.cpp:158",
@@ -798,7 +817,7 @@ def test_the_worker_records_the_wan_model_it_loaded(child_state):
     import queue
     _child = child_state
     q = queue.Queue()
-    log_cb, _progress = _child._make_callbacks(q)
+    log_cb, _progress, _preview = _child._make_callbacks(q)
     log_cb(2, b"model manager memory on ROCm0: reported free 10018.88 MB", None)
     log_cb(2, b"Wan2.1-T2V-1.3B --- wan.hpp:921", None)
     log_cb(2, b"Wan2.1-I2V-14B --- wan.hpp:917", None)
