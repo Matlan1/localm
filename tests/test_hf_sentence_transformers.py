@@ -395,4 +395,4 @@ def test_a_stdout_filter_without_a_target_raises_attribute_error_not_recursion()
 
     bare = object.__new__(_DocstringLeakFilter)
     with pytest.raises(AttributeError):
-        _ = bare.isatty
+        _ = bare.closed
