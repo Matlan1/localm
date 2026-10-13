@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""On-device reranking with a reranker GGUF.
+"""On-device reranking with a reranker GGUF or a Hugging Face cross-encoder folder.
 
 A reranker (a BERT / XLM-R cross-encoder such as bge-reranker-v2-m3, or a decoder
 reranker such as Qwen3-Reranker) scores a query against each of several documents.
-It runs in the same isolated worker process as the embedder
+A GGUF runs in the same isolated worker process as the embedder
 (``embedder.IsolatedEmbedder`` / ``_embedder_runner.py``), loaded with RANK
-pooling, so a native driver failure cannot take this process down.
+pooling, so a native driver failure cannot take this process down. A Hugging Face
+folder whose architecture is a single-score ``*ForSequenceClassification`` runs
+in an isolated HF worker (``backends.hf.HFBackend`` with ``task="rerank"``) and
+returns the head's raw logit.
 
 One reranker is resident at a time, loaded on first use and replaced when a
 request names a different one. Loading serialises on the engine's process-global
 load lock, so it never races a chat-model load onto the GPU.
 
-``resolve_reranker`` maps a registered model name to its GGUF path and refuses
-anything that is not a registered reranker; a request can never name a filesystem
-path. ``rerank`` scores and ``rank_results`` shapes the response.
+``resolve_reranker`` maps a registered model name to its GGUF file or model folder
+and refuses anything that is not a registered reranker; a request can never name a
+filesystem path. ``rerank`` scores and ``rank_results`` shapes the response.
 """
 
 from __future__ import annotations
@@ -57,9 +60,17 @@ class RerankerUnavailableError(RuntimeError):
 
 
 def _file_key(path: str) -> tuple[str, int, int]:
+    """Identity of the model at *path*: its resolved path with the mtime and size
+    of the file, or for a model folder the newest mtime and the total size of the
+    files directly in it."""
     try:
-        st = Path(path).stat()
-        return (str(Path(path).resolve()), st.st_mtime_ns, st.st_size)
+        p = Path(path)
+        if p.is_dir():
+            stats = [c.stat() for c in p.iterdir() if c.is_file()]
+            return (str(p.resolve()), max((s.st_mtime_ns for s in stats), default=0),
+                    sum(s.st_size for s in stats))
+        st = p.stat()
+        return (str(p.resolve()), st.st_mtime_ns, st.st_size)
     except OSError:
         return (str(path), 0, 0)
 
@@ -89,6 +100,23 @@ def _registered_gguf_path(name: str) -> Optional[str]:
     if not path or is_unc_or_device_path(str(path)):
         return None
     return str(path) if Path(path).is_file() else None
+
+
+def _registered_model_path(name: str) -> Optional[str]:
+    """The GGUF file or Hugging Face model folder registered under *name*, or None
+    when it names no existing local one."""
+    from localm.model_manager.registry import get_model_info
+    from localm.pathsafe import is_unc_or_device_path
+    info = get_model_info(name)
+    if not info:
+        return None
+    path = info[0] if isinstance(info, tuple) else info
+    if not path or is_unc_or_device_path(str(path)):
+        return None
+    p = Path(path)
+    if p.is_file():
+        return str(path)
+    return str(path) if (p.is_dir() and (p / "config.json").is_file()) else None
 
 
 _KIND_WORDS = {
@@ -151,11 +179,11 @@ def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
             f"Model {name!r} is an embedding model, not a reranker: it has no "
             "classifier head to score a query against a document. Use "
             "/v1/embeddings for it.", 422)
-    path = _registered_gguf_path(name)
+    path = _registered_model_path(name)
     if path is None:
         raise RerankerModelError(
-            f"Model {name!r} is registered but its GGUF file is missing or is "
-            "not a single local file.", 422)
+            f"Model {name!r} is registered but its GGUF file or model folder is "
+            "missing or is not a single local one.", 422)
     return name, path
 
 
@@ -171,16 +199,66 @@ def _check_head(path: str) -> None:
             "conversion that includes the head.")
 
 
+def _check_hf_head(path: str) -> None:
+    """Refuse a Hugging Face folder whose complete weight listing holds no
+    classification head tensor."""
+    from localm.inference.backends._hf_fp8 import weight_files
+    from localm.inference.hf_head_check import classifier_head_present
+    present = classifier_head_present(weight_files(path))
+    if present is False:
+        raise RerankerHeadMissingError(
+            f"{Path(path).name} has no classification head (no 'classifier' or 'score' "
+            "tensor in its weights), so it would return an arbitrary value instead of "
+            "a relevance score. Use a cross-encoder checkpoint that includes the head.")
+
+
+class HFReranker:
+    """A resident Hugging Face cross-encoder: the isolated worker behind an
+    ``HFBackend(task="rerank")``, with the surface of ``IsolatedEmbedder`` that
+    this module uses (``rerank``, ``cls_labels``, ``active_requests``, ``close``,
+    ``model_path`` and ``_runner``)."""
+
+    def __init__(self, path: str, device: Optional[str] = None) -> None:
+        from localm.inference.backends.hf import HFBackend
+        self.model_path = path
+        self.active_requests = 0
+        self._call_lock = threading.Lock()
+        self._backend = HFBackend(path, device=device, task="rerank")
+        self._backend.load()
+        self.cls_labels = list(self._backend.rerank_labels)
+        self._runner = self._backend._runner
+
+    def rerank(self, pairs: list[tuple[str, str]]) -> list[dict]:
+        """Score *pairs*, starting the worker again first when it has died."""
+        self.active_requests += 1
+        try:
+            with self._call_lock:
+                if not self._backend.loaded:
+                    logger.warning("reranker worker is not running; reloading %s",
+                                   self.model_path)
+                    self._backend.unload()
+                    self._backend.load()
+                    self._runner = self._backend._runner
+                return self._backend.rerank(pairs)
+        finally:
+            self.active_requests = max(0, self.active_requests - 1)
+
+    def close(self) -> None:
+        self._backend.unload()
+        self._runner = None
+
+
 def get_reranker(path: str):
-    """The resident reranker for the GGUF at *path*, loading it first (and
-    releasing a different resident reranker). Raises
-    :class:`RerankerHeadMissingError` for a model without a classifier head and
-    :class:`RerankerUnavailableError` when the load fails (a failed file is not
+    """The resident reranker for the GGUF file or Hugging Face model folder at
+    *path*, loading it first (and releasing a different resident reranker).
+    Raises :class:`RerankerHeadMissingError` for a model without a classifier head
+    and :class:`RerankerUnavailableError` when the load fails (a failed file is not
     retried for a minute unless it changes) or a different reranker is still
     busy."""
     global _RERANKER, _RERANKER_KEY
     from localm.config import load_config
     from localm.inference import embedder as emb
+    hf_folder = Path(path).is_dir()
     key = _file_key(path)
     with _LOCK:
         if _RERANKER is not None and _RERANKER_KEY == key:
@@ -188,13 +266,20 @@ def get_reranker(path: str):
         failed = _latched_failure(key)
         if failed is not None:
             raise RerankerUnavailableError(failed)
-    _check_head(path)
-    cfg = load_config()
-    explicit = emb._explicit_embedder_gpu_layers(cfg)
-    emb._maybe_swap_for_embedder(path, explicit if explicit is not None else 99)
-    ngl, placement_reason = emb._choose_embedder_gpu_layers(path, cfg)
-    if placement_reason is not None:
-        logger.warning("reranker placement: %s", placement_reason)
+    hf_device: Optional[str] = None
+    if hf_folder:
+        _check_hf_head(path)
+        ngl, placement_reason = 0, None
+        if emb._explicit_embedder_gpu_layers(load_config()) == 0:
+            hf_device = "cpu"
+    else:
+        _check_head(path)
+        cfg = load_config()
+        explicit = emb._explicit_embedder_gpu_layers(cfg)
+        emb._maybe_swap_for_embedder(path, explicit if explicit is not None else 99)
+        ngl, placement_reason = emb._choose_embedder_gpu_layers(path, cfg)
+        if placement_reason is not None:
+            logger.warning("reranker placement: %s", placement_reason)
     from localm.inference.engine import _LOAD_LOCK
     with _LOAD_LOCK:
         with _LOCK:
@@ -212,9 +297,12 @@ def get_reranker(path: str):
                 _RERANKER_KEY = None
                 current.close()
             try:
-                _RERANKER = emb.IsolatedEmbedder(
-                    path, n_gpu_layers=ngl, pooling_type=emb._POOLING_RANK,
-                    gpu_fallback_reason=placement_reason)
+                if hf_folder:
+                    _RERANKER = HFReranker(path, hf_device)
+                else:
+                    _RERANKER = emb.IsolatedEmbedder(
+                        path, n_gpu_layers=ngl, pooling_type=emb._POOLING_RANK,
+                        gpu_fallback_reason=placement_reason)
             except Exception as e:
                 reason = pathscrub.scrub_paths(str(e))
                 _LOAD_FAILED[key] = (reason, time.monotonic())

@@ -218,6 +218,43 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
     return p
 
 
+def hf_reranker_state(folder: Path) -> Optional[bool]:
+    """Whether the Hugging Face model folder *folder* is a cross-encoder reranker:
+    its config.json declares a ``*ForSequenceClassification`` architecture with a
+    single output label. None when config.json cannot be read.
+
+    A head with several labels is a classifier (sentiment, NLI), not a reranker,
+    and answers False."""
+    try:
+        config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    archs = config.get("architectures")
+    if not (isinstance(archs, list) and any(
+            isinstance(a, str) and a.endswith("ForSequenceClassification") for a in archs)):
+        return False
+    id2label = config.get("id2label")
+    num_labels = config.get("num_labels")
+    if isinstance(id2label, dict):
+        return len(id2label) == 1
+    return num_labels == 1
+
+
+def _is_sentence_transformers_folder(path: Path) -> bool:
+    """Whether *path* holds a sentence-transformers ``modules.json`` listing a
+    Transformer module followed by a Pooling module."""
+    try:
+        modules = json.loads((path / "modules.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    if not isinstance(modules, list):
+        return False
+    kinds = [str(m.get("type") or "").rsplit(".", 1)[-1] for m in modules if isinstance(m, dict)]
+    return "Transformer" in kinds and "Pooling" in kinds
+
+
 _MEDIA_KIND_TYPES = {
     "diffusion": "diffusion-unet", "checkpoint": "diffusion-unet", "vae": "vae",
     "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
@@ -262,7 +299,9 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     'mmproj'; then an embedding/pooling signal (``gguf_embedding_signal`` -
     architecture or a ``*.pooling_type`` key) -> 'embedding'; otherwise it is a
     llama.cpp text model -> 'llm'. An HF directory is classified from
-    config.json: a LoRA/adapter dir -> 'lora'; an ``architectures`` class ending
+    config.json: a LoRA/adapter dir -> 'lora'; a sentence-transformers folder
+    (``modules.json`` with a Transformer and a Pooling module) or a single-score
+    ``*ForSequenceClassification`` cross-encoder -> 'embedding'; an ``architectures`` class ending
     in ForCausalLM / LMHeadModel / ForConditionalGeneration -> 'llm'; anything we
     cannot resolve -> 'unknown' (never a silent 'llm').
 
@@ -292,6 +331,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
         if is_hf:
             if (path / "adapter_config.json").exists():
                 return "lora", {}
+            if _is_sentence_transformers_folder(path) or hf_reranker_state(path):
+                return "embedding", {}
             cfg_path = path / "config.json"
             if cfg_path.exists():
                 conf = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -2021,6 +2062,10 @@ def _register(
         reranker = gguf_reranker_state(path)
         if reranker is not None:
             entry["reranker"] = reranker
+    elif model_type == "embedding" and path.is_dir():
+        reranker = hf_reranker_state(path)
+        if reranker is not None:
+            entry["reranker"] = reranker
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
     # a parallel pull, sync_models_dir) can't clobber this entry.
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
@@ -2029,7 +2074,8 @@ def _register(
 def entry_is_reranker(name: str, entry: dict) -> bool:
     """True when the registered model *name* is a reranker or classifier: an
     ``embedding``-type model whose GGUF header marks it so (see
-    ``gguf_reranker_state``).
+    ``gguf_reranker_state``) or whose Hugging Face config declares a single-score
+    sequence-classification head (see ``hf_reranker_state``).
 
     Reads the stored ``reranker`` flag. An entry registered before the flag
     existed has none, so the GGUF is classified once here and the answer is
@@ -2042,9 +2088,14 @@ def entry_is_reranker(name: str, entry: dict) -> bool:
     if isinstance(flag, bool):
         return flag
     path = _entry_path(entry)
-    if path is None or not Path(path).is_file():
+    if path is None:
         return False
-    flag = gguf_reranker_state(Path(path))
+    if Path(path).is_dir():
+        flag = hf_reranker_state(Path(path))
+    elif Path(path).is_file():
+        flag = gguf_reranker_state(Path(path))
+    else:
+        return False
     if flag is None:
         return False
 

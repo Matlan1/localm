@@ -125,7 +125,7 @@ def missing_parts(rec: RecommendedVideoModel, blk: Optional[dict] = None) -> lis
 def missing_model_message(blk: Optional[dict] = None) -> str:
     rec = RECOMMENDED_VIDEO_MODELS[0]
     total = sum(p.size_bytes for p in rec.parts) / 1024 ** 3
-    pulls = "; ".join(f"localm pull {p.spec} --type {p.model_type}"
+    pulls = "; ".join(f"localm pull {p.spec} --type {p.model_type} --sha256 {p.sha256}"
                       for p in missing_parts(rec, blk) or rec.parts)
     return (f"No native video model is set up. The recommended one is {rec.name} "
             f"({total:.1f} GB in {len(rec.parts)} files): {pulls}. Or set 'Native model' "

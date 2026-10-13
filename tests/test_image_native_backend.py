@@ -120,7 +120,7 @@ def test_no_model_names_the_recommended_download():
     with pytest.raises(native._ModelError) as ei:
         native.resolve_models({"native": {}})
     rec = native.RECOMMENDED_MODELS[0]
-    assert f"localm pull {rec.spec} --type diffusion-unet" in str(ei.value)
+    assert f"localm pull {rec.spec} --type diffusion-unet --sha256 {rec.sha256}" in str(ei.value)
 
 
 def test_blank_model_picks_the_downloaded_recommended_model(tmp_path):

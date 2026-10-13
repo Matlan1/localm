@@ -12,6 +12,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Sentence-transformers folders embed the way their model defines.** A Hugging Face folder
+  with a `modules.json` is registered as an embedding model, and its Pooling (mean, CLS, max,
+  last token and the other modes), Dense and Normalize modules are applied, so a CLS-pooled
+  model such as bge no longer gets mean-pooled vectors. A folder that lists any other module,
+  or keeps its Dense weights in a pickle file, is refused with the module named.
+- **Cross-encoder rerankers in Hugging Face format.** A folder whose model is a
+  `*ForSequenceClassification` with a single output (for example bge-reranker-v2-m3) is
+  registered as a reranker and scores `POST /v1/rerank`, `localm rerank` and Knowledge
+  reranking with the head's raw logit, on the CPU or the GPU like the GGUF rerankers. A
+  checkpoint saved without its classification head is refused, and a classifier with several
+  labels is not offered as a reranker.
 - **Add models from Jan.** `localm add` on Jan's data folder (or its `llamacpp/models`
   folder) registers every downloaded model under its Jan id, with its vision projector
   attached, and follows a model that Jan only links to a file kept elsewhere. A download
@@ -439,6 +450,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **`localm info` says whether the install is portable.** It prints a `mode` line (`portable`
+  or `standard`) and a `temp dir` line naming where temporary files go.
 - **Knowledge chat injects less off-topic text without embeddings.** Where the check can only compare
   words (no embedding model, or a passage without a vector), an excerpt now needs at least two of the
   message's words, unless the message is a single word, so a greeting that shares one word with the
@@ -551,6 +564,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The FLUX VAE offered for a missing ComfyUI workflow file downloads again.** `ae.safetensors`
   came from a Hugging Face repository that now requires a licence click-through and answers
   401 to an anonymous download. It now comes from an open repository that holds the same file.
+- **Hugging Face encoder models load.** Loading a plain encoder such as bge or MiniLM
+  failed with `'_DocstringLeakFilter' object has no attribute 'isatty'` whenever transformers
+  printed a weight-loading report. They load now, and a sentence-transformers folder
+  loads as the encoder it is instead of as a language model.
+- **SmolVLM2 image chats no longer log a processor warning.** Each image turn logged
+  "Kwargs passed to `processor.__call__` have to be in `processor_kwargs` dict" twice.
 - **A half-copied GGUF file is no longer registered by a folder import.** `localm add
   <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
   whose header declares more tensor data than the file holds, and one named `incomplete-...`
@@ -1884,8 +1903,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instead of 10, so a slower GPU can finish it, and a cancelled coder run now stops the image its
   `generate_image` tool is rendering instead of letting it run on. Ctrl-C in `localm image`, `music` or `video` still
   stops everything ComfyUI is doing, as it says.
+- **A PC with touch input opens straight into the app.** A Windows PC that reports touch points (a
+  touchscreen, a pen, or a remote-desktop session from a phone) got the phone onboarding screen, and every
+  desktop showed the camera button. Both now follow the browser's own mobile flag, a phone or tablet
+  user agent, or a coarse primary pointer.
 
 ### Security
+- **The default embedding models are downloaded from a fixed version and checked.** The
+  first use of semantic search, `localm setup-embeddings` and the Knowledge page fetch
+  bge-small (or nomic-embed) from a pinned commit, delete the file and report the failure
+  when its sha256 is not the expected one, and register it with that digest. The commands
+  printed for the recommended image and video models now include `--sha256`.
 - **A plain `coder` API key can no longer run commands through the project's coder
   configuration.** A restricted coder session (a shared, non-owner key) started any
   MCP server listed in the project's `.localcoder/config.toml` when it opened, and
