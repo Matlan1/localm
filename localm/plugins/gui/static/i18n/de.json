@@ -1124,6 +1124,7 @@
   "models.switch.confirmLabel": "Trotzdem wechseln",
   "models.switch.confirmTitle": "Modellwechsel bestätigen",
   "models.switch.mmapFromDisk": "läuft aus festplattengestütztem Speicher, erste Tokens langsamer",
+  "models.switch.mmapCpuFromDisk": "CPU-Schichten lesen aus festplattengestütztem Speicher, jedes Token langsamer",
   "models.tab.all": "Alle",
   "models.tab.diffusionUnet": "Diffusion",
   "models.tab.embedding": "Embedding",

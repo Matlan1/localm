@@ -1343,6 +1343,7 @@ export const I18N_EN = {
   "models.switch.confirmLabel": "Switch anyway",
   "models.switch.confirmTitle": "Confirm model switch",
   "models.switch.mmapFromDisk": "running from disk-backed memory, first tokens slower",
+  "models.switch.mmapCpuFromDisk": "CPU layers read from disk-backed memory, every token slower",
   "models.tab.all": "All",
   "models.tab.diffusionUnet": "Diffusion",
   "models.tab.embedding": "Embedding",
