@@ -367,7 +367,7 @@ def gpu_cache_dirs() -> dict:
 
 
 def contained_gpu_cache_env(base: Optional[dict] = None) -> dict:
-    """An environment with the AMD GPU cache variables pinned inside the data dir.
+    """An environment with the GPU driver cache variables pinned inside the data dir.
 
     *base* defaults to a copy of the current process environment. A variable the user
     set (other than localm's own earlier pin of it) is left exactly as set;
