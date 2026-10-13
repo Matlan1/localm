@@ -451,6 +451,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **A native image, video or music job frees the other native runtime when the card is short.** The music runtime and the image/video worker each stay loaded for ten minutes after a job, so a job of the other kind started with that memory still taken. When the job needs more than the free VRAM, the idle runtime is now stopped first and the job log says so in one line. When another localm instance holds VRAM on the same GPU, the log names it (its port, chat model and loaded media runtimes).
 - **`localm info` says whether the install is portable.** It prints a `mode` line (`portable`
   or `standard`) and a `temp dir` line naming where temporary files go.
 - **Knowledge chat injects less off-topic text without embeddings.** Where the check can only compare
@@ -562,6 +563,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A request cancelled behind an image turn now stops at once.** An image reply, and a
+  reply sent with `cache_prompt: false`, wait for every running reply to finish before they
+  start. A client that disconnected or cancelled during that wait was not noticed until the
+  wait ended and the reply had already processed its prompt. The cancel is now seen within
+  a fraction of a second, and the request ends with no output and no error.
 - **The FLUX VAE offered for a missing ComfyUI workflow file downloads again.** `ae.safetensors`
   came from a Hugging Face repository that now requires a licence click-through and answers
   401 to an anonymous download. It now comes from an open repository that holds the same file.
@@ -2056,6 +2062,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   of the eight models offered when a ComfyUI workflow is missing a file now fails and deletes
   the file when its bytes are not the expected ones. The weekly pin report lists these digests
   and flags one the hub no longer serves.
+- **Downloads from Hugging Face are checked more completely.** Every part of a split GGUF is
+  checked against the digest the hub publishes, not only the first; a vision projector is
+  checked and deleted when it does not match; a file already on disk is checked before it is
+  registered under the hub's digest, and refused when it does not match; each weight file of a
+  whole-repository download is checked. The file metadata and the bytes are read from one
+  commit, so a repository that changes during a pull no longer fails the check. When no digest
+  can be read, the pull now says so instead of finishing silently.
 
 ## [0.2.0] - 2026-09-04
 

@@ -321,6 +321,8 @@ Issues = "https://github.com/Matlan1/localm/issues"
 Changelog = "https://github.com/Matlan1/localm/blob/master/CHANGELOG.md"
 
 [tool.uv]
+# Locks win32, linux and darwin as separate resolutions. See test_non_windows_resolutions_reach_no_rocm_artefact.
+environments = ["sys_platform == 'win32'", "sys_platform == 'linux'", "sys_platform == 'darwin'"]
 exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-libraries-gfx103x-all = false, torch = false, torchvision = false, transformers = false }
 # ctranslate2's win32/darwin wheel metadata resolves an older setuptools than its
 # Linux wheel does (CVE-2026-59890, sdist MANIFEST.in exclusion bypass, fixed in

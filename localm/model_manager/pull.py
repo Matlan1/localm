@@ -897,25 +897,76 @@ def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
 
 
 
+_FULL_GIT_ID_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _valid_commit(value: object) -> Optional[str]:
+    """*value* when it is a full 40-hex commit id, else None."""
+    return value if isinstance(value, str) and _FULL_GIT_ID_RE.match(value) else None
+
+
+class _PublishedDigest(str):
+    """A sha256 hex digest that also carries, in ``commit``, the repository
+    commit that last changed the file it describes (None when unknown). The
+    file at that commit is the file the digest describes, so a download made at
+    it cannot disagree with the digest because the repository changed
+    meanwhile."""
+
+    commit: Optional[str]
+
+    def __new__(cls, digest: str, commit: Optional[str] = None) -> "_PublishedDigest":
+        obj = super().__new__(cls, digest)
+        obj.commit = _valid_commit(commit)
+        return obj
+
+
+def _revision_kwargs(commit: Optional[str]) -> dict[str, Any]:
+    """The ``revision`` keyword for a hub call at *commit*; nothing when no
+    commit is known, which leaves the call on the default branch."""
+    return {"revision": commit} if commit else {}
+
+
+def _at_commit(published: Optional[str]) -> dict[str, Any]:
+    """The ``revision`` keyword for a hub download of the file *published*
+    describes."""
+    return _revision_kwargs(getattr(published, "commit", None))
+
+
 def _hf_file_sha256(repo_id: str, filename: str,
                      token: Optional[str] = None) -> Optional[str]:
     """
     Ask the HuggingFace API for a file's LFS sha256 without downloading it.
-    Returns None when offline, on any API error, or for non-LFS files.
+    Returns a :class:`_PublishedDigest`, or None when offline, on any API error
+    (logged at debug), or for non-LFS files.
 
     *token*: optional HF API token - needed for a gated repo's metadata.
     """
     try:
         from huggingface_hub import HfApi
         info = HfApi(endpoint=_HF_ENDPOINT).get_paths_info(
-            repo_id, [filename], token=token)
+            repo_id, [filename], token=token, expand=True)
         if info:
             lfs = getattr(info[0], "lfs", None)
             digest = getattr(lfs, "sha256", None) if lfs else None
-            return digest.lower() if digest else None
-    except Exception:
-        pass
+            if digest:
+                last = getattr(info[0], "last_commit", None)
+                return _PublishedDigest(digest.lower(), getattr(last, "oid", None))
+    except Exception as e:
+        logger.debug("could not read the sha256 of %s from %s: %s", filename, repo_id, e)
     return None
+
+
+def _note_unverified(repo_id: str, names: list[str]) -> None:
+    """Say that *names* are not checked against a published sha256 because none
+    could be read."""
+    from rich.markup import escape
+    shown = ", ".join(names[:3]) + (" ..." if len(names) > 3 else "")
+    console.print(
+        f"[yellow]Note:[/yellow] no sha256 could be read for {escape(shown)} from "
+        f"{escape(repo_id)} (the file is not stored with a digest, or the lookup "
+        "failed), so it is not checked against one.")
+    logger.warning("no published sha256 for %s in %s; the download is not integrity-checked",
+                   shown, repo_id)
 
 
 
@@ -1100,17 +1151,28 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
     *dest*."""
     from huggingface_hub import hf_hub_download
     _ensure_hf_resumable_download()
+    expected = _mm._hf_file_sha256(repo_id, remote_name)
+    extra = _at_commit(expected)
     plain = base_dir / remote_name
     if dest == plain:
         local = hf_hub_download(repo_id=repo_id, filename=remote_name,
-                                 local_dir=str(base_dir), endpoint=_HF_ENDPOINT)
+                                 local_dir=str(base_dir), endpoint=_HF_ENDPOINT, **extra)
         if Path(local) != dest:
             shutil.move(local, dest)
+    else:
+        with tempfile.TemporaryDirectory(dir=base_dir, prefix=".mmproj-") as scratch:
+            local = hf_hub_download(repo_id=repo_id, filename=remote_name,
+                                     local_dir=scratch, endpoint=_HF_ENDPOINT, **extra)
+            shutil.move(local, dest)
+    if expected is None:
+        _note_unverified(repo_id, [remote_name])
         return
-    with tempfile.TemporaryDirectory(dir=base_dir, prefix=".mmproj-") as scratch:
-        local = hf_hub_download(repo_id=repo_id, filename=remote_name,
-                                 local_dir=scratch, endpoint=_HF_ENDPOINT)
-        shutil.move(local, dest)
+    actual = _verify_digest(dest, purpose="to check the vision projector").lower()
+    if actual != expected:
+        dest.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"sha256 mismatch for {remote_name}: expected {expected[:16]}..., "
+            f"got {actual[:16]}... - the file was deleted")
 
 
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
@@ -1433,9 +1495,15 @@ def _pull_gguf_file(
     model_name = _sanitize_name(name or filename.removesuffix(".gguf"))
     dest = base_dir / filename
 
-    # Expected digest from HF metadata - free, no download needed.
-    # (Only identifies the first part of a split GGUF, which is enough.)
+    # Expected digest from HF metadata - free, no download needed. Each file is
+    # downloaded at the commit its digest was read at.
     expected = _mm._hf_file_sha256(repo_id, _remote(filename))
+    part_digests = {}
+    for part in all_parts[1:]:
+        part_digest = _mm._hf_file_sha256(repo_id, _remote(part))
+        if part_digest:
+            part_digests[part] = part_digest
+    published = {filename: expected, **part_digests}
 
     # Honour a user-supplied --sha256: when HF's own metadata digest is known
     # and disagrees with it, the bytes can never match, so refuse up front
@@ -1459,6 +1527,12 @@ def _pull_gguf_file(
     # The digest we will verify against / store: prefer HF metadata, else the
     # user-supplied value.
     verify_digest = expected or want
+    digests = dict(part_digests)
+    if verify_digest:
+        digests[filename] = verify_digest
+    unchecked = [p for p in all_parts if p not in digests]
+    if unchecked:
+        _note_unverified(repo_id, unchecked)
 
     missing = [p for p in all_parts if not (base_dir / p).exists()]
     if not missing:
@@ -1475,6 +1549,21 @@ def _pull_gguf_file(
                        "Delete it and pull again."
                        if pinned_starter else
                        f"match --sha256 ({escape(want[:16])}…).")
+                )
+                return False
+        # A digest read from Hugging Face is registered as the file's own, so
+        # the file on disk has to match it first.
+        for part, published in digests.items():
+            if part == filename and want:
+                continue
+            on_disk = _verify_digest(base_dir / part,
+                                     purpose="to check the file already here")
+            if on_disk.lower() != published.lower():
+                console.print(
+                    f"[red]SHA256 mismatch![/red] The file already at "
+                    f"{escape(part)} ({escape(on_disk[:16])}…) does not match the "
+                    f"digest Hugging Face publishes ({escape(published[:16])}…): it is "
+                    "incomplete, damaged or another version. Delete it and pull again."
                 )
                 return False
         if register:
@@ -1545,7 +1634,8 @@ def _pull_gguf_file(
         import requests as _req
         total_size = 0
         for part in missing:
-            cdn_url = hf_hub_url(repo_id, _remote(part), endpoint=_HF_ENDPOINT)
+            cdn_url = hf_hub_url(repo_id, _remote(part), endpoint=_HF_ENDPOINT,
+                                 **_at_commit(published.get(part)))
             head    = _req.head(cdn_url, allow_redirects=True, timeout=10)
             size = int(head.headers.get("content-length", 0))
             part_sizes[part] = size
@@ -1618,6 +1708,7 @@ def _pull_gguf_file(
                     filename=_remote(part),
                     local_dir=str(stage_dir),
                     endpoint=_HF_ENDPOINT,
+                    **_at_commit(published.get(part)),
                 )
                 final = base_dir / part
                 if Path(local) != final:
@@ -1634,21 +1725,28 @@ def _pull_gguf_file(
     # Verify the downloaded first part against the digest we will register it
     # under: HF's LFS metadata when known, else the user's --sha256. On
     # mismatch, delete the part(s) and fail.
-    if verify_digest:
-        actual = _verify_digest(dest).lower()
-        if actual != verify_digest.lower():
-            console.print(
-                f"[red]SHA256 mismatch![/red] Expected "
-                f"{escape(verify_digest[:16])}…, got "
-                f"{escape(actual[:16])}… - deleting downloaded file(s)"
-            )
-            for part in all_parts:
-                p = base_dir / part
-                if p.exists():
-                    p.unlink()
-            return False
-        _report_success(f"[green]✓[/green] SHA256 verified: {escape(actual[:16])}…",
-                        f"[green]OK[/green] SHA256 verified: {escape(actual[:16])}…")
+    if digests:
+        actual_digests = {}
+        for part in all_parts:
+            if part not in digests:
+                continue
+            actual = _verify_digest(base_dir / part).lower()
+            actual_digests[part] = actual
+            if actual != digests[part].lower():
+                console.print(
+                    f"[red]SHA256 mismatch![/red] Expected "
+                    f"{escape(digests[part][:16])}…, got "
+                    f"{escape(actual[:16])}… - deleting downloaded file(s)"
+                    + (f" ({escape(part)})" if part != filename else "")
+                )
+                for each in all_parts:
+                    p = base_dir / each
+                    if p.exists():
+                        p.unlink()
+                return False
+        shown = actual_digests.get(filename) or next(iter(actual_digests.values()))
+        _report_success(f"[green]✓[/green] SHA256 verified: {escape(shown[:16])}…",
+                        f"[green]OK[/green] SHA256 verified: {escape(shown[:16])}…")
 
     if register:
         unusable = _mm.gguf_unusable_reason(base_dir / filename)
@@ -1696,6 +1794,36 @@ def _pull_gguf_file(
     return True
 
 
+
+
+def _snapshot_files_failing_digest(dest: Path, repo_siblings, repo_id: str) -> list[str]:
+    """Names of the files of the snapshot at *dest* that do not hash to the LFS
+    sha256 *repo_siblings* (a ``model_info(files_metadata=True)`` listing) gives
+    them. A listed file with a digest that is absent from disk counts as failing.
+    Each failing file is deleted, so a second pull fetches it again."""
+    from localm import pathsafe
+    failing = []
+    for sib in repo_siblings:
+        lfs = getattr(sib, "lfs", None)
+        published = (lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None))             if lfs else None
+        if not published:
+            continue
+        name = str(sib.rfilename)
+        try:
+            fp = pathsafe.confined_under(dest, name)
+        except ValueError as e:
+            logger.warning("repo %s lists an out-of-bounds filename (%s); not checking it",
+                           repo_id, e)
+            failing.append(name)
+            continue
+        if not fp.is_file():
+            failing.append(name)
+            continue
+        actual = _verify_digest(fp, purpose=f"to check {name}").lower()
+        if actual != str(published).lower():
+            fp.unlink(missing_ok=True)
+            failing.append(name)
+    return failing
 
 
 def _snapshot_bytes_on_disk(dest: Path) -> int:
@@ -1868,12 +1996,15 @@ def _pull_hf_snapshot(
     # display below. A disk-full mid-download can leave config.json, one of the
     # smallest and earliest files, on disk while weight shards are missing.
     repo_siblings = None
+    commit = None
     total_size = 0
     try:
         from huggingface_hub import HfApi
         info = HfApi(endpoint=_HF_ENDPOINT).model_info(repo_id, files_metadata=True)
         repo_siblings = info.siblings
         total_size = sum(getattr(s, "size", None) or 0 for s in repo_siblings)
+        info_sha = getattr(info, "sha", None)
+        commit = _valid_commit(info_sha)
     except Exception as e:
         # Offline or API error: fall back to a config.json-only completeness
         # check below and an indeterminate (0) progress total.
@@ -1985,11 +2116,27 @@ def _pull_hf_snapshot(
                 repo_id=repo_id,
                 local_dir=str(dest),
                 endpoint=_HF_ENDPOINT,
+                **_revision_kwargs(commit),
             )
             _prog.ok()
     except Exception as e:
         console.print(f"[red]Download failed:[/red] {escape(str(e))}")
         return False
+
+    if repo_siblings is None:
+        console.print(
+            f"[yellow]Note:[/yellow] the file digests of {escape(repo_id)} could not be "
+            "read, so the downloaded files are not checked against them.")
+        logger.warning("no file digests for %s; the snapshot is not integrity-checked", repo_id)
+    else:
+        damaged = _snapshot_files_failing_digest(dest, repo_siblings, repo_id)
+        if damaged:
+            shown = ", ".join(escape(n) for n in damaged[:3]) + (" ..." if len(damaged) > 3 else "")
+            console.print(
+                f"[red]SHA256 mismatch![/red] {len(damaged)} downloaded file(s) of "
+                f"{escape(repo_id)} do not match the digests Hugging Face publishes "
+                f"({shown}) - deleted. Pull again to fetch them; the model was not registered.")
+            return False
 
     _warn_if_repo_ships_code(dest, repo_id)
     # _register_with_dedup, the same dedup-aware registration _pull_gguf_file
