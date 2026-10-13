@@ -24,8 +24,18 @@ localm is a local-first, single-owner application. API access is gated by a
   requires `Authorization: Bearer <key>`, gated by capability scopes: model-read
   routes (`GET /v1/models`, `GET /v1/models/{id}`) need `models:read`, plugin
   routes their per-plugin scope, key/config/plugin administration their privileged
-  scopes (the owner key implies every scope). The sole exception is `GET /health`,
-  an unauthenticated liveness probe that returns the status, model name, and load state.
+  scopes (the owner key implies every scope). The routes that take no bearer key
+  are `GET /health` (a liveness probe that returns the status, model name, and
+  load state), `GET /whoami` (the instance identity handshake), `GET /localm-ca.crt`
+  (the CA certificate, never the key), `GET /` on a `localm serve` API-only
+  instance (a redirect to the API docs), and the three session routes
+  `GET /api/session`, `POST /api/session` and `POST /api/session/logout` -
+  login exchanges a key for a cookie, so it cannot require one. Four more
+  routes take no bearer key but carry a credential of their own:
+  `POST /v1/surfaces/gui` (this instance's attach token, or an owner key) and
+  `GET /v1/instances/status`, `POST /v1/instances/vouch` and
+  `POST /v1/instances/cooperate-unload` (multi-instance GPU coordination; see
+  *State-changing endpoints* below).
 
 Manage the key from the CLI: `localm key show` / `generate` / `set` / `clear`, and
 mint named, scope-limited keys with `localm key create --scope <scope>` - by
@@ -85,17 +95,23 @@ only** by default, so a web page on another `localhost` port (a dev server, an
 npm postinstall page) cannot drive it from your browser. The guard is
 allowlist-by-default: it covers plugin data routes (`/api/rag`, `/api/coder`,
 ...) too, not just key/config/plugin administration, and a new route is
-protected the moment it is added. Three groups are exempt from the check itself,
-each because it carries its own credential instead: the OpenAI-compatible
-inference API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`),
-left cross-origin callable so a local app can use it; `/v1/surfaces/gui`
-(on-demand GUI mount), gated on its own attach token or the owner key; and
+protected the moment it is added. Two kinds of route are exempt from the check
+itself. Inference routes are left cross-origin callable so a local app can use
+them, and they carry the bearer key when one is configured: the OpenAI-compatible
+set (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank`,
+`/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/images/generations`), the
+Ollama-compatible set (`/api/chat`, `/api/generate`, `/api/embed`,
+`/api/embeddings`, `/api/show`), the Anthropic-compatible `/v1/messages` and
+`/v1/messages/count_tokens`, and the OpenAI Responses route `/v1/responses`.
+The other kind carries its own credential instead: `/v1/surfaces/gui` (on-demand
+GUI mount), gated on its own attach token or the owner key; and
 `/v1/instances/cooperate-unload`, `/v1/instances/vouch` and
 `/v1/instances/status` (multi-instance GPU coordination between instances on one
 machine): they answer only on an instance that coordinates, refuse any request
 that carries an `Origin` header, and an unload happens only after the asking
-instance confirms the request on `/vouch`. Each is an exact route, not a prefix - exempting a
-future sibling route needs its own deliberate addition. A configured
+instance confirms the request on `/vouch`. Every one of these is matched as an
+exact route, not a prefix - a route added under one of them is not exempt, and
+exempting a new route needs its own deliberate addition. A configured
 `"cors_origins"` (or `"*"`) opts specific origins into cross-origin use for
 everything else.
 
@@ -130,8 +146,13 @@ closes a specific gap CORS's own permissive `localhost`/`127.0.0.1` origin polic
 would otherwise create: without it, any other program on the machine that can read
 the loopback GUI shell's HTML (CORS trusts every `localhost:PORT` origin to read a
 matching response) could lift the embedded token and replay it cross-origin against
-these routes. `GET /v1/models` and `GET /health` are exempt (unauthenticated by
-design, matching the inference API's own cross-origin posture).
+these routes. The exempt read paths (unauthenticated by design, matching
+the inference API's own cross-origin posture) are `GET /v1/models` (including
+`GET /v1/models/{id}`), the Ollama-compatible `GET /api/tags`, `GET /api/ps` and
+`GET /api/version`, and `GET /api/session` (the "am I logged in?" check). The
+unauthenticated routes outside the `/api` and `/v1` prefixes (`GET /health`,
+`GET /whoami`, `GET /localm-ca.crt`) never enter this gate, and
+`GET /v1/instances/status` is covered by the exemptions listed above.
 
 ### Content Security Policy
 
@@ -197,8 +218,9 @@ localm process's own permissions rather than a sandbox:
 - **Host filesystem access** is a separate dial, and it gates the model and
   media routes that can name a path on the server: pulling a model by naming a
   path that already exists there, scanning for ComfyUI models, downloading a
-  curated ComfyUI model, and moving a generated media file out of the data
-  directory (see above). Without it, a key holding those scopes is confined to
+  curated ComfyUI model, re-pointing a registered model at a moved file by
+  naming its new server-side path, and moving a generated media file out of the data directory (see
+  above). Without it, a key holding those scopes is confined to
   HuggingFace-by-name pulls and the folders localm already manages. It is a
   per-route gate on those routes, not a blanket property of every scope.
 - **Installing a plugin** (a store name, or a third-party directory via
@@ -274,7 +296,8 @@ this section states the security properties and, more importantly, their edges.
 - **No redirect off HTTPS, on any of them.** Separate from the policy above and
   narrower: every outbound client that uses localm's shared verified opener
   (setup-llama's runtime download and its GitHub and PyPI lookups, the update
-  check and download, the issues list, the bug-report upload) refuses a redirect
+  check and download, the issues list, the bug-report upload, the native image
+  and music runtime downloads) refuses a redirect
   that leaves HTTPS for a weaker scheme. Verifying the first hop's certificate
   says nothing about the hops after it, and a redirect target is chosen by the
   server, after any check on the URL you configured has already run. This is a
@@ -292,11 +315,16 @@ this section states the security properties and, more importantly, their edges.
   under `ask`, the same way `/web` or `localm pull` are consent by definition.
   The authorization is a single call argument, never written to config or any
   other state, and it changes nothing about `net_mode` for any other request.
-  `net_mode = off` still refuses it unconditionally - this bypasses `ask`'s
-  friction, never `off`'s kill switch.
-- **`off` has one documented exception, and it is not the one above.** An
-  admin-only setting (`update_ignore_net_policy`, off by default) lets the
-  update check run regardless of `off`. Nothing else opts out of `off`.
+  `net_mode = off` still refuses it unless `net_allow_model_downloads` is on
+  (next bullet) - this bypasses `ask`'s friction, never `off` by itself.
+- **`off` has two documented exceptions, and neither is the one above.** Both
+  are admin-only settings, off by default. `update_ignore_net_policy` lets the
+  update check run regardless of `off`. `net_allow_model_downloads` lets the
+  downloads you trigger yourself proceed under `off`: model pulls and
+  HuggingFace search, the vision-projector, voice, embedding-model, browser-build
+  and TTS model fetches. It never applies to model-initiated access (the
+  coder's `fetch_url` and `web_search`, chat web access), which stays governed
+  by `net_mode` alone. Nothing else opts out of `off`.
 - **Private-address guard.** Requests to loopback, link-local, CGNAT and
   private ranges are refused, and the check is re-applied to the resolved
   address rather than the name. It classifies by ADDRESS TYPE, so a service

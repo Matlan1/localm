@@ -19,7 +19,7 @@ See the table below for what each backend needs and when to pick it.
 | Backend | Runs on | Notes |
 |---|---|---|
 | `vulkan` | any AMD / NVIDIA / Intel GPU | the universal fallback - only the normal display driver, no CUDA/ROCm/oneAPI toolkit; auto-picked for Intel on Linux and for AMD with no ROCm/HIP toolkit detected |
-| `cuda` | NVIDIA | auto-picked on every OS (peak performance); setup fetches the CUDA runtime for you (no Toolkit) on both Windows and Linux, then load-tests and falls back to vulkan/cpu if it cannot load |
+| `cuda` | NVIDIA | auto-picked on every OS (peak performance); setup fetches the CUDA runtime for you (no Toolkit) on both Windows and Linux, then load-tests and offers vulkan/cpu if it cannot load |
 | `amd-rocm` | AMD RX 6000/7000/9000 (gfx103X/110X/120X), Windows only | self-contained ROCm build matched to your card's family (bundles its runtime, no toolkit needed); auto-picked for RX 6000 (gfx103X), the best-tested family - request it explicitly (`--backend amd-rocm`) on RX 7000/9000 too, since auto-detect still defaults those to `hip`/`vulkan`; on Linux use `hip` or `--from` instead |
 | `hip` | AMD (any gfx) | upstream ROCm build; auto-picked when a system ROCm/HIP toolkit is detected present, else `vulkan` |
 | `sycl` | Intel GPU (Arc/Battlemage, or an 11th-gen+ Core integrated GPU) | self-contained on Windows (bundles the oneAPI runtime) and auto-picked there; needs a system oneAPI install on Linux, so it stays opt-in there |
@@ -167,7 +167,7 @@ runtime bundle from the same llama.cpp release, so **you do not need to
 install the CUDA Toolkit** (needs CUDA >= 12.4 for most GPUs). Setup also
 detects your GPU's own architecture and picks the CUDA asset line it actually
 needs: NVIDIA Blackwell (RTX 50-series and datacenter B100/B200) automatically
-gets the newer 13.x line - which needs a newer driver in turn (CUDA >= 13.3) -
+gets the newer 13.x line - which needs a newer driver in turn (CUDA >= 13.4) -
 since the 12.x build has no kernels for Blackwell; every earlier architecture
 stays on the 12.x line. Setup checks your driver against whichever line your
 GPU needs and, if it is too old or no NVIDIA is found, uses Vulkan for now and
@@ -184,9 +184,10 @@ works and outperforms Vulkan on Linux too, so it is now the default
 recommendation there, the same as Windows.
 
 After provisioning, setup **load-tests** the library exactly as `localm run`
-will, on every platform. If the CUDA build cannot load on your machine it
-automatically falls back to Vulkan, then CPU, so setup never leaves you with a
-broken runtime.
+will, on every platform. If the CUDA build cannot load on your machine,
+setup says why and offers the universal Vulkan build (declining stops setup so
+you can fix the cause; a non-interactive run falls back to Vulkan, then CPU,
+with a warning), so setup never leaves you with a silently broken runtime.
 
 > `--sha256 <hex>` pins the **CUDA build** archive only; the cudart runtime
 > bundle (Windows) or the CUDA runtime libraries (Linux) are verified by their

@@ -39,10 +39,13 @@ an app-menu entry. Pass `--yes` for defaults.
 The PyTorch stack is only needed to run HuggingFace (non-GGUF) Transformers
 models; GGUF chat through the llama.cpp backend needs none of it. There is no
 separate yes/no prompt for it - `setup.sh` installs a matching PyTorch build
-automatically for whichever GPU llama.cpp backend you pick, and skips it only
-if you pick the `cpu` llama.cpp backend, which also gives up
-GPU-accelerated GGUF chat. If you want GPU-accelerated GGUF chat but not
-PyTorch, uninstall it after setup finishes
+(and the `hf` and `audio` extras) automatically when the llama.cpp backend you
+pick maps to one: `cuda` for NVIDIA, ROCm for the `hip` backend, XPU for Intel.
+It skips them for the `cpu` backend (which also gives up GPU-accelerated GGUF
+chat) and for a vendor-neutral pick (`vulkan`, `metal`, or your own build) on a
+machine with no NVIDIA or Intel GPU, such as an AMD or Apple Silicon box, and
+prints how to add PyTorch yourself. If you want GPU-accelerated GGUF chat but
+not PyTorch, uninstall it after setup finishes
 (`uv pip uninstall -p .venv torch torchvision`) - or add it back later
 yourself (see the README extras).
 

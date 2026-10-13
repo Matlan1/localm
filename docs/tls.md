@@ -65,8 +65,8 @@ if 8642 was busy - use the address it prints). Under the hood:
   its `100.x.y.z` address to avoid a certificate warning. The same cert works
   however a device reaches you, within that set.
 - The certificate is reused across restarts, and it is regenerated as it nears
-  expiry (about 30 days before) or when its addresses/names change. The CA is
-  reused for those regenerations, so a device you trusted once stays trusted
+  expiry (about 30 days before) or when it no longer covers an address or name
+  the server needs. The CA is reused for those regenerations, so a device you trusted once stays trusted
   after your address changes.
 - The CA itself is replaced only when it cannot be reused: it has reached its own
   expiry (it is issued for about 10 years), or `ca.crt`/`ca.key` are missing or
