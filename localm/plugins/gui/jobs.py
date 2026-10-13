@@ -33,6 +33,17 @@ _HISTORY_MAX = 10_000
 #: Event type carrying one live-view frame. Only the most recent is kept.
 FRAME_EVENT = "frame"
 
+def frame_event(preview: dict) -> dict:
+    """The ``frame`` event for one media-job preview (``{"step", "steps",
+    "png"}``, PNG bytes). The job keeps only the latest frame and never
+    persists it, so a preview exists in memory and on the wire to the page that
+    is watching, in every session mode."""
+    import base64
+    return {"type": FRAME_EVENT, "mime": "image/png", "step": preview.get("step"),
+            "steps": preview.get("steps"),
+            "data": base64.b64encode(preview["png"]).decode("ascii")}
+
+
 # Every status a job can hold. "interrupted" means the server stopped while the
 # operation was in flight, so its outcome is unknown; "failed" means the work
 # itself failed; "cancelled" means someone stopped it.

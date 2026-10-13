@@ -7,7 +7,7 @@
 "use strict";
 
 import { chat, renderAttachChips } from "../app/chat.js";
-import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
@@ -48,6 +48,8 @@ const imageGallery = createGallery({
     $("img-guidance").value = m.guidance ?? "";
     $("img-denoise").value = m.denoise ?? "";
     $("img-cfg").value = m.cfg ?? "";
+    $("img-steps").value = m.backend === "native" ? (m.steps ?? "") : "";
+    $("img-clip-skip").value = m.clip_skip ?? "";
     $("img-input").value = m.input_image || "";
     $("img-lora").value = m.lora_name || "";
     $("img-lora-strength-model").value = m.lora_strength_model ?? "";
@@ -132,8 +134,20 @@ bindReloadToggle("image", "img-reload-llm");
    which backend runs and which model it uses. */
 export const imageBackend = { active: null, choice: null };
 
+/* The steps box shows the picked model family's step count as its placeholder. */
+function showImageStepDefault(data) {
+  const input = $("img-steps");
+  if (!input) return;
+  const steps = data && data.preview && data.preview.defaults && data.preview.defaults.steps;
+  input.placeholder = steps ? t("images.stepsPlaceholderValue", { value: steps })
+    : t("images.stepsPlaceholder");
+}
+
 export const imageModelPicker = createNativeModelPicker(
-  { media: "image", prefix: "imagine", mountId: "img-native-models" });
+  { media: "image", prefix: "imagine", mountId: "img-native-models",
+    onData: showImageStepDefault });
+
+const imageLivePreview = createJobPreview("img-preview");
 
 export async function refreshImageBackend() {
   let data;
@@ -170,6 +184,9 @@ export async function refreshImageBackend() {
   }
   for (const node of document.querySelectorAll("#view-images .img-comfy-only")) {
     node.hidden = native;
+  }
+  for (const node of document.querySelectorAll("#view-images .img-native-only")) {
+    node.hidden = !native;
   }
 }
 
@@ -249,7 +266,12 @@ $("img-generate").onclick = async () => {
   }
   const nativeChoice = native ? imageModelPicker.choice() : {};
   Object.assign(body, nativeChoice);
+  if (native) {
+    body.steps = num("img-steps");
+    body.clip_skip = num("img-clip-skip");
+  }
   $("img-generate").disabled = true;
+  imageLivePreview.clear();
   const log = $("img-log");
   log.style.display = "block";
   log.textContent = "";
@@ -268,7 +290,8 @@ $("img-generate").onclick = async () => {
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
-    });
+    }, undefined, imageLivePreview.show);
+    imageLivePreview.clear();
     if (end.status === "done" && end.result) {
       const img = document.createElement("img");
       img.src = await fetchImageURL(
@@ -283,6 +306,7 @@ $("img-generate").onclick = async () => {
     toast(t("images.generationFailed", { message: e.message }), true);
   } finally {
     $("img-generate").disabled = false;
+    imageLivePreview.clear();
     hideStop("img-stop");
   }
 };

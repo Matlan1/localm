@@ -87,6 +87,23 @@ set nor read them, and the Images page and job log show only a model's file name
 - Progress (loading, each sampling step, decoding) streams to the job log, the CLI
   and the MCP progress notifications. Stop cancels a running model load or
   generation; the first-use runtime download runs to completion.
+- **Live preview.** The Images and Video pages show a small picture of the image taking
+  shape, refreshed about eight times per run (every few sampling steps), under the job
+  log. It is a quick projection of the model's latent, so it looks rough and washed out
+  before the final decode. The preview lives in memory only: it is never saved, never
+  written to the job history, and exists in privacy mode too.
+- **Warnings that were recovered from.** A decode that does not fit in VRAM is retried in
+  tiles and succeeds; the job log then shows one line ("Not enough VRAM to decode in one
+  piece; decoding in tiles.") instead of the runtime's failure messages from before the
+  retry. Warnings that are not followed by a recovery are shown unchanged, and every raw
+  line is in the debug log.
+- **Steps and clip skip per image.** The Images Advanced fold takes Steps and Clip skip
+  for the next image; the placeholder shows the step count the picked model's family
+  uses. Blank keeps the Settings value, then the model's recommended value, then the family default.
+- **Negative prompt and CFG 1.** Models that default to CFG 1 (FLUX.1 dev and schnell, Z-Image,
+  FLUX.2) skip the second, negative-prompt pass, so a negative prompt changes nothing there. The
+  job log says so when you give one at CFG 1; set CFG to about 3 to apply it, at roughly twice
+  the time per step.
 - The chat model is unloaded first when the image model needs the VRAM (Media VRAM
   swap setting) and reloaded afterwards. The worker keeps its model loaded between
   generations and exits after 10 minutes without one, when VRAM is handed back, or

@@ -1928,6 +1928,22 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   word-break: break-word;
   color: var(--text-dim);
 }
+.job-preview {
+  margin-top: 12px;
+}
+.job-preview-img {
+  display: block;
+  width: 100%;
+  max-width: 384px;
+  height: auto;
+  max-height: 384px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.job-preview-caption {
+  margin-top: 4px;
+}
 
 /* data tables */
 
