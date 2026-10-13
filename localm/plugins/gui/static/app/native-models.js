@@ -48,7 +48,7 @@ function nmOption(value, text) {
 /** A <select> whose first option (value "") is *firstText*, then *items*
  * ({name, file, family_label}) grouped by family. A *current* value missing
  * from *items* is kept as an option so a saved choice is never dropped. */
-export function modelSelect(items, current, firstText) {
+export function nativeModelSelect(items, current, firstText) {
   const sel = document.createElement("select");
   sel.appendChild(nmOption("", firstText));
   const groups = new Map();
@@ -121,7 +121,7 @@ export function createNativeModelPicker({ media, prefix, mountId }) {
     const cur = data.current || {};
     const prev = data.preview || null;
     const box = el("div", "native-models");
-    const modelSel = modelSelect(data.models || [], state.models.model || "",
+    const modelSel = nativeModelSelect(data.models || [], state.models.model || "",
       cur.model ? t("nativeModels.settingsDefault", { name: cur.model })
         : t("nativeModels.settingsDefaultNone"));
     modelSel.onchange = () => {
@@ -158,7 +158,7 @@ export function createNativeModelPicker({ media, prefix, mountId }) {
         : (cur[slot] && !state.models.model
           ? t("nativeModels.settingsDefault", { name: cur[slot] })
           : t("nativeModels.automaticNone"));
-      const sel = modelSelect(slots[slot], state.models[slot] || "", autoText);
+      const sel = nativeModelSelect(slots[slot], state.models[slot] || "", autoText);
       sel.dataset.slot = slot;
       sel.onchange = () => {
         if (sel.value) state.models[slot] = sel.value;
@@ -186,7 +186,7 @@ export function createNativeModelPicker({ media, prefix, mountId }) {
     const available = (data && data.loras) || [];
     state.loras.forEach((item, i) => {
       const row = el("div", "native-lora-row");
-      const sel = modelSelect(available, item.name || "", t("nativeModels.loraPick"));
+      const sel = nativeModelSelect(available, item.name || "", t("nativeModels.loraPick"));
       sel.onchange = () => { item.name = sel.value; persist(); };
       const strength = document.createElement("input");
       strength.type = "number";
@@ -268,7 +268,7 @@ export function createMusicModelPicker({ mountId }) {
     const cur = data.current || {};
     for (const key of Object.keys(NM_MUSIC_KEYS)) {
       const items = comps[key] || [];
-      const sel = modelSelect(items, state[key] || "",
+      const sel = nativeModelSelect(items, state[key] || "",
         cur[key] ? t("nativeModels.settingsDefault", { name: cur[key] })
           : t("nativeModels.musicDefault"));
       sel.dataset.slot = key;

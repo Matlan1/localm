@@ -8,7 +8,7 @@ import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDange
 import { t, tOr } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
-import { modelSelect } from "../app/native-models.js";
+import { nativeModelSelect } from "../app/native-models.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -3421,7 +3421,7 @@ export async function enhanceNativeModelFields(name, controls) {
     const items = opts[c.field.key] || [];
     const value = input.value.trim();
     const known = !value || items.some((it) => it.name === value);
-    const sel = modelSelect(items, known ? value : "", t("settings.nativeModel.automatic"));
+    const sel = nativeModelSelect(items, known ? value : "", t("settings.nativeModel.automatic"));
     sel.classList.add("native-model-select");
     const custom = document.createElement("option");
     custom.value = CUSTOM_PATH;
