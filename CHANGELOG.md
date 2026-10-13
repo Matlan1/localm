@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Add models from Jan.** `localm add` on Jan's data folder (or its `llamacpp/models`
+  folder) registers every downloaded model under its Jan id, with its vision projector
+  attached, and follows a model that Jan only links to a file kept elsewhere. A download
+  still in progress is skipped. A copy or move out of Jan's folder is refused, because every
+  weights file in it is named `model.gguf`.
 - **Transcription without Whisper.** `POST /v1/audio/transcriptions` now answers with an
   installed GGUF model that hears audio (for example Qwen3-ASR) when faster-whisper is not
   installed, or when `model` names one. Whisper stays the default when it is installed. This
@@ -503,6 +508,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A half-copied GGUF file is no longer registered by a folder import.** `localm add
+  <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
+  whose header declares more tensor data than the file holds, and one named `incomplete-...`
+  (how GPT4All names a download in progress), and says why. A file named `incomplete-...`
+  still registers when it is added by its own path.
+- **A Diffusers pipeline or a CTranslate2 folder is named instead of rejected as "not a
+  model".** Adding one, or finding one in the Hugging Face cache, now says what it is and
+  what to use instead.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's

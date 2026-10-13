@@ -212,12 +212,60 @@ def openvino_refusal(folder: Path) -> Optional[str]:
     return _OPENVINO_SENTENCE
 
 
+_CTRANSLATE2_SENTENCE = (
+    "This folder is a CTranslate2 model (model.bin). localm uses CTranslate2 only "
+    "inside its speech-to-text feature, so it cannot run this one as a chat, "
+    "embedding or translation model. Use the model's GGUF or its original Hugging "
+    "Face-format weights.")
+
+
+def ctranslate2_refusal(folder: Path) -> Optional[str]:
+    """The reason a CTranslate2 export cannot be loaded (``model.bin`` with no
+    safetensors, PyTorch or GGUF weights beside it and a config.json that declares
+    no ``architectures`` or ``model_type``), or None."""
+    try:
+        if not (folder / "model.bin").is_file():
+            return None
+        for pattern in ("*.safetensors", "pytorch_model*", "*.gguf"):
+            if next(folder.glob(pattern), None) is not None:
+                return None
+    except OSError:
+        return None
+    config = _read_config(folder)
+    if config is not None and ("architectures" in config or "model_type" in config):
+        return None
+    return _CTRANSLATE2_SENTENCE
+
+
+_DIFFUSERS_SENTENCE = (
+    "This folder is a Diffusers pipeline (model_index.json with component folders "
+    "such as unet/ and vae/), which loads only in the Hugging Face diffusers "
+    "library. localm generates images from single-file checkpoints (.safetensors or "
+    ".gguf); download the model's single-file checkpoint instead.")
+
+
+def diffusers_refusal(folder: Path) -> Optional[str]:
+    """The reason a Diffusers pipeline folder (a ``model_index.json`` naming a
+    ``_class_name`` or ``_diffusers_version``) cannot be loaded, or None."""
+    try:
+        data = json.loads((folder / "model_index.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if isinstance(data, dict) and ("_class_name" in data or "_diffusers_version" in data):
+        return _DIFFUSERS_SENTENCE
+    return None
+
+
 def hf_folder_refusal(folder: Path) -> Optional[str]:
     """The reason the HuggingFace-style *folder* cannot be loaded (MLX-quantized,
-    quantized for a runtime localm lacks, or an OpenVINO export), or None."""
+    quantized for a runtime localm lacks, an OpenVINO export or a CTranslate2
+    export), or None."""
     openvino = openvino_refusal(folder)
     if openvino is not None:
         return openvino
+    ctranslate2 = ctranslate2_refusal(folder)
+    if ctranslate2 is not None:
+        return ctranslate2
     config = _read_config(folder)
     if config is None:
         return None
@@ -260,7 +308,8 @@ def explain_unsupported_model(path: Path) -> Optional[str]:
 
     Covers what a user points ``localm add`` straight at: a lone legacy GGML
     ``.bin``, ``.onnx`` / TensorRT / LiteRT / NeMo files, and folders in MLC,
-    OpenVINO, Mistral-native, MLX-quantized or EXL2/EXL3 layouts."""
+    OpenVINO, CTranslate2, Mistral-native, Diffusers, MLX-quantized or EXL2/EXL3
+    layouts."""
     try:
         if path.is_file():
             legacy = legacy_ggml_refusal(path)
@@ -271,7 +320,8 @@ def explain_unsupported_model(path: Path) -> Optional[str]:
             for marker, sentence in _FOLDER_MARKER_EXPLANATIONS:
                 if (path / marker).is_file():
                     return sentence
-            return mistral_native_refusal(path) or hf_folder_refusal(path)
+            return (mistral_native_refusal(path) or diffusers_refusal(path)
+                    or hf_folder_refusal(path))
     except OSError:
         return None
     return None

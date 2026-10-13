@@ -504,7 +504,7 @@ class TestImatrix:
             backend.load()
         assert str(caught.value) == IMATRIX_SENTENCE
 
-    @pytest.mark.parametrize("general_type", ["model", "adapter", "clip-vision"])
+    @pytest.mark.parametrize("general_type", ["model", "adapter", "mmproj"])
     def test_other_general_types_are_left_alone(self, tmp_path, general_type):
         f = _gguf(tmp_path / "x.gguf", general_type=general_type)
         assert gguf_unusable_reason(f) is None

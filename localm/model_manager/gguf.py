@@ -2250,13 +2250,13 @@ def gguf_architecture(path: Path, meta: Optional[dict] = None) -> Optional[str]:
     return meta.get("architecture")
 
 
-# llama.cpp's clip.cpp writes this exact general.architecture value for every
+# llama.cpp writes this exact general.architecture value for every
 # vision-projector (mmproj) GGUF it exports - llava, idefics3, siglip and every
 # other projector variant share it, distinguished instead by a
-# "clip.projector_type" key. Such a file also carries a parallel
-# general.type="clip-vision" and a "clip.vision.*"-prefixed metadata block,
-# never a "<arch>.*"-prefixed one, so it cannot collide with
-# gguf_embedding_signal's architecture check above.
+# "clip.projector_type" key. Current converters also write general.type="mmproj";
+# legacy converters write no general.type. The metadata block is "clip.*"-prefixed,
+# never "<arch>.*"-prefixed, so it cannot collide with gguf_embedding_signal's
+# architecture check above.
 _GGUF_MMPROJ_ARCHITECTURE = "clip"
 
 
