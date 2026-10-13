@@ -111,7 +111,7 @@ def load_fingerprint(name: str) -> str:
             and str(parts["config"].get("spec_source") or "").strip().lower() == "draft"):
         try:
             from localm.inference.engine import resolve_spec_draft_model
-            parts["draft"] = _file_identity(resolve_spec_draft_model(cfg))
+            parts["draft"] = _file_identity(resolve_spec_draft_model(parts["config"]))
         except Exception as exc:
             logger.debug("routing latch: draft model unreadable for %s: %s", name, exc)
             parts["draft"] = "unreadable"
