@@ -298,6 +298,12 @@ def _do_load(payload):
     from . import _binding as b
     lib = _State.lib or _load_lib(payload)
     _State.lib = lib
+    if not b.list_devices(lib):
+        raise RuntimeError(
+            f"the stable-diffusion.cpp runtime at {payload.get('runtime_dir')} loaded "
+            "but reports no compute device, so nothing can run on it. Reinstall it "
+            "with 'localm setup-sdcpp --force', or pick another runtime backend "
+            "('localm setup-sdcpp --backend vulkan').")
     if _State.ctx is not None:
         lib.free_sd_ctx(_State.ctx)
         _State.ctx = None

@@ -266,3 +266,60 @@ def test_refresh_unknown_name_raises(env):
     mgr = PluginManager(None, store_root=env / "store", installed_root=env / "inst")
     with pytest.raises(KeyError):
         mgr.refresh("ghost")                    # no such builtin
+
+
+def test_a_failed_swap_is_reported_not_called_up_to_date(env, monkeypatch, caplog):
+    import logging
+
+    from localm.plugins.engine import PluginManager
+    store, inst = env / "store", env / "installed"
+    _valued_plugin(store, "ref9", 2)
+    _valued_plugin(inst, "ref9", 1)
+    monkeypatch.setattr(PluginManager, "_swap_in_store_copy",
+                        lambda self, *a, **kw: False)
+    mgr = PluginManager(None, store_root=store, installed_root=inst)
+
+    with pytest.raises(RuntimeError, match="could not be swapped in"):
+        mgr.refresh("ref9")
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        assert mgr.refresh() == []
+    assert "ref9" in mgr.last_refresh_failures
+    assert any("ref9" in r.getMessage() for r in caplog.records)
+    assert (inst / "ref9" / "backend.py").read_text() != \
+        (store / "ref9" / "backend.py").read_text()
+
+
+def test_refresh_routes_report_a_failed_swap(env, monkeypatch):
+    from localm.plugins.engine import PluginManager, attach_engine
+    store, inst = env / "store", env / "installed"
+    _valued_plugin(store, "ref9", 2)
+    _valued_plugin(inst, "ref9", 1)
+    monkeypatch.setattr(PluginManager, "_swap_in_store_copy",
+                        lambda self, *a, **kw: False)
+    monkeypatch.setattr("localm.plugins.engine._store_root", lambda: store)
+    monkeypatch.setattr("localm.plugins.loader.plugins_dir", lambda: inst)
+    app = FastAPI()
+    attach_engine(app)
+    with TestClient(app) as c:
+        one = c.post("/api/plugins/ref9/refresh")
+        assert one.status_code == 500 and "could not be swapped in" in one.json()["detail"]
+        every = c.post("/api/plugins/refresh").json()
+        assert every["status"] == "partial" and "ref9" in every["failed"]
+
+
+def test_enable_keeps_the_installed_copy_when_the_refresh_swap_fails(env, monkeypatch):
+    from localm.plugins.engine import PluginManager
+    store, inst = env / "store", env / "installed"
+    _valued_plugin(store, "ref9", 2)
+    _valued_plugin(inst, "ref9", 1)
+    monkeypatch.setattr(PluginManager, "_swap_in_store_copy",
+                        lambda self, *a, **kw: False)
+    app = FastAPI()
+    mgr = PluginManager(app, store_root=store, installed_root=inst)
+    mgr.discover()
+
+    mgr.enable("ref9")
+
+    with TestClient(app) as c:
+        assert c.get("/api/ref9/val").json()["val"] == 1
+    assert "could not be swapped in" in mgr.api_state()["errors"].get("ref9", "")

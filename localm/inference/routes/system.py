@@ -9,6 +9,7 @@ engine from the http_server module global, so a model swap is reflected here.
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 
 import localm.inference.http_server as _hs
@@ -98,7 +99,9 @@ def register(app: FastAPI, ctx) -> None:
             # Fall back to an owner/ADMIN API key (protected mode).
             from localm.auth import any_key_configured, verify
             if any_key_configured():
-                held = verify(presented)
+                # Off the event loop: verify() can take the keystore's
+                # cross-process lock.
+                held = await run_in_threadpool(verify, presented)
                 ok = held is not None and scopes.grants(held, scopes.ADMIN)
         if not ok:
             raise HTTPException(
