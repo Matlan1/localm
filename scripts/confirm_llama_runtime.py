@@ -139,11 +139,8 @@ try:
     out["abi"] = abi_report().status
 except Exception as e:
     out["abi"] = "unavailable: %s" % e
-# compute_backends_available() returns a BOOL ("at least one ggml compute backend
-# registered"), not a list. Read it as one: an earlier version of this probe did
-# list(...) on it, which raised, and the resulting ERROR STRING was truthy - so
-# the "did it register a backend" gate passed on a probe that had failed to run.
-# An unmeasured check must never read as a passed one.
+# compute_backends_available() returns a bool (at least one ggml compute backend
+# registered), read as one; a probe that fails to run is INCONCLUSIVE, never a pass.
 try:
     out["compute_backends"] = bool(_loader.compute_backends_available())
 except Exception as e:

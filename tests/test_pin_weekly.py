@@ -1408,3 +1408,20 @@ def test_every_advancer_script_that_exists_follows_the_contract_cli():
                 assert "--receipt" in options, rel
             if rel == a.confirm_script and not a.verify_current_cmd:
                 assert "--current" in options, rel
+
+
+_BANNED_IN_TRACKED_TEXT = ("dev-notes/", "issues/issues.txt", "qa/", "AGENTS.md", "CLAUDE.md", "RELEASE.md")
+
+
+def test_no_pin_script_or_test_names_a_gitignored_path_in_its_comments_and_docstrings():
+    root = Path(_PATH).parent.parent
+    scripts, tests = root / "scripts", root / "tests"
+    files = [*scripts.glob("pin_*.py"), scripts / "check_pins.py", *scripts.glob("confirm_*_runtime.py"),
+             *scripts.glob("bump_*.py"), *tests.glob("test_pin_*.py"), tests / "test_check_pins.py"]
+    hits = []
+    for f in sorted(files):
+        if f.name == Path(__file__).name:
+            continue
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            hits += [f"{f.name}:{n}: {b}" for b in _BANNED_IN_TRACKED_TEXT if b in line]
+    assert hits == []
