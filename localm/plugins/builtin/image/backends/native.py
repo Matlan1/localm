@@ -481,6 +481,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         except _ModelError as e:
             return False, str(e)
     saved: list[Path] = []
+    result: dict = {}
 
     def partial(text: str) -> str:
         if not saved:

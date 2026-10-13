@@ -78,7 +78,7 @@ class ImagineRequest(BaseModel):
     loras: list[LoraChoice] | None = Field(default=None, max_length=MAX_LORAS)
     # Native backend only: images per job (image i uses seed + i), a sampler and
     # scheduler by library name, and a hires-fix pass.
-    batch: int = Field(1, ge=1, le=MAX_BATCH)
+    batch: int = Field(default=1, ge=1, le=MAX_BATCH)
     sample_method: str | None = None
     scheduler: str | None = None
     hires: HiresChoice | None = None
