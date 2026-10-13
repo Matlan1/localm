@@ -184,6 +184,17 @@ _QUERY = "w1 w2"
 _DOCS = ["w1 w2 w3", "w9 w8 w7 w6", "w1"]
 
 
+class TestResidentModelKey:
+    def test_a_folder_model_has_a_new_key_when_a_file_in_it_changes(self, tmp_path):
+        folder = tmp_path / "m"
+        folder.mkdir()
+        (folder / "model.safetensors").write_bytes(b"a" * 10)
+        (folder / "config.json").write_text("{}")
+        before = reranker._file_key(str(folder))
+        (folder / "model.safetensors").write_bytes(b"b" * 25)
+        assert reranker._file_key(str(folder)) != before
+
+
 @needs_stack
 class TestRealCrossEncoder:
     def test_registered_as_a_reranker_and_resolved_by_name(self, cross_encoder, isolated_home):
