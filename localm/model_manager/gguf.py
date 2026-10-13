@@ -1315,6 +1315,48 @@ def gguf_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int) -> int:
     return n_head_kv * per_head_bytes * nextn_layers
 
 
+def gguf_attention_head_count(path: Path) -> int:
+    """``<architecture>.attention.head_count`` read from *path*'s own GGUF
+    header before the model is loaded. Returns 0 - never raises - when the
+    file is not a readable GGUF, declares no architecture, or the key is
+    absent or not a positive integer."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_META_PROBE_BYTES)
+    except OSError:
+        return 0
+    architecture = None
+    vals: dict = {}
+    try:
+        if buf[:4] != b"GGUF":
+            return 0
+        (version,) = struct.unpack_from("<I", buf, 4)
+        if not gguf_version_supported(version):
+            return 0
+        _tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        off = 24
+        for _ in range(kv_count):
+            key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
+                architecture, off = _gguf_read_string(buf, off)
+                continue
+            if key.endswith(".attention.head_count"):
+                try:
+                    vals[key], off = _gguf_read_scalar(buf, off, vtype)
+                    continue
+                except struct.error:
+                    pass        # not a scalar - skip it normally
+            off = _gguf_skip_value(buf, off, vtype)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        pass
+    if not architecture:
+        return 0
+    v = vals.get(f"{architecture}.attention.head_count")
+    return int(v) if isinstance(v, int) and v > 0 else 0
+
+
 def gguf_expert_count(path: Path) -> int:
     """Number of EXPERTS in *path*, or 0 when it is not a Mixture-of-Experts model.
 

@@ -1144,17 +1144,30 @@ def test_mtp_draft_vram_charges_kv_plus_the_flat_overhead_when_eligible():
 
 def test_mtp_draft_vram_charges_the_draft_batch_of_logits_when_the_vocab_is_known():
     from localm.inference.backends.llamacpp._sizing import (
-        MTP_DRAFT_BYTES_PER_VOCAB_ROW, MTP_DRAFT_COMPUTE_MARGIN_BYTES)
+        MTP_DRAFT_BYTES_PER_VOCAB_ROW, MTP_DRAFT_COMPUTE_MARGIN_BYTES, MTP_DRAFT_SCORE_BYTES)
     n_vocab = 248_320
     b = _mtp_sizing_backend(n_ctx=4096)
     with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
                return_value=("qwen35", 1)),          patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
                return_value=1000),          patch("localm.model_manager.gguf._gguf_split_layout_meta",
-               return_value=(24, n_vocab)):
+               return_value=(24, n_vocab)),          patch("localm.model_manager.gguf.gguf_attention_head_count", return_value=16):
         charge = b._mtp_draft_context_vram_bytes()
     batch = LlamaCppModule._MTP_DRAFT_BATCH
     assert charge == (4096 * 1000 + n_vocab * batch * MTP_DRAFT_BYTES_PER_VOCAB_ROW
+                      + batch * 16 * 4096 * MTP_DRAFT_SCORE_BYTES
                       + MTP_DRAFT_COMPUTE_MARGIN_BYTES)
+
+
+def test_mtp_draft_attention_charge_grows_with_the_context():
+    def charge(n_ctx):
+        b = _mtp_sizing_backend(n_ctx=n_ctx)
+        with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+                   return_value=("qwen35", 1)),              patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+                   return_value=0),              patch("localm.model_manager.gguf._gguf_split_layout_meta",
+                   return_value=(24, 1000)),              patch("localm.model_manager.gguf.gguf_attention_head_count", return_value=16):
+            return b._mtp_draft_context_vram_bytes()
+    batch = LlamaCppModule._MTP_DRAFT_BATCH
+    assert charge(65536) - charge(32768) == batch * 16 * 32768 * 4
 
 
 def test_mtp_draft_vram_scales_with_the_main_context_past_2048_tokens():

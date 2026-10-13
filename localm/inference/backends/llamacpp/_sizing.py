@@ -62,6 +62,10 @@ HOST_RAM_HEADROOM_BYTES = 2 * 1024 ** 3
 # logits (4) and the buffers of its backend draft sampler (8).
 MTP_DRAFT_BYTES_PER_VOCAB_ROW = 12
 
+# Bytes per attention head, batch row and context token of the MTP draft
+# context's attention scores.
+MTP_DRAFT_SCORE_BYTES = 4
+
 # VRAM the MTP draft context takes beyond its KV cache and per-row buffers.
 MTP_DRAFT_COMPUTE_MARGIN_BYTES = 384 * 1024 * 1024
 
@@ -789,18 +793,22 @@ class VramSizingMixin:
 
     def _mtp_draft_compute_bytes(self, path: Path) -> int:
         """VRAM of the MTP draft context beyond its KV cache, for the model at
-        *path*: ``MTP_DRAFT_BYTES_PER_VOCAB_ROW`` per vocabulary entry for each
-        of its ``min(n_ctx, llama._MTP_DRAFT_BATCH)`` batch rows, plus
-        ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``; ``_VRAM_OVERHEAD_BYTES`` when the
-        GGUF header gives no vocabulary size."""
-        from localm.model_manager.gguf import _gguf_split_layout_meta
+        *path*, for each of its ``min(n_ctx, llama._MTP_DRAFT_BATCH)`` batch
+        rows: ``MTP_DRAFT_BYTES_PER_VOCAB_ROW`` per vocabulary entry and
+        ``MTP_DRAFT_SCORE_BYTES`` per attention head per token of ``n_ctx``;
+        plus ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``. ``_VRAM_OVERHEAD_BYTES`` when
+        the GGUF header gives no vocabulary size; the attention term is 0 when
+        it gives no head count."""
+        from localm.model_manager.gguf import _gguf_split_layout_meta, gguf_attention_head_count
         from .llama import _MTP_DRAFT_BATCH
         meta = _gguf_split_layout_meta(path)
         n_vocab = meta[1] if meta else 0
         if not n_vocab:
             return self._VRAM_OVERHEAD_BYTES
         rows = max(1, min(int(self.n_ctx), _MTP_DRAFT_BATCH))
+        n_head = gguf_attention_head_count(path)
         return (rows * int(n_vocab) * MTP_DRAFT_BYTES_PER_VOCAB_ROW
+                + rows * n_head * int(self.n_ctx) * MTP_DRAFT_SCORE_BYTES
                 + MTP_DRAFT_COMPUTE_MARGIN_BYTES)
 
     def _recurrent_state_vram_bytes(self) -> int:
