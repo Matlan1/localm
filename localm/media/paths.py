@@ -126,13 +126,28 @@ class InputImageUnavailable(InputImageRefused):
     "did this pass" still fails closed by catching the base."""
 
 
+def _expand_data_dir_label(raw: str, home: Path) -> str:
+    """*raw* with a leading ``pathscrub.DATA_DIR_LABEL`` (the form a scrubbed
+    gallery path takes) replaced by *home*; any other string is returned
+    unchanged."""
+    from localm.pathscrub import DATA_DIR_LABEL
+    if raw == DATA_DIR_LABEL:
+        return str(home)
+    for sep in ("/", "\\"):
+        if raw.startswith(DATA_DIR_LABEL + sep):
+            return str(home / raw[len(DATA_DIR_LABEL) + 1:])
+    return raw
+
+
 def check_input_image(raw: str) -> Path:
     """Resolve and confine an ``input_image`` to an allowed root, or raise.
 
     The transport-independent policy. Raises InputImageRefused when the path
     escapes every allowed root or does not point at an existing file, and
-    InputImageUnavailable when the data dir cannot be resolved at all. Symlinks
-    are resolved first, so a link inside an allowed root that targets outside it
+    InputImageUnavailable when the data dir cannot be resolved at all. A path
+    starting with ``pathscrub.DATA_DIR_LABEL`` (the scrubbed gallery form a
+    caller other than the local operator is given) is read relative to the data
+    dir. Symlinks are resolved first, so a link inside an allowed root that targets outside it
     is still rejected.
 
     Messages name the allowed LOCATIONS but never an absolute path: the data dir
@@ -148,17 +163,18 @@ def check_input_image(raw: str) -> Path:
         raise InputImageUnavailable(
             "Cannot resolve the localm data directory, so no input image can be "
             "authorised. See the server log for the cause.")
+    target = _expand_data_dir_label(raw, home)
     # BEFORE any syscall on the caller's string: a UNC path would be refused
     # below anyway (it cannot be under a local data dir), but only AFTER
     # .resolve() had already dialled SMB and stalled the event loop for minutes.
     # Skipped only if the data dir is ITSELF a UNC path, where a UNC input can
     # legitimately be under an allowed root.
-    if is_unc_or_device_path(raw) and not is_unc_or_device_path(str(home)):
+    if is_unc_or_device_path(target) and not is_unc_or_device_path(str(home)):
         raise InputImageRefused(
             "Input image must be a local file you uploaded or a generated "
             "image; network (UNC) and device paths are not accepted.")
     try:
-        resolved = Path(raw).expanduser().resolve()
+        resolved = Path(target).expanduser().resolve()
     except (OSError, ValueError, RuntimeError) as e:
         raise InputImageRefused("Invalid input image path") from e
     if not any(_under(resolved, h) for h in _home_input_roots(home)):

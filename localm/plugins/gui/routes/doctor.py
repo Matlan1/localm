@@ -36,7 +36,10 @@ import time
 from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import diagnostics, scopes
-from localm.inference.http_server import principal_id, require_scope
+from localm.pathscrub import map_strings
+from localm.inference.http_server import (
+    caller_is_operator, path_formatter, principal_id, require_scope,
+)
 
 # The job kind, which is also what ``has_running`` is keyed on. One run at a
 # time.
@@ -91,8 +94,13 @@ def register(app: FastAPI, ctx) -> None:
         """The last diagnostics report, or nulls when nothing has been run.
 
         Read-only and cheap: it runs no probe and starts no process, so a card
-        may poll it while a run is in flight."""
-        return _snapshot(request.app, jobs)
+        may poll it while a run is in flight. Every string in ``report`` is
+        path-scrubbed (``http_server.path_formatter``) for a caller other than
+        the local operator."""
+        snap = _snapshot(request.app, jobs)
+        if snap["report"] is not None and not caller_is_operator(request):
+            snap["report"] = map_strings(snap["report"], path_formatter(request))
+        return snap
 
     @app.post("/api/doctor/run",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
