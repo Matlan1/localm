@@ -918,12 +918,16 @@ class _PublishedDigest(str):
         return obj
 
 
+def _revision_kwargs(commit: Optional[str]) -> dict[str, Any]:
+    """The ``revision`` keyword for a hub call at *commit*; nothing when no
+    commit is known, which leaves the call on the default branch."""
+    return {"revision": commit} if commit else {}
+
+
 def _at_commit(published: Optional[str]) -> dict[str, Any]:
     """The ``revision`` keyword for a hub download of the file *published*
-    describes; nothing when no commit is known, which leaves the call on the
-    default branch."""
-    commit = getattr(published, "commit", None)
-    return {"revision": commit} if commit else {}
+    describes."""
+    return _revision_kwargs(getattr(published, "commit", None))
 
 
 def _hf_file_sha256(repo_id: str, filename: str,
@@ -2094,7 +2098,7 @@ def _pull_hf_snapshot(
                 repo_id=repo_id,
                 local_dir=str(dest),
                 endpoint=_HF_ENDPOINT,
-                **({"revision": commit} if commit else {}),
+                **_revision_kwargs(commit),
             )
             _prog.ok()
     except Exception as e:
