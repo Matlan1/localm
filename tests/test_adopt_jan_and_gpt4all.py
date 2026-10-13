@@ -4,7 +4,7 @@
 Jan keeps each model in ``llamacpp/models/<id>/`` beside a ``model.yml``; GPT4All
 keeps flat GGUF files and names a download in progress ``incomplete-<file>``. A
 GGUF whose header declares tensor data beyond the end of the file is an unfinished
-copy and is never registered by a folder import or a single-file add.
+copy and is never registered by a folder import (a single-file add is unchanged).
 """
 
 import struct
@@ -129,21 +129,80 @@ class TestJanStore:
         assert add_local(str(data)) is True
         assert Path(load_registry()["org-orig-name"]["path"]).name == "Original.Q4.gguf"
 
-    def test_a_dangling_link_is_reported_not_registered(
+    def test_a_dangling_link_is_reported_by_the_name_it_links_to(
             self, tmp_path, isolated_home, capsys):
         data = self._store(tmp_path)
-        _jan_unit(data, "gone/Linked", yml=f"model_path: {tmp_path / 'nowhere.gguf'}\n")
+        target = tmp_path / "nowhere.gguf"
+        _jan_unit(data, "gone/Linked", yml=f"model_path: {target}\n")
         assert add_local(str(data)) is True
         assert "gone-Linked" not in load_registry()
-        assert "weights file is missing" in " ".join(capsys.readouterr().out.split())
+        out = " ".join(capsys.readouterr().out.split())
+        assert "linked file is missing" in out and "nowhere.gguf" in out
 
     def test_a_model_path_climbing_out_of_the_data_folder_is_not_followed(
-            self, tmp_path, isolated_home):
+            self, tmp_path, isolated_home, capsys):
         data = tmp_path / "Jan" / "data"
         _jan_unit(data, "org/escape", yml="model_path: ../../secret.gguf\n")
         (tmp_path / "secret.gguf").write_bytes(_gguf(tag="secret"))
         assert add_local(str(data)) is False
         assert load_registry() == {}
+        assert "climbs out" in " ".join(capsys.readouterr().out.split())
+
+    @pytest.mark.parametrize("link", [
+        r"\\host\share\x.gguf", "//host/share/x.gguf", "C:x.gguf", r"\rooted\x.gguf"])
+    def test_network_drive_relative_and_rooted_links_are_not_followed(
+            self, tmp_path, isolated_home, link):
+        from localm.model_manager.jan_store import _resolve
+        assert _resolve(link, tmp_path) is None
+
+    def test_a_huge_whitespace_run_in_model_yml_does_not_hang_the_scan(
+            self, tmp_path, isolated_home):
+        import time
+        data = tmp_path / "Jan" / "data"
+        _jan_unit(data, "org/hostile", weights=_gguf(tag="h"),
+                  yml="model_path: a" + " " * 3000 + "b\n" + "# " + "x" * 5_000_000 + "\n")
+        started = time.monotonic()
+        assert add_local(str(data)) is True
+        assert time.monotonic() - started < 10
+
+    def test_bom_and_trailing_comments_in_model_yml_are_read(self, tmp_path, isolated_home):
+        data = tmp_path / "Jan" / "data"
+        unit = _jan_unit(data, "org/odd", weights=None,
+                         yml="model_path: custom.gguf # the weights\n")
+        (unit / "model.yml").write_bytes(
+            b"\xef\xbb\xbfmodel_path: llamacpp/models/org/odd/custom.gguf # the weights\n")
+        (unit / "custom.gguf").write_bytes(_gguf(tag="odd"))
+        assert add_local(str(data)) is True
+        assert Path(load_registry()["org-odd"]["path"]).name == "custom.gguf"
+
+    def test_a_download_with_no_model_yml_yet_is_reported(
+            self, tmp_path, isolated_home, capsys):
+        data = self._store(tmp_path)
+        pending = data / "llamacpp" / "models" / "qwen" / "Q4"
+        pending.mkdir(parents=True)
+        (pending / "model.gguf.tmp").write_bytes(b"partial")
+        assert add_local(str(data)) is True
+        assert "qwen-Q4: its download has not finished" in " ".join(capsys.readouterr().out.split())
+
+    @pytest.mark.parametrize("answer", ["copy", "move"])
+    def test_a_duplicate_is_never_copied_or_moved_out_of_the_store(
+            self, tmp_path, isolated_home, answer, capsys):
+        data = self._store(tmp_path)
+        assert add_local(str(data)) is True
+        before = {p for p in (data / "llamacpp").rglob("*.gguf")}
+        assert add_local(str(data), on_duplicate=answer) is False
+        assert {p for p in (data / "llamacpp").rglob("*.gguf")} == before
+        assert not list(isolated_home.joinpath("models").glob("model*.gguf"))
+        assert "Cannot" in " ".join(capsys.readouterr().out.split())
+
+    def test_a_duplicate_under_ask_is_skipped_with_a_note(
+            self, tmp_path, isolated_home, capsys):
+        data = self._store(tmp_path)
+        assert add_local(str(data)) is True
+        capsys.readouterr()
+        assert add_local(str(data), on_duplicate="ask") is True
+        assert "registered in place" in " ".join(capsys.readouterr().out.split())
+        assert len(load_registry()) == 2
 
     def test_quoted_yaml_values_are_unquoted(self, tmp_path, isolated_home):
         data = tmp_path / "Jan" / "data"
@@ -186,7 +245,7 @@ class TestGpt4allFolder:
         (folder / "test_write.txt").write_text("x", encoding="utf-8")
         return folder
 
-    def test_complete_models_register_and_nothing_else_does(self, tmp_path, isolated_home):
+    def test_complete_models_register_and_the_rmodel_file_is_left_alone(self, tmp_path, isolated_home):
         folder = self._folder(tmp_path)
         assert add_local(str(folder)) is True
         reg = load_registry()

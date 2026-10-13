@@ -18,7 +18,9 @@ from typing import Optional
 from .gguf import _has_gguf_magic, gguf_is_mmproj, gguf_unusable_reason
 
 _MAX_DEPTH = 6
-_YML_SCALAR_RE = re.compile(r"^(model_path|mmproj_path):[ \t]*(.*?)[ \t]*$")
+_YML_KEYS = ("model_path", "mmproj_path")
+_YML_MAX_BYTES = 64 * 1024
+_YML_MAX_LINE = 4096
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -46,35 +48,55 @@ def find_jan_models_root(p: Path) -> Optional[Path]:
     return None
 
 
-def _yml_paths(yml: Path) -> dict[str, str]:
-    """``model_path`` and ``mmproj_path`` from the top level of *yml*, with
-    surrounding quotes removed. Keys that are absent or unreadable are left out."""
+def _is_file(p: Path) -> bool:
     try:
-        text = yml.read_text(encoding="utf-8", errors="replace")
+        return p.is_file()
+    except OSError:
+        return False
+
+
+def _unquote(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value.split(" #", 1)[0].strip()
+
+
+def _yml_paths(yml: Path) -> dict[str, str]:
+    """``model_path`` and ``mmproj_path`` from the top level of *yml* (its first
+    64 KiB, lines up to 4096 characters), with quotes and a trailing comment
+    removed. Keys that are absent or unreadable are left out."""
+    try:
+        with open(yml, "rb") as fh:
+            text = fh.read(_YML_MAX_BYTES).decode("utf-8-sig", errors="replace")
     except OSError:
         return {}
     found: dict[str, str] = {}
     for line in text.splitlines():
-        m = _YML_SCALAR_RE.match(line)
-        if not m:
+        if not line or line[0] in " \t#" or len(line) > _YML_MAX_LINE:
             continue
-        value = m.group(2)
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        if value:
-            found.setdefault(m.group(1), value)
+        key, sep, value = line.partition(":")
+        if sep and key in _YML_KEYS:
+            value = _unquote(value)
+            if value:
+                found.setdefault(key, value)
     return found
 
 
 def _resolve(value: str, data_folder: Path) -> Optional[Path]:
     """*value* as a path: absolute as written, else relative to *data_folder*.
-    None when it climbs out with a ``..`` part."""
+    None when it climbs out with a ``..`` part, names a network share, or is
+    relative to a drive or to the root of the current drive."""
     if any(part == ".." for part in PureWindowsPath(value).parts) or \
             any(part == ".." for part in PurePosixPath(value).parts):
         return None
-    if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute() \
-            or _WINDOWS_DRIVE_RE.match(value):
+    if value.startswith(("\\\\", "//")):
+        return None
+    if _WINDOWS_DRIVE_RE.match(value) or PurePosixPath(value).is_absolute():
         return Path(value)
+    windows = PureWindowsPath(value)
+    if windows.drive or windows.root:
+        return None
     return data_folder / value
 
 
@@ -82,12 +104,19 @@ def _weights(unit: Path, paths: dict[str, str], data_folder: Path) -> tuple[Opti
     """``(weights, "")`` for a model directory, or ``(None, reason)``."""
     named = paths.get("model_path")
     candidate = _resolve(named, data_folder) if named else None
-    if candidate is None or not candidate.is_file():
-        candidate = unit / "model.gguf"
-    if not candidate.is_file():
-        if (unit / "model.gguf.tmp").exists():
+    if candidate is None or not _is_file(candidate):
+        fallback = unit / "model.gguf"
+        if _is_file(fallback):
+            candidate = fallback
+        elif named and candidate is None:
+            return None, (f"its model_path {named!r} climbs out of the Jan data folder or "
+                          "is not a plain path")
+        elif named:
+            return None, f"the linked file is missing ({named})"
+        elif _is_file(unit / "model.gguf.tmp"):
             return None, "its download has not finished"
-        return None, f"the weights file is missing ({candidate.name})"
+        else:
+            return None, "the weights file is missing (model.gguf)"
     if candidate.suffix.lower() != ".gguf":
         return None, f"{candidate.name} is not a GGUF file"
     if not _has_gguf_magic(candidate):
@@ -103,9 +132,9 @@ def _projector(unit: Path, paths: dict[str, str], data_folder: Path) -> tuple[Op
     ``(None, reason)`` when it names one that cannot be used."""
     named = paths.get("mmproj_path")
     candidate = _resolve(named, data_folder) if named else None
-    if candidate is None or not candidate.is_file():
+    if candidate is None or not _is_file(candidate):
         candidate = unit / "mmproj.gguf"
-        if not candidate.is_file():
+        if not _is_file(candidate):
             return None, ("the projector file is missing" if named else "")
     if not (_has_gguf_magic(candidate) and gguf_is_mmproj(candidate)):
         return None, f"{candidate.name} is not a GGUF vision projector"
@@ -115,7 +144,8 @@ def _projector(unit: Path, paths: dict[str, str], data_folder: Path) -> tuple[Op
 def scan_jan_models(root: Path) -> tuple[list[JanModel], list[str]]:
     """``(models, problems)`` for the Jan model store *root*.
 
-    A directory holding ``model.yml`` is one model and is not searched further.
+    A directory holding ``model.yml`` is one model and is not searched further;
+    one holding ``model.gguf.tmp`` and no ``model.yml`` is a download in progress.
     The id is its path below *root* with ``/`` as ``-``. *problems* lists one
     sentence per model that cannot be registered or whose projector is left off."""
     data_folder = root.parent.parent
@@ -128,10 +158,9 @@ def scan_jan_models(root: Path) -> tuple[list[JanModel], list[str]]:
         except OSError:
             return
         for child in children:
-            yml = child / "model.yml"
-            if yml.is_file():
-                model_id = "-".join(child.relative_to(root).parts)
-                paths = _yml_paths(yml)
+            model_id = "-".join(child.relative_to(root).parts)
+            if _is_file(child / "model.yml"):
+                paths = _yml_paths(child / "model.yml")
                 weights, why = _weights(child, paths, data_folder)
                 if weights is None:
                     problems.append(f"{model_id}: {why}")
@@ -140,6 +169,8 @@ def scan_jan_models(root: Path) -> tuple[list[JanModel], list[str]]:
                 if why:
                     problems.append(f"{model_id}: no vision projector attached, {why}")
                 models.append(JanModel(model_id, weights, projector))
+            elif _is_file(child / "model.gguf.tmp"):
+                problems.append(f"{model_id}: its download has not finished")
             elif depth < _MAX_DEPTH:
                 walk(child, depth + 1)
 

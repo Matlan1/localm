@@ -4292,20 +4292,25 @@ def _add_local_jan(
     its projector recorded on the entry. *name* applies only to a store holding
     one model. Returns True when anything was registered, False when nothing
     could be, and None when the folder holds no Jan model at all (so the caller
-    treats it as an ordinary folder). A copy or move is refused: Jan names every
-    weights file ``model.gguf``."""
+    treats it as an ordinary folder). A copy or move, requested with ``store`` or
+    as the answer to a duplicate, is refused: Jan names every weights file
+    ``model.gguf``. A duplicate under ``ask`` is skipped."""
     from rich.markup import escape
 
     models, problems = scan_jan_models(root)
     if not models and not problems:
         return None
-    if store:
+    if store or on_duplicate in ("copy", "move"):
         console.print(
-            f"[red]Cannot {store} models out of the Jan model store[/red] "
+            f"[red]Cannot {store or on_duplicate} models out of the Jan model store[/red] "
             f"({escape(str(root))}): every file in it is named model.gguf and the "
             "names would collide in the models folder. Register them in place "
-            "(leave out --store).")
+            "(leave out --store, and do not answer a duplicate with copy or move).")
         return False
+    if on_duplicate == "ask":
+        console.print("[dim]Jan models are registered in place, so a duplicate is skipped "
+                      "(pass --on-duplicate alias or register to change that).[/dim]")
+        on_duplicate = "skip"
     for problem in problems:
         console.print(f"[yellow]Skipped part of the Jan model store:[/yellow] {escape(problem)}")
     if not models:

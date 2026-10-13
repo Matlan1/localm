@@ -68,6 +68,23 @@ class TestCTranslate2:
         assert hf_folder_refusal(folder) == ctranslate2_refusal(folder)
         assert explain_unsupported_model(folder) == ctranslate2_refusal(folder)
 
+    def test_adding_one_registers_it_with_the_sentence_and_the_backend_refuses_it(
+            self, tmp_path, monkeypatch, capsys):
+        import localm.config as cfg
+        import localm.model_manager as mm
+        from localm.model_manager import add_local
+        home = tmp_path / ".localm"
+        (home / "models").mkdir(parents=True)
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+        monkeypatch.setattr(mm, "MODELS_DIR", home / "models")
+        folder = _ct2(tmp_path / "nllb", config={"bos_token": "<s>"}, extra=("tokenizer.json",))
+        assert add_local(str(folder)) is True
+        assert "cannot load it" in " ".join(capsys.readouterr().out.split())
+
     def test_the_hf_backend_refuses_to_load_it_before_a_worker_is_spawned(self, tmp_path):
         folder = _ct2(tmp_path / "nllb", config={"bos_token": "<s>"})
         with pytest.raises(UnsupportedModelRoleError, match="CTranslate2"):
