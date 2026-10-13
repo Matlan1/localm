@@ -28,7 +28,7 @@ function setup({ rejectWith = null } = {}) {
       return { ok: true, status: 200, body: null, headers: { get: () => null },
         json: async () => ({}) };
     }
-    if (u === "/api/rag/extract") {
+    if (u === "/api/chat/extract") {
       return { ok: true, status: 200, headers: { get: () => null },
         json: async () => ({ filename: "notes.txt", text: "hello", chars: 5, truncated: false }) };
     }
@@ -123,7 +123,7 @@ test("attaching a WAV keeps it as an audio clip with a chip, not as a document o
   assert.equal(clip.format, "wav");
   assert.equal(clip.data, WAV_B64);
   assert.equal(clip.seconds, 4);
-  assert.equal(fetchCalls.filter((c) => c.url === "/api/rag/extract").length, 0,
+  assert.equal(fetchCalls.filter((c) => c.url === "/api/chat/extract").length, 0,
     "audio never reaches document extraction");
 
   const chip = window.document.querySelector("#attach-chips .chip");
@@ -139,7 +139,7 @@ test("attaching a WAV keeps it as an audio clip with a chip, not as a document o
 test("a text file still goes through document extraction", async () => {
   const { window, fetchCalls } = setup();
   window.addAttachedFiles([new window.File(["hello"], "notes.txt", { type: "text/plain" })]);
-  await waitFor(() => fetchCalls.some((c) => c.url === "/api/rag/extract"), "extraction");
+  await waitFor(() => fetchCalls.some((c) => c.url === "/api/chat/extract"), "extraction");
   assert.equal(clipCount(window), 0);
 });
 
