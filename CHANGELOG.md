@@ -608,10 +608,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
-- **A worker process starts even when the debug log it inherits cannot be opened.** In debug
-  mode, a model, embedding, speech or image worker whose debug log folder was missing or not
-  writable exited before answering, and the load was reported as a crash with no reason; it
-  now logs one warning to the console and carries on.
+- **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
+  its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
+  localm is reported as such instead of with advice to repair the llama.cpp runtime.
+- **A transformers model whose grammar constraint fails mid-reply is no longer reported as constrained.**
+  The failure is logged and shown, and later grammar requests to that model are refused, as for GGUF
+  models.
+- **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
+  cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
+  dropped. A model worker that does not exit when stopped is killed.
+- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
@@ -640,6 +646,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   while it was still starting used to report that no browser was open and leave it to finish
   starting; it now cancels the start, the browser is closed as soon as it is up, and the calls
   waiting for it get an error.
+- **A worker process starts even when the debug log it inherits cannot be opened.** In debug
+  mode, a model, embedding, speech or image worker whose debug log folder was missing or not
+  writable exited before answering, and the load was reported as a crash with no reason; it
+  now logs one warning to the console and carries on.
 - **The coder no longer crashes on a project config whose `mcp` key is not a table.** A
   `.localcoder/config.toml` with, for example, `mcp = "x"` stopped MCP setup with an error; it now
   means no MCP servers are configured.

@@ -96,8 +96,9 @@ def _candidate_dirs() -> list[Path]:
         bd = load_config().get("binary_dir")
         if bd:
             dirs.append(Path(bd))
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError) as e:
+        logger.warning("the binary_dir setting is ignored (%s: %s); the bundled "
+                       "llama.cpp runtime is used instead", type(e).__name__, e)
 
     # The self-contained location: binaries bundled in the venv via the
     # localm-llama-runtime wheel (populated by `localm setup-llama`).
@@ -516,6 +517,16 @@ def _warn_if_not_bundled(binary_dir: Path) -> None:
 _warned_foreign_binary_dir = False
 
 
+def _register_compute_backends(binary_dir, lib) -> bool:
+    """``_register_ggml_backends`` as a bool. A registration that raises is
+    logged with its traceback and counts as no backends registered."""
+    try:
+        return bool(_register_ggml_backends(binary_dir, lib))
+    except Exception:
+        logger.warning("ggml compute backend registration raised", exc_info=True)
+        return False
+
+
 def load_lib() -> ctypes.CDLL:
     """Load (and cache) the native llama shared library.
 
@@ -604,12 +615,7 @@ def load_lib() -> ctypes.CDLL:
     # record it as a warning AND in _compute_backends_ok, which setup's
     # load-test reads.
     global _compute_backends_ok
-    try:
-        _compute_backends_ok = bool(_register_ggml_backends(binary_dir, _loaded_lib))
-    except Exception:
-        # Registration itself faulted: record no backends rather than leaving
-        # the flag unknown.
-        _compute_backends_ok = False
+    _compute_backends_ok = _register_compute_backends(binary_dir, _loaded_lib)
     if not _compute_backends_ok:
         logger.warning(
             'no ggml compute backends registered; model load will fail '
