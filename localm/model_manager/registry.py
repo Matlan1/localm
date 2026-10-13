@@ -38,6 +38,7 @@ from .gguf import _gguf_declared_min_size
 from .gguf import _has_gguf_magic
 from .gguf import gguf_unusable_reason
 from .unsupported import explain_unsupported_model, hf_folder_refusal
+from .jan_store import find_jan_models_root, scan_jan_models
 from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
@@ -1551,18 +1552,9 @@ def relocate_target(new_path: str) -> "tuple[Path | None, str | None]":
     elif (unusable := gguf_unusable_reason(p)) is not None:
         return None, f"{p}: {unusable}"
     elif not _has_gguf_magic(p):
-        declared_min = _gguf_declared_min_size(p)
-        try:
-            size = p.stat().st_size
-        except OSError:
-            size = None
-        if declared_min is not None and size is not None and size < declared_min:
-            return None, (
-                f"{p} looks like a GGUF file that has not finished copying "
-                f"(only {size} of at least {declared_min} bytes present) - "
-                "if it is still being copied or downloaded, wait for it to "
-                "finish and try again."
-            )
+        unfinished = _unfinished_gguf_reason(p)
+        if unfinished is not None:
+            return None, f"{p} {unfinished}"
         return None, f"Not a GGUF model file: {p}"
     return p, None
 
@@ -3839,20 +3831,66 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str) -> Optional[list[
 
 
 
+_UNFINISHED_DOWNLOAD_PREFIX = "incomplete"
+
+
+def _unfinished_gguf_reason(path: Path) -> Optional[str]:
+    """A sentence saying *path* is a GGUF file that has not finished copying or
+    downloading, or None when it is not evidently so.
+
+    Evident means its header declares tensor data starting beyond the end of the
+    file. A file cut inside its last tensor's data is not detected."""
+    declared_min = _gguf_declared_min_size(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if declared_min is not None and size < declared_min:
+        return (f"looks like a GGUF file that has not finished copying "
+                f"(only {size} of at least {declared_min} bytes present) - "
+                "if it is still being copied or downloaded, wait for it to "
+                "finish and try again.")
+    return None
+
+
 def _skip_unusable_ggufs(first_parts: list[Path]) -> list[Path]:
     """*first_parts* without the GGUF files that cannot be registered
-    (unsupported version, byte-swapped, importance matrix); each skipped file is
-    reported with its reason."""
+    (unsupported version, byte-swapped, importance matrix, unfinished copy or
+    download); each skipped file is reported with its reason."""
     from rich.markup import escape
 
     usable: list[Path] = []
     for gguf in first_parts:
-        reason = gguf_unusable_reason(gguf)
+        reason = gguf_unusable_reason(gguf) or _unfinished_gguf_reason(gguf)
+        if reason is None and gguf.name.startswith(_UNFINISHED_DOWNLOAD_PREFIX):
+            reason = ("its name starts with 'incomplete', which GPT4All gives a "
+                      "download in progress. Add the file by its own path to "
+                      "register it anyway.")
         if reason is None:
             usable.append(gguf)
         else:
             console.print(f"[yellow]Skipped {escape(gguf.name)}:[/yellow] {escape(reason)}")
     return usable
+
+
+def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
+                    fast: bool) -> "tuple[Optional[str], Optional[int]]":
+    """``(sha256, size)`` to register *gguf* with: neither under *no_hash*; only
+    the size under *fast* (dedup on size alone); otherwise the hash, computed only
+    when it can change the outcome (an unknown path or a registered alias with no
+    digest)."""
+    if no_hash:
+        return None, None
+    if fast:
+        try:
+            return None, gguf.stat().st_size
+        except OSError:
+            return None, None
+    already_known = find_aliases_by_path(gguf, reg)
+    needs_backfill = any(not reg[n].get("sha256") for n in already_known)
+    digest = _mm._hash_with_progress(gguf) \
+        if (not already_known or needs_backfill) else None
+    return digest, None
 
 
 def _add_local_gguf_dir(
@@ -3900,23 +3938,7 @@ def _add_local_gguf_dir(
             (names or {}).get(gguf) or base)
         model_name = _unique_registry_name(reg, wanted)
 
-        size = None
-        if no_hash:
-            digest = None
-        elif fast:
-            # --fast: skip the SHA, dedup on size alone (cheap stat).
-            digest = None
-            try:
-                size = gguf.stat().st_size
-            except OSError:
-                size = None
-        else:
-            # Hash only when it can change the outcome (unknown path / missing
-            # digest), exactly like the single-file branch below.
-            already_known = find_aliases_by_path(gguf, reg)
-            needs_backfill = any(not reg[n].get("sha256") for n in already_known)
-            digest = _mm._hash_with_progress(gguf) \
-                if (not already_known or needs_backfill) else None
+        digest, size = _digest_for_add(gguf, reg, no_hash, fast)
 
         detected_type, gmeta = _detect_local_model_type(gguf, is_gguf=True, is_hf=False)
         _mm._register_with_dedup(
@@ -4371,6 +4393,63 @@ def _add_local_ollama_root(
     return registered_any
 
 
+def _add_local_jan(
+    root: Path,
+    name: Optional[str],
+    on_duplicate: str,
+    no_hash: bool,
+    fast: bool,
+    model_type: Optional[str],
+    store: Optional[str],
+) -> Optional[bool]:
+    """Register every model in a Jan model store (see ``scan_jan_models``), each
+    in place under its Jan id (the author and file stem, joined with ``-``), with
+    its projector recorded on the entry. *name* applies only to a store holding
+    one model. Returns True when anything was registered, False when nothing
+    could be, and None when the folder holds no Jan model at all (so the caller
+    treats it as an ordinary folder). A copy or move, requested with ``store`` or
+    as the answer to a duplicate, is refused: Jan names every weights file
+    ``model.gguf``. A duplicate under ``ask`` is skipped."""
+    from rich.markup import escape
+
+    models, problems = scan_jan_models(root)
+    if not models and not problems:
+        return None
+    if store or on_duplicate in ("copy", "move"):
+        console.print(
+            f"[red]Cannot {store or on_duplicate} models out of the Jan model store[/red] "
+            f"({escape(str(root))}): every file in it is named model.gguf and the "
+            "names would collide in the models folder. Register them in place "
+            "(leave out --store, and do not answer a duplicate with copy or move).")
+        return False
+    if on_duplicate == "ask":
+        console.print("[dim]Jan models are registered in place, so a duplicate is skipped "
+                      "(pass --on-duplicate alias or register to change that).[/dim]")
+        on_duplicate = "skip"
+    for problem in problems:
+        console.print(f"[yellow]Skipped part of the Jan model store:[/yellow] {escape(problem)}")
+    if not models:
+        console.print(f"[red]Not a model:[/red] no usable model in the Jan model store "
+                      f"{escape(str(root))}")
+        return False
+    registered_any = False
+    for model in models:
+        reg = _mm.load_registry()
+        wanted = _sanitize_name(name) if (name and len(models) == 1) else model.model_id
+        model_name = _unique_registry_name(reg, wanted)
+        digest, size = _digest_for_add(model.weights, reg, no_hash, fast)
+        detected, meta = _detect_local_model_type(model.weights, is_gguf=True, is_hf=False)
+        effective = model_type if model_type is not None else detected
+        registered_any = _mm._register_with_dedup(
+            model_name, model.weights, "local", on_duplicate=on_duplicate,
+            digest=digest, size=size, model_type=effective,
+            mmproj=model.projector if effective in _PROJECTOR_TYPES else None,
+            architecture=meta.get("architecture"),
+            expert_count=meta.get("expert_count"),
+        ) or registered_any
+    return registered_any
+
+
 def _add_local_hub_cache(
     root: Path,
     hub: HubCacheScan,
@@ -4414,7 +4493,11 @@ def _add_local_hub_cache(
             continue
         first_parts, _hf = _find_model_units(unit.snapshot, max_depth=_import_max_depth())
         if not first_parts:
-            unusable += 1
+            why = explain_unsupported_model(unit.snapshot)
+            if why is None:
+                unusable += 1
+            else:
+                console.print(f"[yellow]Skipped {escape(unit.repo_id)}:[/yellow] {escape(why)}")
             continue
         found += 1
         models = [g for g in first_parts if "mmproj" not in g.name.lower()]
@@ -4574,6 +4657,12 @@ def add_local(
         if hub is not None:
             return _add_local_hub_cache(
                 p, hub, name, on_duplicate, no_hash, fast, model_type, store)
+        jan_root = find_jan_models_root(p)
+        if jan_root is not None:
+            outcome = _add_local_jan(
+                jan_root, name, on_duplicate, no_hash, fast, model_type, store)
+            if outcome is not None:
+                return outcome
 
     max_depth = _import_max_depth()
     if p.is_dir() and not is_hf:

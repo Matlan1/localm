@@ -235,7 +235,8 @@ def _real_gguf(path: Path, kv) -> Path:
         out.append(_gguf_str(key))
         out.append(struct.pack("<I", vtype))
         out.append(_gguf_str(val) if vtype == _T_STRING else struct.pack("<I", val))
-    path.write_bytes(b"".join(out))
+    header = b"".join(out)
+    path.write_bytes(header + b"\0" * (-len(header) % 32))
     return path
 
 

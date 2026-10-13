@@ -529,7 +529,7 @@ def generate_image(
     denoise: Optional[float] = None,
     localm_url: Optional[str] = None,
     instance_token: Optional[str] = None,
-    max_poll_seconds: int = 600,
+    max_poll_seconds: int = 1800,
     write_sidecar: bool = True,
     launch_cmd: Optional[str] = None,
     workdir: Optional[str] = None,
@@ -626,7 +626,7 @@ def generate_image(
         one fails with a message rather than ignoring the size. Cannot be
         combined with *input_image*, whose dimensions the output takes.
     max_poll_seconds
-        Timeout waiting for ComfyUI to finish (default 10 minutes).
+        Timeout waiting for ComfyUI to finish (default 30 minutes).
     write_sidecar
         Write a ``<output>.json`` sidecar with the prompt and settings so
         the image can be reproduced.  Pass False in privacy mode. The image's

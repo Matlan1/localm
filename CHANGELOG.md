@@ -23,6 +23,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   reranking with the head's raw logit, on the CPU or the GPU like the GGUF rerankers. A
   checkpoint saved without its classification head is refused, and a classifier with several
   labels is not offered as a reranker.
+- **Add models from Jan.** `localm add` on Jan's data folder (or its `llamacpp/models`
+  folder) registers every downloaded model under its Jan id, with its vision projector
+  attached, and follows a model that Jan only links to a file kept elsewhere. A download
+  still in progress is skipped. A copy or move out of Jan's folder is refused, because every
+  weights file in it is named `model.gguf`.
 - **Models quantized with compressed-tensors load.** A Hugging Face checkpoint whose
   `config.json` declares `quant_method: compressed-tensors` is expanded to full precision
   when it loads, the way FP8 checkpoints are, and the load output says so. The `hf` and `gpu`
@@ -560,6 +565,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   loads as the encoder it is instead of as a language model.
 - **SmolVLM2 image chats no longer log a processor warning.** Each image turn logged
   "Kwargs passed to `processor.__call__` have to be in `processor_kwargs` dict" twice.
+- **A half-copied GGUF file is no longer registered by a folder import.** `localm add
+  <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
+  whose header declares more tensor data than the file holds, and one named `incomplete-...`
+  (how GPT4All names a download in progress), and says why. A file named `incomplete-...`
+  still registers when it is added by its own path.
+- **A Diffusers pipeline or a CTranslate2 folder is named instead of rejected as "not a
+  model".** Adding one, or finding one in the Hugging Face cache, now says what it is and
+  what to use instead.
 - **Zed lists localm's models even when one model's file is gone.** `/api/tags` and `/api/show` gave
   such a model a `null` `modified_at`, and Zed rejects the whole model list on a `null` there; the
   field is now always a date (1970-01-01 when the file's time cannot be read).
@@ -1877,6 +1890,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   (offline, or the API rate limit is hit), setup installs the pinned CUDA build and checks it
   against its pinned checksum. On a machine with GPUs of different generations, one Blackwell
   GPU now selects the CUDA 13 build.
+- **Stopping or timing out one ComfyUI job leaves the others alone.** Cancelling an image, video or
+  music job in the app or over the API interrupted whatever ComfyUI was rendering and
+  emptied its whole queue, so another job waiting there was dropped; a generation that timed out kept
+  rendering in ComfyUI after localm had given up on it. Both now stop only that job: it is interrupted
+  if it is running and removed from the queue if it is waiting. An image may also take up to 30 minutes
+  instead of 10, so a slower GPU can finish it, and a cancelled coder run now stops the image its
+  `generate_image` tool is rendering instead of letting it run on. Ctrl-C in `localm image`, `music` or `video` still
+  stops everything ComfyUI is doing, as it says.
 
 ### Security
 - **A plain `coder` API key can no longer run commands through the project's coder
