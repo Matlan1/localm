@@ -487,6 +487,91 @@ class TestAFailedLoadIsNotRetriedByRouting:
         assert "could be loaded" not in note
 
 
+class TestAFailureRecordedAfterTheRouteIsSeenBeforeTheLoad:
+    """A routing candidate whose load failure is recorded between route() and
+    its load (by another request) is not loaded or made room for; the model
+    the request would otherwise use, and a copy already loaded, still are."""
+
+    @staticmethod
+    def _engines(reg):
+        engines = TestAFailedLoadIsNotRetriedByRouting._crashing(reg, set())
+        engines.made_room = []
+        return engines
+
+    @staticmethod
+    def _fail_later(engines, *names):
+        latch = engines.routing_latch()
+        for name in names:
+            latch.record_failure(name, f"{name} crashed in another request")
+
+    @staticmethod
+    def _room(engines):
+        return patch.object(EngineCache, "_make_room_for",
+                            lambda self, name: engines.made_room.append(name))
+
+    def test_the_coder_moves_on_without_loading_or_evicting_for_it(self, reg):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        engines = self._engines(reg)
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        assert decision.candidates == ("tooly", "tooly2")
+        self._fail_later(engines, "tooly")
+        with self._room(engines):
+            engine, name, answered = coder_engine(engines, decision)
+        assert name == "tooly2" and engine is engines.made["tooly2"]
+        assert "tooly" not in engines.loads, engines.loads
+        assert "tooly" not in engines.made_room, (
+            "room was made for a model the latch refused")
+
+    def test_chat_moves_on_without_loading_it(self, reg):
+        from localm.plugins.mcpserver.tools.chat import answer_with, routing_note
+        engines = self._engines(reg)
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        self._fail_later(engines, "tooly")
+        with self._room(engines):
+            result, answered = answer_with(
+                engines, decision, lambda engine, name: name)
+        assert result == "tooly2"
+        assert "tooly" not in engines.loads and "tooly" not in engines.made_room
+        note = routing_note(answered)
+        assert note is not None and "tooly was skipped because its last load failed" in note
+
+    def test_the_model_the_request_would_otherwise_use_is_still_loaded(self, reg):
+        from localm.plugins.mcpserver.tools.chat import answer_with
+        engines = self._engines(reg)
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        self._fail_later(engines, "tooly", "tooly2", decision.current)
+        with self._room(engines):
+            result, _ = answer_with(engines, decision, lambda engine, name: name)
+        assert result == decision.current
+        assert engines.loads == [decision.current]
+
+    def test_a_copy_already_loaded_here_is_used(self, reg):
+        engines = self._engines(reg)
+        with self._room(engines):
+            loaded = engines.get_loaded("tooly")
+        self._fail_later(engines, "tooly")
+        with self._room(engines):
+            again = engines.get_loaded_chat("tooly", skip_if_latched=True)
+        assert again is loaded and engines.loads == ["tooly"]
+
+    def test_the_refusal_names_the_latched_failure(self, reg):
+        from localm.plugins.mcpserver.server import ModelLoadSkipped
+        engines = self._engines(reg)
+        self._fail_later(engines, "tooly")
+        with self._room(engines), pytest.raises(ModelLoadSkipped) as caught:
+            engines.get_loaded_chat("tooly", skip_if_latched=True)
+        assert caught.value.skipped.model == "tooly"
+        assert "tooly was skipped because its last load failed" in str(caught.value)
+        assert engines.loads == [] and engines.made_room == []
+
+    def test_without_the_flag_a_latched_model_is_loaded(self, reg):
+        engines = self._engines(reg)
+        self._fail_later(engines, "tooly")
+        with self._room(engines):
+            engines.get_loaded_chat("tooly")
+        assert engines.loads == ["tooly"]
+
+
 class TestPullModel:
     def test_a_pulled_model_that_fails_to_load_is_not_kept_as_resident(self, reg):
         made = {}
