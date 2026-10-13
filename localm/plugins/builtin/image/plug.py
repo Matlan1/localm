@@ -674,10 +674,13 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
         if estimate:
             s["vram_estimate_bytes"] = estimate
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
+                                 note_other_vram_holders, release_other_native_media,
                                  unload_chat_for_media)
+        release_other_native_media(job, s, "image")
         swap = decide_media_swap(s) or bool(media_single_device_shortfall(s))
         if swap and not unload_chat_for_media(job, self_url, "image", instance_token):
             say("Could not unload the chat model - the upscaler may run low on VRAM.")
+        note_other_vram_holders(job, s, "image")
         is_privacy = effective_mode("server") == SessionMode.PRIVACY
         ok, message = native.upscale(
             s, source, upscaler, out_path, extra_meta=extra_meta,
