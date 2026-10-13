@@ -838,6 +838,21 @@ class _DiffusionStopped(Exception):
     """The model is being unloaded under a running diffusion generation."""
 
 
+def _ends_quietly_when_exclusive_cancelled(generator_method):
+    """Wrap a generator method that enters ``SlotScheduler.exclusive``: when
+    that wait is cancelled by the stream stop check, the method ends with no
+    output and ``last_finish_reason`` "stop"."""
+    from ._slots import ExclusiveCancelled
+
+    @functools.wraps(generator_method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            yield from generator_method(self, *args, **kwargs)
+        except ExclusiveCancelled:
+            self.last_finish_reason = "stop"
+    return wrapper
+
+
 def _greedy_chain():
     """A sampler chain holding one greedy sampler; it reuses its candidate
     buffer from one sample to the next."""
@@ -2164,6 +2179,7 @@ class LlamaCpp:
                 
         return batch
 
+    @_ends_quietly_when_exclusive_cancelled
     def _generate(
         self,
         prompt_tokens: list[int],
@@ -2211,9 +2227,11 @@ class LlamaCpp:
                     grammar_triggers=grammar_triggers, seed=seed, on_status=on_status,
                     sampling=sampling, logprobs=logprobs)
                 return
-            from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
+            from localm.inference.backends.base import (
+                WAITING_FOR_MODEL_STATUS, stream_stop_requested)
             exclusive = self._slots.exclusive(
-                on_wait=(lambda: on_status(WAITING_FOR_MODEL_STATUS)) if on_status else None)
+                on_wait=(lambda: on_status(WAITING_FOR_MODEL_STATUS)) if on_status else None,
+                stop_requested=stream_stop_requested)
         else:
             exclusive = contextlib.nullcontext()
         with exclusive, self._inference_lock:
@@ -3028,6 +3046,7 @@ class LlamaCpp:
             out.append(new_msg)
         return out, media
 
+    @_ends_quietly_when_exclusive_cancelled
     def _generate_image(
         self,
         messages: list[dict],
@@ -3069,9 +3088,11 @@ class LlamaCpp:
         exclusive section: it starts once the text replies in flight have
         ended, and no new one starts until it is done."""
         if self._slots is not None:
-            from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
+            from localm.inference.backends.base import (
+                WAITING_FOR_MODEL_STATUS, stream_stop_requested)
             exclusive = self._slots.exclusive(
-                on_wait=(lambda: on_status(WAITING_FOR_MODEL_STATUS)) if on_status else None)
+                on_wait=(lambda: on_status(WAITING_FOR_MODEL_STATUS)) if on_status else None,
+                stop_requested=stream_stop_requested)
         else:
             exclusive = contextlib.nullcontext()
         with exclusive, self._inference_lock:

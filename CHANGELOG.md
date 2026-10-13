@@ -562,6 +562,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A request cancelled behind an image turn now stops at once.** An image reply, and a
+  reply sent with `cache_prompt: false`, wait for every running reply to finish before they
+  start. A client that disconnected or cancelled during that wait was not noticed until the
+  wait ended and the reply had already processed its prompt. The cancel is now seen within
+  a fraction of a second, and the request ends with no output and no error.
 - **The FLUX VAE offered for a missing ComfyUI workflow file downloads again.** `ae.safetensors`
   came from a Hugging Face repository that now requires a licence click-through and answers
   401 to an anonymous download. It now comes from an open repository that holds the same file.
