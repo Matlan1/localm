@@ -175,14 +175,17 @@ def _pool(torch, hidden, mask, modes: tuple):
 
 def _dense(torch, vector, stage: Stage, cache: dict):
     from safetensors.torch import load_file
-    key = str(stage.weight_file)
+    weight_file = stage.weight_file
+    if weight_file is None:
+        raise StUnsupportedError("a Dense stage has no weights file")
+    key = str(weight_file)
     if key not in cache:
         cache[key] = load_file(key)
     tensors = cache[key]
     weight = tensors.get("linear.weight")
     if weight is None:
         raise StUnsupportedError(
-            f"{stage.weight_file.parent.name}/model.safetensors has no 'linear.weight' tensor")
+            f"{weight_file.parent.name}/model.safetensors has no 'linear.weight' tensor")
     out = torch.nn.functional.linear(
         vector, weight.to(vector.dtype).to(vector.device),
         tensors["linear.bias"].to(vector.dtype).to(vector.device) if "linear.bias" in tensors else None)
@@ -205,4 +208,6 @@ def apply_plan(torch, plan: StPlan, hidden, mask, cache: dict):
             vector = _dense(torch, vector, stage, cache)
         elif stage.kind == "normalize":
             vector = torch.nn.functional.normalize(vector, p=2.0, dim=1)
+    if vector is None:
+        raise StUnsupportedError("this sentence-transformers folder has no Pooling stage")
     return vector

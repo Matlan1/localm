@@ -473,8 +473,11 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             continue
 
         if name == "rerank":
+            if worker is None:
+                resp_q.put(("error", "no model is loaded in this process"))
+                continue
             try:
-                resp_q.put(("ok", worker.rerank(payload)))
+                resp_q.put(("ok", worker.rerank(list(payload or []))))
             except RerankInputError as e:
                 # Raised before the forward pass, so the model is unharmed and
                 # the worker keeps serving.
