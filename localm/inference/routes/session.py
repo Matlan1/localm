@@ -209,13 +209,19 @@ def register(app: FastAPI, ctx) -> None:
         recover``, the local compromise path.
         """
         from localm import auth
+        import json as _json
         payload = {}
-        try:
-            parsed = await request.json()
-            if isinstance(parsed, dict):
-                payload = parsed
-        except Exception:
-            payload = {}
+        raw = await request.body()
+        if raw.strip():
+            try:
+                parsed = _json.loads(raw)
+            except (ValueError, RecursionError):
+                parsed = None
+            if not isinstance(parsed, dict):
+                raise HTTPException(
+                    400, "The body must be a JSON object such as "
+                         "{\"key\": \"...\"}, or empty to generate a key.")
+            payload = parsed
         requested = payload.get("key")
         if requested is not None and not isinstance(requested, str):
             raise HTTPException(

@@ -147,6 +147,21 @@ class TestBadInputIsA400NotA500:
         assert r.status_code == 400
         assert auth.get_api_key() == old
 
+    @pytest.mark.parametrize("body,ctype", [
+        (b"key=mine-chosen-key-value-1234", "application/x-www-form-urlencoded"),
+        (b'["mine-chosen-key-value-1234"]', "application/json"),
+        (b'{"key": ', "application/json"),
+    ])
+    def test_a_body_that_is_not_a_json_object_rotates_nothing(self, body, ctype):
+        old = auth.regenerate_key()
+        c = _client()
+
+        r = c.post(ROTATE, content=body,
+                   headers={**_owner(old), "Content-Type": ctype})
+
+        assert r.status_code == 400, r.text
+        assert auth.get_api_key() == old
+
 
 class TestRotationHonesty:
     """A rotation that did not change the live credential is not reported as a

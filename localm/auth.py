@@ -1127,7 +1127,9 @@ def revoke_key(key_id: str) -> bool:
                     "dropped; an admin-scoped session for it may still be "
                     "usable until the session store is writable again", key_id)
         except Exception as e:
-            logger.debug("session cleanup after key revoke failed (non-fatal): %s", e)
+            logger.warning(
+                "key %s was revoked, but dropping its browser sessions failed (%s); "
+                "an admin-scoped session for it may still be usable", key_id, e)
     return True
 
 
