@@ -40,6 +40,12 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
    CPU when no GPU is found, and Vulkan otherwise. A build that does not load on this
    machine falls back to Vulkan, then CPU, and says so.
 
+   **Linux with an NVIDIA GPU runs on Vulkan.** The pinned upstream release
+   (`master-951-f89d9b1`) publishes a CUDA build for Windows only; its Linux archives are
+   CPU, Vulkan and ROCm. So on Linux `auto` picks Vulkan for NVIDIA, and
+   `localm setup-sdcpp --backend cuda` there fails with "stable-diffusion.cpp publishes
+   no 'cuda' build for this platform (available: cpu, vulkan, rocm)".
+
 2. **Model.** With no model set, the Images page offers to download the recommended
    one (SD-Turbo, about 2 GB). From the command line:
 
@@ -64,6 +70,7 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
 |---|---|
 | Native model | A checkpoint or a diffusion model, recognised from the file. Blank: the recommended model once downloaded. |
 | Native runtime | `auto`, `cpu`, `vulkan`, `cuda`, `rocm`, `metal`. |
+| Embed generation parameters in the PNG | Off by default. See [Parameters in the PNG](#parameters-in-the-png). |
 | Native sampling steps, CFG scale, sampler | Blank uses the model's recommended values (SD-Turbo: 2 steps, CFG 1), else the model family's (FLUX.1 dev: 20 steps, CFG 1; schnell: 4 steps), else stable-diffusion.cpp's defaults (20 steps, CFG 7). |
 | Native VAE, CLIP-L, CLIP-G, T5-XXL, LLM | Model parts. Blank: picked from the registered models that fit the model's family. |
 
@@ -90,6 +97,33 @@ set nor read them, and the Images page and job log show only a model's file name
   LoRA made for another family is applied with a note). ComfyUI workflow model picks
   are refused with a reason rather than ignored. Per-component GPU placement applies to ComfyUI only; with
   it turned on, a native job says so and loads each model on one GPU.
+
+## Parameters in the PNG
+
+By default a generated PNG carries no metadata, so a shared or moved image reveals nothing.
+Settings > Images > **Embed generation parameters in the PNG** (`plugins.image.native.embed_params`,
+off by default) writes the prompt, negative prompt, seed, steps, CFG, guidance, size, model,
+model parts and LoRAs into each new native image, as an A1111-style `parameters` text chunk (other
+tools can read it) and a `localm` chunk with the full record. The init-image path, timings and
+runtime are never embedded. Privacy mode never embeds, whatever the setting says, and the
+setting does not apply to images made through ComfyUI.
+
+**Import parameters from image** (Images page, under the prompt) reads a PNG or a localm `.json`
+sidecar and fills the prompt, negative prompt, seed, guidance, CFG, denoise, size and, on the
+native backend, the model and LoRAs. It understands localm images and sidecars, A1111/Forge
+`parameters` and ComfyUI `prompt` chunks. A model or LoRA is matched against your registered
+ones by name or file name; anything that cannot be applied (an unregistered model, or steps and
+sampler, which are Settings values) is named in the message instead of being dropped silently.
+The file is read in memory and not stored.
+
+## Enhance prompt
+
+The **Enhance prompt** button under the prompt on the Images, Video and Music pages asks the
+loaded chat model to expand a short idea. The instruction depends on the model that will
+generate: tag lists for Stable Diffusion 1.x, 2.x and SDXL, descriptive sentences for the other
+image families, motion and camera wording for video, and style tags for music. The result
+replaces the text in the field, still editable, and **Undo** restores your original. With no chat
+model loaded the button says so and changes nothing; it never loads a model itself.
 
 ## Tested hardware
 

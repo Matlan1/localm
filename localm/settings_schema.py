@@ -1895,6 +1895,11 @@ MEDIA_PLUGIN_FIELDS: list = [
                "Native sampler",
                "e.g. euler, euler_a, dpm++2m, lcm. Blank uses the model's default.",
                plugins=_NATIVE),
+    MediaField("native_embed_params", ("native", "embed_params"), "", Widget.TOGGLE,
+               "Embed generation parameters in the PNG",
+               "Off (default): the image carries no metadata. On: the prompt, seed and settings "
+               "travel inside each native image and can be imported again. Never in privacy mode.",
+               plugins=_IMAGE_ONLY),
     MediaField("native_vae", ("native", "vae"), "", Widget.TEXT, "Native VAE",
                "Optional VAE (registered name or file path).", plugins=_NATIVE,
                admin_only=True),

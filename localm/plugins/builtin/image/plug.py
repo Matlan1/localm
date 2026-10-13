@@ -3,6 +3,8 @@
 
 Routes (mounted by the engine, auto-scoped to the ``image`` capability):
   POST   /api/imagine                       - generate an image (background job)
+  POST   /api/imagine/import-params         - read generation parameters out of an
+                                              uploaded PNG or sidecar (nothing saved)
   POST   /v1/images/generations             - OpenAI-compatible: generate and
                                               return the image(s) in the response
   GET    /api/imagine/history               - generated images, newest first
@@ -310,6 +312,37 @@ async def imagine_backend():
         return await run_in_threadpool_bounded(_read, timeout=20.0)
     except ThreadCallTimeout as e:
         raise HTTPException(504, f"Reading the image backend settings timed out: {e}") from e
+
+
+@_router.post("/api/imagine/import-params")
+async def imagine_import_params(request: Request):
+    """Generation parameters read from the request body: a PNG (localm,
+    A1111 or ComfyUI text chunks) or a localm ``.json`` sidecar. Returns
+    ``{"source", "params", "notes"}``; the upload is parsed in memory and not
+    stored."""
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+    from localm.media import image_params
+    limit = image_params.MAX_IMPORT_BYTES
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise HTTPException(413, "The file is too large to read parameters from.")
+    chunks, size = [], 0
+    async for part in request.stream():
+        size += len(part)
+        if size > limit:
+            raise HTTPException(413, "The file is too large to read parameters from.")
+        chunks.append(part)
+    if not size:
+        raise HTTPException(400, "Send the image or sidecar file as the request body.")
+    try:
+        return await run_in_threadpool_bounded(
+            image_params.params_from_bytes, b"".join(chunks), timeout=20.0)
+    except image_params.ImageParamsError as e:
+        raise HTTPException(422, f"Cannot import parameters: {e}") from e
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading the file timed out: {e}") from e
 
 
 MAX_IMAGES_PER_REQUEST = 4

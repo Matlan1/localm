@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.media.image_params import png_text_entries
 from localm.media.sdcpp import families, pairing
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
@@ -276,8 +277,12 @@ def _load_init_image(path: Path, width: Optional[int], height: Optional[int]) ->
         return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
 
 
-def _write_png(out_path: Path, result: dict) -> None:
+def _write_png(out_path: Path, result: dict,
+               text_entries: Optional[list] = None) -> None:
+    """Save *result* as a PNG at *out_path*. The file carries no metadata
+    except *text_entries* (``[(keyword, text)]``) when given."""
     from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
     mode = {3: "RGB", 4: "RGBA", 1: "L"}.get(result["channel"])
     if mode is None:
         raise ValueError(f"the runtime returned an image with {result['channel']} channels")
@@ -285,13 +290,28 @@ def _write_png(out_path: Path, result: dict) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
     try:
-        img.save(tmp, format="PNG")
+        info = None
+        if text_entries:
+            info = PngInfo()
+            for key, text in text_entries:
+                info.add_text(key, text)
+        img.save(tmp, format="PNG", pnginfo=info)
         os.replace(tmp, out_path)
     finally:
         try:
             tmp.unlink()
         except OSError:
             pass
+
+
+def _embed_params(blk: dict, write_sidecar: bool) -> bool:
+    """Whether this image carries its parameters as PNG text: the opt-in
+    ``embed_params`` setting is on, the caller allows a sidecar, and the
+    session is not in privacy mode."""
+    if not blk.get("embed_params") or not write_sidecar:
+        return False
+    from localm.audit import SessionMode, effective_mode
+    return effective_mode("server") != SessionMode.PRIVACY
 
 
 def _write_sidecar(out_path: Path, record: dict) -> str:
@@ -381,7 +401,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
              height: Optional[int] = None,
              loras: Optional[list] = None) -> tuple[bool, str]:
     """Generate one image of *prompt* into *out_path* (a PNG without embedded
-    metadata). Returns ``(ok, message)``. Writes only
+    metadata unless the ``embed_params`` setting is on and the session is not in
+    privacy mode). Returns ``(ok, message)``. Writes only
     *out_path* and, when *write_sidecar*, ``<out_path>.json``.
 
     *loras* (``[{"name", "strength"}]``) and *lora_name* (with
@@ -476,26 +497,29 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         finally:
             if runner.is_alive():
                 shared.arm_idle_timer()
+    record = {
+        "prompt": prompt, "negative_prompt": negative_prompt or None,
+        "seed": int(seed), "cfg": cfg_scale, "guidance": guidance, "steps": steps,
+        "width": result["width"], "height": result["height"],
+        "input_image": str(input_image) if input_image else None,
+        "denoise": params["strength"],
+        "backend": "native", "model": models["label"],
+        "components": {k: v["name"] for k, v in (models.get("components") or {}).items()}
+        or None,
+        "loras": [{"name": x["name"], "strength": x["multiplier"]} for x in lora_files]
+        or None,
+        "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
+    }
+    entries = png_text_entries(record) if _embed_params(blk, write_sidecar) else None
     try:
-        _write_png(Path(out_path), result)
+        _write_png(Path(out_path), result, entries)
     except (OSError, ValueError) as e:
         return False, f"The generated image could not be saved: {e}"
     elapsed = time.monotonic() - started
     warning = ""
     if write_sidecar:
         warning = _write_sidecar(Path(out_path), {
-            "prompt": prompt, "negative_prompt": negative_prompt or None,
-            "seed": int(seed), "cfg": cfg_scale, "guidance": guidance, "steps": steps,
-            "width": result["width"], "height": result["height"],
-            "input_image": str(input_image) if input_image else None,
-            "denoise": params["strength"],
-            "backend": "native", "model": models["label"],
-            "components": {k: v["name"] for k, v in (models.get("components") or {}).items()}
-            or None,
-            "loras": [{"name": x["name"], "strength": x["multiplier"]} for x in lora_files]
-            or None,
-            "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
-            "elapsed_seconds": round(elapsed, 1),
+            **record, "elapsed_seconds": round(elapsed, 1),
             "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
     message = (f"Saved {Path(out_path).name} ({result['width']}x{result['height']}, "
