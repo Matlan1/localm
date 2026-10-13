@@ -100,8 +100,12 @@ def register(app: FastAPI, ctx) -> None:
         if mgr is not None:
             try:
                 warns = mgr.scope_deps_warnings(scope_list)
-            except Exception:
-                warns = []
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("could not check plugin readiness for granted scopes: %s",
+                             e, exc_info=True)
+                warns = ["Could not check whether the plugins behind these scopes "
+                         "are installed and ready; the key was created."]
             if warns:
                 created = {**created, "warnings": warns}
         # Lockout guard: in open mode the loopback GUI is trusted via the

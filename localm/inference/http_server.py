@@ -312,7 +312,10 @@ def _current_gpu_index() -> int:
         from localm.discover import last_gpu_reading, resolve_load_gpu_index
         return resolve_load_gpu_index(load_config(), gpus=last_gpu_reading() or [],
                                       quiet=True)
-    except Exception:
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("could not resolve the load GPU index, assuming device 0: %s",
+                     e, exc_info=True)
         return 0
 
 
@@ -2717,6 +2720,7 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
     def _run() -> None:
         fh = None
         last_dump = None
+        write_failed = False
         try:
             while not stop.wait(poll):
                 if _hb_monotonic is None:
@@ -2763,9 +2767,16 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
                             fh.write(f"\n--- thread {tid} ---\n")
                             fh.write("".join(traceback.format_stack(frame)))
                     fh.flush()
-                except Exception:
+                except Exception as e:
                     # The watchdog must never crash the process it is diagnosing.
-                    pass
+                    if not write_failed:
+                        write_failed = True
+                        try:
+                            from localm.debuglog import logger as _dbg
+                            _dbg.warning("hang watchdog: could not write the stall "
+                                         "trace to %s: %s", trace_path, e)
+                        except Exception:
+                            pass
         finally:
             if fh is not None:
                 try:
@@ -4478,7 +4489,7 @@ def _make_lifespan():
                 hb_task = asyncio.create_task(_hang_heartbeat_loop())
             except Exception as e:
                 from localm.debuglog import logger as _dbg
-                _dbg.debug("heartbeat task startup failed (continuing): %s", e)
+                _dbg.warning("heartbeat task startup failed (continuing): %s", e)
 
         # The stack-dump-on-stall THREAD keeps its own, unchanged privacy gate:
         # on by default in the log/full session modes (the trace file is lazy,
@@ -4508,7 +4519,7 @@ def _make_lifespan():
                     loop.slow_callback_duration = 0.5
             except Exception as e:
                 from localm.debuglog import logger as _dbg
-                _dbg.debug("hang watchdog startup failed (continuing): %s", e)
+                _dbg.warning("hang watchdog startup failed (continuing): %s", e)
 
         # Executor thread-pool saturation watch: a separate off-loop daemon
         # thread, always on (unlike the hang watchdog it sits beside, it logs
@@ -4541,8 +4552,8 @@ def _make_lifespan():
                     asyncio.get_running_loop(), anyio_limiter=anyio_limiter)
             except Exception as e:
                 from localm.debuglog import logger as _dbg
-                _dbg.debug("executor saturation watch startup failed "
-                          "(continuing): %s", e)
+                _dbg.warning("executor saturation watch startup failed "
+                             "(continuing): %s", e)
 
         # Stats prewarm: the CPU baseline and the first VRAM / GPU-load probes
         # start now, so the first status-bar poll finds readings. Skipped under
@@ -4598,7 +4609,7 @@ def _make_lifespan():
                     _hang_alarm_instance = hang_alarm
             except Exception as e:
                 from localm.debuglog import logger as _dbg
-                _dbg.debug("hang alarm startup failed (continuing): %s", e)
+                _dbg.warning("hang alarm startup failed (continuing): %s", e)
 
         # Cross-install GPU/VRAM coordination (see localm.gpu_registry): a real,
         # non-isolated, advertise()'d server (instance_id + port/scheme are set by

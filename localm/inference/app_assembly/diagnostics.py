@@ -120,14 +120,18 @@ def add_debug_stacks(app: FastAPI) -> None:
         # This handler IS async with a running loop, so unlike the background
         # saturation watch it can fetch anyio's default thread limiter fresh
         # on every call - no captured reference needed for THIS consumer.
+        executors_error = None
         try:
             from localm.inference._executor_health import executors_snapshot
             import anyio.to_thread
             executors = executors_snapshot(
                 asyncio.get_running_loop(),
                 anyio_limiter=anyio.to_thread.current_default_thread_limiter())
-        except Exception:
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("/debug/stacks: executor snapshot failed: %s", e, exc_info=True)
             executors = {}
+            executors_error = f"{type(e).__name__}: {e}"
         # None (cold start, before the heartbeat's first tick) renders as
         # JSON null, never as 0.0, so a stack dump taken during startup is not
         # reported as identically healthy to one taken with a real lag
@@ -135,4 +139,5 @@ def add_debug_stacks(app: FastAPI) -> None:
         lag = _hs._loop_lag_seconds()
         return {"pid": os.getpid(),
                 "loop_lag_s": round(lag, 2) if lag is not None else None,
-                "threads": threads, "tasks": tasks, "executors": executors}
+                "threads": threads, "tasks": tasks, "executors": executors,
+                "executors_error": executors_error}
