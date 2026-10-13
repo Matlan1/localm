@@ -30,6 +30,7 @@ import pytest
 
 from localm import netpolicy
 from localm.netpolicy import NetworkPolicyError, check_url
+from tests.conftest import set_config
 
 
 class _FakeSession:
@@ -66,11 +67,11 @@ def _allow_mode(monkeypatch):
     """net_mode=allow (so check_url runs the IP/host gates, not the off bail) and
     a default config (net_allow_private False, no allow/deny lists)."""
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
-    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    set_config(monkeypatch, lambda: {})
 
 
 def _cfg(monkeypatch, **cfg):
-    monkeypatch.setattr("localm.config.load_config", lambda: cfg)
+    set_config(monkeypatch, lambda: cfg)
 
 
 # --------------------------------------------------------------------------- #

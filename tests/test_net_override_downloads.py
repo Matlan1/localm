@@ -41,6 +41,7 @@ from fastapi.testclient import TestClient
 import huggingface_hub
 
 from localm import voice
+from tests.conftest import set_config
 
 OWNER_KEY = "owner-admin-key-f1-net-override"
 
@@ -62,9 +63,7 @@ def _voice_cfg(monkeypatch, tmp_path, net_mode: str, model: str = "base"):
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
     import localm.config as _cfg
-    monkeypatch.setattr(
-        _cfg, "load_config",
-        lambda: {"voice_stt_model": model, "net_mode": net_mode})
+    set_config(monkeypatch, lambda: {"voice_stt_model": model, "net_mode": net_mode})
 
 
 _FAKE_MODEL_BYTES = b"\x00"
@@ -144,9 +143,7 @@ class TestPrefetchPolicy:
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
         import localm.config as _cfg
-        monkeypatch.setattr(
-            _cfg, "load_config",
-            lambda: {"voice_stt_model": "base", "net_mode": "off",
+        set_config(monkeypatch, lambda: {"voice_stt_model": "base", "net_mode": "off",
                      "net_allow_model_downloads": True})
         calls = _snapshot_spy(monkeypatch, create=True)
         ok, reason = voice.prefetch_stt_model(allow_download=True)
@@ -673,7 +670,7 @@ class TestEmbeddingRoutes:
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
         import localm.config as _cfg
-        monkeypatch.setattr(_cfg, "load_config", lambda: {"net_mode": "off"})
+        set_config(monkeypatch, lambda: {"net_mode": "off"})
         monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
         from localm.inference import embedder as emb
         emb.reset_embedder()
@@ -694,9 +691,7 @@ class TestEmbeddingRoutes:
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
         import localm.config as _cfg
-        monkeypatch.setattr(
-            _cfg, "load_config",
-            lambda: {"net_mode": "off", "net_allow_model_downloads": True})
+        set_config(monkeypatch, lambda: {"net_mode": "off", "net_allow_model_downloads": True})
         monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
         from localm.inference import embedder as emb
         emb.reset_embedder()
@@ -731,7 +726,7 @@ class TestEmbeddingRoutes:
         monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
         from localm.inference import embedder as emb
         try:
-            monkeypatch.setattr(_cfg, "load_config", lambda: {"net_mode": "ask"})
+            set_config(monkeypatch, lambda: {"net_mode": "ask"})
             emb.reset_embedder()
             assert emb.resolve_embedding_model_path() is None
             ask_reason = emb.last_error()
@@ -739,7 +734,7 @@ class TestEmbeddingRoutes:
             assert "right now" in ask_reason, \
                 "ask must say the one-time action works NOW, not just name the mode"
 
-            monkeypatch.setattr(_cfg, "load_config", lambda: {"net_mode": "off"})
+            set_config(monkeypatch, lambda: {"net_mode": "off"})
             emb.reset_embedder()
             assert emb.resolve_embedding_model_path() is None
             off_reason = emb.last_error()

@@ -33,6 +33,7 @@ from tests._web_retrieval_fixtures import (
     nav_heavy_page,
     searx_json,
 )
+from tests.conftest import set_config
 
 _LONG = " ".join(f"Sentence number {i} about the visit." for i in range(15))
 
@@ -349,8 +350,7 @@ class TestSearchFailures:
         assert b.search_status == "failed"
 
     def test_policy_off_raises(self, monkeypatch):
-        monkeypatch.setattr("localm.config.load_config",
-                            lambda: {"net_mode": "off"})
+        set_config(monkeypatch, lambda: {"net_mode": "off"})
         with pytest.raises(netpolicy.NetworkPolicyError):
             retrieve(QUERY)
 

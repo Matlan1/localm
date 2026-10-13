@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _version, updater
+from tests.conftest import set_config
 
 
 def _opener(payload, status=200):
@@ -40,28 +41,28 @@ def _write_pyproject(d, deps, *, extras=None, requires_python="==3.12.*"):
 # ------------------------------- endpoint -------------------------------
 
 def test_endpoint_reuses_bugreport_config(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w.example", "bugreport_upload_token": "t"})
     assert updater.endpoint() == ("https://w.example", "t")
     assert updater.available() is True
 
 
 def test_endpoint_update_override_wins(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://bug", "bugreport_upload_token": "bt",
         "update_url": "https://upd", "update_token": "ut"})
     assert updater.endpoint() == ("https://upd", "ut")
 
 
 def test_unconfigured(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    set_config(monkeypatch, lambda: {})
     assert updater.available() is False
 
 
 # -------------------------------- check ---------------------------------
 
 def test_check_reports_newer(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
     op = _opener({"ok": True, "version": "v0.2.0", "notes": "stuff",
                   "asset": {"id": 3, "name": "localm-0.2.0.zip", "size": 9}})
@@ -74,21 +75,21 @@ def test_check_reports_newer(monkeypatch):
 
 
 def test_check_not_newer_when_same(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr(_version, "read_version", lambda: "0.2.0")
     res = updater.check(opener=_opener({"version": "v0.2.0"}))
     assert res["newer"] is False
 
 
 def test_check_no_releases(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
     res = updater.check(opener=_opener({"ok": True, "version": None}))
     assert res["latest"] is None and res["newer"] is False
 
 
 def test_check_comparable_true_for_a_real_tie(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr(_version, "read_version", lambda: "0.2.0")
     res = updater.check(opener=_opener({"version": "v0.2.0"}))
     assert res["newer"] is False and res["comparable"] is True
@@ -98,14 +99,14 @@ def test_check_comparable_false_for_an_unrecognized_tag(monkeypatch):
     """A tag the comparator cannot order (e.g. a "stable"/"nightly" release
     name) is reported as comparable=False rather than folded into "not
     newer"."""
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.4")
     res = updater.check(opener=_opener({"version": "nightly"}))
     assert res["newer"] is False and res["comparable"] is False
 
 
 def test_check_unconfigured_raises(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    set_config(monkeypatch, lambda: {})
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
         updater.check()
@@ -129,7 +130,7 @@ def _counting_opener(payload):
 
 def test_check_blocked_when_net_mode_off_never_calls_opener(monkeypatch):
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w", "net_mode": "off"})
     from localm.bugreport import LocalmError
     op = _counting_opener({"ok": True, "version": "v9.9.9"})
@@ -146,7 +147,7 @@ def test_check_net_mode_off_but_exempted_still_calls_opener(monkeypatch):
     the opener IS invoked, and the result is a normal successful check (not the
     blocked path)."""
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w", "net_mode": "off",
         "update_ignore_net_policy": True})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
@@ -162,7 +163,7 @@ def test_check_ask_and_allow_modes_are_unaffected(monkeypatch, mode):
     """The gate fires only on the literal 'off' kill switch, so it is a no-op
     for the default 'ask' mode and for 'allow'."""
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w", "net_mode": mode})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
     op = _counting_opener({"ok": True, "version": "v0.2.0"})
@@ -175,7 +176,7 @@ def test_check_env_var_off_blocks_even_with_config_ask(monkeypatch):
     """LOCALM_NET_MODE overrides config, matching network_mode()'s own
     precedence - a blocked check via the env var must also never call out."""
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w", "net_mode": "ask"})
     from localm.bugreport import LocalmError
     op = _counting_opener({"ok": True, "version": "v0.2.0"})
@@ -184,14 +185,24 @@ def test_check_env_var_off_blocks_even_with_config_ask(monkeypatch):
     assert op.calls["n"] == 0
 
 
-def test_net_policy_allows_update_check_fails_safe_on_unreadable_config(monkeypatch):
-    """An unreadable config resolves to BLOCKED, never exempted."""
+def test_net_policy_allows_update_check_fails_safe_on_unreadable_config(monkeypatch, tmp_path):
+    """A config.json that exists and cannot be read resolves to BLOCKED, never
+    exempted, even when it held an explicit exemption."""
+    import json
+    import localm.config as cfg
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-
-    def boom():
-        raise OSError("config unreadable")
-
-    monkeypatch.setattr("localm.config.load_config", boom)
+    home = tmp_path / ".localm"
+    home.mkdir()
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    (home / "config.json").write_text(
+        json.dumps({"net_mode": "ask", "update_ignore_net_policy": True}),
+        encoding="utf-8")
+    assert updater._net_policy_allows_update_check() is True
+    (home / "config.json").write_bytes(bytes([0xFF, 0xFE, 0x00, 0x20]))
+    (home / "config.json.bak").write_bytes(bytes([0xFF, 0xFE, 0x00, 0x20]))
     assert updater._net_policy_allows_update_check() is False
 
 
@@ -200,7 +211,7 @@ def test_net_policy_allows_update_check_fails_safe_on_unreadable_config(monkeypa
 def test_check_stable_by_default_no_channel_param(monkeypatch):
     """Opt-in only: with the setting absent OR explicitly False, the request
     carries no query string at all, not even an empty one."""
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
     op = _opener({"ok": True, "version": "v0.2.0"})
     updater.check(opener=op)
@@ -209,7 +220,7 @@ def test_check_stable_by_default_no_channel_param(monkeypatch):
 
 
 def test_check_prerelease_opt_in_adds_channel_param(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w", "update_allow_prerelease": True})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
     op = _opener({"ok": True, "version": "v0.2.0"})
@@ -218,11 +229,11 @@ def test_check_prerelease_opt_in_adds_channel_param(monkeypatch):
 
 
 def test_prerelease_channel_enabled_reads_the_setting(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"update_allow_prerelease": True})
+    set_config(monkeypatch, lambda: {"update_allow_prerelease": True})
     assert updater._prerelease_channel_enabled() is True
-    monkeypatch.setattr("localm.config.load_config", lambda: {"update_allow_prerelease": False})
+    set_config(monkeypatch, lambda: {"update_allow_prerelease": False})
     assert updater._prerelease_channel_enabled() is False
-    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    set_config(monkeypatch, lambda: {})
     assert updater._prerelease_channel_enabled() is False, "absent -> stable-only, not offered"
 
 
@@ -238,7 +249,7 @@ def test_opting_out_after_an_rc_does_not_strand_or_downgrade(monkeypatch):
     """A client on 0.1.4-rc2 that opts back out, while the stable channel's
     latest is still older (0.1.3), stays on the rc: not newer, no downgrade
     offered, no crash."""
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w", "update_allow_prerelease": False})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.4-rc2")
     res = updater.check(opener=_opener({"ok": True, "version": "0.1.3"}))
@@ -345,7 +356,7 @@ def test_class_summary_is_human():
 # ------------------------------ download --------------------------------
 
 def test_download_streams_to_file(tmp_path, monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w", "bugreport_upload_token": "tok"})
     dest = tmp_path / "build.zip"
     captured = {}
@@ -362,7 +373,7 @@ def test_download_streams_to_file(tmp_path, monkeypatch):
 
 
 def test_download_bad_asset_id_raises(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
         updater.download("not-a-number", "/tmp/x")
@@ -371,7 +382,7 @@ def test_download_bad_asset_id_raises(monkeypatch):
 def test_download_refuses_non_https_endpoint(tmp_path, monkeypatch):
     """A code-update download over the real urllib path refuses a non-HTTPS
     endpoint."""
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "http://insecure.example"})   # http, not https
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
@@ -434,7 +445,7 @@ def _fake_install(tmp_path, deps=("click",)):
 
 
 def test_apply_reboot_swaps_and_reports(tmp_path, monkeypatch, sig_env):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
     op, sig = _signed_build("0.2.0", ["click"])
@@ -446,7 +457,7 @@ def test_apply_reboot_swaps_and_reports(tmp_path, monkeypatch, sig_env):
 
 
 def test_apply_deps_runs_post_command(tmp_path, monkeypatch, sig_env):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
     ran = []
@@ -458,7 +469,7 @@ def test_apply_deps_runs_post_command(tmp_path, monkeypatch, sig_env):
 
 
 def test_apply_rolls_back_on_post_command_failure(tmp_path, monkeypatch, sig_env):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
     op, sig = _signed_build("0.2.0", ["click", "httpx"])
@@ -472,7 +483,7 @@ def test_apply_rolls_back_on_post_command_failure(tmp_path, monkeypatch, sig_env
 
 
 def test_rollback_last_restores(tmp_path, monkeypatch, sig_env):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
     op, sig = _signed_build("0.2.0", ["click"])
@@ -486,7 +497,7 @@ def test_rollback_last_restores(tmp_path, monkeypatch, sig_env):
 def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch, sig_env):
     """If the post-update step fails AND rollback also fails, apply() must say so
     (manual recovery needed) - never report a clean rollback over a broken install."""
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
     from localm import _apply_update as au
@@ -503,7 +514,7 @@ def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch, sig_env):
 
 
 def test_rollback_last_without_backup_raises(tmp_path, monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home2")
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
@@ -557,7 +568,7 @@ def test_apply_removes_stale_manifest_when_write_fails(tmp_path, monkeypatch, si
     set. apply() unlinks it before the swap and WARNS on the failed write."""
     import logging
     from pathlib import Path
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     home = tmp_path / "home"
     monkeypatch.setattr("localm.config.home_dir", lambda: home)
     inst = _fake_install(tmp_path, deps=("click",))
@@ -623,7 +634,7 @@ def test_apply_early_abort_preserves_prior_manifest(tmp_path, monkeypatch, sig_e
     """The manifest unlink sits AFTER download/verify/extract, so an EARLY abort
     (bad signature, downgrade, corrupt zip) leaves the PREVIOUS update's
     still-valid applied_names.json intact."""
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     home = tmp_path / "home"
     monkeypatch.setattr("localm.config.home_dir", lambda: home)
     inst = _fake_install(tmp_path, deps=("click",))
@@ -651,7 +662,7 @@ def test_apply_warns_when_prior_manifest_unlink_fails(tmp_path, monkeypatch, sig
     and the subsequent write still overwrites it."""
     import logging
     from pathlib import Path
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     home = tmp_path / "home"
     monkeypatch.setattr("localm.config.home_dir", lambda: home)
     inst = _fake_install(tmp_path, deps=("click",))
@@ -684,7 +695,7 @@ def test_apply_warns_when_prior_manifest_unlink_fails(tmp_path, monkeypatch, sig
 # stable path only after that run's own swap has succeeded (_promote_backup).
 
 def _setup_apply_env(tmp_path, monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     home = tmp_path / "home"
     monkeypatch.setattr("localm.config.home_dir", lambda: home)
     return home, _fake_install(tmp_path, deps=("click",))

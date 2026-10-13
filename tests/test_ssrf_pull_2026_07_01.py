@@ -6,6 +6,7 @@ pull URL and its redirects.
 """
 
 import pytest
+from tests.conftest import set_config
 
 
 def test_pull_model_refused_when_net_mode_off(monkeypatch):
@@ -71,9 +72,7 @@ def test_ssrf_resolver_proceeds_when_downloads_allowed_despite_off(monkeypatch):
     import localm.netpolicy as netpolicy
     from localm.model_manager.pull import _ssrf_resolve_final_url
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
-    monkeypatch.setattr(
-        _cfg, "load_config",
-        lambda: {"net_mode": "off", "net_allow_model_downloads": True})
+    set_config(monkeypatch, lambda: {"net_mode": "off", "net_allow_model_downloads": True})
     calls = []
 
     class _Resp:
