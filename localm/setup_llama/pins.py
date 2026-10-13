@@ -151,6 +151,13 @@ _TRACK_DEFAULT = "default"
 # localm-built or localm-hosted binary.
 _CUDA_LINUX_REPO = "hybridgroup/llama-cpp-builder"
 
+# Offline checksums for the Linux CUDA assets of _PINNED_TAG on _CUDA_LINUX_REPO.
+# Only consulted when that repo's release listing is unavailable.
+_CUDA_LINUX_PINNED_SHA256 = {
+    "llama-b11541-bin-ubuntu-cuda-13-x64.tar.gz": "26a4f126a6de5004d92b9a47e67f5e405cfaa0b9520e3df5ae387c25e727c7fa",
+    "llama-b11541-bin-ubuntu-cuda-x64.tar.gz": "f00cf0a5c832746380f3d3980004633b01751f8640db0be4d14241a749739792",
+}
+
 
 # Offline checksums for the assets of the pinned builds. Only consulted when the
 # release API is unreachable or publishes no `digest` - the online path reads the

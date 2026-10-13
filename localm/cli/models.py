@@ -241,7 +241,7 @@ def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
         usage = engine.speculation_usage() or {}
         status = usage.get("reason")
         usable = source == "off" or usage.get("state") not in (None, "unavailable")
-        if source == "draft" and engine.draft_model_on_gpu() is False:
+        if source == "draft" and engine.draft_model_status() == "ok-cpu":
             console.print("[yellow]The draft model runs on the CPU (the model "
                           "runs on the CPU, or the draft model does not fit in "
                           "VRAM beside it).[/yellow]")
@@ -555,7 +555,13 @@ def bench_spec(model, source, draft_model, gen_tokens, rounds, ctx, gpu_layers,
     draft_path = None
     if source == "draft":
         from ..inference.engine import resolve_spec_draft_model
-        draft_path = resolve_spec_draft_model(load_config(), draft_model)
+        cfg = load_config()
+        draft_path = resolve_spec_draft_model(cfg, draft_model)
+        draft_name = str(draft_model if draft_model is not None
+                         else cfg.get("spec_draft_model") or "").strip()
+        if not draft_path and draft_name:
+            console.print(f"[red]Draft model not found:[/red] {escape(draft_name)}")
+            sys.exit(1)
         if not draft_path:
             console.print("[red]No draft model:[/red] pass --draft-model or set "
                           "spec_draft_model. `localm spec-drafts "
@@ -1011,7 +1017,8 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
     """Register a local model file, a HuggingFace model directory, or a folder of them.
 
     Also reads where other tools keep models: the Hugging Face hub cache, an Ollama
-    model store, and a .llamafile (its model is unpacked into the models folder).
+    model store, the Jan app's data folder, GPT4All's download folder (finished GGUF
+    files only), and a .llamafile (its model is unpacked into the models folder).
 
     Duplicate detection is two-tier: the resolved path is checked first,
     then the file's SHA256 against digests stored in the registry. For large
@@ -1029,6 +1036,7 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
       localm add D:\\models\\mymodel.gguf --store move   # move into <data dir>/models
       localm add ~/.cache/huggingface   # the Hugging Face cache, in place
       localm add ~/.ollama              # every GGUF model in Ollama's store
+      localm add ~/.local/share/Jan/data   # every model in Jan's store, projectors attached
       localm add D:\\models\\tiny.llamafile   # unpacks the model into <data dir>/models
     """
     # Resolve add_local from the package at call time so tests that monkeypatch
@@ -1307,6 +1315,13 @@ def info():
     console.print(f"  [bold]config     [/bold]   {escape(str(HOME_DIR / 'config.json'))}")
     binaries_s = escape(str(binary_dir)) if binary_dir else "[dim]not found[/dim]"
     console.print(f"  [bold]binaries   [/bold]   {binaries_s}")
+    from ..config import _is_portable_home, temp_dir
+    mode_s = ("portable (data folder inside the install)"
+              if _is_portable_home(HOME_DIR) else "standard")
+    temp_path = temp_dir(HOME_DIR)
+    temp_s = escape(str(temp_path)) if temp_path else "system temp folder"
+    console.print(f"  [bold]mode       [/bold]   {mode_s}")
+    console.print(f"  [bold]temp dir   [/bold]   {temp_s}")
     console.print()
     for k, v in sorted(cfg.items()):
         # `cfg` is DEFAULT_CONFIG overlaid with the raw contents of

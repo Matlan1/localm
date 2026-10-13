@@ -22,12 +22,15 @@ def tool_generate_image(
     input_image: Optional[str] = None,
     denoise: Optional[float] = None,
     _privacy: bool = False,
+    _cancel=None,
 ) -> ToolResult:
     """Generate with the image plugin's selected backend: the native one through
     ``backend.generate_unless_comfy``, else localm.image_gen.comfy.generate_image.
 
     In privacy mode (``_privacy=True``, injected by the agent) the prompt
-    sidecar is suppressed so no prompt trace is written to disk."""
+    sidecar is suppressed so no prompt trace is written to disk. _cancel
+    (injected by the agent) is the run's cancel check: once it returns True the
+    generation is stopped."""
     import os
 
     from localm.image_gen.comfy import generate_image
@@ -45,7 +48,7 @@ def tool_generate_image(
         guidance=guidance, negative_prompt=negative_prompt, seed=seed,
         lora_name=lora_name, lora_strength_model=lora_strength_model,
         lora_strength_clip=lora_strength_clip, input_image=input_p, denoise=denoise,
-        write_sidecar=not _privacy, delete_outputs=_privacy)
+        write_sidecar=not _privacy, delete_outputs=_privacy, cancel_check=_cancel)
     if native is not None:
         ok, message = native
         if ok:
@@ -71,6 +74,7 @@ def tool_generate_image(
         denoise=denoise,
         write_sidecar=not _privacy,
         delete_outputs=_privacy,
+        cancel_check=_cancel,
     )
     if ok:
         rel = out_p.relative_to(cwd) if out_p.is_relative_to(cwd) else out_p

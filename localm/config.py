@@ -343,6 +343,8 @@ _GPU_CACHE_PINS = (
     ("AMD_COMGR_CACHE_DIR", "comgr"),
     ("MIOPEN_USER_DB_PATH", "miopen/db"),
     ("MIOPEN_CUSTOM_CACHE_DIR", "miopen/cache"),
+    ("MESA_SHADER_CACHE_DIR", "mesa"),
+    ("__GL_SHADER_DISK_CACHE_PATH", "glcache"),
 )
 
 
@@ -351,18 +353,21 @@ def _gpu_pin_marker(var: str) -> str:
 
 
 def gpu_cache_dirs() -> dict:
-    """localm's OWN AMD GPU compiler caches, ``{env var: path}``, inside the data dir.
+    """localm's OWN GPU driver caches, ``{env var: path}``, inside the data dir.
 
     comgr (the HIP runtime's kernel compiler) keeps its LLVM object cache under
     ``%LOCALAPPDATA%\\comgr`` and MIOpen (torch convolutions) keeps its kernel cache and
-    tuning database under ``~/.miopen`` when these variables are unset. Those are
-    per-user locations OUTSIDE the data dir that "delete saved data" never reaches.
-    Siblings of the pip / uv / whisper / Hugging Face caches under ``cache_dir()``."""
+    tuning database under ``~/.miopen`` when these variables are unset. Mesa
+    (``MESA_SHADER_CACHE_DIR``) and the NVIDIA Linux driver
+    (``__GL_SHADER_DISK_CACHE_PATH``) keep compiled OpenGL shaders under ``~/.cache``.
+    Those are per-user locations OUTSIDE the data dir that "delete saved data" never
+    reaches. Siblings of the pip / uv / whisper / Hugging Face caches under
+    ``cache_dir()``."""
     return {var: cache_dir().joinpath(*sub.split("/")) for var, sub in _GPU_CACHE_PINS}
 
 
 def contained_gpu_cache_env(base: Optional[dict] = None) -> dict:
-    """An environment with the AMD GPU cache variables pinned inside the data dir.
+    """An environment with the GPU driver cache variables pinned inside the data dir.
 
     *base* defaults to a copy of the current process environment. A variable the user
     set (other than localm's own earlier pin of it) is left exactly as set;
@@ -924,6 +929,11 @@ DEFAULT_CONFIG: dict = {
     "rag_rerank": True,
     "rag_rerank_model": "",
     "rag_rerank_candidates": 20,
+    # The reranker score a hit needs to count as relevant when chat asks for
+    # relevant hits only, in the reranker's own scale. None = the measured value
+    # for the reranker files in localm.rag.rerank.CALIBRATED_MIN_SCORES, and the
+    # cosine/keyword floor for any other reranker.
+    "rag_rerank_min_score": None,
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,

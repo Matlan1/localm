@@ -5,10 +5,15 @@ chunks against the query with a registered reranker GGUF, as configured by
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple, Optional
+
+from localm.debuglog import logger as _log
 
 from ._store.search import DEFAULT_RERANK_CANDIDATES
 from ._store.types import RerankFn
+
+_WARNED_MIN_SCORES: set[str] = set()
 
 MIN_CANDIDATES = 5
 MAX_CANDIDATES = 100
@@ -22,8 +27,9 @@ class RerankPlan(NamedTuple):
     registered name when *fn* is set; *note* says why a wanted rerank cannot run
     (None when reranking is off or simply not installed); *min_score* is the
     reranker score a hit needs to count as relevant under
-    ``relevant_only``, or None when the reranker is not calibrated and the
-    relevance floor stays the gate."""
+    ``relevant_only``: the ``rag_rerank_min_score`` setting, else the measured
+    value for the reranker file, else None and the relevance floor stays the
+    gate."""
     fn: Optional[RerankFn]
     candidates: int
     model: Optional[str]
@@ -51,6 +57,25 @@ def calibrated_min_score(name: str) -> Optional[float]:
     if not isinstance(entry, dict):
         return None
     return CALIBRATED_MIN_SCORES.get(str(entry.get("sha256") or "").lower())
+
+
+def configured_min_score(cfg: dict, calibrated: Optional[float]) -> Optional[float]:
+    """``rag_rerank_min_score`` from *cfg* when it is a finite number, else
+    *calibrated*. A value that is set but unusable is logged and ignored."""
+    raw = cfg.get("rag_rerank_min_score")
+    if raw is None or raw == "":
+        return calibrated
+    if not isinstance(raw, bool):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = math.nan
+        if math.isfinite(value):
+            return value
+    if repr(raw) not in _WARNED_MIN_SCORES:
+        _WARNED_MIN_SCORES.add(repr(raw))
+        _log.warning("Ignoring rag_rerank_min_score=%r: not a finite number", raw)
+    return calibrated
 
 
 def make_rerank_fn(model: Optional[str] = None) -> tuple[str, RerankFn]:
@@ -109,4 +134,5 @@ def rerank_plan(cfg: Optional[dict] = None, *,
         name, fn = make_rerank_fn(model)
     except reranker.RerankerModelError as e:
         return RerankPlan(None, candidates, None, str(e))
-    return RerankPlan(fn, candidates, name, None, calibrated_min_score(name))
+    return RerankPlan(fn, candidates, name, None,
+                      configured_min_score(cfg, calibrated_min_score(name)))

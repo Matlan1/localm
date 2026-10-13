@@ -8,6 +8,7 @@ import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDange
 import { t, tOr } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
+import { nativeModelSelect } from "../app/native-models.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -1847,26 +1848,32 @@ export async function refreshSettingsPage() {
   // sections; fields is passed through so the two managed-ComfyUI schema
   // fields (group="Media", skipped from the flat loop above) can be rendered
   // here instead.
-  await buildMediaSection(form, fields);
-  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+  const tailLoading = el("div", "sub settings-loading", t("settings.loadingMore"));
+  form.appendChild(tailLoading);
+  try {
+    await buildMediaSection(form, fields);
+    if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
-  // user_avatar / model_avatar_default / model_avatar_overrides: HIDDEN
-  // schema fields (skipped from the flat loop above, same as Media's own
-  // fields), rendered here with their own picker UI instead.
-  await buildAvatarsSection(form, fields);
-  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+    // user_avatar / model_avatar_default / model_avatar_overrides: HIDDEN
+    // schema fields (skipped from the flat loop above, same as Media's own
+    // fields), rendered here with their own picker UI instead.
+    await buildAvatarsSection(form, fields);
+    if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
-  // The tts plugin's own settings block (its own section in the Plugins group).
-  // Not part of the core schema: those keys live under config["plugins"]["tts"]
-  // and are edited through /v1/tts/config, like the media blocks above.
-  await buildTtsSection(form);
-  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+    // The tts plugin's own settings block (its own section in the Plugins group).
+    // Not part of the core schema: those keys live under config["plugins"]["tts"]
+    // and are edited through /v1/tts/config, like the media blocks above.
+    await buildTtsSection(form);
+    if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
-  // Any OTHER active plugin's own contributed fields (host.add_settings()),
-  // one section per plugin - the generic counterpart to the tts block above
-  // for a plugin the core has no bespoke schema for.
-  await buildPluginSettingsSections(form);
-  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+    // Any OTHER active plugin's own contributed fields (host.add_settings()),
+    // one section per plugin - the generic counterpart to the tts block above
+    // for a plugin the core has no bespoke schema for.
+    await buildPluginSettingsSections(form);
+    if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+  } finally {
+    tailLoading.remove();
+  }
 
   // Build the nav now that the schema sections exist, so the first config
   // section (not a static card) is the default tab. The owner-gated panels then
@@ -3355,6 +3362,7 @@ export function renderMediaSubsection(name) {
   }
   _mediaControls[name] = controls;
   sub.appendChild(grid);
+  enhanceNativeModelFields(name, controls);
 
   const actions = el("div", "actions");
   // R11/R13: client-side "Copy from <other>" - prefills this subsection's shared
@@ -3375,6 +3383,71 @@ export function renderMediaSubsection(name) {
   save.onclick = () => saveMediaPlugin(name);
   actions.appendChild(save);
   sub.appendChild(actions);
+}
+
+const NATIVE_MODEL_ROUTES = { image: "imagine", video: "video", music: "music" };
+const CUSTOM_PATH = "__custom_path__";
+
+/** The registered models each native model setting can name, from the
+ *  page's native-models route: `{fieldKey: [{name, file, family_label}]}`. */
+function nativeFieldOptions(name, data) {
+  if (name === "music") {
+    const c = data.components || {};
+    return { native_dit: c.dit, native_text_encoder: c.text_encoder,
+             native_vae: c.vae, native_lm: c.lm };
+  }
+  const s = data.slots || {};
+  return { native_model: data.models, native_clip_l: s.clip_l, native_clip_g: s.clip_g,
+           native_t5xxl: s.t5xxl, native_llm: s.llm, native_vae: s.vae,
+           native_clip_vision: s.clip_vision };
+}
+
+/** Put a dropdown of registered models in front of each native model text
+ *  field of media subsection *name*. The text box stays the saved value: a
+ *  pick writes the model name into it; "Custom path..." (or a saved value that
+ *  is not a registered name) shows it for a file path. */
+export async function enhanceNativeModelFields(name, controls) {
+  const route = NATIVE_MODEL_ROUTES[name];
+  if (!route) return;
+  const keys = new Set(["native_model", "native_clip_l", "native_clip_g", "native_t5xxl",
+    "native_llm", "native_vae", "native_clip_vision", "native_dit", "native_text_encoder",
+    "native_lm"]);
+  const targets = controls.filter((c) => keys.has(c.field.key));
+  if (!targets.length) return;
+  let data;
+  try {
+    const r = await fetch(`/api/${route}/native-models`, { headers: authHeaders() });
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+  const opts = nativeFieldOptions(name, data);
+  for (const c of targets) {
+    const input = c.node.querySelector("input");
+    if (!input || c.node.querySelector("select.native-model-select")) continue;
+    const items = opts[c.field.key] || [];
+    const value = input.value.trim();
+    const known = !value || items.some((it) => it.name === value);
+    const sel = nativeModelSelect(items, known ? value : "", t("settings.nativeModel.automatic"));
+    sel.classList.add("native-model-select");
+    const custom = document.createElement("option");
+    custom.value = CUSTOM_PATH;
+    custom.textContent = t("settings.nativeModel.customPath");
+    sel.appendChild(custom);
+    if (!known) sel.value = CUSTOM_PATH;
+    input.hidden = known;
+    sel.onchange = () => {
+      if (sel.value === CUSTOM_PATH) {
+        input.hidden = false;
+        input.focus();
+      } else {
+        input.hidden = true;
+        input.value = sel.value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      c.node.classList.remove("media-inherited");
+    };
+    input.before(sel);
+  }
 }
 
 /** R11: prefill the *to* subsection's shared fields from the *from* subsection's

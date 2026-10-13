@@ -242,6 +242,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if not is_safe_lora_name(stripped):
                 raise HTTPException(400, "Invalid LoRA name")
             req.lora_name = stripped
+        from localm.media.native_models import apply_choice, validate_choice
+        try:
+            native_choice = validate_choice(req.native_models, kind)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
         from localm.media.comfy_client import describe_missing_models
         from localm.media.managed_comfy import resolve_comfy_target
         from localm.model_manager.comfy_resolve import (
@@ -262,9 +267,20 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if s.get("backend") != "native":
                 return None
             native = import_module(f"localm.plugins.builtin.{kind}.backends.native")
+            s = apply_choice(s, native_choice)
             st = native.status(s)
             if not st["missing"]:
                 return {"status": "verified", "missing": [], "warning": None}
+            all_parts = st.get("missing_components") or []
+            parts = [p for p in all_parts if p.get("download")]
+            if parts:
+                return {"status": "verified",
+                        "warning": st["missing"] if len(parts) < len(all_parts) else None,
+                        "missing": [{
+                    "filename": p["download"]["filename"], "native": True,
+                    "searchable": False, "slot": p["slot"],
+                    "source": {**p["download"], "name": None, "origin": "curated"},
+                } for p in parts]}
             if (s.get("native") or {}).get("model"):
                 return {"status": "verified", "missing": [], "warning": st["missing"]}
             rec = st["recommended"]
@@ -288,6 +304,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if s.get("backend") != "native":
                 return None
             from localm.plugins.builtin.music.backends import native
+            s = apply_choice(s, native_choice)
             st = native.status(s)
             configured = s.get("native") or {}
             from localm.media.koboldcpp.models import LABELS
@@ -298,7 +315,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             return {"status": "verified", "warning": warning, "missing": [{
                 "filename": m["file"], "native": True, "searchable": False,
                 "source": {"repo": m["repo"], "file": m["file"], "spec": m["spec"],
-                           "sha256": None, "name": m["name"], "size_bytes": m["size_bytes"],
+                           "sha256": m["sha256"], "name": m["name"], "size_bytes": m["size_bytes"],
                            "model_type": m["model_type"], "origin": "curated"},
             } for m in st["missing"]]}
 
@@ -448,7 +465,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 "'ComfyUI folder' field in Settings > Media (per-plugin or "
                 "shared), or enable the managed ComfyUI instance.")
         args = ["pull", "--type", source.model_type, "--comfy-dest-dir", str(dest_dir),
-                "--no-register", "--", source.spec]
+                "--no-register"]
+        if source.sha256:
+            args += ["--sha256", source.sha256]
+        args += ["--", source.spec]
         job = jobs.start_cli("pull", args, extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",

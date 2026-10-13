@@ -671,12 +671,18 @@ def _run_gh(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
 def _verify_main_checkout(repo: Path) -> None:
     """Raise PipelineError unless *repo* resolves as its own git toplevel
     and is currently on master."""
-    toplevel = _run_git(["rev-parse", "--show-toplevel"], cwd=repo).stdout.strip()
+    top = _run_git(["rev-parse", "--show-toplevel"], cwd=repo)
+    if top.returncode != 0:
+        raise InfraError(f"could not read the main checkout's git toplevel: {top.stderr.strip()}")
+    toplevel = top.stdout.strip()
     if Path(toplevel).resolve() != repo.resolve():
         raise PipelineError(
             f"scripts/pin_pipeline.py must run from the main checkout, not a worktree "
             f"(git toplevel is {toplevel!r}, expected {repo})")
-    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo).stdout.strip()
+    head = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo)
+    if head.returncode != 0:
+        raise InfraError(f"could not read the main checkout's branch: {head.stderr.strip()}")
+    branch = head.stdout.strip()
     if branch != "master":
         raise PipelineError(f"main checkout is on {branch!r}, not master; refusing to "
                             "proceed until it is back on master")

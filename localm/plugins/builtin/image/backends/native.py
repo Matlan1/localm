@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.media.sdcpp import families, pairing
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
 from localm.media.sdcpp.files import ModelFileError as _ModelError
@@ -100,13 +101,17 @@ def missing_model_message() -> str:
     rec = RECOMMENDED_MODELS[0]
     return (f"No native image model is set up. Download the recommended one "
             f"({rec.name}, {rec.size_bytes / 1024 ** 3:.1f} GB) with "
-            f"'localm pull {rec.spec} --type diffusion-unet', or set "
+            f"'localm pull {rec.spec} --type diffusion-unet --sha256 {rec.sha256}', or set "
             "'Native image model' in Settings > Images to a model you have.")
 
 
 def resolve_models(s: dict) -> dict:
     """The model files the native backend would load for settings *s*:
-    ``{"key", "ctx", "label", "recommended"}``. Raises ``_ModelError`` with a
+    ``{"key", "ctx", "label", "recommended", "family", "components",
+    "notes", "defaults"}`` (see ``pairing.build_context``; ``defaults`` is the
+    family's ``families.Defaults`` or None). A diffusion model's missing text
+    encoders and VAE are picked from the registry. Raises ``_ModelError``
+    (``pairing.MissingComponents`` when a companion file is missing) with a
     user-facing reason when they cannot be resolved."""
     blk = _native_block(s)
     model = (blk.get("model") or "").strip()
@@ -120,21 +125,19 @@ def resolve_models(s: dict) -> dict:
         if found is None:
             raise _ModelError(missing_model_message())
         label, main, rec = found
-    ctx: dict = {}
-    components = {}
-    for key, field in _COMPONENT_FIELDS:
+    explicit = {}
+    for key, _field in _COMPONENT_FIELDS:
         value = (blk.get(key) or "").strip()
         if value:
-            components[field] = str(_resolve_file(value, key.replace("_", "-")))
-    has_encoders = any(f in components for f in ("clip_l_path", "clip_g_path",
-                                                 "t5xxl_path", "llm_path"))
-    if has_encoders:
-        ctx["diffusion_model_path"] = str(main)
-    else:
-        ctx["model_path"] = str(main)
-    ctx.update(components)
+            explicit[key] = (display_name(value), _resolve_file(value, key.replace("_", "-")))
+    built = pairing.build_context(main, label, explicit, where="Settings > Images",
+                                  media="image")
+    ctx = built["ctx"]
     key = tuple(sorted(ctx.items()))
-    return {"key": key, "ctx": ctx, "label": label, "recommended": rec}
+    info = built["info"]
+    return {"key": key, "ctx": ctx, "label": label, "recommended": rec,
+            "family": info.family, "components": built["components"],
+            "notes": built["notes"], "defaults": families.defaults_for(info)}
 
 
 def _runtime_choice(s: dict) -> str:
@@ -175,9 +178,13 @@ def status(s: dict) -> dict:
     None), ``missing`` (the reason no model resolves, or None) and
     ``recommended`` (the curated download offered when no model is set up)."""
     rt = sd_runtime.resolve(_runtime_choice(s))
+    family, components, parts, notes = None, {}, [], []
     try:
         models = resolve_models(s)
         model, missing = models["label"], None
+        family, components, notes = models["family"], models["components"], models["notes"]
+    except pairing.MissingComponents as e:
+        model, missing, family, parts = None, str(e), e.family, e.missing
     except Exception as e:  # noqa: BLE001
         model, missing = None, str(e)
     rec = RECOMMENDED_MODELS[0]
@@ -186,6 +193,10 @@ def status(s: dict) -> dict:
         "runtime_choice": _runtime_choice(s),
         "model": model,
         "missing": missing,
+        "family": family,
+        "components": components,
+        "missing_components": parts,
+        "notes": notes,
         "loaded": shared.worker_pid() is not None,
         "recommended": {"name": rec.name, "repo": rec.repo, "file": rec.file,
                         "spec": rec.spec, "sha256": rec.sha256,
@@ -221,12 +232,15 @@ def vram_estimate_bytes(s: dict) -> Optional[int]:
     return int(total * 1.2) + COMPUTE_ALLOWANCE_BYTES
 
 
-def _default_size(version: str, rec: Optional[RecommendedModel], blk: dict) -> tuple[int, int]:
+def _default_size(version: str, rec: Optional[RecommendedModel], blk: dict,
+                  defaults: Optional[families.Defaults] = None) -> tuple[int, int]:
     w, h = blk.get("width"), blk.get("height")
     if isinstance(w, int) and isinstance(h, int):
         return w, h
     if rec is not None:
         return rec.width, rec.height
+    if defaults is not None:
+        return defaults.width, defaults.height
     v = (version or "").lower()
     if v.startswith("sd 1") or v.startswith("sd 2"):
         return 512, 512
@@ -322,8 +336,10 @@ def refusal(*, model_overrides=None, lora_name=None,
         return ("Workflow model choices apply to ComfyUI. The native backend uses "
                 "the model set in Settings > Images.")
     if lora_name:
-        return ("LoRAs are not supported by the native image backend yet; "
-                "use the ComfyUI backend for LoRA generation.")
+        try:
+            pairing.resolve_loras([{"name": lora_name}], None)
+        except _ModelError as e:
+            return str(e)
     if (width is None) != (height is None):
         return "Give both width and height, or neither."
     if width is not None and height is not None:
@@ -362,13 +378,17 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
              placement: Optional[dict] = None,
              on_progress=None,
              width: Optional[int] = None,
-             height: Optional[int] = None) -> tuple[bool, str]:
+             height: Optional[int] = None,
+             loras: Optional[list] = None) -> tuple[bool, str]:
     """Generate one image of *prompt* into *out_path* (a PNG without embedded
     metadata). Returns ``(ok, message)``. Writes only
     *out_path* and, when *write_sidecar*, ``<out_path>.json``.
 
-    ComfyUI-only inputs are refused with a reason rather than ignored:
-    ``model_overrides`` (workflow model slots) and ``lora_name``.
+    *loras* (``[{"name", "strength"}]``) and *lora_name* (with
+    *lora_strength_model*) name registered LoRAs (``pairing.resolve_loras``);
+    *lora_strength_clip* has no native counterpart and is ignored.
+    ``model_overrides`` (ComfyUI workflow model slots) is refused with a
+    reason rather than ignored.
     ``delete_outputs`` has nothing to act on (there is no second copy).
     *swap* asks this backend to unload the chat model itself, used when the
     caller's own unload did not succeed."""
@@ -387,6 +407,20 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         return False, str(e)
     blk = _native_block(s)
     rec = models["recommended"]
+    defaults = models.get("defaults")
+    wanted = list(loras or [])
+    if lora_name:
+        wanted.append({"name": lora_name, "strength": lora_strength_model})
+    try:
+        lora_files, lora_notes = pairing.resolve_loras(wanted, models.get("family"))
+    except _ModelError as e:
+        return False, str(e)
+    for note in list(models.get("notes") or ()) + lora_notes:
+        say(note)
+    if lora_files:
+        say("LoRA: " + ", ".join(f"{x['name']} ({x['multiplier']:g})" for x in lora_files) + ".")
+    if any(c.get("auto") for c in (models.get("components") or {}).values()):
+        say("Using " + pairing.describe_components(models["components"]) + ".")
     if swap and self_url:
         from localm.media.comfy_client import _localm_unload
         say("Freeing VRAM: unloading the chat model...")
@@ -411,13 +445,14 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 init = _load_init_image(Path(input_image), width, height)
                 width, height = init["width"], init["height"]
             if width is None or height is None:
-                width, height = _default_size(info.get("version", ""), rec, blk)
+                width, height = _default_size(info.get("version", ""), rec, blk, defaults)
             if seed is None or seed < 0:
                 seed = secrets.randbelow(2 ** 31)
-            steps = blk.get("steps") or (rec.steps if rec else None)
+            steps = blk.get("steps") or (rec.steps if rec else None) or (
+                defaults.steps if defaults else None)
             cfg_scale = cfg if cfg is not None else (
                 blk.get("cfg_scale") if blk.get("cfg_scale") is not None
-                else (rec.cfg_scale if rec else None))
+                else (rec.cfg_scale if rec else (defaults.cfg_scale if defaults else None)))
             params = {
                 "prompt": prompt, "negative_prompt": negative_prompt or "",
                 "width": int(width), "height": int(height), "seed": int(seed),
@@ -426,6 +461,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 "scheduler": blk.get("scheduler") or None,
                 "init_image": init,
                 "strength": (denoise if denoise is not None else 0.75) if init else None,
+                "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
+                          for x in lora_files],
             }
             say(f"Generating {width}x{height}"
                 + (f", {steps} steps" if steps else "") + f", seed {seed}...")
@@ -453,6 +490,10 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             "input_image": str(input_image) if input_image else None,
             "denoise": params["strength"],
             "backend": "native", "model": models["label"],
+            "components": {k: v["name"] for k, v in (models.get("components") or {}).items()}
+            or None,
+            "loras": [{"name": x["name"], "strength": x["multiplier"]} for x in lora_files]
+            or None,
             "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
             "elapsed_seconds": round(elapsed, 1),
             "created": time.strftime("%Y-%m-%dT%H:%M:%S"),

@@ -14,6 +14,7 @@ from localm.config import load_registry
 from localm.model_manager import add_local
 from localm.model_manager.gguf import (
     hub_repo_id,
+    is_hub_blob_link,
     hub_snapshot_repo_id,
     logical_model_path,
     scan_hub_cache,
@@ -40,26 +41,30 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
+def _require_symlinks() -> None:
+    probe_dir = Path(os.environ.get("TMP", ".")) / f"symprobe-{os.getpid()}"
+    probe_dir.mkdir(exist_ok=True)
+    try:
+        (probe_dir / "t").write_bytes(b"x")
+        os.symlink(probe_dir / "t", probe_dir / "l")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+    finally:
+        for f in ("l", "t"):
+            try:
+                (probe_dir / f).unlink()
+            except OSError:
+                pass
+        try:
+            probe_dir.rmdir()
+        except OSError:
+            pass
+
+
 @pytest.fixture(params=["links", "copies"])
 def layout(request):
     if request.param == "links":
-        probe_dir = Path(os.environ.get("TMP", ".")) / f"symprobe-{os.getpid()}"
-        probe_dir.mkdir(exist_ok=True)
-        try:
-            (probe_dir / "t").write_bytes(b"x")
-            os.symlink(probe_dir / "t", probe_dir / "l")
-        except (OSError, NotImplementedError):
-            pytest.skip("symlinks are not available here")
-        finally:
-            for f in ("l", "t"):
-                try:
-                    (probe_dir / f).unlink()
-                except OSError:
-                    pass
-            try:
-                probe_dir.rmdir()
-            except OSError:
-                pass
+        _require_symlinks()
     return request.param
 
 
@@ -311,6 +316,48 @@ class TestDirectPaths:
         assert logical_model_path(outside / "alias.gguf").name == "real.bin"
 
 
+class TestBlobsFolderThatIsALink:
+    def _linked_blobs_repo(self, tmp_path, layout):
+        if layout != "links":
+            pytest.skip("only the link layout has links")
+        root = tmp_path / "hub"
+        root.mkdir()
+        snap = _repo(root, layout, "org/m", _REV_A, {"m.Q4.gguf": _gguf_bytes("m")})
+        blobs = snap.parent.parent / "blobs"
+        elsewhere = tmp_path / "other-drive"
+        blobs.rename(elsewhere)
+        try:
+            os.symlink(elsewhere, blobs, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("directory symlinks are not available here")
+        return snap, elsewhere
+
+    def test_logical_path_keeps_the_snapshot_link(self, tmp_path, layout):
+        snap, _elsewhere = self._linked_blobs_repo(tmp_path, layout)
+        assert logical_model_path(snap / "m.Q4.gguf").name == "m.Q4.gguf"
+
+    def test_is_hub_blob_link_sees_through_the_linked_folder(self, tmp_path, layout):
+        snap, _elsewhere = self._linked_blobs_repo(tmp_path, layout)
+        assert is_hub_blob_link(snap / "m.Q4.gguf") is True
+
+    def test_adding_the_link_registers_the_snapshot_path(self, tmp_path, isolated_home, layout):
+        snap, elsewhere = self._linked_blobs_repo(tmp_path, layout)
+        assert add_local(str(snap / "m.Q4.gguf")) is True
+        path = Path(load_registry()["m.Q4"]["path"])
+        assert path.name == "m.Q4.gguf" and elsewhere.name not in path.parts
+
+    def test_a_link_to_an_ordinary_file_is_not_a_hub_link(self, tmp_path):
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (outside / "real.bin").write_bytes(b"x")
+        try:
+            os.symlink(outside / "real.bin", outside / "alias.gguf")
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available here")
+        assert is_hub_blob_link(outside / "alias.gguf") is False
+        assert is_hub_blob_link(outside / "real.bin") is False
+
+
 class TestStore:
     def test_move_out_of_the_cache_is_refused(self, tmp_path, isolated_home, layout):
         root = _cache(tmp_path, layout)
@@ -356,3 +403,87 @@ class TestRealHubCache:
         assert reg["mradermacher-tiny-random-granite-moe-GGUF"]["model_type"] == "llm"
         snap = Path(reg["hf-internal-testing-tiny-random-BertModel"]["path"])
         assert (snap / "config.json").is_file() and "snapshots" in snap.parts
+
+
+class TestMixedLinksAndCopies:
+    """huggingface_hub falls back to a plain copy for a file when it cannot link it,
+    so one repo can hold links and copies side by side."""
+
+    def _mixed(self, root, repo_id, link_files, copy_files):
+        _require_symlinks()
+        _repo(root, "links", repo_id, _REV_A, link_files)
+        return _repo(root, "copies", repo_id, _REV_A, copy_files)
+
+    def test_hf_folder_with_a_linked_weight_file_and_copied_config(self, tmp_path, isolated_home):
+        root = tmp_path / "hub"
+        root.mkdir()
+        self._mixed(
+            root, "org/mixed",
+            {"model.safetensors": b"\0" * 64},
+            {"config.json": b'{"architectures": ["LlamaForCausalLM"], "model_type": "llama"}',
+             "tokenizer.json": b"{}"})
+        assert add_local(str(root)) is True
+        reg = load_registry()
+        assert set(reg) == {"org-mixed"}
+        entry = reg["org-mixed"]
+        assert Path(entry["path"]) == (root / "models--org--mixed" / "snapshots" / _REV_A).resolve()
+        assert entry["model_type"] == "llm"
+
+    def test_gguf_repo_with_one_linked_and_one_copied_file_registers_both(
+            self, tmp_path, isolated_home):
+        root = tmp_path / "hub"
+        root.mkdir()
+        self._mixed(root, "org/two", {"two-Q4.gguf": _gguf_bytes("q4")},
+                    {"two-Q8.gguf": _gguf_bytes("q8")})
+        assert add_local(str(root)) is True
+        reg = load_registry()
+        assert set(reg) == {"two-Q4", "two-Q8"}
+        snap = (root / "models--org--two" / "snapshots" / _REV_A).resolve()
+        assert all(Path(e["path"]).parent == snap for e in reg.values())
+        assert all("blobs" not in Path(e["path"]).parts for e in reg.values())
+
+
+class TestDiffusersRepo:
+    _INDEX = (b'{"_class_name": "StableDiffusionPipeline", '
+              b'"_diffusers_version": "0.30.0"}')
+
+    def _diffusers(self, root, layout, repo_id="org/pipe"):
+        return _repo(root, layout, repo_id, _REV_A, {
+            "model_index.json": self._INDEX,
+            "unet/diffusion_pytorch_model.safetensors": b"\0" * 64,
+            "vae/config.json": b"{}",
+        })
+
+    def test_a_diffusers_only_cache_is_refused_with_the_format_named(
+            self, tmp_path, isolated_home, layout, capsys):
+        root = tmp_path / "hub"
+        root.mkdir()
+        self._diffusers(root, layout)
+        assert add_local(str(root)) is False
+        assert load_registry() == {}
+        out = " ".join(capsys.readouterr().out.split())
+        assert "org/pipe" in out and "Diffusers pipeline" in out
+
+    def test_other_repos_still_register_beside_a_diffusers_repo(
+            self, tmp_path, isolated_home, layout, capsys):
+        root = _cache(tmp_path, layout)
+        self._diffusers(root, layout)
+        assert add_local(str(root)) is True
+        assert set(load_registry()) == {"org-alpha-GGUF", "org-beta"}
+        assert "Diffusers pipeline" in " ".join(capsys.readouterr().out.split())
+
+    def test_a_diffusers_snapshot_folder_added_directly_is_explained(
+            self, tmp_path, isolated_home, layout, capsys):
+        root = tmp_path / "hub"
+        root.mkdir()
+        snap = self._diffusers(root, layout)
+        assert add_local(str(snap)) is False
+        assert "Diffusers pipeline" in " ".join(capsys.readouterr().out.split())
+
+    def test_a_model_index_without_diffusers_keys_is_not_called_diffusers(
+            self, tmp_path, isolated_home, capsys):
+        folder = tmp_path / "plain"
+        folder.mkdir()
+        (folder / "model_index.json").write_text('{"note": "unrelated"}')
+        assert add_local(str(folder)) is False
+        assert "Diffusers" not in capsys.readouterr().out

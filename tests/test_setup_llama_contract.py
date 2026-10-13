@@ -37,6 +37,7 @@ import pytest
 from click.testing import CliRunner
 
 import localm.setup_llama as sl
+from localm.setup_llama import pins
 from localm import config, cpu_backend_select, hwdetect
 from localm.bugreport import LocalmError
 from localm.http_ssl import RedirectDowngradeRefused
@@ -1463,8 +1464,6 @@ def test_offline_resolution_reads_the_pinned_asset_table(world, plat, backend, l
                        "cpu, cuda, hip, sycl, vulkan."),
     ("darwin", "vulkan", "backend 'vulkan' is not available on this platform (darwin). "
                          "Available: cpu, metal."),
-    ("linux", "cuda", f"no Linux CUDA build found for llama.cpp tag '{PIN}' on "
-                      f"{HYBRID} - falling back to vulkan."),
     ("linux", "amd-rocm", "the self-contained 'amd-rocm' build is Windows-only; on Linux use "
                           "--backend hip (needs ROCm) or build with --from."),
 ])
@@ -1473,6 +1472,22 @@ def test_unresolvable_backends_are_refused_with_a_reason(world, plat, backend, m
     with pytest.raises(click.ClickException) as ei:
         sl._resolve_backend_asset(backend)
     assert ei.value.message == message
+
+
+def test_an_unpinned_linux_cuda_tag_with_no_listing_is_refused_with_a_reason(world):
+    world.platform("linux")
+    with pytest.raises(click.ClickException) as ei:
+        sl._resolve_backend_asset("cuda", tag="b1")
+    assert ei.value.message == (f"no Linux CUDA build found for llama.cpp tag 'b1' on "
+                                f"{HYBRID} - falling back to vulkan.")
+
+
+def test_the_pinned_linux_cuda_tag_with_no_listing_resolves_the_pinned_build(world):
+    world.platform("linux")
+    url, sha, tag = sl._resolve_backend_asset("cuda")
+    name = f"llama-{PIN}-bin-ubuntu-cuda-x64.tar.gz"
+    assert url == f"https://github.com/{HYBRID}/releases/download/{PIN}/{name}"
+    assert sha == pins._CUDA_LINUX_PINNED_SHA256[name] and tag == PIN
 
 
 @pytest.mark.parametrize("gpu, family", [

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.media.sdcpp import families, pairing
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
 from localm.media.sdcpp.files import ModelFileError as _ModelError
@@ -124,7 +125,7 @@ def missing_parts(rec: RecommendedVideoModel, blk: Optional[dict] = None) -> lis
 def missing_model_message(blk: Optional[dict] = None) -> str:
     rec = RECOMMENDED_VIDEO_MODELS[0]
     total = sum(p.size_bytes for p in rec.parts) / 1024 ** 3
-    pulls = "; ".join(f"localm pull {p.spec} --type {p.model_type}"
+    pulls = "; ".join(f"localm pull {p.spec} --type {p.model_type} --sha256 {p.sha256}"
                       for p in missing_parts(rec, blk) or rec.parts)
     return (f"No native video model is set up. The recommended one is {rec.name} "
             f"({total:.1f} GB in {len(rec.parts)} files): {pulls}. Or set 'Native model' "
@@ -133,32 +134,49 @@ def missing_model_message(blk: Optional[dict] = None) -> str:
 
 def resolve_models(s: dict) -> dict:
     """The model files the native backend would load for settings *s*:
-    ``{"key", "ctx", "label", "recommended"}``. ``ctx`` also turns on
-    diffusion flash attention. Raises ``_ModelError`` with a user-facing
-    reason when they cannot be resolved."""
+    ``{"key", "ctx", "label", "recommended", "family", "components",
+    "notes", "defaults"}``. ``ctx`` also turns on diffusion flash attention.
+    A set model's missing text encoder, VAE and CLIP vision encoder are
+    picked from the registry (``pairing.build_context``). Raises
+    ``_ModelError`` (``pairing.MissingComponents`` when a companion file is
+    missing) with a user-facing reason when they cannot be resolved."""
     blk = _native_block(s)
     model = (blk.get("model") or "").strip()
     ctx: dict = {}
     rec = None
     if model:
-        ctx["diffusion_model_path"] = str(_resolve_file(model, "model"))
+        explicit = {}
+        for key, _field in _COMPONENT_FIELDS:
+            value = (blk.get(key) or "").strip()
+            if value:
+                explicit[key] = (display_name(value),
+                                 _resolve_file(value, key.replace("_", "-")))
         label = display_name(model)
-    else:
-        rec = RECOMMENDED_VIDEO_MODELS[0]
-        if missing_parts(rec, blk):
-            raise _ModelError(missing_model_message(blk))
-        for part in rec.parts:
-            hit = registered_file(part.filename)
-            if hit is not None:
-                ctx[_PART_FIELDS[part.role]] = str(hit[1])
-        label = rec.name
+        built = pairing.build_context(_resolve_file(model, "model"), label, explicit,
+                                      where="Settings > Video", media="video")
+        ctx = dict(built["ctx"])
+        ctx["diffusion_flash_attn"] = True
+        info = built["info"]
+        return {"key": tuple(sorted(ctx.items())), "ctx": ctx, "label": label,
+                "recommended": None, "family": info.family,
+                "components": built["components"], "notes": built["notes"],
+                "defaults": families.defaults_for(info)}
+    rec = RECOMMENDED_VIDEO_MODELS[0]
+    if missing_parts(rec, blk):
+        raise _ModelError(missing_model_message(blk))
+    for part in rec.parts:
+        hit = registered_file(part.filename)
+        if hit is not None:
+            ctx[_PART_FIELDS[part.role]] = str(hit[1])
+    label = rec.name
     for key, field in _COMPONENT_FIELDS:
         value = (blk.get(key) or "").strip()
         if value:
             ctx[field] = str(_resolve_file(value, key.replace("_", "-")))
     ctx["diffusion_flash_attn"] = True
     key = tuple(sorted(ctx.items()))
-    return {"key": key, "ctx": ctx, "label": label, "recommended": rec}
+    return {"key": key, "ctx": ctx, "label": label, "recommended": rec,
+            "family": "wan2.1", "components": {}, "notes": [], "defaults": None}
 
 
 def _runtime_choice(s: dict) -> str:
@@ -214,9 +232,13 @@ def status(s: dict) -> dict:
     ``missing`` (the reason it cannot run, or None), ``loaded`` and
     ``recommended`` (its name, size and the parts not yet downloaded)."""
     rt = sd_runtime.resolve(_runtime_choice(s))
+    family, components, parts, notes = None, {}, [], []
     try:
         models = resolve_models(s)
         model, missing = models["label"], None
+        family, components, notes = models["family"], models["components"], models["notes"]
+    except pairing.MissingComponents as e:
+        model, missing, family, parts = None, str(e), e.family, e.missing
     except Exception as e:  # noqa: BLE001
         model, missing = None, str(e)
     rec = RECOMMENDED_VIDEO_MODELS[0]
@@ -225,6 +247,10 @@ def status(s: dict) -> dict:
         "runtime_choice": _runtime_choice(s),
         "model": model,
         "missing": missing,
+        "family": family,
+        "components": components,
+        "missing_components": parts,
+        "notes": notes,
         "loaded": shared.worker_pid() is not None,
         "recommended": {
             "name": rec.name, "width": rec.width, "height": rec.height,
@@ -426,6 +452,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
               cancel_check=None,
               placement: Optional[dict] = None,
               on_progress=None,
+              loras: Optional[list] = None,
               **unsupported) -> tuple[bool, str]:
     """Generate one clip of *prompt* into *out_path* (MP4, H.264, with an AAC
     track when the model returns audio). Returns ``(ok, message)``. Writes only
@@ -435,7 +462,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     arguments this backend does not take are refused with a reason.
     ``delete_outputs`` has nothing to act on (there is no second copy). *swap*
     asks this backend to unload the chat model itself, used when the caller's
-    own unload did not succeed."""
+    own unload did not succeed. *loras* (``[{"name", "strength"}]``) name
+    registered LoRAs (``pairing.resolve_loras``)."""
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, placement=placement,
                       width=width, height=height, seconds=seconds, fps=fps,
@@ -455,8 +483,21 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         return False, problem
     blk = _native_block(s)
     rec = models["recommended"]
+    defaults = models.get("defaults")
+    try:
+        lora_files, lora_notes = pairing.resolve_loras(list(loras or []), models.get("family"))
+    except _ModelError as e:
+        return False, str(e)
+    for note in list(models.get("notes") or ()) + lora_notes:
+        say(note)
+    if lora_files:
+        say("LoRA: " + ", ".join(f"{x['name']} ({x['multiplier']:g})" for x in lora_files) + ".")
+    if any(c.get("auto") for c in (models.get("components") or {}).values()):
+        say("Using " + pairing.describe_components(models["components"]) + ".")
     if width is None or height is None:
-        width, height = (rec.width, rec.height) if rec else (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        width, height = ((rec.width, rec.height) if rec else
+                         (defaults.width, defaults.height) if defaults else
+                         (DEFAULT_WIDTH, DEFAULT_HEIGHT))
     width, height = int(width), int(height)
     frames = frame_count(seconds, fps)
     if swap and self_url:
@@ -468,12 +509,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     runner = shared.runner
     if seed is None or seed < 0:
         seed = secrets.randbelow(2 ** 31)
-    steps = steps or blk.get("steps") or (rec.steps if rec else None)
+    steps = steps or blk.get("steps") or (rec.steps if rec else None) or (
+        defaults.steps if defaults else None)
     cfg_scale = cfg if cfg is not None else (
         blk.get("cfg_scale") if blk.get("cfg_scale") is not None
-        else (rec.cfg_scale if rec else None))
+        else (rec.cfg_scale if rec else (defaults.cfg_scale if defaults else None)))
     flow_shift = blk.get("flow_shift") if blk.get("flow_shift") is not None else (
-        rec.flow_shift if rec else None)
+        rec.flow_shift if rec else (defaults.flow_shift if defaults else None))
     negative = negative_prompt if negative_prompt is not None else (
         rec.negative_prompt if rec else "")
     with shared.lock:
@@ -498,6 +540,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 "steps": steps, "cfg_scale": cfg_scale, "flow_shift": flow_shift,
                 "sample_method": blk.get("sample_method") or None,
                 "init_image": init,
+                "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
+                          for x in lora_files],
             }
             say(f"Generating {frames} frames at {width}x{height}"
                 + (f", {steps} steps" if steps else "") + f", seed {seed}...")
@@ -530,6 +574,10 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "seconds": round(len(result["frames"]) / out_fps, 2),
                     "input_image": str(input_image) if input_image else None,
                     "backend": "native", "model": models["label"],
+                    "components": {k: v["name"] for k, v in
+                                   (models.get("components") or {}).items()} or None,
+                    "loras": [{"name": x["name"], "strength": x["multiplier"]}
+                              for x in lora_files] or None,
                     "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
                     "elapsed_seconds": round(elapsed, 1),
                     "created": time.strftime("%Y-%m-%dT%H:%M:%S"),

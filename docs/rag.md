@@ -206,13 +206,17 @@ embedder too rather than quietly returning those vectors.
   with vectors from any other embedding model, a hit passes only when it
   contains most of the question's words, not counting question and
   conversation words such as "how", "explain" or "tell me about", and
-  matching simple plural and tense forms ("resynced" matches "resync"). This
+  matching simple plural and tense forms ("resynced" matches "resync"), and
+  at least two of them unless the question is a single word, so a greeting
+  that happens to share one word with the collection brings in nothing. This
   keyword-only check cannot tell a chatty question that happens to share
   words with the collection from a real one, so installing the embedding
   model makes the floor noticeably sharper. A question that points back at
   the conversation ("why did that search fail?", "your previous answer",
-  "the second one") gets excerpts only on a strong cosine match, and none
-  from the keyword-only check. The
+  "the second one", "the thing you said") gets excerpts only on a strong
+  cosine match, and none from the keyword-only check, unless the caller sends
+  the user's previous message as `context`: chat does, and such a question is
+  then searched together with that message and judged like any other. The
   Knowledge page's search box, `localm rag query` and the coder's search tool
   show the plain ranking; `localm rag query --relevant-only` and the API's
   `"relevant_only": true` apply the floor. Each injected excerpt is the whole
@@ -235,7 +239,12 @@ embedder too rather than quietly returning those vectors.
   drop then still finds its answer, and an unrelated question still returns
   nothing. Any other reranker file leaves the floor in charge, applied to the
   candidates before the reranker sees them, as does a question that points back
-  at the conversation and a reranker that fails.
+  at the conversation (with no `context`) and a reranker that fails.
+  To gate on the reranker score for another reranker, or with another cut-off,
+  set Settings > Knowledge > Reranker minimum score (`rag_rerank_min_score`) to
+  the lowest score an excerpt may have, in that reranker's own scale (the
+  Qwen3-Reranker score is a probability from 0 to 1; bge-reranker gives a
+  logit); blank keeps the measured value, or the floor.
   It is on by default (the `rag_rerank` setting, or the toggle on the Knowledge
   page) but does nothing while no reranker is installed. With several installed,
   name one in `rag_rerank_model`. Chat, `localm rag query` (`--rerank` or

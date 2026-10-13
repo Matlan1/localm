@@ -37,6 +37,9 @@ if os.environ.get("FAKE_CONFIRM_SLEEP"):
     time.sleep(float(os.environ["FAKE_CONFIRM_SLEEP"]))
 open(os.environ.get("FAKE_CONFIRM_LOG", os.devnull), "a").write(" ".join(args) + "\\n")
 verdict = {0: "PASS", 1: "FAIL"}.get(rc, "INCONCLUSIVE")
+if os.environ.get("FAKE_CONFIRM_CRASH"):
+    print("crashed: no network")
+    sys.exit(rc)
 json.dump({"schema": 1, "verdict": verdict, "why": os.environ.get("FAKE_CONFIRM_WHY", ""),
            "checks": {"load": {"status": verdict}}}, open(receipt, "w"))
 sys.exit(rc)
@@ -89,7 +92,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(pp, "STATE_DIR", state)
     monkeypatch.setattr(pp, "ISSUES_PATH", issues)
     for name in ("FAKE_CONFIRM_RC", "FAKE_CONFIRM_SLEEP", "FAKE_BUMP_RC", "FAKE_CONFIRM_LOG",
-                 "FAKE_CONFIRM_WHY"):
+                 "FAKE_CONFIRM_WHY", "FAKE_CONFIRM_CRASH"):
         monkeypatch.delenv(name, raising=False)
 
     spies = Spies()
@@ -183,6 +186,46 @@ def test_inconclusive_is_recorded_cooled_down_and_not_logged_as_a_fail(env, monk
     assert pp.load_state(pin="fake")["verdict"] == "INCONCLUSIVE"
     assert "FAKE" not in env.issues.read_text(encoding="utf-8")
     assert pw.advance(_adv(), dry_run=False).verdict == pw.SKIPPED
+
+
+def test_a_confirm_that_dies_without_a_receipt_reports_its_exit_code_and_output(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CONFIRM_RC", "2")
+    monkeypatch.setenv("FAKE_CONFIRM_CRASH", "1")
+    out = pw.advance(_adv(), dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE
+    assert "exit code 2" in out.detail and "crashed: no network" in out.detail
+
+
+def test_current_pin_check_that_dies_without_a_receipt_reports_its_exit_code_and_output(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CONFIRM_RC", "2")
+    monkeypatch.setenv("FAKE_CONFIRM_CRASH", "1")
+    out = pw.verify_current(_adv())
+    assert out.verdict == pw.INCONCLUSIVE
+    assert "exit code 2" in out.detail and "crashed: no network" in out.detail
+
+
+def test_a_custom_current_pin_check_that_dies_without_a_receipt_reports_its_exit_code_and_output(env):
+    script = "import sys; print('crashed: no network'); sys.exit(2)"
+    out = pw.verify_current(_adv(verify_current_cmd=lambda work, receipt: [sys.executable, "-c", script]))
+    assert out.verdict == pw.INCONCLUSIVE
+    assert "exit code 2" in out.detail and "crashed: no network" in out.detail
+
+
+def test_an_unreadable_receipt_does_not_hide_a_confirms_output(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CONFIRM_RC", "2")
+
+    def garbage(args):
+        receipt = args[args.index("--receipt") + 1]
+        Path(receipt).write_text("{not json", encoding="utf-8")
+    real_run_cmd = pw.run_cmd
+
+    def run_cmd(cmd, **k):
+        rc, out = real_run_cmd(cmd, **k)
+        garbage(cmd)
+        return rc, out + "\ncrashed: no network"
+    monkeypatch.setattr(pw, "run_cmd", run_cmd)
+    out = pw.verify_current(_adv())
+    assert out.verdict == pw.INCONCLUSIVE and "crashed: no network" in out.detail
 
 
 def test_pass_bumps_in_the_worktree_commits_opens_pr_waits_and_merges(env, tmp_path):

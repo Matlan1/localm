@@ -10,6 +10,7 @@ import { chat, renderAttachChips } from "../app/chat.js";
 import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
+import { createNativeModelPicker } from "../app/native-models.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -51,6 +52,10 @@ const imageGallery = createGallery({
     $("img-lora").value = m.lora_name || "";
     $("img-lora-strength-model").value = m.lora_strength_model ?? "";
     $("img-lora-strength-clip").value = m.lora_strength_clip ?? "";
+    if (m.backend === "native") {
+      imageModelPicker.setModels({ model: m.model, ...(m.components || {}) });
+      imageModelPicker.setLoras(m.loras || []);
+    }
     // Most of those ids live behind this page's Advanced fold; open it when
     // they are filled.
     revealFilledAdvanced($("view-images"));
@@ -127,6 +132,9 @@ bindReloadToggle("image", "img-reload-llm");
    which backend runs and which model it uses. */
 export const imageBackend = { active: null, choice: null };
 
+export const imageModelPicker = createNativeModelPicker(
+  { media: "image", prefix: "imagine", mountId: "img-native-models" });
+
 export async function refreshImageBackend() {
   let data;
   try {
@@ -154,6 +162,11 @@ export async function refreshImageBackend() {
   for (const id of ["img-lora-field", "img-workflow-card"]) {
     const node = $(id);
     if (node) node.hidden = native;
+  }
+  const picker = $("img-native-models");
+  if (picker) {
+    picker.hidden = !native;
+    if (native) imageModelPicker.refresh();
   }
   for (const node of document.querySelectorAll("#view-images .img-comfy-only")) {
     node.hidden = native;
@@ -234,6 +247,8 @@ $("img-generate").onclick = async () => {
   if (!native && modelOverrides.image && Object.keys(modelOverrides.image).length) {
     body.model_overrides = modelOverrides.image;
   }
+  const nativeChoice = native ? imageModelPicker.choice() : {};
+  Object.assign(body, nativeChoice);
   $("img-generate").disabled = true;
   const log = $("img-log");
   log.style.display = "block";
@@ -241,7 +256,8 @@ $("img-generate").onclick = async () => {
   $("img-result").replaceChildren();
   try {
     await checkModelsBeforeGenerate("image", log,
-      { model_overrides: native ? undefined : modelOverrides.image, lora_name: loraName || undefined });
+      { model_overrides: native ? undefined : modelOverrides.image, lora_name: loraName || undefined,
+        native_models: nativeChoice.native_models });
     if (native) refreshImageBackend();
     const r = await fetch("/api/imagine", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),

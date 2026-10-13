@@ -92,10 +92,9 @@ def restart_after_seconds() -> float:
 
 
 def starvation_seconds() -> float:
-    """Detector S's window. 0 disables it. The default sits WELL above every
-    bounded long operation this codebase has on a request path (the ~330s
-    comfy-launch worst case is the longest): S covers the unbounded wedge, not
-    slow-but-finite work."""
+    """Detector S's window. 0 disables it. The default sits above the ~330s
+    ComfyUI launch wait; a /v1/images/generations request can stay in flight
+    up to 30 minutes per image, which S only logs."""
     try:
         return max(0.0, float(os.environ.get(_STARVATION_SECS_ENV, "600")))
     except ValueError:

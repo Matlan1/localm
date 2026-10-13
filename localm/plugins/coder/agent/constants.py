@@ -165,10 +165,11 @@ _MAX_SHELL_SCOPE_FLAGS = 3
 # gates.
 _SHELL_EXEC_TOOLS: frozenset[str] = frozenset({"run_shell", "run_shell_background"})
 
-# Tools that block on a child process of their own and are handed the run's
-# cancel token (``_cancel``), so a cancelled run kills the process instead of
-# waiting out a model-supplied timeout.
-_CANCELLABLE_SUBPROCESS_TOOLS: frozenset[str] = frozenset({"run_shell", "run_tests"})
+# Tools that block on a child process or a render of their own and are handed
+# the run's cancel token (``_cancel``), so a cancelled run stops that work
+# instead of waiting it out.
+_CANCELLABLE_SUBPROCESS_TOOLS: frozenset[str] = frozenset(
+    {"run_shell", "run_tests", "generate_image"})
 
 # Tools the shell reject-list inspects before anything else can run them. The
 # shell pair takes a command line; git_push takes argv parts and appends its
@@ -347,6 +348,36 @@ _IMPERATIVE_LEADS: frozenset[str] = frozenset({
     "okay", "so", "first", "next", "finally", "hey", "hi", "yes", "yeah",
     "sure", "great", "thanks", "thank", "you", "quickly", "again", "carefully",
     "simply", "actually", "well", "alright", "cool", "good", "perfect", "right",
+})
+
+# Words that, directly after a clause-initial action word, make it the subject of
+# a statement rather than an imperative ("Build is red", "Search fails", "Test
+# didn't run").
+_STATEMENT_PREDICATES: frozenset[str] = frozenset({
+    "is", "are", "was", "were", "has", "have", "had", "does", "did", "will",
+    "would", "can", "could", "should", "might", "may", "must", "cannot",
+    "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't",
+    "doesn't", "didn't", "won't", "wouldn't", "can't", "couldn't", "shouldn't",
+    "mustn't", "fails", "breaks", "broke", "crashes", "hangs", "throws",
+    "threw", "exits", "passes", "works", "worked", "keeps", "kept", "stops",
+    "timed", "ran", "got", "became", "seems", "looks",
+})
+
+# Participles that make the preceding action word a statement subject only when
+# they end the clause or are followed by a linking word ("Build failed.",
+# "Test failed on CI"); "fix failed tests" stays an imperative.
+_STATEMENT_PARTICIPLES: frozenset[str] = frozenset({
+    "failed", "broken", "stopped", "crashed", "errored", "passed", "hung",
+    "returned", "finished", "completed",
+})
+
+# Words that may follow a statement participle without making it a modifier of
+# an object.
+_STATEMENT_LINKS: frozenset[str] = frozenset({
+    "with", "because", "on", "at", "due", "again", "after", "when", "while",
+    "in", "for", "since", "during", "but", "and", "so", "to", "if", "as",
+    "once", "before", "twice", "yesterday", "today", "just", "too",
+    "already", "completely", "silently", "unexpectedly", "randomly", "here",
 })
 
 # Suffixes that make a dotted token a domain name, not a file name.

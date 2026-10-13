@@ -5,6 +5,7 @@ safe model filenames, and SHA256 hashing. Leaf utilities, no registry/pull deps.
 import localm.model_manager as _mm  # read package-patchable names at call time
 
 import hashlib
+import os
 import queue
 import re
 import struct
@@ -12,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from typing import cast
 from typing import Collection
 from typing import NamedTuple
 from typing import Optional
@@ -551,6 +553,22 @@ def is_hub_blob(path: Path) -> bool:
             and hub_repo_id(path.parent.parent.name) is not None)
 
 
+def is_hub_blob_link(path: Path) -> bool:
+    """True when *path* is a symlink that points into a hub-cache repo's ``blobs``
+    folder: either its fully resolved target is a blob, or its one-hop target,
+    taken without resolving the folders on the way, is (a ``blobs`` folder that is
+    itself a link to another drive resolves to a path outside the cache)."""
+    try:
+        if not path.is_symlink():
+            return False
+        if is_hub_blob(path.resolve()):
+            return True
+        hop = Path(os.path.normpath(path.parent.resolve() / os.readlink(path)))
+        return is_hub_blob(hop)
+    except (OSError, ValueError):
+        return False
+
+
 def hub_snapshot_repo_id(path: Path) -> Optional[str]:
     """The repository id when *path* is ``<models--repo>/snapshots/<revision>``
     (a snapshot folder of a hub cache, its path left unresolved); else None."""
@@ -568,11 +586,8 @@ def logical_model_path(path: Path) -> Path:
     extension; resolving it fully would register the blob. That final link is
     kept, with its parent folder resolved. Any other path resolves normally."""
     path = Path(path)
-    try:
-        if path.is_symlink() and is_hub_blob(path.resolve()):
-            return path.parent.resolve() / path.name
-    except OSError:
-        pass
+    if is_hub_blob_link(path):
+        return path.parent.resolve() / path.name
     return path.resolve()
 
 
@@ -1645,6 +1660,10 @@ def gguf_input_layer_bytes(
     ``None`` failure. Left unset (the default), *path* is parsed here exactly
     as before.
 
+    For a split GGUF, *path*'s sibling parts are read too, so an input tensor
+    stored in a later part counts; a sibling part that is missing or does not
+    parse adds nothing.
+
     Returns ``None`` - never raises - when the file cannot be parsed as a
     GGUF; the caller then falls back to charging the whole file. In practice
     every real LLM GGUF has at least a ``token_embd.weight``, so a successful
@@ -1652,9 +1671,24 @@ def gguf_input_layer_bytes(
     a naming convention this probe does not yet know - but is returned as a
     real answer rather than raised, matching every other probe in this
     module's contract."""
-    parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
+    parsed = cast(
+        "Optional[tuple[list[tuple[str, int]], int, int]]",
+        _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed)
     if parsed is None:
         return None
+    total = _input_layer_bytes_of(parsed)
+    for part in split_gguf_parts(Path(path).name) or ():
+        if part == Path(path).name:
+            continue
+        sibling = _gguf_tensor_offset_entries(Path(path).parent / part)
+        if sibling is not None:
+            total += _input_layer_bytes_of(sibling)
+    return total
+
+
+def _input_layer_bytes_of(parsed: "tuple[list[tuple[str, int]], int, int]") -> int:
+    """Bytes of the input-layer tensors in one file's ``_gguf_tensor_offset_entries``
+    result."""
     entries, file_size, data_start = parsed
     total = 0
     for idx, (name, offset) in enumerate(entries):
@@ -2250,13 +2284,13 @@ def gguf_architecture(path: Path, meta: Optional[dict] = None) -> Optional[str]:
     return meta.get("architecture")
 
 
-# llama.cpp's clip.cpp writes this exact general.architecture value for every
+# llama.cpp writes this exact general.architecture value for every
 # vision-projector (mmproj) GGUF it exports - llava, idefics3, siglip and every
 # other projector variant share it, distinguished instead by a
-# "clip.projector_type" key. Such a file also carries a parallel
-# general.type="clip-vision" and a "clip.vision.*"-prefixed metadata block,
-# never a "<arch>.*"-prefixed one, so it cannot collide with
-# gguf_embedding_signal's architecture check above.
+# "clip.projector_type" key. Current converters also write general.type="mmproj";
+# legacy converters write no general.type. The metadata block is "clip.*"-prefixed,
+# never "<arch>.*"-prefixed, so it cannot collide with gguf_embedding_signal's
+# architecture check above.
 _GGUF_MMPROJ_ARCHITECTURE = "clip"
 
 

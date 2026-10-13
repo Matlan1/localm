@@ -38,6 +38,7 @@ from .gguf import _gguf_declared_min_size
 from .gguf import _has_gguf_magic
 from .gguf import gguf_unusable_reason
 from .unsupported import explain_unsupported_model, hf_folder_refusal
+from .jan_store import find_jan_models_root, scan_jan_models
 from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
@@ -52,7 +53,7 @@ from .gguf import gguf_adapter_incompatibility, gguf_adapter_kind
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
 from .gguf import _gguf_metadata_probe
 from .gguf import HubCacheScan
-from .gguf import is_hub_blob
+from .gguf import is_hub_blob_link
 from .gguf import hub_snapshot_repo_id
 from .gguf import logical_model_path
 from .gguf import scan_hub_cache
@@ -217,6 +218,74 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
     return p
 
 
+def hf_reranker_state(folder: Path) -> Optional[bool]:
+    """Whether the Hugging Face model folder *folder* is a cross-encoder reranker:
+    its config.json declares a ``*ForSequenceClassification`` architecture with a
+    single output label. None when config.json cannot be read.
+
+    A head with several labels is a classifier (sentiment, NLI), not a reranker,
+    and answers False."""
+    try:
+        config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    archs = config.get("architectures")
+    if not (isinstance(archs, list) and any(
+            isinstance(a, str) and a.endswith("ForSequenceClassification") for a in archs)):
+        return False
+    id2label = config.get("id2label")
+    num_labels = config.get("num_labels")
+    if isinstance(id2label, dict):
+        return len(id2label) == 1
+    return num_labels == 1
+
+
+def _is_sentence_transformers_folder(path: Path) -> bool:
+    """Whether *path* holds a sentence-transformers ``modules.json`` listing a
+    Transformer module followed by a Pooling module."""
+    try:
+        modules = json.loads((path / "modules.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    if not isinstance(modules, list):
+        return False
+    kinds = [str(m.get("type") or "").rsplit(".", 1)[-1] for m in modules if isinstance(m, dict)]
+    return "Transformer" in kinds and "Pooling" in kinds
+
+
+_MEDIA_KIND_TYPES = {
+    "diffusion": "diffusion-unet", "checkpoint": "diffusion-unet", "vae": "vae",
+    "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
+    "t5xxl": "text-encoder", "umt5": "text-encoder", "byt5": "text-encoder",
+    "clip_vision": "text-encoder",
+}
+_MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora"})
+
+
+def _media_component_type(path: Path, model_type: Optional[str]) -> Optional[str]:
+    """The registry type a single ``.safetensors`` file registers as when it is
+    an image/video model file (a diffusion model, text encoder, VAE or LoRA),
+    or None when it is not one. An explicit media *model_type* is taken as
+    given; otherwise the file's tensor layout decides
+    (``localm.media.sdcpp.families``). A file inside a HuggingFace model or
+    PEFT adapter directory, and an LLM LoRA, is never one unless *model_type*
+    says so."""
+    if model_type in _MEDIA_COMPONENT_TYPES:
+        return model_type
+    if model_type is not None:
+        return None
+    from localm.inference.engine import _is_hf_dir
+    if _is_hf_dir(str(path.parent)) or (path.parent / "adapter_config.json").exists():
+        return None
+    from localm.media.sdcpp.families import inspect_file
+    info = inspect_file(path)
+    if info.kind == "lora" and info.family == "llm":
+        return None
+    return _MEDIA_KIND_TYPES.get(info.kind)
+
+
 def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                              is_blob: bool = False) -> tuple[str, dict]:
     """Deterministically classify a LOCAL model's type from HARD metadata only.
@@ -230,7 +299,9 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     'mmproj'; then an embedding/pooling signal (``gguf_embedding_signal`` -
     architecture or a ``*.pooling_type`` key) -> 'embedding'; otherwise it is a
     llama.cpp text model -> 'llm'. An HF directory is classified from
-    config.json: a LoRA/adapter dir -> 'lora'; an ``architectures`` class ending
+    config.json: a LoRA/adapter dir -> 'lora'; a sentence-transformers folder
+    (``modules.json`` with a Transformer and a Pooling module) or a single-score
+    ``*ForSequenceClassification`` cross-encoder -> 'embedding'; an ``architectures`` class ending
     in ForCausalLM / LMHeadModel / ForConditionalGeneration -> 'llm'; anything we
     cannot resolve -> 'unknown' (never a silent 'llm').
 
@@ -260,6 +331,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
         if is_hf:
             if (path / "adapter_config.json").exists():
                 return "lora", {}
+            if _is_sentence_transformers_folder(path) or hf_reranker_state(path):
+                return "embedding", {}
             cfg_path = path / "config.json"
             if cfg_path.exists():
                 conf = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -314,6 +387,7 @@ class ComfySource:
     model_type: str       # "diffusion-unet" | "text-encoder" | "vae" | "lora"
     comfy_subfolder: str  # ComfyUI models/<subfolder> this file belongs in
     size_bytes: int
+    sha256: Optional[str] = None  # passed to the pull as --sha256 when set
 
 
 # filename (exact, as ComfyUI's /object_info reports it) -> curated download source
@@ -325,38 +399,43 @@ class ComfySource:
 # (exact-filename lookup, no fuzzy/heuristic matching) - see
 # resolve_comfy_model_source().
 #
-# ae.safetensors is sourced from the ungated Apache-2.0 FLUX.1-schnell repo rather
-# than the gated (license-click-through) FLUX.1-dev repo: the file is
-# byte-identical in both, and sourcing it from the ungated repo avoids a
-# HuggingFace license-gate failure for users who have not accepted the FLUX.1-dev
-# non-commercial license.
+# Every entry carries the sha256 the downloaded file must have; a pull whose
+# bytes differ is deleted.
 COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
     "flux1-dev-Q8_0.gguf": ComfySource(
         "city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf",
-        "diffusion-unet", "unet", 12_708_281_504),
+        "diffusion-unet", "unet", 12_708_281_504,
+        "129032f32224bf7138f16e18673d8008ba5f84c1ec74063bf4511a8bb4cf553d"),
     "clip_l.safetensors": ComfySource(
         "comfyanonymous/flux_text_encoders:clip_l.safetensors",
-        "text-encoder", "clip", 246_144_152),
+        "text-encoder", "clip", 246_144_152,
+        "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"),
     "t5xxl_fp8_e4m3fn.safetensors": ComfySource(
         "comfyanonymous/flux_text_encoders:t5xxl_fp8_e4m3fn.safetensors",
-        "text-encoder", "clip", 4_893_934_904),
+        "text-encoder", "clip", 4_893_934_904,
+        "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"),
     "ae.safetensors": ComfySource(
-        "black-forest-labs/FLUX.1-schnell:ae.safetensors",
-        "vae", "vae", 335_304_388),
+        "Comfy-Org/z_image_turbo:split_files/vae/ae.safetensors",
+        "vae", "vae", 335_304_388,
+        "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"),
     "ace_step_v1_3.5b.safetensors": ComfySource(
         "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors",
-        "diffusion-unet", "checkpoints", 7_699_743_341),
+        "diffusion-unet", "checkpoints", 7_699_743_341,
+        "f07cad74c4adce52ca14ca1bdf74cf3c14cbafb0823b95eca4459467fa369f40"),
     "wan2.2_ti2v_5B_fp16.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
         "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
-        "diffusion-unet", "diffusion_models", 9_999_658_848),
+        "diffusion-unet", "diffusion_models", 9_999_658_848,
+        "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e"),
     "umt5_xxl_fp8_e4m3fn_scaled.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
         "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-        "text-encoder", "text_encoders", 6_735_906_897),
+        "text-encoder", "text_encoders", 6_735_906_897,
+        "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"),
     "wan2.2_vae.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:split_files/vae/wan2.2_vae.safetensors",
-        "vae", "vae", 1_409_400_960),
+        "vae", "vae", 1_409_400_960,
+        "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"),
 }
 
 
@@ -1479,18 +1558,9 @@ def relocate_target(new_path: str) -> "tuple[Path | None, str | None]":
     elif (unusable := gguf_unusable_reason(p)) is not None:
         return None, f"{p}: {unusable}"
     elif not _has_gguf_magic(p):
-        declared_min = _gguf_declared_min_size(p)
-        try:
-            size = p.stat().st_size
-        except OSError:
-            size = None
-        if declared_min is not None and size is not None and size < declared_min:
-            return None, (
-                f"{p} looks like a GGUF file that has not finished copying "
-                f"(only {size} of at least {declared_min} bytes present) - "
-                "if it is still being copied or downloaded, wait for it to "
-                "finish and try again."
-            )
+        unfinished = _unfinished_gguf_reason(p)
+        if unfinished is not None:
+            return None, f"{p} {unfinished}"
         return None, f"Not a GGUF model file: {p}"
     return p, None
 
@@ -1992,6 +2062,10 @@ def _register(
         reranker = gguf_reranker_state(path)
         if reranker is not None:
             entry["reranker"] = reranker
+    elif model_type == "embedding" and path.is_dir():
+        reranker = hf_reranker_state(path)
+        if reranker is not None:
+            entry["reranker"] = reranker
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
     # a parallel pull, sync_models_dir) can't clobber this entry.
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
@@ -2000,7 +2074,8 @@ def _register(
 def entry_is_reranker(name: str, entry: dict) -> bool:
     """True when the registered model *name* is a reranker or classifier: an
     ``embedding``-type model whose GGUF header marks it so (see
-    ``gguf_reranker_state``).
+    ``gguf_reranker_state``) or whose Hugging Face config declares a single-score
+    sequence-classification head (see ``hf_reranker_state``).
 
     Reads the stored ``reranker`` flag. An entry registered before the flag
     existed has none, so the GGUF is classified once here and the answer is
@@ -2013,9 +2088,14 @@ def entry_is_reranker(name: str, entry: dict) -> bool:
     if isinstance(flag, bool):
         return flag
     path = _entry_path(entry)
-    if path is None or not Path(path).is_file():
+    if path is None:
         return False
-    flag = gguf_reranker_state(Path(path))
+    if Path(path).is_dir():
+        flag = hf_reranker_state(Path(path))
+    elif Path(path).is_file():
+        flag = gguf_reranker_state(Path(path))
+    else:
+        return False
     if flag is None:
         return False
 
@@ -3571,10 +3651,7 @@ _HUB_MOVE_REFUSAL = (
 
 def _is_hub_cache_link(path: Path) -> bool:
     """True when *path* is a symlink into a Hugging Face hub cache blob."""
-    try:
-        return path.is_symlink() and is_hub_blob(path.resolve())
-    except OSError:
-        return False
+    return is_hub_blob_link(path)
 
 
 def _primary_name_collision(gguf: Path, claimed: dict) -> Optional[str]:
@@ -3760,20 +3837,66 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str) -> Optional[list[
 
 
 
+_UNFINISHED_DOWNLOAD_PREFIX = "incomplete"
+
+
+def _unfinished_gguf_reason(path: Path) -> Optional[str]:
+    """A sentence saying *path* is a GGUF file that has not finished copying or
+    downloading, or None when it is not evidently so.
+
+    Evident means its header declares tensor data starting beyond the end of the
+    file. A file cut inside its last tensor's data is not detected."""
+    declared_min = _gguf_declared_min_size(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if declared_min is not None and size < declared_min:
+        return (f"looks like a GGUF file that has not finished copying "
+                f"(only {size} of at least {declared_min} bytes present) - "
+                "if it is still being copied or downloaded, wait for it to "
+                "finish and try again.")
+    return None
+
+
 def _skip_unusable_ggufs(first_parts: list[Path]) -> list[Path]:
     """*first_parts* without the GGUF files that cannot be registered
-    (unsupported version, byte-swapped, importance matrix); each skipped file is
-    reported with its reason."""
+    (unsupported version, byte-swapped, importance matrix, unfinished copy or
+    download); each skipped file is reported with its reason."""
     from rich.markup import escape
 
     usable: list[Path] = []
     for gguf in first_parts:
-        reason = gguf_unusable_reason(gguf)
+        reason = gguf_unusable_reason(gguf) or _unfinished_gguf_reason(gguf)
+        if reason is None and gguf.name.startswith(_UNFINISHED_DOWNLOAD_PREFIX):
+            reason = ("its name starts with 'incomplete', which GPT4All gives a "
+                      "download in progress. Add the file by its own path to "
+                      "register it anyway.")
         if reason is None:
             usable.append(gguf)
         else:
             console.print(f"[yellow]Skipped {escape(gguf.name)}:[/yellow] {escape(reason)}")
     return usable
+
+
+def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
+                    fast: bool) -> "tuple[Optional[str], Optional[int]]":
+    """``(sha256, size)`` to register *gguf* with: neither under *no_hash*; only
+    the size under *fast* (dedup on size alone); otherwise the hash, computed only
+    when it can change the outcome (an unknown path or a registered alias with no
+    digest)."""
+    if no_hash:
+        return None, None
+    if fast:
+        try:
+            return None, gguf.stat().st_size
+        except OSError:
+            return None, None
+    already_known = find_aliases_by_path(gguf, reg)
+    needs_backfill = any(not reg[n].get("sha256") for n in already_known)
+    digest = _mm._hash_with_progress(gguf) \
+        if (not already_known or needs_backfill) else None
+    return digest, None
 
 
 def _add_local_gguf_dir(
@@ -3821,23 +3944,7 @@ def _add_local_gguf_dir(
             (names or {}).get(gguf) or base)
         model_name = _unique_registry_name(reg, wanted)
 
-        size = None
-        if no_hash:
-            digest = None
-        elif fast:
-            # --fast: skip the SHA, dedup on size alone (cheap stat).
-            digest = None
-            try:
-                size = gguf.stat().st_size
-            except OSError:
-                size = None
-        else:
-            # Hash only when it can change the outcome (unknown path / missing
-            # digest), exactly like the single-file branch below.
-            already_known = find_aliases_by_path(gguf, reg)
-            needs_backfill = any(not reg[n].get("sha256") for n in already_known)
-            digest = _mm._hash_with_progress(gguf) \
-                if (not already_known or needs_backfill) else None
+        digest, size = _digest_for_add(gguf, reg, no_hash, fast)
 
         detected_type, gmeta = _detect_local_model_type(gguf, is_gguf=True, is_hf=False)
         _mm._register_with_dedup(
@@ -4194,16 +4301,52 @@ def _scan_ollama_root(root: Path):
         if not _has_gguf_magic(blob):
             problems.append(f"{label}: the model is not a GGUF file")
             continue
-        projector, proj_problem = _ollama_layer_blob(blobs, layers, _OLLAMA_PROJECTOR_LAYER)
+        projector, proj_problem = _ollama_checked_projector(blobs, layers)
         if proj_problem:
             problems.append(f"{label}: no vision projector attached, {proj_problem}")
-        elif projector is not None and not (
-                _has_gguf_magic(projector) and gguf_is_mmproj(projector)):
-            problems.append(f"{label}: no vision projector attached, "
-                            "its projector layer is not a GGUF projector")
-            projector = None
         models.append(_OllamaModel(label, blob, projector))
     return models, problems
+
+
+def _ollama_checked_projector(blobs: Path, layers: list):
+    """``(projector_blob, problem)`` for the projector layer in *layers*: the blob
+    when it is a GGUF vision projector, else None and the reason. ``(None, None)``
+    when there is no projector layer."""
+    projector, problem = _ollama_layer_blob(blobs, layers, _OLLAMA_PROJECTOR_LAYER)
+    if problem:
+        return None, problem
+    if projector is not None and not (_has_gguf_magic(projector) and gguf_is_mmproj(projector)):
+        return None, "its projector layer is not a GGUF projector"
+    return projector, None
+
+
+def _ollama_manifest_projector(manifest_dir: Path, blob: Path) -> Optional[Path]:
+    """The vision projector blob of the tag in *manifest_dir* whose model layer is
+    *blob* (a file in the store's ``blobs`` folder), or None when that tag has no
+    usable projector. A projector that is present but unusable is reported."""
+    import json as _json
+    from rich.markup import escape
+
+    try:
+        tag_files = sorted(f for f in manifest_dir.iterdir() if f.is_file())
+    except OSError:
+        return None
+    for tag_file in tag_files:
+        try:
+            manifest = _json.loads(tag_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        layers = manifest.get("layers") if isinstance(manifest, dict) else None
+        if not isinstance(layers, list):
+            continue
+        model_blob, _problem = _ollama_layer_blob(blob.parent, layers, _OLLAMA_MODEL_LAYER)
+        if model_blob != blob:
+            continue
+        projector, problem = _ollama_checked_projector(blob.parent, layers)
+        if problem:
+            console.print(f"[yellow]No vision projector attached:[/yellow] {escape(problem)}")
+        return projector
+    return None
 
 
 def _add_local_ollama_root(
@@ -4256,6 +4399,63 @@ def _add_local_ollama_root(
     return registered_any
 
 
+def _add_local_jan(
+    root: Path,
+    name: Optional[str],
+    on_duplicate: str,
+    no_hash: bool,
+    fast: bool,
+    model_type: Optional[str],
+    store: Optional[str],
+) -> Optional[bool]:
+    """Register every model in a Jan model store (see ``scan_jan_models``), each
+    in place under its Jan id (the author and file stem, joined with ``-``), with
+    its projector recorded on the entry. *name* applies only to a store holding
+    one model. Returns True when anything was registered, False when nothing
+    could be, and None when the folder holds no Jan model at all (so the caller
+    treats it as an ordinary folder). A copy or move, requested with ``store`` or
+    as the answer to a duplicate, is refused: Jan names every weights file
+    ``model.gguf``. A duplicate under ``ask`` is skipped."""
+    from rich.markup import escape
+
+    models, problems = scan_jan_models(root)
+    if not models and not problems:
+        return None
+    if store or on_duplicate in ("copy", "move"):
+        console.print(
+            f"[red]Cannot {store or on_duplicate} models out of the Jan model store[/red] "
+            f"({escape(str(root))}): every file in it is named model.gguf and the "
+            "names would collide in the models folder. Register them in place "
+            "(leave out --store, and do not answer a duplicate with copy or move).")
+        return False
+    if on_duplicate == "ask":
+        console.print("[dim]Jan models are registered in place, so a duplicate is skipped "
+                      "(pass --on-duplicate alias or register to change that).[/dim]")
+        on_duplicate = "skip"
+    for problem in problems:
+        console.print(f"[yellow]Skipped part of the Jan model store:[/yellow] {escape(problem)}")
+    if not models:
+        console.print(f"[red]Not a model:[/red] no usable model in the Jan model store "
+                      f"{escape(str(root))}")
+        return False
+    registered_any = False
+    for model in models:
+        reg = _mm.load_registry()
+        wanted = _sanitize_name(name) if (name and len(models) == 1) else model.model_id
+        model_name = _unique_registry_name(reg, wanted)
+        digest, size = _digest_for_add(model.weights, reg, no_hash, fast)
+        detected, meta = _detect_local_model_type(model.weights, is_gguf=True, is_hf=False)
+        effective = model_type if model_type is not None else detected
+        registered_any = _mm._register_with_dedup(
+            model_name, model.weights, "local", on_duplicate=on_duplicate,
+            digest=digest, size=size, model_type=effective,
+            mmproj=model.projector if effective in _PROJECTOR_TYPES else None,
+            architecture=meta.get("architecture"),
+            expert_count=meta.get("expert_count"),
+        ) or registered_any
+    return registered_any
+
+
 def _add_local_hub_cache(
     root: Path,
     hub: HubCacheScan,
@@ -4299,7 +4499,11 @@ def _add_local_hub_cache(
             continue
         first_parts, _hf = _find_model_units(unit.snapshot, max_depth=_import_max_depth())
         if not first_parts:
-            unusable += 1
+            why = explain_unsupported_model(unit.snapshot)
+            if why is None:
+                unusable += 1
+            else:
+                console.print(f"[yellow]Skipped {escape(unit.repo_id)}:[/yellow] {escape(why)}")
             continue
         found += 1
         models = [g for g in first_parts if "mmproj" not in g.name.lower()]
@@ -4384,10 +4588,12 @@ def add_local(
         # sync_models_dir uses, so a '../evil' or 'a/b' name can never become a
         # raw registry key.
         model_name = _sanitize_name(name) if name else suggested
+        effective = model_type if model_type is not None else "llm"
         return _register_ollama_blob(
             blob_path, model_name, on_duplicate=on_duplicate,
-            model_type=(model_type if model_type is not None else "llm"),
-            store=store,
+            model_type=effective, store=store,
+            projector=(_ollama_manifest_projector(p, blob_path)
+                       if effective == "llm" else None),
         )
 
     # A llamafile (an executable with a ZIP of its weights appended) is unpacked
@@ -4415,7 +4621,14 @@ def add_local(
     # the file sits inside a real HF model dir, register that DIRECTORY
     # (deterministic type detection below then classifies it); otherwise reject
     # with a precise, actionable reason instead of the bare "Not a model".
-    if p.is_file() and p.suffix.lower() == ".safetensors" and not (is_gguf or is_hf or is_blob):
+    media_type = None
+    if p.is_file() and p.suffix.lower() in (".safetensors", ".sft") and not (is_gguf or is_hf
+                                                                           or is_blob):
+        media_type = _media_component_type(p, model_type)
+    if media_type is not None:
+        if model_type is None:
+            model_type = media_type
+    elif p.is_file() and p.suffix.lower() == ".safetensors" and not (is_gguf or is_hf or is_blob):
         parent = p.parent
         if _is_hf_dir(str(parent)):
             p = parent
@@ -4450,6 +4663,12 @@ def add_local(
         if hub is not None:
             return _add_local_hub_cache(
                 p, hub, name, on_duplicate, no_hash, fast, model_type, store)
+        jan_root = find_jan_models_root(p)
+        if jan_root is not None:
+            outcome = _add_local_jan(
+                jan_root, name, on_duplicate, no_hash, fast, model_type, store)
+            if outcome is not None:
+                return outcome
 
     max_depth = _import_max_depth()
     if p.is_dir() and not is_hf:
@@ -4477,7 +4696,7 @@ def add_local(
                 ) or registered_any
             return registered_any
 
-    if not (is_gguf or is_hf or is_blob):
+    if not (is_gguf or is_hf or is_blob or media_type):
         detail = explain_unsupported_model(p)
         if detail is None:
             detail = ("Expected a .gguf file or a HuggingFace model directory "

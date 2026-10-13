@@ -426,3 +426,41 @@ def test_nvidia_preflight_handles_unsupported_compute_cap_field(monkeypatch):
     # or being mistaken for a Blackwell architecture.
     assert info.cuda_line == "cuda-12"
     assert info.driver_ok is False   # 11.4 genuinely too old for cuda-12's 12.4 minimum
+
+
+# --------------------------------------------------------------------------- #
+# A mixed-generation host: the newest GPU decides the line.                   #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("lines, expected", [
+    (["8.6", "12.0"], "12.0"),
+    (["12.0", "8.6"], "12.0"),
+    (["8.9", "8.6"], "8.9"),
+    (["10", "9.0"], "10"),
+    (["not a version", "7.5"], "7.5"),
+    (["not a version"], "not a version"),
+    (["", " 8.0 "], "8.0"),
+    ([], ""),
+])
+def test_newest_capability_picks_the_highest_parseable_level(lines, expected):
+    from localm.setup_llama.cuda import _newest_capability
+    assert _newest_capability(lines) == expected
+
+
+@pytest.mark.parametrize("caps, expected_line", [
+    ("8.6\n12.0\n", "cuda-13"),
+    ("12.0\n8.6\n", "cuda-13"),
+    ("8.9\n8.6\n", "cuda-12"),
+])
+def test_preflight_selects_the_line_from_the_newest_gpu(monkeypatch, caps, expected_line):
+    def fake_smi(*args):
+        joined = " ".join(str(a) for a in args)
+        if "compute_cap" in joined:
+            return caps
+        if "--query-gpu=name" in joined:
+            return "GPU A\nGPU B\n"
+        return ("|  NVIDIA-SMI 595.44   Driver Version: 595.44   "
+                "CUDA Version: 13.4  |\n")
+    monkeypatch.setattr(sl, "_nvidia_smi", fake_smi)
+    info = sl.nvidia_preflight()
+    assert info.cuda_line == expected_line

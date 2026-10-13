@@ -1741,8 +1741,8 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 /* Camera button: only useful on a device with a camera + touch (a phone). The
    attach button already offers camera+gallery on mobile via the OS picker, so
    hide the dedicated one on a mouse-pointer (desktop) device to avoid clutter. */
-.chat-camera { display: none; }
-@media (pointer: coarse) { .chat-camera { display: inline-flex; } }
+.composer .chat-camera { display: none; }
+@media (pointer: coarse) { .composer .chat-camera { display: flex; } }
 
 /* "download" button on a coder changed-file row (pull output onto a phone). */
 .file-dl { margin-left: 8px; }
@@ -3155,3 +3155,11 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 
 
+
+/* Native media model pickers (app/native-models.js). */
+.native-models { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin: 6px 0 10px; }
+.native-models > .sub, .native-models > .native-loras { grid-column: 1 / -1; }
+.native-lora-row { display: grid; grid-template-columns: 1fr 90px auto; gap: 8px; margin-bottom: 6px; }
+@media (max-width: 640px) {
+  .native-models { grid-template-columns: 1fr; }
+}

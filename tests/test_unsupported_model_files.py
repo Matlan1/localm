@@ -30,6 +30,7 @@ from localm.model_manager.gguf import (
     gguf_unusable_reason,
 )
 from localm.model_manager.unsupported import (
+    _LOADER_QUANT_METHODS,
     explain_unsupported_model,
     gguf_header_refusal,
     hf_folder_refusal,
@@ -55,6 +56,12 @@ GGJT_SENTENCE = ("This is a legacy llama.cpp model in the old GGJT format, from 
                  "before GGUF. localm loads GGUF only. Use a GGUF of the same model.")
 GGMF_SENTENCE = ("This is a legacy llama.cpp model in the old GGMF format, from "
                  "before GGUF. localm loads GGUF only. Use a GGUF of the same model.")
+GGLA_SENTENCE = ("This is a LoRA adapter in the old GGLA format, from before GGUF "
+                 "adapters. localm attaches LoRA adapters only as GGUF. Convert the "
+                 "original adapter with llama.cpp's convert_lora_to_gguf.py, or use a "
+                 "GGUF adapter.")
+SESSION_SENTENCE = ("This is a llama.cpp saved session file (cached prompt state), not a "
+                    "model. Point localm at the model's own .gguf file instead.")
 GGML_SENTENCE = ("This is an old-format GGML file (the pre-GGUF format used by early "
                  "llama.cpp and by whisper.cpp). localm loads GGUF, not GGML. For a "
                  "language model, use a GGUF of the same model; a whisper.cpp speech "
@@ -302,6 +309,17 @@ class TestLegacyGgml:
         assert sentence in "\n".join(printed)
         assert mm.load_registry() == {}
 
+    @pytest.mark.parametrize("magic,sentence", [(b"algg", GGLA_SENTENCE),
+                                                (b"nsgg", SESSION_SENTENCE),
+                                                (b"qsgg", SESSION_SENTENCE)])
+    def test_old_lora_and_session_files_are_explained(self, home, tmp_path, printed,
+                                                      magic, sentence):
+        f = _legacy_bin(tmp_path / "ggml-adapter-model.bin", magic, versioned=True)
+        assert explain_unsupported_model(f) == sentence
+        assert mm.add_local(str(f)) is False
+        assert sentence in "\n".join(printed)
+        assert mm.load_registry() == {}
+
     def test_a_whisper_model_is_not_called_a_llama_model(self, tmp_path):
         f = _legacy_bin(tmp_path / "ggml-base.bin", b"lmgg", versioned=False, vocab=51865)
         sentence = explain_unsupported_model(f)
@@ -411,13 +429,74 @@ class TestUnsupportedQuantMethod:
             hf_mod.HFBackend(str(d)).load()
 
     @pytest.mark.parametrize("method", ["gptq", "bitsandbytes", "fp8", "compressed-tensors",
-                                        "mxfp4", "something-new", None, 3])
+                                        "mxfp4", None, 3])
     def test_other_methods_are_left_to_the_loader(self, tmp_path, method):
         d = tmp_path / "q"
         d.mkdir()
         (d / "config.json").write_text(json.dumps(
             {"quantization_config": {"quant_method": method, "bits": 4}}))
         assert hf_folder_refusal(d) is None
+
+
+def _quant_folder(root: Path, qconf: dict) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.json").write_text(json.dumps({"quantization_config": qconf}))
+    return root
+
+
+def _unknown_method_sentence(shown: str) -> str:
+    return (f"This model is quantized with {shown}, a method the Hugging Face loader "
+            f"localm uses does not support, so its packed weights cannot be read. {ALT}")
+
+
+class TestQuantMethodTheLoaderHasNoQuantizerFor:
+    @pytest.mark.parametrize("method", ["something-new", "squeezellm", "modelopt", "GPTQ"])
+    def test_refused_by_name(self, tmp_path, method):
+        d = _quant_folder(tmp_path / "q", {"quant_method": method, "bits": 4})
+        assert hf_folder_refusal(d) == _unknown_method_sentence(f"'{method}'")
+        assert explain_unsupported_model(d) == _unknown_method_sentence(f"'{method}'")
+
+    @pytest.mark.parametrize("method", sorted(_LOADER_QUANT_METHODS))
+    def test_every_method_the_loader_maps_gets_no_sentence(self, tmp_path, method):
+        d = _quant_folder(tmp_path / "q", {"quant_method": method, "bits": 4})
+        assert hf_folder_refusal(d) is None
+
+    @pytest.mark.parametrize("flag", ["load_in_4bit", "load_in_8bit"])
+    def test_a_bitsandbytes_flag_decides_not_the_method_string(self, tmp_path, flag):
+        d = _quant_folder(tmp_path / "q", {"quant_method": "something-new", flag: True})
+        assert hf_folder_refusal(d) is None
+
+    @pytest.mark.parametrize("method", ["x" * 41, "a b", "evil\nname", "[bold]x[/bold]"])
+    def test_an_odd_method_string_is_not_echoed(self, tmp_path, method):
+        d = _quant_folder(tmp_path / "q", {"quant_method": method})
+        assert hf_folder_refusal(d) == _unknown_method_sentence("an unrecognised method")
+
+    @pytest.mark.parametrize("method", ["", "   "])
+    def test_a_blank_method_gets_no_sentence(self, tmp_path, method):
+        d = _quant_folder(tmp_path / "q", {"quant_method": method})
+        assert hf_folder_refusal(d) is None
+
+    def test_exllama_keeps_its_own_sentence(self, tmp_path):
+        d = _quant_folder(tmp_path / "q", EXL2_QUANT)
+        assert hf_folder_refusal(d) == EXL2_SENTENCE
+
+    def test_registers_with_the_note_and_is_refused_at_load(self, home, tmp_path, monkeypatch, printed):
+        hf_mod = _no_runner(monkeypatch)
+        d = _hf_dir(tmp_path / "sq", {"architectures": ["LlamaForCausalLM"],
+                                      "quantization_config": {"quant_method": "squeezellm"}})
+        assert mm.add_local(str(d)) is True
+        sentence = _unknown_method_sentence("'squeezellm'")
+        assert "Registered, but localm cannot load it" in "\n".join(printed)
+        assert sentence in "\n".join(printed)
+        with pytest.raises(UnsupportedModelRoleError) as caught:
+            hf_mod.HFBackend(str(d)).load()
+        assert str(caught.value) == sentence
+
+    @pytest.mark.integration
+    def test_the_loader_set_is_the_installed_transformers_mapping(self):
+        quantizers = pytest.importorskip("transformers.quantizers.auto")
+        assert set(quantizers.AUTO_QUANTIZATION_CONFIG_MAPPING) | {"bitsandbytes"} == set(
+            _LOADER_QUANT_METHODS)
 
 
 # --------------------------------------------------------------------------- #
@@ -504,7 +583,7 @@ class TestImatrix:
             backend.load()
         assert str(caught.value) == IMATRIX_SENTENCE
 
-    @pytest.mark.parametrize("general_type", ["model", "adapter", "clip-vision"])
+    @pytest.mark.parametrize("general_type", ["model", "adapter", "mmproj"])
     def test_other_general_types_are_left_alone(self, tmp_path, general_type):
         f = _gguf(tmp_path / "x.gguf", general_type=general_type)
         assert gguf_unusable_reason(f) is None
@@ -545,6 +624,25 @@ class TestOtherFormats:
         assert explain_unsupported_model(f) == sentence
         assert mm.add_local(str(f)) is False
         assert "Not a model" in "\n".join(printed) and sentence in "\n".join(printed)
+
+    @pytest.mark.parametrize("name", ["model.engine", "model.plan", "gemma.task"])
+    def test_a_text_file_with_the_extension_gets_no_sentence(self, home, tmp_path, printed, name):
+        f = tmp_path / name
+        f.write_text("buy milk\nwrite tests\n")
+        assert explain_unsupported_model(f) is None
+        assert mm.add_local(str(f)) is False
+        assert "Expected a .gguf file or a HuggingFace model directory" in "\n".join(printed)
+
+    @pytest.mark.parametrize("name", ["model.engine", "model.plan", "gemma.task"])
+    def test_an_empty_file_with_the_extension_gets_no_sentence(self, tmp_path, name):
+        f = tmp_path / name
+        f.write_bytes(b"")
+        assert explain_unsupported_model(f) is None
+
+    def test_the_content_check_covers_only_the_three_ambiguous_extensions(self, tmp_path):
+        f = tmp_path / "model.onnx"
+        f.write_text("plain text")
+        assert explain_unsupported_model(f) == FILE_SENTENCES["model.onnx"]
 
     @pytest.mark.parametrize("marker,sentence", FOLDER_SENTENCES.items())
     def test_folder_formats(self, home, tmp_path, printed, marker, sentence):

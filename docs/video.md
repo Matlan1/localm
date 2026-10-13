@@ -26,10 +26,13 @@ localm pull city96/umt5-xxl-encoder-gguf:umt5-xxl-encoder-Q4_K_M.gguf --type tex
 With nothing set up yet, Generate on the Video page offers to download the three files.
 With those registered and **Native model** left blank, the native backend uses them with
 their recommended settings (832x480, 30 steps, CFG 6, flow shift 3). Any video model
-stable-diffusion.cpp supports can be set instead: **Native model** is the diffusion model,
-**Native T5-XXL text encoder** takes Wan's umt5-xxl, **Native VAE** the VAE, and **Native
-CLIP vision encoder** the clip_vision_h file Wan image-to-video models need. These part
-fields also replace the matching part of the recommended set when **Native model** is blank.
+stable-diffusion.cpp supports can be picked instead, in the **Model** dropdown on the Video
+page or as **Native model** in Settings. A Wan model is recognised from the file and gets its
+umt5-xxl text encoder, its VAE and, for image-to-video, the clip_vision_h encoder from your
+registered models; **Native T5-XXL text encoder**, **Native VAE** and **Native CLIP vision
+encoder** (or the page's dropdowns) override the pick, and a missing part is offered as a
+download. These part fields also replace the matching part of the recommended set when
+**Native model** is blank. Registered LoRAs can be added with a strength each.
 A start image needs an image-to-video model (Wan I2V, FLF2V or TI2V); a text-to-video model
 such as the recommended one refuses it with a reason rather than ignoring it.
 

@@ -21,6 +21,7 @@ see ``_free_total_vram_bytes``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -882,30 +883,10 @@ class VramSizingMixin:
 
     def _draft_model_rejected_by_metadata(self, path: Path) -> bool:
         """Whether *path*'s GGUF metadata already shows the load would reject it
-        as this model's draft model: not a causal chat model
-        (``draft_role_refusal``), recurrent-state layers, or a vocabulary
-        ``draft_vocab_mismatch`` refuses against this model's. False when the
+        as this model's draft model (``draft_metadata_refusal``). False when the
         metadata cannot be read. Never raises."""
-        try:
-            from localm.inference.backends.llamacpp._draftmodel import (
-                draft_role_refusal, draft_vocab_mismatch, gguf_vocab_view)
-            from localm.model_manager.gguf import (
-                gguf_recurrent_state_bytes, gguf_vocab_signature)
-            if draft_role_refusal(path) is not None:
-                return True
-            if gguf_recurrent_state_bytes(path) > 0:
-                return True
-            target = gguf_vocab_signature(Path(self.model_path))
-            draft = gguf_vocab_signature(path)
-            if target is None or draft is None:
-                return False
-            return draft_vocab_mismatch(gguf_vocab_view(target),
-                                        gguf_vocab_view(draft)) is not None
-        except Exception as exc:
-            from localm.debuglog import logger as _dbg
-            _dbg.debug("draft-model metadata check failed (%s); charging it",
-                       type(exc).__name__)
-            return False
+        from localm.inference.backends.llamacpp._draftmodel import draft_metadata_refusal
+        return draft_metadata_refusal(self.model_path, path) is not None
 
     def _draft_model_vram_bytes(self) -> int:
         """VRAM the draft model takes for THIS load: ``_draft_model_charge_bytes``
@@ -1118,11 +1099,29 @@ class VramSizingMixin:
         return sum(size for layer, size in self._moe_expert_bytes_by_layer().items()
                    if layer < n_cpu_moe)
 
+    def _adapter_bytes(self) -> int:
+        """Bytes on disk of the LoRA adapters attached to this load; a missing
+        or unreadable adapter file counts as 0."""
+        total = 0
+        for adapter in getattr(self, "adapters", None) or ():
+            try:
+                total += os.path.getsize(adapter[0])
+            except OSError:
+                continue
+        return total
+
     def _vram_model_bytes(self, n_cpu_moe: int) -> int:
         """VRAM-resident weight bytes for a load that keeps the routed experts
-        of the first *n_cpu_moe* layers in system RAM: ``_model_bytes()`` minus
-        the input-layer tensors (every load) and those experts. See
-        :meth:`_effective_model_bytes_for_vram`."""
+        of the first *n_cpu_moe* layers in system RAM: the base model's
+        (:meth:`_base_vram_model_bytes`) plus the attached LoRA adapters'
+        (:meth:`_adapter_bytes`). See :meth:`_effective_model_bytes_for_vram`."""
+        return self._base_vram_model_bytes(n_cpu_moe) + self._adapter_bytes()
+
+    def _base_vram_model_bytes(self, n_cpu_moe: int) -> int:
+        """The model file's VRAM-resident weight bytes for a load that keeps the
+        routed experts of the first *n_cpu_moe* layers in system RAM:
+        ``_model_bytes()`` minus the input-layer tensors (every load) and those
+        experts."""
         model_bytes = self._model_bytes()
         parsed = self._gguf_parsed_tensor_entries()
 
@@ -1833,7 +1832,7 @@ class VramSizingMixin:
         n_cpu_moe = self._load_n_cpu_moe()
         if n_cpu_moe > 0 and not self._block_bytes():
             return None
-        return max(0, model_bytes - self._vram_model_bytes(n_cpu_moe))
+        return max(0, model_bytes - self._base_vram_model_bytes(n_cpu_moe))
 
     def _cpu_held_weight_bytes(self, gpu_layers: int) -> Optional[int]:
         """Weight bytes a load with *gpu_layers* below 99 keeps in system RAM:

@@ -255,6 +255,7 @@ _CHAT_PLUGIN_ROUTES = {
     ("api", "GET", "/api/prompts"): ("scope:chat",),
     ("api", "PUT", "/api/prompts/{name}"): ("scope:chat",),
     ("api", "DELETE", "/api/prompts/{name}"): ("scope:chat",),
+    ("api", "POST", "/api/chat/extract"): ("scope:chat",),
 }
 
 _API_LANDING_ROUTES = {("api", "GET", "/"): ()}

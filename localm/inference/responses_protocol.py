@@ -42,7 +42,7 @@ MAX_TOP_LOGPROBS = 20
 CHAT_EXTRAS = (
     "top_k", "min_p", "repeat_penalty", "presence_penalty", "frequency_penalty", "seed",
     "stop", "grammar", "grammar_lazy", "grammar_triggers", "required_capabilities",
-    "pin_model", "min_context", "chat_template_kwargs",
+    "pin_model", "min_context", "chat_template_kwargs", "cache_prompt",
 )
 
 
