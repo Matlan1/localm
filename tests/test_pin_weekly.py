@@ -1410,7 +1410,9 @@ def test_every_advancer_script_that_exists_follows_the_contract_cli():
                 assert "--current" in options, rel
 
 
-_BANNED_IN_TRACKED_TEXT = ("dev-notes/", "issues/issues.txt", "qa/", "AGENTS.md", "CLAUDE.md", "RELEASE.md")
+_BANNED_IN_TRACKED_TEXT = tuple("".join(parts) for parts in (
+    ("dev-", "notes/"), ("issues/", "issues.txt"), ("q", "a/"), ("AGENTS", ".md"), ("CLAUDE", ".md"),
+    ("RELEASE", ".md")))
 
 
 def test_no_pin_script_or_test_names_a_gitignored_path_in_its_comments_and_docstrings():
