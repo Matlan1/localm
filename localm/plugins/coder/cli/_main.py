@@ -25,7 +25,7 @@ from pathlib import Path
 import click
 
 
-def _echo(message: object = "", **kwargs) -> None:
+def _safe_echo(message: object = "", **kwargs) -> None:
     """``click.echo`` of text localm did not author, without terminal control characters."""
     from localm.console import strip_controls
     click.echo(strip_controls(str(message)), **kwargs)
@@ -509,7 +509,7 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
     if restore_episode_id:
         ep = store.restore(restore_episode_id)
         if ep is not None:
-            _echo(f"Restored episode {ep.id}: {ep.lesson or ep.summary}")
+            _safe_echo(f"Restored episode {ep.id}: {ep.lesson or ep.summary}")
             if not store.last_restore_archive_ok:
                 # The lesson IS live again, so this is a caveat and not a failure.
                 click.echo(
@@ -553,7 +553,7 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
             return True
         click.echo(f"{len(rows)} archived episode(s) for {work_dir}:")
         for r in rows:
-            _echo("  - %s [%s] %s" % (r.get("id", "?"), r.get("reason", "?"),
+            _safe_echo("  - %s [%s] %s" % (r.get("id", "?"), r.get("reason", "?"),
                                            r.get("lesson") or r.get("summary") or ""))
         return True
 
@@ -564,7 +564,7 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
     click.echo(f"{len(eps)} episode(s) for {work_dir}:")
     for e in eps:
         # The id is what --forget-episode / --restore-episode address.
-        _echo(f"  - {e.id} [{e.outcome}] {e.lesson or e.summary}")
+        _safe_echo(f"  - {e.id} [{e.outcome}] {e.lesson or e.summary}")
     return True
 
 

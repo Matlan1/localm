@@ -28,7 +28,7 @@ from datetime import datetime
 import click
 
 
-def _echo(message: object = "", **kwargs) -> None:
+def _safe_echo(message: object = "", **kwargs) -> None:
     """``click.echo`` of text localm did not author, without terminal control characters."""
     from localm.console import strip_controls
     click.echo(strip_controls(str(message)), **kwargs)
@@ -227,9 +227,9 @@ def job_run(job_id):
     result = run_job(job, engine=None)
     store.record_result(job_id, result)
     if result.get("status") == "ok":
-        _echo(result.get("output", ""))
+        _safe_echo(result.get("output", ""))
     else:
-        _echo(f"Job failed: {result.get('error')}", err=True)
+        _safe_echo(f"Job failed: {result.get('error')}", err=True)
         sys.exit(1)
 
 
@@ -260,7 +260,7 @@ def job_results(job_id, limit, offset):
         text = (r.get("error") or "(error, no detail)") if is_error \
             else (r.get("output") or "(no output)")
         for line in text.splitlines() or [""]:
-            _echo(f"    {line}")
+            _safe_echo(f"    {line}")
         click.echo()
 
 
