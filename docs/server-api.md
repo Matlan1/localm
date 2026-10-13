@@ -46,7 +46,7 @@ plus localm request extras:
 | `stop` | A string or a list of up to 16 strings (each up to 1024 characters). The reply is cut before the first match, the generation ends there, and `finish_reason` is `stop`. A stop sequence inside a model's `<think>` block is not applied. Also accepted by `POST /v1/completions`. |
 | `tools`, `tool_choice`, `parallel_tool_calls` | OpenAI function tools; see [Tool calling](#tool-calling). |
 | `grammar`, `grammar_lazy`, `grammar_triggers` | GBNF grammar constraining the output (local models); a lazy grammar stays unconstrained until a trigger pattern appears, and requires `grammar_triggers` |
-| `chat_template_kwargs` | `{"enable_thinking": false}` asks a reasoning model that uses `<think>` blocks, the harmony format (gpt-oss) or Gemma 4 thought channels to answer without reasoning. Only `enable_thinking` is applied and must be a boolean (otherwise 422); other keys are accepted and ignored. A model with none of these conventions is unaffected. |
+| `chat_template_kwargs` | `{"enable_thinking": false}` asks a reasoning model that uses `<think>` blocks or the harmony format (gpt-oss) to answer without reasoning. Only `enable_thinking` is applied and must be a boolean (otherwise 422); other keys are accepted and ignored. A model with none of these conventions is unaffected. |
 
 While a streaming reply is being prepared, localm reports what it is doing in
 chunks whose `delta` carries `status` (English text) and `status_code` (a

@@ -836,8 +836,9 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     global _detected_context_layout, _context_layout_assumed
 
     # Detection runs BEFORE the skip check and never raises: the escape hatch
-    # suppresses the refusal, not the choice of struct class. `contradiction` is
-    # the one detection outcome that is itself a refusal.
+    # suppresses the refusal, not the choice of struct class. Two detection
+    # outcomes are themselves refusals: a model_params `contradiction` and an
+    # undecided context_params V2/V3 split (`ctx_undecided`).
     #
     # Two independent layout decisions: model_params (symbol probe plus value
     # fingerprint) and context_params (value fingerprint only). Only
@@ -868,7 +869,8 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
              + f"; proceeding with {layout} - if the model loads on the wrong "
                "GPU or memory behaviour looks wrong, this is why.", warn=True)
     if ctx_undecided:
-        _log(ctx_undecided + f"; proceeding with {context_layout}.", warn=True)
+        _log(ctx_undecided + f"; the load is refused unless {SKIP_ENV} is set.",
+             warn=True)
     refusals = [r for r in (contradiction, ctx_undecided) if r]
 
     if os.environ.get(SKIP_ENV):

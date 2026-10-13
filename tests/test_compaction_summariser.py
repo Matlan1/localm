@@ -72,10 +72,6 @@ class TestNoThinkPrompt:
     GEMMA4 = "<bos><|turn>user\nhi<turn|>\n<|turn>model\n"
     GEMMA4_TEMPLATE = "{{- '<|channel>thought\\n' -}}"
 
-    def test_gemma4_prompt_gets_an_empty_thought_channel(self):
-        assert (no_think_prompt(self.GEMMA4, self.GEMMA4_TEMPLATE)
-                == self.GEMMA4 + "<|channel>thought\n<channel|>")
-
     def test_gemma4_open_thought_channel_is_closed_empty(self):
         p = self.GEMMA4 + "<|channel>thought\n"
         assert no_think_prompt(p, None) == p + "<channel|>"
@@ -84,9 +80,9 @@ class TestNoThinkPrompt:
         p = self.GEMMA4 + "<|channel>thought\n<channel|>"
         assert no_think_prompt(p, self.GEMMA4_TEMPLATE) == p
 
-    def test_gemma4_turn_without_a_channel_template_is_unchanged(self):
+    def test_gemma4_model_turn_is_not_prefilled(self):
+        assert no_think_prompt(self.GEMMA4, self.GEMMA4_TEMPLATE) == self.GEMMA4
         assert no_think_prompt(self.GEMMA4, None) == self.GEMMA4
-        assert no_think_prompt(self.GEMMA4, "{{ messages }}") == self.GEMMA4
 
 
 # --------------------------------------------------------------------------- #

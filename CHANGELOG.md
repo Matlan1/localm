@@ -505,11 +505,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Fixed
 - **gpt-oss replies reach their answer.** A gpt-oss reply stopped at the end of its
   reasoning, so the answer came back empty; it now continues into the answer.
-- **Thinking off on gpt-oss and Gemma 4.** Asking a model to answer without reasoning
+- **Thinking off on gpt-oss.** Asking a model to answer without reasoning
   (`chat_template_kwargs: {"enable_thinking": false}`, `reasoning_effort: "none"`, and the
   summary written when a long conversation is compacted) now starts a gpt-oss reply in its
-  final channel, with no analysis before it, and a Gemma 4 reply after an empty thought
-  channel. Before, only models that reason in `<think>` blocks were affected.
+  final channel, with no analysis before it. Before, only models that reason in `<think>`
+  blocks were affected.
 - **A llama runtime whose context-parameter layout cannot be told apart is refused.** When
   a provided llama.cpp build's default context parameters fit both the layout with and the
   one without the MoE expert cache field, loading stops with the ABI mismatch message
