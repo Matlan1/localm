@@ -58,6 +58,17 @@ def embedder_ctx_reservation_bytes() -> int:
 # weights for them to be read into memory instead of memory-mapped.
 HOST_RAM_HEADROOM_BYTES = 2 * 1024 ** 3
 
+# Bytes per vocabulary entry per batch row of the MTP draft context: its
+# logits (4) and the buffers of its backend draft sampler (8).
+MTP_DRAFT_BYTES_PER_VOCAB_ROW = 12
+
+# Bytes per attention head, batch row and context token of the MTP draft
+# context's attention scores.
+MTP_DRAFT_SCORE_BYTES = 4
+
+# VRAM the MTP draft context takes beyond its KV cache and per-row buffers.
+MTP_DRAFT_COMPUTE_MARGIN_BYTES = 384 * 1024 * 1024
+
 
 class MmapDecision(NamedTuple):
     """How a load memory-maps the model file (:func:`decide_use_mmap`).
@@ -744,12 +755,8 @@ class VramSizingMixin:
 
         Two charges: the draft context's own KV cache, sized to the main
         ``self.n_ctx`` (the draft context is created at the main context's size)
-        and its own nextn/draft layer count rather than the whole stack; and a flat
-        compute-buffer charge of ``_VRAM_OVERHEAD_BYTES``, the same constant
-        the main context's own KV-cache-plus-compute-buffer overhead already
-        uses - the draft context's n_batch/n_ubatch are set to its own n_ctx
-        regardless of layer count, so its buffers are not assumed to shrink
-        proportionally with it.
+        and its own nextn/draft layer count rather than the whole stack; and its
+        compute buffers (:meth:`_mtp_draft_compute_bytes`).
 
         Eligibility is the SAME two-part gate llama_model_mtp_support checks
         on an already-loaded model (declared nextn metadata AND an
@@ -775,7 +782,7 @@ class VramSizingMixin:
                 kv_per_token = gguf_mtp_draft_kv_bytes_per_token(
                     path, nextn_layers)
                 self._mtp_draft_kv_per_token_cached = int(kv_per_token)
-                charge = self.n_ctx * kv_per_token + self._VRAM_OVERHEAD_BYTES
+                charge = self.n_ctx * kv_per_token + self._mtp_draft_compute_bytes(path)
         except Exception as exc:
             from localm.debuglog import logger as _dbg
             _dbg.debug("mtp draft-context VRAM probe failed (%s); charging "
@@ -783,6 +790,26 @@ class VramSizingMixin:
             charge = 0
         self._mtp_draft_vram_bytes_cached = charge
         return charge
+
+    def _mtp_draft_compute_bytes(self, path: Path) -> int:
+        """VRAM of the MTP draft context beyond its KV cache, for the model at
+        *path*, for each of its ``min(n_ctx, llama._MTP_DRAFT_BATCH)`` batch
+        rows: ``MTP_DRAFT_BYTES_PER_VOCAB_ROW`` per vocabulary entry and
+        ``MTP_DRAFT_SCORE_BYTES`` per attention head per token of ``n_ctx``;
+        plus ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``. ``_VRAM_OVERHEAD_BYTES`` when
+        the GGUF header gives no vocabulary size; the attention term is 0 when
+        it gives no head count."""
+        from localm.model_manager.gguf import _gguf_split_layout_meta, gguf_attention_head_count
+        from .llama import _MTP_DRAFT_BATCH
+        meta = _gguf_split_layout_meta(path)
+        n_vocab = meta[1] if meta else 0
+        if not n_vocab:
+            return self._VRAM_OVERHEAD_BYTES
+        rows = max(1, min(int(self.n_ctx), _MTP_DRAFT_BATCH))
+        n_head = gguf_attention_head_count(path)
+        return (rows * int(n_vocab) * MTP_DRAFT_BYTES_PER_VOCAB_ROW
+                + rows * n_head * int(self.n_ctx) * MTP_DRAFT_SCORE_BYTES
+                + MTP_DRAFT_COMPUTE_MARGIN_BYTES)
 
     def _recurrent_state_vram_bytes(self) -> int:
         """VRAM the main context's recurrent state takes for THIS load - 0 for a

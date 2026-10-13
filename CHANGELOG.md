@@ -628,6 +628,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A Diffusers pipeline or a CTranslate2 folder is named instead of rejected as "not a
   model".** Adding one, or finding one in the Hugging Face cache, now says what it is and
   what to use instead.
+- **MTP needs several GB less VRAM.** The MTP draft context now works in 64-token batches. Its
+  compute buffer and the buffers of its on-GPU draft sampler grow with the batch size and the
+  vocabulary, and at the old 2048-token batch took about 6 GB on Qwen3.5-4B once a reply had
+  started; they now take under 0.5 GB. The VRAM estimate charges them from the model's
+  vocabulary instead of a flat amount that undercounted them. Drafting and its output are
+  unchanged.
 - **Zed lists localm's models even when one model's file is gone.** `/api/tags` and `/api/show` gave
   such a model a `null` `modified_at`, and Zed rejects the whole model list on a `null` there; the
   field is now always a date (1970-01-01 when the file's time cannot be read).
