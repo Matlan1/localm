@@ -94,8 +94,12 @@ def _load() -> list:
 
 
 def _load_for_update() -> list:
-    """A private copy of the store's records for a read-modify-write, so a save
-    that fails leaves the mtime cache holding only what is on disk."""
+    """A private copy of the store's records, read from disk, for a
+    read-modify-write. The mtime cache is not trusted here, so a same-size write
+    from another process inside the same timestamp tick is still seen; the copy
+    means a save that fails leaves the cache holding only what is on disk."""
+    _CACHE["mtime"] = None
+    _CACHE["records"] = None
     return copy.deepcopy(_load())
 
 
@@ -106,20 +110,28 @@ def _store_lock(*, create_dirs: bool = False, timeout: Optional[float] = None):
 
     With *create_dirs* the data dir is created first. Without it, a data dir that
     does not exist means there is no store to change, so only ``_LOCK`` is taken.
-    *timeout* is the cross-process wait budget (None: the config default).
-    Raises ``TimeoutError`` (an ``OSError``) when another process holds the lock
-    past it."""
+    *timeout* bounds the wait for ``_LOCK`` and then for the cross-process lock
+    (None: ``_LOCK`` is waited for without a bound and the cross-process lock for
+    the config default). Raises ``TimeoutError`` (an ``OSError``) when either is
+    still held past it."""
     from localm.config import _cross_process_lock, ensure_dirs
     path = sessions_file()
     if create_dirs:
         ensure_dirs()
         path.parent.mkdir(parents=True, exist_ok=True)
-    with _LOCK:
+    if timeout is None:
+        _LOCK.acquire()
+    elif not _LOCK.acquire(timeout=timeout):
+        raise TimeoutError(f"timed out after {timeout:g}s waiting for the session "
+                           "store lock held by another thread")
+    try:
         if not path.parent.is_dir():
             yield
             return
         with _cross_process_lock(path, timeout=timeout):
             yield
+    finally:
+        _LOCK.release()
 
 
 def _save(records: list) -> None:

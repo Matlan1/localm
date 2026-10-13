@@ -128,6 +128,52 @@ def test_a_held_lock_costs_the_request_path_at_most_its_short_budget(home):
     assert sessions._BEST_EFFORT_LOCK_TIMEOUT_S < cfg._CROSS_LOCK_TIMEOUT
 
 
+def test_a_stamp_does_not_wait_on_a_thread_holding_the_store(home):
+    sid = sessions.create(scopes={"admin"}, key_hash="KH")
+    sessions._last_used_writes.clear()
+    out = {}
+
+    def _lookup():
+        started = time.monotonic()
+        out["rec"] = sessions.lookup(sid)
+        out["owner"] = sessions.remember_owner_key_minted(sid)
+        out["elapsed"] = time.monotonic() - started
+
+    sessions._LOCK.acquire()
+    try:
+        t = threading.Thread(target=_lookup, daemon=True)
+        t.start()
+        t.join(10)
+        finished = not t.is_alive()
+    finally:
+        sessions._LOCK.release()
+    t.join(10)
+    assert finished, "a request-path stamp waited on another thread's store write"
+    assert out["rec"] is not None and out["owner"] is False
+    assert out["elapsed"] < 2 * sessions._BEST_EFFORT_LOCK_TIMEOUT_S + 1.0
+
+
+def test_a_same_size_write_from_another_process_is_not_undone(home):
+    """Inside the lock the store is read from disk, not from the mtime cache,
+    so a write that kept the file's size and timestamp is still seen."""
+    sid = sessions.create(scopes={"admin"}, key_hash="AAAA")
+    other = sessions.create(scopes={"admin"}, key_hash="CCCC")
+    path = sessions.sessions_file()
+    st = path.stat()
+    raw = path.read_text(encoding="utf-8").replace('"AAAA"', '"BBBB"')
+    path.write_text(raw, encoding="utf-8")
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert path.stat().st_size == st.st_size
+
+    sessions.relink_key_hash("CCCC", "DDDD")
+
+    records = json.loads(path.read_text(encoding="utf-8"))
+    hashes = {r["key_hash"] for r in records}
+    assert hashes == {"BBBB", "DDDD"}, hashes
+    assert sessions.lookup(sid)["key_hash"] == "BBBB"
+    assert sessions.lookup(other)["key_hash"] == "DDDD"
+
+
 def test_a_failed_save_leaves_the_cache_holding_what_is_on_disk(home, monkeypatch):
     sid = sessions.create(scopes={"admin"}, key_hash="OLD")
     assert sessions.lookup(sid)["key_hash"] == "OLD"

@@ -67,9 +67,10 @@ def register(app: FastAPI, ctx) -> None:
         # _is_owner_key is a constant-time plaintext compare against the live owner
         # key: a POSITIVE proof that reads no keystore, so a corrupt auth.json
         # cannot flip it, and holding ADMIN cannot earn it.
-        sid = sessions.create(scopes=held, key_hash=_hash_key(presented),
-                              fs_access=fs, rag_roots=rag_roots,
-                              owner_key_minted=_is_owner_key(presented))
+        sid = await run_in_threadpool(
+            lambda: sessions.create(scopes=held, key_hash=_hash_key(presented),
+                                    fs_access=fs, rag_roots=rag_roots,
+                                    owner_key_minted=_is_owner_key(presented)))
         secure = request.url.scheme == "https"
         response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                             secure=secure, samesite="strict", path="/",
@@ -99,7 +100,7 @@ def register(app: FastAPI, ctx) -> None:
         warnings: list[str] = []
         if source == "cookie" and token:
             from localm import sessions
-            if sessions.revoke(token) is None:
+            if await run_in_threadpool(sessions.revoke, token) is None:
                 # The store write failed, so the session id is STILL VALID on the
                 # server. Clearing the cookie below stops this browser using it,
                 # but the session survives, so this does not report a clean
@@ -140,7 +141,7 @@ def register(app: FastAPI, ctx) -> None:
         # everywhere - and READ THE RESULT: revoke_all returns None when the store
         # could not be written, which is a failed sign-out, not an empty store.
         from localm import sessions
-        revoked = sessions.revoke_all()
+        revoked = await run_in_threadpool(sessions.revoke_all)
         secure = request.url.scheme == "https"
         # Invalidate the session cookie immediately so the browser is forced
         # back to the key gate on the next navigation (the old cookie value
@@ -283,9 +284,10 @@ def register(app: FastAPI, ctx) -> None:
             # owner_key_minted is PROVEN, not assumed: _is_owner_key re-compares
             # against the live value, so a write that somehow did not take reports
             # False instead of stamping a privilege nothing established.
-            sid = sessions.create(scopes={scopes.ADMIN},
-                                  key_hash=auth._hash_key(key), fs_access="host",
-                                  owner_key_minted=auth._is_owner_key(key))
+            sid = await run_in_threadpool(
+                lambda: sessions.create(scopes={scopes.ADMIN},
+                                        key_hash=auth._hash_key(key), fs_access="host",
+                                        owner_key_minted=auth._is_owner_key(key)))
             secure = request.url.scheme == "https"
             response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",

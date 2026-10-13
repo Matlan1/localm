@@ -164,7 +164,7 @@ that has to happen regardless of install path.
 | `plugin_config(name=None)` | Read this plugin's own config block (`config["plugins"][<own name>]`). Passing another plugin's name is refused: it is confined to the caller's own block instead, and the attempt is logged. |
 | `save_plugin_config(name=None, cfg=None)` | Write this plugin's own config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). Passing another plugin's name is confined and logged the same way as `plugin_config`. |
 | `engine()` | Handle to the inference engine. |
-| `driving_engine(engine=None)` | Context manager: wrap around a real generation call to pin the engine busy and reset its idle-unload clock for the duration. Never wrap a bare `.loaded`/name check with it. |
+| `driving_engine(engine=None)` | Context manager: wrap around a real generation call to pin the engine busy and reset its idle-unload clock for the duration. Never wrap a bare `.loaded`/name check with it. Raises FastAPI's `HTTPException` (503) without running the block when the engine is being unloaded; retry later. |
 | `on_startup(callback)` | Queue work to run once the server's event loop is up (register() runs before uvicorn creates it on a normal start). |
 | `audit(event, data)` | Log a plugin event. |
 | `browse_dirs(path)` | Server-side folder picker helper. |

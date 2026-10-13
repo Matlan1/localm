@@ -1959,6 +1959,7 @@ def register(host) -> None:
 
 def unregister() -> None:
     """End every live coder session, so none keeps running once the plugin's
-    routes (stop included) are gone."""
+    routes (stop included) are gone. Runs on every unload: disable, uninstall
+    and a refresh to a new plugin version."""
     from localm.plugins.coder.sessions import stop_all_live_sessions
     stop_all_live_sessions()

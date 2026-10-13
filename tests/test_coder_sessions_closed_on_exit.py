@@ -233,3 +233,27 @@ def test_stopping_all_live_sessions_survives_one_that_fails():
     assert recording.stopped, "a session after one whose stop raised was not stopped"
     assert manager.snapshot() == []
     assert recording.closed.wait(10), "the background close never reached the session"
+
+
+def test_an_exit_right_after_a_disable_waits_for_its_closes(monkeypatch):
+    class _Slow:
+        id = "slow"
+
+        def __init__(self):
+            self.closed = False
+
+        def stop(self):
+            pass
+
+        def close(self):
+            time.sleep(0.5)
+            self.closed = True
+
+    slow = _Slow()
+    manager = coder_sessions.SessionManager()
+    manager._sessions["slow"] = slow
+
+    assert coder_sessions.stop_all_live_sessions() >= 1
+    coder_sessions.close_all_for_exit(timeout_s=10)
+
+    assert slow.closed, "the exit path did not wait for a close the disable started"

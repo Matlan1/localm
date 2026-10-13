@@ -638,7 +638,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   job ran again. Writes to the session and job stores now wait for each other across processes.
 - **Disabling the coder plugin ends its open sessions.** A coder session kept running after the plugin
   was disabled, with its stop button gone. Disabling or uninstalling the plugin now stops and closes
-  every live coder session.
+  every live coder session, and so does refreshing the plugin to a new
+  version.
 - **A background task no longer reloads a model that is being unloaded.** A scheduled job or a memory
   consolidation that started on a model just as it was unloaded or evicted could load it again where
   the Models page and idle unload could not see it. It now fails with a message to retry.
