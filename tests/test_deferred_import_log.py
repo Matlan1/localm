@@ -115,6 +115,7 @@ class TestPluginCliWiringDiagnostic:
         from localm.cli import maintenance
 
         monkeypatch.setattr(debuglog, "_deferred_records", [])
+        monkeypatch.setattr(maintenance.main, "commands", dict(maintenance.main.commands))
 
         def _boom(mod_name, *a, **kw):
             raise ImportError(f"No module named {mod_name!r}")
