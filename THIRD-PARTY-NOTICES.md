@@ -19,12 +19,31 @@ CDN. Each keeps its own license:
 | Inter (`vendor/inter`, Latin woff2 + `OFL.txt`) | UI typeface | SIL OFL 1.1 | (c) 2016 The Inter Project Authors |
 | jsQR | QR-code camera scanning (phone pairing) | Apache-2.0 | (c) Cosmo Wolfe and contributors |
 
-The TTS plugin vendors a separate browser bundle. Its components and licenses are
+The TTS plugin vendors a separate browser bundle (`kokoro.min.js`) under
+`localm/plugins/builtin/tts/static/vendor/`. Its components and licenses are
 documented in
-[`localm/plugins/builtin/tts/static/vendor/NOTICE.md`](localm/plugins/builtin/tts/static/vendor/NOTICE.md)
-(kokoro-js and transformers.js under Apache-2.0; onnxruntime-web and phonemizer
-under MIT), with the kokoro-js license text in the adjacent `LICENSE.kokoro-js`.
-All are permissive.
+[`localm/plugins/builtin/tts/static/vendor/NOTICE.md`](localm/plugins/builtin/tts/static/vendor/NOTICE.md),
+with each license text beside the bundle (`LICENSE.kokoro-js`,
+`LICENSE.transformers-js`, `LICENSE.onnxruntime-web`, `LICENSE.espeak-ng`):
+
+| Component | Used for | License | Copyright |
+|---|---|---|---|
+| kokoro-js | Kokoro text-to-speech model runner | Apache-2.0 | per upstream; text in `LICENSE.kokoro-js` |
+| transformers.js (`@huggingface/transformers`) | Model loading and inference in the browser | Apache-2.0 | per upstream; text in `LICENSE.transformers-js` |
+| onnxruntime-web | ONNX runtime (WebAssembly) | MIT | (c) Microsoft Corporation |
+| phonemizer | Text-to-phoneme wrapper | Apache-2.0 | per upstream; covered by the kokoro-js notice |
+| eSpeak NG (compiled into `phonemizer`, plus the `espeak-ng-data/` dictionaries) | Phoneme engine and non-English pronunciation dictionaries | GPL-3.0-or-later | (c) the eSpeak NG authors; text in `LICENSE.espeak-ng` |
+
+The TTS bundle is not wholly permissive. eSpeak NG is GPL-3.0-or-later and is
+compiled into `kokoro.min.js` (its WebAssembly build and `espeak-ng-data` payload),
+and its five non-English dictionaries are committed beside the bundle. Section 13
+of the AGPL permits combining an AGPL-covered work with a GPL-3.0 work, so the
+combination is licensed, and the combined bundle carries eSpeak NG under the GPL.
+
+The test suite carries four Gemma 4 chat templates from Google's `google/gemma-4-E2B-it` and
+`google/gemma-4-31B-it` model repositories (Apache-2.0, (c) Google LLC) as test fixtures in
+[`tests/fixtures/gemma4_chat_templates/`](tests/fixtures/gemma4_chat_templates/README.md). They are
+not shipped in the package.
 
 ## Bundled at release time (native inference binaries)
 

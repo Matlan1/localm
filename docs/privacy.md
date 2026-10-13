@@ -211,9 +211,10 @@ policy](network.md) instead.
   press "Check for updates" in the GUI or run `localm update` / `localm update
   --check`.
 - **What it sends, and what it does not.** A bare GET request identifying itself
-  as `localm`, plus a shared-secret header if one is configured. It does **not**
-  send your installed version, chat content, or anything else - the comparison
-  to the latest release happens locally, on your machine. What it does expose to
+  as `localm`, plus a shared-secret header if one is configured. The request path
+  names the release channel (stable, or prerelease if you opted in). It does
+  **not** send your installed version or chat content - the comparison to the
+  latest release happens locally, on your machine. What it does expose to
   the update server is your IP address, the time you checked, and the fact that
   a localm install checked in.
 - **It obeys `net_mode`.** The update check reads the network mode you set
@@ -224,8 +225,10 @@ policy](network.md) instead.
   than a URL you or a fetched page supplied - see
   [network.md](network.md#what-the-policy-does-not-govern). Turn on "Check
   for updates even when network access is off" in **Settings > Updates** to
-  exempt just this one channel; it is off by default, so `net_mode=off` is a
-  real kill switch unless you opt back in.
+  exempt just this one channel; it is off by default. `net_mode=off` blocks
+  the update check and everything a model triggers unless you opt back in; the
+  separate admin-only `net_allow_model_downloads` setting (also off by default)
+  exempts only the downloads you trigger yourself.
 - **Turning the channel off entirely.** Clear the update endpoint
   (`update_url` and `bugreport_upload_url` both blank) to disable update
   checks regardless of network policy.

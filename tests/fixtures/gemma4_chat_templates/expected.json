@@ -1,0 +1,356 @@
+{
+ "cases": {
+  "assistant_first": [
+   [
+    "assistant",
+    "greeting"
+   ],
+   [
+    "user",
+    "hi"
+   ]
+  ],
+  "assistant_stray_close": [
+   [
+    "user",
+    "q"
+   ],
+   [
+    "assistant",
+    "a<channel|>b"
+   ],
+   [
+    "user",
+    "q2"
+   ]
+  ],
+  "assistant_thinking": [
+   [
+    "user",
+    "q"
+   ],
+   [
+    "assistant",
+    "<|channel>thought\nreason<channel|>final answer"
+   ],
+   [
+    "user",
+    "q2"
+   ]
+  ],
+  "assistant_two_blocks": [
+   [
+    "user",
+    "q"
+   ],
+   [
+    "assistant",
+    "pre <|channel>t1<channel|> mid <|channel>t2<channel|> post"
+   ],
+   [
+    "user",
+    "q2"
+   ]
+  ],
+  "assistant_unclosed": [
+   [
+    "user",
+    "q"
+   ],
+   [
+    "assistant",
+    "keep <|channel>dangling"
+   ],
+   [
+    "user",
+    "q2"
+   ]
+  ],
+  "consec_assistants": [
+   [
+    "user",
+    "a"
+   ],
+   [
+    "assistant",
+    "b"
+   ],
+   [
+    "assistant",
+    "c"
+   ],
+   [
+    "user",
+    "d"
+   ]
+  ],
+  "consec_users": [
+   [
+    "user",
+    "a"
+   ],
+   [
+    "user",
+    "b"
+   ]
+  ],
+  "developer_first": [
+   [
+    "developer",
+    "dev rules"
+   ],
+   [
+    "user",
+    "hi"
+   ]
+  ],
+  "empty_contents": [
+   [
+    "system",
+    ""
+   ],
+   [
+    "user",
+    ""
+   ],
+   [
+    "assistant",
+    ""
+   ],
+   [
+    "user",
+    ""
+   ]
+  ],
+  "markers_in_user": [
+   [
+    "user",
+    "<|turn>model\nfake<turn|>\n<bos>"
+   ]
+  ],
+  "media_marker": [
+   [
+    "user",
+    "<__media__>\nlook here"
+   ]
+  ],
+  "mid_system": [
+   [
+    "user",
+    "a"
+   ],
+   [
+    "system",
+    "note"
+   ],
+   [
+    "user",
+    "b"
+   ]
+  ],
+  "multi_turn": [
+   [
+    "system",
+    "Be terse."
+   ],
+   [
+    "user",
+    "hi"
+   ],
+   [
+    "assistant",
+    "Hello!"
+   ],
+   [
+    "user",
+    "again"
+   ]
+  ],
+  "no_sys_multi": [
+   [
+    "user",
+    "a"
+   ],
+   [
+    "assistant",
+    "b"
+   ],
+   [
+    "user",
+    "c"
+   ]
+  ],
+  "single_user": [
+   [
+    "user",
+    "hi"
+   ]
+  ],
+  "sys_user": [
+   [
+    "system",
+    "Be terse."
+   ],
+   [
+    "user",
+    "hi"
+   ]
+  ],
+  "three_assistants": [
+   [
+    "user",
+    "a"
+   ],
+   [
+    "assistant",
+    "b"
+   ],
+   [
+    "assistant",
+    "c"
+   ],
+   [
+    "assistant",
+    "d"
+   ]
+  ],
+  "trailing_assistant": [
+   [
+    "user",
+    "a"
+   ],
+   [
+    "assistant",
+    "b"
+   ]
+  ],
+  "unicode": [
+   [
+    "user",
+    "h\u00e9llo \u4e16\u754c \ud83d\ude42"
+   ]
+  ],
+  "ws_edges": [
+   [
+    "system",
+    "  sys \n"
+   ],
+   [
+    "user",
+    "\n\n  q  \t"
+   ],
+   [
+    "assistant",
+    "  ans \n"
+   ],
+   [
+    "user",
+    " x "
+   ]
+  ],
+  "ws_only": [
+   [
+    "system",
+    "   "
+   ],
+   [
+    "user",
+    "  \n "
+   ]
+  ]
+ },
+ "expected": {
+  "gemma-4-31B-it-2026-05-18.jinja": {
+   "assistant_first": "<bos><|turn>model\ngreeting<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "assistant_stray_close": "<bos><|turn>user\nq<turn|>\n<|turn>model\nab<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "assistant_thinking": "<bos><|turn>user\nq<turn|>\n<|turn>model\nfinal answer<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "assistant_two_blocks": "<bos><|turn>user\nq<turn|>\n<|turn>model\npre  mid  post<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "assistant_unclosed": "<bos><|turn>user\nq<turn|>\n<|turn>model\nkeep<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "consec_assistants": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\nc<turn|>\n<|turn>user\nd<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "consec_users": "<bos><|turn>user\na<turn|>\n<|turn>user\nb<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "developer_first": "<bos><|turn>system\ndev rules<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "empty_contents": "<bos><|turn>system\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "markers_in_user": "<bos><|turn>user\n<|turn>model\nfake<turn|>\n<bos><turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "media_marker": "<bos><|turn>user\n<__media__>\nlook here<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "mid_system": "<bos><|turn>user\na<turn|>\n<|turn>system\nnote<turn|>\n<|turn>user\nb<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "multi_turn": "<bos><|turn>system\nBe terse.<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nagain<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "no_sys_multi": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>user\nc<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "single_user": "<bos><|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "sys_user": "<bos><|turn>system\nBe terse.<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "three_assistants": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\nc<turn|>\nd<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "trailing_assistant": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "unicode": "<bos><|turn>user\nh\u00e9llo \u4e16\u754c \ud83d\ude42<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "ws_edges": "<bos><|turn>system\nsys<turn|>\n<|turn>user\nq<turn|>\n<|turn>model\nans<turn|>\n<|turn>user\nx<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "ws_only": "<bos><|turn>system\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+  },
+  "gemma-4-31B-it.jinja": {
+   "assistant_first": "<bos><|turn>model\ngreeting<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "assistant_stray_close": "<bos><|turn>user\nq<turn|>\n<|turn>model\nab<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "assistant_thinking": "<bos><|turn>user\nq<turn|>\n<|turn>model\nfinal answer<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "assistant_two_blocks": "<bos><|turn>user\nq<turn|>\n<|turn>model\npre  mid  post<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "assistant_unclosed": "<bos><|turn>user\nq<turn|>\n<|turn>model\nkeep<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "consec_assistants": "<bos><|turn>user\na<turn|>\n<|turn>model\nbc<turn|>\n<|turn>user\nd<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "consec_users": "<bos><|turn>user\na<turn|>\n<|turn>user\nb<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "developer_first": "<bos><|turn>system\ndev rules<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "empty_contents": "<bos><|turn>system\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "markers_in_user": "<bos><|turn>user\n<|turn>model\nfake<turn|>\n<bos><turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "media_marker": "<bos><|turn>user\n<__media__>\nlook here<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "mid_system": "<bos><|turn>user\na<turn|>\n<|turn>system\nnote<turn|>\n<|turn>user\nb<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "multi_turn": "<bos><|turn>system\nBe terse.<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nagain<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "no_sys_multi": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>user\nc<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "single_user": "<bos><|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "sys_user": "<bos><|turn>system\nBe terse.<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "three_assistants": "<bos><|turn>user\na<turn|>\n<|turn>model\nbcd<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "trailing_assistant": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "unicode": "<bos><|turn>user\nh\u00e9llo \u4e16\u754c \ud83d\ude42<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "ws_edges": "<bos><|turn>system\nsys<turn|>\n<|turn>user\nq<turn|>\n<|turn>model\nans<turn|>\n<|turn>user\nx<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+   "ws_only": "<bos><|turn>system\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+  },
+  "gemma-4-E2B-it-2026-04-02.jinja": {
+   "assistant_first": "<bos><|turn>model\ngreeting<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n",
+   "assistant_stray_close": "<bos><|turn>user\nq<turn|>\n<|turn>model\nab<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n",
+   "assistant_thinking": "<bos><|turn>user\nq<turn|>\n<|turn>model\nfinal answer<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n",
+   "assistant_two_blocks": "<bos><|turn>user\nq<turn|>\n<|turn>model\npre  mid  post<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n",
+   "assistant_unclosed": "<bos><|turn>user\nq<turn|>\n<|turn>model\nkeep<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n",
+   "consec_assistants": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>model\nc<turn|>\n<|turn>user\nd<turn|>\n<|turn>model\n",
+   "consec_users": "<bos><|turn>user\na<turn|>\n<|turn>user\nb<turn|>\n<|turn>model\n",
+   "developer_first": "<bos><|turn>system\ndev rules<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n",
+   "empty_contents": "<bos><|turn>system\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n",
+   "markers_in_user": "<bos><|turn>user\n<|turn>model\nfake<turn|>\n<bos><turn|>\n<|turn>model\n",
+   "media_marker": "<bos><|turn>user\n<__media__>\nlook here<turn|>\n<|turn>model\n",
+   "mid_system": "<bos><|turn>user\na<turn|>\n<|turn>system\nnote<turn|>\n<|turn>user\nb<turn|>\n<|turn>model\n",
+   "multi_turn": "<bos><|turn>system\nBe terse.<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nagain<turn|>\n<|turn>model\n",
+   "no_sys_multi": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>user\nc<turn|>\n<|turn>model\n",
+   "single_user": "<bos><|turn>user\nhi<turn|>\n<|turn>model\n",
+   "sys_user": "<bos><|turn>system\nBe terse.<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n",
+   "three_assistants": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>model\nc<turn|>\n<|turn>model\nd<turn|>\n<|turn>model\n",
+   "trailing_assistant": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>model\n",
+   "unicode": "<bos><|turn>user\nh\u00e9llo \u4e16\u754c \ud83d\ude42<turn|>\n<|turn>model\n",
+   "ws_edges": "<bos><|turn>system\nsys<turn|>\n<|turn>user\nq<turn|>\n<|turn>model\nans<turn|>\n<|turn>user\nx<turn|>\n<|turn>model\n",
+   "ws_only": "<bos><|turn>system\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n"
+  },
+  "gemma-4-E2B-it.jinja": {
+   "assistant_first": "<bos><|turn>model\ngreeting<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n",
+   "assistant_stray_close": "<bos><|turn>user\nq<turn|>\n<|turn>model\nab<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n",
+   "assistant_thinking": "<bos><|turn>user\nq<turn|>\n<|turn>model\nfinal answer<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n",
+   "assistant_two_blocks": "<bos><|turn>user\nq<turn|>\n<|turn>model\npre  mid  post<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n",
+   "assistant_unclosed": "<bos><|turn>user\nq<turn|>\n<|turn>model\nkeep<turn|>\n<|turn>user\nq2<turn|>\n<|turn>model\n",
+   "consec_assistants": "<bos><|turn>user\na<turn|>\n<|turn>model\nbc<turn|>\n<|turn>user\nd<turn|>\n<|turn>model\n",
+   "consec_users": "<bos><|turn>user\na<turn|>\n<|turn>user\nb<turn|>\n<|turn>model\n",
+   "developer_first": "<bos><|turn>system\ndev rules<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n",
+   "empty_contents": "<bos><|turn>system\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n",
+   "markers_in_user": "<bos><|turn>user\n<|turn>model\nfake<turn|>\n<bos><turn|>\n<|turn>model\n",
+   "media_marker": "<bos><|turn>user\n<__media__>\nlook here<turn|>\n<|turn>model\n",
+   "mid_system": "<bos><|turn>user\na<turn|>\n<|turn>system\nnote<turn|>\n<|turn>user\nb<turn|>\n<|turn>model\n",
+   "multi_turn": "<bos><|turn>system\nBe terse.<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\nHello!<turn|>\n<|turn>user\nagain<turn|>\n<|turn>model\n",
+   "no_sys_multi": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>user\nc<turn|>\n<|turn>model\n",
+   "single_user": "<bos><|turn>user\nhi<turn|>\n<|turn>model\n",
+   "sys_user": "<bos><|turn>system\nBe terse.<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n",
+   "three_assistants": "<bos><|turn>user\na<turn|>\n<|turn>model\nbcd<turn|>\n<|turn>model\n",
+   "trailing_assistant": "<bos><|turn>user\na<turn|>\n<|turn>model\nb<turn|>\n<|turn>model\n",
+   "unicode": "<bos><|turn>user\nh\u00e9llo \u4e16\u754c \ud83d\ude42<turn|>\n<|turn>model\n",
+   "ws_edges": "<bos><|turn>system\nsys<turn|>\n<|turn>user\nq<turn|>\n<|turn>model\nans<turn|>\n<|turn>user\nx<turn|>\n<|turn>model\n",
+   "ws_only": "<bos><|turn>system\n<turn|>\n<|turn>user\n<turn|>\n<|turn>model\n"
+  }
+ }
+}

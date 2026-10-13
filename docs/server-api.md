@@ -12,7 +12,12 @@ Authentication: open (no key required) until an API key exists - the
 scoped key minted with `localm key create` / the GUI's key manager /
 `POST /v1/keys`. Once any key is configured, every route below requires
 `Authorization: Bearer <key>` (or the GUI's session cookie) except `GET
-/health`, `GET /localm-ca.crt`, and `GET /whoami`, which stay public. Most authenticated
+/health`, `GET /localm-ca.crt`, `GET /whoami`, and the three session routes
+(`GET /api/session`, `POST /api/session`, `POST /api/session/logout`), which stay
+public. `POST /v1/surfaces/gui` and `GET /v1/instances/status`, `POST
+/v1/instances/vouch` and `POST /v1/instances/cooperate-unload` take no bearer key
+either, but carry a credential of their own (an attach token or an instance
+vouch; see [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md)). Most authenticated
 routes also check the caller's key for a specific scope (noted per section
 below; the `admin` scope implies every other one). CORS is locked to
 localhost by default; widen it with the `cors_origins` config key. See
@@ -55,7 +60,10 @@ stable id): `waiting` (another request is running on this model), `compacting`
 (older messages are being summarised to fit the context window), `processing`,
 `encoding_image`, `encoding_image_gpu`, `encoding_image_cpu`,
 `vision_cpu_retry`, `encoding_audio_gpu`, `encoding_audio_cpu`,
-`audio_cpu_retry` and `generating`. A streaming request that is compacted
+`audio_cpu_retry`, `loading_model`, `recalling_memory`,
+`downloading_embedder` (the embedding model memory recall needs, on its first
+download), `chat_hooks` (chat plugins' inlet hooks are running),
+`checking_grammar` and `generating`. A streaming request that is compacted
 carries `X-Localm-Context-Compacted: 1`; if the conversation still does not fit
 after compaction, the refusal arrives in the stream as the reply text with
 `finish_reason: "error"` instead of an HTTP 413.
@@ -733,15 +741,23 @@ count landed on the GPU, so a caller can tell that apart from a full GPU
 load. `parallel_slots` appears when the loaded model answers more than one
 request at once, and says how many.
 
-`POST /v1/models/unload` returns `status` (`"unloaded"`, `"in_use"` when
-every loaded model was mid-request and none could be freed, or
+`POST /v1/models/unload` with no `model` returns `status` (`"unloaded"`,
+`"in_use"` when every loaded model was mid-request and none could be freed, or
 `"already_unloaded"`), `unloaded_models`, `embedder_unloaded`, and
-`skipped_in_use` when something was pinned by an in-flight request. Both
-routes add `vram_freed`, `vram_before_bytes`, and `vram_after_bytes` when a
-GPU free-memory reading is available, plus `vram_reading_uncertain` and a
-`vram_note` when that reading cannot be trusted (a stale probe, a driver that
-reports only this process's own allocations, or an unmeasurable post-unload
-reading). Unloading is implicit-recovery: the next chat request against an
+`skipped_in_use` when something was pinned by an in-flight request. It adds
+`confirm_required` (what is still using a model) when a model stayed loaded
+because it was still in use after a short grace period; this route has no
+`force` parameter to override that. With `?model=<name>` it returns
+`{"status": "unloaded", "model": ..., "was_active": ...}`, or
+`{"status": "already_unloaded", "model": ...}`, or
+`{"status": "confirm_required", "model": ..., "detail": ...}` when the model
+was still in use after the grace period and was left loaded. Treat anything
+other than `"unloaded"` or `"already_unloaded"` as "the model is still
+resident". The unload routes (not the load route) add `vram_freed`,
+`vram_before_bytes`, and `vram_after_bytes` when a GPU free-memory reading is
+available, plus `vram_reading_uncertain` and a `vram_note` when that reading
+cannot be trusted (a stale probe, a driver that reports only this process's own
+allocations, or an unmeasurable post-unload reading). Unloading is implicit-recovery: the next chat request against an
 unloaded model reloads it automatically.
 
 `POST /v1/models/rename?model=<name>&new_name=<name>` renames a registered
@@ -778,11 +794,9 @@ and `POST /v1/comfy/restart`).
 
 Read and update `<data dir>/config.json`. PATCH accepts only known keys and
 persists immediately; engine values (context sizes, GPU layers) apply on the
-next model load. A handful of settings (the `rag_*` indexing paths,
-`net_allow_private`, `cors_origins`, and the `bugreport_upload_*` / `update_*`
-endpoints) widen a trust boundary and are hidden from, and refused for, a
+next model load. These settings widen a trust boundary and are hidden from, and refused for, a
 non-owner `config:write` key - only an `admin`-scoped key or the open-mode
-owner may read or change them.
+owner may read or change them: `allow_network_drives`, `binary_dir`, `bind_host`, `browser_allow`, `browser_custom_domain_rules`, `browser_deny`, `browser_enabled`, `browser_engine`, `bugreport_upload_token`, `bugreport_upload_url`, `chat_mode`, `civitai_api_key`, `coder_mode`, `coder_reviewer`, `coder_reviewer_model`, `coder_untrusted_provenance`, `comfy_api_url`, `comfy_launch_cmd`, `comfy_workdir`, `cors_origins`, `embedding_model`, `gui_preview_enabled`, `gui_preview_owner_only`, `gui_proxy_remote_images`, `hf_token`, `hf_trust_remote_code`, `keep_diagnostics`, `llama_runtime_history`, `llama_runtime_pin`, `metrics_enabled`, `mode`, `net_allow_model_downloads`, `net_allow_private`, `net_deny`, `net_search_url`, `rag_allowed_roots`, `rag_denied_roots`, `rag_indexing_mode`, `require_auth`, `spec_draft_model`, `tls_cert`, `tls_enabled`, `tls_key`, `update_allow_prerelease`, `update_ignore_net_policy`, `update_token`, `update_url`.
 
 Two further keys, `plugins` and `plugins_enabled`, are plugin STATE rather than
 settings: this endpoint cannot validate what is inside them, and their own write

@@ -430,11 +430,12 @@ def _iter_top_level_json_objects(text: str, last_close: int = None):
 
 
 # Cap on how many EXPENSIVE retries one _iter_marker_variant_calls call gets. A
-# failed brace-balance scan is retried from the very next marker, which is the
-# only correct recovery: a scan started at a LATER marker resets its own depth to
-# 0, so it can balance at a position an earlier scan never reached. Once the
-# budget is spent the scan falls back to skipping past the last closing brace,
-# which is fast but lossy, and bounds the cost of many never-balancing markers.
+# failed brace-balance scan, or a balanced body with no closing marker after it,
+# is retried from the very next marker, which is the only correct recovery: a
+# scan started at a LATER marker resets its own depth to 0, so it can balance at
+# a position an earlier scan never reached. Once the budget is spent a failed
+# scan skips past the last closing brace and an unclosed body is skipped whole,
+# which is fast but lossy, and bounds the cost of many markers that never close.
 _MAX_EXPENSIVE_MARKER_RESCANS = 32
 
 
@@ -495,7 +496,11 @@ def _iter_marker_variant_calls(text: str, last_close: int = None):
             j += 1
         closer = _RE_TOOL_MARKER.match(text, j)
         if closer is None:
-            pos = opener.end()
+            if expensive_retries_left > 0:
+                expensive_retries_left -= 1
+                pos = opener.end()
+            else:
+                pos = body_end
             continue
         yield opener.start(), closer.end(), name, text[i:body_end]
         pos = closer.end()

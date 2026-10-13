@@ -107,8 +107,8 @@ cli = "module:attr"          # optional legacy Click command entry point
 tab_id = "mytab"             # "" = no tab (settings-only or headless plugin)
 label = "My Plugin"
 icon = "book"                # one of a fixed set: chat, code, image, music,
-                             # video, book, clock; anything else falls back to
-                             # a generic icon
+                             # video, book, clock, web; anything else falls back
+                             # to a generic icon
 assets_dir = "static"        # client assets dir; served at /plugins/<name>/ when set
 client_entry = "myplugin.js" # ES module under assets_dir the SPA import()s on boot
 settings_group = "My Plugin" # label for this plugin's settings section

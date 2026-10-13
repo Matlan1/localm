@@ -552,7 +552,9 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             return text
         return f"{text} {len(saved)} of {batch} images were saved."
 
-    with shared.lock:
+    with shared.held(say, cancel_check) as acquired:
+        if not acquired:
+            return False, "Cancelled."
         shared.cancel_idle_timer()
         try:
             if runner.loaded_key != models["key"] or not runner.is_alive():
@@ -748,7 +750,9 @@ def _upscale(s, source, upscaler, out_path, extra_meta, write_sidecar, cancel_ch
     relay = _event_relay(say)
     runner = shared.runner
     started = time.monotonic()
-    with shared.lock:
+    with shared.held(say, cancel_check) as acquired:
+        if not acquired:
+            return False, "Cancelled."
         shared.cancel_idle_timer()
         try:
             say(f"Upscaling {pixels['width']}x{pixels['height']} with {display_name(upscaler)} "

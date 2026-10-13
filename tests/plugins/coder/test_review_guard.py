@@ -219,3 +219,20 @@ def test_sensitive_changes_notice_survives_a_review_guard_import_failure(tmp_pat
                side_effect=RuntimeError("boom")):
         result = agent.run_task("add a test")
     assert result.startswith("Done.")
+
+
+def test_classify_sensitive_changes_tolerates_malformed_entries():
+    entries = [None, 7, {}, {"path": None}, {"path": ""}, {"path": 123},
+               {"path": b"tests/test_bytes.py"}, {"nopath": "x"},
+               {"path": "tests/test_ok.py"}, "ci/.flake8"]
+    flags = classify_sensitive_changes(entries)
+    assert "tests/test_ok.py" in flags["tests"]
+    assert "ci/.flake8" in flags["ci_config"]
+    assert render_warning(flags) and render_reviewer_note(flags)
+
+
+def test_sensitive_changes_helpers_tolerate_empty_inputs():
+    assert classify_sensitive_changes(None) == {"tests": [], "ci_config": []}
+    assert classify_sensitive_changes([]) == {"tests": [], "ci_config": []}
+    assert render_warning({}) == ""
+    assert render_reviewer_note({}) == ""

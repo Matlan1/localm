@@ -1,7 +1,10 @@
 # Internet access for the coder and chat
 
-> The network policy (`localm/netpolicy.py`) is CORE and always governs every
-> outbound request, plugin or not. The chat "Web access" surface is provided
+> The network policy (`localm/netpolicy.py`) is CORE and governs every
+> model-initiated web request, plugin or not, along with model pulls and
+> HuggingFace search. It is not a gate on every socket localm opens (see
+> [the list of ungoverned paths](#what-the-policy-does-not-govern)). The
+> chat "Web access" surface is provided
 > by the `web` plugin and appears only when it is active. The coder's
 > `fetch_url` and `web_search` tools are built into the coder itself and are
 > always present, independent of the `web` plugin. The off/ask/allow modes
@@ -21,7 +24,11 @@ tools, and the chat's web access, all use it. There is no second path.
 Things a *user* triggers directly (`localm pull`, the `/web` chat command,
 the Knowledge page's one-time embedding-model download, the mic button's
 one-time Whisper download) are consent by definition - but `net_mode off`
-still kills them, with no exception. A one-time download like the last two
+still blocks them, with one exception: the admin-only
+`net_allow_model_downloads` setting (off by default) lets the downloads you
+trigger yourself (model pulls, HuggingFace search, the embedding-model and
+Whisper downloads) proceed under `off`. It never lifts `off` for anything a
+model triggers. A one-time download like the last two
 is a single-call authorization, never written to config; it lets that one
 fetch through `ask`'s per-request friction, exactly like clicking "download
 now" is itself the consent, and it changes nothing about how the next
@@ -32,7 +39,9 @@ are not covered by this policy at all: every request to OpenAI/Anthropic
 goes out over HTTPS through a direct provider client, outside
 `netpolicy`, with no `net_mode` check anywhere in that path. The only gate
 is the explicit CLI flag itself, plus a warning if you try it in privacy
-mode.
+mode. The same privacy-mode warning names the host when `--url` (or
+`LOCALCODER_URL`) points the coder at a model server that is not on this
+machine.
 
 ## Modes
 

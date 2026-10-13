@@ -1218,6 +1218,40 @@ def test_generations_wait_for_the_worker_in_turn(timed_native, tmp_path):
     assert not t.is_alive() and results[0][0] is True
 
 
+def _cancel_while_queued(call, runner):
+    import threading
+    import time
+    cancel = threading.Event()
+    lines = []
+    results = []
+    with shared.lock:
+        t = threading.Thread(target=lambda: results.append(call(cancel.is_set, lines.append)))
+        t.start()
+        deadline = time.monotonic() + 5.0
+        while not lines and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert lines and "Waiting" in lines[0]
+        assert t.is_alive() and runner.loads == []
+        cancel.set()
+        t.join(3.0)
+        assert not t.is_alive(), "a cancel while queued must not wait for the lock holder"
+        assert shared.lock.locked()
+    assert results == [(False, "Cancelled.")]
+    assert runner.loads == []
+    assert shared.lock.acquire(blocking=False)
+    shared.lock.release()
+    return lines
+
+
+def test_a_generation_queued_behind_another_says_so_and_cancels_at_once(timed_native, tmp_path):
+    runner, s = timed_native
+    lines = _cancel_while_queued(
+        lambda cancel, say: native.generate(s, "p", tmp_path / "q.png", write_sidecar=False,
+                                            cancel_check=cancel, on_progress=say), runner)
+    assert len(lines) == 1
+    assert not (tmp_path / "q.png").exists()
+
+
 # --------------------------------------------------------------------------- #
 #  opt-in parameters in the PNG, and importing them back                      #
 # --------------------------------------------------------------------------- #

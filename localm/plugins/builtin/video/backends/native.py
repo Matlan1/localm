@@ -551,7 +551,9 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         rec.flow_shift if rec else (defaults.flow_shift if defaults else None))
     negative = negative_prompt if negative_prompt is not None else (
         rec.negative_prompt if rec else "")
-    with shared.lock:
+    with shared.held(say, cancel_check) as acquired:
+        if not acquired:
+            return False, "Cancelled."
         shared.cancel_idle_timer()
         try:
             if runner.loaded_key != models["key"] or not runner.is_alive():

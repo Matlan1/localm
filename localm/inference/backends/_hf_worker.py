@@ -31,7 +31,7 @@ import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Sequence
 
 from localm.debuglog import logger
 
@@ -515,16 +515,76 @@ def _auto_device(torch, override: Optional[str] = None) -> str:
     return "cpu"
 
 
+def _bitmask_backend(device_type: str) -> Literal["torch_native", "cpu"]:
+    """The ``xgrammar.apply_token_bitmask_inplace`` backend for logits on
+    *device_type*: ``"torch_native"`` (plain torch tensor ops on the GPU) for
+    ``"cuda"`` logits, which covers AMD ROCm, and ``"cpu"`` (xgrammar's bundled
+    native kernel) for everything else: CPU logits in place, any other device's
+    logits on a CPU copy made by ``_XgrammarProcessor``. Neither compiles code at run time, so masking needs no C compiler,
+    Triton build or CUDA toolkit on the host. See
+    test_bitmask_backend_never_needs_a_compiler."""
+    return "torch_native" if device_type == "cuda" else "cpu"
+
+
+class _XgrammarProcessor:
+    """Duck-typed transformers LogitsProcessor that masks every token *compiled*
+    (an ``xgrammar.CompiledGrammar``) does not allow at the current parse position.
+
+    Same token protocol as ``xgrammar.contrib.hf.LogitsProcessor``: the first call
+    only fills the mask, every later call first feeds the previously sampled token
+    to each row's matcher. The mask is applied through ``_bitmask_backend``: in
+    place for CPU and ``"cuda"`` logits, on a CPU copy moved back to the device for
+    any other device. Raises RuntimeError when the batch size changes between
+    calls or a sampled token is rejected by the grammar. Single use: build a fresh
+    one per generate() call.
+    """
+
+    def __init__(self, compiled):
+        self._compiled = compiled
+        self._matchers: Optional[list] = None
+        self._bitmask: Any = None
+        self._prefilled = False
+
+    def __call__(self, input_ids, scores):
+        import xgrammar as xgr
+        batch = input_ids.shape[0]
+        if self._matchers is None:
+            self._matchers = [xgr.GrammarMatcher(self._compiled) for _ in range(batch)]
+            self._bitmask = xgr.allocate_token_bitmask(
+                batch, self._compiled.tokenizer_info.vocab_size)
+        elif batch != len(self._matchers):
+            raise RuntimeError(f"batch size changed from {len(self._matchers)} to {batch} "
+                               "during grammar-constrained generation")
+        if self._prefilled:
+            for i, matcher in enumerate(self._matchers):
+                if not matcher.is_terminated():
+                    token = int(input_ids[i, -1])
+                    if not matcher.accept_token(token):
+                        raise RuntimeError(f"sampled token {token} was rejected by the grammar")
+        self._prefilled = True
+        for i, matcher in enumerate(self._matchers):
+            if not matcher.is_terminated():
+                matcher.fill_next_token_bitmask(self._bitmask, i)
+        device_type = scores.device.type
+        backend = _bitmask_backend(device_type)
+        if device_type in ("cpu", "cuda"):
+            xgr.apply_token_bitmask_inplace(scores, self._bitmask.to(scores.device),
+                                            backend=backend)
+            return scores
+        cpu_scores = scores.to("cpu")
+        xgr.apply_token_bitmask_inplace(cpu_scores, self._bitmask, backend=backend)
+        return cpu_scores.to(scores.device)
+
+
 class _SafeGrammarProcessor:
-    """Wrap an xgrammar HF LogitsProcessor so a RUNTIME failure during generation
-    (for example xgrammar needing Triton, which is not available on Windows)
-    degrades to unconstrained decoding instead of raising inside the generate()
+    """Wrap a grammar LogitsProcessor so a RUNTIME failure during generation
+    (for example a sampled token the grammar matcher rejects) degrades to
+    unconstrained decoding instead of raising inside the generate()
     thread - which crashes the thread and hangs the HTTP request indefinitely.
 
-    The grammar compiles fine, so the build-time soft-degrade cannot catch this;
-    the failure only surfaces on the first token's logits call. It is caught
-    there, warned about once, and logits pass through unchanged for the rest of
-    the generation.
+    The first exception from any logits call is caught, warned about once, and
+    logits pass through unchanged for the rest of the generation; ``failed``
+    reports it.
     """
 
     def __init__(self, inner):
@@ -845,7 +905,6 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         return None
     try:
         import xgrammar as xgr
-        from xgrammar.contrib.hf import LogitsProcessor
         from transformers import LogitsProcessorList
     except ImportError as exc:
         # Normally unreachable: HFBackend.supports_grammar is False without the
@@ -863,7 +922,7 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         vocab = getattr(getattr(model, "config", None), "vocab_size", None)
         info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab)
         compiled = xgr.GrammarCompiler(info).compile_grammar(grammar)
-        return LogitsProcessorList([_SafeGrammarProcessor(LogitsProcessor(compiled))])
+        return LogitsProcessorList([_SafeGrammarProcessor(_XgrammarProcessor(compiled))])
     except Exception as e:   # malformed grammar, tokenizer mismatch, etc.
         # Mirrors the GGUF backend: llama.py raises InvalidGrammarError when the
         # native GBNF parser rejects a grammar (a NULL sampler), which the route
@@ -2047,8 +2106,8 @@ class HFWorker:
 
         # Grammar-constrained decoding (optional [grammar] extra). When a grammar
         # is supplied, xgrammar masks tokens that would break it; sampling/greedy
-        # then picks only from the still-legal tokens. Soft-degrades to
-        # unconstrained generation if xgrammar is absent or the grammar is bad.
+        # then picks only from the still-legal tokens. Raises if xgrammar is
+        # absent or the grammar does not compile.
         lp = _grammar_processor(grammar, tokenizer, model)
         grammar_guard = next((p for p in (lp or []) if isinstance(p, _SafeGrammarProcessor)),
                              None)

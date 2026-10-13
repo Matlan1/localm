@@ -142,7 +142,7 @@ def _recall_enabled() -> bool:
         from localm.config import load_config
         return bool(load_config().get("memory_enabled", True))
     except Exception:
-        return True                                # config unreadable -> default on
+        return True                                # config could not be loaded -> default on
 
 
 def _recall_in_privacy(surface: str) -> bool:

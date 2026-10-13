@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GUI upload routes: accept files into <home>/uploads/, list them, delete one.
 
-The multipart parser, the uploads-dir confinement, the unique-target helper, and
-the size cap stay in ``web.py``; they are reached via ``import ... as _web`` (not
+The form is read with ``localm.multipartform.read_form``; the uploads-dir
+confinement, the unique-target helper, and the size cap stay in ``web.py`` and
+are reached via ``import ... as _web`` (not
 imported by value) so that a test which reassigns e.g. ``web._MAX_UPLOAD_BYTES``
 is still seen here - the same live-attribute access the inference routes use for
 ``http_server``.
@@ -17,6 +18,11 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 import localm.plugins.gui.web as _web
 from localm import scopes
 from localm.inference.http_server import path_formatter, require_scope
+from localm.multipartform import MultipartError, read_form
+
+
+# Most file parts one upload request may carry.
+_MAX_UPLOAD_PARTS = 1000
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -28,20 +34,18 @@ def register(app: FastAPI, ctx) -> None:
         parsed without python-multipart. CONFIG_WRITE (owner/companion-admin)
         because writing host files is privileged - a restricted shared key must
         not be able to drop files on the host. Capped at _MAX_UPLOAD_BYTES."""
-        clen = request.headers.get("content-length", "")
         cap_mb = _web._MAX_UPLOAD_BYTES // (1024 * 1024)
-        if clen.isdigit() and int(clen) > _web._MAX_UPLOAD_BYTES:
-            raise HTTPException(413, f"Upload too large (max {cap_mb} MB per request).")
-        boundary = _web._multipart_boundary(request.headers.get("content-type", ""))
-        if boundary is None:
-            raise HTTPException(400, "Expected a multipart/form-data upload.")
-        body = await request.body()
-        if len(body) > _web._MAX_UPLOAD_BYTES:
-            raise HTTPException(413, f"Upload too large (max {cap_mb} MB per request).")
-        _fields, files = _web._parse_multipart(body, boundary)
+        try:
+            form = await read_form(
+                request, max_bytes=_web._MAX_UPLOAD_BYTES,
+                max_parts=_MAX_UPLOAD_PARTS,
+                too_large=f"Upload too large (max {cap_mb} MB per request).")
+        except MultipartError as e:
+            raise HTTPException(e.status, e.message) from e
         base = _web._uploads_dir()
         saved = []
-        for filename, _ctype, data in files:
+        for upload in (u for group in form.files.values() for u in group):
+            filename, data = upload.filename, upload.data
             if not data:
                 continue
             safe = Path(filename or "").name[:255]

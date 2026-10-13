@@ -578,63 +578,10 @@ def _parse_share_entry(path: Path) -> tuple[str, str | None, str]:
     return fid, None, name
 
 
-def _multipart_boundary(content_type: str) -> bytes | None:
-    """The boundary token from a multipart/form-data Content-Type, or None."""
-    if "multipart/form-data" not in (content_type or "").lower():
-        return None
-    for part in content_type.split(";"):
-        part = part.strip()
-        if part.lower().startswith("boundary="):
-            b = part[len("boundary="):].strip().strip('"')
-            return b.encode("latin-1") if b else None
-    return None
-
-
-def _disp_param(disposition: bytes, key: bytes) -> bytes | None:
-    """Value of a Content-Disposition parameter, e.g. name= or filename=."""
-    token = key + b'="'
-    i = disposition.find(token)
-    if i == -1:
-        return None
-    i += len(token)
-    j = disposition.find(b'"', i)
-    return disposition[i:j] if j != -1 else None
-
-
-def _parse_multipart(body: bytes, boundary: bytes):
-    """Minimal multipart/form-data parser - no python-multipart dependency, in
-    keeping with localm's self-contained rule (it already hand-builds multipart
-    for ComfyUI uploads). Returns (fields: dict[str,str], files: list of
-    (filename, content_type, data))."""
-    fields: dict = {}
-    files: list = []
-    for raw in body.split(b"--" + boundary):
-        part = raw.strip(b"\r\n")
-        if not part or part == b"--":
-            continue                       # preamble / closing delimiter
-        head, sep, data = part.partition(b"\r\n\r\n")
-        if not sep:
-            continue
-        headers: dict = {}
-        for line in head.split(b"\r\n"):
-            k, _, v = line.partition(b":")
-            headers[k.strip().lower()] = v.strip()
-        disposition = headers.get(b"content-disposition", b"")
-        name = _disp_param(disposition, b"name")
-        filename = _disp_param(disposition, b"filename")
-        if filename is not None:
-            ctype = headers.get(b"content-type", b"application/octet-stream")
-            files.append((filename.decode("utf-8", "replace"),
-                          ctype.decode("latin-1"), data))
-        elif name is not None:
-            fields[name.decode("utf-8", "replace")] = data.decode("utf-8", "replace")
-    return fields, files
-
-
 # A phone (or any browser) uploads files INTO a durable localm folder that models
 # and tools can then read, distinct from transient chat attachments and the
-# share_inbox. Capped per request because the hand-rolled parser reads the whole
-# body into memory; large model weights go through the model pull flow.
+# share_inbox. Capped per request; large model weights go through the model pull
+# flow.
 _MAX_UPLOAD_BYTES = 100 * 1024 * 1024   # 100 MB / request
 
 

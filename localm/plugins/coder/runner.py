@@ -292,8 +292,9 @@ def warn_sensitive_changes(agent) -> None:
         message = render_warning(classify_sensitive_changes(agent.changed_files()))
         if message:
             print_warning(message)
-    except Exception:                                       # noqa: BLE001
-        pass
+    except Exception as e:                                  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.debug("sensitive-changes warning skipped: %r", e)   # See test_classify_sensitive_changes_tolerates_malformed_entries.
 
 
 def browser_enabled() -> bool:
