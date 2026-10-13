@@ -556,9 +556,12 @@ class TestVisionPathIsGuardedToo:
     def _vision_llama(self, pre_type, prompt):
         import threading
 
-        from localm.inference.backends.llamacpp.llama import LlamaCpp
+        from tests._bare_llama import make_bare_llama
 
-        obj = LlamaCpp.__new__(LlamaCpp)
+        # make_bare_llama registers the instance, so the conftest teardown nulls
+        # its fake pointers before a later test can collect it under a mocked api.
+        # See test_vision_llama_pointers_are_nulled_after_the_test.
+        obj = make_bare_llama()
         obj._inference_lock = threading.RLock()
         obj._model_ptr = object()
         obj._mtmd = MagicMock()
@@ -603,6 +606,24 @@ class TestVisionPathIsGuardedToo:
             self._drive(obj, prompt)
         assert not isinstance(exc.value, PretokenizerUnsafeInputError)
         obj._mtmd.tokenize.assert_called_once()
+
+    def test_vision_llama_pointers_are_nulled_after_the_test(self):
+        import gc
+
+        from tests._bare_llama import neutralise_fake_pointers
+
+        prompt = _letters(400)
+        obj = self._vision_llama("qwen2", prompt)
+        with pytest.raises(Exception):
+            self._drive(obj, prompt)
+        neutralise_fake_pointers()
+        assert obj._model_ptr is None and obj._ctx_ptr is None
+        mock_api = MagicMock()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            del obj
+            gc.collect()
+        mock_api.llama_free_model.assert_not_called()
+        mock_api.llama_free.assert_not_called()
 
 
 class TestAFailedPreTypeReadIsVisible:
