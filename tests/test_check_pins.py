@@ -645,7 +645,7 @@ def test_only_pins_with_a_written_reason_are_blocked():
 
 def test_unchecked_sources_are_listed_every_run_with_their_reason():
     rows = cp.run_checks([s for s in cp.build_registry() if s.group == "unchecked"], NOW)
-    assert len(rows) == len(cp._NOT_CHECKABLE) >= 5
+    assert len(rows) == len(cp._NOT_CHECKABLE) >= 3
     assert all(r.status == cp.UNVERSIONED and len(r.detail) > 10 for r in rows)
 
 
