@@ -545,11 +545,11 @@ def pid_space_id() -> str:
 
 
 def legacy_pid_space_id() -> str | None:
-    """The pid-space id localm 0.2.x wrote into download lock and partial owner
-    records on this host: the platform, the Windows MachineGuid, the host name
-    and, on Linux, the pid namespace, hashed. None when none of those but the
-    platform can be read (that version then used an id unique to its process,
-    which nothing can match)."""
+    """The pid-space id that owner records written before the Linux machine-id
+    was part of :func:`pid_space_id` carry on this host: the platform, the
+    Windows MachineGuid, the host name and, on Linux, the pid namespace,
+    hashed. None when none of those but the platform can be read (such a
+    record then carries an id unique to its process, which nothing matches)."""
     import hashlib
     import platform
     parts = [sys.platform, machine_guid()]

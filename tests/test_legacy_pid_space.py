@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Download lock and partial owner records written by localm 0.2.x carry the
-pid-space id of that version. One written on this host is judged as this pid
-space, so an interrupted pull from before the upgrade is reclaimed once its
-process is gone; one that cannot be tied to this host still never is."""
+"""Download lock and partial owner records can carry the pid-space id from
+before the Linux machine-id was part of it. One written on this host is judged
+as this pid space, so its interrupted pull is reclaimed once its process is
+gone; one that cannot be tied to this host still never is."""
 
 import hashlib
 import json
