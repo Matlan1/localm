@@ -592,8 +592,9 @@ class HFBackend(BaseBackend):
         self.last_finish_reason = done.get("finish_reason", "stop")
         if done.get("grammar_unsupported") and not getattr(self, "_grammar_unsupported", False):
             self._grammar_unsupported = True
-            logger.warning("the grammar constraint failed during generation; "
-                           "this model now generates without grammar constraints")
+            logger.warning("the grammar constraint failed during generation; this "
+                           "reply was unconstrained and later grammar requests to "
+                           "this model are refused")
             console.print(
                 "[yellow]grammar constraints failed at generation time for this "
                 "model (the xgrammar runtime raised); later grammar requests are "

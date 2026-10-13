@@ -166,7 +166,7 @@ def test_hf_backend_latches_a_dropped_grammar_and_refuses_the_next(monkeypatch, 
         assert list(b.chat_stream(msgs, grammar='root ::= "a"')) == ["ok"]
 
     assert b.supports_grammar is False
-    assert any("grammar constraint failed" in r.getMessage() for r in caplog.records)
+    assert any("later grammar requests to this model are refused" in r.getMessage() for r in caplog.records)
     with pytest.raises(GrammarUnsupportedError):
         list(b.chat_stream(msgs, grammar='root ::= "a"'))
 
