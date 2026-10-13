@@ -178,6 +178,17 @@ def test_the_guard_test_pins_follow_the_runtime_bytes(bump):
     assert f"const EXPECTED_WASM_BYTES = {len(built.runtime[_WASM])};" in out
 
 
+def test_a_region_found_twice_is_refused_by_the_rewrite(bump):
+    notice, _ = bump._read_text(_ROOT / bump.NOTICE_REL)
+    pins = _real_pins(bump)
+    row = next(line for line in notice.splitlines() if line.startswith("| `phonemizer`"))
+    with pytest.raises(bump.Refused, match="found 2"):
+        bump.rewrite_notice(notice + "\n" + row + "\n", pins, pins, _built(bump), None)
+    guard, _ = bump._read_text(_ROOT / bump.TEST_REL)
+    with pytest.raises(bump.Refused, match="found 2"):
+        bump.rewrite_guard_test(guard + 'const PINNED_MJS_HASH = "x";\n', pins, _built(bump))
+
+
 def test_a_notice_missing_a_region_is_refused_by_name(bump):
     notice, _ = bump._read_text(_ROOT / bump.NOTICE_REL)
     pins = _real_pins(bump)
