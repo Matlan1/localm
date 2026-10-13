@@ -576,3 +576,94 @@ def test_preflight_names_a_missing_part_that_has_no_download(flux_set, monkeypat
     assert sorted(m["slot"] for m in data["missing"]) == ["t5xxl", "vae"]
     assert all(m["source"]["sha256"] for m in data["missing"])
     assert bad.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+#  the page's per-job choice through the real routes                          #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def media_app(flux_set, runner, tmp_path, monkeypatch):
+    import localm.image_gen.comfy as ic
+    import localm.media.comfy_client as cc
+    from fastapi import FastAPI
+
+    from localm.config import update_config
+    from localm.media import backend_choice
+    from localm.plugins.engine import PluginManager
+    from localm.plugins.gui.jobs import JobManager
+    monkeypatch.setattr(backend_choice, "managed_comfy_active", lambda cfg=None: False)
+    monkeypatch.setattr(cc, "is_comfy_confirmed", lambda api_url=None: False)
+    monkeypatch.setattr(cc, "_comfy_alive", lambda url, timeout=3.0: False)
+    monkeypatch.setattr(ic, "_comfy_alive", lambda url, timeout=3.0: False)
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: False)
+    monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda s: None)
+    update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault("image", {}).update(
+        {"backend": "native", "native": {"model": "wan2.1_t2v", "vae": "wan_2.1_vae"}}))
+    app = FastAPI()
+    pm = PluginManager(app, external_root=tmp_path / "noplugins")
+    pm.install("image")
+    app.state.jobs = JobManager()
+    app.state.self_url = "http://127.0.0.1:8642/v1"
+    return app
+
+
+def _finish(app, job_id, timeout=30.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = app.state.jobs.get(job_id)
+        if job is not None and job.status != "running" and getattr(job, "finished_at", None):
+            return job
+        time.sleep(0.05)
+    raise AssertionError("job did not finish")
+
+
+def test_imagine_route_runs_the_page_choice_with_its_loras(media_app, runner, flux_set):
+    from fastapi.testclient import TestClient
+    with TestClient(media_app) as c:
+        r = c.post("/api/imagine", json={
+            "prompt": "a fox", "size": "512x512",
+            "native_models": {"model": "fluxunchained", "clip_l": "ViT-L-14-TEXT"},
+            "loras": [{"name": "aidma-flux", "strength": 0.6}]})
+        assert r.status_code == 200, r.text
+        job = _finish(media_app, r.json()["job_id"])
+    lines = [e.get("text", "") for e in job._history if e.get("type") == "line"]
+    assert job.status == "done", lines
+    ctx = runner.loads[-1]
+    assert ctx["diffusion_model_path"] == str(flux_set["fluxunchained"])
+    assert ctx["clip_l_path"] == str(flux_set["ViT-L-14-TEXT"])
+    assert ctx["vae_path"] == str(flux_set["ae"])
+    assert runner.generates[-1]["loras"] == [{"path": str(flux_set["aidma-flux"]),
+                                             "multiplier": 0.6}]
+
+
+@pytest.mark.parametrize("body,needle", [
+    ({"native_models": {"model": "D:/x/evil.gguf"}}, "not a registered model"),
+    ({"native_models": {"unet": "fluxunchained"}}, "Unknown native image model slot"),
+    ({"loras": [{"name": "fluxunchained"}]}, "not a registered LoRA"),
+    ({"loras": [{"name": "aidma-flux"}] * 9}, ""),
+])
+def test_imagine_route_refuses_a_bad_choice_up_front(media_app, runner, body, needle):
+    from fastapi.testclient import TestClient
+    with TestClient(media_app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p", **body})
+    assert r.status_code in (400, 422), r.text
+    assert needle in r.text
+    assert runner.loads == []
+
+
+def test_native_models_route_lists_and_previews_without_paths(media_app, flux_set):
+    from fastapi.testclient import TestClient
+    with TestClient(media_app) as c:
+        data = c.get("/api/imagine/native-models",
+                     params={"model": "fluxunchained"}).json()
+        bad = c.get("/api/imagine/native-models", params={"model": "C:/Windows/notepad.exe"})
+    assert bad.status_code == 400
+    assert {m["name"] for m in data["models"]} >= {"fluxunchained"}
+    assert data["current"]["model"] == "wan2.1_t2v"
+    prev = data["preview"]
+    assert prev["family"] == "flux" and prev["needs"] == ["clip_l", "t5xxl", "vae"]
+    assert prev["components"]["vae"] == {"name": "ae", "auto": True}
+    shown = json.dumps(data).replace("\\\\", "/")
+    assert str(flux_set["ae"].parent).replace("\\", "/") not in shown
