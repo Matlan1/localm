@@ -608,6 +608,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Gemma 4 GGUF models are prompted in their own chat format.** Every chat with a Gemma 4
+  GGUF used to be sent as a generic ChatML prompt, with a warning that the template was not
+  recognised, because llama.cpp's built-in template matcher has no Gemma 4 entry. localm now
+  writes the Gemma 4 turn format itself, as the model's own template does with thinking off,
+  including the empty thought block the 12B, 26B and 31B templates add. Gemma 4's turn,
+  channel, tool and media markers in fetched or tool-returned text are now escaped like other
+  models' control tokens.
 - **The coder's diff edits leave every line they were not asked to touch exactly as it was.**
   A form feed or Unicode line separator elsewhere in the file no longer turns into a newline, a
   file with mixed line endings keeps each line's own ending, and trailing blank lines survive.
