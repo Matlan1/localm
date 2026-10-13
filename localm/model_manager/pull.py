@@ -61,6 +61,20 @@ def _pid_space_id() -> str:
     return instances.pid_space_id()
 
 
+def _same_pid_space(rec: dict) -> bool:
+    """True when owner record *rec* was written in this process's pid space:
+    its id is this one (see :func:`_pid_space_id`), or it is the id an earlier
+    localm wrote on this host (see
+    :func:`localm.instances.legacy_pid_space_id` and
+    :func:`localm.instances.legacy_record_is_this_host`). A record naming no
+    pid space is not judged here."""
+    space = rec.get("space")
+    if space == _pid_space_id():
+        return True
+    return (space is not None and space == instances.legacy_pid_space_id()
+            and instances.legacy_record_is_this_host(rec))
+
+
 def _write_partial_owner(partial: Path) -> None:
     """Record this process (pid, pid space and start identity) as the owner of
     *partial*."""
@@ -113,7 +127,7 @@ def _partial_owner_is_gone(partial: Path) -> bool:
     if pid <= 0:
         return False
     space = rec.get("space")
-    if space is not None and space != _pid_space_id():
+    if space is not None and not _same_pid_space(rec):
         return False
     if pid == os.getpid():
         return not _partial_in_flight(partial)
@@ -2271,7 +2285,7 @@ def _record_holder_is_gone(rec) -> bool:
     except (TypeError, ValueError):
         return False
     space = rec.get("space")
-    if space is not None and space != _pid_space_id():
+    if space is not None and not _same_pid_space(rec):
         return False
     if pid == os.getpid():
         return False
