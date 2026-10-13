@@ -193,7 +193,7 @@ class TestHostileInput:
 
     def test_zlib_and_itxt_text_are_decoded(self):
         z = _chunk(b"zTXt", b"k1\x00\x00" + zlib.compress(b"hello"))
-        i = _chunk(b"iTXt", "k2".encode() + b"\x00\x00\x00en\x00\x00" + "h\u00e9llo".encode())
+        i = _chunk(b"iTXt", b"k2" + b"\x00\x00\x00en\x00\x00" + "h\u00e9llo".encode())
         assert ip.read_png_text(_png([z, i])) == {"k1": "hello", "k2": "h\u00e9llo"}
 
     def test_malformed_text_chunk_is_skipped(self):
