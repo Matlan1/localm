@@ -2087,6 +2087,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   skipped the cross-origin refusal and the open-mode shell-token check without anyone listing it.
   Each now matches only its own path. A trailing-slash spelling of one of those paths is no longer
   exempt.
+- **One request can no longer tie up the server with an oversized input.** A scheduled job's cron
+  expression is limited to 512 characters (a longer one used to stop every scheduled job from firing
+  while reporting the scheduler healthy, and the Jobs page now says when the scheduler is stuck); a
+  JSON schema `format` or `response_format` whose grammar would exceed 64 KB is refused while it is
+  being built instead of after hundreds of megabytes of work; a lazy grammar takes at most 64
+  `grammar_triggers` and stops validating them after 10 seconds; and an attached image is refused
+  above 50 megapixels, above 64 images per request, or above 100 megapixels in total, before it is
+  decoded.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move

@@ -304,7 +304,7 @@ class TestHFWorkerChatStreamCallsOnStatus:
             "localm.inference.backends._hf_worker._grammar_processor",
             lambda *a, **k: None)
         monkeypatch.setattr(
-            "localm.inference.media.decode_image_url", lambda url: object())
+            "localm.inference.media.decode_image_url", lambda url, budget=None: object())
 
         model, tokenizer = _fake_model_and_tokenizer()
         processor = MagicMock()
@@ -331,6 +331,47 @@ class TestHFWorkerChatStreamCallsOnStatus:
         assert received == [
             "Encoding image...", "Processing prompt...", "Generating response...",
         ]
+
+    def test_images_past_the_request_count_limit_are_refused(self, monkeypatch):
+        pytest.importorskip("transformers", exc_type=ImportError)
+        import base64
+        import io
+
+        import transformers
+        from PIL import Image
+
+        from localm.inference import media
+        from localm.inference.backends.base import VisionInputError
+
+        monkeypatch.setattr(transformers, "TextIteratorStreamer", _FakeStreamer)
+        monkeypatch.setattr(
+            "localm.inference.backends._hf_worker._grammar_processor",
+            lambda *a, **k: None)
+        monkeypatch.setattr(media, "MAX_REQUEST_IMAGES", 2)
+        decoded: list = []
+        real_decode = media.decode_image_url
+
+        def recording_decode(url, budget=None):
+            decoded.append(budget)
+            return real_decode(url, budget=budget)
+
+        monkeypatch.setattr(media, "decode_image_url", recording_decode)
+
+        buf = io.BytesIO()
+        Image.new("RGB", (4, 4)).save(buf, format="PNG")
+        uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        part = {"type": "image_url", "image_url": {"url": uri}}
+
+        model, tokenizer = _fake_model_and_tokenizer()
+        worker = _make_hf_worker(
+            model, tokenizer, processor=MagicMock(), is_multimodal=True)
+        messages = [{"role": "user", "content": [part, part]},
+                    {"role": "user", "content": [part]}]
+        with pytest.raises(VisionInputError, match="more than 2 images"):
+            list(worker.chat_stream(messages))
+        assert len(decoded) == 3
+        assert decoded[0] is not None
+        assert all(b is decoded[0] for b in decoded)
 
     def test_no_status_fires_for_a_text_only_multimodal_capable_model(self, monkeypatch):
         # A model whose processor CAN see images gets no "Encoding image..."
