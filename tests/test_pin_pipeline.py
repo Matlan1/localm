@@ -298,6 +298,16 @@ def test_a_failed_issue_write_leaves_the_original_file_and_no_temp_file(monkeypa
     assert sorted(p.name for p in tmp_path.iterdir()) == ["issues.txt"]
 
 
+def test_an_entry_for_another_pin_does_not_speak_about_llama(tmp_path):
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    pipeline.append_fail_issue("v1.123", "targeted tests failed", None, issues_path=path, pin="koboldcpp")
+    out = path.read_text(encoding="utf-8")
+    assert "NEW-PIN-PIPELINE-KOBOLDCPP-V1-123-CONFIRM-FAILED" in out
+    assert "the koboldcpp pin could not be moved to v1.123: targeted tests failed" in out
+    assert "llama.cpp" not in out and "confirm_llama" not in out
+
+
 def test_append_fail_issue_still_dedupes_within_the_same_kind(tmp_path):
     path = tmp_path / "issues.txt"
     path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
@@ -661,6 +671,13 @@ def test_wait_for_ci_resets_the_stable_count_when_a_check_starts_running(monkeyp
         _named(("a", "completed", "success"), ("b", "completed", "success"))])
     assert pipeline.wait_for_ci(tmp_path) == "GREEN"
     assert len(seen) == 4
+
+
+def test_the_ci_wait_outlasts_the_longest_pull_request_gate_job():
+    ci = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci[ci.index("  python-pr-gate:"):]
+    minutes = int(job[job.index("timeout-minutes:"):].split(":", 1)[1].split()[0])
+    assert pipeline.CI_WAIT_TIMEOUT_SECONDS > minutes * 60
 
 
 def _expire_after_two_polls(monkeypatch):

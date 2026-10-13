@@ -423,6 +423,13 @@ def test_legacy_gate_exit_codes_map_to_statuses(monkeypatch, rc, out, status):
     assert check(NOW).status == status
 
 
+def test_a_legacy_gate_that_dies_with_only_stderr_still_explains_itself(monkeypatch):
+    monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="could not read pins.py: boom"))
+    row = cp._legacy_check("n", "g", "scripts/check_llama_pin.py", "a")(NOW)
+    assert row.status == cp.STALE and "exit code 1" in row.detail and "could not read pins.py: boom" in row.detail
+
+
 def test_legacy_gate_that_cannot_launch_is_unknown(monkeypatch):
     def boom(*a, **k):
         raise OSError("no python")

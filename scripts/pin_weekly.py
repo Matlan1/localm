@@ -77,7 +77,9 @@ NOT_MEASURED = "NOT MEASURED"
 NEEDS_UPDATE = "NEEDS CODE UPDATE"
 CODE_UPDATE_MARKER = "needs a code update"
 
+TIMED_OUT_MARK = "timed out after"
 CONFIRM_TIMEOUT_SECONDS = 3 * 3600
+LEASE_TTL_SECONDS = CONFIRM_TIMEOUT_SECONDS + 600
 TEST_TIMEOUT_SECONDS = 30 * 60
 LEASE_BUSY_EXIT = 75
 
@@ -97,7 +99,7 @@ _SELF_SCRIPTS = ("pin_weekly.py", "pin_pipeline.py", "check_pins.py")
 def _reexec(args: list[str], *, windows: bool | None = None) -> int | None:
     """Restart this script on the new code. POSIX replaces the process (never returns);
     Windows cannot, so the child runs to completion and its exit code is returned."""
-    command = [sys.executable, str(SCRIPTS / "pin_weekly.py"), *args]
+    command = [sys.executable, "-u", "-X", "utf8", str(SCRIPTS / "pin_weekly.py"), *args]
     if windows is None:
         windows = os.name == "nt"
     if windows:
@@ -210,7 +212,7 @@ def run_cmd(cmd: list[str], *, cwd: Path, timeout: float, env: dict | None = Non
     except subprocess.TimeoutExpired:
         _kill_tree(proc.pid)
         out, _ = proc.communicate()
-        return 2, (out or "") + f"\n(timed out after {int(timeout)}s; process tree killed)"
+        return 2, (out or "") + f"\n({TIMED_OUT_MARK} {int(timeout)}s; process tree killed)"
     return proc.returncode, out or ""
 
 
@@ -219,7 +221,8 @@ def scratch_dir(key: str) -> Path:
 
 
 def _gpu_wrap(cmd: list[str], purpose: str) -> list[str]:
-    return [sys.executable, str(pp.gpu_lease_script()), "run", "--purpose", purpose, "--", *cmd]
+    return [sys.executable, str(pp.gpu_lease_script()), "run", "--purpose", purpose,
+            "--ttl", str(LEASE_TTL_SECONDS), "--", *cmd]
 
 
 def _verdict_from_rc(rc: int) -> str:
@@ -449,7 +452,7 @@ def close_superseded_prs(worktree: Path, key: str, keep_branch: str) -> list[int
 def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Path | None,
                     now_iso: str) -> Outcome:
     worktree = pp.ensure_pipeline_worktree()
-    close_superseded_prs(worktree, adv.key, f"claude/pin-pipeline-{adv.key}-{new}")
+    close_superseded_prs(worktree, adv.key, pp.bump_branch_name(adv.key, new))
     branch = pp.prepare_bump_branch(worktree, new, pin=adv.key)
 
     bump_cmd = [sys.executable, str(worktree / adv.bump_script), *adv.bump_args, "--tag", new]
@@ -471,14 +474,18 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
         rc, cmd_out = run_cmd(_resolve_exe(list(cmd)), cwd=worktree, timeout=TEST_TIMEOUT_SECONDS,
                               env=_without_token(pp._worktree_env(worktree)))
         if rc != 0:
-            raise pp.PipelineError(f"`{' '.join(cmd)}` failed after the bump:\n{cmd_out[-2000:]}")
+            environmental = TIMED_OUT_MARK in cmd_out or tuple(cmd) == ("npm", "ci")
+            raise (pp.InfraError if environmental else pp.PipelineError)(
+                f"`{' '.join(cmd)}` failed after the bump:\n{cmd_out[-2000:]}")
 
     if adv.tests:
         rc, test_out = run_cmd(
             [sys.executable, "-m", "pytest", *adv.tests, "-m", "not integration", "-q"],
             cwd=worktree, timeout=TEST_TIMEOUT_SECONDS, env=pp._worktree_env(worktree))
         if rc != 0:
-            raise pp.PipelineError(f"targeted tests failed after the bump:\n{test_out[-2000:]}")
+            failed_tests = rc == 1 and TIMED_OUT_MARK not in test_out
+            raise (pp.PipelineError if failed_tests else pp.InfraError)(
+                f"targeted tests failed after the bump:\n{test_out[-2000:]}")
 
     title = f"Advance the bundled {adv.title} to {new}"
     review_note = "" if adv.auto_merge(old, new) else " This update needs a review before it is merged."
@@ -586,6 +593,10 @@ def verify_current(adv: Advancer) -> Outcome:
             return out
         out.verdict = _verdict_from_rc(rc)
         out.detail = (_receipt_summary(receipt) if receipt.exists() else "") or f"exit code {rc}: {text[-400:]}"
+        if out.verdict in (PASS, FAIL):
+            problem = receipt_problem(receipt, out.verdict)
+            if problem:
+                out.verdict, out.detail = INCONCLUSIVE, f"exit code {rc} but {problem}; {out.detail}"
         return out
     if adv.confirm_script is None:
         out.verdict = NOT_MEASURED
@@ -963,11 +974,32 @@ def run_weekly(advancers: list[Advancer], *, dry_run: bool, verify: bool = True)
             if out.verdict == FAIL:
                 _report_current_failure(out)
             outcomes.append(out)
+    try:
+        pp.sync_main_checkout()
+    except pp.PipelineError as e:
+        print(f"WARNING: the main checkout could not be brought up to date before the currency table: {e}")
     rows = cp.run_checks(cp.build_registry(), _dt.datetime.now(_dt.UTC))
     report = render_report(rows, outcomes, started, dry_run)
     path = write_report(report, outcomes, started)
     print(f"report: {path}")
     return max(severity(outcomes), cp.exit_code(rows)), path
+
+
+def run_temp_dir() -> Path:
+    """The temp directory every process of a weekly run uses, beside the checkout so it is
+    on the checkout's drive."""
+    return REPO.parent / f"{REPO.name}-pin-weekly-tmp"
+
+
+def redirect_temp() -> Path:
+    """Point this process and its children at run_temp_dir() for TMP, TEMP and TMPDIR,
+    starting from an empty directory."""
+    temp = run_temp_dir()
+    shutil.rmtree(temp, ignore_errors=True)
+    temp.mkdir(parents=True, exist_ok=True)
+    for name in ("TMP", "TEMP", "TMPDIR"):
+        os.environ[name] = str(temp)
+    return temp
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -988,6 +1020,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no runtime matches --only {args.only!r}", file=sys.stderr)
             return 2
 
+    redirect_temp()
     source = ensure_github_token()
     print(f"GitHub API auth: {source}" + (" (anonymous requests are rate limited)" if source == "none" else ""))
     try:
@@ -1013,6 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
                                      verify=not args.skip_verify_current)
             finally:
                 pp.clear_worktree_temp(pp.pipeline_worktree_path())
+                shutil.rmtree(run_temp_dir(), ignore_errors=True)
             return code
     except pp.PipelineLockBusy as e:
         print(f"INCONCLUSIVE: {e}")

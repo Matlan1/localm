@@ -82,7 +82,7 @@ INCONCLUSIVE_ISSUE_THRESHOLD = 5
 
 # How long to wait for a merged branch's CI checks before giving up for this
 # run (leaving the PR open, never force-merging, never abandoning it).
-CI_WAIT_TIMEOUT_SECONDS = 45 * 60
+CI_WAIT_TIMEOUT_SECONDS = 75 * 60
 CI_POLL_INTERVAL_SECONDS = 20
 
 REQUIRE_BACKENDS = ("cpu", "vulkan")
@@ -562,10 +562,13 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
               "NOT logged there (the FAIL above and the state file are still recorded)")
         return False
     receipt_note = f" (receipt: {receipt_path})" if receipt_path else ""
-    summary = summary or (
-        f"llama.cpp {candidate} FAILS to load and generate on this hardware\n"
-        f"    scripts/pin_pipeline.py ran scripts/confirm_llama_runtime.py against upstream's\n"
-        f"    {candidate} for real (cpu + vulkan) and it did not pass: {reason}{receipt_note}.")
+    if summary is None and pin == "llama":
+        summary = (
+            f"llama.cpp {candidate} FAILS to load and generate on this hardware\n"
+            f"    scripts/pin_pipeline.py ran scripts/confirm_llama_runtime.py against upstream's\n"
+            f"    {candidate} for real (cpu + vulkan) and it did not pass: {reason}{receipt_note}.")
+    elif summary is None:
+        summary = f"the {pin} pin could not be moved to {candidate}: {reason}{receipt_note}."
     entry = (
         f"{title} [OPEN - filed {today}] bug/setup - the automated pin pipeline confirmed "
         f"{summary}\n"
@@ -793,12 +796,19 @@ def reset_pipeline_worktree(worktree: Path) -> None:
             f"the pipeline worktree is not clean after a reset: {status.stdout or status.stderr}")
 
 
+def bump_branch_name(pin: str, candidate: str) -> str:
+    """The git branch a bump of *pin* to *candidate* lives on. Characters git refuses in a
+    ref name (a digest's colon, a version's plus or equals sign) become hyphens."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", candidate).strip(".-") or "candidate"
+    return f"claude/pin-pipeline-{pin}-{safe}"
+
+
 def prepare_bump_branch(worktree: Path, candidate: str, *, pin: str = "llama") -> str:
     """Reset the pipeline worktree to a fresh branch off origin/master, ready
     for this candidate's bump commit. Raises InfraError if the fetch or the
     detach fails, rather than branching off whatever the worktree was on
     before. See test_prepare_bump_branch_refuses_when_fetch_fails."""
-    branch = f"claude/pin-pipeline-{pin}-{candidate}"
+    branch = bump_branch_name(pin, candidate)
     reset_pipeline_worktree(worktree)
     check_free_space(worktree.parent)
     result = _run_git(["fetch", "origin"], cwd=worktree)

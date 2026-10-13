@@ -681,6 +681,8 @@ def _legacy_check(name, group, script, advancer, pinned_re=None, latest_re=None)
         lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
         verdict_lines = [line for line in lines if _VERDICT_LINE_RE.match(line)]
         tail = " | ".join(verdict_lines or lines[-3:])[:300]
+        if not tail:
+            tail = f"exit code {proc.returncode}: {(proc.stderr or '').strip()[-250:]}"
         status = {0: CURRENT, 1: STALE, 2: UNKNOWN}.get(proc.returncode, UNKNOWN)
         if proc.returncode == 0 and re.search(r"\bBEHIND\b", proc.stdout):
             status = BEHIND
