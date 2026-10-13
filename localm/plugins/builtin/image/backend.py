@@ -94,6 +94,14 @@ def settings(full_config: dict) -> dict:
     }
 
 
+def recommended_defaults() -> dict:
+    """``{file name: {"steps", "cfg_scale", "width", "height"}}`` for the curated
+    native models: what a job uses for them when nothing else is set."""
+    from .backends import native
+    return {r.file: {"steps": r.steps, "cfg_scale": r.cfg_scale, "width": r.width,
+                     "height": r.height} for r in native.RECOMMENDED_MODELS}
+
+
 def prepare_for_job(s: dict, full_config: dict) -> dict:
     """Finish resolving *s* (from ``settings``) for one generation, in the job's
     own thread: ``auto`` re-checked against a live ComfyUI

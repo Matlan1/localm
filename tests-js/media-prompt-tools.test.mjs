@@ -208,8 +208,9 @@ test("importing a foreign image matches the model by file stem and reports what 
   assert.deepEqual(JSON.parse(win.__c), { native_models: { model: "dreamshaper_8" } });
   const toast = $("toast").textContent;
   assert.match(toast, /A1111\/Forge/);
-  assert.match(toast, /Not applied: .*steps/);
-  assert.match(toast, /sampler/);
+  assert.equal($("img-steps").value, "30", "steps fill the Steps field");
+  assert.match(toast, /Not applied: sampler/);
+  assert.doesNotMatch(toast, /steps/);
   assert.match(toast, /LoRA not-installed/);
 });
 

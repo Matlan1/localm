@@ -240,14 +240,23 @@ def make_router(media: str, prefix: str, plugin_backend) -> APIRouter:
             blk = s.get("native") if isinstance(s.get("native"), dict) else {}
             configured = {k: str(blk.get(k) or "").strip() for k in keys}
             cands = pairing.registry_candidates()
-            out = pairing.native_options(media, cands)
-            out["current"] = {k: display_name(v) if v else "" for k, v in configured.items()}
             other_model = "model" in query and query["model"] != configured["model"]
             picked = {k: query.get(k, "" if other_model and k != "model" else configured[k])
                       for k in keys}
             model = picked.pop("model", "")
-            out["preview"] = (pairing.preview(media, model, picked, cands) if model
-                              else None)
+            recommended = getattr(plugin_backend, "recommended_defaults", None)
+            preview = (pairing.preview(media, model, picked, cands,
+                                       recommended() if recommended else None)
+                       if model else None)
+            if preview and preview["defaults"]:
+                for key in ("steps", "cfg_scale"):
+                    if blk.get(key) is not None:
+                        preview["defaults"][key] = blk[key]
+            out = pairing.native_options(
+                media, cands, family=preview["family"] if preview else None,
+                variant=preview["variant"] if preview else None)
+            out["current"] = {k: display_name(v) if v else "" for k, v in configured.items()}
+            out["preview"] = preview
             return out
         try:
             return await run_in_threadpool_bounded(_read, timeout=30.0)

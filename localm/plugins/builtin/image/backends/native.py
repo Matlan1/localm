@@ -25,6 +25,7 @@ from localm.media.image_params import png_text_entries
 from localm.media.sdcpp import families, pairing
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
+from localm.media.sdcpp.logrelay import RecoveredWarnings
 from localm.media.sdcpp.files import ModelFileError as _ModelError
 from localm.media.sdcpp.files import display_name, registered_file, resolve_model_file
 from localm.media.sdcpp.runner import SdCancelled, SdWorkerError
@@ -59,6 +60,9 @@ RECOMMENDED_MODELS: tuple[RecommendedModel, ...] = (
         sha256="d50be7655f0a554cf8041c145d88b210bd5f3c545423119dee62ae08cae51580",
         size_bytes=2_023_745_376, steps=2, cfg_scale=1.0, width=512, height=512),
 )
+
+NEGATIVE_AT_CFG_1 = ("The negative prompt has no effect at CFG 1. Raise CFG (for example "
+                     "to 3) to apply it; generation then takes about twice as long per step.")
 
 _COMPONENT_FIELDS = (("clip_l", "clip_l_path"), ("clip_g", "clip_g_path"),
                      ("t5xxl", "t5xxl_path"), ("llm", "llm_path"), ("vae", "vae_path"))
@@ -325,27 +329,47 @@ def _write_sidecar(out_path: Path, record: dict) -> str:
     return ""
 
 
-def _event_relay(say):
-    state: dict = {"phase": None}
+class _EventRelay:
+    """The worker-event handler for one job: status lines to *say*, preview
+    frames to *on_preview*. ``flush`` shows any held warning lines and must be
+    called when the job ends."""
 
-    def on_event(event) -> None:
-        if event[0] == "log":
-            say(f"stable-diffusion.cpp: {event[2]}")
+    def __init__(self, say, on_preview=None):
+        self._say = say
+        self._on_preview = on_preview
+        self._phase = None
+        self._warnings = RecoveredWarnings(say)
+
+    def flush(self) -> None:
+        self._warnings.flush()
+
+    def __call__(self, event) -> None:
+        kind = event[0]
+        if kind == "log":
+            self._warnings.line(event[2])
+            return
+        if kind == "preview":
+            if self._on_preview is not None:
+                self._on_preview(event[1])
             return
         info = event[1]
         phase, step, steps = info.get("phase"), info.get("step", 0), info.get("steps", 0)
         if phase == "sampling":
+            self._warnings.sampling()
             secs = info.get("secs") or 0.0
             rate = f" ({secs:.2f} s/step)" if secs else ""
-            say(f"Step {step}/{steps}{rate}")
-        elif phase != state["phase"] or (steps and step == steps):
+            self._say(f"Step {step}/{steps}{rate}")
+        elif phase != self._phase or (steps and step == steps):
             label = "Decoding" if phase == "decoding" else "Loading weights"
             if steps and step == steps:
-                say(f"{label}: done")
-            elif phase != state["phase"]:
-                say(f"{label}...")
-        state["phase"] = phase
-    return on_event
+                self._say(f"{label}: done")
+            elif phase != self._phase:
+                self._say(f"{label}...")
+        self._phase = phase
+
+
+def _event_relay(say, on_preview=None) -> _EventRelay:
+    return _EventRelay(say, on_preview)
 
 
 def refusal(*, model_overrides=None, lora_name=None,
@@ -399,7 +423,10 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
              on_progress=None,
              width: Optional[int] = None,
              height: Optional[int] = None,
-             loras: Optional[list] = None) -> tuple[bool, str]:
+             loras: Optional[list] = None,
+             steps: Optional[int] = None,
+             clip_skip: Optional[int] = None,
+             on_preview=None) -> tuple[bool, str]:
     """Generate one image of *prompt* into *out_path* (a PNG without embedded
     metadata unless the ``embed_params`` setting is on and the session is not in
     privacy mode). Returns ``(ok, message)``. Writes only
@@ -412,7 +439,10 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     reason rather than ignored.
     ``delete_outputs`` has nothing to act on (there is no second copy).
     *swap* asks this backend to unload the chat model itself, used when the
-    caller's own unload did not succeed."""
+    caller's own unload did not succeed. *steps* and *clip_skip* override the
+    settings and the family default for this image. *on_preview*, when given,
+    receives ``{"step", "steps", "width", "height", "png"}`` for each
+    in-progress frame the worker makes."""
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, lora_name=lora_name,
                       width=width, height=height)
@@ -447,7 +477,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         say("Freeing VRAM: unloading the chat model...")
         if _localm_unload(self_url, instance_token) is None:
             say("Could not unload the chat model - the image model may run low on VRAM.")
-    relay = _event_relay(say)
+    relay = _event_relay(say, on_preview)
     runner = shared.runner
     with shared.lock:
         shared.cancel_idle_timer()
@@ -469,7 +499,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 width, height = _default_size(info.get("version", ""), rec, blk, defaults)
             if seed is None or seed < 0:
                 seed = secrets.randbelow(2 ** 31)
-            steps = blk.get("steps") or (rec.steps if rec else None) or (
+            steps = steps or blk.get("steps") or (rec.steps if rec else None) or (
                 defaults.steps if defaults else None)
             cfg_scale = cfg if cfg is not None else (
                 blk.get("cfg_scale") if blk.get("cfg_scale") is not None
@@ -478,6 +508,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 "prompt": prompt, "negative_prompt": negative_prompt or "",
                 "width": int(width), "height": int(height), "seed": int(seed),
                 "steps": steps, "cfg_scale": cfg_scale, "guidance": guidance,
+                "clip_skip": clip_skip, "preview": on_preview is not None,
                 "sample_method": blk.get("sample_method") or None,
                 "scheduler": blk.get("scheduler") or None,
                 "init_image": init,
@@ -485,6 +516,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
                           for x in lora_files],
             }
+            if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
+                say(NEGATIVE_AT_CFG_1)
             say(f"Generating {width}x{height}"
                 + (f", {steps} steps" if steps else "") + f", seed {seed}...")
             result = runner.generate_image(params, on_event=relay, cancel_check=cancel_check)
@@ -495,12 +528,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         except (OSError, ValueError) as e:
             return False, f"Native image generation failed: {e}"
         finally:
+            relay.flush()
             if runner.is_alive():
                 shared.arm_idle_timer()
     record = {
         "prompt": prompt, "negative_prompt": negative_prompt or None,
         "seed": int(seed), "cfg": cfg_scale, "guidance": guidance, "steps": steps,
-        "width": result["width"], "height": result["height"],
+        "clip_skip": clip_skip, "width": result["width"], "height": result["height"],
         "input_image": str(input_image) if input_image else None,
         "denoise": params["strength"],
         "backend": "native", "model": models["label"],

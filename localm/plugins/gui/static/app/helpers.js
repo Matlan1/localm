@@ -1117,7 +1117,9 @@ export async function readSSE(response, onData, onAnyFrame) {
 }
 
 /** Stream a background job's events. onLine gets text lines; the optional
- *  onProgress gets {downloaded,total,pct,phase} events. Resolves with end. */
+ *  onProgress gets {downloaded,total,pct,phase} events and the optional
+ *  onFrame gets live-preview frames ({data, mime, step, steps}). Resolves with
+ *  end. */
 // Ask the server to cancel a running job (model pull, media generation). The
 // job's worker stops cooperatively (media gen interrupts ComfyUI mid-render),
 // so streamJob's "end" event arrives with status "cancelled".
@@ -1134,7 +1136,7 @@ export async function cancelJob(jobId) {
 export let JOB_RECONNECT_DELAY_MS = 1500;
 export let JOB_RECONNECT_MAX_ATTEMPTS = 20;   // ~30s of reconnect budget
 
-export async function streamJob(jobId, onLine, onProgress) {
+export async function streamJob(jobId, onLine, onProgress, onFrame) {
   // GET /api/jobs/{id}/events can end WITHOUT an "end" frame (a network
   // blip, laptop sleep/wake, a backgrounded tab) while the job keeps running
   // server-side regardless of whether anyone is subscribed (JobManager.Job.
@@ -1170,6 +1172,9 @@ export async function streamJob(jobId, onLine, onProgress) {
       await readSSE(r, (payload) => {
         let ev;
         try { ev = JSON.parse(payload); } catch { return; }
+        // A frame is not part of the job's replayed history, so it is not
+        // counted: the server resends only the latest one after a reconnect.
+        if (ev.type === "frame") { if (onFrame) onFrame(ev); return; }
         const isNew = indexThisAttempt >= seen;
         indexThisAttempt++;
         if (isNew) seen++;
@@ -1190,6 +1195,39 @@ export async function streamJob(jobId, onLine, onProgress) {
     }
   }
   return { status: "disconnected" };
+}
+
+/** The live preview of a generating media job, shown in the element with id
+ *  *mountId*: `show(frame)` replaces the picture with a streamJob() frame and
+ *  `clear()` removes it. */
+export function createJobPreview(mountId) {
+  const mount = document.getElementById(mountId);
+  let img = null;
+  let caption = null;
+  return {
+    show(frame) {
+      if (!mount || !frame || typeof frame.data !== "string" || !frame.data) return;
+      if (!img) {
+        img = document.createElement("img");
+        img.className = "job-preview-img";
+        img.alt = t("mediaGallery.previewAlt");
+        caption = el("div", "sub job-preview-caption");
+        mount.replaceChildren(img, caption);
+      }
+      const mime = frame.mime === "image/jpeg" ? "image/jpeg" : "image/png";
+      img.src = `data:${mime};base64,${frame.data}`;
+      caption.textContent = t("mediaGallery.previewCaption",
+        { step: frame.step ?? "?", steps: frame.steps ?? "?" });
+      mount.hidden = false;
+    },
+    clear() {
+      if (!mount) return;
+      img = null;
+      caption = null;
+      mount.replaceChildren();
+      mount.hidden = true;
+    },
+  };
 }
 
 /** A streamJob() end status, worded for dropping into a "<Operation> " +

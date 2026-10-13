@@ -187,6 +187,7 @@ class _FakeRunner:
         self.loaded_key = None
         self.loads = []
         self.generates = []
+        self.extra_events = []
         self.alive = False
         self.pid = 4242
 
@@ -209,6 +210,11 @@ class _FakeRunner:
         if on_event:
             on_event(("progress", {"phase": "sampling", "step": 1, "steps": 2, "secs": 0.5}))
             on_event(("log", 3, "a warning from the runtime"))
+            if params.get("preview"):
+                on_event(("preview", {"step": 1, "steps": 2, "width": 4, "height": 4,
+                                      "png": b"fake-png"}))
+            for event in self.extra_events:
+                on_event(event)
         w, h = params["width"], params["height"]
         return {"width": w, "height": h, "channel": 3, "data": bytes([200, 30, 30]) * (w * h),
                 "seed": params["seed"]}
@@ -311,6 +317,69 @@ def test_requests_the_native_backend_cannot_honour_are_refused(fake_native, tmp_
     ok, msg = native.generate(s, "p", out, write_sidecar=False, **kwargs)
     assert not ok and needle in msg
     assert runner.loads == [] and not out.exists()
+
+
+def test_steps_and_clip_skip_for_one_image_override_the_settings(fake_native, tmp_path):
+    runner, s = fake_native
+    s["native"]["steps"] = 9
+    out = tmp_path / "h.png"
+    ok, _ = native.generate(s, "p", out, write_sidecar=True, steps=4, clip_skip=2)
+    assert ok
+    assert (runner.generates[0]["steps"], runner.generates[0]["clip_skip"]) == (4, 2)
+    side = json.loads(out.with_suffix(".png.json").read_text(encoding="utf-8"))
+    assert (side["steps"], side["clip_skip"]) == (4, 2)
+    ok, _ = native.generate(s, "p", tmp_path / "i.png", write_sidecar=False)
+    assert ok
+    assert (runner.generates[1]["steps"], runner.generates[1]["clip_skip"]) == (9, None)
+
+
+def test_a_preview_callback_gets_the_frames_and_turns_previews_on(fake_native, tmp_path):
+    runner, s = fake_native
+    frames = []
+    ok, _ = native.generate(s, "p", tmp_path / "j.png", write_sidecar=False,
+                            on_preview=frames.append)
+    assert ok
+    assert runner.generates[0]["preview"] is True
+    assert frames == [{"step": 1, "steps": 2, "width": 4, "height": 4, "png": b"fake-png"}]
+    ok, _ = native.generate(s, "p", tmp_path / "k.png", write_sidecar=False)
+    assert ok and runner.generates[1]["preview"] is False
+
+
+def test_a_recovered_decode_is_one_line_in_the_job_log(fake_native, tmp_path):
+    runner, s = fake_native
+    runner.extra_events = [
+        ("log", 3, "model_manager.cpp:1914 - model manager cannot make enough memory available"),
+        ("log", 4, "ggml_runner.cpp:898 - vae segment 1/1 (graph) failed during weight preparation"),
+        ("log", 4, "vae.hpp:377 - vae decode compute failed"),
+        ("log", 3, "backend_fit.cpp:522 - VAE decode ran out of memory; retrying with spatial "
+                   "tiling")]
+    lines = []
+    ok, _ = native.generate(s, "p", tmp_path / "l.png", write_sidecar=False,
+                            on_progress=lines.append)
+    assert ok
+    assert "Not enough VRAM to decode in one piece; decoding in tiles." in lines
+    assert not any("failed during" in ln or "compute failed" in ln for ln in lines)
+
+
+def test_decode_failures_without_a_recovery_reach_the_job_log_when_it_ends(fake_native, tmp_path):
+    runner, s = fake_native
+    runner.extra_events = [("log", 4, "vae.hpp:377 - vae decode compute failed")]
+    lines = []
+    ok, _ = native.generate(s, "p", tmp_path / "m.png", write_sidecar=False,
+                            on_progress=lines.append)
+    assert ok
+    assert "stable-diffusion.cpp: vae.hpp:377 - vae decode compute failed" in lines
+
+
+def test_a_negative_prompt_at_cfg_1_says_it_has_no_effect(fake_native, tmp_path):
+    runner, s = fake_native
+    for cfg, negative, said in ((1.0, "blurry", True), (3.0, "blurry", False),
+                                (1.0, None, False), (1.0, "", False), (None, "blurry", False)):
+        lines = []
+        ok, _ = native.generate(s, "p", tmp_path / "n.png", write_sidecar=False,
+                                negative_prompt=negative, cfg=cfg, on_progress=lines.append)
+        assert ok
+        assert (native.NEGATIVE_AT_CFG_1 in lines) is said, (cfg, negative)
 
 
 def test_a_cancel_is_reported_and_writes_nothing(fake_native, tmp_path):
@@ -580,6 +649,87 @@ def test_route_says_gpu_placement_is_comfyui_only_for_native(native_app):
     assert job.status == "done", lines
     assert any("GPU placement applies to ComfyUI only" in ln for ln in lines)
     assert runner.generates[0]["prompt"] == "a lighthouse"
+
+
+def test_imagine_route_sends_steps_and_clip_skip_to_the_worker(native_app):
+    from fastapi.testclient import TestClient
+    app, runner = native_app
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p", "steps": 6, "clip_skip": 2})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "done"
+    assert (runner.generates[0]["steps"], runner.generates[0]["clip_skip"]) == (6, 2)
+
+
+@pytest.mark.parametrize("body,needle", [
+    ({"steps": 0}, "Steps"), ({"steps": 201}, "Steps"),
+    ({"clip_skip": 0}, "Clip skip"), ({"clip_skip": 13}, "Clip skip"),
+])
+def test_imagine_route_rejects_steps_and_clip_skip_out_of_range(native_app, body, needle):
+    from fastapi.testclient import TestClient
+    app, runner = native_app
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p", **body})
+    assert r.status_code == 400 and needle in r.json()["detail"]
+    assert runner.generates == []
+
+
+def test_a_native_job_streams_its_previews_as_frames_kept_only_in_memory(native_app):
+    import base64
+    from fastapi.testclient import TestClient
+    app, runner = native_app
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p"})
+        job = _wait_job(app, r.json()["job_id"])
+    assert runner.generates[0]["preview"] is True
+    frame = job._last_frame
+    assert frame["type"] == "frame" and frame["mime"] == "image/png"
+    assert (frame["step"], frame["steps"]) == (1, 2)
+    assert base64.b64decode(frame["data"]) == b"fake-png"
+    assert all(e.get("type") != "frame" for e in job._history)
+
+
+def test_a_comfyui_job_with_steps_is_refused_before_anything_runs(native_app, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    app, runner = native_app
+    update_config(lambda cfg: cfg["plugins"]["image"].update({"backend": "comfy"}))
+    mod = sys.modules["_localm_plugin_image.backend"]
+    monkeypatch.setattr(mod._COMFY_REF, "ensure_available",
+                        lambda s, on_progress=None: (_ for _ in ()).throw(
+                            AssertionError("ComfyUI must not be reached")))
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p", "steps": 5})
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "failed"
+    lines = [e.get("text", "") for e in job._history if e.get("type") == "line"]
+    assert any("apply to the native backend" in ln for ln in lines)
+    assert runner.generates == []
+
+
+def test_a_comfyui_job_gets_none_of_the_native_only_arguments(native_app, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    app, runner = native_app
+    update_config(lambda cfg: cfg["plugins"]["image"].update({"backend": "comfy"}))
+    mod = sys.modules["_localm_plugin_image.backend"]
+    seen = {}
+
+    def comfy_generate(s, prompt, out_path, *, self_url, write_sidecar, **kwargs):
+        seen.update(kwargs)
+        return True, "Saved."
+
+    monkeypatch.setattr(mod._COMFY_REF, "ensure_available", lambda s, on_progress=None: (True, "ok"))
+    monkeypatch.setattr(mod._COMFY_REF, "generate", comfy_generate)
+    monkeypatch.setattr(mod._COMFY_REF, "free_vram", lambda s: True)
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p"})
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "done", [e.get("text") for e in job._history]
+    assert seen and not ({"steps", "clip_skip", "on_preview"} & set(seen))
 
 
 def test_imagine_route_rejects_a_bad_size(native_app):

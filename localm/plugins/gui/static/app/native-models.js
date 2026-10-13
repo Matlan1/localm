@@ -56,8 +56,9 @@ function nmOption(value, text) {
 export function nativeModelSelect(items, current, firstText) {
   const sel = document.createElement("select");
   sel.appendChild(nmOption("", firstText));
+  const others = items.filter((it) => it.fits === false);
   const groups = new Map();
-  for (const it of items) {
+  for (const it of items.filter((x) => x.fits !== false)) {
     const g = it.family_label || "";
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push(it);
@@ -69,6 +70,10 @@ export function nativeModelSelect(items, current, firstText) {
       parent.appendChild(nmOption(it.name, it.file && it.file !== it.name
         ? `${it.name} (${it.file})` : it.name));
     }
+  }
+  for (const it of others) {
+    const text = it.file && it.file !== it.name ? `${it.name} (${it.file})` : it.name;
+    sel.appendChild(nmOption(it.name, t("nativeModels.otherFamily", { name: text })));
   }
   if (current && ![...sel.options].some((o) => o.value === current)) {
     sel.appendChild(nmOption(current, t("nativeModels.notRegistered", { name: current })));
@@ -86,7 +91,7 @@ function nmField(labelText, control) {
 
 /** The image/video picker mounted in #mountId. `choice()` returns
  * `{native_models, loras}` for the request body (empty values left out). */
-export function createNativeModelPicker({ media, prefix, mountId }) {
+export function createNativeModelPicker({ media, prefix, mountId, onData }) {
   const storeKey = `localm.nativeModels.${media}`;
   let state = nmLoad(storeKey, { models: {}, loras: [] });
   if (!state.models || typeof state.models !== "object") state.models = {};
@@ -120,6 +125,7 @@ export function createNativeModelPicker({ media, prefix, mountId }) {
     data = await r.json();
     if (mine !== seq) return;
     render(mount);
+    if (onData) onData(data);
   }
 
   function render(mount) {

@@ -24,6 +24,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   checkpoint saved without its classification head is refused, and a classifier with several
   labels is not offered as a reranker.
 - **Import models from StabilityMatrix, and type them by content.** Import from ComfyUI also takes a StabilityMatrix install, data or models folder. Every model file found is filed as a diffusion model, text encoder, VAE or LoRA by what is inside it, not only by the folder it sits in, and ComfyUI's `diffusion_models` and `clip_vision` folders and StabilityMatrix's `StableDiffusion`, `DiffusionModels`, `TextEncoders`, `ClipVision`, `Lora` and `VAE` folders are recognised in any letter case.
+- **Live preview while a native image or video renders.** The Images and Video pages show a
+  small picture of the image taking shape under the job log, refreshed every few sampling
+  steps, so a slow render no longer runs blind and a bad composition can be stopped early.
+  The preview is held in memory only and never saved, including in privacy mode.
+- **Steps and clip skip on the Images page.** The Advanced fold takes both for the next native
+  image, with the model family's step count as the placeholder. ComfyUI jobs that send either
+  are refused with a reason, because ComfyUI takes them from its workflow.
+- **A negative prompt at CFG 1 says it has no effect.** FLUX and other models that default to
+  CFG 1 skip the negative-prompt pass entirely, so a negative prompt used to change nothing with no
+  message. The job log now says so and suggests raising CFG.
+- **Component pickers list what fits first.** Choosing a model on the Images or Video page
+  lists the text encoders and VAEs that fit its family first; files of another family are still
+  offered, marked "(other family)".
 - **Add models from Jan.** `localm add` on Jan's data folder (or its `llamacpp/models`
   folder) registers every downloaded model under its Jan id, with its vision projector
   attached, and follows a model that Jan only links to a file kept elsewhere. A download
@@ -596,6 +609,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   loads as the encoder it is instead of as a language model.
 - **SmolVLM2 image chats no longer log a processor warning.** Each image turn logged
   "Kwargs passed to `processor.__call__` have to be in `processor_kwargs` dict" twice.
+- **Recovered runtime warnings no longer look like failures.** When a native image decode does
+  not fit in VRAM and is retried in tiles, the job log shows one plain line instead of the
+  runtime's memory and decode errors from before the retry. Warnings that are not followed by a
+  recovery are shown as before.
 - **A half-copied GGUF file is no longer registered by a folder import.** `localm add
   <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
   whose header declares more tensor data than the file holds, and one named `incomplete-...`

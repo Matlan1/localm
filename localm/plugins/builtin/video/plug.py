@@ -35,6 +35,7 @@ from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import MAX_LORAS, LoraChoice, apply_choice, check_request
 from localm.pathsafe import confined_file, confined_name
+from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
 from . import backend as _backend
 
@@ -197,6 +198,8 @@ async def video(req: VideoRequest, request: Request):
             kwargs["model_overrides"] = req.model_overrides
         if native_loras:
             kwargs["loras"] = native_loras
+        if s.get("backend") == "native":
+            kwargs["on_preview"] = lambda p: job.push(frame_event(p))
         is_privacy = effective_mode("server") == SessionMode.PRIVACY
         # privacy mode forces deletion of ComfyUI's own output copy: no traces
         # left anywhere, regardless of the configured delete_outputs preference.
