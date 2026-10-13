@@ -561,6 +561,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **OpenGL shader caches stay in the data folder.** Mesa and the NVIDIA Linux driver wrote
+  compiled shaders to `~/.cache/mesa_shader_cache` and `~/.cache/nvidia`, outside the data
+  folder, so "delete saved data" never removed them. They now go to `cache/mesa` and
+  `cache/glcache` inside it. A location you set yourself with `MESA_SHADER_CACHE_DIR` or
+  `__GL_SHADER_DISK_CACHE_PATH` is used as you set it. Files already in the old location are
+  left where they are.
 - **Hugging Face encoder models load.** Loading a plain encoder such as bge or MiniLM
   failed with `'_DocstringLeakFilter' object has no attribute 'isatty'` whenever transformers
   printed a weight-loading report. They load now, and a sentence-transformers folder
