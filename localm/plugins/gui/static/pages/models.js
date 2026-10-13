@@ -2733,6 +2733,7 @@ export const IMPORT_TYPE_LABELS = {
   "text-encoder": "models.importComfy.type.textEncoder",
   vae: "models.importComfy.type.vae",
   lora: "models.importComfy.type.lora",
+  upscaler: "models.importComfy.type.upscaler",
   unknown: "models.importComfy.type.unknown",
 };
 

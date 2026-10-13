@@ -1257,6 +1257,7 @@ export const I18N_EN = {
   "models.importComfy.type.lora": "LoRAs",
   "models.importComfy.type.textEncoder": "Text encoders",
   "models.importComfy.type.unknown": "Other",
+  "models.importComfy.type.upscaler": "Upscalers",
   "models.importComfy.type.vae": "VAEs",
   "models.importComfy.useManagedButton": "Use localm's own ComfyUI",
   "models.keyRequired": "This LocaLM server requires an API key.",

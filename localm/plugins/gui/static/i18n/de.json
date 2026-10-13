@@ -1048,6 +1048,7 @@
   "models.importComfy.type.lora": "LoRAs",
   "models.importComfy.type.textEncoder": "Text-Encoder",
   "models.importComfy.type.unknown": "Andere",
+  "models.importComfy.type.upscaler": "Upscaler",
   "models.importComfy.type.vae": "VAEs",
   "models.importComfy.useManagedButton": "localms eigenes ComfyUI verwenden",
   "models.keyRequired": "Dieser LocaLM-Server erfordert einen API-Schlüssel.",
