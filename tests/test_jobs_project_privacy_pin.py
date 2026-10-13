@@ -111,3 +111,49 @@ def test_localm_mode_still_outranks_the_project_pin(home, tmp_path, monkeypatch)
     assert _run(runner, proj)["status"] == "ok"
 
     assert captured["mode"] == SessionMode.PRIVACY
+
+
+def test_a_project_dir_that_cannot_be_searched_runs_the_job_in_privacy(
+        home, tmp_path, monkeypatch, caplog):
+    _write_config(home, coder_mode="full")
+    proj = _project(tmp_path, 'mode = "log"\n')
+    real_is_file = Path.is_file
+
+    def _is_file(self):
+        if self.name == "config.toml" and self.parent.name == ".localcoder":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", _is_file)
+    runner, captured = _capture_agent(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        assert _run(runner, proj)["status"] == "ok"
+
+    assert captured["mode"] == SessionMode.PRIVACY
+    assert any("privacy mode" in r.getMessage() for r in caplog.records)
+
+
+def test_a_confined_job_uses_the_pin_of_the_directory_it_runs_in(
+        home, tmp_path, monkeypatch):
+    from localm import auth
+    from localm.plugins.builtin.jobs.store import Job, JobStore
+    _write_config(home, coder_mode="full")
+    root = tmp_path / "root"
+    (root / ".localcoder").mkdir(parents=True)
+    (root / ".localcoder" / "config.toml").write_text('mode = "privacy"\n',
+                                                     encoding="utf-8")
+    elsewhere = _project(tmp_path, 'mode = "full"\n')
+    monkeypatch.setattr("localm.instances.resolve_root_dir", lambda *a, **k: str(root))
+    auth.set_api_key("owner-key-privacy-pin-0123456789")
+    created = auth.create_key("bot", ["jobs"], allow_privileged=False)
+    job = Job(name="x", task_kind="coder", prompt="p", cwd=str(elsewhere),
+              schedule_kind="interval", schedule=60,
+              owner=auth._hash_key(created["key"]))
+    JobStore().add(job)
+    runner, captured = _capture_agent(monkeypatch)
+
+    assert runner.run_job(job, engine=None)["status"] == "ok"
+
+    assert captured["cwd"] == root.resolve()
+    assert captured["mode"] == SessionMode.PRIVACY

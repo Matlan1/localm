@@ -15,7 +15,8 @@ from click.testing import CliRunner
 
 from localm.plugins.coder.cli._main import main
 
-_CONSOLE = "localm.plugins.coder.privacy.console"
+_CONSOLE = "localm.plugins.coder.privacy.err_console"
+_REMOTE_HOST = "192.0.2.10"
 
 
 def _activate_coder_plugin(monkeypatch, home: Path):
@@ -36,6 +37,17 @@ def run_cli(tmp_path, monkeypatch):
     _activate_coder_plugin(monkeypatch, tmp_path / "home")
     proj = tmp_path / "proj"
     proj.mkdir()
+    import socket
+    real_connect = socket.socket.connect
+    dialled: list = []
+
+    def _connect(sock, address):
+        if isinstance(address, tuple) and address and address[0] == _REMOTE_HOST:
+            dialled.append(address)
+            raise OSError("test: off-machine connect blocked")
+        return real_connect(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", _connect)
 
     def _run(*args, env=None):
         printed: list = []
@@ -44,6 +56,7 @@ def run_cli(tmp_path, monkeypatch):
             result = CliRunner().invoke(
                 main, ["--no-server", "-m", "stub-model", "--cwd", str(proj), *args],
                 catch_exceptions=True, input="\n", env=env)
+        assert dialled == [], f"the CLI dialled the off-machine server: {dialled}"
         return result, "\n".join(printed)
 
     return _run

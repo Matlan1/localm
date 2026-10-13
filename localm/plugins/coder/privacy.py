@@ -40,7 +40,7 @@ import re
 import sys
 from pathlib import Path
 
-from .display import console
+from .display import console, err_console
 
 
 # ---------------------------------------------------------------------------
@@ -348,8 +348,8 @@ _PROVIDER_NAMES = {
 
 
 def warn_external_provider(provider: str) -> None:
-    """Print a prominent warning when privacy mode is active but prompts will be
-    sent to an external API.
+    """Print a prominent warning on stderr when privacy mode is active but
+    prompts will be sent to an external API.
 
     Using an external provider is always an explicit opt-in (--online /
     --anthropic flags). This warning fires only when privacy mode is also active,
@@ -361,7 +361,7 @@ def warn_external_provider(provider: str) -> None:
     provider from receiving, logging, or training on your prompts.
     """
     name = _PROVIDER_NAMES.get(provider, provider)
-    console.print(
+    err_console.print(
         f"\n[bold yellow]⚠  Privacy mode + {name} API[/bold yellow]\n"
         f"[yellow]   Your prompts will be sent to {name}'s servers.\n"
         f"   {name} may log or use them per their privacy policy.\n"
@@ -370,8 +370,8 @@ def warn_external_provider(provider: str) -> None:
 
 
 def warn_external_url(url: str, *, from_env: bool = False) -> None:
-    """Print a prominent warning when privacy mode is active and the coder's
-    model server (``--url`` or ``LOCALCODER_URL``) is not on this machine.
+    """Print a prominent warning on stderr when privacy mode is active and the
+    coder's model server (``--url`` or ``LOCALCODER_URL``) is not on this machine.
 
     Names the destination host and port only (never the userinfo, path or
     query of *url*), and says when the URL came from ``LOCALCODER_URL`` rather
@@ -386,7 +386,7 @@ def warn_external_url(url: str, *, from_env: bool = False) -> None:
     except ValueError:
         host = "an unparseable address"
     source = " (from LOCALCODER_URL)" if from_env else ""
-    console.print(
+    err_console.print(
         f"\n[bold yellow]⚠  Privacy mode + off-machine model server[/bold yellow]\n"
         f"[yellow]   The model server{source} is at {host}, not on this machine.\n"
         f"   Your prompts and the files the agent reads will be sent there,\n"

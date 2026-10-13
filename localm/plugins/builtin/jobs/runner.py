@@ -743,8 +743,7 @@ def _run_coder(job: Job, *, engine=None) -> str:
             "directory.", job.name, job.id)
 
     backend = _coder_backend(job)
-    # The job's project dir, so a per-project .localcoder/config.toml mode applies
-    # to the run the same way it does to an interactive coder session there.
+    # Resolved with the job's project dir, where a .localcoder/config.toml mode applies.
     mode = effective_mode("coder", cwd=cwd)
 
     # Safe-by-default: an unattended scheduled run has nobody to approve a destructive
