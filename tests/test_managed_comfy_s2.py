@@ -250,6 +250,18 @@ def test_torch_index_url_derived(line, expected):
     assert prov.torch_index_url_from_freeze([line]) == expected
 
 
+@pytest.mark.parametrize("device_line", [
+    "amd-torch-device-gfx1030==2.12.0+rocm7.14.0",
+    "rocm-sdk-device-gfx1100==7.14.0",
+    "amd-torchvision-device-gfx1201==0.27.0+rocm7.14.0",
+])
+def test_an_amd_device_package_selects_amd_multi_arch_index(device_line):
+    from localm.media import managed_comfy_provision as prov
+    freeze = ["numpy==2.4.4", "torch==2.12.0+rocm7.14.0", device_line]
+    assert (prov.torch_index_url_from_freeze(freeze)
+            == "https://repo.amd.com/rocm/whl-multi-arch/")
+
+
 def test_torch_index_url_none_for_plain_pypi():
     from localm.media import managed_comfy_provision as prov
     assert prov.torch_index_url_from_freeze(["torch==2.5.1", "numpy==1.26.4"]) is None

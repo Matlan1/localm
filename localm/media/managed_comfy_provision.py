@@ -92,6 +92,14 @@ _NON_SOURCE_DIRS = (
 _TORCH_LABEL_RE = re.compile(
     r"^(?:torch|torchvision|torchaudio)==[^+\s]+\+([A-Za-z0-9.]+)", re.IGNORECASE)
 
+# AMD's multi-arch ROCm wheel index: the per-GPU device packages
+# (amd-torch-device-gfx1030, rocm-sdk-device-gfx1030, ...) and the torch builds
+# they pin are published there, not on download.pytorch.org.
+_AMD_MULTI_ARCH_INDEX = "https://repo.amd.com/rocm/whl-multi-arch/"
+_AMD_DEVICE_PACKAGE_RE = re.compile(
+    r"^(?:amd-torch(?:vision|audio)?-device|rocm-sdk-device)-[A-Za-z0-9]+==",
+    re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class UserComfyStack:
@@ -372,11 +380,18 @@ def read_user_freeze(venv_python: Path) -> Optional[list]:
 
 
 def torch_index_url_from_freeze(freeze_lines) -> Optional[str]:
-    """The PyTorch wheel index-url implied by a torch pin's local version label
+    """The PyTorch wheel index-url implied by *freeze_lines*: AMD's multi-arch
+    ROCm index when the freeze holds an AMD per-GPU device package
+    (``amd-torch-device-gfx1030==...``, ``rocm-sdk-device-gfx1030==...``), else
+    the one implied by a torch pin's local version label
     (``torch==2.4.1+rocm6.2`` -> ``https://download.pytorch.org/whl/rocm6.2``), or
     None when torch is a plain PyPI build (no ``+label``) or absent. pip does not
-    record the index a package came from, so this label is the only signal we have."""
-    for line in freeze_lines:
+    record the index a package came from, so these names and labels are the only
+    signal we have."""
+    lines = [line.strip() for line in freeze_lines]
+    if any(_AMD_DEVICE_PACKAGE_RE.match(line) for line in lines):
+        return _AMD_MULTI_ARCH_INDEX
+    for line in lines:
         m = _TORCH_LABEL_RE.match(line.strip())
         if m:
             return f"https://download.pytorch.org/whl/{m.group(1)}"
