@@ -624,6 +624,41 @@ class TestSurfaceOverridesOnServerTraffic:
             self._post(client, "pinned project file", headers)
         assert "pinned project file" not in _session_text(tmp_path, "*_server.*")
 
+    @pytest.mark.parametrize("held,recorded", [
+        ({"chat"}, True),
+        ({"admin"}, False),
+    ])
+    def test_only_an_owner_caller_can_narrow_recording(self, tmp_path, held, recorded):
+        """A scoped (non-ADMIN) key's chat- or coder-tagged traffic is recorded
+        under the server's mode; the owner's is capped."""
+        from localm import scopes
+        held = {scopes.ADMIN} if held == {"admin"} else held
+        with _server(tmp_path, "full") as (client, config), \
+             patch("localm.inference.http_server.caller_scopes", return_value=held):
+            config.set(chat_mode="privacy", coder_mode="privacy")
+            self._post(client, "tagged chat", {"X-Client-Id": "chat"})
+            self._post(client, "tagged coder", {
+                "X-Client-Id": "coder", "X-Localm-Session-Mode": "privacy"})
+        text = _session_text(tmp_path, "*_server.*")
+        assert ("tagged chat" in text) is recorded
+        assert ("tagged coder" in text) is recorded
+
+    def test_localm_run_attached_to_the_server_records_by_the_chat_mode(self, tmp_path):
+        """The headers `localm run`'s HttpEngine sends when attached to a
+        server, replayed through the real route."""
+        from localm.inference.http_engine import HttpEngine
+        engine = HttpEngine("http://127.0.0.1:1/v1", token="t", model="test-model",
+                            client_id="chat", session_mode=SessionMode.PRIVACY)
+        headers = engine._headers()
+        assert (headers["X-Client-Id"], headers["X-Localm-Session-Mode"]) == (
+            "chat", "privacy")
+        assert "X-Client-Id" not in HttpEngine("http://127.0.0.1:1/v1")._headers()
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="full")
+            headers["Authorization"] = client.headers["Authorization"]
+            self._post(client, "run --mode privacy line", headers)
+        assert "run --mode privacy line" not in _session_text(tmp_path, "*_server.*")
+
     def test_the_coder_backend_sends_no_session_mode_off_localm(self):
         from localm.plugins.coder.backends.http import HTTPBackend
         backend = HTTPBackend("http://127.0.0.1:1/v1", "m")

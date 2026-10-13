@@ -99,3 +99,47 @@ test("a chat request names the chat surface", async () => {
   assert.equal(posts.length, 1, "the chat request fired");
   assert.equal(posts[0].headers["X-Client-Id"], "chat");
 });
+
+test("a Chat persistence override of full does not start saving non-chat keys " +
+     "while the server mode is privacy", async () => {
+  const { window } = loadApp({
+    seedLocalStorage: {
+      "localm.instanceId": "backend-x",
+      "localm.coderCwd": "left-over-project",
+    },
+  });
+  runScript(window, `window.__cfg = ${JSON.stringify(
+    { effective_mode: "privacy", effective_chat_mode: "full" })};` + CONFIG_FETCH +
+    "refreshCtxLimit();");
+  await drain();
+  assert.equal(window.chatState.privacy, false);
+  assert.equal(window.localStorage.getItem("localm.coderCwd"), null,
+    "a non-chat key is wiped under a privacy server mode");
+  runScript(window, `lsSetScoped("localm.coderCwd", "new-project");
+                     lsSetScoped("localm.webAccess", "1");`);
+  assert.equal(window.localStorage.getItem("localm.coderCwd"), null,
+    "a non-chat key is not written under a privacy server mode");
+  assert.equal(window.localStorage.getItem("localm.webAccess"), "1",
+    "a chat setting follows the chat mode");
+});
+
+test("a Chat persistence override of privacy keeps saving non-chat keys while " +
+     "the server mode is full", async () => {
+  const { window } = loadApp({
+    seedLocalStorage: {
+      "localm.instanceId": "backend-x",
+      "localm.coderCwd": "kept-project",
+    },
+  });
+  runScript(window, `window.__cfg = ${JSON.stringify(
+    { effective_mode: "full", effective_chat_mode: "privacy" })};` + CONFIG_FETCH +
+    "refreshCtxLimit();");
+  await drain();
+  assert.equal(window.chatState.privacy, true);
+  assert.equal(window.localStorage.getItem("localm.coderCwd"), "kept-project");
+  runScript(window, `lsSetScoped("localm.coderCwd", "new-project");
+                     lsSetScoped("localm.webAccess", "1");`);
+  assert.equal(window.localStorage.getItem("localm.coderCwd"), "new-project");
+  assert.equal(window.localStorage.getItem("localm.webAccess"), null,
+    "a chat setting is not written under a privacy chat mode");
+});

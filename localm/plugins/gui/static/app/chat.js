@@ -150,6 +150,7 @@ export const chat = {
   // grammar THIS backend has already demonstrated it cannot honour.
   toolGrammarUnsupported: false,
   privacy: false,    // chat in privacy mode: conversations not persisted
+  serverPrivacy: false,  // server in privacy mode: non-chat stored keys not persisted
   // True once /v1/config has answered and `privacy` reflects the server's real
   // mode. The two localStorage write funnels (lsSetScoped, saveConversations)
   // queue their writes while this is false - the boot default above is not an
@@ -186,6 +187,8 @@ export const chat = {
   // user's own in-flight or just-landed message, misreporting a real answer
   // as if nothing was said.
   privacyWiped: false,
+  // The same latch for the server-mode wipe of the Coder tab's project field.
+  serverPrivacyWiped: false,
 };
 
 // The human-facing label of a tagged row (kb/doc) or a tool event; used by
@@ -558,12 +561,26 @@ export async function refreshCtxLimit() {
       // once, so this also handles a switch while the page is open.
       const wasPrivacy = chat.modeKnown && chat.privacy;
       chat.privacy = (cfg.effective_chat_mode ?? cfg.effective_mode) === "privacy";
+      chat.serverPrivacy = cfg.effective_mode === "privacy";
       chat.modeKnown = true;
       settlePendingScopedWrites();
+      for (const key of INSTANCE_SCOPED_KEYS) {
+        if (scopedKeyPrivate(key)) localStorage.removeItem(key);
+      }
+      if (chat.serverPrivacy) {
+        // The Coder tab's "Project directory" input was filled from
+        // "localm.coderCwd" at boot; clear it once per privacy confirmation.
+        if (!chat.serverPrivacyWiped) {
+          chat.serverPrivacyWiped = true;
+          const cwdInputPriv = $("setup-cwd");
+          if (cwdInputPriv) cwdInputPriv.value = "";
+        }
+      } else {
+        chat.serverPrivacyWiped = false;
+      }
       if (chat.privacy) {
         chat.persist = false;
         document.getElementById("persist-hint")?.remove();
-        for (const key of INSTANCE_SCOPED_KEYS) localStorage.removeItem(key);
         // GUI-LIVE-WIPE: the destructive in-memory reset below must run only
         // the FIRST time privacy mode is confirmed for this page load, not on
         // every refreshCtxLimit() call - this function is also polled every
@@ -587,13 +604,6 @@ export async function refreshCtxLimit() {
           setWebAskSession(null);                        // R27: forget the session choice
           renderConvList();
           renderChat();
-          // AUD-INSTANCEID/AUD-PRIV-2: same DOM-field gap as the mismatch branch
-          // above - the Coder tab's "Project directory" input was already
-          // populated from "localm.coderCwd" at boot before this could run, and
-          // nothing else re-reads that key into the field, so the wipe above
-          // needs a matching correction here too.
-          const cwdInputPriv = $("setup-cwd");
-          if (cwdInputPriv) cwdInputPriv.value = "";
         }
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
@@ -655,19 +665,30 @@ export function settlePendingScopedWrites() {
   const saveConv = _pendingConversationSave;
   _pendingScopedWrites.clear();
   _pendingConversationSave = false;
-  if (chat.privacy) return;
   for (const [key, value] of writes) _writeScoped(key, value);
-  if (saveConv) saveConversations();
+  if (saveConv && !chat.privacy) saveConversations();
+}
+
+// Instance-scoped keys holding chat conversations or chat settings. They follow
+// the chat mode (chat.privacy); every other instance-scoped key follows the
+// server mode (chat.serverPrivacy).
+const CHAT_SCOPED_KEYS = Object.freeze([
+  "localm.conversations", "localm.convCollapsed", "localm.webAccess",
+  "localm.speakAloud",
+]);
+
+/** True when *key* must not be kept in localStorage under the confirmed mode. */
+export function scopedKeyPrivate(key) {
+  return CHAT_SCOPED_KEYS.includes(key) ? chat.privacy : chat.serverPrivacy;
 }
 
 export function lsSetScoped(key, value) {
-  if (chat.privacy) return;
   if (!chat.modeKnown) { _pendingScopedWrites.set(key, value); return; }
   _writeScoped(key, value);
 }
 
 function _writeScoped(key, value) {
-  if (chat.privacy) return;
+  if (scopedKeyPrivate(key)) return;
   if (!INSTANCE_SCOPED_KEYS.includes(key)) {
     // Loud, not silent: a key reaching here that is not in
     // the wipe list is LM-DA-047's exact failure mode. Warn rather than throw

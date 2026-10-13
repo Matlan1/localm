@@ -43,6 +43,17 @@ per-surface config (`chat_mode` / `coder_mode`) > global config (`mode`) >
 Notes:
 - The mode is resolved per surface, so you can, for example, keep the coder in
   `log` while chat stays `privacy` (`coder_mode = log`).
+- The chat page in the app and `localm run` save conversations by the chat mode,
+  and a coder session saves its own log and transcript by the coder mode.
+- The server's own audit log and transcript (`*_server.jsonl` / `*_server.md`)
+  record a chat or coder request under the more private of the global mode and
+  that surface's mode (for the coder, the session's own mode, including a
+  project's `.localcoder/config.toml`). So `chat_mode = privacy` keeps chat out
+  of the server's records even when `mode = full`, while `chat_mode = full`
+  under `mode = privacy` saves conversations but adds nothing to the server's
+  records. Any other client of the server's API is recorded under the global
+  mode. The surface's mode applies only to requests made with the owner key (or
+  in open mode); a scoped key's requests are recorded under the global mode.
 - "Nothing written automatically" is the promise privacy mode makes; anything you
   do explicitly (saving a conversation, filing a bug report, `--debug`) is a
   deliberate action, not an automatic trace.

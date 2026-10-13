@@ -238,6 +238,7 @@ def _prepare_child(
             port = 8642
         try:
             backend = make_localm_backend(model, port=port)
+            backend.session_mode = getattr(parent.backend, "session_mode", None)
         except Exception:
             backend = parent.backend
 

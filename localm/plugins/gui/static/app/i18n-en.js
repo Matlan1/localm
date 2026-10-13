@@ -1611,9 +1611,9 @@ export const I18N_EN = {
   "settings.field.mode.label": "Session persistence",
   "settings.field.mode.help": "What localm saves: privacy = nothing written automatically; log = a JSONL audit trail; full = log plus a chat transcript.",
   "settings.field.chatMode.label": "Chat persistence override",
-  "settings.field.chatMode.help": "Overrides Session persistence for chat only. Blank inherits whatever Session persistence is set to.",
+  "settings.field.chatMode.help": "Overrides Session persistence for chat only. What the server records of chat is only ever made more private by it. Blank inherits whatever Session persistence is set to.",
   "settings.field.coderMode.label": "Coder persistence override",
-  "settings.field.coderMode.help": "Overrides Session persistence for the coder only. Blank inherits whatever Session persistence is set to.",
+  "settings.field.coderMode.help": "Overrides Session persistence for the coder only. What the server records of coder requests is only ever made more private by it. Blank inherits whatever Session persistence is set to.",
 
   // Settings > schema fields: Memory
   "settings.field.memoryEnabled.label": "Memory recall",
