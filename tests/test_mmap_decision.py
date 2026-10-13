@@ -103,6 +103,48 @@ def _ram(total, available):
     return patch("localm.sysstats.system_ram", MagicMock(return_value=(total, available)))
 
 
+class TestSplitAndAdapterBytes:
+    def _split(self, tmp_path):
+        from tests.test_gguf_moe_vram_sizing import _T_STRING, _gguf_with_tensors
+        kv = [("general.architecture", _T_STRING, "llama")]
+        first = _gguf_with_tensors(tmp_path / "m-00001-of-00002.gguf", kv,
+                                   [("blk.0.attn_q.weight", [4], 0, 4096)])
+        _gguf_with_tensors(tmp_path / "m-00002-of-00002.gguf", kv,
+                           [("token_embd.weight", [4], 0, 5000)])
+        return first
+
+    def test_an_input_tensor_in_a_later_split_part_is_host_resident(self, tmp_path):
+        first = self._split(tmp_path)
+        assert _backend(first)._host_resident_bytes() == 5000
+
+    def test_adapter_bytes_are_vram_weights_and_not_host_resident(self, tmp_path):
+        model = _dense_model(tmp_path)
+        adapter = tmp_path / "adapter.gguf"
+        adapter.write_bytes(b"\0" * 7000)
+        base = _backend(model)
+        tuned = GgufBackend(str(model), n_ctx=64, adapters=[(str(adapter), 1.0)])
+        assert tuned._vram_model_bytes(0) - base._vram_model_bytes(0) == 7000
+        assert (tuned._effective_model_bytes_for_vram()
+                - base._effective_model_bytes_for_vram()) == 7000
+        assert tuned._host_resident_bytes() == base._host_resident_bytes()
+
+    def test_a_missing_adapter_file_adds_nothing(self, tmp_path):
+        model = _dense_model(tmp_path)
+        base = _backend(model)
+        tuned = GgufBackend(str(model), n_ctx=64,
+                            adapters=[(str(tmp_path / "gone.gguf"), 1.0)])
+        assert tuned._vram_model_bytes(0) == base._vram_model_bytes(0)
+
+    def test_two_adapters_add_both(self, tmp_path):
+        model = _dense_model(tmp_path)
+        a, b = tmp_path / "a.gguf", tmp_path / "b.gguf"
+        a.write_bytes(b"\0" * 100)
+        b.write_bytes(b"\0" * 250)
+        base = _backend(model)
+        tuned = GgufBackend(str(model), n_ctx=64, adapters=[(str(a), 1.0), (str(b), 0.5)])
+        assert tuned._vram_model_bytes(0) - base._vram_model_bytes(0) == 350
+
+
 class TestHostResidentBytes:
     def test_a_dense_full_offload_keeps_only_the_input_layer_in_ram(self, tmp_path):
         host = _backend(_dense_model(tmp_path))._host_resident_bytes()

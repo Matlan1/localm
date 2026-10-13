@@ -503,6 +503,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Adding one Ollama model folder keeps its vision projector.** `localm add` on a single
+  Ollama manifest folder now attaches the model's vision projector, as adding the whole Ollama
+  store already did.
+- **A Hugging Face cache whose `blobs` folder is a link to another drive** now registers the
+  model from its snapshot path, not from the hash-named blob.
+- **Quantizations localm cannot load are named.** A Hugging Face folder quantized with a
+  method the loader has no support for (for example `squeezellm`) is registered with a note
+  naming the method and refused at load, instead of having its packed weights read as plain
+  ones. Old-format LoRA adapters and llama.cpp session files are now recognised and explained,
+  and a text file named `.plan`, `.task` or `.engine` is no longer described as a TensorRT or
+  MediaPipe file.
+- **Memory estimates for split GGUF models and LoRA adapters.** An embedding table stored in
+  a later part of a split GGUF now counts as host memory, and attached LoRA adapters now count
+  toward the VRAM estimate.
+- **Linux CUDA setup without the GitHub API.** When the release listing cannot be read
+  (offline, or the API rate limit is hit), setup installs the pinned CUDA build and checks it
+  against its pinned checksum. On a machine with GPUs of different generations, one Blackwell
+  GPU now selects the CUDA 13 build.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's

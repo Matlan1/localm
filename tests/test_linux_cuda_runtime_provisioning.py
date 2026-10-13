@@ -338,8 +338,8 @@ def test_resolve_linux_cuda_asset_raises_when_not_yet_built(monkeypatch):
 
     # Matched on the PIN rather than a stubbed tag: the message names the build
     # that was actually looked for, which under the pin is _PINNED_TAG.
-    with pytest.raises(click.ClickException, match=sl._PINNED_TAG):
-        sl._resolve_backend_asset("cuda")
+    with pytest.raises(click.ClickException, match="b1'"):
+        sl._resolve_backend_asset("cuda", tag="b1")
 
 
 def test_resolve_backend_asset_windows_cuda_unaffected_by_linux_branch(monkeypatch):
