@@ -164,6 +164,32 @@ def test_slot_mode_runs_the_reply_alone_in_the_exclusive_section():
     assert late["r"] == _reference(PROMPTS[2], 5)
 
 
+def test_closing_the_reply_mid_decode_releases_the_exclusive_section():
+    log: list = []
+    sched = SlotScheduler(_LoggedSim(log), 2)
+    llm = _llm()
+    llm._slots = sched
+    api = _api(log)
+    try:
+        with patch.object(L, "api", api), patch.object(L, "_build_sampler", return_value=999):
+            gen = llm._generate([7, 8, 9], 50, 0.0, 40, 0.9, 1.0, cache_prompt=False)
+            assert next(gen) == 42
+            assert sched._exclusive_held
+            gen.close()
+        assert not sched._exclusive_held
+        assert not llm._inference_lock.locked()
+        done: dict = {}
+        t = threading.Thread(
+            target=lambda: done.update(r=_drain(sched.submit(PROMPTS[1], 5, _Sampler()))),
+            daemon=True)
+        t.start()
+        t.join(10)
+        assert not t.is_alive(), "the scheduler stayed blocked after the reply was closed"
+    finally:
+        sched.close(timeout=5)
+    assert done["r"] == _reference(PROMPTS[1], 5)
+
+
 def test_slot_mode_with_the_cache_still_goes_to_the_scheduler():
     calls = []
 
