@@ -19,11 +19,11 @@ Shell history coverage by shell:
                Cleaned on exit; also suppressed in child shells via env vars.
   fish         Non-interactive fish sessions never save history.  No action.
 
-Online providers (--online / --anthropic) are *always* explicit opt-in flags.
-You cannot accidentally send data to an external API.  The privacy-mode warning
-fires only when both flags are active simultaneously (e.g. --mode privacy set
-in config.toml but --online passed on the command line), to surface the
-contradiction clearly.
+Online providers (--online / --anthropic) and an off-machine --url are the
+ways prompts reach a model server that is not on this machine.  In privacy
+mode each prints a warning naming where the prompts go (e.g. --mode privacy
+set in config.toml but --online passed on the command line, or LOCALCODER_URL
+set in the environment to a remote server).
 
 What privacy mode CANNOT suppress:
   - OS-level process-creation logs (Windows Event Log, Linux auditd/syslog).
@@ -366,4 +366,31 @@ def warn_external_provider(provider: str) -> None:
         f"[yellow]   Your prompts will be sent to {name}'s servers.\n"
         f"   {name} may log or use them per their privacy policy.\n"
         f"   Use a local model (--model) for full privacy.[/yellow]\n"
+    )
+
+
+def warn_external_url(url: str, *, from_env: bool = False) -> None:
+    """Print a prominent warning when privacy mode is active and the coder's
+    model server (``--url`` or ``LOCALCODER_URL``) is not on this machine.
+
+    Names the destination host and port only (never the userinfo, path or
+    query of *url*), and says when the URL came from ``LOCALCODER_URL`` rather
+    than the command line. The caller decides that *url* leaves the machine.
+    """
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or "an unknown host"
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+    except ValueError:
+        host = "an unparseable address"
+    source = " (from LOCALCODER_URL)" if from_env else ""
+    console.print(
+        f"\n[bold yellow]⚠  Privacy mode + off-machine model server[/bold yellow]\n"
+        f"[yellow]   The model server{source} is at {host}, not on this machine.\n"
+        f"   Your prompts and the files the agent reads will be sent there,\n"
+        f"   and that server may log them. Privacy mode only stops what is\n"
+        f"   written on this machine.\n"
+        f"   Use a local model (--model without --url) for full privacy.[/yellow]\n"
     )

@@ -608,6 +608,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A scheduled coder job honours its project's privacy setting.** A `mode` set in the project's
+  `.localcoder/config.toml` now applies to scheduled runs as it does to interactive coder sessions, so
+  a project pinned to privacy mode no longer gets a transcript, audit log or saved lessons from a job.
+- **`localm coder --url` warns in privacy mode when the model server is on another machine.** The
+  warning names the host your prompts and files go to, and says when the address came from
+  `LOCALCODER_URL`, as `--online` and `--anthropic` already did.
 - **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
   its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
   localm is reported as such instead of with advice to repair the llama.cpp runtime.
