@@ -16,7 +16,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from localm.console import SafeConsole, markup_safe, strip_controls
+import localm.console as lc
 
 HOSTILE = "a\x1b[2Jb\x1bcc\x9b31md\x07e\x1b]52;c;cGF5bG9hZA==\x07f\rg\x7fh"
 ROOT = Path(__file__).resolve().parent.parent / "localm"
@@ -24,19 +24,19 @@ ROOT = Path(__file__).resolve().parent.parent / "localm"
 
 def _console():
     buf = io.StringIO()
-    return SafeConsole(file=buf, force_terminal=True, color_system="truecolor",
+    return lc.SafeConsole(file=buf, force_terminal=True, color_system="truecolor",
                        width=200), buf
 
 
 def _plain_console():
     buf = io.StringIO()
-    return SafeConsole(file=buf, force_terminal=True, color_system=None,
+    return lc.SafeConsole(file=buf, force_terminal=True, color_system=None,
                        highlight=False, width=200), buf
 
 
 def test_strip_controls_keeps_newline_tab_and_text():
-    assert strip_controls(HOSTILE) == "a[2Jbcc31mde]52;c;cGF5bG9hZA==fgh"
-    assert strip_controls("line\n\tindent é中") == "line\n\tindent é中"
+    assert lc.strip_controls(HOSTILE) == "a[2Jbcc31mde]52;c;cGF5bG9hZA==fgh"
+    assert lc.strip_controls("line\n\tindent é中") == "line\n\tindent é中"
 
 
 @pytest.mark.parametrize("make", [
@@ -70,7 +70,7 @@ def test_a_carriage_return_line_end_still_redraws():
 
 def test_markup_safe_text_is_printed_literally():
     con, buf = _plain_console()
-    con.print(f"[red]Reason:[/red] {markup_safe('[/] [link=http://x.example]y')}")
+    con.print(f"[red]Reason:[/red] {lc.markup_safe('[/] [link=http://x.example]y')}")
     assert "[/] [link=http://x.example]y" in buf.getvalue()
 
 
