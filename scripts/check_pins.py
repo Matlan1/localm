@@ -41,6 +41,11 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import ci_runner_files  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 
 CURRENT = "CURRENT"
@@ -747,12 +752,8 @@ def _annotate(level: str, message: str) -> None:
 
 
 def _write_summary(text: str) -> None:
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not path:
-        return
     try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(text)
+        ci_runner_files.append(ci_runner_files.STEP_SUMMARY, text)
     except OSError as e:
         print(f"(could not write the step summary: {e})")
 
