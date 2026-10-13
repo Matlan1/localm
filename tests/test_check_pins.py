@@ -1144,6 +1144,13 @@ def test_torch_reads_the_pypi_entry_not_the_local_version_wheel(monkeypatch, tmp
     assert row.pinned == "2.13.0"
 
 
+def test_a_torch_entry_from_another_source_with_a_plain_version_is_not_taken_for_the_pypi_one(monkeypatch, tmp_path):
+    other = '[[package]]\nname = "torch"\nversion = "9.9.9"\nsource = { url = "https://example.invalid/t.whl" }\n\n'
+    lock = other + _lock("2.13.0")
+    row = _torch_row(monkeypatch, tmp_path, lock, lambda p: ("2.13.0", NOW))
+    assert row.pinned == "2.13.0" and row.status == cp.CURRENT
+
+
 def test_a_lock_without_a_pypi_torch_is_a_local_read_error_row(monkeypatch, tmp_path):
     spec = next(s for s in cp.build_registry() if s.name == "torch (uv.lock)")
     (tmp_path / "uv.lock").write_text('name = "torch"\nversion = "2.11.0+rocm7.13.0"\n', encoding="utf-8")
