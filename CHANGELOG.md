@@ -2010,6 +2010,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   user agent, or a coarse primary pointer.
 
 ### Security
+- **Text localm did not write can no longer drive your terminal.** Model output, server replies,
+  model and plugin metadata, search results and error messages printed by the CLI and the coder had
+  their terminal control characters passed through, so a crafted reply could clear the screen, move
+  the cursor to hide lines of a diff before you approved it, set the window title or write to the
+  clipboard. Every console localm prints through now removes those characters, and text interpolated
+  into styled output is escaped so it cannot restyle or break it. Streamed chat output is cleaned on a
+  terminal and left exact when piped.
 - **The default embedding models are downloaded from a fixed version and checked.** The
   first use of semantic search, `localm setup-embeddings` and the Knowledge page fetch
   bge-small (or nomic-embed) from a pinned commit, delete the file and report the failure
