@@ -504,6 +504,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **`localm pull` of a Qwen3-TTS model fetches a projector that works.** In a repo that ships both a
+  Q8_0 and an f16 projector (such as `mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF`), the pull took the
+  f16 one, and speaking with it crashed the speech worker on the CPU and on AMD ROCm. A text-to-speech
+  pull now takes the Q8_0 projector, then bf16, and f16 only when nothing else is there.
 - **A model split between GPU and system RAM says when its RAM part does not fit.** A load that keeps
   layers on the CPU (a partial offload, a machine with no GPU, or a draft model placed on the CPU) whose
   weights in system RAM do not fit available RAM now says in the load output, the GUI load toast and the
