@@ -509,6 +509,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Windows) failed with "pip found no matching version"; those packages now install from AMD's own index.
   The copy also finds the models your ComfyUI finds through its own `extra_model_paths.yaml` (such as
   StabilityMatrix's shared models folder), not only those under its `models` folder.
+- **Document attachments without the Knowledge plugin.** Attaching a text document, PDF or code file in
+  Chat or the Coder no longer fails with "Method Not Allowed" when the Knowledge plugin is not
+  installed: attachments are now converted to text by the built-in chat plugin
+  (`POST /api/chat/extract`), still entirely in memory. An API key needs the `chat` scope for
+  this, where the old route needed `rag`.
 - **A model split between GPU and system RAM says when its RAM part does not fit.** A load that keeps
   layers on the CPU (a partial offload, a machine with no GPU, or a draft model placed on the CPU) whose
   weights in system RAM do not fit available RAM now says in the load output, the GUI load toast and the
