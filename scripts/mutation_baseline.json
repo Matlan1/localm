@@ -1928,11 +1928,11 @@
         "x_contain_gpu_caches": "96b8d26aec5e",
         "x_contain_hf_cache": "71606e40f67f",
         "x_contain_temp_dir": "56c1fba88fa9",
-        "x_contained_gpu_cache_env": "f36dd9366ba3",
+        "x_contained_gpu_cache_env": "fef77fc85ed0",
         "x_contained_hf_env": "4081a75bddb9",
         "x_ensure_dirs": "1343454d0217",
         "x_find_binary_dir": "47ce7baa8b2f",
-        "x_gpu_cache_dirs": "4ace953038e6",
+        "x_gpu_cache_dirs": "46b572af6db6",
         "x_hf_cache_user_placement": "9d962d2d9e1c",
         "x_hf_home_dir": "3aee537cb368",
         "x_instance_id": "f89918f25705",
@@ -2374,10 +2374,10 @@
         "localm.config.x_find_binary_dir__mutmut_6": "survived",
         "localm.config.x_find_binary_dir__mutmut_7": "survived",
         "localm.config.x_gpu_cache_dirs__mutmut_1": {
-          "equivalent": "joinpath parses '/' inside a segment as a separator on Windows and POSIX, so joining the unsplit subpath gives the same Path"
+          "equivalent": "splitting the relative sub-path on no separator leaves one component that still contains the slashes, and Path.joinpath treats slashes as separators, so the resulting path is identical"
         },
         "localm.config.x_gpu_cache_dirs__mutmut_2": {
-          "equivalent": "joinpath parses '/' inside a segment as a separator on Windows and POSIX, so joining the unsplit subpath gives the same Path"
+          "equivalent": "a separator string that never occurs leaves the whole sub-path as one component, and Path.joinpath splits it on slashes again, so the resulting path is identical"
         },
         "localm.config.x_hf_cache_user_placement__mutmut_1": "killed",
         "localm.config.x_hf_cache_user_placement__mutmut_10": "killed",
@@ -2550,7 +2550,7 @@
       }
     },
     "localm/tls.py": {
-      "score_floor": 79.08,
+      "score_floor": 79.65,
       "function_hashes": {
         "x__ca_key_path": "a7c78c017726",
         "x__cert_sans": "9931cb9e678c",
@@ -2725,11 +2725,11 @@
         "localm.tls.x__make_ca__mutmut_50": "killed",
         "localm.tls.x__make_ca__mutmut_51": "killed",
         "localm.tls.x__make_ca__mutmut_52": "killed",
-        "localm.tls.x__make_ca__mutmut_53": "survived",
+        "localm.tls.x__make_ca__mutmut_53": "killed",
         "localm.tls.x__make_ca__mutmut_54": "killed",
         "localm.tls.x__make_ca__mutmut_55": "killed",
         "localm.tls.x__make_ca__mutmut_56": "killed",
-        "localm.tls.x__make_ca__mutmut_57": "survived",
+        "localm.tls.x__make_ca__mutmut_57": "killed",
         "localm.tls.x__make_ca__mutmut_58": "killed",
         "localm.tls.x__make_ca__mutmut_59": "survived",
         "localm.tls.x__make_ca__mutmut_6": "killed",
@@ -3006,7 +3006,7 @@
         "localm.tls.x_ensure_cert__mutmut_15": "killed",
         "localm.tls.x_ensure_cert__mutmut_16": "killed",
         "localm.tls.x_ensure_cert__mutmut_17": "killed",
-        "localm.tls.x_ensure_cert__mutmut_18": "survived",
+        "localm.tls.x_ensure_cert__mutmut_18": "killed",
         "localm.tls.x_ensure_cert__mutmut_19": "killed",
         "localm.tls.x_ensure_cert__mutmut_2": "killed",
         "localm.tls.x_ensure_cert__mutmut_20": "killed",

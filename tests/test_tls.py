@@ -44,6 +44,13 @@ def test_san_targets_always_includes_loopback():
     assert "::1" in ips
 
 
+def test_san_targets_lists_ipv4_addresses_before_ipv6_each_sorted(monkeypatch):
+    monkeypatch.setattr(tls, "_host_ips", lambda: [])
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "")
+    _, ips = tls.san_targets(extra_ips=["fe80::1", "10.0.0.9", "9.9.9.9", "2001:db8::1"])
+    assert ips == ["10.0.0.9", "127.0.0.1", "9.9.9.9", "2001:db8::1", "::1", "fe80::1"]
+
+
 def test_san_targets_routes_extras_and_drops_wildcard():
     hosts, ips = tls.san_targets(
         extra_hostnames=["phone.local", "10.0.0.5", "0.0.0.0"],
