@@ -596,6 +596,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A UNet-only SDXL model loads in the native image backend.** Choosing an SDXL file that holds
+  only the UNet (ComfyUI layout, or diffusers layout) used to fail with "get sd version from file
+  failed"; it now loads with its CLIP-L, CLIP-G and VAE from your registered models.
+- **An external SDXL VAE no longer gives an all-white image.** A VAE picked next to an SDXL
+  checkpoint, or paired with a UNet-only SDXL model, produced a blank white picture that was still
+  reported as a success. The native backend now scales that VAE the way stable-diffusion.cpp does
+  when it uses the checkpoint's own.
+- **A missing SD3 VAE is offered as a download.** An SD3 or SD3.5 UNet without a VAE now names a
+  verified file to pull, registered under a name the automatic pairing recognises.
+- **LoRAs made for SDXL, Qwen-Image or Z-Image are recognised, and Chroma LoRAs are no longer
+  flagged.** An SDXL LoRA was read as Stable Diffusion 1.x and a Chroma LoRA as FLUX.1, so the
+  native backend warned that the LoRA "may have no effect" when it was the right one.
 - **A request cancelled behind an image turn now stops at once.** An image reply, and a
   reply sent with `cache_prompt: false`, wait for every running reply to finish before they
   start. A client that disconnected or cancelled during that wait was not noticed until the
