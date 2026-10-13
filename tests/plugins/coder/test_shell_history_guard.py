@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The suite-wide ``_no_real_shell_history`` fixture (tests/conftest.py): a
+"""The ``_no_real_shell_history`` fixture (tests/plugins/coder/conftest.py): a
 privacy-mode coder CLI exit inside a test finds no shell history files, even
 when APPDATA and HISTFILE point at real-looking ones."""
 
