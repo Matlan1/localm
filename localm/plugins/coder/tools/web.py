@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from localm.console import strip_controls as _strip
+
 from .base import ToolResult, _truncate
 
 def tool_fetch_url(
@@ -37,12 +39,12 @@ def tool_fetch_url(
     from localm.netpolicy import NetworkPolicyError, fetch_text
 
     if _privacy:
-        print(f"[localm privacy] fetch_url: {url}", file=_sys.stderr, flush=True)
+        print(_strip(f"[localm privacy] fetch_url: {url}"), file=_sys.stderr, flush=True)
 
     on_endpoint = None
     if _privacy:
         def on_endpoint(endpoint: str) -> None:
-            print(f"[localm privacy] fetch_url endpoint: {endpoint}",
+            print(_strip(f"[localm privacy] fetch_url endpoint: {endpoint}"),
                   file=_sys.stderr, flush=True)
 
     try:
@@ -55,7 +57,7 @@ def tool_fetch_url(
             f"Could not fetch {url}: {describe_failure(e, url)}")
 
     if _privacy and final_url != url:
-        print(f"[localm privacy] fetch_url read: {final_url}",
+        print(_strip(f"[localm privacy] fetch_url read: {final_url}"),
               file=_sys.stderr, flush=True)
 
     output, trunc = _truncate(text, max_chars)
@@ -98,12 +100,12 @@ def tool_web_search(
     import sys as _sys
 
     if _privacy:
-        print(f"[localm privacy] web_search: {query}", file=_sys.stderr, flush=True)
+        print(_strip(f"[localm privacy] web_search: {query}"), file=_sys.stderr, flush=True)
 
     on_endpoint = None
     if _privacy:
         def on_endpoint(endpoint: str) -> None:
-            print(f"[localm privacy] web_search endpoint: {endpoint}",
+            print(_strip(f"[localm privacy] web_search endpoint: {endpoint}"),
                   file=_sys.stderr, flush=True)
 
     try:
@@ -119,10 +121,10 @@ def tool_web_search(
         # Every page read the retrieval attempted is an outbound request too.
         for src in bundle.sources:
             if src.retrieval_status != "skipped":
-                print(f"[localm privacy] web_search read: {src.url}",
+                print(_strip(f"[localm privacy] web_search read: {src.url}"),
                       file=_sys.stderr, flush=True)
             if src.final_url and src.final_url != src.url:
-                print(f"[localm privacy] web_search read from: {src.final_url}",
+                print(_strip(f"[localm privacy] web_search read from: {src.final_url}"),
                       file=_sys.stderr, flush=True)
 
     if bundle.search_status != "ok":

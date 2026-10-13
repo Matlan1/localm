@@ -10,7 +10,7 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-from rich.console import Console
+from localm.console import SafeConsole as Console, strip_controls
 from rich.markdown import Markdown
 from rich.markup import escape as _markup_escape
 from rich.panel import Panel
@@ -20,14 +20,12 @@ from rich.text import Text
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
 
-_ESC = "\x1b"
-
-
 def _strip_esc(s: str) -> str:
-    """Remove raw ANSI escape bytes so externally-controlled text (model
-    output, tool args/results, an exception message) can never carry a
-    terminal control sequence (e.g. a screen clear) to the user."""
-    return s.replace(_ESC, "") if _ESC in s else s
+    """Remove terminal control characters (ESC and every other C0/C1 control
+    except newline and tab) so externally-controlled text (model output, tool
+    args/results, an exception message) can never carry a terminal control
+    sequence (e.g. a screen clear) to the user."""
+    return strip_controls(s)
 
 
 def _sanitized_text(s: str, *, style: str | None = None) -> Text:

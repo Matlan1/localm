@@ -90,7 +90,8 @@ class ModelLoadSkipped(RuntimeError):
 
 def _log(msg: str) -> None:
     """Server-side logging - stderr only, stdout belongs to the protocol."""
-    print(f"[localm-mcp] {msg}", file=sys.stderr, flush=True)
+    from localm.console import strip_controls
+    print(f"[localm-mcp] {strip_controls(str(msg))}", file=sys.stderr, flush=True)
 
 
 _progress_sink: Optional[Callable[[str], None]] = None
@@ -114,7 +115,7 @@ def _redirect_consoles_to_stderr() -> None:
     Re-point every rich Console used during model loading at stderr.
     A single stray print to stdout corrupts the JSON-RPC stream.
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     err = Console(stderr=True)
     import localm.inference.engine as _engine_mod
     import localm.inference.backends.gguf as _gguf_mod
