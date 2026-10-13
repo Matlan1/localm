@@ -871,6 +871,8 @@ export async function initServerConversations() {
     const data = await r.json();
     if (!data.enabled) return;
     chat.persist = true;
+    const unreadable = (data.unreadable || []).length;
+    if (unreadable) toast(tn("chat.conv.unreadable", unreadable), true);
     // Remote rows are index-only placeholders until opened.
     const byId = new Map((data.conversations || []).map(
       (c) => [c.id, { ...c, _meta: true, messages: [] }]));
