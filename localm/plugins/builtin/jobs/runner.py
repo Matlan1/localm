@@ -743,7 +743,8 @@ def _run_coder(job: Job, *, engine=None) -> str:
             "directory.", job.name, job.id)
 
     backend = _coder_backend(job)
-    mode = effective_mode("coder")
+    # Resolved with the job's project dir, where a .localcoder/config.toml mode applies.
+    mode = effective_mode("coder", cwd=cwd)
 
     # Safe-by-default: an unattended scheduled run has nobody to approve a destructive
     # tool, so it runs RESTRICTED (read plus confined edit, no run_shell, no network,

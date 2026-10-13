@@ -608,6 +608,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A scheduled coder job honours its project's privacy setting.** A `mode` set in the project's
+  `.localcoder/config.toml` now applies to scheduled runs as it does to interactive coder sessions, so
+  a project pinned to privacy mode no longer gets a transcript or audit log from a job. A project
+  folder that cannot be checked for that file now means privacy mode too.
+- **`localm coder --url` warns in privacy mode when the model server is on another machine**, as
+  `--online` and `--anthropic` already did. The warning names the host your prompts and files go to,
+  and says when the address came from `LOCALCODER_URL`. These privacy warnings now go to stderr, so
+  `--output-format json` output stays clean.
 - **Gemma 4 GGUF models are prompted in their own chat format.** Every chat with a Gemma 4
   GGUF used to be sent as a generic ChatML prompt, with a warning that the template was not
   recognised, because llama.cpp's built-in template matcher has no Gemma 4 entry. localm now

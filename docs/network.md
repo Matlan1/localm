@@ -39,7 +39,9 @@ are not covered by this policy at all: every request to OpenAI/Anthropic
 goes out over HTTPS through a direct provider client, outside
 `netpolicy`, with no `net_mode` check anywhere in that path. The only gate
 is the explicit CLI flag itself, plus a warning if you try it in privacy
-mode.
+mode. The same privacy-mode warning names the host when `--url` (or
+`LOCALCODER_URL`) points the coder at a model server that is not on this
+machine.
 
 ## Modes
 
