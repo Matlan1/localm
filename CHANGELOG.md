@@ -506,7 +506,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Document attachments without the Knowledge plugin.** Attaching a text document, PDF or code file in
   Chat or the Coder no longer fails with "Method Not Allowed" when the Knowledge plugin is not
   installed: attachments are now converted to text by the built-in chat plugin
-  (`POST /api/chat/extract`), still entirely in memory.
+  (`POST /api/chat/extract`), still entirely in memory. An API key needs the `chat` scope for
+  this, where the old route needed `rag`.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's
