@@ -240,7 +240,7 @@ def _engine():
     engine = MagicMock()
     engine.display_name = "test-model"
     type(engine).loaded = property(lambda self: True)
-    engine.chat_stream.side_effect = lambda messages, **kw: iter(["Hi", " there"])
+    engine.chat_stream.side_effect = lambda messages, **kw: (t for t in ["Hi", " there"])
     engine.count_tokens.side_effect = lambda text: max(1, len(text.split()))
     return engine
 
