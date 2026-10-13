@@ -39,14 +39,14 @@ class TestOwnEntry:
         assert entry["instance_id"] == iid and entry["token"]
         assert instances.unregister_own(iid) is None
 
-    def test_restore_own_writes_it_back(self, advertised, tmp_path):
+    def test_restore_own_writes_it_back_where_it_was(self, advertised):
         iid, path = advertised
         entry = instances.unregister_own(iid)
-        instances.restore_own(tmp_path, entry)
+        instances.restore_own(entry)
         back = instances.read_entry(path)
         assert back is not None
-        for key in ("instance_id", "port", "host", "root_dir", "mode", "token",
-                    "scheme", "started"):
+        for key in ("instance_id", "pid", "port", "host", "root_dir", "mode",
+                    "token", "scheme", "started", "version"):
             assert back[key] == entry[key], key
         assert instances.unregister_own(iid) is not None
 

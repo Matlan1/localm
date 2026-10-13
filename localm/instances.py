@@ -204,20 +204,22 @@ def unregister_own(instance_id: Optional[str]) -> Optional[dict]:
     if path is None:
         return None
     entry = read_entry(path)
+    if entry is not None:
+        entry["_path"] = str(path)
     unregister_instance(path)
     return entry
 
 
-def restore_own(home: Path, entry: Optional[dict]) -> None:
-    """Write back an entry :func:`unregister_own` removed, for a process that
-    is still serving after all. No-op for None."""
-    if not entry:
+def restore_own(entry: Optional[dict]) -> None:
+    """Write back, at the path it was removed from, an entry
+    :func:`unregister_own` removed, for a process that is still serving after
+    all. No-op for None."""
+    if not entry or not entry.get("_path") or not entry.get("instance_id"):
         return
-    path = register_instance(
-        home, instance_id=entry["instance_id"], port=entry["port"],
-        host=entry["host"], root_dir=entry["root_dir"], mode=entry["mode"],
-        token=entry["token"], scheme=entry.get("scheme", "http"),
-        started=entry.get("started"))
+    path = Path(entry["_path"])
+    body = {k: v for k, v in entry.items() if k != "_path"}
+    from localm.config import atomic_write_private
+    atomic_write_private(path, json.dumps(body, indent=2))
     _OWN_PATHS[entry["instance_id"]] = path
 
 

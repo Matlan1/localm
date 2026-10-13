@@ -4338,7 +4338,6 @@ def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:
     import sys
 
     from localm import instances
-    from localm.config import home_dir
     removed = None
     try:
         removed = instances.unregister_own(instance_id)
@@ -4350,7 +4349,7 @@ def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:
         os.execv(sys.executable, _execv_argv(_restart_argv(port)))
     except BaseException:
         try:
-            instances.restore_own(home_dir(), removed)
+            instances.restore_own(removed)
         except Exception:
             _dbg_swallow("writing back this instance's registry entry after a "
                          "failed re-exec failed", level="warning")
