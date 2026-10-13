@@ -605,6 +605,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A model worker starts even when the debug log it inherits cannot be opened.** In debug
+  mode, a model, embedding or Hugging Face worker whose debug log file had gone away exited
+  before answering, and the load was reported as a crash with no reason; it now logs one
+  warning to the console and carries on.
 - **The coder's browser_close stops a browser that is still starting.** Closing the browser
   while it was still starting used to report that no browser was open and leave it to finish
   starting; it now cancels the start, the browser is closed as soon as it is up, and the calls
