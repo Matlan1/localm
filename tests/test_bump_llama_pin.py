@@ -37,6 +37,20 @@ def bump():
     return _load(_BUMP, "bump_llama_pin")
 
 
+@pytest.fixture(autouse=True)
+def _no_live_cuda_linux_lookup(bump, monkeypatch):
+    """A lookup of the Linux CUDA repo without an injected opener reads as an
+    unreachable release instead of reaching the network."""
+    real = bump._release_assets
+
+    def guarded(repo, tag, opener=None):
+        if opener is None and repo == bump.CUDA_LINUX_REPO:
+            raise bump.Refused("network lookups are disabled in tests")
+        return real(repo, tag, opener)
+
+    monkeypatch.setattr(bump, "_release_assets", guarded)
+
+
 AA, BB, CC, DD = "aa" * 32, "bb" * 32, "cc" * 32, "dd" * 32
 
 SETUP_FIXTURE = f'''# header
@@ -62,6 +76,9 @@ _PINNED_FALLBACK_SHA256 = {{
     "llama-b1307-windows-rocm-gfx103X-x64.zip": "{DD}",
 }}
 
+_CUDA_LINUX_PINNED_SHA256 = {{
+}}
+
 _ASSET_MATCH = {{}}
 '''
 
@@ -75,6 +92,14 @@ MTP_GRAPH_ARCHITECTURES = frozenset({
 
 OTHER = 1
 '''
+
+CUDA_FIXTURE = SETUP_FIXTURE.replace(
+    "_CUDA_LINUX_PINNED_SHA256 = {\n}\n",
+    "_CUDA_LINUX_PINNED_SHA256 = {\n"
+    f'    "llama-b100-bin-ubuntu-cuda-13-x64.tar.gz": "{AA}",\n'
+    f'    "llama-b100-bin-ubuntu-cuda-x64.tar.gz": "{BB}",\n'
+    "}\n")
+assert CUDA_FIXTURE != SETUP_FIXTURE
 
 NEW_DIGESTS = {
     "llama-b200-bin-win-vulkan-x64.zip": "11" * 32,
@@ -120,6 +145,53 @@ def test_rewrite_moves_pin_digests_source_tag_and_allowlist_together(bump):
     assert api.endswith("OTHER = 1\n")
 
 
+def test_rewrite_replaces_the_linux_cuda_block_only_when_given_one(bump):
+    new = {"llama-b200-bin-ubuntu-cuda-x64.tar.gz": "33" * 32}
+    setup, _api = bump.rewrite(CUDA_FIXTURE, API_FIXTURE, "b200", NEW_DIGESTS,
+                               {"qwen35"}, new)
+    block = setup.split("_CUDA_LINUX_PINNED_SHA256 = {\n", 1)[1].split("}", 1)[0]
+    assert block == f'    "llama-b200-bin-ubuntu-cuda-x64.tar.gz": "{"33" * 32}",\n'
+    assert "llama-b100-bin-ubuntu-cuda" not in setup
+
+    untouched, _api = bump.rewrite(CUDA_FIXTURE, API_FIXTURE, "b200", NEW_DIGESTS,
+                                   {"qwen35"})
+    assert "llama-b100-bin-ubuntu-cuda-x64.tar.gz" in untouched
+
+    emptied, _api = bump.rewrite(CUDA_FIXTURE, API_FIXTURE, "b200", NEW_DIGESTS,
+                                 {"qwen35"}, {})
+    assert "_CUDA_LINUX_PINNED_SHA256 = {\n}" in emptied
+
+
+def test_the_linux_cuda_block_must_be_found_exactly_once(bump):
+    with pytest.raises(bump.Refused, match="_CUDA_LINUX_PINNED_SHA256"):
+        bump.set_cuda_linux_block(SETUP_FIXTURE.replace("_CUDA_LINUX_PINNED_SHA256", "_RENAMED"), {})
+
+
+def test_fetch_cuda_linux_digests_keeps_only_the_x64_linux_cuda_assets(bump):
+    import io
+
+    def opener_for(payload):
+        def opener(req, timeout=None):
+            return io.BytesIO(json.dumps(payload).encode("utf-8"))
+        return opener
+
+    good = {"name": "llama-b200-bin-ubuntu-cuda-x64.tar.gz", "digest": "sha256:" + "11" * 32}
+    thirteen = {"name": "llama-b200-bin-ubuntu-cuda-13-x64.tar.gz", "digest": "sha256:" + "22" * 32}
+    other = {"name": "llama-b200-bin-ubuntu-cuda-arm64.tar.gz", "digest": "sha256:" + "33" * 32}
+    nodigest = {"name": "llama-b200-bin-ubuntu-cuda-13-x64.tar.gz"}
+    got = bump.fetch_cuda_linux_digests("b200", opener_for({"assets": [good, thirteen, other]}))
+    assert got == {good["name"]: "11" * 32, thirteen["name"]: "22" * 32}
+    assert bump.fetch_cuda_linux_digests("b200", opener_for({"assets": [good, nodigest]})) == {
+        good["name"]: "11" * 32}
+
+
+def test_fetch_cuda_linux_digests_is_empty_when_the_release_is_unreadable(bump, capsys):
+    def dead(req, timeout=None):
+        raise OSError("offline")
+    assert bump.fetch_cuda_linux_digests("b200", dead) == {}
+    assert "WARNING" in capsys.readouterr().out
+
+
 def test_rewrite_is_idempotent_and_a_no_op_at_the_current_values(bump):
     once = bump.rewrite(SETUP_FIXTURE, API_FIXTURE, "b200", NEW_DIGESTS, {"qwen35"})
     twice = bump.rewrite(once[0], once[1], "b200", NEW_DIGESTS, {"qwen35"})
@@ -155,6 +227,7 @@ def test_the_regions_match_exactly_once_on_the_real_tree(bump):
     assert len(list(bump._MTP_SET_RE.finditer(api))) == 1
 
     from localm import setup_llama as sl
+    from localm.setup_llama import pins
     from localm.inference.backends.llamacpp import _api
     m = bump._SHA_BLOCK_RE.search(setup)
     assert m.group("tag") == sl._PINNED_TAG, "the upstream block is labelled with the pin"
@@ -165,6 +238,11 @@ def test_the_regions_match_exactly_once_on_the_real_tree(bump):
     assert bump.measured_backends(setup) == {
         b for b, note in sl._PIN_CONFIRMATION.items() if "load + generate, measured" in note}
     assert _api.MTP_ARCH_SOURCE_TAG == sl._PINNED_TAG
+
+    cuda = list(bump._CUDA_LINUX_BLOCK_RE.finditer(setup))
+    assert len(cuda) == 1
+    assert cuda[0].group("entries").count("\n") == len(pins._CUDA_LINUX_PINNED_SHA256)
+    assert all(bump._CUDA_LINUX_ASSET_RE.match(n) for n in pins._CUDA_LINUX_PINNED_SHA256)
 
 
 # --------------------------------------------------------------------------- #

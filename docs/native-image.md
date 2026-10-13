@@ -48,19 +48,24 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
    ```
 
    Any model stable-diffusion.cpp supports works: SD 1.x/2.x and SDXL checkpoints,
-   SD3, FLUX, Z-Image, Qwen Image and more, as GGUF, safetensors or ckpt. Set
-   **Native model** to a registered model name or a file path. Models that come
-   as separate parts (FLUX, SD3, Z-Image) also need their text encoders and VAE in the
-   matching fields (CLIP-L, CLIP-G, T5-XXL, LLM, VAE).
+   SD3, FLUX, Z-Image, Qwen Image and more, as GGUF, safetensors or ckpt. Pick it in
+   the **Model** dropdown on the Images page (for the next generation) or set
+   **Native model** in Settings (a registered model or a file path). A model that comes
+   as separate parts (a FLUX, Chroma, SD3, SDXL, Qwen-Image or Z-Image diffusion model)
+   is recognised from the file, and its text encoders and VAE are taken from your
+   registered models: the CLIP-L, T5 or LLM encoder and the VAE that fit that family.
+   Choose a component yourself (on the page or in Settings) to override the pick; a
+   missing one is offered as a download before generating. A full checkpoint (SD 1.x,
+   2.x, SDXL) loads on its own.
 
 ## Settings
 
 | Setting | Meaning |
 |---|---|
-| Native model | Checkpoint, or diffusion model when encoders are set. Blank: the recommended model once downloaded. |
+| Native model | A checkpoint or a diffusion model, recognised from the file. Blank: the recommended model once downloaded. |
 | Native runtime | `auto`, `cpu`, `vulkan`, `cuda`, `rocm`, `metal`. |
-| Native sampling steps, CFG scale, sampler | Blank uses the model's recommended values (SD-Turbo: 2 steps, CFG 1), else stable-diffusion.cpp's defaults (20 steps, CFG 7). |
-| Native VAE, CLIP-L, CLIP-G, T5-XXL, LLM | Optional model parts. |
+| Native sampling steps, CFG scale, sampler | Blank uses the model's recommended values (SD-Turbo: 2 steps, CFG 1), else the model family's (FLUX.1 dev: 20 steps, CFG 1; schnell: 4 steps), else stable-diffusion.cpp's defaults (20 steps, CFG 7). |
+| Native VAE, CLIP-L, CLIP-G, T5-XXL, LLM | Model parts. Blank: picked from the registered models that fit the model's family. |
 
 Paths and model names are owner-only settings: a key without admin rights can neither
 set nor read them, and the Images page and job log show only a model's file name. Network
@@ -81,8 +86,9 @@ set nor read them, and the Images page and job log show only a model's file name
   when the server stops.
 - The PNG carries no embedded metadata. A `.json` sidecar with the prompt and
   settings is written next to it except in privacy mode.
-- ComfyUI-only features are refused with a reason rather than ignored: workflow model
-  picks and ComfyUI LoRA files. Per-component GPU placement applies to ComfyUI only; with
+- LoRAs: the Images page takes one or more registered LoRAs with a strength each (a
+  LoRA made for another family is applied with a note). ComfyUI workflow model picks
+  are refused with a reason rather than ignored. Per-component GPU placement applies to ComfyUI only; with
   it turned on, a native job says so and loads each model on one GPU.
 
 ## Tested hardware

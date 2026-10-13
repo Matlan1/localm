@@ -1061,6 +1061,28 @@ class TestVramEstimate:
                                   params={"model": "m", "n_ctx": 0}).json()
         assert data["weights"] == os.path.getsize(model_file) - input_bytes
 
+    def test_estimate_of_a_split_model_sizes_every_part(self, gui_app, tmp_path):
+        """A split GGUF registers its first part; the estimate must charge the
+        bytes of every part, or the input-layer discount (which reads every
+        part) is taken from a first-part-only total."""
+        import os
+        from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors, _T_STRING
+        app, _ = gui_app
+        kv = [("general.architecture", _T_STRING, "testarch")]
+        first = _gguf_with_tensors(tmp_path / "m-00001-of-00002.gguf", kv,
+                                   [("blk.0.attn_q.weight", [4], 0, 2_000)])
+        second = _gguf_with_tensors(tmp_path / "m-00002-of-00002.gguf", kv,
+                                    [("token_embd.weight", [4], 0, 300_000)])
+        reg = {"m": {"path": str(first), "source": "local"}}
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate",
+                                  params={"model": "m", "n_ctx": 0}).json()
+        total = os.path.getsize(first) + os.path.getsize(second)
+        assert data["weights"] == total - 300_000
+
     def test_estimate_skips_moe_probe_when_registry_confirms_dense(
             self, gui_app, tmp_path):
         """expert_count is persisted on a registry entry at registration time,

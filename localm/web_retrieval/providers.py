@@ -78,6 +78,9 @@ _DDG_NO_RESULTS_RE = re.compile(r"""class\s*=\s*["'][^"']*\bno-results\b""",
                                 re.IGNORECASE)
 _SEARXNG_NO_RESULTS_RE = re.compile(
     r"""class\s*=\s*["'][^"']*\bdialog-error-block\b""", re.IGNORECASE)
+_BRAVE_CAPTCHA_RE = re.compile(
+    r"""\bpage\s*:\s*["']/captcha["']|\bschedule\s+a\s+captcha\b""",
+    re.IGNORECASE)
 _SEARXNG_ENGINE_ERROR_RE = re.compile(
     r"""class\s*=\s*["'][^"']*\bresponse-error\b""", re.IGNORECASE)
 _ENGINES_NAMED = 5
@@ -529,7 +532,7 @@ class BraveSearchProvider:
             return resp.text
         text = _with_retries(send, finish_by=finish_by)
         items = _parse(_BraveParser(), text)
-        if not items and "captcha" in text.lower():
+        if not items and _BRAVE_CAPTCHA_RE.search(str(text)):
             raise BotCheckError(
                 f"{self.label} answered with a bot check instead of results")
         return _checked_results(items, text, max_results, self.name,

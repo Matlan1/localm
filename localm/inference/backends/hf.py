@@ -509,7 +509,9 @@ class HFBackend(BaseBackend):
         min_p: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        cache_prompt: bool = True,
     ) -> Iterator[str]:
+        # This backend keeps no prompt cache, so cache_prompt changes nothing.
         # Checked before the loaded-state gate below and before touching
         # self._runner, so any caller gets a clean UnsupportedInputError for an
         # image against a text-only model rather than a not-loaded error.

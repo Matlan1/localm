@@ -15,6 +15,10 @@ nothing is touched):
     _PINNED_FALLBACK_SHA256       the upstream block only: every asset of the
                                   target release with the sha256 digest the
                                   GitHub API publishes for it
+    _CUDA_LINUX_PINNED_SHA256     the Linux CUDA assets of the same tag on
+                                  hybridgroup/llama-cpp-builder (empty, with a
+                                  printed warning, when that repo has not built
+                                  the tag)
   localm/inference/backends/llamacpp/_api.py
     MTP_ARCH_SOURCE_TAG           the target tag
     MTP_GRAPH_ARCHITECTURES       re-derived from upstream source at the target
@@ -60,6 +64,7 @@ import re
 import sys
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 REPO = Path(__file__).resolve().parent.parent
 SETUP_PATH = REPO / "localm" / "setup_llama" / "pins.py"
@@ -67,6 +72,7 @@ API_PATH = REPO / "localm" / "inference" / "backends" / "llamacpp" / "_api.py"
 MTP_SCRIPT = REPO / "scripts" / "check_mtp_arch_allowlist.py"
 
 UPSTREAM_REPO = "ggml-org/llama.cpp"
+CUDA_LINUX_REPO = "hybridgroup/llama-cpp-builder"
 RELEASE_URL = "https://api.github.com/repos/%s/releases/tags/%s"
 # Fewer usable assets than this means the release listing is not the one localm
 # installs from (b10375 publishes 27).
@@ -80,6 +86,11 @@ _SHA_BLOCK_RE = re.compile(
     r'(?P<indent>[ \t]+)# tag (?P<tag>\S+) upstream assets \(_PINNED_TAG\)\.(?P<rest>[^\n]*)\n'
     r'(?P<comment>(?:[ \t]+#[^\n]*\n)*)'
     r'(?P<entries>(?:[ \t]+"[^"\n]+": "[0-9a-f]{64}",\n)+)')
+_CUDA_LINUX_BLOCK_RE = re.compile(
+    r'(?P<head>_CUDA_LINUX_PINNED_SHA256 = \{\n)'
+    r'(?P<entries>(?:[ \t]+"[^"\n]+": "[0-9a-f]{64}",\n)*)'
+    r'(?P<tail>\})')
+_CUDA_LINUX_ASSET_RE = re.compile(r"^llama-b\d+-bin-ubuntu-cuda(-13)?-x64\.tar\.gz$")
 _MTP_SET_RE = re.compile(
     r'(?P<head>MTP_GRAPH_ARCHITECTURES = frozenset\(\{\n)'
     r'(?P<entries>(?:[ \t]+"[^"\n]+",\n)*)'
@@ -95,11 +106,10 @@ class Refused(Exception):
 #  Upstream                                                                    #
 # --------------------------------------------------------------------------- #
 
-def fetch_release_assets(tag: str, opener=None) -> dict:
-    """{asset name: sha256} for every asset of the release tagged *tag*.
+def _release_assets(repo: str, tag: str, opener=None) -> list:
+    """The asset list of *repo*'s release tagged *tag*.
 
-    Raises Refused when the release cannot be read, an asset carries no sha256
-    digest, or fewer than MIN_ASSETS assets are listed."""
+    Raises Refused when the release cannot be read or carries no asset list."""
     if opener is None:
         from localm.http_ssl import verified_urlopen
         opener = verified_urlopen
@@ -108,16 +118,52 @@ def fetch_release_assets(tag: str, opener=None) -> dict:
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(RELEASE_URL % (UPSTREAM_REPO, tag), headers=headers)
+    req = urllib.request.Request(RELEASE_URL % (repo, tag), headers=headers)
     try:
         with opener(req, timeout=30) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        raise Refused(f"could not read the {tag} release from the GitHub API: "
+        raise Refused(f"could not read the {tag} release of {repo} from the GitHub API: "
                       f"{type(e).__name__}: {e}") from e
     assets = body.get("assets") if isinstance(body, dict) else None
     if not isinstance(assets, list):
-        raise Refused(f"the {tag} release listing carries no asset list")
+        raise Refused(f"the {tag} release listing of {repo} carries no asset list")
+    return assets
+
+
+def fetch_cuda_linux_digests(tag: str, opener=None) -> dict:
+    """{asset name: sha256} for the Linux CUDA assets of the *tag* release on
+    CUDA_LINUX_REPO; {} (after printing why) when that release cannot be read or
+    carries none, so the offline table is emptied rather than left naming a
+    previous tag."""
+    try:
+        assets = _release_assets(CUDA_LINUX_REPO, tag, opener)
+    except Refused as e:
+        print(f"WARNING: {e}; the Linux CUDA offline table will be empty")
+        return {}
+    digests = {}
+    for a in assets:
+        name = a.get("name") if isinstance(a, dict) else None
+        digest = a.get("digest") if isinstance(a, dict) else None
+        if not isinstance(name, str) or not _CUDA_LINUX_ASSET_RE.match(name):
+            continue
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            print(f"WARNING: {name} of {tag} has no usable sha256 digest; left out of "
+                  "the Linux CUDA offline table")
+            continue
+        digests[name] = digest.split(":", 1)[1]
+    if not digests:
+        print(f"WARNING: {CUDA_LINUX_REPO} lists no Linux CUDA asset for {tag}; "
+              "the Linux CUDA offline table will be empty")
+    return digests
+
+
+def fetch_release_assets(tag: str, opener=None) -> dict:
+    """{asset name: sha256} for every asset of the release tagged *tag*.
+
+    Raises Refused when the release cannot be read, an asset carries no sha256
+    digest, or fewer than MIN_ASSETS assets are listed."""
+    assets = _release_assets(UPSTREAM_REPO, tag, opener)
     digests = {}
     for a in assets:
         name = a.get("name") if isinstance(a, dict) else None
@@ -223,6 +269,14 @@ def set_sha_block(setup_text: str, tag: str, digests: dict) -> str:
     return _replace_once(_SHA_BLOCK_RE, setup_text, repl, "_PINNED_FALLBACK_SHA256 upstream block")
 
 
+def set_cuda_linux_block(setup_text: str, digests: dict) -> str:
+    def repl(m):
+        entries = "".join(f'    "{name}": "{digests[name]}",\n' for name in sorted(digests))
+        return m.group("head") + entries + m.group("tail")
+    return _replace_once(_CUDA_LINUX_BLOCK_RE, setup_text, repl,
+                         "_CUDA_LINUX_PINNED_SHA256 block")
+
+
 def set_mtp_tag(api_text: str, tag: str) -> str:
     return _replace_once(_MTP_TAG_RE, api_text,
                          lambda m: m.group(1) + tag + m.group(3), "MTP_ARCH_SOURCE_TAG")
@@ -236,9 +290,12 @@ def set_mtp_set(api_text: str, archs: set) -> str:
 
 
 def rewrite(setup_text: str, api_text: str, tag: str, digests: dict,
-            archs: set) -> tuple[str, str]:
-    """(new pins.py text, new _api.py text)."""
+            archs: set, cuda_linux: Optional[dict] = None) -> tuple[str, str]:
+    """(new pins.py text, new _api.py text). *cuda_linux* None leaves the Linux
+    CUDA offline table as it is."""
     setup_text = set_sha_block(set_pin(setup_text, tag), tag, digests)
+    if cuda_linux is not None:
+        setup_text = set_cuda_linux_block(setup_text, cuda_linux)
     api_text = set_mtp_set(set_mtp_tag(api_text, tag), archs)
     return setup_text, api_text
 
@@ -330,7 +387,11 @@ def main(argv=None) -> int:
         archs = derive_mtp_architectures(tag)
         print(f"  {len(archs)} architecture(s): {', '.join(sorted(archs))}")
 
-        new_setup, new_api = rewrite(setup_text, api_text, tag, digests, archs)
+        print(f"reading the {tag} Linux CUDA assets of {CUDA_LINUX_REPO} ...")
+        cuda_linux = fetch_cuda_linux_digests(tag)
+        print(f"  {len(cuda_linux)} assets with sha256 digests")
+
+        new_setup, new_api = rewrite(setup_text, api_text, tag, digests, archs, cuda_linux)
     except Refused as e:
         print(f"REFUSED: {e}")
         return 1

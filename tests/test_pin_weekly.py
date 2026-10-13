@@ -2,7 +2,7 @@
 """Tests for scripts/pin_weekly.py.
 
 The confirm and bump scripts it drives are REAL subprocesses here: tiny stand-ins
-written into a temp repo that follow dev-notes/pin-automation/CONTRACT.md (exit
+written into a temp repo that follow the contract in scripts/pin_weekly.py (exit
 0/1/2, a receipt file, a bump that edits a file). Only the git and gh effects
 (worktree, branch, commit, PR, CI wait, merge) are replaced, by recording spies,
 because there is no remote to push to.
@@ -99,11 +99,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(pp, "ensure_pipeline_worktree", lambda: worktree)
     monkeypatch.setattr(pp, "prepare_bump_branch",
                         lambda wt, cand, pin: spies.calls.append(("branch", cand, pin)) or "br")
+    spies.texts = []
     monkeypatch.setattr(pp, "commit_and_push",
-                        lambda wt, br, cand, old, message=None: spies.calls.append(("push", cand)))
+                        lambda wt, br, cand, old, message=None:
+                        spies.texts.append(message) or spies.calls.append(("push", cand)))
     monkeypatch.setattr(pp, "open_pr",
                         lambda wt, br, cand, old, title=None, body=None:
-                        spies.calls.append(("pr", title)) or 77)
+                        spies.texts.extend([title, body]) or spies.calls.append(("pr", title)) or 77)
     monkeypatch.setattr(pw, "close_superseded_prs",
                         lambda wt, key, keep: spies.calls.append(("supersede", key, keep)) or [])
     monkeypatch.setattr(pp, "wait_for_ci", lambda wt: spies.calls.append(("ci",)) or spies.ci)
@@ -226,6 +228,16 @@ def test_an_ordinary_fail_is_still_a_build_fail(env, monkeypatch):
     monkeypatch.setenv("FAKE_CONFIRM_RC", "1")
     out = pw.advance(_adv(), dry_run=False)
     assert out.verdict == pw.FAIL
+
+
+@pytest.mark.parametrize("kw", [{}, {"auto_merge": lambda old, new: False}, {"confirm_script": None}])
+def test_the_commit_and_pull_request_text_names_the_change_and_no_internal_process(env, kw):
+    pw.advance(_adv(**kw), dry_run=False)
+    assert len(env.texts) == 3 and all(env.texts)
+    joined = "\n".join(env.texts)
+    assert "v2" in joined and "Fake runtime" in joined
+    internal = ("real hardware", "this machine", "confirm_", "bump_", "receipt", "Automated:", "GUI test suite")
+    assert [w for w in internal if w in joined] == []
 
 
 def test_red_ci_is_a_fail_and_never_merges(env):
@@ -711,6 +723,7 @@ def _stub_main(monkeypatch, *, fingerprint_after):
     calls = []
     monkeypatch.setattr(pp, "pipeline_lock", lock)
     monkeypatch.setattr(pp, "sync_main_checkout", lambda: calls.append("sync"))
+    monkeypatch.setattr(pp, "clear_worktree_temp", lambda wt: calls.append("cleared"))
     monkeypatch.setattr(pw, "ensure_github_token", lambda: "env")
     monkeypatch.setattr(pw, "STARTUP_FINGERPRINT", "before")
     monkeypatch.setattr(pw, "script_fingerprint", lambda: fingerprint_after)
@@ -764,6 +777,19 @@ def test_main_does_not_restart_when_the_scripts_are_unchanged(monkeypatch):
     calls, execs = _stub_main(monkeypatch, fingerprint_after="before")
     assert pw.main(["--only", "uv"]) == 0
     assert execs == [] and "ran" in calls
+
+
+def test_main_empties_the_worktree_temp_dir_after_the_run_even_when_it_raises(monkeypatch):
+    calls, _ = _stub_main(monkeypatch, fingerprint_after="before")
+    assert pw.main(["--only", "uv"]) == 0
+    assert calls[-1] == "cleared"
+    calls.clear()
+
+    def boom(advs, **k):
+        raise pp.PipelineError("refused")
+    monkeypatch.setattr(pw, "run_weekly", boom)
+    assert pw.main(["--only", "uv"]) == 1
+    assert calls[-1] == "cleared"
 
 
 def test_main_sync_failure_before_the_lock_is_inconclusive(monkeypatch, capsys):
@@ -1153,6 +1179,15 @@ def test_shipped_advancers_cover_every_runtime_with_a_pipeline_or_a_named_gap():
             assert t.startswith("tests/test_")
 
 
+def _declared_options(path):
+    """Every option string the script passes to an add_argument call."""
+    import ast
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {a.value for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"
+            for a in n.args if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+
+
 def test_every_advancer_script_that_exists_follows_the_contract_cli():
     for a in pw.build_advancers():
         scripts = [a.bump_script] if a.confirm_script is None else [a.confirm_script, a.bump_script]
@@ -1160,9 +1195,9 @@ def test_every_advancer_script_that_exists_follows_the_contract_cli():
             path = Path(_PATH).parent.parent / rel
             if not path.is_file():
                 continue
-            text = path.read_text(encoding="utf-8")
-            assert '"--tag"' in text or a.delegate, rel
+            options = _declared_options(path)
+            assert "--tag" in options or a.delegate, rel
             if a.confirm_script is not None:
-                assert '"--receipt"' in text, rel
+                assert "--receipt" in options, rel
             if rel == a.confirm_script and not a.verify_current_cmd:
-                assert '"--current"' in text, rel
+                assert "--current" in options, rel

@@ -318,6 +318,38 @@ class TestGgufInputLayerBytes:
         f.write_bytes(b"\0" * 4096)
         assert gguf_input_layer_bytes(f) is None
 
+    def test_split_set_counts_an_input_tensor_stored_in_a_later_part(self, tmp_path):
+        kv = [("general.architecture", _T_STRING, "testarch")]
+        first = _gguf_with_tensors(tmp_path / "m-00001-of-00002.gguf", kv,
+                                   [("blk.0.attn_q.weight", [4], 0, 64)])
+        _gguf_with_tensors(tmp_path / "m-00002-of-00002.gguf", kv,
+                           [("token_embd.weight", [4], 0, 500)])
+        assert gguf_input_layer_bytes(first) == 500
+
+    def test_split_set_sums_input_tensors_across_parts(self, tmp_path):
+        kv = [("general.architecture", _T_STRING, "testarch")]
+        first = _gguf_with_tensors(tmp_path / "m-00001-of-00003.gguf", kv,
+                                   [("token_embd.weight", [4], 0, 300),
+                                    ("blk.0.attn_q.weight", [4], 0, 64)])
+        _gguf_with_tensors(tmp_path / "m-00002-of-00003.gguf", kv,
+                           [("blk.1.attn_q.weight", [4], 0, 64)])
+        _gguf_with_tensors(tmp_path / "m-00003-of-00003.gguf", kv,
+                           [("per_layer_token_embd.weight", [4], 0, 200)])
+        assert gguf_input_layer_bytes(first) == 500
+
+    def test_a_missing_later_part_adds_nothing(self, tmp_path):
+        kv = [("general.architecture", _T_STRING, "testarch")]
+        first = _gguf_with_tensors(tmp_path / "m-00001-of-00002.gguf", kv,
+                                   [("token_embd.weight", [4], 0, 300)])
+        assert gguf_input_layer_bytes(first) == 300
+
+    def test_an_unparseable_later_part_adds_nothing(self, tmp_path):
+        kv = [("general.architecture", _T_STRING, "testarch")]
+        first = _gguf_with_tensors(tmp_path / "m-00001-of-00002.gguf", kv,
+                                   [("token_embd.weight", [4], 0, 300)])
+        (tmp_path / "m-00002-of-00002.gguf").write_bytes(b"\0" * 4096)
+        assert gguf_input_layer_bytes(first) == 300
+
     def test_none_when_file_missing(self, tmp_path):
         assert gguf_input_layer_bytes(tmp_path / "nope.gguf") is None
 

@@ -237,7 +237,7 @@ export function truncateAtWord(text, max) {
 export function archiveCopy(m) {
   if (isToolEvent(m)) return { ...m };
   const out = { role: m.role, content: msgText(m) };
-  for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "webUnfinished", "bridge"]) {
+  for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "webUnfinished", "noWebEvidence", "bridge"]) {
     if (m[k] !== undefined) out[k] = m[k];
   }
   const media = msgImages(m).length + msgAudioClips(m).length +
@@ -1993,7 +1993,10 @@ export function renderChat() {
       : m.webUnfinished
       ? "\n\n*[" + t("chat.web.unfinished") + "]*"
       : "";
-    addMessageRow(box, m.role, msgText(m) + noteSuffix, {
+    const evidenceSuffix = m.noWebEvidence
+      ? "\n\n*[" + t("chat.web.noEvidence") + "]*"
+      : "";
+    addMessageRow(box, m.role, msgText(m) + noteSuffix + evidenceSuffix, {
       images: msgImages(m),
       clips: msgAudioClips(m),
       audio: m.audio ? [m.audio] : [],
@@ -2419,7 +2422,7 @@ export async function attachAudio(file) {
   if (seconds > 0) { clip.seconds = seconds; renderAttachChips(); }
 }
 
-/** Document attachment → text via /api/rag/extract. The file is converted
+/** Document attachment → text via /api/chat/extract. The file is converted
  *  in memory on the server and never written to disk (privacy-clean). */
 export async function attachDocument(file) {
   const b64 = await new Promise((resolve, reject) => {
@@ -2428,7 +2431,7 @@ export async function attachDocument(file) {
     reader.onerror = () => reject(new Error("could not read file"));
     reader.readAsDataURL(file);
   });
-  const r = await fetch("/api/rag/extract", {
+  const r = await fetch("/api/chat/extract", {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify({ filename: file.name, content_b64: b64 }),
   });

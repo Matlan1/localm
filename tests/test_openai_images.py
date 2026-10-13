@@ -270,6 +270,37 @@ class TestRefusals:
         assert r.status_code == 502
         assert "could not be started" in r.json()["detail"]
 
+    def test_a_failed_reload_after_a_failed_generation_does_not_hide_the_reason(
+            self, client, backend, monkeypatch):
+        mod = sys.modules["_localm_plugin_image.backend"]
+        monkeypatch.setattr(mod, "free_vram", lambda s: True, raising=False)
+        monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: True)
+        monkeypatch.setattr("localm.vram.unload_chat_for_media",
+                            lambda job, url, label, token=None: True)
+
+        class _NoModel:
+            ok, status_code = False, 503
+
+        monkeypatch.setattr("localm.selfclient.self_request", lambda *a, **k: _NoModel())
+        backend.fail = "Prompt outputs failed validation: unet_name not in list"
+        r = client.post(URL, json={"prompt": "p"})
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert "unet_name not in list" in detail and "Reload deferred" not in detail
+
+    def test_an_error_after_a_successful_availability_check_is_the_reason(
+            self, client, backend, monkeypatch):
+        mod = sys.modules["_localm_plugin_image.backend"]
+
+        def _boom(*a, **k):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(mod, "generate", _boom)
+        r = client.post(URL, json={"prompt": "p"})
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert "kaboom" in detail and "ComfyUI is up" not in detail
+
     def test_unavailable_backend_is_a_502_with_its_message(
             self, client, backend, image_app, monkeypatch):
         mod = sys.modules["_localm_plugin_image.backend"]
@@ -422,6 +453,16 @@ class TestAwaitJob:
                         {"type": "end", "status": "failed"}])
         got = asyncio.run(plug._await_job(job, _FakeRequest(False)))
         assert got == ("failed", "boom") and not job.cancelled
+
+    def test_the_outcome_line_wins_over_later_lines(self, plug):
+        import asyncio
+        job = _FakeJob([{"type": "line", "text": "Submitting"},
+                        {"type": "line", "outcome": True, "text": "workflow rejected"},
+                        {"type": "line", "text": "Reloading the chat model..."},
+                        {"type": "line", "text": "Reload deferred to the next message (HTTP 503)."},
+                        {"type": "end", "status": "failed"}])
+        got = asyncio.run(plug._await_job(job, _FakeRequest(False)))
+        assert got == ("failed", "workflow rejected")
 
     def test_disconnect_cancels_the_job_and_waits_for_it_to_stop(self, plug):
         import asyncio

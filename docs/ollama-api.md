@@ -96,7 +96,8 @@ is refused with a 400, and `truncate` is accepted and ignored.
 ## Listings
 
 - `GET /api/tags` lists the registered chat and embedding models, with
-  `name`, `model`, `size`, `modified_at`, `digest` (the recorded SHA-256, or
+  `name`, `model`, `size`, `modified_at` (the weights file's modification time, or
+  `1970-01-01T00:00:00Z` when it cannot be read), `digest` (the recorded SHA-256, or
   empty) and `details` (`format`, and `family` when the model's architecture is
   recorded). `parameter_size` and `quantization_level` are empty.
 - `GET /api/ps` lists the loaded models with `context_length` (the loaded
