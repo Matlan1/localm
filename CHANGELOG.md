@@ -605,6 +605,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Gemma 4 GGUF models are prompted in their own chat format.** Every chat with a Gemma 4
+  GGUF used to be sent as a generic ChatML prompt, with a warning that the template was not
+  recognised, because llama.cpp's built-in template matcher has no Gemma 4 entry. localm now
+  writes the Gemma 4 turn format itself, as the model's own template does with thinking off,
+  including the empty thought block the 12B, 26B and 31B templates add. Gemma 4's turn and
+  channel markers in fetched or tool-returned text are now escaped like other models' control
+  tokens.
 - **Pulling a file whose name another repository's model already uses no longer calls it
   damaged.** The pull is still refused, since the models folder keeps one file per name, but the
   message now says the name is in use, names the registered model that holds it and how to

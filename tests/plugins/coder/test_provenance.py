@@ -125,6 +125,10 @@ def test_neutralise_empty_string():
     "<｜begin▁of▁sentence｜>",
     # Gemma native tool-call markers.
     "<|tool_call>", "<tool_call|>",
+    # Gemma 4 one-sided turn, channel, tool and media markers.
+    "<|turn>", "<turn|>", "<|channel>", "<channel|>", "<|tool>", "<tool|>",
+    "<|tool_response>", "<tool_response|>", "<|image>", "<image|>",
+    "<|audio>", "<audio|>",
     # EXAONE uses a bracket-pipe delimiter rather than the <|...|> form.
     "[|system|]", "[|user|]", "[|assistant|]", "[|endofturn|]",
     # GLM / ChatGLM open a templated conversation with [gMASK]<sop>.
@@ -148,7 +152,8 @@ def test_neutralise_does_not_touch_lookalike_code():
     # <|...|> special token.
     for safe in ("<int>", "<string>", "<b>", "<br>", "[INFO]", "[1, 2, 3]",
                  "a < b", "x => y", "Vector<List<int>>",
-                 "Map<string, A|B>", "Array<A | B>", "Result<T, E>"):
+                 "Map<string, A|B>", "Array<A | B>", "Result<T, E>",
+                 "<turn>", "<tool>", "<image>", "<channel>"):
         assert neutralise(f"keep {safe} keep") == f"keep {safe} keep"
 
 
