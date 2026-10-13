@@ -485,6 +485,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 - **The bundled koboldcpp runtime (native music generation) moved from v1.122.1 to v1.123.** An existing install picks it up the next time music generation starts.
+- **Speculative drafting measures the verification cost of 4, 8 and 16 tokens.** On several MoE and
+  hybrid models a batch of 5, 9 or 17 tokens costs much more than one token fewer, and the load-time
+  measurement used to see only the larger size, so it priced 4- and 8-token drafts too high and drafted
+  shorter than paid. With n-gram drafting, copy-heavy replies decode 5-10% faster on Qwen3-30B-A3B and
+  Qwen3.5-9B.
 - **MTP keeps more of its speedup.** While speculation is clearly faster than plain decoding, MTP
   now checks plain decoding every 48 to 96 steps instead of every 24, which recovers about 2% of
   decoding speed on Qwen3.5-4B. It still pauses drafting as soon as speculation stops paying.
