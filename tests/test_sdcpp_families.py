@@ -64,6 +64,16 @@ WAN22_5B = dict(WAN21_T2V, **{"model.diffusion_model.patch_embedding.weight": (3
 SD3 = {"model.diffusion_model.joint_blocks.0.x_block.attn.qkv.weight": (4608, 1536)}
 SDXL_UNET = {"model.diffusion_model.input_blocks.0.0.weight": (320, 4, 3, 3),
              "model.diffusion_model.label_emb.0.0.weight": (1280, 2816)}
+SDXL_UNET_DIFFUSERS = {"conv_in.weight": (320, 4, 3, 3),
+                       "time_embedding.linear_1.weight": (1280, 320),
+                       "add_embedding.linear_1.weight": (1280, 2816),
+                       "down_blocks.0.resnets.0.norm1.weight": (320,)}
+SDXL_CKPT = {"model.diffusion_model.input_blocks.0.0.weight": (320, 4, 3, 3),
+             "model.diffusion_model.label_emb.0.0.weight": (1280, 2816),
+             "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight":
+                 (49408, 768),
+             "conditioner.embedders.1.model.ln_final.weight": (1280,),
+             "first_stage_model.decoder.conv_in.weight": (512, 4, 3, 3)}
 QWEN_IMAGE = {"transformer_blocks.0.img_mod.1.weight": (18432, 3072)}
 Z_IMAGE = {"cap_embedder.0.weight": (2560,), "layers.0.attention.qkv.weight": (11520, 3840)}
 SD2_CKPT = {"model.diffusion_model.input_blocks.0.0.weight": (320, 4, 3, 3),
@@ -116,6 +126,9 @@ WAN22_5B_LORA = {"diffusion_model.blocks.0.cross_attn.k.lora_down.weight": (128,
     (WAN22_5B, "st", None, "diffusion", "wan2.2"),
     (SD3, "st", None, "diffusion", "sd3"),
     (SDXL_UNET, "st", None, "diffusion", "sdxl"),
+    (SDXL_UNET_DIFFUSERS, "gguf", "stable-diffusion-xl-unet", "diffusion", "sdxl"),
+    (SDXL_UNET_DIFFUSERS, "st", None, "diffusion", "sdxl"),
+    (SDXL_CKPT, "st", None, "checkpoint", "sdxl"),
     (QWEN_IMAGE, "st", None, "diffusion", "qwen-image"),
     (Z_IMAGE, "st", None, "diffusion", "z-image"),
     (SD2_CKPT, "gguf", None, "checkpoint", "sd2"),
@@ -548,6 +561,63 @@ def test_a_slot_the_family_does_not_use_is_left_out_with_a_note(flux_set):
     m = video_native.resolve_models({"native": {"model": "wan2.1_t2v", "llm": "clip_l"}})
     assert "llm_path" not in m["ctx"]
     assert any("do not use" in n for n in m["notes"])
+
+
+@pytest.fixture
+def sdxl_set(tmp_path):
+    d = tmp_path / "sdxl"
+    d.mkdir()
+    files = {
+        "sdxl-unet": (write_safetensors(d / "sdxl_unet.safetensors", SDXL_UNET), "diffusion-unet"),
+        "sdxl-diffusers": (write_gguf(d / "sdxl-unet-q4.gguf", SDXL_UNET_DIFFUSERS,
+                                      "stable-diffusion-xl-unet"), "diffusion-unet"),
+        "sdxl-full": (write_safetensors(d / "sdxl_full.safetensors", SDXL_CKPT),
+                      "diffusion-unet"),
+        "clip_l": (write_safetensors(d / "clip_l.safetensors", CLIP_L), "text-encoder"),
+        "clip_g": (write_safetensors(d / "clip_g.safetensors", CLIP_G), "text-encoder"),
+        "sdxl_vae": (write_safetensors(d / "sdxl_vae.safetensors", SD_VAE), "vae"),
+    }
+    for name, (path, mtype) in files.items():
+        _register(name, path, mtype)
+    return {k: v[0] for k, v in files.items()}
+
+
+@pytest.mark.parametrize("model", ["sdxl-unet", "sdxl-diffusers"])
+def test_an_sdxl_unet_alone_gets_its_parts_and_the_version_hint(sdxl_set, model):
+    m = image_native.resolve_models({"native": {"model": model}})
+    ctx = m["ctx"]
+    assert ctx["diffusion_model_path"] == str(sdxl_set[model])
+    assert ctx["clip_l_path"] == str(sdxl_set["clip_l"])
+    assert ctx["clip_g_path"] == str(sdxl_set["clip_g"])
+    assert ctx["vae_path"] == str(sdxl_set["sdxl_vae"])
+    assert ctx["force_sdxl_vae_conv_scale"] is True
+    names = families.read_tensors(Path(ctx["model_path"]))[0]
+    assert any("conditioner.embedders.1" in n for n in names)
+    assert any("middle_block.1" in n for n in names)
+
+
+def test_an_sdxl_checkpoint_scales_an_external_vae_and_needs_no_hint(sdxl_set):
+    alone = image_native.resolve_models({"native": {"model": "sdxl-full"}})
+    assert alone["ctx"] == {"model_path": str(sdxl_set["sdxl-full"])}
+    with_vae = image_native.resolve_models({"native": {"model": "sdxl-full",
+                                                       "vae": "sdxl_vae"}})
+    assert with_vae["ctx"] == {"model_path": str(sdxl_set["sdxl-full"]),
+                               "vae_path": str(sdxl_set["sdxl_vae"]),
+                               "force_sdxl_vae_conv_scale": True}
+
+
+def test_the_version_hint_file_is_rewritten_when_it_differs(sdxl_set):
+    from localm.media.sdcpp import versionhint
+    path = versionhint.sdxl_hint_path()
+    assert path.read_bytes() == versionhint.hint_bytes()
+    path.write_bytes(b"damaged")
+    assert versionhint.sdxl_hint_path() == path
+    assert path.read_bytes() == versionhint.hint_bytes()
+
+
+def test_the_worker_accepts_the_sdxl_vae_scale_flag():
+    from localm.media.sdcpp import _child
+    assert "force_sdxl_vae_conv_scale" in _child._CTX_BOOL_FIELDS
 
 
 def test_sd_family_vaes_follow_their_names(tmp_path):

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from . import families
+from . import families, versionhint
 from .families import FileInfo
 from .files import ModelFileError
 
@@ -351,6 +351,12 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
                 ctx[CTX_FIELDS[slot]] = c["path"]
                 components[slot] = {"name": c["name"], "auto": c["auto"]}
         notes = pairing.mismatched
+        if info.family == "sdxl":
+            try:
+                ctx["model_path"] = str(versionhint.sdxl_hint_path())
+            except OSError as e:
+                raise ModelFileError(f"'{label}' is an SDXL UNet and needs a small helper file "
+                                     f"that could not be written: {e}") from e
     else:
         for slot, (name, path) in explicit.items():
             if slot in CTX_FIELDS:
@@ -361,6 +367,8 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
             ctx["diffusion_model_path"] = str(main)
         else:
             ctx["model_path"] = str(main)
+    if info.family == "sdxl" and "vae_path" in ctx:
+        ctx["force_sdxl_vae_conv_scale"] = True
     return {"ctx": ctx, "info": info, "components": components, "notes": notes}
 
 

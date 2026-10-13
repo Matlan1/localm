@@ -362,6 +362,8 @@ def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
         if in_ch == 36 and not i2v:
             return "wan2.2", {"variant": "i2v-a14b"}
         return "wan2.1", {"i2v": i2v}
+    if _has(names, p + "down_blocks.") and _has(names, p + "add_embedding."):
+        return "sdxl", {}
     if _has(names, p + "input_blocks."):
         if _has(names, p + "label_emb."):
             return "sdxl", {}
