@@ -9,7 +9,9 @@ to ``[cA, cB, cC, 0, rest]`` so its raw cosine to every chunk is chosen exactly.
 
 from __future__ import annotations
 
+import json
 import math
+import time
 from pathlib import Path
 
 import pytest
@@ -114,6 +116,34 @@ class TestCosineFloor:
 
 
 class TestKeywordCoverageBasis:
+    def test_one_matching_word_in_a_sentence_is_not_enough(self, tmp_path):
+        coll = _collection(tmp_path)
+        q = "tell me about the release please"
+        extra_i = [c["text"] for c in coll._chunks].index(EXTRA)
+        assert coll._lexical_index().coverage(q, [extra_i]) == [1.0]
+        assert coll._lexical_index().matched_terms(q, [extra_i]) == [1]
+        assert _texts(coll.query(q, k=4)) == [EXTRA]
+        assert coll.query(q, k=4, relevant_only=True) == []
+
+    def test_a_single_word_query_passes_on_its_one_match(self, tmp_path):
+        coll = _collection(tmp_path)
+        assert _texts(coll.query("release", k=4, relevant_only=True)) == [EXTRA]
+        assert _texts(coll.query("Release?", k=4, relevant_only=True)) == [EXTRA]
+
+    def test_two_matching_words_pass(self, tmp_path):
+        coll = _collection(tmp_path)
+        assert _texts(coll.query("tell me about release notes", k=4,
+                                 relevant_only=True)) == [EXTRA]
+
+    def test_chunk_without_a_vector_follows_the_same_rule(self, tmp_path):
+        coll = _collection(tmp_path)
+        coll._vectors[[c["text"] for c in coll._chunks].index(EXTRA)] = None
+        q = "tell me about the release please"
+        embed = _embedder({q: _query_vec(cos_gpu=0.0)})
+        assert coll.query(q, k=4, embed_fn=embed, relevant_only=True) == []
+        assert _texts(coll.query("release notes", k=4, embed_fn=_embedder(
+            {"release notes": _query_vec()}), relevant_only=True)) == [EXTRA]
+
     def test_lexical_only_query_uses_keyword_coverage(self, tmp_path):
         coll = _collection(tmp_path)
         q = "why did that search fail?"
@@ -177,7 +207,10 @@ class TestConversationReference:
         "what does that resync do?", "can you rewrite your previous answer",
         "ok and what about the second one?", "summarize what we just talked about",
         "why did my last message not get through", "can you say that again",
-        "what time is it",
+        "what time is it", "the thing you said about the cache", "go back to what you mentioned",
+        "I did not follow the part you wrote about ports", "as you said, how long does it take",
+        "can you expand the example above", "you just said the opposite", "explain the previous one",
+        "what was the point you made earlier",
     ])
     def test_detected(self, text):
         assert refers_to_conversation(text)
@@ -188,15 +221,31 @@ class TestConversationReference:
         "can the model browse the web by itself",
         "how do I add a folder to a knowledge collection",
         "explain how knowledge collections are resynced when files change",
+        "what is the default part size for uploads", "how many steps does a release take",
+        "list the steps to set up the server", "the example config file in the docs",
+        "you can set the port in the config", "which one of the two reranker files is used",
         "",
     ])
     def test_not_detected(self, text):
         assert not refers_to_conversation(text)
 
+    def test_labelled_questions_are_not_references_beyond_the_one_known(self):
+        queries = json.loads((Path(__file__).parent / "fixtures" / "rag_rerank_eval"
+                              / "queries.json").read_text(encoding="utf-8"))["queries"]
+        flagged = [q["id"] for q in queries if refers_to_conversation(q["query"])]
+        assert flagged == ["phone-secure"]
+
     def test_long_adversarial_input_is_handled(self):
         assert not refers_to_conversation("it " * 50_000 + "x")
         assert not refers_to_conversation("why did " * 50_000 + "x")
         assert refers_to_conversation("x" + " " * 100_000 + "it")
+
+    @pytest.mark.parametrize("unit", ["you ", "thing you ", "what you ", "as ", "above ",
+                                      "thing ", "you just ", "one "])
+    def test_repeated_phrase_starts_stay_linear(self, unit):
+        started = time.perf_counter()
+        assert not refers_to_conversation(unit * 40_000 + "x")
+        assert time.perf_counter() - started < 2.0
 
     def test_keyword_basis_injects_nothing_for_a_conversation_reference(self, tmp_path):
         coll = _collection(tmp_path)
@@ -216,6 +265,13 @@ class TestConversationReference:
 
 
 class TestFloorsAndCoverage:
+    def test_matched_terms_counts_distinct_counted_terms(self):
+        index = BM25(["alpha beta gamma", "alpha delta", "epsilon"])
+        assert index.matched_terms("alpha beta zeta", [0, 1, 2]) == [2, 1, 0]
+        assert index.matched_terms("please tell me about", [0, 1]) == [0, 0]
+        assert BM25([]).matched_terms("alpha", []) == []
+        assert index.matched_terms("alphas", [0]) == [1]
+
     def test_stem_joins_plural_and_tense_forms(self):
         assert {stem(w) for w in ("change", "changes", "changed", "changing")} == {"chang"}
         assert stem("resynced") == stem("resync")
@@ -310,3 +366,119 @@ class TestCliRelevantOnly:
         assert "(no relevant matches)" in gated.output
         assert "web.md" not in gated.output
         assert (plain.exit_code, gated.exit_code) == (0, 0), plain.output + gated.output
+
+
+class TestConversationContext:
+    CTX = "how are knowledge collections rebuilt when files change"
+    QUESTION = "what does that resync do?"
+
+    def test_follow_up_is_searched_with_the_previous_message(self, tmp_path):
+        coll = _collection(tmp_path)
+        assert coll.query(self.QUESTION, k=4, relevant_only=True) == []
+        assert not coll.context_applied
+        hits = coll.query(self.QUESTION, k=4, relevant_only=True, context=self.CTX)
+        assert _texts(hits) == [SYNC]
+        assert coll.context_applied
+
+    def test_context_is_ignored_for_a_question_that_stands_alone(self, tmp_path):
+        coll = _collection(tmp_path)
+        q = "resync files on disk"
+        hits = coll.query(q, k=4, relevant_only=True,
+                          context="install the rocm runtime for the gpu")
+        assert _texts(hits) == [SYNC]
+        assert not coll.context_applied
+
+    def test_context_needs_relevant_only(self, tmp_path):
+        coll = _collection(tmp_path)
+        plain = coll.query(self.QUESTION, k=4)
+        with_context = coll.query(self.QUESTION, k=4, context=self.CTX)
+        assert plain == with_context
+        assert not coll.context_applied
+
+    @pytest.mark.parametrize("context", [None, "", "   \n"])
+    def test_blank_context_changes_nothing(self, tmp_path, context):
+        coll = _collection(tmp_path)
+        assert coll.query(self.QUESTION, k=4, relevant_only=True,
+                          context=context) == []
+        assert not coll.context_applied
+
+    def test_applied_flag_resets_on_the_next_query(self, tmp_path):
+        coll = _collection(tmp_path)
+        coll.query(self.QUESTION, k=4, relevant_only=True, context=self.CTX)
+        assert coll.context_applied
+        coll.query("resync files on disk", k=4, relevant_only=True)
+        assert not coll.context_applied
+
+    def test_cosine_basis_judges_the_combined_text(self, tmp_path):
+        combined = f"{self.CTX} {self.QUESTION}"
+        embed = _embedder({self.QUESTION: _query_vec(cos_sync=BGE_WEAK + 0.02),
+                           combined: _query_vec(cos_sync=BGE_STRONG + 0.01)})
+        coll = _collection(tmp_path)
+        assert coll.query(self.QUESTION, k=4, embed_fn=embed, relevant_only=True) == []
+        hits = coll.query(self.QUESTION, k=4, embed_fn=embed, relevant_only=True,
+                          context=self.CTX)
+        assert _texts(hits) == [SYNC]
+
+    def test_off_topic_context_does_not_let_a_follow_up_through(self, tmp_path):
+        q = "why did that search fail?"
+        ctx = "tell me a joke about cats"
+        embed = _embedder({q: _query_vec(cos_web=BGE_WEAK - 0.03),
+                           f"{ctx} {q}": _query_vec(cos_web=BGE_WEAK - 0.08)})
+        coll = _collection(tmp_path)
+        assert coll.query(q, k=4, embed_fn=embed, relevant_only=True,
+                          context=ctx) == []
+        assert coll.context_applied
+
+    def test_reranker_scores_the_combined_text_and_gates_on_it(self, tmp_path):
+        coll = _collection(tmp_path)
+        seen = []
+
+        def rerank(query, texts):
+            seen.append(query)
+            return [0.9 if t == SYNC else 0.1 for t in texts]
+
+        hits = coll.query(self.QUESTION, k=4, relevant_only=True, rerank_fn=rerank,
+                          rerank_min_score=0.5, context=self.CTX)
+        assert _texts(hits) == [SYNC]
+        assert seen == [f"{self.CTX} {self.QUESTION}"]
+
+    def test_unrelated_follow_up_with_context_still_returns_nothing(self, tmp_path):
+        coll = _collection(tmp_path)
+        assert coll.query("why did that fail?", k=4, relevant_only=True,
+                          context="what is the capital of australia") == []
+
+
+class TestContextRouteAndCli:
+    def test_route_passes_the_context_and_reports_it(self, rag_app):
+        from fastapi.testclient import TestClient
+        ctx = TestConversationContext.CTX
+        q = TestConversationContext.QUESTION
+        with TestClient(rag_app) as c:
+            assert c.post("/api/rag/collections", json={"name": "kb"}).status_code == 200
+            Collection("kb").add_uploads(
+                [{"filename": f"{n}.md", "data": t.encode()}
+                 for n, t in (("gpu", GPU), ("web", WEB), ("sync", SYNC))])
+            body = {"query": q, "k": 4, "relevant_only": True}
+            bare = c.post("/api/rag/collections/kb/query", json=body).json()
+            withctx = c.post("/api/rag/collections/kb/query",
+                             json={**body, "context": ctx}).json()
+            huge = c.post("/api/rag/collections/kb/query",
+                          json={**body, "context": ctx + " " + "x" * 100_000})
+        assert (bare["hits"], bare["context_used"]) == ([], False)
+        assert [h["text"] for h in withctx["hits"]] == [SYNC]
+        assert withctx["context_used"] is True
+        assert huge.status_code == 200, huge.text
+
+    def test_cli_context_flag(self, cli_runner):
+        from localm.cli import main
+        coll = Collection("kb").create()
+        coll.add_uploads([{"filename": f"{n}.md", "data": t.encode()}
+                          for n, t in (("gpu", GPU), ("web", WEB), ("sync", SYNC))])
+        q = TestConversationContext.QUESTION
+        bare = cli_runner.invoke(main, ["rag", "query", "kb", q, "--relevant-only"])
+        withctx = cli_runner.invoke(
+            main, ["rag", "query", "kb", q, "--relevant-only",
+                   "--context", TestConversationContext.CTX])
+        assert "(no relevant matches)" in bare.output
+        assert "sync.md" in withctx.output
+        assert (bare.exit_code, withctx.exit_code) == (0, 0), bare.output + withctx.output

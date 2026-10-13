@@ -2964,18 +2964,44 @@ export function clipAtBoundary(text, max) {
   return s.slice(0, end).trimEnd() + "…";
 }
 
+/** Longest earlier user message sent with a knowledge query, in characters. */
+export const KB_CONTEXT_CHARS = 400;
+
+function messageText(m) {
+  const c = m && m.content;
+  if (typeof c === "string") return c;
+  if (!Array.isArray(c)) return "";
+  return c.filter((p) => p && p.type === "text" && typeof p.text === "string")
+    .map((p) => p.text).join(" ");
+}
+
+/** The user message typed before *query* in *conv* (not an injected knowledge,
+ *  document or tool row), cut to KB_CONTEXT_CHARS; "" when there is none. */
+export function previousUserText(conv, query) {
+  const typed = ((conv && conv.messages) || []).filter(
+    (m) => m.role === "user" && !m.tag && m.origin !== "tool");
+  const last = typed[typed.length - 1];
+  const current = last ? messageText(last) : "";
+  const prev = last && query && current.includes(query)
+    ? typed[typed.length - 2] : last;
+  return prev ? messageText(prev).trim().slice(0, KB_CONTEXT_CHARS) : "";
+}
+
 let lastRerankNote = null;
 
 /** Query the selected knowledge collection for hits that clear its relevance
  *  floor and inject them as cited excerpts; when none clear it, inject a note
- *  saying the collection had nothing relevant. */
+ *  saying the collection had nothing relevant. The user's previous message is
+ *  sent along so a follow-up that refers back to it is searched with it. */
 export async function retrieveKnowledge(conv, query, opts = {}) {
   const kb = $("p-kb")?.value;
   if (!kb || !query) return;
   try {
+    const context = previousUserText(conv, query);
     const fetchOpts = {
       method: "POST", headers: authHeaders(),
-      body: JSON.stringify({ query, k: 4, relevant_only: true }),
+      body: JSON.stringify({ query, k: 4, relevant_only: true,
+                             ...(context ? { context } : {}) }),
     };
     if (opts.signal) fetchOpts.signal = opts.signal;
     const r = await fetch(

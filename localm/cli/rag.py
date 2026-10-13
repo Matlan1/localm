@@ -460,7 +460,10 @@ def _cli_rag_embed_fn(url):
               help="Re-score the best hits with an installed reranker model. "
                    "Default: the rag_rerank setting (on, and used only while a "
                    "reranker is installed).")
-def rag_query(collection, text, k, embed, url, relevant_only, rerank):
+@click.option("--context", default=None,
+              help="The previous chat message. With --relevant-only, a TEXT that "
+                   "refers back to the conversation is searched together with it.")
+def rag_query(collection, text, k, embed, url, relevant_only, rerank, context):
     """Show the top-K chunks COLLECTION returns for TEXT.
 
     By default the CLI scores lexically (BM25). Pass --embed to also embed the
@@ -487,7 +490,7 @@ def rag_query(collection, text, k, embed, url, relevant_only, rerank):
                       "installed (see 'localm pull').")
     hits = coll.query(text, k=k, embed_fn=embed_fn, relevant_only=relevant_only,
                       rerank_fn=plan.fn, rerank_candidates=plan.candidates,
-                      rerank_min_score=plan.min_score)
+                      rerank_min_score=plan.min_score, context=context)
     if coll.rerank_degrade_reason:
         console.print(f"[yellow]Not reranked:[/yellow] "
                       f"{escape(coll.rerank_degrade_reason)}")

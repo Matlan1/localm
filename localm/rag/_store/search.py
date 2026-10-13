@@ -12,7 +12,7 @@ from typing import Optional
 from localm.debuglog import logger as _log
 from localm.rag import store as _st
 
-from ..bm25 import BM25, ENGLISH_STOP_WORDS
+from ..bm25 import BM25, ENGLISH_STOP_WORDS, tokenize
 from .cache import _COLLECTION_CACHE
 from .types import EmbedFn, RerankFn
 from .vectors import _cosine, _maxnorm, _vectors_finite
@@ -47,7 +47,16 @@ _CONVERSATION_REF_RE = re.compile(
     r"|\b(?:previous|last|earlier)\s+(?:answer|reply|message|response|question|search)\b"
     r"|\bwe\s+(?:just\s+)?(?:talked|discussed|said|did)\b"
     r"|\b(?:first|second|third|other|last)\s+one\b"
-    r"|\b(?:say|explain|do|try)\s+(?:that|it)\s+again\b",
+    r"|\b(?:say|explain|do|try)\s+(?:that|it)\s+again\b"
+    r"|\b(?:thing|stuff|part|point|bit|step|one|example|list)\s+(?:you|we|i)\s+"
+    r"(?:just\s+)?(?:said|mentioned|wrote|told|suggested|gave|listed|meant|made)\b"
+    r"|\b(?:what|which)\s+(?:you|we)\s+(?:just\s+)?"
+    r"(?:said|mentioned|wrote|told|suggested|meant)\b"
+    r"|\byou\s+(?:just\s+)?(?:said|mentioned|wrote|suggested)\b"
+    r"|\b(?:as|like)\s+(?:i|you)\s+(?:said|mentioned|asked)\b"
+    r"|\b(?:thing|part|point|one|item|step|example|code|list|answer)\s+"
+    r"(?:above|before|earlier)\b"
+    r"|\b(?:above|earlier|previous|prior)\s+(?:one|point|part|item|step|example|code|list)\b",
     re.IGNORECASE)
 
 
@@ -62,6 +71,10 @@ def refers_to_conversation(text: str) -> bool:
 #: or a chunk stored without a vector.
 LEXICAL_RELEVANCE_COVERAGE = 0.6
 
+#: Distinct query words a chunk must contain to pass on that coverage, unless
+#: the whole query is a single word.
+LEXICAL_RELEVANCE_MIN_TERMS = 2
+
 
 class _CollectionSearch:
     """Mixin of ``Collection``: querying a collection."""
@@ -75,7 +88,8 @@ class _CollectionSearch:
               relevant_only: bool = False,
               rerank_fn: Optional[RerankFn] = None,
               rerank_candidates: int = DEFAULT_RERANK_CANDIDATES,
-              rerank_min_score: Optional[float] = None) -> list[dict]:
+              rerank_min_score: Optional[float] = None,
+              context: Optional[str] = None) -> list[dict]:
         """Top-*k* chunks for *text*: max-normalised BM25, blended 50/50 with
         max-normalised cosine similarity when vectors cover the corpus and the
         query can be embedded. ``score`` is that blend, relative to the best
@@ -105,10 +119,22 @@ class _CollectionSearch:
         would drop is kept when the reranker ranks its answer highly. The scale
         of *rerank_min_score* is the reranker's own. A query that
         ``refers_to_conversation`` keeps the floor above, and so does a query
-        whose reranking degraded."""
+        whose reranking degraded.
+
+        With *relevant_only* and *context* (the user's previous message), a *text*
+        that ``refers_to_conversation`` is searched as ``context`` followed by
+        *text* and judged like any other question, so a follow-up such as "what
+        does that resync do?" finds what the conversation was about.
+        ``context_applied`` says whether the last query did this."""
         self.rerank_degrade_reason = None
+        self.context_applied = False
         if not text.strip() or not self._chunks:
             return []
+        conversational = relevant_only and refers_to_conversation(text)
+        if conversational and context and context.strip():
+            text = f"{context.strip()} {text}"
+            conversational = False
+            self.context_applied = True
         index = self._lexical_index()
         scores = index.scores(text)
         top = max(scores) if scores else 0.0
@@ -127,11 +153,10 @@ class _CollectionSearch:
                        reverse=True)[:pool]
         order = [i for i in order if scores[i] > 0]
         gate_min = None
-        if (relevant_only and rerank_fn is not None
-                and not refers_to_conversation(text)):
+        if relevant_only and rerank_fn is not None and not conversational:
             gate_min = rerank_min_score
         if relevant_only and gate_min is None:
-            order = self._relevant(text, order, index, cosines)
+            order = self._relevant(text, order, index, cosines, conversational)
         reranked: dict[int, float] = {}
         if rerank_fn is not None and (len(order) > 1
                                       or (gate_min is not None and order)):
@@ -141,7 +166,7 @@ class _CollectionSearch:
                 if gate_min is not None:
                     order = [i for i in order if reranked[i] >= gate_min]
             elif gate_min is not None:
-                order = self._relevant(text, order, index, cosines)
+                order = self._relevant(text, order, index, cosines, conversational)
         order = order[:k]
         return [
             {**self._chunks[i], "score": round(scores[i], 4),
@@ -181,27 +206,32 @@ class _CollectionSearch:
         return {}
 
     def _relevant(self, text: str, order: list[int], index: BM25,
-                  cosines: Optional[list[float]]) -> list[int]:
+                  cosines: Optional[list[float]],
+                  conversational: bool) -> list[int]:
         """The members of *order* that clear the absolute relevance floor
-        documented on ``query``, in the same order."""
+        documented on ``query``, in the same order. *conversational* is whether
+        *text* is judged as a reference back to the conversation."""
         if not order:
             return []
         floors = None
         if cosines is not None and not self.embedding_model_mixed():
             floors = RELEVANCE_FLOORS.get(self.embedding_model() or "")
         vectors = self._vectors or []
-        conversational = refers_to_conversation(text)
         coverage = index.coverage(text, order)
+        matched = index.matched_terms(text, order)
+        single_word = len(tokenize(text)) == 1
 
-        def passes(i: int, cov: float) -> bool:
+        def passes(i: int, cov: float, terms: int) -> bool:
             if floors is not None and i < len(vectors) and vectors[i]:
                 strong, weak, need = floors
                 if conversational:
                     return cosines[i] >= strong
                 return cosines[i] >= strong or (cosines[i] >= weak and cov >= need)
-            return not conversational and cov >= LEXICAL_RELEVANCE_COVERAGE
+            return (not conversational and cov >= LEXICAL_RELEVANCE_COVERAGE
+                    and (terms >= LEXICAL_RELEVANCE_MIN_TERMS or single_word))
 
-        keep = [i for i, cov in zip(order, coverage, strict=True) if passes(i, cov)]
+        keep = [i for i, cov, terms in zip(order, coverage, matched, strict=True)
+                if passes(i, cov, terms)]
         if len(keep) < len(order):
             _log.debug("RAG collection %r: %d of %d hit(s) below the relevance "
                        "floor (%s%s)", self.name, len(order) - len(keep), len(order),

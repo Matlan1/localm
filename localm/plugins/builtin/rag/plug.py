@@ -86,6 +86,9 @@ class RagQueryRequest(BaseModel):
     # None follows the rag_rerank setting; True or False overrides it for this
     # query.
     rerank: Optional[bool] = None
+    # The user's previous message. With relevant_only, a query that refers back to
+    # the conversation is searched together with it (Collection.query context).
+    context: Optional[str] = None
 
 
 class RagRemoveDocRequest(BaseModel):
@@ -222,6 +225,9 @@ def _make_self_classify(self_url: str, active_model):
 # Seconds an image description may take end to end, including any wait for a
 # vision model to load. See test_the_waits_leave_an_image_description_a_minute_for_load_and_reply.
 _DESCRIBE_TIMEOUT_S = 180
+
+# Longest previous-message context a Knowledge query uses, in characters.
+_QUERY_CONTEXT_CHARS = 600
 
 
 def _make_self_describe_image(self_url: str, active_model):
@@ -891,19 +897,21 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
         hits = coll.query(req.query, k=k, embed_fn=self_embed,
                           relevant_only=req.relevant_only, rerank_fn=plan.fn,
                           rerank_candidates=plan.candidates,
-                          rerank_min_score=plan.min_score)
+                          rerank_min_score=plan.min_score,
+                          context=(req.context or "")[:_QUERY_CONTEXT_CHARS])
         reranked = any("rerank_score" in h for h in hits)
         return (_neutralise_hits(hits), plan.model if reranked else None,
-                coll.rerank_degrade_reason or plan.note)
+                coll.rerank_degrade_reason or plan.note, coll.context_applied)
 
     # Defang control/frame tokens in the untrusted chunk text before it can be
     # spliced into a chat prompt. Runs inside the executor, with the query and
     # collection load, so unbounded CPU does not stall the event loop.
-    hits, rerank_model, rerank_note = await loop.run_in_executor(
+    hits, rerank_model, rerank_note, context_used = await loop.run_in_executor(
         get_plugin_executor(), _execute)
     return {"collection": name, "query": req.query, "hits": hits,
             "relevant_only": req.relevant_only, "reranked": rerank_model is not None,
-            "rerank_model": rerank_model, "rerank_note": rerank_note}
+            "rerank_model": rerank_model, "rerank_note": rerank_note,
+            "context_used": context_used}
 
 
 @_router.get("/api/rag/rerank")

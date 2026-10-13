@@ -1005,6 +1005,14 @@ CORE_FIELDS: list = [
                  "How many of the best matches the reranker re-scores. More finds "
                  "answers ranked lower, and takes proportionally longer per question.",
                  group="Knowledge", owner="rag", min=5, max=100, step=5),
+    SettingField("rag_rerank_min_score", Widget.NUMBER, "Reranker minimum score",
+                 "The reranker score a Knowledge excerpt needs to be added to a chat, "
+                 "in the reranker's own scale (Qwen3-Reranker: 0 to 1, higher is "
+                 "stricter; bge-reranker: a logit, usually between -10 and 10). "
+                 "Blank uses the measured value for the Qwen3-Reranker-0.6B and "
+                 "bge-reranker-v2-m3 Q8_0 files, and the relevance floor for any "
+                 "other reranker.",
+                 group="Knowledge", owner="rag", step=0.05),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     # These three are the CORE twins of the admin_only MediaFields (see
     # MEDIA_PLUGIN_FIELDS below). The write gate reads CORE_FIELDS only -
@@ -1446,6 +1454,7 @@ def _validate_user_name(key: str, val) -> str:
 # NUMBER fields whose default is None (unset) and whose value is an integer;
 # a blank value clears them.
 _NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens", "diffusion_steps"})
+_NULLABLE_FLOAT_NUMBERS = frozenset({"rag_rerank_min_score"})
 
 
 def _validate_one(key: str, val, field: SettingField, default):
@@ -1465,6 +1474,10 @@ def _validate_one(key: str, val, field: SettingField, default):
             if isinstance(val, str) and not val.strip():
                 return None
             return _to_number(key, val, want_int=True, lo=field.min, hi=field.max)
+        if key in _NULLABLE_FLOAT_NUMBERS:
+            if isinstance(val, str) and not val.strip():
+                return None
+            return _to_number(key, val, want_int=False, lo=field.min, hi=field.max)
         want_int = isinstance(default, int) and not isinstance(default, bool)
         return _to_number(key, val, want_int=want_int, lo=field.min, hi=field.max)
 
