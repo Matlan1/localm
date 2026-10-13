@@ -200,7 +200,7 @@ class TestJanStore:
         data = self._store(tmp_path)
         assert add_local(str(data)) is True
         capsys.readouterr()
-        assert add_local(str(data), on_duplicate="ask") is True
+        assert add_local(str(data), on_duplicate="ask") is False
         assert "registered in place" in " ".join(capsys.readouterr().out.split())
         assert len(load_registry()) == 2
 
