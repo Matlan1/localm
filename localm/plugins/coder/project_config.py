@@ -55,6 +55,28 @@ class ProjectConfigUnreadable(Exception):
         self.path = path
 
 
+def read_project_config_file(path: Path) -> dict[str, Any]:
+    """Parse the TOML file at *path* and return every table in it, unfiltered.
+
+    Raises ProjectConfigUnreadable (carrying ``.path``) when the file cannot be
+    read or parsed, or when no TOML parser is available."""
+    try:
+        import tomllib                     # Python 3.11+
+    except ImportError:                    # pragma: no cover - requires-python >=3.12
+        try:
+            import tomli as tomllib        # backport for 3.10 and below
+        except ImportError as e:
+            raise ProjectConfigUnreadable(
+                f"{path}: no TOML parser is available to read it", path) from e
+
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except Exception as e:
+        raise ProjectConfigUnreadable(f"{path}: {e}", path) from e
+    return raw
+
+
 def load_project_config(cwd: Path) -> dict[str, Any]:
     """
     Load .localcoder/config.toml nearest to cwd.
@@ -81,21 +103,7 @@ def load_project_config(cwd: Path) -> dict[str, Any]:
     path = find_project_config(cwd)
     if path is None:
         return {}                          # genuinely absent: no project config
-
-    try:
-        import tomllib                     # Python 3.11+
-    except ImportError:                    # pragma: no cover - requires-python >=3.12
-        try:
-            import tomli as tomllib        # backport for 3.10 and below
-        except ImportError as e:
-            raise ProjectConfigUnreadable(
-                f"{path}: no TOML parser is available to read it", path) from e
-
-    try:
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
-    except Exception as e:
-        raise ProjectConfigUnreadable(f"{path}: {e}", path) from e
+    raw = read_project_config_file(path)
 
     _KNOWN = {"model", "max_turns", "auto_approve", "always_confirm",
               "memory_file", "max_tokens", "temperature", "mode",

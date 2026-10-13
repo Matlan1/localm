@@ -2,10 +2,9 @@
 """Contract test for ``_CROSS_ORIGIN_OK`` in ``localm/inference/app_assembly/security.py``.
 
 Every entry in that tuple must be a full route path, never a directory prefix
-(it is matched with ``str.startswith()``), because a prefix silently exempts
-every FUTURE route added under it from both the cross-origin/CSRF refusal and
-the open-mode shell-token gate - without its author writing anything that
-looks like a security decision.
+(it is matched by exact path), so a route added under one of the entries is
+not exempt from the cross-origin/CSRF refusal or the open-mode shell-token
+gate without its author writing anything that looks like a security decision.
 
 Two things are pinned independently, and both are needed:
 

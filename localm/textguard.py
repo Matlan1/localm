@@ -78,6 +78,8 @@ _PIPE = r"[|｜]"   # ASCII bar U+007C and fullwidth bar U+FF5C (DeepSeek)
 _SPECIAL_RE = re.compile(
     r"<" + _PIPE + r"[^<>\n]{0,200}?" + _PIPE + r">"  # <|...|> incl fullwidth pipe
     r"|<\|?/?tool_call\|?>"                  # Gemma native tool-call markers
+    r"|<\|(?:turn|channel|tool|tool_response|image|audio)>"   # Gemma 4 opening markers
+    r"|<(?:turn|channel|tool|tool_response|image|audio)\|>"   # Gemma 4 closing markers
     r"|<</?SYS>>"                            # <<SYS>>  <</SYS>>  (Llama-2 / Mistral)
     r"|</?s>"                                # <s>  </s>          (Llama-2 / Mistral BOS/EOS)
     r"|<(?:start|end)_of_turn>"              # Gemma turn markers

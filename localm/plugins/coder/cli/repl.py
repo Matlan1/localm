@@ -139,8 +139,9 @@ def _warn_goal_run_sensitive_changes(agent: Agent, before: dict) -> None:
         message = render_warning(classify_sensitive_changes(touched))
         if message:
             print_warning(message)
-    except Exception:                                       # noqa: BLE001
-        pass
+    except Exception as e:                                  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.debug("sensitive-changes warning skipped: %r", e)   # See test_classify_sensitive_changes_tolerates_malformed_entries.
 
 
 def _repl(agent: Agent) -> None:

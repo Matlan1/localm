@@ -482,3 +482,61 @@ def test_a_batch_sibling_before_the_arming_call_still_runs(skill_agent):
     env.assert_called_once()
     assert skill_agent.active_skill_tools() == frozenset({"read_file"})
     assert len(blocks) == 2
+
+
+# --- unreadable entries are reported, not silently absent ------------------- #
+
+def _deny_locked_skill_md(monkeypatch):
+    real = Path.read_text
+
+    def read_text(self, *a, **k):
+        if self.parent.name == "locked" and self.name == "SKILL.md":
+            raise PermissionError("denied")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+
+def test_discover_reports_an_unreadable_skill_md(tmp_path, monkeypatch):
+    root = tmp_path / ".localcoder" / "skills"
+    _make_skill(root, "good")
+    _make_skill(root, "locked")
+    _deny_locked_skill_md(monkeypatch)
+    problems: list[str] = []
+    assert [s.name for s in S.discover_skills(tmp_path, problems)] == ["good"]
+    assert len(problems) == 1 and "locked" in problems[0] and "denied" in problems[0]
+
+
+def test_discover_reports_a_skill_folder_that_cannot_be_listed(tmp_path, monkeypatch):
+    root = tmp_path / ".localcoder" / "skills"
+    _make_skill(root, "good")
+    real = Path.iterdir
+
+    def iterdir(self):
+        if self == root:
+            raise PermissionError("denied")
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    problems: list[str] = []
+    assert S.discover_skills(tmp_path, problems) == []
+    assert len(problems) == 1 and str(root) in problems[0]
+
+
+def test_register_skill_tools_surfaces_an_unreadable_skill_as_a_warning(
+        tmp_path, monkeypatch, clean_registry):
+    root = tmp_path / ".localcoder" / "skills"
+    _make_skill(root, "good")
+    _make_skill(root, "locked")
+    _deny_locked_skill_md(monkeypatch)
+    names, warnings = S.register_skill_tools(tmp_path)
+    assert names == ["list_skills", "use_skill"]
+    assert len(warnings) == 1 and "locked" in warnings[0]
+
+
+def test_discover_without_a_problems_list_still_skips_quietly(tmp_path, monkeypatch):
+    root = tmp_path / ".localcoder" / "skills"
+    _make_skill(root, "good")
+    _make_skill(root, "locked")
+    _deny_locked_skill_md(monkeypatch)
+    assert [s.name for s in S.discover_skills(tmp_path)] == ["good"]

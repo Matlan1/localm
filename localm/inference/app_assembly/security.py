@@ -68,11 +68,10 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
     # protected the moment it is added. Non-browser clients (CLI / SDK) send no
     # Origin; "cors_origins": "*" opts out entirely.
     _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-    # Every entry below is a full route path, not a directory prefix - matched
-    # with str.startswith(), so a prefix entry would silently exempt every
-    # FUTURE route added under it too. Exempting a new sibling route must be a
-    # deliberate addition here, not an inheritance. Keep in sync with
-    # _BESPOKE_GATED_ROUTES. See test_every_kernel_route_is_gated_or_explicitly_allowlisted.
+    # Every entry below is a full route path, matched by exact equality: a
+    # route under one of these paths is not exempt by inheritance, and
+    # exempting a new sibling route is a deliberate addition here. Keep in sync
+    # with _BESPOKE_GATED_ROUTES. See test_every_kernel_route_is_gated_or_explicitly_allowlisted.
     _CROSS_ORIGIN_OK = (
         "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
         "/v1/rerank",
@@ -193,7 +192,7 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
                  and ((_path in _CROSS_ORIGIN_GET_REFUSED
                        and not _metrics_off(request))
                       or _path.startswith(_CROSS_ORIGIN_GET_REFUSED_PREFIXES))))
-                and not _path.startswith(_CROSS_ORIGIN_OK)
+                and _path not in _CROSS_ORIGIN_OK
                 and _path not in _OLLAMA_CROSS_ORIGIN_OK
                 and _path not in _ANTHROPIC_CROSS_ORIGIN_OK
                 and _path not in _RESPONSES_CROSS_ORIGIN_OK):
@@ -237,7 +236,7 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
             and request.url.path not in _OLLAMA_OPEN_MODE_GETS
         )
         if ((is_unsafe or is_metadata_get)
-                and not request.url.path.startswith(_CROSS_ORIGIN_OK)
+                and request.url.path not in _CROSS_ORIGIN_OK
                 and request.url.path not in _OLLAMA_CROSS_ORIGIN_OK
                 and request.url.path not in _ANTHROPIC_CROSS_ORIGIN_OK
                 and request.url.path not in _RESPONSES_CROSS_ORIGIN_OK):

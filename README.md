@@ -152,7 +152,7 @@ The pip package covers the CLI, the server, and every plugin. It does not includ
 
 ### Docker (API server)
 
-Release images are published to `ghcr.io/matlan1/localm` (CPU, Vulkan and NVIDIA CUDA; see the package page for the tags that exist), and `docker build --platform linux/amd64 -f docker/Dockerfile -t localm .` builds one from a clone. The container runs `localm serve`, keeps its data in the `/data` volume, and refuses to start without an API key:
+Release images are published to `ghcr.io/matlan1/localm` (CPU, Vulkan, and NVIDIA CUDA in two lines: `cuda` for CUDA 12, every architecture before Blackwell, and `cuda13` for Blackwell; see the package page for the tags that exist), and `docker build --platform linux/amd64 -f docker/Dockerfile -t localm .` builds one from a clone. The container runs `localm serve`, keeps its data in the `/data` volume, and refuses to start without an API key:
 
 ```bash
 docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate    # prints a key once
@@ -191,7 +191,7 @@ self-contained - the same tradeoff `setup.bat`/`setup.sh`'s "Shared" choice
 describes), just drop the `UV_PYTHON_INSTALL_DIR`/`UV_CACHE_DIR`/
 `--python-preference` and run the plain `uv venv --python 3.12 .venv`.
 
-The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` is required after a manual install to fetch the native backend (`setup.bat` does this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately - the index depends on GPU generation (Blackwell and newer need a different one than older cards), so ask localm's own detector rather than guessing: `uv pip install -p .venv $(.venv/bin/python -m localm.hwdetect torch-args cuda)` (see [docs/gpu-setup.md](docs/gpu-setup.md#huggingface-transformers-pytorch) for the full table and Windows form).
+The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` is required after a manual install to fetch the native backend (`setup.bat` does this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately - the index depends on GPU generation (Blackwell and newer need a different one than older cards), so ask localm's own detector rather than guessing: `uv pip install -p .venv $(.venv/bin/python -m localm.hwdetect torch-args cuda)` (see [docs/gpu-setup.md](docs/gpu-setup.md#huggingface-transformers-pytorch) for the full table and Windows form), then `uv pip install -p .venv -e ".[hf]"` adds the Transformers stack on top of it (the installers run `.[hf,audio]`).
 
 A pip extra and a plugin install are two separate steps. The extra installs a plugin's heavy Python dependencies into the venv; `localm plugin install <name>` activates the plugin itself. The defined extras are:
 
@@ -201,15 +201,17 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | `browser` | The browser plugin: an automated web browser the coder can drive (`playwright`) |
 | `desktop` | Native OS app window for `localm gui` instead of a browser tab (`pywebview`; see [native app](docs/native-app.md)) |
 | `gpu` | AMD RDNA2 ROCm 7.13 stack: torch, transformers, rocm-sdk (Windows, Python 3.12) |
+| `hf` | HuggingFace Transformers stack (`transformers`, `tokenizers`, `accelerate`, and helpers) without the AMD ROCm torch pin; install a torch build for your GPU first |
 | `audio` | Audio multimodal input (`soundfile`) |
 | `rag` | PDF parsing for Knowledge (`pypdf`); other formats are stdlib |
-| `voice` | Whisper speech-to-text for the GUI mic (`faster-whisper`, CPU, no torch) |
+| `voice` | Whisper speech-to-text for the GUI mic (`faster-whisper` and `av`, CPU, no torch) |
 | `monitor` | Live hardware monitor in the GUI status bar (`psutil`) |
 | `grammar` | Grammar-constrained decoding for HuggingFace models (`xgrammar`, layers on `[gpu]`) |
 | `cpu` | Explicit CPU-only marker (empty; core already runs GGUF on CPU) |
-| `dev` | Contributor / CI tooling: `ruff`, `pytest`, `pytest-cov`, `pytest-xdist`, plus `pypdf`/`psutil` so the tests that need them do not skip |
+| `dev` | Contributor / CI tooling: the linter, type checker, test runner and its plugins, plus `pypdf`/`psutil` so the tests that need them do not skip |
+| `docs` | Building this documentation site locally (`mkdocs`, `mkdocs-material`) |
 
-Not every plugin needs an extra: the image/music/video plugins talk to an external media-generation server you run (ComfyUI today), jobs and web have no extra, and tts runs in the browser.
+Not every plugin needs an extra: the image/music/video plugins generate with built-in native backends that localm provisions itself (or through a ComfyUI server you point it at), jobs and web have no extra, and tts runs in the browser.
 
 > **Avoid `uv tool install` for this project.** Tool installs are *global per package name*, so a second clone would silently replace the first one's `localm.exe`.
 
@@ -387,7 +389,7 @@ localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 
 Vulkan runs on any GPU with just the vendor's normal driver; CUDA/ROCm give peak performance when their runtime is present; CPU always works. The AMD ROCm build is self-contained (it bundles its ROCm runtime via the `[gpu]` extra's `rocm-sdk` wheels). macOS/Metal is experimental. See [docs/phone.md](docs/phone.md) to reach the GUI from a phone.
 
-**NVIDIA users:** on **both Windows and Linux** the installer recommends **CUDA** (peak performance) - press Enter to accept it: it fetches a self-contained CUDA runtime (no Toolkit needed - a third-party build plus the CUDA runtime libraries on Linux, the official build plus a `cudart` bundle on Windows), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for the CUDA line your GPU needs (12.4+ for most GPUs; Blackwell - RTX 50-series and datacenter B100/B200 - is detected automatically and needs a newer driver, CUDA 13.3+, for its own 13.x build). Prefer the universal driver-only build with no vendor-runtime download? Choose **Vulkan** in the setup menu (or run `localm setup-llama --backend vulkan`).
+**NVIDIA users:** on **both Windows and Linux** the installer recommends **CUDA** (peak performance) - press Enter to accept it: it fetches a self-contained CUDA runtime (no Toolkit needed - a third-party build plus the CUDA runtime libraries on Linux, the official build plus a `cudart` bundle on Windows), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for the CUDA line your GPU needs (12.4+ for most GPUs; Blackwell - RTX 50-series and datacenter B100/B200 - is detected automatically and needs a newer driver, CUDA 13.4+, for its own 13.x build). Prefer the universal driver-only build with no vendor-runtime download? Choose **Vulkan** in the setup menu (or run `localm setup-llama --backend vulkan`).
 
 localm resolves the binary directory in order: `LLAMA_CPP_LIB` env > `binary_dir` config > the bundled runtime wheel. No absolute path is ever assumed as a default; an unprovisioned install resolves to nothing and points you at `localm setup-llama`. Before loading a model, localm checks free VRAM against the model size and warns when it will not fit, instead of crashing mid-load.
 
@@ -403,7 +405,7 @@ localm/
 ├── cli/            # Click command package
 ├── inference/      # Engine (GGUF vs HF), FastAPI server, routes, backends/llamacpp (ctypes binding)
 ├── model_manager/  # registry, pull, dedup, aliases
-├── image_gen/ music_gen/ video_gen/ media/   # ComfyUI transports for the media plugins
+├── image_gen/ music_gen/ video_gen/ media/   # ComfyUI transports and the native media backends
 └── plugins/        # the plugin engine + every feature plugin (builtin/ = the read-only store)
 ```
 

@@ -609,7 +609,7 @@ def test_windows_amd_rocm_provision_keeps_blas_kernel_layout(world, pin, note):
         _in_order(r.text, note, "Backend: amd-rocm")
     else:
         assert "Note:" not in r.text
-    _in_order(r.text, "Backend: amd-rocm (self-contained AMD ROCm build (gfx103X / RX 6000))",
+    _in_order(r.text, "Backend: amd-rocm (self-contained AMD ROCm build (RX 6000 / 7000 / 9000))",
               f"Downloading {urls[name]}", f"Downloading {cpu_url}",
               f"CPU backend: ggml-cpu-haswell from llama.cpp {sl._ROCM_CPU_TAG} (SIMD), "
               "replacing the amd-rocm build's own", "OK - amd-rocm runtime loads on this machine.")

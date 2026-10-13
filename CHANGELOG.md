@@ -616,6 +616,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `--online` and `--anthropic` already did. The warning names the host your prompts and files go to,
   and says when the address came from `LOCALCODER_URL`. These privacy warnings now go to stderr, so
   `--output-format json` output stays clean.
+- **Gemma 4 GGUF models are prompted in their own chat format.** Every chat with a Gemma 4
+  GGUF used to be sent as a generic ChatML prompt, with a warning that the template was not
+  recognised, because llama.cpp's built-in template matcher has no Gemma 4 entry. localm now
+  writes the Gemma 4 turn format itself, as the model's own template does with thinking off,
+  including the empty thought block the 12B, 26B and 31B templates add. Gemma 4's turn,
+  channel, tool and media markers in fetched or tool-returned text are now escaped like other
+  models' control tokens.
+- **The coder's diff edits leave every line they were not asked to touch exactly as it was.**
+  A form feed or Unicode line separator elsewhere in the file no longer turns into a newline, a
+  file with mixed line endings keeps each line's own ending, and trailing blank lines survive.
+- **Phone share and file upload reject malformed or oversized multipart bodies up front.** Both
+  read the form with the same bounded reader as the audio routes, so a body that is not valid
+  multipart answers 400 or 415 and a share over its size limit is refused before it is parsed.
+- **Settings labels and help translate for every field.** Forty-six settings had no German text and
+  showed English in the German interface: the reranker, diffusion, parallel-request and metrics
+  settings, every image, music and video generation setting, and the text-to-speech settings.
 - **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
   its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
   localm is reported as such instead of with advice to repair the llama.cpp runtime.
@@ -626,6 +642,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
   dropped. A model worker that does not exit when stopped is killed.
 - **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes.
+- **Two command-line hints no longer mislead.** `localm memory list` on an empty store says that
+  `localm memory add` does not work in privacy mode, and `localm mcp --help` now names the `rerank`
+  tool and each plugin tool.
+- **A broken coder config no longer hides your MCP servers or skills silently.** When
+  `.localcoder/config.toml` cannot be parsed, or a skill folder or `SKILL.md` cannot be read,
+  the coder now prints a warning at start-up naming the file instead of starting with no MCP
+  tools or a shorter skill list and saying nothing.
+- **An unreadable saved conversation is reported instead of vanishing from the sidebar.** A chat
+  file that is corrupt or locked used to be left out of the list with no message. The list now
+  names how many were skipped, the Chat page shows a notice, and the log records which one.
+- **A share inbox that cannot be listed says so.** If the folder holding items shared from a
+  phone cannot be read, the 15-minute clean-up now logs that it could not run instead of
+  leaving expired items on disk unreported.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
@@ -2052,6 +2081,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **The cross-origin exemptions match exact paths only.** The inference routes that browsers may
+  call cross-origin (chat completions, embeddings, rerank, speech, images and the surface and
+  instance routes) were matched as path prefixes, so a route added under one of them would have
+  skipped the cross-origin refusal and the open-mode shell-token check without anyone listing it.
+  Each now matches only its own path. A trailing-slash spelling of one of those paths is no longer
+  exempt.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move
@@ -2074,6 +2109,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tools or skills, and refuses to create or change anything inside a `.localcoder`
   directory at any depth; a `search_replace` sweep leaves those files alone and
   lists them. Owner sessions are unchanged.
+- **A plain `coder` API key can no longer change the project's git configuration.** A
+  restricted coder session's file tools could create or change files under `.git`, and
+  could write into a folder that a linked `.localcoder` elsewhere in the project pointed
+  at. A restricted session now refuses to write inside a `.git` file or directory at any
+  depth, into any folder a linked `.localcoder` or `.git` (or a `.git` file's `gitdir:`
+  line) points at, and through a file that has another hard link. Owner sessions are
+  unchanged.
 - **`setup.sh`, `setup-gui.sh`, `setup.bat` and `setup-gui.bat` install a fixed uv release and check it before running it.**
   They used to run whatever Astral's installer URL returned. They now download the installer
   of one pinned uv release and run it only when its checksum matches; a failed download, a
