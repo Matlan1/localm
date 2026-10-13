@@ -612,9 +612,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   GGUF used to be sent as a generic ChatML prompt, with a warning that the template was not
   recognised, because llama.cpp's built-in template matcher has no Gemma 4 entry. localm now
   writes the Gemma 4 turn format itself, as the model's own template does with thinking off,
-  including the empty thought block the 12B, 26B and 31B templates add. Gemma 4's turn and
-  channel markers in fetched or tool-returned text are now escaped like other models' control
-  tokens.
+  including the empty thought block the 12B, 26B and 31B templates add. Gemma 4's turn,
+  channel, tool and media markers in fetched or tool-returned text are now escaped like other
+  models' control tokens.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A

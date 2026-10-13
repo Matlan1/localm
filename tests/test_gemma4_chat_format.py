@@ -4,12 +4,15 @@
 llama.cpp's built-in ``llama_chat_apply_template`` matcher has no Gemma 4
 branch, so these templates are rendered by ``_chat_formats.format_gemma4``.
 The expected strings are the official Gemma 4 chat template's output for the
-same conversations. The template fixtures carry only the marker lines the
-renderer reads from a template.
+same conversations. The synthetic template fixtures carry only the marker lines
+the renderer reads from a template; tests/fixtures/gemma4_chat_templates holds
+four official templates with their Jinja2-rendered output.
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -152,6 +155,44 @@ def test_no_messages_is_just_the_generation_prompt():
 def test_no_think_prompt_leaves_a_gemma4_prompt_unchanged(tmpl):
     prompt = format_gemma4([("user", "hi")], tmpl)
     assert no_think_prompt(prompt, tmpl) == prompt
+
+
+# --------------------------------------------------------------------------- #
+#  Official templates                                                         #
+# --------------------------------------------------------------------------- #
+
+_OFFICIAL = Path(__file__).parent / "fixtures" / "gemma4_chat_templates"
+_GOLDEN = json.loads((_OFFICIAL / "expected.json").read_text(encoding="utf-8"))
+_OFFICIAL_RENDERS = [(name, case) for name in sorted(_GOLDEN["expected"])
+                     for case in sorted(_GOLDEN["cases"])]
+
+
+def _official(name):
+    return (_OFFICIAL / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", sorted(_GOLDEN["expected"]))
+def test_official_templates_are_detected(name):
+    assert is_gemma4_template(_official(name))
+
+
+@pytest.mark.parametrize("name, case", _OFFICIAL_RENDERS)
+def test_render_matches_the_official_template_output(name, case):
+    messages = [tuple(pair) for pair in _GOLDEN["cases"][case]]
+    assert format_gemma4(messages, _official(name)) == _GOLDEN["expected"][name][case]
+
+
+@pytest.mark.parametrize("name", sorted(_GOLDEN["expected"]))
+def test_official_template_routes_through_render_template(name):
+    apply = MagicMock(return_value=-1)
+    with patch(_LLAMA_API + ".llama_model_chat_template", return_value=_official(name)), \
+         patch(_LLAMA_API + ".llama_chat_apply_template", apply):
+        prompt, reason = _render_template(object(), [
+            {"role": "system", "content": "Be terse."}, {"role": "user", "content": "hi"}])
+    apply.assert_not_called()
+    assert reason is None
+    assert prompt == _GOLDEN["expected"][name]["sys_user"]
+    assert no_think_prompt(prompt, _official(name)) == prompt
 
 
 # --------------------------------------------------------------------------- #

@@ -26,6 +26,11 @@ documented in
 under MIT), with the kokoro-js license text in the adjacent `LICENSE.kokoro-js`.
 All are permissive.
 
+The test suite carries four Gemma 4 chat templates from Google's `google/gemma-4-E2B-it` and
+`google/gemma-4-31B-it` model repositories (Apache-2.0, (c) Google LLC) as test fixtures in
+[`tests/fixtures/gemma4_chat_templates/`](tests/fixtures/gemma4_chat_templates/README.md). They are
+not shipped in the package.
+
 ## Bundled at release time (native inference binaries)
 
 The `localm-llama-runtime` package carries native inference binaries that are NOT
