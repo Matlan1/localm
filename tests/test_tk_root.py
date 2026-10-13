@@ -167,16 +167,29 @@ def _imports_from_tk_root(tree) -> set[str]:
             for alias in node.names}
 
 
+_TK_BUILDERS = {"Tk", "Toplevel", "Launcher", "build_tk_root"}
+
+
+def _builds_tk_windows(tree) -> bool:
+    """True when the module calls Tk, Toplevel, Launcher or build_tk_root."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in _TK_BUILDERS:
+                return True
+    return False
+
+
 def test_every_module_that_builds_tk_windows_collects_its_garbage():
     missing = []
-    for path in sorted(_TESTS.glob("*.py")):
+    for path in sorted(_TESTS.rglob("*.py")):
         if path.name == "_tk_root.py":
             continue
         source = path.read_text(encoding="utf-8")
-        names = _imports_from_tk_root(ast.parse(source))
-        builds = "build_tk_root" in names or "tk.Tk(" in source or "tkinter.Tk(" in source
-        if builds and "collect_tk_garbage" not in names:
-            missing.append(path.name)
+        tree = ast.parse(source)
+        if _builds_tk_windows(tree) and "collect_tk_garbage" not in _imports_from_tk_root(tree):
+            missing.append(path.relative_to(_TESTS).as_posix())
     assert missing == [], (
         "import collect_tk_garbage from tests._tk_root next to build_tk_root, so the "
         f"Tk objects these tests leave in cycles are freed on the main thread: {missing}")
@@ -184,6 +197,9 @@ def test_every_module_that_builds_tk_windows_collects_its_garbage():
 
 _OFF_THREAD_FREE = """
 import gc, sys, threading, tkinter
+if sys.platform == "win32":
+    import ctypes
+    ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002)
 class Holder: pass
 def build():
     root = tkinter.Tk(); root.withdraw()

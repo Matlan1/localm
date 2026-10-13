@@ -43,6 +43,10 @@ os.environ["LOCALM_PEER_DETECTION"] = "off"
 # flag is inherited by spawned subprocesses.
 os.environ["LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"] = "1"
 
+# Debug mode off for the suite: an inherited LOCALM_DEBUG is removed, so no test
+# starts with a debug log. Tests of debug mode set it themselves.
+os.environ.pop("LOCALM_DEBUG", None)
+
 
 def pytest_sessionfinish(session, exitstatus):
     _cleanup_test_home()

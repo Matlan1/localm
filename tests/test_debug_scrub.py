@@ -155,16 +155,25 @@ class TestDebugLog:
         seen = []
         recorder = logging.Handler()
         recorder.emit = seen.append
-        debuglog.logger.addHandler(recorder)
+        saved_level = debuglog.logger.level
+        monkeypatch.setattr(debuglog.logger, "handlers", [recorder])
+        monkeypatch.setattr(debuglog, "_ring_handler", None)
         try:
             debuglog.attach_child_logging()
+            debuglog.attach_child_logging()
+            handlers = list(debuglog.logger.handlers)
+            level = debuglog.logger.level
         finally:
-            debuglog.logger.removeHandler(recorder)
-        assert not any(isinstance(h, logging.FileHandler)
-                       and h.baseFilename == str(missing)
-                       for h in debuglog.logger.handlers)
+            for h in debuglog.logger.handlers:
+                if h is not recorder:
+                    h.close()
+            debuglog.logger.setLevel(saved_level)
+        assert not any(isinstance(h, logging.FileHandler) for h in handlers)
+        assert any(type(h) is logging.StreamHandler for h in handlers), handlers
+        assert debuglog._ring_handler is not None and debuglog._ring_handler in handlers
+        assert level == logging.DEBUG
         warnings = [r for r in seen if r.levelno == logging.WARNING]
-        assert len(warnings) == 1
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
         assert str(missing) in warnings[0].getMessage()
 
     def test_enable_is_idempotent(self):

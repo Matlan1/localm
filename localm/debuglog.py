@@ -546,6 +546,9 @@ def _install_thread_hook() -> None:
     threading.excepthook = _hook
 
 
+_unopenable_child_logs: set[str] = set()
+
+
 def attach_child_logging() -> None:
     """
     In a child process that inherited LOCALM_DEBUG: attach the file handler
@@ -553,11 +556,12 @@ def attach_child_logging() -> None:
 
     Never raises OSError: when the log file cannot be opened (its folder is
     gone, or it is not writable), the console mirror and the ring buffer are
-    still installed and one WARNING names the path and the error. See
+    still installed and one WARNING per path per process names the path and
+    the error; a later call for the same path does nothing. See
     test_a_debug_log_the_worker_cannot_open_does_not_crash_it.
     """
     path = log_file_path()
-    if path is None or any(
+    if path is None or str(path) in _unopenable_child_logs or any(
         isinstance(h, logging.FileHandler)
         and getattr(h, "baseFilename", "") == str(path)
         for h in logger.handlers
@@ -582,6 +586,7 @@ def attach_child_logging() -> None:
     install_ring_buffer()    # buffer breadcrumbs for a bug report in this child too
     _install_thread_hook()
     if open_error is not None:
+        _unopenable_child_logs.add(str(path))
         logger.warning("debug log %s could not be opened in this process (%s); "
                        "logging to the console only", path, open_error)
 
