@@ -168,20 +168,37 @@ class BM25:
         rarest of them; a term with no indexed match weighs as much as the
         rarest possible term. Every value is 0.0 when the query has no counted
         terms or the index is empty; otherwise each lies in [0, 1]."""
-        terms = set(tokenize(query, self._stop_words)) - QUERY_FILLER
-        if not terms or not self._n:
+        total, weight, _ = self._match(query, docs)
+        if not total:
             return [0.0] * len(docs)
+        return [weight[d] / total for d in docs]
+
+    def matched_terms(self, query: str, docs: list[int]) -> list[int]:
+        """How many of *query*'s distinct counted terms (see ``coverage``) occur
+        in each of *docs*, in the order given."""
+        _, _, count = self._match(query, docs)
+        return [count[d] for d in docs]
+
+    def _match(self, query: str, docs: list[int]):
+        """``(total weight, matched weight per doc, matched term count per doc)``
+        of *query*'s counted terms against *docs*; the total is 0.0 when the
+        query has no counted terms or the index is empty."""
+        terms = set(tokenize(query, self._stop_words)) - QUERY_FILLER
+        weight = dict.fromkeys(docs, 0.0)
+        count = dict.fromkeys(docs, 0)
+        if not terms or not self._n:
+            return 0.0, weight, count
         unseen = math.log(1 + (self._n + 0.5) / 0.5)
         total = 0.0
-        matched = dict.fromkeys(docs, 0.0)
         for term in terms:
             root = stem(term)
             variants = [v for v in {term} | {b + s for b in (root, root + "e")
                                              for s in ("", "s", "es", "d", "ed", "ing")}
                         if v in self._postings and stem(v) == root]
-            weight = max((self._idf[v] for v in variants), default=unseen)
-            total += weight
-            hit = {i for v in variants for i, _ in self._postings[v] if i in matched}
+            w = max((self._idf[v] for v in variants), default=unseen)
+            total += w
+            hit = {i for v in variants for i, _ in self._postings[v] if i in weight}
             for i in hit:
-                matched[i] += weight
-        return [matched[d] / total for d in docs]
+                weight[i] += w
+                count[i] += 1
+        return total, weight, count

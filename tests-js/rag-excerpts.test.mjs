@@ -129,3 +129,43 @@ test("no relevant hits injects a note saying so, with no excerpts", async () => 
     '[No excerpts from the "kb1" collection were relevant to: why did that search fail?]'));
   assert.ok(!/\[1\]/.test(content), "no excerpt is cited");
 });
+
+function convWith(window, messages) {
+  const conv = { id: "c1", title: "t", messages };
+  runScript(window, `chat.conversations = [${JSON.stringify(conv)}]; chat.activeId = "c1";`);
+  return window.currentConv();
+}
+
+test("the previous typed user message is sent as context, without injected rows", async () => {
+  const { window, requests } = setup([]);
+  const conv = convWith(window, [
+    { role: "user", content: "how are knowledge collections rebuilt?", id: "m1" },
+    { role: "user", tag: "kb", content: "[Excerpts ...]", id: "m2" },
+    { role: "assistant", content: "They resync.", id: "m3" },
+    { role: "user", content: "what does that resync do?", id: "m4" },
+  ]);
+  await window.retrieveKnowledge(conv, "what does that resync do?");
+  assert.equal(requests[0].body.context, "how are knowledge collections rebuilt?");
+  assert.equal(requests[0].body.query, "what does that resync do?");
+});
+
+test("context handles part-array content, cuts long text and skips tool rows", async () => {
+  const { window, requests } = setup([]);
+  const conv = convWith(window, [
+    { role: "user", content: [{ type: "text", text: "a".repeat(900) },
+                              { type: "image_url", image_url: { url: "data:x" } }], id: "m1" },
+    { role: "user", origin: "tool", content: "tool output", id: "m2" },
+    { role: "user", content: [{ type: "text", text: "and that one?" }], id: "m3" },
+  ]);
+  await window.retrieveKnowledge(conv, "and that one?");
+  runScript(window, "window.__ctxMax = KB_CONTEXT_CHARS;");
+  assert.equal(requests[0].body.context, "a".repeat(window.__ctxMax));
+});
+
+test("the first message of a conversation sends no context field", async () => {
+  const { window, conv, requests } = setup([]);
+  conv.messages.length = 0;
+  conv.messages.push({ role: "user", content: "only question", id: "m1" });
+  await window.retrieveKnowledge(conv, "only question");
+  assert.ok(!("context" in requests[0].body), "no previous message, no context");
+});

@@ -1,0 +1,107 @@
+{
+  "description": "Follow-up questions that refer back to the previous message. 'on' pairs follow a labelled on-topic question (prior_id in queries.json) and must find that question's document when the previous message is sent as context; 'off' pairs follow an off-topic question (prior_id in offtopic.json) and must return nothing.",
+  "on": [
+    {
+      "id": "f-docker-exit",
+      "prior_id": "docker-exit",
+      "query": "Why did that happen?"
+    },
+    {
+      "id": "f-phone-remote",
+      "prior_id": "phone-remote",
+      "query": "How does that work?"
+    },
+    {
+      "id": "f-tls-reset",
+      "prior_id": "tls-reset",
+      "query": "What does that do exactly?"
+    },
+    {
+      "id": "f-jobs-missed",
+      "prior_id": "jobs-missed",
+      "query": "Why is that?"
+    },
+    {
+      "id": "f-mem-default",
+      "prior_id": "mem-default",
+      "query": "Can you explain that again?"
+    },
+    {
+      "id": "f-net-allow",
+      "prior_id": "net-allow",
+      "query": "How do I change that?"
+    },
+    {
+      "id": "f-tls-cors",
+      "prior_id": "tls-cors",
+      "query": "Why is that?"
+    },
+    {
+      "id": "f-jobs-overlap",
+      "prior_id": "jobs-overlap",
+      "query": "Can you say that again?"
+    },
+    {
+      "id": "f-docker-cuda",
+      "prior_id": "docker-cuda",
+      "query": "What did you mean by that?"
+    },
+    {
+      "id": "f-phone-qr",
+      "prior_id": "phone-qr",
+      "query": "How do I do that?"
+    },
+    {
+      "id": "f-mem-clear",
+      "prior_id": "mem-clear",
+      "query": "Tell me more about that"
+    },
+    {
+      "id": "f-net-pull",
+      "prior_id": "net-pull",
+      "query": "Why does that happen?"
+    }
+  ],
+  "off": [
+    {
+      "id": "fo-u-capital",
+      "prior_id": "u-capital",
+      "query": "Why did that happen?"
+    },
+    {
+      "id": "fo-n-kubernetes",
+      "prior_id": "n-kubernetes",
+      "query": "How does that work?"
+    },
+    {
+      "id": "fo-n-oauth",
+      "prior_id": "n-oauth",
+      "query": "What does that do exactly?"
+    },
+    {
+      "id": "fo-n-ocr",
+      "prior_id": "n-ocr",
+      "query": "Can you explain that again?"
+    },
+    {
+      "id": "fo-n-backup",
+      "prior_id": "n-backup",
+      "query": "How do I do that?"
+    },
+    {
+      "id": "fo-u-pasta",
+      "prior_id": "u-pasta",
+      "query": "Why is that?"
+    },
+    {
+      "id": "fo-n-finetune",
+      "prior_id": "n-finetune",
+      "query": "Tell me more about that"
+    },
+    {
+      "id": "fo-n-podman",
+      "prior_id": "n-podman",
+      "query": "What did you mean by that?"
+    }
+  ]
+}
