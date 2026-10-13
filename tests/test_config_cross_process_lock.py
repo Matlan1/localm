@@ -384,3 +384,75 @@ def test_release_reports_a_lock_file_it_could_not_remove(home, caplog):
             lockpath.unlink()
         except FileNotFoundError:
             pass
+
+
+# --------------------------------------------------------------------------- #
+#  The stale-lock reclaim must not delete a lock a NEW holder already took     #
+# --------------------------------------------------------------------------- #
+
+def _stale(lockpath, token=b"4242:deadbeef", age=10.0):
+    lockpath.write_bytes(token)
+    t = cfg.time.time() - age
+    os.utime(lockpath, (t, t))
+    return token, lockpath.stat().st_mtime
+
+
+def test_a_stale_lock_is_reclaimed_when_nothing_changed(home, monkeypatch):
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    token, mtime = _stale(lockpath)
+    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
+    assert not lockpath.exists()
+
+
+def test_a_stale_lock_is_not_reclaimed_after_a_new_holder_took_it(home, monkeypatch):
+    """Two waiters can both reach the stale branch. The first reclaims and
+    creates its own lock; the second must NOT then delete that fresh lock and
+    create a second one, which would put both inside the lock at once."""
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    token, mtime = _stale(lockpath)
+    # The first waiter reclaimed it and took the lock itself: new bytes, new mtime.
+    lockpath.write_bytes(b"777:feedface")
+    now = cfg.time.time()
+    os.utime(lockpath, (now, now))
+
+    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is False
+    assert lockpath.read_bytes() == b"777:feedface", (
+        "the stale-lock reclaim deleted a lock a new holder had already taken")
+
+
+def test_a_stale_lock_whose_bytes_changed_in_place_is_not_reclaimed(home, monkeypatch):
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    token, mtime = _stale(lockpath)
+    lockpath.write_bytes(b"777:feedface")
+    os.utime(lockpath, (mtime, mtime))
+    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is False
+    assert lockpath.exists()
+
+
+def test_an_already_gone_lock_lets_the_caller_retry(home, monkeypatch):
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    token, mtime = _stale(lockpath)
+    lockpath.unlink()
+    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
+
+
+def test_an_unreadable_stale_lock_is_still_reclaimed(home, monkeypatch):
+    """A stale lock whose bytes cannot be read must not wedge every writer: the
+    mtime test alone decides."""
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    token, mtime = _stale(lockpath)
+    real_read = type(lockpath).read_bytes
+
+    def refuse(self):
+        if self == lockpath:
+            raise PermissionError("held open by another handle")
+        return real_read(self)
+
+    monkeypatch.setattr(type(lockpath), "read_bytes", refuse)
+    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
+    assert not lockpath.exists()

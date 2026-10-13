@@ -111,3 +111,48 @@ def test_real_generation_sizes_progress_and_cancel(sd_runner):
     res = sd_runner.generate_image({"prompt": "a cat", "width": 512, "height": 512,
                                     "steps": 1, "cfg_scale": 1.0, "seed": 2})
     assert len(res["data"]) == 512 * 512 * 3
+
+
+def test_a_loaded_runtime_with_no_compute_device_refuses_the_model_load(monkeypatch):
+    """A runtime directory that still holds the main library but has lost its
+    compute-backend modules loads and lists NO device. install() refuses that at
+    install time; the model load must refuse it too instead of building a context
+    on nothing."""
+    from localm.media.sdcpp import _binding as b, _child
+
+    monkeypatch.setattr(_child._State, "lib", object(), raising=False)
+    monkeypatch.setattr(b, "list_devices", lambda lib: [])
+    with pytest.raises(RuntimeError, match="no compute device"):
+        _child._do_load({"runtime_dir": "X", "ctx": {"model_path": "m.gguf"}})
+
+
+def test_the_no_device_refusal_does_not_fire_when_a_device_is_present(monkeypatch):
+    """Control for the test above: with a device listed, the load gets past that
+    check and fails later for an unrelated reason."""
+    from localm.media.sdcpp import _binding as b, _child
+
+    monkeypatch.setattr(_child._State, "lib", object(), raising=False)
+    monkeypatch.setattr(b, "list_devices", lambda lib: [("CPU", "a cpu")])
+    with pytest.raises(Exception) as excinfo:
+        _child._do_load({"runtime_dir": "X", "ctx": {"model_path": "m.gguf"}})
+    assert "no compute device" not in str(excinfo.value)
+
+
+@pytest.mark.integration
+def test_real_runtime_without_its_backend_modules_refuses_the_load(sd_runner, tmp_path):
+    import shutil
+
+    rt, model, extra = _real_setup()
+    copy = tmp_path / "damaged"
+    shutil.copytree(rt, copy)
+    removed = 0
+    for pattern in ("ggml-cpu-*.dll", "libggml-cpu*.so", "ggml-cpu*.dylib",
+                    "ggml-vulkan*", "ggml-hip*", "ggml-cuda*", "ggml-metal*"):
+        for f in copy.glob(pattern):
+            f.unlink()
+            removed += 1
+    if not removed:
+        pytest.skip("this runtime ships no separate compute-backend modules")
+    with pytest.raises(SdWorkerError, match="no compute device"):
+        sd_runner.ensure_loaded(("m", model), copy, {"model_path": model},
+                                extra_dirs=extra)

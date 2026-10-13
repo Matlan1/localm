@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 
 from localm import scopes
@@ -82,7 +83,8 @@ def register(app: FastAPI, ctx) -> None:
         # for arbitrary input is pointless, and this rejects garbage / an already
         # expired key (verify() returns None for both).
         from localm import auth
-        if auth.verify(key.strip()) is None:
+        # Off the event loop: verify() can take the keystore's cross-process lock.
+        if await run_in_threadpool(auth.verify, key.strip()) is None:
             raise HTTPException(400, "Not a current localm key (mint one first).")
         loop = asyncio.get_running_loop()
         svg = await loop.run_in_executor(get_plugin_executor(), _pairing_qr_svg, key.strip())
