@@ -528,6 +528,29 @@ def test_sd_family_vaes_follow_their_names(tmp_path):
                                                             families.inspect_file(ae), "vae")]) == []
 
 
+def test_an_sd3_unet_without_a_vae_offers_the_sd3_vae_under_a_name_the_pairing_picks(tmp_path):
+    d = tmp_path / "m"
+    d.mkdir()
+    _register("sd3.5_medium-Q4_K_M", write_gguf(d / "sd3.5_medium-Q4_K_M.gguf", SD3, "sd3"),
+              "diffusion-unet")
+    _register("clip_l", write_safetensors(d / "clip_l.safetensors", CLIP_L), "text-encoder")
+    _register("clip_g", write_safetensors(d / "clip_g.safetensors", CLIP_G), "text-encoder")
+    _register("t5xxl", write_safetensors(d / "t5xxl.safetensors", T5XXL), "text-encoder")
+    settings = {"native": {"model": "sd3.5_medium-Q4_K_M"}}
+    with pytest.raises(pairing.MissingComponents) as ei:
+        image_native.resolve_models(settings)
+    assert [m["slot"] for m in ei.value.missing] == ["vae"]
+    dl = ei.value.missing[0]["download"]
+    assert dl["spec"] == "Shio-Koube/SD-3.5-vae:diffusion_pytorch_model.safetensors"
+    assert dl["name"] == "sd3.5_vae" and dl["model_type"] == "vae"
+    assert f"localm pull {dl['spec']} --type vae --name sd3.5_vae" in str(ei.value)
+    vae = write_safetensors(d / dl["filename"], FLUX_AE)
+    _register(dl["name"], vae, "vae")
+    m = image_native.resolve_models(settings)
+    assert m["ctx"]["vae_path"] == str(vae)
+    assert m["components"]["vae"] == {"name": "sd3.5_vae", "auto": True}
+
+
 LLM_LORA = {"base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": (8, 4096),
             "base_model.model.model.layers.0.mlp.gate_proj.lora_B.weight": (11008, 8)}
 SD_LORA_WITH_TE = {"lora_te_text_model_encoder_layers_0_self_attn_q_proj.lora_down.weight": (4, 768),

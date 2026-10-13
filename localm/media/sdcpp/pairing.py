@@ -47,6 +47,7 @@ class Download:
     size_bytes: int
     sha256: str
     model_type: str
+    name: str = ""
 
     @property
     def spec(self) -> str:
@@ -56,10 +57,20 @@ class Download:
     def filename(self) -> str:
         return self.file.rsplit("/", 1)[-1]
 
+    @property
+    def pull_args(self) -> str:
+        """The ``localm pull`` arguments that download this file, verified,
+        and register it under the name the automatic pairing recognises."""
+        args = f"{self.spec} --type {self.model_type}"
+        if self.name:
+            args += f" --name {self.name}"
+        return f"{args} --sha256 {self.sha256}"
+
     def as_dict(self) -> dict:
         return {"repo": self.repo, "file": self.file, "spec": self.spec,
                 "filename": self.filename, "size_bytes": self.size_bytes,
-                "sha256": self.sha256, "model_type": self.model_type}
+                "sha256": self.sha256, "model_type": self.model_type, "name": self.name,
+                "pull_args": self.pull_args}
 
 
 _CLIP_L = Download("comfyanonymous/flux_text_encoders", "clip_l.safetensors", 246_144_152,
@@ -103,6 +114,9 @@ _QWEN3_4B = Download("Comfy-Org/z_image_turbo", "split_files/text_encoders/qwen_
                      8_044_982_048,
                      "6c671498573ac2f7a5501502ccce8d2b08ea6ca2f661c458e708f36b36edfc5a",
                      "text-encoder")
+_SD3_VAE = Download("Shio-Koube/SD-3.5-vae", "diffusion_pytorch_model.safetensors", 167_666_902,
+                    "8f53304a79335b55e13ec50f63e5157fee4deb2f30d5fae0654e2b2653c109dc", "vae",
+                    name="sd3.5_vae")
 _SDXL_VAE = Download("stabilityai/sdxl-vae", "sdxl_vae.safetensors", 334_641_164,
                      "63aeecb90ff7bc1c115395962d3e803571385b61938377bc7089b36e81e92e2e", "vae")
 _SD_VAE = Download("stabilityai/sd-vae-ft-mse-original",
@@ -119,7 +133,8 @@ _DOWNLOADS: dict[tuple[str, str], Download] = {
     ("vae", "flux"): _FLUX_AE, ("vae", "chroma"): _FLUX_AE,
     ("vae", "z-image"): _FLUX_AE, ("vae", "ovis-image"): _FLUX_AE,
     ("vae", "flux2"): _FLUX2_VAE, ("vae", "wan2.1"): _WAN21_VAE,
-    ("vae", "qwen-image"): _QWEN_VAE, ("vae", "sdxl"): _SDXL_VAE, ("vae", "sd1"): _SD_VAE,
+    ("vae", "qwen-image"): _QWEN_VAE, ("vae", "sd3"): _SD3_VAE, ("vae", "sdxl"): _SDXL_VAE,
+    ("vae", "sd1"): _SD_VAE,
     ("vae", "sd2"): _SD_VAE,
     ("clip_vision", "wan2.1"): _CLIP_VISION_H,
     ("llm", "qwen-image"): _QWEN25_VL, ("llm", "z-image"): _QWEN3_4B,
@@ -535,8 +550,8 @@ def missing_message(model_label: str, family: Optional[str], missing: list,
     parts = []
     for m in missing:
         dl = m.get("download")
-        how = (f"download it with 'localm pull {dl['spec']} --type {dl['model_type']}"
-               f" --sha256 {dl['sha256']}'" if dl else f"set it in {where}")
+        how = (f"download it with 'localm pull {dl['pull_args']}'"
+               if dl else f"set it in {where}")
         parts.append(f"a {m['label']} ({how})")
     return (f"{model_label} is a {fam} model and needs " + "; ".join(parts)
             + f". None is registered on this machine. Or choose one in {where}.")
