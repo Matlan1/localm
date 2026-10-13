@@ -369,6 +369,33 @@ class TestWedgedTorchIsNotRetriedForever:
             "_GPU_PROBE_DEADLINE")
 
 
+class _DiscoverClock:
+    """discover's ``time`` module with monotonic() reading ``now[0]``."""
+
+    def __init__(self, now):
+        self._now = now
+
+    def monotonic(self):
+        return self._now[0]
+
+    def __getattr__(self, name):
+        import time as real_time
+        return getattr(real_time, name)
+
+
+def _set_discover_clock(monkeypatch, start):
+    now = [start]
+    monkeypatch.setattr(discover, "time", _DiscoverClock(now))
+    return now
+
+
+def _after_the_retry_wait(monkeypatch):
+    """Move the probe's clock past the isolated probe's retry wait."""
+    with discover._gpu_probe_lock:
+        at = discover._isolated_torch_retry_at
+    _set_discover_clock(monkeypatch, at + 1.0)
+
+
 class TestBrokenIsolationOnWindowsNeverImportsInProcess:
     """On Windows a cold ``import torch`` holds the OS loader lock and freezes the
     server, and a child that died printing nothing usually means torch's import
@@ -417,11 +444,13 @@ class TestBrokenIsolationOnWindowsNeverImportsInProcess:
         assert "falling back to importing torch" not in hits[0].message, (
             "the warning claims a fallback import that no longer happens")
 
-    def test_does_not_latch_the_next_round_still_asks_the_child(self, monkeypatch):
+    def test_does_not_latch_a_round_after_the_wait_still_asks_the_child(
+            self, monkeypatch):
         self._windows_with_broken_isolation(monkeypatch)
         discover._torch_gpus_isolated_once()
         with discover._gpu_probe_lock:
             assert discover._isolated_torch_unavailable is False
+        _after_the_retry_wait(monkeypatch)
         monkeypatch.setattr(discover, "_torch_gpus_isolated",
                             lambda: [{"index": 0, "name": "G", "total": 8, "free": 4}])
         assert discover._torch_gpus_isolated_once()[0]["name"] == "G"
@@ -466,6 +495,7 @@ class TestBrokenIsolationOnWindowsNeverImportsInProcess:
         discover._list_gpus_probe()
         with discover._gpu_probe_lock:
             assert discover._isolated_torch_unanswered is True
+        _after_the_retry_wait(monkeypatch)
         monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: [])
         discover._list_gpus_probe()
         with discover._gpu_probe_lock:
@@ -487,6 +517,121 @@ class TestBrokenIsolationOnWindowsNeverImportsInProcess:
         for plat in ("linux", "darwin"):
             monkeypatch.setattr(sys, "platform", plat)
             assert discover._in_process_torch_import_can_freeze() is False
+
+
+class TestBrokenIsolationIsNotRespawnedEveryRound:
+    """While isolation stays broken the child is spawned again only after a wait
+    that doubles per failure, and any answer ends the wait."""
+
+    def setup_method(self):
+        discover._reset_gpu_probe_cache()
+
+    def teardown_method(self):
+        discover._reset_gpu_probe_cache()
+
+    @staticmethod
+    def _clock(monkeypatch, start=1000.0):
+        return _set_discover_clock(monkeypatch, start)
+
+    @staticmethod
+    def _broken(monkeypatch, *, windows=True):
+        spawns = []
+
+        def isolated():
+            spawns.append(1)
+            return None
+
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: windows)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", isolated)
+        return spawns
+
+    def test_rounds_inside_the_wait_spawn_no_child(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        spawns = self._broken(monkeypatch)
+        for _ in range(20):
+            assert discover._torch_gpus_isolated_once() == []
+            now[0] += 1.0
+        assert spawns == [1], (
+            f"the broken isolated probe was spawned {len(spawns)} times in 20 rounds")
+
+    def test_a_round_inside_the_wait_is_reported_like_a_failed_one(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        self._broken(monkeypatch)
+        discover._torch_gpus_isolated_once()
+        with discover._gpu_probe_lock:
+            discover._isolated_torch_unanswered = False
+        now[0] += 1.0
+        assert discover._torch_gpus_isolated_once() == []
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is True
+            assert discover._isolated_torch_unavailable is False
+
+    def test_the_wait_doubles_up_to_its_cap(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        spawns = self._broken(monkeypatch)
+        waits = []
+        for _ in range(8):
+            discover._torch_gpus_isolated_once()
+            with discover._gpu_probe_lock:
+                waits.append(discover._isolated_torch_retry_wait)
+                now[0] = discover._isolated_torch_retry_at
+        first, cap = (discover._ISOLATED_TORCH_RETRY_FIRST,
+                      discover._ISOLATED_TORCH_RETRY_MAX)
+        assert waits[:3] == [first, 2 * first, 4 * first]
+        assert max(waits) == cap and waits[-1] == cap
+        assert len(spawns) == 8
+
+    def test_an_answer_ends_the_wait(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        spawns = self._broken(monkeypatch)
+        discover._torch_gpus_isolated_once()
+        with discover._gpu_probe_lock:
+            now[0] = discover._isolated_torch_retry_at
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            lambda: spawns.append(1) or [])
+        assert discover._torch_gpus_isolated_once() == []
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_retry_wait == 0.0
+            assert discover._isolated_torch_retry_at == 0.0
+        discover._torch_gpus_isolated_once()
+        assert len(spawns) == 3, "a round after an answer did not ask the child"
+
+    def test_the_reset_clears_the_wait(self, monkeypatch):
+        self._clock(monkeypatch)
+        spawns = self._broken(monkeypatch)
+        discover._torch_gpus_isolated_once()
+        discover._reset_gpu_probe_cache()
+        self._broken(monkeypatch)
+        discover._torch_gpus_isolated_once()
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_retry_wait == (
+                discover._ISOLATED_TORCH_RETRY_FIRST)
+        assert spawns == [1]
+
+    def test_off_windows_a_round_inside_the_wait_still_degrades_in_process(
+            self, monkeypatch):
+        now = self._clock(monkeypatch)
+        spawns = self._broken(monkeypatch, windows=False)
+        monkeypatch.setattr(discover, "_torch_gpus_resident",
+                            lambda: [{"index": 0, "name": "G", "total": 8, "free": 4}])
+        first = discover._torch_gpus_isolated_once()
+        now[0] += 1.0
+        second = discover._torch_gpus_isolated_once()
+        assert first[0]["name"] == second[0]["name"] == "G"
+        assert spawns == [1]
+
+    def test_a_wedge_still_latches_and_sets_no_wait(self, monkeypatch):
+        self._clock(monkeypatch)
+
+        def wedged():
+            raise discover._IsolatedTorchWedged()
+
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", wedged)
+        assert discover._torch_gpus_isolated_once() == []
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unavailable is True
+            assert discover._isolated_torch_retry_at == 0.0
 
 
 class TestChildProbeContract:
