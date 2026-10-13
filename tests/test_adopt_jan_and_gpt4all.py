@@ -141,7 +141,7 @@ class TestJanStore:
             self, tmp_path, isolated_home):
         data = tmp_path / "Jan" / "data"
         _jan_unit(data, "org/escape", yml="model_path: ../../secret.gguf\n")
-        (tmp_path / "Jan" / "secret.gguf").write_bytes(_gguf(tag="secret"))
+        (tmp_path / "secret.gguf").write_bytes(_gguf(tag="secret"))
         assert add_local(str(data)) is False
         assert load_registry() == {}
 
