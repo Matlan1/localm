@@ -538,6 +538,385 @@ class TestRestrictedUnwritableHelper:
         assert restricted_unwritable(root, ".localcoder/config.toml") is True
 
 
+def _dir_link(target, link):
+    """Make *link* a directory symlink to *target*, else skip the test."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError) as e:
+        pytest.skip(f"cannot create a directory symlink here: {e}")
+
+
+def _git_refused(result):
+    return result.ok is False and ".git" in result.output
+
+
+@pytest.fixture()
+def git_project(tmp_path):
+    """A project with a repository directory and a source file."""
+    root = tmp_path / "proj"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    (root / "src").mkdir()
+    (root / "src" / "a.txt").write_text("core\n", encoding="utf-8")
+    return root
+
+
+class TestRestrictedWritesCannotReachGit:
+    @pytest.mark.parametrize("path", [
+        ".git/config",
+        ".git/hooks/pre-commit",
+        ".GIT/config",
+        ".git./config",
+        ".git /config",
+        ".git\\config",
+        "src/../.git/config",
+        "sub/.git/config",
+        ".git",
+    ])
+    def test_write_file_cannot_create_it(self, tmp_path, path):
+        root = tmp_path / "proj"
+        root.mkdir()
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path=path, content="[core]\n"), interactive=False)
+        assert _git_refused(result), result.output
+        assert list(root.rglob("*")) == []
+
+    @pytest.mark.parametrize("call", [
+        _call("write_file", path=".git/config", content="[alias]\n"),
+        _call("edit_file", path=".git/config", old="[core]", new="[alias]"),
+        _call("edit_files", edits=[
+            {"path": "src/a.txt", "old": "core", "new": "x"},
+            {"path": ".git/config", "old": "[core]", "new": "[alias]"}]),
+        _call("write_file", path=".git/hooks/pre-commit", content="x"),
+    ], ids=lambda c: f"{c.name}:{c.args.get('path', 'edits')}")
+    def test_no_write_tool_can_change_it(self, git_project, call):
+        agent = _agent(git_project, restricted=True)
+        result = agent._execute_tool(call, interactive=False)
+        assert _git_refused(result), result.output
+        assert (git_project / ".git" / "config").read_text(
+            encoding="utf-8") == "[core]\n"
+        assert not (git_project / ".git" / "hooks" / "pre-commit").exists()
+        assert (git_project / "src" / "a.txt").read_text(encoding="utf-8") == "core\n"
+
+    def test_a_sweep_skips_it(self, git_project):
+        agent = _agent(git_project, restricted=True)
+        result = agent._execute_tool(
+            _call("search_replace", pattern="core", replacement="alias",
+                  glob=".git/*"), interactive=False)
+        assert _git_refused(result), result.output
+        assert (git_project / ".git" / "config").read_text(
+            encoding="utf-8") == "[core]\n"
+
+    def test_patch_mode_does_not_capture_it(self, git_project):
+        agent = _agent(git_project, restricted=True, patch_mode=True)
+        result = agent._execute_tool(
+            _call("write_file", path=".git/config", content="x"), interactive=False)
+        assert _git_refused(result), result.output
+        assert agent.current_patch() == ""
+
+    def test_the_folder_a_git_file_points_at_is_refused(self, tmp_path):
+        root = tmp_path / "proj"
+        inner = root / "repo-data"
+        inner.mkdir(parents=True)
+        (inner / "config").write_text("[core]\n", encoding="utf-8")
+        (root / ".git").write_text("gitdir: repo-data\n", encoding="utf-8")
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="repo-data/config", content="[alias]\n"),
+            interactive=False)
+        assert _git_refused(result), result.output
+        assert (inner / "config").read_text(encoding="utf-8") == "[core]\n"
+
+    def test_the_common_dir_a_linked_worktree_names_is_refused(self, tmp_path):
+        root = tmp_path / "proj"
+        common = root / "shared-git"
+        wt = common / "worktrees" / "w1"
+        wt.mkdir(parents=True)
+        (wt / "commondir").write_text("../..\n", encoding="utf-8")
+        (common / "config").write_text("[core]\n", encoding="utf-8")
+        checkout = root / "w1"
+        checkout.mkdir()
+        (checkout / ".git").write_text(f"gitdir: {wt}\n", encoding="utf-8")
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="shared-git/config", content="[alias]\n"),
+            interactive=False)
+        assert _git_refused(result), result.output
+        assert (common / "config").read_text(encoding="utf-8") == "[core]\n"
+
+    def test_a_linked_git_dir_target_is_refused(self, tmp_path):
+        root = tmp_path / "proj"
+        real = root / "gitstore"
+        real.mkdir(parents=True)
+        (real / "config").write_text("[core]\n", encoding="utf-8")
+        _dir_link(real, root / ".git")
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="gitstore/config", content="[alias]\n"),
+            interactive=False)
+        assert _git_refused(result), result.output
+        assert (real / "config").read_text(encoding="utf-8") == "[core]\n"
+
+    def test_a_hard_link_to_its_config_is_refused(self, git_project):
+        alias = git_project / "src" / "settings.ini"
+        try:
+            os.link(git_project / ".git" / "config", alias)
+        except (OSError, NotImplementedError) as e:
+            pytest.skip(f"cannot create a hard link here: {e}")
+        agent = _agent(git_project, restricted=True)
+        for call in (_call("write_file", path="src/settings.ini", content="[alias]\n"),
+                     _call("edit_file", path="src/settings.ini",
+                           old="[core]", new="[alias]")):
+            result = agent._execute_tool(call, interactive=False)
+            assert result.ok is False and "hard link" in result.output, result.output
+        result = agent._execute_tool(
+            _call("search_replace", pattern="core", replacement="alias",
+                  glob="src/*.ini"), interactive=False)
+        assert result.ok is False and "hard link" in result.output, result.output
+        assert (git_project / ".git" / "config").read_text(
+            encoding="utf-8") == "[core]\n"
+
+    def test_lookalike_names_are_still_writable(self, git_project):
+        agent = _agent(git_project, restricted=True)
+        for path in (".gitignore", ".github/workflows/x.yml", "git/x.txt",
+                     "docs/.gitx/y.txt", ".gitattributes"):
+            result = agent._execute_tool(
+                _call("write_file", path=path, content="ok"), interactive=False)
+            assert result.ok, (path, result.output)
+            assert (git_project / path).read_text(encoding="utf-8") == "ok"
+
+    def test_the_owner_can_still_write_it(self, git_project):
+        agent = _agent(git_project, restricted=False)
+        result = agent._execute_tool(
+            _call("write_file", path=".git/config", content="[alias]\n"),
+            interactive=False)
+        assert result.ok, result.output
+        assert (git_project / ".git" / "config").read_text(
+            encoding="utf-8") == "[alias]\n"
+
+
+class TestRestrictedWritesCannotReachANonAncestorLinkedConfig:
+    @staticmethod
+    def _project(tmp_path):
+        """``sub/.localcoder`` links to ``coder-config``, a sibling folder that is
+        not on the path from the project root to ``sub``."""
+        root = tmp_path / "proj"
+        real = root / "coder-config"
+        real.mkdir(parents=True)
+        (real / "config.toml").write_text(_CONFIG, encoding="utf-8")
+        (root / "sub").mkdir()
+        (root / "src").mkdir()
+        (root / "src" / "a.txt").write_text("privacy\n", encoding="utf-8")
+        _dir_link(real, root / "sub" / ".localcoder")
+        return root, real
+
+    @pytest.mark.parametrize("call", [
+        _call("write_file", path="coder-config/config.toml", content='mode = "normal"\n'),
+        _call("edit_file", path="coder-config/config.toml", old="privacy", new="normal"),
+        _call("write_file", path="coder-config/skills/x/SKILL.md", content="x"),
+    ], ids=lambda c: f"{c.name}:{c.args['path']}")
+    def test_the_folder_it_points_at_is_refused(self, tmp_path, call):
+        root, real = self._project(tmp_path)
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(call, interactive=False)
+        assert _refused(result), result.output
+        assert (real / "config.toml").read_text(encoding="utf-8") == _CONFIG
+        assert not (real / "skills").exists()
+
+    def test_a_sweep_skips_the_folder_it_points_at(self, tmp_path):
+        root, real = self._project(tmp_path)
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("search_replace", pattern="privacy", replacement="normal",
+                  glob="**/*"), interactive=False)
+        assert result.ok, result.output
+        assert (root / "src" / "a.txt").read_text(encoding="utf-8") == "normal\n"
+        assert (real / "config.toml").read_text(encoding="utf-8") == _CONFIG
+
+    def test_the_owner_can_still_write_it(self, tmp_path):
+        root, real = self._project(tmp_path)
+        agent = _agent(root, restricted=False)
+        result = agent._execute_tool(
+            _call("write_file", path="coder-config/config.toml",
+                  content='mode = "normal"\n'), interactive=False)
+        assert result.ok, result.output
+        assert (real / "config.toml").read_text(encoding="utf-8") == 'mode = "normal"\n'
+
+
+class TestRestrictedRedirectWalkEdges:
+    def test_the_common_dir_a_git_directory_names_is_refused(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / ".git").mkdir(parents=True)
+        (root / ".git" / "commondir").write_text("../shared\n", encoding="utf-8")
+        (root / "shared" / "hooks").mkdir(parents=True)
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="shared/hooks/pre-commit", content="x"),
+            interactive=False)
+        assert _git_refused(result), result.output
+        assert not (root / "shared" / "hooks" / "pre-commit").exists()
+
+    def test_a_padded_git_file_is_followed_like_git_follows_it(self, tmp_path):
+        root = tmp_path / "proj"
+        inner = root / "repo-data"
+        inner.mkdir(parents=True)
+        (root / ".git").write_text("gitdir: repo-data" + " " * 8000 + "\n\n",
+                                   encoding="utf-8")
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="repo-data/config", content="[alias]\n"),
+            interactive=False)
+        assert _git_refused(result), result.output
+        assert not (inner / "config").exists()
+
+    def test_a_git_file_over_the_size_git_accepts_is_not_read_whole(self, tmp_path):
+        from localm.plugins.coder.tools import base
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / ".git").write_bytes(
+            b"gitdir: x" + b" " * (base._GIT_POINTER_MAX_BYTES + 10))
+        assert base.unwritable_redirects(root.resolve()) == ()
+
+    @pytest.mark.parametrize("named", [
+        "//host/share/repo", "\\\\host\\share\\repo", "\\\\?\\UNC\\host\\share"])
+    def test_a_network_gitdir_is_never_resolved(self, tmp_path, monkeypatch, named):
+        import pathlib
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / ".git").write_text(f"gitdir: {named}\n", encoding="utf-8")
+        seen = []
+        real = pathlib.Path.resolve
+
+        def spy(self, *a, **kw):
+            seen.append(str(self))
+            return real(self, *a, **kw)
+        monkeypatch.setattr(pathlib.Path, "resolve", spy)
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="src/x.txt", content="ok"), interactive=False)
+        assert result.ok, result.output
+        assert seen, "the resolve spy never fired"
+        assert [s for s in seen if "host" in s] == []
+
+    def test_a_link_to_a_network_share_is_never_resolved(self, tmp_path, monkeypatch):
+        import pathlib
+        root = tmp_path / "proj"
+        root.mkdir()
+        try:
+            os.symlink("//host/share/cfg", root / ".localcoder",
+                       target_is_directory=True)
+        except (OSError, NotImplementedError) as e:
+            pytest.skip(f"cannot create a dangling directory symlink here: {e}")
+        seen = []
+        real = pathlib.Path.resolve
+
+        def spy(self, *a, **kw):
+            seen.append(str(self))
+            return real(self, *a, **kw)
+        monkeypatch.setattr(pathlib.Path, "resolve", spy)
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="src/x.txt", content="ok"), interactive=False)
+        assert result.ok, result.output
+        assert seen, "the resolve spy never fired"
+        assert [s for s in seen if "host" in s] == []
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="NTFS junctions")
+    def test_a_junction_named_localcoder_is_followed(self, tmp_path):
+        import _winapi
+        root = tmp_path / "proj"
+        real = root / "coder-config"
+        real.mkdir(parents=True)
+        (real / "config.toml").write_text(_CONFIG, encoding="utf-8")
+        (root / "sub").mkdir()
+        _winapi.CreateJunction(str(real), str(root / "sub" / ".localcoder"))
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="coder-config/config.toml", content="x"),
+            interactive=False)
+        assert _refused(result), result.output
+        assert (real / "config.toml").read_text(encoding="utf-8") == _CONFIG
+
+    @staticmethod
+    def _unlistable(monkeypatch, target, *, traversable):
+        """Make *target* unlistable, and its children unreachable by name too
+        when not *traversable*."""
+        real_scandir, real_lstat = os.scandir, os.lstat
+
+        def scandir(path="."):
+            if os.path.normcase(os.fspath(path)) == os.path.normcase(str(target)):
+                raise PermissionError(13, "listing denied", str(path))
+            return real_scandir(path)
+
+        def lstat(path, *a, **kw):
+            if (not traversable and os.path.normcase(os.path.dirname(os.fspath(path)))
+                    == os.path.normcase(str(target))):
+                raise PermissionError(13, "traverse denied", str(path))
+            return real_lstat(path, *a, **kw)
+        monkeypatch.setattr(os, "scandir", scandir)
+        monkeypatch.setattr(os, "lstat", lstat)
+
+    def test_a_traversable_unlistable_folder_refuses_the_write(self, tmp_path, monkeypatch):
+        root = (tmp_path / "proj")
+        (root / "private").mkdir(parents=True)
+        root = root.resolve()
+        agent = _agent(root, restricted=True)
+        self._unlistable(monkeypatch, root / "private", traversable=True)
+        result = agent._execute_tool(
+            _call("write_file", path="src/x.txt", content="ok"), interactive=False)
+        assert result.ok is False and "could not be checked" in result.output, result.output
+        assert not (root / "src" / "x.txt").exists()
+
+    def test_an_untraversable_folder_is_skipped(self, tmp_path, monkeypatch):
+        root = (tmp_path / "proj")
+        (root / "private").mkdir(parents=True)
+        root = root.resolve()
+        agent = _agent(root, restricted=True)
+        self._unlistable(monkeypatch, root / "private", traversable=False)
+        result = agent._execute_tool(
+            _call("write_file", path="src/x.txt", content="ok"), interactive=False)
+        assert result.ok, result.output
+
+    def test_an_unlistable_project_root_refuses_a_sweep(self, tmp_path, monkeypatch):
+        from localm.plugins.coder.tools import base
+        root = (tmp_path / "proj")
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "a.txt").write_text("privacy\n", encoding="utf-8")
+        root = root.resolve()
+
+        def walk(_cwd):
+            raise PermissionError(13, "listing denied", str(_cwd))
+        monkeypatch.setattr(base, "unwritable_redirects", walk)
+        from localm.plugins.coder.tools import files
+        monkeypatch.setattr(files, "unwritable_redirects", walk)
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("search_replace", pattern="privacy", replacement="normal",
+                  glob="**/*"), interactive=False)
+        assert result.ok is False and "could not check" in result.output, result.output
+        assert (root / "src" / "a.txt").read_text(encoding="utf-8") == "privacy\n"
+
+    def test_an_unreadable_git_file_refuses_the_write(self, tmp_path, monkeypatch):
+        from localm.plugins.coder.tools import base
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / ".git").write_text("gitdir: repo-data\n", encoding="utf-8")
+        import builtins
+        real_open = builtins.open
+
+        def fake_open(file, *a, **kw):
+            if os.path.basename(os.fspath(file)) == ".git":
+                raise PermissionError(13, "read denied", str(file))
+            return real_open(file, *a, **kw)
+        monkeypatch.setattr(base, "open", fake_open, raising=False)
+        agent = _agent(root, restricted=True)
+        result = agent._execute_tool(
+            _call("write_file", path="src/x.txt", content="ok"), interactive=False)
+        assert result.ok is False and "could not be checked" in result.output, result.output
+        assert not (root / "src" / "x.txt").exists()
+
+
 def test_every_restricted_write_tool_is_covered_by_the_lockout():
     """A write tool added to SAFE_RESTRICTED_TOOLS must be gated too."""
     from localm.plugins.coder.agent.constants import _RESTRICTED_PATH_WRITE_TOOLS

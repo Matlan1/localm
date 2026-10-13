@@ -36,9 +36,10 @@ Backends (``--backend``), so any machine has a working out-of-the-box path:
     runtime and is self-contained (the auto default on Windows), while the
     Linux build does not and needs oneAPI installed separately, so it stays
     opt-in there; ``cpu`` is self-contained.
-  * ``amd-rocm`` - the self-contained gfx103X (RDNA2) ROCm build (bundles its
-    own ROCm runtime; the current default for AMD RX 6000 on Windows, since it
-    needs no system toolkit at all).
+  * ``amd-rocm`` - the self-contained ROCm build for the card's family (gfx103X
+    for RX 6000, gfx110X for RX 7000, gfx120X for RX 9000; bundles its own ROCm
+    runtime; the default for these AMD cards on Windows, since it needs no
+    system toolkit at all).
 
 Sources, in order of preference:
   * ``--from <dir>``  - copy from a local llama.cpp build output (any backend).

@@ -608,6 +608,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
+  its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
+  localm is reported as such instead of with advice to repair the llama.cpp runtime.
+- **A transformers model whose grammar constraint fails mid-reply is no longer reported as constrained.**
+  The failure is logged and shown, and later grammar requests to that model are refused, as for GGUF
+  models.
+- **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
+  cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
+  dropped. A model worker that does not exit when stopped is killed.
+- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes.
+- **Two command-line hints no longer mislead.** `localm memory list` on an empty store says that
+  `localm memory add` does not work in privacy mode, and `localm mcp --help` now names the `rerank`
+  tool and each plugin tool.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
@@ -2041,6 +2054,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **The cross-origin exemptions match exact paths only.** The inference routes that browsers may
+  call cross-origin (chat completions, embeddings, rerank, speech, images and the surface and
+  instance routes) were matched as path prefixes, so a route added under one of them would have
+  skipped the cross-origin refusal and the open-mode shell-token check without anyone listing it.
+  Each now matches only its own path. A trailing-slash spelling of one of those paths is no longer
+  exempt.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move
@@ -2063,6 +2082,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tools or skills, and refuses to create or change anything inside a `.localcoder`
   directory at any depth; a `search_replace` sweep leaves those files alone and
   lists them. Owner sessions are unchanged.
+- **A plain `coder` API key can no longer change the project's git configuration.** A
+  restricted coder session's file tools could create or change files under `.git`, and
+  could write into a folder that a linked `.localcoder` elsewhere in the project pointed
+  at. A restricted session now refuses to write inside a `.git` file or directory at any
+  depth, into any folder a linked `.localcoder` or `.git` (or a `.git` file's `gitdir:`
+  line) points at, and through a file that has another hard link. Owner sessions are
+  unchanged.
 - **`setup.sh`, `setup-gui.sh`, `setup.bat` and `setup-gui.bat` install a fixed uv release and check it before running it.**
   They used to run whatever Astral's installer URL returned. They now download the installer
   of one pinned uv release and run it only when its checksum matches; a failed download, a

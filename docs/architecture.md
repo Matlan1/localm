@@ -292,7 +292,8 @@ their original precision.
 `inference/http_server.py` builds the FastAPI app (`create_app(engine)`) and
 holds the shared inference state; the route handlers themselves live in
 `inference/routes/` modules (chat, models, config, keys, session, admin,
-system, gpu). The plugin management API is mounted separately, by
+system, gpu, plus the `ollama`, `anthropic` and `responses` compatibility
+surfaces). The plugin management API is mounted separately, by
 `localm/plugins/engine.py`. `create_app()` reads as the boot order: it
 resets the engine registry and opens the session audit (module globals that
 `http_server` owns, as does the lifespan that starts the background services),

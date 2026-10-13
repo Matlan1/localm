@@ -84,10 +84,15 @@ def _load_failure_message(exc: BaseException, hint: str = "") -> str:
     model's context size, split or memory instead. A crash report from the
     runner already carries its own advice, so none is appended to it."""
     from .llamacpp._loader import lib_filename
-    from .llamacpp._runner import NativeLoadCrashError
-    reason = str(exc).strip()
+    from .llamacpp._runner import NativeLoadCrashError, UnexpectedLoadError
+    reason = str(exc).strip() or type(exc).__name__
     if reason and reason[-1] not in ".!?":
         reason += "."
+    if isinstance(exc, UnexpectedLoadError):
+        return (f"The model failed to load because of an unexpected error in "
+                f"localm: {reason}{hint}\n"
+                f"This is not a problem with the llama.cpp runtime; "
+                f"localm bug-report  sends the details to the maintainer.")
     if isinstance(exc, NativeLoadCrashError):
         prefix = ("The model failed to load" if exc.phase in ("context", "draft")
                   else "Native llama runtime failed to load")
