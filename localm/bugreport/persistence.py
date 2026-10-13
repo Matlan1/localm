@@ -52,12 +52,12 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
 _SAVED_REPORT_NAME = re.compile(r"bug-[A-Za-z0-9_-]+\.md")
 
 
-def read_saved_report(filename: str) -> str:
+def read_saved_report(filename: object) -> str:
     """The text of the saved report *filename* in ``<data dir>/bug-reports``.
 
     *filename* must be a bare ``bug-<stamp>.md`` name as ``save_report``
-    writes it. Raises ValueError for any other name (a path, a separator, a
-    different extension) and OSError when the file cannot be read or is not
+    writes it. Raises ValueError for anything else (a non-string, a path, a
+    separator, a different extension) and OSError when the file cannot be read or is not
     valid UTF-8."""
     if not isinstance(filename, str) or not _SAVED_REPORT_NAME.fullmatch(filename):
         raise ValueError("not a saved bug-report file name")
