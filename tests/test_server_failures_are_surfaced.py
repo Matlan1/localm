@@ -57,7 +57,7 @@ def test_debug_stacks_reports_a_failed_executor_snapshot(monkeypatch, caplog):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["executors"] == {}
-    assert body["executors_error"] == "AttributeError: '_work_queue'"
+    assert body["executors_error"] == "AttributeError: _work_queue"
     assert any("executor snapshot failed" in rec.getMessage() for rec in caplog.records)
 
 
