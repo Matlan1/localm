@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from typing import cast
 from typing import Collection
 from typing import NamedTuple
 from typing import Optional
@@ -1670,7 +1671,9 @@ def gguf_input_layer_bytes(
     a naming convention this probe does not yet know - but is returned as a
     real answer rather than raised, matching every other probe in this
     module's contract."""
-    parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
+    parsed = cast(
+        "Optional[tuple[list[tuple[str, int]], int, int]]",
+        _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed)
     if parsed is None:
         return None
     total = _input_layer_bytes_of(parsed)
