@@ -524,6 +524,47 @@ class TestBodyDecoder:
     def test_each_step_yields_at_most_the_limit(self):
         assert len(netpolicy._BodyDecoder("gzip").decode(self._gz(b"a" * 1000), 10)) == 10
 
+    def test_deflate_steps_yield_at_most_the_limit(self):
+        import zlib
+        co = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+        raw = co.compress(b"z" * 1000) + co.flush()
+        for stream in (zlib.compress(b"z" * 1000), raw):
+            assert len(netpolicy._BodyDecoder("deflate").decode(stream, 10)) == 10
+
+    def test_a_second_deflate_chunk_is_decoded_by_the_same_stream(self):
+        import zlib
+        wrapped = zlib.compress(b"0123456789" * 30)
+        dec = netpolicy._BodyDecoder("deflate")
+        out = dec.decode(wrapped[:20], 1000) + dec.decode(wrapped[20:], 1000)
+        assert out == b"0123456789" * 30
+
+    def test_corrupt_data_after_a_good_deflate_chunk_is_refused(self):
+        import zlib
+        wrapped = zlib.compress(b"0123456789" * 30)
+        dec = netpolicy._BodyDecoder("deflate")
+        dec.decode(wrapped[:20], 1000)
+        with pytest.raises(requests.exceptions.ContentDecodingError, match="corrupt deflate body"):
+            dec.decode(bytes(range(250, 256)) + b" garbage garbage", 1000)
+
+    def test_the_raw_deflate_retry_is_only_for_the_first_chunk(self):
+        import zlib
+        wrapped = zlib.compress(b"0123456789" * 30)
+        stored_block = bytes([1, 5, 0, 0xFA, 0xFF]) + b"hello"
+        dec = netpolicy._BodyDecoder("deflate")
+        dec.decode(wrapped[:6], 1000)
+        with pytest.raises(requests.exceptions.ContentDecodingError, match="corrupt deflate body"):
+            dec.decode(stored_block, 1000)
+
+    def test_a_trailing_member_must_be_gzip_framed(self):
+        import zlib
+        data = self._gz(b"first") + zlib.compress(b"second")
+        with pytest.raises(requests.exceptions.ContentDecodingError, match="corrupt gzip body"):
+            netpolicy._BodyDecoder("gzip").decode(data, 1000)
+
+    def test_a_trailing_member_is_cut_at_the_room_left_under_the_limit(self):
+        data = self._gz(b"ab") + self._gz(b"cdefghij")
+        assert netpolicy._BodyDecoder("gzip").decode(data, 5) == b"abcde"
+
     def test_several_gzip_members_are_decoded_in_one_step(self):
         data = self._gz(b"first-") + self._gz(b"second")
         assert netpolicy._BodyDecoder("gzip").decode(data, 1000) == b"first-second"
