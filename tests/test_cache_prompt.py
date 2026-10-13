@@ -87,7 +87,7 @@ def test_generate_without_the_cache_prefills_the_whole_prompt_from_zero(cache_pr
         assert prefill_pos == [0, 1, 2, 3, 4] and prefill_tokens == [1, 2, 3, 4, 5]
         api.llama_memory_clear.assert_called_once_with(MEM, True)
         assert not [c for c in api.llama_memory_seq_rm.call_args_list if c.args[2] != 0]
-    assert [pos for _, pos, _ in log[1:]] == [[5]]
+    assert [pos for _, pos, _ in log[1:]] == [[5], [6]]
 
 
 # ------------------------------------------------------------------ parallel slots
@@ -116,7 +116,7 @@ def test_slot_mode_runs_the_reply_alone_in_the_exclusive_section():
     api = _api(log, delay=0.01)
     try:
         running = sched.submit(PROMPTS[0], 40, _Sampler())
-        next(running)
+        head = next(running)
         statuses: list = []
         result: dict = {}
 
@@ -160,7 +160,7 @@ def test_slot_mode_runs_the_reply_alone_in_the_exclusive_section():
         "a reply admitted while the exclusive reply waited started before it ended"
     assert log[native[0]][1] == [0, 1, 2]
     api.llama_memory_clear.assert_called_with(MEM, True)
-    assert first == _reference(PROMPTS[0], 40)
+    assert ([head] + first[0], first[1]) == _reference(PROMPTS[0], 40)
     assert late["r"] == _reference(PROMPTS[2], 5)
 
 
