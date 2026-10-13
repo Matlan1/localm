@@ -302,6 +302,14 @@ def test_a_timed_out_test_run_is_inconclusive_not_a_recorded_fail(env, monkeypat
     assert pp.load_state(pin="fake")["verdict"] == "INCONCLUSIVE"
 
 
+def test_a_real_test_failure_that_prints_the_timeout_words_is_still_a_fail(env, monkeypatch):
+    real = pw.run_cmd
+    monkeypatch.setattr(pw, "run_cmd", lambda cmd, **k: (1, f"FAILED test_x: {pw.TIMED_OUT_MARK} 5s waiting")
+                        if "pytest" in cmd else real(cmd, **k))
+    out = pw.advance(_adv(tests=("tests/test_x.py",)), dry_run=False)
+    assert out.verdict == pw.FAIL and pp.load_state(pin="fake")["verdict"] == "FAIL"
+
+
 def test_a_failing_npm_ci_is_inconclusive_but_a_failing_npm_test_is_a_fail(env, monkeypatch):
     real = pw.run_cmd
 

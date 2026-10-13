@@ -474,7 +474,7 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
         rc, cmd_out = run_cmd(_resolve_exe(list(cmd)), cwd=worktree, timeout=TEST_TIMEOUT_SECONDS,
                               env=_without_token(pp._worktree_env(worktree)))
         if rc != 0:
-            environmental = TIMED_OUT_MARK in cmd_out or tuple(cmd) == ("npm", "ci")
+            environmental = rc != 1 or tuple(cmd) == ("npm", "ci")
             raise (pp.InfraError if environmental else pp.PipelineError)(
                 f"`{' '.join(cmd)}` failed after the bump:\n{cmd_out[-2000:]}")
 
@@ -483,7 +483,7 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
             [sys.executable, "-m", "pytest", *adv.tests, "-m", "not integration", "-q"],
             cwd=worktree, timeout=TEST_TIMEOUT_SECONDS, env=pp._worktree_env(worktree))
         if rc != 0:
-            failed_tests = rc == 1 and TIMED_OUT_MARK not in test_out
+            failed_tests = rc == 1
             raise (pp.PipelineError if failed_tests else pp.InfraError)(
                 f"targeted tests failed after the bump:\n{test_out[-2000:]}")
 
