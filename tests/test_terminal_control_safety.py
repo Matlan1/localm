@@ -60,6 +60,14 @@ def test_safe_console_keeps_its_own_styling():
     assert "\x1b[1m" in buf.getvalue()
 
 
+def test_a_carriage_return_line_end_still_redraws():
+    con, buf = _console()
+    con.print("10%", end="\r")
+    con.print(escape("x\ry"), end="\r")
+    out = buf.getvalue()
+    assert out.count("\r") == 2 and "xy" in out
+
+
 def test_markup_safe_text_is_printed_literally():
     con, buf = _plain_console()
     con.print(f"[red]Reason:[/red] {markup_safe('[/] [link=http://x.example]y')}")

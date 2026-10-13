@@ -23,7 +23,10 @@ and no single-byte terminal command such as ``ESC c``.
 ``strip_controls`` to the text of every segment it renders, whatever the
 renderable (a markup string, ``Text``, ``Syntax``, ``Table``, ``Panel``, a
 ``Progress`` description). Rich's own styling is applied after that step and
-its cursor control travels as control segments, so both are unaffected. Markup
+its cursor control travels as control segments, so both are unaffected. A
+segment that is exactly ``"\r"`` (a ``print(..., end="\r")`` terminator) is kept:
+Rich removes carriage returns from the text it renders, so only ``end`` can
+produce one. Markup
 in a string is still parsed: text localm did not author that is interpolated
 into markup also needs ``markup_safe`` (or ``rich.markup.escape``).
 """
@@ -57,7 +60,8 @@ class SafeConsole(Console):
     def render(self, renderable: RenderableType,
                options: Optional[ConsoleOptions] = None) -> Iterable[Segment]:
         for segment in super().render(renderable, options):
-            if segment.control or not _CONTROL_CHARS.search(segment.text):
+            if (segment.control or segment.text == "\r"
+                    or not _CONTROL_CHARS.search(segment.text)):
                 yield segment
             else:
                 yield Segment(strip_controls(segment.text), segment.style)
