@@ -28,6 +28,12 @@ def _console():
                        width=200), buf
 
 
+def _plain_console():
+    buf = io.StringIO()
+    return SafeConsole(file=buf, force_terminal=True, color_system=None,
+                       highlight=False, width=200), buf
+
+
 def test_strip_controls_keeps_newline_tab_and_text():
     assert strip_controls(HOSTILE) == "a[2Jbcc31mde]52;c;cGF5bG9hZA==fgh"
     assert strip_controls("line\n\tindent é中") == "line\n\tindent é中"
@@ -55,7 +61,7 @@ def test_safe_console_keeps_its_own_styling():
 
 
 def test_markup_safe_text_is_printed_literally():
-    con, buf = _console()
+    con, buf = _plain_console()
     con.print(f"[red]Reason:[/red] {markup_safe('[/] [link=http://x.example]y')}")
     assert "[/] [link=http://x.example]y" in buf.getvalue()
 
@@ -95,7 +101,7 @@ def test_streamed_chat_tokens_are_verbatim_when_piped(monkeypatch, capsys):
 
 def test_bug_report_header_survives_markup_in_the_failure(monkeypatch, tmp_path):
     from localm.bugreport import _common, consent
-    con, buf = _console()
+    con, buf = _plain_console()
     monkeypatch.setattr(_common, "console", con)
     monkeypatch.setattr(consent, "console", con)
     monkeypatch.setattr(consent._br, "save_report", lambda text: tmp_path / "r.md")

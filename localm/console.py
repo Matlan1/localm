@@ -64,3 +64,19 @@ class SafeConsole(Console):
 
 
 console = SafeConsole()
+
+def show_url(url: str) -> str:
+    """*url* made safe to interpolate into a ``console.print`` markup string.
+
+    Rich reads ``[...]`` as a style tag, and an IPv6 URL authority is bracketed
+    by RFC 3986, so an unescaped address whose literal starts with a lowercase
+    hex letter - every link-local (``fe80::``) and unique-local (``fd..``) one -
+    renders as the empty string. ``[::1]`` and ``[2001:db8::5]`` survive,
+    because Rich's tag pattern needs a letter, ``#``, ``/`` or ``@`` after the
+    bracket.
+
+    The escape belongs HERE, not inside ``bindhost.url_host``: that builds URLs
+    also handed to requests and to sockets, where a Rich escape is
+    corruption."""
+    from rich.markup import escape
+    return escape(url)
