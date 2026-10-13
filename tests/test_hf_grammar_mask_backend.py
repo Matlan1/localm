@@ -66,7 +66,7 @@ class _Bitmask:
 @pytest.fixture
 def fake_xgrammar(monkeypatch):
     """A stand-in xgrammar recording matcher traffic and every mask application."""
-    rec = types.SimpleNamespace(applied=[], matchers=[], reject=set())
+    rec = types.SimpleNamespace(applied=[], matchers=[], bitmasks=[], reject=set())
     xgr = types.ModuleType("xgrammar")
 
     class _Info:
@@ -89,10 +89,11 @@ def fake_xgrammar(monkeypatch):
     class _Matcher:
         def __init__(self, compiled):
             self.accepted = []
+            self.terminated = False
             rec.matchers.append(self)
 
         def is_terminated(self):
-            return False
+            return self.terminated
 
         def accept_token(self, token):
             self.accepted.append(token)
@@ -107,7 +108,11 @@ def fake_xgrammar(monkeypatch):
     xgr.TokenizerInfo = _Info
     xgr.GrammarCompiler = _Compiler
     xgr.GrammarMatcher = _Matcher
-    xgr.allocate_token_bitmask = lambda batch, vocab: _Bitmask()
+    def _allocate(batch, vocab):
+        rec.bitmasks.append(_Bitmask())
+        return rec.bitmasks[-1]
+
+    xgr.allocate_token_bitmask = _allocate
     xgr.apply_token_bitmask_inplace = _apply
     monkeypatch.setitem(sys.modules, "xgrammar", xgr)
     tfm = types.ModuleType("transformers")
@@ -153,6 +158,16 @@ def test_sampled_tokens_reach_the_matcher_after_the_first_call(fake_xgrammar):
     assert [m.accepted for m in fake_xgrammar.matchers] == [[], []]
     proc(_InputIds([[5, 6, 9], [7, 8, 10]]), _Scores("cuda"))
     assert [m.accepted for m in fake_xgrammar.matchers] == [[9], [10]]
+    assert proc.failed is False
+
+
+def test_a_terminated_row_is_neither_fed_nor_refilled(fake_xgrammar):
+    proc = _processor()
+    proc(_InputIds([[5], [7]]), _Scores("cuda"))
+    fake_xgrammar.matchers[0].terminated = True
+    proc(_InputIds([[5, 6], [7, 8]]), _Scores("cuda"))
+    assert [m.accepted for m in fake_xgrammar.matchers] == [[], [8]]
+    assert fake_xgrammar.bitmasks[0].filled == [0, 1, 1]
     assert proc.failed is False
 
 

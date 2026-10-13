@@ -239,8 +239,8 @@ monitor = [
 # Grammar-constrained decoding (GBNF/EBNF) for the HuggingFace backend. The GGUF
 # backend already has this natively via llama.cpp's grammar sampler; this extra
 # brings the same capability to transformers models through xgrammar. Optional:
-# chat works without it, and the HF backend falls back to unconstrained output
-# if a grammar is requested while this is not installed. Layers on top of [gpu].
+# chat works without it, and a grammar request to a transformers model is
+# refused while this is not installed. Layers on top of [gpu].
 # The HF backend applies xgrammar's token mask with plain torch ops on a CUDA
 # or ROCm GPU and with xgrammar's bundled CPU kernel otherwise, so constrained
 # decoding needs no C compiler, Triton build or CUDA toolkit. On Windows this

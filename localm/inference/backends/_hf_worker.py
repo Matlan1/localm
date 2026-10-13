@@ -519,8 +519,8 @@ def _bitmask_backend(device_type: str) -> str:
     """The ``xgrammar.apply_token_bitmask_inplace`` backend for logits on
     *device_type*: ``"torch_native"`` (plain torch tensor ops on the GPU) for
     ``"cuda"`` logits, which covers AMD ROCm, and ``"cpu"`` (xgrammar's bundled
-    native kernel) for everything else, which ``_XgrammarProcessor`` masks on a
-    CPU copy. Neither compiles code at run time, so masking needs no C compiler,
+    native kernel) for everything else: CPU logits in place, any other device's
+    logits on a CPU copy made by ``_XgrammarProcessor``. Neither compiles code at run time, so masking needs no C compiler,
     Triton build or CUDA toolkit on the host. See
     test_bitmask_backend_never_needs_a_compiler."""
     return "torch_native" if device_type == "cuda" else "cpu"
@@ -582,10 +582,9 @@ class _SafeGrammarProcessor:
     unconstrained decoding instead of raising inside the generate()
     thread - which crashes the thread and hangs the HTTP request indefinitely.
 
-    The grammar compiles fine, so the build-time soft-degrade cannot catch this;
-    the failure only surfaces on the first token's logits call. It is caught
-    there, warned about once, and logits pass through unchanged for the rest of
-    the generation.
+    The first exception from any logits call is caught, warned about once, and
+    logits pass through unchanged for the rest of the generation; ``failed``
+    reports it.
     """
 
     def __init__(self, inner):
