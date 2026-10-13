@@ -213,6 +213,18 @@ def test_render_template_uses_gemma4_format_without_llama_cpp():
                       "<|turn>model\n")
 
 
+@pytest.mark.parametrize("tmpl", [G4_SMALL, None])
+def test_none_content_renders_as_empty_text(tmpl):
+    messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": None},
+                {"role": "user", "content": "again"}]
+    with patch(_LLAMA_API + ".llama_model_chat_template", return_value=tmpl):
+        prompt, reason = _render_template(object(), messages)
+        spans = _content_spans_in_prompt(object(), messages, prompt, reason)
+    assert "None" not in prompt
+    assert spans is not None
+    assert [prompt[a:b] for a, b, _lead in spans] == ["hi", "", "again"]
+
+
 @pytest.mark.parametrize("tmpl", [GEMMA3, CHATML])
 def test_other_templates_still_go_through_llama_cpp(tmpl):
     apply = MagicMock(return_value=-1)

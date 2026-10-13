@@ -483,7 +483,9 @@ def model_stop_strings(tokenizer) -> frozenset:
 
 
 def _extract_text(content) -> str:
-    """Return the plain-text portion of a message content field."""
+    """Return the plain-text portion of a message content field; "" for None."""
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
