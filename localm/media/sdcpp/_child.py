@@ -52,6 +52,7 @@ class _State:
     generating = False
     sample_steps = 0
     hires_steps = 0
+    upscaling = False
     decoding = False
     redact: tuple = ()
     paths: tuple = ()
@@ -155,7 +156,9 @@ def _make_callbacks(resp_q):
         if step not in (1, steps) and now - _State.last_progress < _PROGRESS_MIN_INTERVAL:
             return
         _State.last_progress = now
-        if steps and steps in (_State.sample_steps, _State.hires_steps) and not _State.decoding:
+        if _State.upscaling:
+            phase = "upscaling"
+        elif steps and steps in (_State.sample_steps, _State.hires_steps) and not _State.decoding:
             phase = "sampling"
         elif _State.decoding:
             phase = "decoding"
@@ -433,6 +436,8 @@ def _do_upscale_image(payload):
         raise ValueError(f"upscaling {w}x{h} by {scale}x would make a {w * scale}x{h * scale} "
                          f"image; each side is limited to {max_side} pixels")
     _State.last_errors = []
+    _State.decoding = False
+    _State.sample_steps = _State.hires_steps = 0
     if path not in _State.paths:
         _State.paths = _State.paths + (path,)
     keep = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
@@ -444,9 +449,11 @@ def _do_upscale_image(payload):
     out = ctypes.POINTER(b.sd_image_t)()
     count = ctypes.c_int(0)
     _State.generating = True
+    _State.upscaling = True
     try:
         ok = lib.upscale(uctx, src, scale, ctypes.byref(out), ctypes.byref(count))
     finally:
+        _State.upscaling = False
         _State.generating = False
         lib.free_upscaler_ctx(uctx)
         del keep

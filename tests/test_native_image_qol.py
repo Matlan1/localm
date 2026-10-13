@@ -702,3 +702,36 @@ def test_the_backend_hands_the_worker_the_output_limit(qol, tmp_path):
     ok, msg = native.upscale(s, _png(tmp_path / "s.png"), "up4x", tmp_path / "o.png")
     assert ok, msg
     assert runner.upscales[0]["max_output_side"] == native.MAX_UPSCALE_OUTPUT_SIDE
+
+
+def test_progress_during_an_upscale_is_labelled_upscaling_not_the_last_job_phase(child_state):
+    import queue
+    q = queue.Queue()
+    _log_cb, progress_cb = child_state._make_callbacks(q)
+    child_state._State.decoding = True
+    child_state._State.sample_steps = 4
+    child_state._State.upscaling = True
+    progress_cb(4, 4, 0.2, None)
+    assert q.get_nowait() == ("progress", {"phase": "upscaling", "step": 4, "steps": 4,
+                                           "secs": pytest.approx(0.2, abs=1e-3)})
+    child_state._State.upscaling = False
+    progress_cb(4, 4, 0.2, None)
+    assert q.get_nowait()[1]["phase"] == "decoding"
+
+
+def test_an_upscale_resets_the_phase_state_of_the_previous_job(child_state):
+    child_state._State.decoding = True
+    child_state._State.sample_steps = child_state._State.hires_steps = 9
+    with pytest.raises(RuntimeError):
+        child_state._do_upscale_image(_upscale_payload(8))
+    assert child_state._State.decoding is False
+    assert (child_state._State.sample_steps, child_state._State.hires_steps) == (0, 0)
+    assert child_state._State.upscaling is False
+
+
+def test_the_relay_words_upscale_progress_as_upscaling():
+    lines = []
+    relay = native._event_relay(lines.append)
+    relay(("progress", {"phase": "upscaling", "step": 2, "steps": 6, "secs": 0.1}))
+    relay(("progress", {"phase": "upscaling", "step": 6, "steps": 6, "secs": 0.1}))
+    assert lines == ["Upscaling 2/6", "Upscaling 6/6"]

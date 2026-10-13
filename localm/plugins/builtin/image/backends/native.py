@@ -319,6 +319,8 @@ def _event_relay(say):
             secs = info.get("secs") or 0.0
             rate = f" ({secs:.2f} s/step)" if secs else ""
             say(f"Step {step}/{steps}{rate}")
+        elif phase == "upscaling":
+            say(f"Upscaling {step}/{steps}")
         elif phase != state["phase"] or (steps and step == steps):
             label = "Decoding" if phase == "decoding" else "Loading weights"
             if steps and step == steps:
