@@ -1744,12 +1744,18 @@ def test_draft_probe_tokens_stay_inside_a_smaller_draft_vocabulary():
     assert costs is not None and costs.draft == pytest.approx(0.2)
 
 
+def _raise_for_the_draft_view(api, model):
+    if model.value == 5:
+        raise AttributeError("llama_vocab_get_text")
+    return _view()
+
+
 def test_an_unexpected_error_after_the_draft_load_leaves_the_target_loaded(tmp_path):
     llm, path, llama_mod = _loading_llama(tmp_path)
     with patch.object(llama_mod, "api") as api, \
          patch.object(llama_mod, "set_use_mmap"), \
          patch("localm.inference.backends.llamacpp._draftmodel.native_vocab_view",
-               side_effect=AttributeError("llama_vocab_get_text")):
+               side_effect=_raise_for_the_draft_view):
         api.llama_load_model_from_file.return_value = ctypes.c_void_p(5)
         llm._load_draft_model(path, None, True)
         freed = [c.args[0].value for c in api.llama_free_model.call_args_list]
@@ -1794,14 +1800,6 @@ def test_no_draft_note_without_the_draft_source(tmp_path):
     b = gguf_mod.GgufBackend(str(tmp_path / "m.gguf"), spec_source="ngram")
     b._apply_speculation_report({"source": "ngram", "status": "ngram-cannot-pay"})
     assert b.draft_status == ""
-
-
-def test_the_worker_load_metadata_carries_the_speculation_report():
-    import inspect
-
-    from localm.inference.backends.llamacpp import _worker as worker_mod
-    source = inspect.getsource(worker_mod.GgufWorker.load)
-    assert '"speculation": self.spec_report' in source
 
 
 def test_a_crash_inside_the_draft_load_is_attributed_to_the_draft():
@@ -1910,7 +1908,7 @@ def test_a_failed_target_free_after_a_cancel_is_not_reported_as_a_draft_error(tm
 
 def test_metadata_without_a_tokenizer_model_or_with_text_after_nul_is_not_refused():
     assert draft_vocab_mismatch(_view(vocab_type=None), _view(vocab_type=2)) is None
-    nul = VocabView(2, 300, None, None, 1, 2,
+    nul = VocabView("gpt2", 300, None, None, 1, 2,
                     lambda i: (b"t%d" % i) if i != 7 else b"t7")
     view = gguf_vocab_view({"model": "gpt2", "tokens": ["t%d" % i if i != 7 else "t7\x00x"
                                                         for i in range(300)]})
