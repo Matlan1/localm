@@ -605,6 +605,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Pulling a file whose name another repository's model already uses no longer calls it
+  damaged.** The pull is still refused, since the models folder keeps one file per name, but the
+  message now says the name is in use, names the registered model that holds it and how to
+  proceed, and leaves that file alone.
 - **The coder's browser_close stops a browser that is still starting.** Closing the browser
   while it was still starting used to report that no browser was open and leave it to finish
   starting; it now cancels the start, the browser is closed as soon as it is up, and the calls
