@@ -1866,12 +1866,13 @@ class VramSizingMixin:
                 held += experts
         return min(held, model_bytes)
 
-    def _cpu_draft_weight_bytes(self) -> int:
+    def _cpu_draft_weight_bytes(self, layers_on_gpu: bool = True) -> int:
         """The draft model's file bytes when this load runs it on the CPU
-        (``spec_source`` "draft" with ``draft_model_on_gpu`` False and a
-        readable ``spec_draft_model``), else 0. Never raises."""
+        (``spec_source`` "draft" with a readable ``spec_draft_model``, and
+        ``draft_model_on_gpu`` False or *layers_on_gpu* False), else 0.
+        Never raises."""
         if (getattr(self, "spec_source", None) != "draft"
-                or getattr(self, "draft_model_on_gpu", True)):
+                or (layers_on_gpu and getattr(self, "draft_model_on_gpu", True))):
             return 0
         raw = getattr(self, "spec_draft_model", None)
         if not raw:
@@ -1907,13 +1908,16 @@ class VramSizingMixin:
         System RAM is read once for every load except ``on``, against the
         weights the load keeps in system RAM: :meth:`_host_resident_bytes`
         with every layer on a GPU, else :meth:`_cpu_held_weight_bytes` (the
-        whole file when *gpu_layers* is 99 but the layers cannot reach a GPU,
-        see :meth:`_layers_reach_a_gpu` on *gpu_readings*), plus
+        whole file when the layers cannot reach a GPU, see
+        :meth:`_layers_reach_a_gpu` on *gpu_readings*), plus
         :meth:`_cpu_draft_weight_bytes`. An auto load whose layers cannot
         reach a GPU keeps the runtime default with reason ``no_gpu``, or
-        ``cpu_exceeds_ram`` when those weights do not fit available RAM.
-        Never raises: a failing GPU check counts as no GPU, and a failing byte
-        count is unknown (``host_unknown`` for a full offload)."""
+        ``cpu_exceeds_ram`` when those weights do not fit available RAM. A
+        full offload that does not fit is ``cpu_exceeds_ram`` instead of
+        ``exceeds_ram`` when those weights include routed experts pinned by
+        n_cpu_moe or a draft model on the CPU. Never raises: a failing GPU
+        check counts as no GPU, and a failing byte count is unknown
+        (``host_unknown`` for a full offload)."""
         setting = getattr(self, "use_mmap", "auto")
         full = gpu_layers >= self._DEFAULT_GPU_LAYERS
         mode = setting.strip().lower() if isinstance(setting, str) else ""
@@ -1922,19 +1926,23 @@ class VramSizingMixin:
             decision = decide_use_mmap(setting, full, None, None, None)
         else:
             on_gpu = gpu_layers > 0
-            if full:
+            if on_gpu:
                 try:
                     on_gpu = self._layers_reach_a_gpu(gpu_readings)
                 except Exception as exc:
                     _dbg.debug("mmap: GPU presence check failed (%s)", type(exc).__name__)
                     on_gpu = False
+            per_token = False
             try:
                 if full and on_gpu:
                     host = self._host_resident_bytes()
+                    per_token = self._load_n_cpu_moe() > 0
                 else:
                     host = self._cpu_held_weight_bytes(gpu_layers if on_gpu else 0)
                 if host is not None:
-                    host += self._cpu_draft_weight_bytes()
+                    draft = self._cpu_draft_weight_bytes(on_gpu)
+                    host += draft
+                    per_token = per_token or draft > 0
             except Exception as exc:
                 _dbg.debug("mmap: host-resident byte count failed (%s)",
                            type(exc).__name__)
@@ -1944,8 +1952,10 @@ class VramSizingMixin:
                 from localm.sysstats import system_ram
                 total, available = system_ram()
             decision = decide_use_mmap(setting, full and on_gpu, host, total, available)
-            if full and not on_gpu and decision.reason == "partial_offload":
+            if not on_gpu and gpu_layers > 0 and decision.reason == "partial_offload":
                 decision = decision._replace(reason="no_gpu")
+            if per_token and decision.reason == "exceeds_ram":
+                decision = decision._replace(reason="cpu_exceeds_ram")
         self.last_mmap_decision = decision
         _dbg.debug("mmap: use_mmap=%s -> %s (%s; host %s bytes, RAM available %s "
                    "of %s bytes)", setting, decision.use_mmap, decision.reason,

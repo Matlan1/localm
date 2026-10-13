@@ -217,7 +217,19 @@ class TestCpuDraftWeightBytes:
         base = b._host_resident_bytes()
         with _ram(64 * GIB, base + 7_000 + HOST_RAM_HEADROOM_BYTES - 1):
             d = b._resolve_use_mmap(99, GPU)
-        assert (d.reason, d.host_bytes) == ("exceeds_ram", base + 7_000)
+        assert (d.reason, d.host_bytes) == ("cpu_exceeds_ram", base + 7_000)
+
+    def test_a_cpu_draft_that_fits_is_a_plain_full_offload(self, tmp_path):
+        b = self._draft_backend(tmp_path, False)
+        with _ram(64 * GIB, 32 * GIB):
+            d = b._resolve_use_mmap(99, GPU)
+        assert d.reason == "fits_ram"
+
+    def test_with_no_gpu_the_draft_counts_wherever_it_was_placed(self, tmp_path):
+        b = self._draft_backend(tmp_path, True)
+        with _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(99, [])
+        assert (d.reason, d.host_bytes) == ("no_gpu", b._model_bytes() + 7_000)
 
 
 class TestResolveUseMmap:
@@ -236,7 +248,7 @@ class TestResolveUseMmap:
         host = b._host_resident_bytes()
         with _ram(64 * GIB, host + HOST_RAM_HEADROOM_BYTES - 1):
             d = b._resolve_use_mmap(99, GPU)
-        assert (d.use_mmap, d.reason, d.host_bytes) == (None, "exceeds_ram", host)
+        assert (d.use_mmap, d.reason, d.host_bytes) == (None, "cpu_exceeds_ram", host)
 
     def test_an_unreadable_ram_reading_keeps_mmap(self, tmp_path):
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
@@ -347,6 +359,19 @@ class TestNoGpu:
             d = b._resolve_use_mmap(99, GPU)
         assert (d.use_mmap, d.reason) == (None, "no_gpu")
 
+    @pytest.mark.parametrize("layers", [1, 3, 98])
+    def test_partial_layers_with_no_gpu_count_the_whole_file(self, tmp_path, layers):
+        b = _backend(_moe_model(tmp_path))
+        with _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(layers, [])
+        assert (d.use_mmap, d.reason, d.host_bytes) == (None, "no_gpu", b._model_bytes())
+
+    def test_partial_layers_with_no_gpu_and_a_model_larger_than_ram_say_so(self, tmp_path):
+        b = _backend(_moe_model(tmp_path))
+        with _ram(64 * GIB, b._model_bytes() + HOST_RAM_HEADROOM_BYTES - 1):
+            d = b._resolve_use_mmap(3, [])
+        assert d.reason == "cpu_exceeds_ram"
+
     def test_an_explicit_off_still_wins_without_a_gpu(self, tmp_path):
         b = _backend(_dense_model(tmp_path))
         b.use_mmap = "off"
@@ -451,12 +476,20 @@ class TestLoadNativeWiring:
         assert b.mmap_forced_by_ram is False
         assert b.mmap_cpu_from_disk is False
 
-    def test_a_full_offload_exceeding_ram_is_not_a_cpu_layer_load(self, tmp_path):
-        b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
+    def test_a_dense_full_offload_exceeding_ram_is_not_a_cpu_layer_load(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
         with _ram(64 * GIB, 1 * GIB):
             _load(b, True)
         assert b.mmap_forced_by_ram is True
         assert b.mmap_cpu_from_disk is False
+
+    def test_a_full_offload_with_pinned_experts_exceeding_ram_reads_them_every_token(
+            self, tmp_path):
+        b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
+        with _ram(64 * GIB, 1 * GIB):
+            _load(b, True)
+        assert b.mmap_forced_by_ram is True
+        assert b.mmap_cpu_from_disk is True
 
     def test_an_unmapped_load_larger_than_ram_warns_before_it_starts(self, tmp_path):
         b = _backend(_moe_model(tmp_path), use_mmap="off")
