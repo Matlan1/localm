@@ -7,7 +7,7 @@ import math
 import operator
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
 from localm.rag import store as _st
@@ -78,6 +78,8 @@ class _CollectionSearch:
     name: str
     dir: Path
     _chunks: list[dict]
+    _vectors: Optional[list]
+    _note_vector_degrade: Callable[..., None]
 
     def query(self, text: str, k: int = 4,
               embed_fn: Optional[EmbedFn] = None, *,
