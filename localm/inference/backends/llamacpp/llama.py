@@ -556,7 +556,7 @@ def _encoder_untrusted_ranges(messages: list[dict], prompt: str) -> tuple[tuple[
 
     def render(sentinels):
         return _flatten_for_encoder(
-            [dict(m, content=s) for m, s in zip(messages, sentinels, strict=False)])
+            [dict(m, content=s) for m, s in zip(messages, sentinels, strict=True)])
 
     spans = content_spans_via_sentinels(contents, render, prompt)
     if spans is None:
@@ -678,7 +678,7 @@ def _content_spans_in_prompt(
     contents = [_extract_text(m.get("content", "")) for m in messages]
 
     def render(sentinels):
-        probe = [dict(m, content=s) for m, s in zip(messages, sentinels, strict=False)]
+        probe = [dict(m, content=s) for m, s in zip(messages, sentinels, strict=True)]
         skeleton, probe_reason = _render_template(model_ptr, probe)
         if probe_reason != fallback_reason:
             return None
@@ -3751,7 +3751,7 @@ class LlamaCpp:
         queued = list(self._queued_tokens)
         row = self._n_embd * ctypes.sizeof(ctypes.c_float)
         base = ctypes.addressof(self._queued_h)
-        for token, src in zip(tokens, h_rows, strict=False):
+        for token, src in zip(tokens, h_rows, strict=True):
             dst = base + len(queued) * row
             if src:
                 ctypes.memmove(dst, src, row)
