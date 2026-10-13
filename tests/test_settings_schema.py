@@ -720,7 +720,8 @@ def test_the_gui_shows_the_schema_text_for_every_core_setting():
 
 def test_the_gui_shows_the_schema_text_for_every_media_plugin_setting():
     bad = _gui_text_mismatches(
-        ss.MEDIA_PLUGIN_FIELDS, lambda f: [(plugin, "media") for plugin in f.plugins])
+        ss.MEDIA_PLUGIN_FIELDS,
+        lambda f: [(plugin, "media") for plugin in (f.plugins or ("image", "music", "video"))])
     assert not bad, f"GUI label/help missing or different from the schema: {bad}"
 
 
