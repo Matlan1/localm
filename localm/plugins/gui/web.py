@@ -427,6 +427,9 @@ class MediaPreflightRequest(BaseModel):
     lora_name: str | None = None
     ckpt_name: str | None = None
     model_overrides: dict[str, dict[str, str]] | None = None
+    # The native backend's per-job model choice (registered names), as the
+    # generate request sends it.
+    native_models: dict[str, str] | None = None
 
 
 class ComfyPullRequest(BaseModel):
