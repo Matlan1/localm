@@ -265,6 +265,24 @@ def _open_gate_for_quant_method(model_path: str) -> Optional[tuple]:
     return method, refusal
 
 
+def _is_compressed_tensors(model_path: str) -> bool:
+    """Whether the checkpoint's config.json declares ``quant_method`` as
+    ``compressed-tensors``."""
+    from localm.inference.backends._hf_fp8 import quant_method
+    return quant_method(model_path) == "compressed-tensors"
+
+
+def _define_missing_distributed_work(torch) -> None:
+    """Define an empty ``distributed.Work`` class on a torch built without
+    ``torch.distributed``; the compressed-tensors package names it when it is
+    imported. No effect when distributed is available or ``Work`` exists. See
+    test_compressed_tensors_loads_without_torch_distributed."""
+    dist = getattr(torch, "distributed", None)
+    if dist is None or dist.is_available() or hasattr(dist, "Work"):
+        return
+    dist.Work = type("Work", (), {})
+
+
 def _hub_kernel_blocked_message(model_path: str, blocked: tuple) -> str:
     from localm.inference.backends._hf_fp8 import one_line
     method, refusal = blocked
@@ -1276,6 +1294,9 @@ class HFWorker:
         )
         if fp8 is not None and not fp8.native:
             load_kwargs["quantization_config"] = tr.FineGrainedFP8Config(dequantize=True)
+        elif fp8 is None and _is_compressed_tensors(self.model_path):
+            _define_missing_distributed_work(torch)
+            load_kwargs["quantization_config"] = tr.CompressedTensorsConfig(dequantize=True)
 
         # Try Auto classes in order: multimodal (vision/audio + text), then
         # encoder-decoder, then causal LM (text-only), then generic fallback.
@@ -1316,6 +1337,9 @@ class HFWorker:
             note = _dequantized_note(self._model, quant_method(self.model_path), hub_blocked)
             if note:
                 self.load_notes.append(note)
+            if _is_compressed_tensors(self.model_path):
+                self.load_notes.append(
+                    f"compressed-tensors weights expanded to {_param_dtype_label(self._model)}")
 
         if device == "xpu":
             # The model loaded on CPU (device_map "cpu" above); move it to the Intel

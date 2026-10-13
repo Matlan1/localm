@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Models quantized with compressed-tensors load.** A Hugging Face checkpoint whose
+  `config.json` declares `quant_method: compressed-tensors` is expanded to full precision
+  when it loads, the way FP8 checkpoints are, and the load output says so. The `hf` and `gpu`
+  extras now include the compressed-tensors package, and a torch built without
+  `torch.distributed` (the ROCm build for Windows) can import it.
 - **Transcription without Whisper.** `POST /v1/audio/transcriptions` now answers with an
   installed GGUF model that hears audio (for example Qwen3-ASR) when faster-whisper is not
   installed, or when `model` names one. Whisper stays the default when it is installed. This

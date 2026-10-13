@@ -228,6 +228,23 @@ wheels = [
 ]
 
 [[package]]
+name = "compressed-tensors"
+version = "0.19.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "loguru" },
+    { name = "psutil" },
+    { name = "pydantic" },
+    { name = "torch", version = "2.11.0+rocm7.13.0", source = { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'darwin' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a5/9d/7ac32c1754d64b9cedeb962b65a2e4282839736f42984df42a737bc1e7f0/compressed_tensors-0.19.0.tar.gz", hash = "sha256:c66f72f121df8970722f708bc2ca719dc1c869004d4fbf6294403b2de1049749", size = 336283, upload-time = "2026-09-21T16:46:33.592Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/a4/4bb391f956a414a5a0223337774ade6def27dce847bca59e4880bc146609/compressed_tensors-0.19.0-py3-none-any.whl", hash = "sha256:5c2dcfd9cd820521906e23e096a51d68755cb88b67e19b1a5c9e11fa69637fb2", size = 240213, upload-time = "2026-09-21T16:46:32.272Z" },
+]
+
+[[package]]
 name = "coverage"
 version = "7.15.2"
 source = { registry = "https://pypi.org/simple" }
@@ -771,6 +788,7 @@ docs = [
 ]
 gpu = [
     { name = "accelerate" },
+    { name = "compressed-tensors" },
     { name = "num2words" },
     { name = "psutil" },
     { name = "rocm", marker = "sys_platform == 'win32'" },
@@ -788,6 +806,7 @@ grammar = [
 ]
 hf = [
     { name = "accelerate" },
+    { name = "compressed-tensors" },
     { name = "num2words" },
     { name = "psutil" },
     { name = "tokenizers" },
@@ -813,6 +832,8 @@ requires-dist = [
     { name = "basedpyright", marker = "extra == 'dev'", specifier = "==1.40.2" },
     { name = "certifi", specifier = ">=2026.7.22" },
     { name = "click", specifier = ">=8.5.0" },
+    { name = "compressed-tensors", marker = "extra == 'gpu'", specifier = ">=0.15.0" },
+    { name = "compressed-tensors", marker = "extra == 'hf'", specifier = ">=0.15.0" },
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "faster-whisper", marker = "extra == 'voice'", specifier = ">=1.2.1" },
@@ -864,6 +885,19 @@ requires-dist = [
     { name = "zizmor", marker = "extra == 'dev'", specifier = ">=1.30.0" },
 ]
 provides-extras = ["coder", "desktop", "browser", "gpu", "hf", "audio", "rag", "voice", "monitor", "grammar", "cpu", "dev", "docs"]
+
+[[package]]
+name = "loguru"
+version = "0.7.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "win32-setctime", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl", hash = "sha256:31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c", size = 61595, upload-time = "2024-12-06T11:20:54.538Z" },
+]
 
 [[package]]
 name = "markdown"
@@ -2341,6 +2375,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/07/f6/d0e5b343768e8bcb4cda79f0f2f55051bf26177ecd5651f84c07567461cf/watchdog-6.0.0-py3-none-win32.whl", hash = "sha256:07df1fdd701c5d4c8e55ef6cf55b8f0120fe1aef7ef39a1c6fc6bc2e606d517a", size = 79065, upload-time = "2024-11-01T14:07:09.525Z" },
     { url = "https://files.pythonhosted.org/packages/db/d9/c495884c6e548fce18a8f40568ff120bc3a4b7b99813081c8ac0c936fa64/watchdog-6.0.0-py3-none-win_amd64.whl", hash = "sha256:cbafb470cf848d93b5d013e2ecb245d4aa1c8fd0504e863ccefa32445359d680", size = 79070, upload-time = "2024-11-01T14:07:10.686Z" },
     { url = "https://files.pythonhosted.org/packages/33/e8/e40370e6d74ddba47f002a32919d91310d6074130fe4e17dabcafc15cbf1/watchdog-6.0.0-py3-none-win_ia64.whl", hash = "sha256:a1914259fa9e1454315171103c6a30961236f508b9b623eae470268bbcc6a22f", size = 79067, upload-time = "2024-11-01T14:07:11.845Z" },
+]
+
+[[package]]
+name = "win32-setctime"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/8f/705086c9d734d3b663af0e9bb3d4de6578d08f46b1b101c2442fd9aecaa2/win32_setctime-1.2.0.tar.gz", hash = "sha256:ae1fdf948f5640aae05c511ade119313fb6a30d7eabe25fef9764dca5873c4c0", size = 4867, upload-time = "2024-12-07T15:28:28.314Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e1/07/c6fe3ad3e685340704d314d765b7912993bcb8dc198f0e7a89382d37974b/win32_setctime-1.2.0-py3-none-any.whl", hash = "sha256:95d644c4e708aba81dc3704a116d8cbc974d70b3bdb8be1d150e36be6e9d1390", size = 4083, upload-time = "2024-12-07T15:28:26.465Z" },
 ]
 
 [[package]]
