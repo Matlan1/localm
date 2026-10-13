@@ -2013,6 +2013,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Querying or deleting a RAG collection that does not exist, with an API key confined to
   specific folders, now returns 404 like it does for every other caller**, instead of a 403
   that implied the collection exists but is off-limits.
+- **The default music models are checked against a fixed sha256.** Downloading the four
+  ACE-Step 1.5 files from the Music page or with `localm setup-music` now fails and
+  deletes the file when its bytes are not the expected ones.
 
 ## [0.2.0] - 2026-09-04
 

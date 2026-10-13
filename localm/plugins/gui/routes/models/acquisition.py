@@ -315,7 +315,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             return {"status": "verified", "warning": warning, "missing": [{
                 "filename": m["file"], "native": True, "searchable": False,
                 "source": {"repo": m["repo"], "file": m["file"], "spec": m["spec"],
-                           "sha256": None, "name": m["name"], "size_bytes": m["size_bytes"],
+                           "sha256": m["sha256"], "name": m["name"], "size_bytes": m["size_bytes"],
                            "model_type": m["model_type"], "origin": "curated"},
             } for m in st["missing"]]}
 
