@@ -36,14 +36,46 @@ CATCH_UP_FREE_TOKENS = 8
 STEADY_CATCH_UP_TOKENS = 3
 
 
+_DRAFT_STATUS_MESSAGES = {
+    "draft-model-missing": "the draft model file was not found",
+    "draft-not-gguf": "the draft model is not a GGUF file",
+    "draft-unsupported-role": "the draft model is not a causal chat model",
+    "draft-rewind-unsupported": "the draft model has recurrent layers",
+    "draft-vocab-mismatch": "the draft model does not share this model's vocabulary",
+    "draft-load-failed": "the draft model failed to load",
+    "draft-context-refused": "the draft model's context could not be created",
+    "draft-cannot-pay": "drafting with it is slower than decoding without it",
+    "rewind-unsupported": "this model's cache cannot drop rejected drafts",
+}
+
+
+def is_gguf_file(path) -> bool:
+    """Whether *path* is a regular file that starts with the GGUF magic.
+    Never raises."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+
+def draft_status_message(status: str) -> str:
+    """A plain-language reason for a draft-model source *status*; a
+    "draft-error:<type>" status reads as a setup error of that type."""
+    if status.startswith("draft-error:"):
+        return "setting up the draft model failed (%s)" % status.split(":", 1)[1]
+    return _DRAFT_STATUS_MESSAGES.get(status, "drafting is unavailable")
+
+
 @dataclass(frozen=True)
 class VocabView:
     """What the compatibility rule reads from one model's vocabulary.
-    ``vocab_type`` is only compared for equality."""
+    ``vocab_type`` is only compared for equality. ``add_bos`` / ``add_eos``
+    are None when they are not known."""
     vocab_type: object
     n_tokens: int
-    add_bos: bool
-    add_eos: bool
+    add_bos: Optional[bool]
+    add_eos: Optional[bool]
     bos: int
     eos: int
     text: Callable[[int], bytes]
@@ -55,12 +87,16 @@ def draft_vocab_mismatch(target: VocabView, draft: VocabView) -> Optional[str]:
     The two must have the same vocabulary type; the same add-BOS and add-EOS
     flags, and the same BOS / EOS id where it is added; sizes at most
     DRAFT_VOCAB_SIZE_MAX_DIFFERENCE apart; and the same token text for every id
-    from DRAFT_VOCAB_CHECK_START_ID up to the smaller size."""
-    if target.vocab_type != draft.vocab_type:
+    from DRAFT_VOCAB_CHECK_START_ID up to the smaller size. A ``vocab_type``
+    or flag that is None on either side skips that comparison (for a flag,
+    its id's too)."""
+    if None not in (target.vocab_type, draft.vocab_type) and target.vocab_type != draft.vocab_type:
         return "vocab-type %s != %s" % (draft.vocab_type, target.vocab_type)
-    if target.add_bos != draft.add_bos or (target.add_bos and target.bos != draft.bos):
+    if None not in (target.add_bos, draft.add_bos) and (
+            target.add_bos != draft.add_bos or (target.add_bos and target.bos != draft.bos)):
         return "bos differs"
-    if target.add_eos != draft.add_eos or (target.add_eos and target.eos != draft.eos):
+    if None not in (target.add_eos, draft.add_eos) and (
+            target.add_eos != draft.add_eos or (target.add_eos and target.eos != draft.eos)):
         return "eos differs"
     if abs(target.n_tokens - draft.n_tokens) > DRAFT_VOCAB_SIZE_MAX_DIFFERENCE:
         return "vocab size %d vs %d" % (draft.n_tokens, target.n_tokens)
@@ -97,18 +133,52 @@ def draft_role_refusal(path) -> Optional[str]:
     return None
 
 
+def draft_metadata_refusal(target_path, draft_path) -> Optional[tuple[str, str]]:
+    """``(status, detail)`` when the GGUF metadata of *draft_path* already shows
+    it cannot draft for the model at *target_path*, else None: status
+    "draft-unsupported-role" (``draft_role_refusal``), "draft-rewind-unsupported"
+    (recurrent-state layers) or "draft-vocab-mismatch" (``draft_vocab_mismatch``
+    on the two files' ``gguf_vocab_view``). None when the metadata cannot be
+    read. Never raises."""
+    from pathlib import Path
+
+    from localm.debuglog import logger
+    try:
+        from localm.model_manager.gguf import gguf_recurrent_state_bytes, gguf_vocab_signature
+        role = draft_role_refusal(draft_path)
+        if role is not None:
+            return "draft-unsupported-role", role
+        if gguf_recurrent_state_bytes(Path(draft_path)) > 0:
+            return "draft-rewind-unsupported", "the draft model has recurrent layers"
+        if target_path is None:
+            return None
+        target = gguf_vocab_signature(Path(target_path))
+        draft = gguf_vocab_signature(Path(draft_path))
+        if target is None or draft is None:
+            return None
+        mismatch = draft_vocab_mismatch(gguf_vocab_view(target), gguf_vocab_view(draft))
+        if mismatch is not None:
+            return "draft-vocab-mismatch", mismatch
+        return None
+    except Exception as exc:
+        logger.debug("draft-model metadata check failed (%s)", type(exc).__name__)
+        return None
+
+
 def gguf_vocab_view(signature: dict) -> VocabView:
-    """The VocabView of a GGUF's ``gguf_vocab_signature``. A flag the file
-    does not carry reads as False and an id it does not carry as -1."""
+    """The VocabView of a GGUF's ``gguf_vocab_signature``. ``add_bos`` and
+    ``add_eos`` are None, as the GGUF metadata alone does not determine
+    them. An id the file does not carry reads as -1, and token text is cut at
+    its first NUL, as the native view reads it."""
     tokens = signature["tokens"]
     return VocabView(
         vocab_type=signature.get("model"),
         n_tokens=len(tokens),
-        add_bos=bool(signature.get("add_bos")),
-        add_eos=bool(signature.get("add_eos")),
+        add_bos=None,
+        add_eos=None,
         bos=-1 if signature.get("bos") is None else int(signature["bos"]),
         eos=-1 if signature.get("eos") is None else int(signature["eos"]),
-        text=lambda i: tokens[i].encode("utf-8"))
+        text=lambda i: tokens[i].encode("utf-8").split(b"\0", 1)[0])
 
 
 def native_vocab_view(api, model_ptr) -> VocabView:
@@ -145,11 +215,12 @@ class DraftModelSource(CountedSource):
     free_miss = False
 
     def __init__(self, llm, model_ptr, draft_max: int,
-                 n_threads: Optional[int] = None) -> None:
+                 n_threads: Optional[int] = None, on_gpu: bool = True) -> None:
         super().__init__(draft_max)
         self._llm_ref = weakref.ref(llm)
         self._model = model_ptr
         self._n_threads = n_threads
+        self.on_gpu = on_gpu
         self._ctx = None
         self._ctx_capacity = 0
         self._ctx_batch = 0
@@ -164,8 +235,9 @@ class DraftModelSource(CountedSource):
 
     def create_context(self, n_ctx: int, offload_kqv: bool) -> str:
         """(Re)create the draft context at *n_ctx* tokens with an empty cache.
-        Returns "" on success, else "draft-context-refused" (also when no
-        draft model is loaded)."""
+        The KV cache is offloaded only when *offload_kqv* and ``on_gpu`` are
+        both True. Returns "" on success, else "draft-context-refused" (also
+        when no draft model is loaded)."""
         from .llama import _greedy_chain, api
         self.free_context()
         model = self._model
@@ -175,7 +247,7 @@ class DraftModelSource(CountedSource):
         cp.n_ctx = n_ctx
         cp.n_batch = min(n_ctx, DRAFT_CONTEXT_BATCH)
         cp.n_ubatch = cp.n_batch
-        cp.offload_kqv = offload_kqv
+        cp.offload_kqv = offload_kqv and self.on_gpu
         if self._n_threads is not None:
             cp.n_threads = self._n_threads
             cp.n_threads_batch = self._n_threads

@@ -172,7 +172,13 @@ def test_tags_lists_registered_chat_and_embedding_models_only(client, home):
 def test_tags_survives_an_entry_whose_file_is_gone(client, home):
     _write_registry(home, {"ghost": {"path": str(home / "missing.gguf")}})
     ghost = {m["name"]: m for m in client.get("/api/tags").json()["models"]}["ghost"]
-    assert ghost["size"] == 0 and ghost["modified_at"] is None
+    assert ghost["size"] == 0 and ghost["modified_at"] == "1970-01-01T00:00:00Z"
+
+
+def test_show_of_an_entry_whose_file_is_gone_still_dates_it(client, home):
+    _write_registry(home, {"ghost": {"path": str(home / "missing.gguf")}})
+    body = client.post("/api/show", json={"model": "ghost"}).json()
+    assert body["modified_at"] == "1970-01-01T00:00:00Z"
 
 
 def test_ps_lists_only_loaded_models(client, engine):

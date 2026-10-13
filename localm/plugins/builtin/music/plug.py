@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 from localm.inference.http_server import principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
+from localm.media.native_models import apply_choice, check_request
 from localm.pathsafe import confined_file, confined_name
 from localm.selfclient import resolve_self_url
 from . import backend as _backend
@@ -56,6 +57,10 @@ class MusicRequest(BaseModel):
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
     # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
     model_overrides: dict[str, dict[str, str]] | None = None
+    # Native backend only: {component: registered name or "" for the default}
+    # laid over Settings > Music for this job (components: dit, text_encoder,
+    # vae, lm).
+    native_models: dict[str, str] | None = None
 
 
 class MoveFileRequest(BaseModel):
@@ -105,6 +110,7 @@ async def music(req: MusicRequest, request: Request):
     # keyless server too - see selfclient.self_request's docstring.
     instance_token = getattr(request.app.state, "instance_token", None)
 
+    native_choice, _ = check_request(req.native_models, None, "music")
     music_dir = _music_dir()
     music_dir.mkdir(parents=True, exist_ok=True)
     out_path = music_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.flac"
@@ -135,6 +141,7 @@ async def music(req: MusicRequest, request: Request):
             if refused:
                 job.push({"type": "line", "text": refused})
                 return False
+            s = apply_choice(s, native_choice)
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
         job.push({"type": "line", "text": msg})
@@ -448,6 +455,8 @@ def register(host) -> None:
     # to this plugin's capability.
     from localm.media_workflows import make_workflow_router, migrate_legacy_override
     host.mount_router(make_workflow_router("music"))
+    from localm.media.native_models import make_music_router
+    host.mount_router(make_music_router(_backend))
     # One-time: rescue any legacy personal override left INSIDE the package
     # (localm/music_gen/ace_workflow_local.json) into home/workflows, which
     # survives a self-update (the localm/ dir is whole-tree-replaced). No-op when absent.

@@ -304,6 +304,7 @@ def register(app: FastAPI, ctx) -> None:
                 seed=req.seed,
                 stop=req.stop,
                 thinking=thinking,
+                cache_prompt=False if req.cache_prompt is False else None,
                 tool_names=tool_names,
                 max_tool_calls=1 if tool_names and req.parallel_tool_calls is False else None,
                 logprobs=logprobs,
@@ -870,6 +871,7 @@ def register(app: FastAPI, ctx) -> None:
                 seed=req.seed,
                 stop=req.stop,
                 logprobs=n_logprobs,
+                cache_prompt=False if req.cache_prompt is False else None,
                 **sampling,
             )
             gen_kwargs: dict[str, Any] = {k: v for k, v in gen_kwargs.items()
