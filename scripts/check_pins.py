@@ -844,6 +844,43 @@ def _check_hf_file_digests(now):
                group=group, detail=f"{len(pins)} pinned digest(s) match what the hub serves")
 
 
+_HF_KERNEL_NAME = "finegrained-fp8 Hub kernel"
+
+
+def _check_hf_kernel(now):
+    """The commit pinned for the finegrained-fp8 Hub kernel against the commit its
+    kernel version points at now, and whether the pinned commit still exists."""
+    name, group = _HF_KERNEL_NAME, "models"
+    advancer = "by hand: read the version's commit from the kernel hub and update the pin"
+    worker = "localm/inference/backends/_hf_worker.py"
+    try:
+        repo = _read_const(worker, r'^FP8_KERNEL_REPO = "([^"]+)"')
+        version = _read_const(worker, r"^FP8_KERNEL_VERSION = (\d+)")
+        pinned = _read_const(worker, r'^FP8_KERNEL_REVISION = "([0-9a-f]{40})"')
+        base = f"https://huggingface.co/api/kernels/{repo}"
+        refs = _get_json(f"{base}/refs")
+        branches = {b.get("name"): b.get("targetCommit") for b in refs.get("branches", [])
+                    if isinstance(b, dict)} if isinstance(refs, dict) else {}
+        try:
+            _get_json(f"{base}/tree/{pinned}/build?recursive=false&expand=false")
+        except FetchError as e:
+            if e.status == 404:
+                return Row(name=name, status=INCONSISTENT, pinned=pinned[:12], advancer=advancer,
+                           group=group, detail="the pinned commit no longer exists on the kernel hub")
+            raise
+    except FetchError as e:
+        return _unknown(name, group, advancer, e)
+    current = branches.get(f"v{version}")
+    if current is None:
+        return Row(name=name, status=INCONSISTENT, pinned=pinned[:12], advancer=advancer, group=group,
+                   detail=f"the kernel hub has no v{version} branch of {repo}")
+    if current != pinned:
+        return Row(name=name, status=BEHIND, pinned=pinned[:12], latest=current[:12], advancer=advancer,
+                   group=group, detail=f"v{version} of {repo} now points at {current[:12]}")
+    return Row(name=name, status=CURRENT, pinned=pinned[:12], latest=current[:12], days=0,
+               advancer=advancer, group=group, detail=f"v{version} of {repo} is the pinned commit")
+
+
 # A pin that is stale for a known reason no automation can fix is reported as BLOCKED, with
 # the reason, until the expiry date; after it the row reads STALE again and has to be
 # decided afresh. name -> (expiry ISO date, reason).
@@ -918,6 +955,8 @@ def build_registry() -> list[PinSpec]:
         PinSpec("Linux CUDA runtime wheels", "cuda", "pin_weekly.py (review PR)", _check_cuda_runtime_wheels),
         PinSpec(_HF_PINS_NAME, "models", "by hand: re-read the digest on the hub and update the table",
                 _check_hf_file_digests),
+        PinSpec(_HF_KERNEL_NAME, "models", "by hand: read the version's commit from the kernel hub and update the pin",
+                _check_hf_kernel),
     ]
     for spec in _VENDORED:
         specs.append(PinSpec(f"vendored {spec[0]}", "vendored", _vendored_advancer(spec[0]),
