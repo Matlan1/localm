@@ -27,7 +27,9 @@ A test file is selected when any of these holds:
 
 A change to tests/conftest.py affects every test file. So does a change to
 pyproject.toml or uv.lock outside the [project] requirement lists, the
-[tool.ruff] and [tool.basedpyright] tables and the locked packages, either file missing or unparsable on either side, a listed
+[tool.ruff], [tool.basedpyright] and [tool.uv] tables, the lock's
+resolution-markers and supported-markers and the locked packages, either file
+missing or unparsable on either side, a listed
 pyproject.toml or uv.lock that does not differ from the base (a committed
 change named with --files), and a changed dependency the project declares
 outside the dev extra that the rules above reach no test file from. A changed
@@ -81,6 +83,8 @@ _EVERYTHING = {"tests/conftest.py"}
 _REEXPORT_FACADES = ("localm.setup_llama", "localm.bugreport")
 _DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
 _UNREAD_TOOL_TABLES = ("ruff", "basedpyright")
+_RESOLVER_TOOL_TABLES = ("uv",)
+_LOCK_FORK_KEYS = ("resolution-markers", "supported-markers")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
 # Modules whose callers import and patch the module itself, which re-exports the
@@ -306,10 +310,12 @@ def _requirements(pyproject: dict) -> dict[str, list[tuple[str, str]]] | None:
 
 
 def _pyproject_rest(pyproject: dict) -> dict:
-    """*pyproject* without the [project] requirement lists and the [tool.ruff]
-    tables, which no test reads."""
+    """*pyproject* without the [project] requirement lists, the tool tables no
+    test reads and the [tool.uv] table, whose effect on the locked packages
+    dependency_change() reads from the lock instead."""
     project = {k: v for k, v in pyproject.get("project", {}).items() if k not in _REQUIREMENT_KEYS}
-    tool = {k: v for k, v in pyproject.get("tool", {}).items() if k not in _UNREAD_TOOL_TABLES}
+    skipped = _UNREAD_TOOL_TABLES + _RESOLVER_TOOL_TABLES
+    tool = {k: v for k, v in pyproject.get("tool", {}).items() if k not in skipped}
     return {**pyproject, "project": project, "tool": tool}
 
 
@@ -362,8 +368,8 @@ def dependency_change(old_pyproject: str, new_pyproject: str, old_lock: str,
     req_old, req_new = _requirements(py_old), _requirements(py_new)
     if req_old is None or req_new is None or _pyproject_rest(py_old) != _pyproject_rest(py_new):
         return None
-    if ({k: v for k, v in lock_old.items() if k != "package"}
-            != {k: v for k, v in lock_new.items() if k != "package"}):
+    if ({k: v for k, v in lock_old.items() if k != "package" and k not in _LOCK_FORK_KEYS}
+            != {k: v for k, v in lock_new.items() if k != "package" and k not in _LOCK_FORK_KEYS}):
         return None
     project = dist_key(str(py_new.get("project", {}).get("name", "")))
     pkg_old, pkg_new = _lock_packages(lock_old, project), _lock_packages(lock_new, project)
