@@ -503,6 +503,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Thinking off on gpt-oss and Gemma 4.** Asking a model to answer without reasoning
+  (`chat_template_kwargs: {"enable_thinking": false}`, `reasoning_effort: "none"`, and the
+  summary written when a long conversation is compacted) now starts a gpt-oss reply in its
+  final channel, with no analysis before it, and a Gemma 4 reply after an empty thought
+  channel. Before, only models that reason in `<think>` blocks were affected.
+- **A llama runtime whose context-parameter layout cannot be told apart is refused.** When
+  a provided llama.cpp build's default context parameters fit both the layout with and the
+  one without the MoE expert cache field, loading stops with the ABI mismatch message
+  instead of assuming the older layout.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's
