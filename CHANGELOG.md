@@ -516,7 +516,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Plugins, Models and Settings show what they are waiting for.** The plugin catalog and external
   list show "Loading plugins", install, enable, disable, refresh, uninstall and remove buttons show
   their working state, "Check for updates" says it is checking, removing a model shows "Removing",
-  the Models page shows "Loading models" on first open, and Settings shows that its remaining
+  a model's info and relocate buttons show that they are working, the Models page and the
+  instances card show a loading line on first open, and Settings shows that its remaining
   sections are still loading.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
