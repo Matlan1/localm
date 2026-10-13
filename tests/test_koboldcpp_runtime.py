@@ -420,7 +420,7 @@ def test_another_model_under_a_default_name_is_not_used(tmp_path, monkeypatch):
         f"{models.DEFAULT_REPO}:{models.DEFAULT_FILES['text_encoder']}", distinct)
     pulled = []
 
-    def fake_pull(spec, name, say, cancel):
+    def fake_pull(spec, name, say, cancel, sha256=None):
         pulled.append((spec, name))
         target = _gguf_file(tmp_path / "pulled" / f"{name}.gguf", "acestep-text-enc")
         assert mm.add_local(str(target)) is True
@@ -432,6 +432,71 @@ def test_another_model_under_a_default_name_is_not_used(tmp_path, monkeypatch):
     assert pulled == [(f"{models.DEFAULT_REPO}:{models.DEFAULT_FILES['text_encoder']}",
                        distinct)]
     assert Path(ms.text_encoder).name == f"{distinct}.gguf"
+
+
+def test_every_default_file_has_a_pinned_commit_and_sha256():
+    from localm.media.koboldcpp import models
+    assert len(models.DEFAULT_REVISION) == 40 and int(models.DEFAULT_REVISION, 16) >= 0
+    assert set(models.DEFAULT_SHA256) == set(models.COMPONENTS)
+    for digest in models.DEFAULT_SHA256.values():
+        assert len(digest) == 64 and digest == digest.lower() and int(digest, 16) >= 0
+    assert len(set(models.DEFAULT_SHA256.values())) == len(models.COMPONENTS)
+
+
+def test_the_default_pull_passes_the_pinned_sha256_to_localm_pull(monkeypatch):
+    from localm.media.koboldcpp import models
+    seen = []
+
+    class FakeProc:
+        stdout = iter(())
+        returncode = 0
+
+        def __init__(self, argv, **kw):
+            seen.append(argv)
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(models.subprocess, "Popen", FakeProc)
+    models._pull("o/r:f.gguf", None, lambda s: None, lambda: False,
+                 models.DEFAULT_SHA256["dit"])
+    models._pull("o/r:g.gguf", "nm", lambda s: None, lambda: False)
+    assert seen[0][-3:] == ["--sha256", models.DEFAULT_SHA256["dit"], "--"] or         seen[0][-4:-1] == ["--sha256", models.DEFAULT_SHA256["dit"], "--"]
+    assert "--sha256" not in seen[1] and "--name" in seen[1]
+
+
+def test_resolve_models_pulls_each_missing_default_with_its_sha256(tmp_path, monkeypatch):
+    from localm.media.koboldcpp import models
+    pulled = {}
+
+    def fake_pull(spec, name, say, cancel, sha256=None):
+        pulled[spec.rsplit(":", 1)[-1]] = sha256
+
+    monkeypatch.setattr(models, "_pull", fake_pull)
+    monkeypatch.setattr(models, "find_default",
+                        lambda comp: tmp_path if models.DEFAULT_FILES[comp] in pulled else None)
+    models.resolve_models({}, use_lm=True, pull_missing=True)
+    assert pulled == {models.DEFAULT_FILES[c]: models.DEFAULT_SHA256[c]
+                      for c in models.COMPONENTS}
+
+
+def test_setup_music_downloads_pass_the_pinned_sha256(cli_runner, monkeypatch):
+    from localm import model_manager as mm
+    from localm.media.koboldcpp import models
+    from localm.media.koboldcpp.cli import main
+    monkeypatch.setattr(runtime, "platform_key", lambda: "windows")
+    monkeypatch.setattr(runtime, "ensure_for_backend",
+                        lambda *a, **k: SimpleNamespace(build="nocuda", path=Path("x")))
+    monkeypatch.setattr(models, "find_default", lambda comp: None)
+    calls = []
+    monkeypatch.setattr(mm, "pull_model",
+                        lambda spec, name=None, expected_sha256=None, **k:
+                        calls.append((spec, expected_sha256)) or False)
+    cli_runner.invoke(main, ["--backend", "cpu", "--no-test"])
+    assert calls
+    comp = models.COMPONENTS[0]
+    assert calls[0] == (f"{models.DEFAULT_REPO}:{models.DEFAULT_FILES[comp]}",
+                        models.DEFAULT_SHA256[comp])
 
 
 def test_a_free_default_name_is_pulled_under_its_usual_name():

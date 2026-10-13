@@ -35,6 +35,18 @@ DEFAULT_FILES = {
     "vae": "vae-BF16.gguf",
 }
 
+# Commit of DEFAULT_REPO the default files below were measured at.
+DEFAULT_REVISION = "666ac70204440867d8c01ba4b119cc79c95b370a"
+
+# component -> sha256 of its default file. A pull passes it as ``--sha256``, so
+# a file whose bytes differ is refused or deleted.
+DEFAULT_SHA256 = {
+    "lm": "bdaf9e292d4470f31c19cafeaca1b74936a114667e3a85e5d33b65247e9908ec",
+    "text_encoder": "972f23255e46adfe744a0eb9a0039f3c63988f65753b0968d776e8b27168c321",
+    "dit": "55b4d8514850f3d0f82536f37e99673aaf48df802b5ae5b153eea32a2e2daa5e",
+    "vae": "0599862ac5d15cd308e1d2e368373aea6c02e25ebd1737ad4a4562a0901b0ef8",
+}
+
 # component -> size in bytes of its default file.
 DEFAULT_SIZES = {
     "lm": 709846656,
@@ -152,12 +164,14 @@ def default_pull(component: str) -> tuple[str, Optional[str]]:
 
 
 def _pull(spec: str, name: Optional[str], on_progress: Progress,
-          cancel_check: CancelCheck) -> None:
+          cancel_check: CancelCheck, sha256: Optional[str] = None) -> None:
     from localm.model_manager._shared import PROGRESS_SENTINEL
     env = dict(os.environ, LOCALM_PROGRESS_JSON="1", HF_HUB_DISABLE_PROGRESS_BARS="1")
     argv = [sys.executable, "-X", "utf8", "-m", "localm", "pull"]
     if name:
         argv += ["--name", name]
+    if sha256:
+        argv += ["--sha256", sha256]
     proc = subprocess.Popen(
         argv + ["--", spec],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -245,7 +259,7 @@ def resolve_models(native_cfg: dict, *, use_lm: bool = True, pull_missing: bool 
             spec, name = default_pull(comp)
             say(f"Downloading the default music {_label(comp)} model "
                 f"({DEFAULT_FILES[comp]})...")
-            _pull(spec, name, say, cancelled)
+            _pull(spec, name, say, cancelled, DEFAULT_SHA256[comp])
             p = find_default(comp)
             if p is None:
                 raise ModelError(f"{spec} downloaded but is not in the model library as an "

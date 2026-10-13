@@ -730,7 +730,9 @@ class TestPullComfySource:
         kind, args, kw = harness.jobs.cli_calls[0]
         assert kind == "pull"
         assert args == ["pull", "--type", "diffusion-unet", "--comfy-dest-dir", str(dest),
-                        "--no-register", "--", "city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf"]
+                        "--no-register", "--sha256",
+                        "129032f32224bf7138f16e18673d8008ba5f84c1ec74063bf4511a8bb4cf553d",
+                        "--", "city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf"]
         assert kw["host_label"] == "Model pull city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf"
 
     def test_an_unknown_plugin_selector_falls_back_to_no_plugin(self, harness, monkeypatch, tmp_path):

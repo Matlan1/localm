@@ -125,6 +125,7 @@ def status(s: dict) -> dict:
             missing.append({"component": comp, "file": models.DEFAULT_FILES[comp],
                             "repo": models.DEFAULT_REPO, "spec": spec, "name": name,
                             "size_bytes": models.DEFAULT_SIZES[comp],
+                            "sha256": models.DEFAULT_SHA256[comp],
                             "model_type": models.REGISTRY_TYPES[comp]})
     return {"runtime": {"choice": choice, "backend": backend, "build": build,
                         "installed": installed},
