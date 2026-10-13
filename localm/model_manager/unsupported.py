@@ -95,6 +95,9 @@ _LEGACY_GGML_MAGICS = {
     b"tjgg": ("GGJT", "legacy llama.cpp"),
     b"fmgg": ("GGMF", "legacy llama.cpp"),
     b"lmgg": ("GGML", "legacy ggml"),
+    b"algg": ("GGLA", "legacy llama.cpp LoRA adapter"),
+    b"nsgg": ("GGSN", "llama.cpp session"),
+    b"qsgg": ("GGSQ", "llama.cpp sequence state"),
 }
 
 
@@ -102,7 +105,9 @@ def legacy_ggml_refusal(path: Path) -> Optional[str]:
     """The reason a lone ``.bin`` file with a pre-GGUF magic cannot be run, or
     None for any other file, including a ``.bin`` beside a ``config.json`` (a
     shard of a HuggingFace folder). The bare ``ggml`` magic is shared by early
-    llama.cpp models and whisper.cpp models, so its sentence names both."""
+    llama.cpp models and whisper.cpp models, so its sentence names both. The
+    ``ggla`` magic is a pre-GGUF LoRA adapter; ``ggsn`` and ``ggsq`` are
+    llama.cpp saved session and sequence-state files, which hold no weights."""
     if path.suffix.lower() != ".bin" or not path.is_file():
         return None
     if (path.parent / "config.json").exists():
@@ -121,6 +126,14 @@ def legacy_ggml_refusal(path: Path) -> Optional[str]:
                 "llama.cpp and by whisper.cpp). localm loads GGUF, not GGML. For a "
                 "language model, use a GGUF of the same model; a whisper.cpp speech "
                 "model cannot be run from this file.")
+    if fmt == "GGLA":
+        return ("This is a LoRA adapter in the old GGLA format, from before GGUF "
+                "adapters. localm attaches LoRA adapters only as GGUF. Convert the "
+                "original adapter with llama.cpp's convert_lora_to_gguf.py, or use a "
+                "GGUF adapter.")
+    if fmt in ("GGSN", "GGSQ"):
+        return ("This is a llama.cpp saved session file (cached prompt state), not a "
+                "model. Point localm at the model's own .gguf file instead.")
     return (f"This is a {who} model in the old {fmt} format, from before GGUF. "
             "localm loads GGUF only. Use a GGUF of the same model.")
 
@@ -161,21 +174,54 @@ _UNSUPPORTED_QUANT_METHODS = {
     "exl3": ("EXL3", "ExLlamaV3"),
 }
 
+# ``quantization_config.quant_method`` values the bundled transformers loader maps
+# to a quantizer (``AUTO_QUANTIZATION_CONFIG_MAPPING``), plus ``bitsandbytes``,
+# which the loader resolves to its 4-bit or 8-bit entry from ``load_in_4bit`` /
+# ``load_in_8bit``. Any other string names a format the loader skips, reading the
+# packed weights as plain ones.
+_LOADER_QUANT_METHODS = frozenset({
+    "aqlm", "auto-round", "awq", "bitnet", "bitsandbytes", "bitsandbytes_4bit",
+    "bitsandbytes_8bit", "compressed-tensors", "eetq", "fbgemm_fp8", "fouroversix",
+    "fp8", "fp_quant", "gemma", "gptq", "higgs", "hqq", "metal", "mxfp4", "mxfp8",
+    "quanto", "quark", "sinq", "spqr", "torchao", "vptq",
+})
+
+_QUANT_METHOD_NAME_MAX = 40
+
+
+def _quant_method_label(method: str) -> str:
+    """*method* as shown in a sentence: itself when short and made of name
+    characters, else a generic phrase."""
+    if (0 < len(method) <= _QUANT_METHOD_NAME_MAX
+            and all(c.isalnum() or c in "_-." for c in method)):
+        return f"'{method}'"
+    return "an unrecognised method"
+
 
 def unsupported_quant_method_refusal(config: dict) -> Optional[str]:
     """The reason a HuggingFace folder with this ``config.json`` uses a
-    quantization only another runtime can load, or None. Named methods only: any
-    other ``quant_method`` is left to the loader."""
+    quantization localm cannot load, or None. EXL2 and EXL3 get a sentence naming
+    the runtime that does run them; any other ``quant_method`` string the loader
+    has no quantizer for gets a sentence naming the method. A config without a
+    non-empty string ``quant_method``, or one flagged ``load_in_4bit`` /
+    ``load_in_8bit``, gets no verdict."""
     qconf = config.get("quantization_config")
     if not isinstance(qconf, dict):
         return None
     method = qconf.get("quant_method")
-    named = _UNSUPPORTED_QUANT_METHODS.get(method.lower()) if isinstance(method, str) else None
-    if named is None:
+    if (not isinstance(method, str) or not method.strip()
+            or qconf.get("load_in_4bit") or qconf.get("load_in_8bit")):
         return None
-    label, runtime = named
-    return (f"This model is quantized with {label}, a format only {runtime} can run, "
-            f"so localm cannot load it. {_ALTERNATIVE}")
+    named = _UNSUPPORTED_QUANT_METHODS.get(method.lower())
+    if named is not None:
+        label, runtime = named
+        return (f"This model is quantized with {label}, a format only {runtime} can run, "
+                f"so localm cannot load it. {_ALTERNATIVE}")
+    if method in _LOADER_QUANT_METHODS:
+        return None
+    return (f"This model is quantized with {_quant_method_label(method)}, a method the "
+            "Hugging Face loader localm uses does not support, so its packed weights "
+            f"cannot be read. {_ALTERNATIVE}")
 
 
 def mistral_native_refusal(folder: Path) -> Optional[str]:
@@ -224,6 +270,22 @@ def hf_folder_refusal(folder: Path) -> Optional[str]:
     return mlx_quantized_refusal(config) or unsupported_quant_method_refusal(config)
 
 
+# Suffixes whose sentence is given only for a binary file: a text file with the
+# name of a TensorRT engine or a MediaPipe bundle is neither.
+_BINARY_ONLY_SUFFIXES = frozenset({".engine", ".plan", ".task"})
+_BINARY_SNIFF_BYTES = 4096
+
+
+def _looks_binary(path: Path) -> bool:
+    """True when the first bytes of *path* contain a NUL byte. False for an empty
+    or unreadable file."""
+    try:
+        with open(path, "rb") as fh:
+            return b"\0" in fh.read(_BINARY_SNIFF_BYTES)
+    except OSError:
+        return False
+
+
 # Extension -> sentence for a file pointed at directly.
 _FILE_SUFFIX_EXPLANATIONS = {
     ".onnx": ("An .onnx file is an ONNX model, which needs an ONNX runtime; localm "
@@ -266,7 +328,10 @@ def explain_unsupported_model(path: Path) -> Optional[str]:
             legacy = legacy_ggml_refusal(path)
             if legacy is not None:
                 return legacy
-            return _FILE_SUFFIX_EXPLANATIONS.get(path.suffix.lower())
+            suffix = path.suffix.lower()
+            if suffix in _BINARY_ONLY_SUFFIXES and not _looks_binary(path):
+                return None
+            return _FILE_SUFFIX_EXPLANATIONS.get(suffix)
         if path.is_dir():
             for marker, sentence in _FOLDER_MARKER_EXPLANATIONS:
                 if (path / marker).is_file():

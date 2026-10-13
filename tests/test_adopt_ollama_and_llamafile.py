@@ -164,6 +164,44 @@ class TestOllamaProjector:
         assert "no vision projector attached" in capsys.readouterr().out
 
 
+class TestOllamaSingleManifestProjector:
+    def _folder(self, root: Path) -> Path:
+        return root / "manifests" / "registry.ollama.ai" / "library" / "llava"
+
+    def _vision(self, tmp_path, projector: bytes) -> Path:
+        root = tmp_path / "ollama"
+        model = _blob(root, _gguf(tag="vision"))
+        proj = _blob(root, projector)
+        _manifest(root, "registry.ollama.ai/library/llava/latest",
+                  [_layer(_MODEL, model), _layer(_PROJECTOR, proj)])
+        return root
+
+    def test_gguf_projector_layer_is_attached(self, tmp_path, isolated_home):
+        proj = _gguf(arch="clip", tag="proj")
+        root = self._vision(tmp_path, proj)
+        assert add_local(str(self._folder(root))) is True
+        entry = load_registry()["llava-latest"]
+        expect = (root / "blobs" / f"sha256-{hashlib.sha256(proj).hexdigest()}").resolve()
+        assert Path(entry["mmproj"]) == expect
+
+    def test_projector_layer_that_is_not_a_projector_is_left_out(self, tmp_path, isolated_home, capsys):
+        root = self._vision(tmp_path, _gguf(arch="llama", tag="notproj"))
+        assert add_local(str(self._folder(root))) is True
+        assert "mmproj" not in load_registry()["llava-latest"]
+        assert "No vision projector attached" in capsys.readouterr().out
+
+    def test_a_model_without_a_projector_layer_registers_without_one(self, tmp_path, isolated_home):
+        root = _store(tmp_path, ("registry.ollama.ai/library/llava/latest", _gguf(tag="plain")))
+        assert add_local(str(self._folder(root))) is True
+        assert "mmproj" not in load_registry()["llava-latest"]
+
+    def test_copy_brings_the_projector_into_the_models_folder(self, tmp_path, isolated_home):
+        root = self._vision(tmp_path, _gguf(arch="clip", tag="proj"))
+        assert add_local(str(self._folder(root)), store="copy") is True
+        entry = load_registry()["llava-latest"]
+        assert Path(entry["mmproj"]).parent == (isolated_home / "models").resolve()
+
+
 class TestOllamaSharedBlob:
     def test_the_tag_with_a_projector_keeps_it_when_another_tag_shares_the_model(self, tmp_path, isolated_home):
         root = tmp_path / "ollama"
