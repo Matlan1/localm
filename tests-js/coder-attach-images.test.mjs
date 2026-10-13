@@ -10,7 +10,7 @@ function boot() {
     fetchImpl: async (url, opts = {}) => {
       const u = String(url);
       calls.push({ url: u, opts });
-      const body = u === "/api/rag/extract"
+      const body = u === "/api/chat/extract"
         ? { filename: "notes.txt", text: "hello", chars: 5, truncated: false }
         : {};
       return {
@@ -22,7 +22,7 @@ function boot() {
   return { window, calls };
 }
 
-const extractCalls = (calls) => calls.filter((c) => c.url === "/api/rag/extract");
+const extractCalls = (calls) => calls.filter((c) => c.url === "/api/chat/extract");
 
 test("coder attach: an image is refused client-side with an accurate message", async () => {
   const { window, calls } = boot();
@@ -35,7 +35,7 @@ test("coder attach: an image is refused client-side with an accurate message", a
       return true;
     });
   }
-  assert.deepEqual(extractCalls(calls), [], "no image reached /api/rag/extract");
+  assert.deepEqual(extractCalls(calls), [], "no image reached /api/chat/extract");
 });
 
 test("coder attach: a text file still goes through extraction", async () => {
