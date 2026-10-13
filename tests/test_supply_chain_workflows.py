@@ -146,3 +146,87 @@ def test_scorecard_shape_accepted_for_publishing():
     triggers = _triggers(doc)
     assert triggers["push"]["branches"] == ["master"]
     assert "schedule" in triggers
+
+
+def _compare_script() -> str:
+    step = next(s for s in _steps(_load("release-attest.yml"), "build")
+                if s.get("name") == "Compare the built files with PyPI")
+    return step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+
+def _run_compare(tmp_path, monkeypatch, capsys, *, event, pypi_hashes, built=b"built"):
+    """Execute the compare step's script against a stubbed PyPI listing."""
+    import hashlib
+    import io
+    import json
+    import runpy
+    import time
+    import urllib.error
+    import urllib.request
+
+    out = tmp_path / "out"
+    out.mkdir()
+    names = ("localm-9.9.9.tar.gz", "localm-9.9.9-py3-none-any.whl")
+    for name in names:
+        (out / name).write_bytes(built)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VERSION", "9.9.9")
+    monkeypatch.setenv("EVENT", event)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+
+    def fake_urlopen(url, timeout=0):
+        if pypi_hashes is None:
+            raise urllib.error.URLError("offline")
+        body = {"urls": [{"filename": n, "digests": {"sha256": h}}
+                         for n, h in pypi_hashes.items()]}
+        return io.StringIO(json.dumps(body))
+
+    class _Ctx(io.StringIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Ctx(fake_urlopen(*a, **k).getvalue()))
+    code = 0
+    try:
+        script = tmp_path / "compare.py"
+        script.write_text(_compare_script(), encoding="utf-8")
+        runpy.run_path(str(script), run_name="__main__")
+    except SystemExit as exc:
+        code = exc.code or 0
+    return code, capsys.readouterr().out, hashlib.sha256(built).hexdigest(), names
+
+
+def test_release_attest_fails_a_release_whose_pypi_file_differs(tmp_path, monkeypatch, capsys):
+    names = ("localm-9.9.9.tar.gz", "localm-9.9.9-py3-none-any.whl")
+    code, out, _built, _ = _run_compare(tmp_path, monkeypatch, capsys, event="release",
+                                        pypi_hashes={n: "0" * 64 for n in names})
+    assert code == 1
+    assert "::error::" in out
+
+
+def test_release_attest_passes_a_release_whose_pypi_files_match(tmp_path, monkeypatch, capsys):
+    import hashlib
+    good = hashlib.sha256(b"built").hexdigest()
+    names = ("localm-9.9.9.tar.gz", "localm-9.9.9-py3-none-any.whl")
+    code, out, _built, _ = _run_compare(tmp_path, monkeypatch, capsys, event="release",
+                                        pypi_hashes={n: good for n in names})
+    assert code == 0
+    assert out.count("byte-identical") == 2
+
+
+def test_release_attest_does_not_fail_a_dry_run_on_a_difference(tmp_path, monkeypatch, capsys):
+    names = ("localm-9.9.9.tar.gz", "localm-9.9.9-py3-none-any.whl")
+    code, out, _built, _ = _run_compare(tmp_path, monkeypatch, capsys, event="workflow_dispatch",
+                                        pypi_hashes={n: "0" * 64 for n in names})
+    assert code == 0
+    assert "::error::" not in out and "differs" in out
+
+
+def test_release_attest_warns_rather_than_passing_when_pypi_cannot_be_read(tmp_path, monkeypatch, capsys):
+    code, out, _built, _ = _run_compare(tmp_path, monkeypatch, capsys, event="release",
+                                        pypi_hashes=None)
+    assert code == 0
+    assert out.count("::warning::") == 2

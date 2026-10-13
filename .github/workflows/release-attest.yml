@@ -84,7 +84,8 @@ jobs:
       - name: Build sdist and wheel
         run: |
           set -euo pipefail
-          uvx --from "build==1.6.1" pyproject-build --outdir out/
+          python -m pip install --require-hashes --no-deps -r .github/requirements/build.txt
+          python -m build --no-isolation --outdir out/
           test -f "out/localm-${VERSION}.tar.gz"
           test -f "out/localm-${VERSION}-py3-none-any.whl"
 
@@ -144,22 +145,37 @@ jobs:
       - name: Compare the built files with PyPI
         run: |
           python - <<'PY'
-          import hashlib, json, os, pathlib, urllib.error, urllib.request
+          import hashlib, json, os, pathlib, time, urllib.error, urllib.request
           version = os.environ["VERSION"]
-          try:
-              with urllib.request.urlopen(f"https://pypi.org/pypi/localm/{version}/json", timeout=30) as r:
-                  published = {u["filename"]: u["digests"]["sha256"] for u in json.load(r)["urls"]}
-          except urllib.error.URLError as exc:
-              print(f"::notice::PyPI comparison skipped: {exc}")
-              raise SystemExit(0)
-          for name in (f"localm-{version}.tar.gz", f"localm-{version}-py3-none-any.whl"):
+          gate = os.environ["EVENT"] == "release"
+          names = (f"localm-{version}.tar.gz", f"localm-{version}-py3-none-any.whl")
+          url = f"https://pypi.org/pypi/localm/{version}/json"
+          attempts = 10 if gate else 1
+          published = {}
+          for attempt in range(attempts):
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as r:
+                      published = {u["filename"]: u["digests"]["sha256"] for u in json.load(r)["urls"]}
+              except urllib.error.URLError as exc:
+                  published = {}
+                  print(f"::notice::PyPI listing unavailable (attempt {attempt + 1}/{attempts}): {exc}")
+              if all(name in published for name in names):
+                  break
+              if attempt + 1 < attempts:
+                  time.sleep(30)
+          mismatched = []
+          for name in names:
               built = hashlib.sha256(pathlib.Path("out", name).read_bytes()).hexdigest()
               if name not in published:
-                  print(f"::notice::{name} is not on PyPI yet")
+                  level = "warning" if gate else "notice"
+                  print(f"::{level}::{name} is not on PyPI, so it could not be compared")
               elif published[name] == built:
                   print(f"::notice::{name} is byte-identical to the PyPI file")
               else:
-                  print(f"::notice::{name} differs from the PyPI file (built {built}, PyPI {published[name]})")
+                  mismatched.append(name)
+                  print(f"::{'error' if gate else 'notice'}::{name} differs from the PyPI file (built {built}, PyPI {published[name]})")
+          if gate and mismatched:
+              raise SystemExit(1)
           PY
 
       - name: List the files to attest
