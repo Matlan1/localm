@@ -6,7 +6,7 @@
 import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
-import { t, tOr } from "../app/i18n.js";
+import { t, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
 import { nativeModelSelect } from "../app/native-models.js";
@@ -211,6 +211,20 @@ function settingsFieldCatalogKey(fieldKey) {
   return fieldKey.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
 }
 
+/** A field's label or help (`part`) from the catalog. A field that sets
+ *  `catalog_scopes` (media and tts fields, whose plain keys are shared with
+ *  other plugins' fields) looks up only `settings.field.<scope>.<key>.<part>`
+ *  for each scope in order; any other field uses `settings.field.<key>.<part>`.
+ *  Falls back to the server-supplied text. */
+function fieldCatalogText(field, part, fallback) {
+  const ck = settingsFieldCatalogKey(field.key);
+  const scopes = field.catalog_scopes;
+  const keys = scopes && scopes.length
+    ? scopes.map(s => `settings.field.${s}.${ck}.${part}`)
+    : [`settings.field.${ck}.${part}`];
+  return tOrFirst(keys, fallback);
+}
+
 /** Build one labelled control for a schema field. Returns { field, read } or
  *  null for HIDDEN fields (never rendered). */
 let _settingControlSeq = 0;
@@ -234,7 +248,7 @@ export function buildSettingControl(field) {
   const wrap = el("div");
   wrap.dataset.fieldKey = field.key;   // so cross-field wiring can find a control
   const label = el("label", "",
-    tOr(`settings.field.${settingsFieldCatalogKey(field.key)}.label`, field.label || field.key));
+    fieldCatalogText(field, "label", field.label || field.key));
   label.title = field.key;
   let statusTag = null;
   if (field.widget === "secret") {
@@ -472,7 +486,7 @@ export function buildSettingControl(field) {
       };
       wrap.appendChild(list);
       wrap.appendChild(add);
-      if (field.help) wrap.appendChild(el("div", "sub", tOr(`settings.field.${settingsFieldCatalogKey(field.key)}.help`, field.help)));
+      if (field.help) wrap.appendChild(el("div", "sub", fieldCatalogText(field, "help", field.help)));
       return { field, node: wrap, read, write };
     }
     case "textarea": {   // free-form multi-line (e.g. the default system prompt)
@@ -608,7 +622,7 @@ export function buildSettingControl(field) {
   } else {
     wrap.appendChild(input);
   }
-  if (field.help) wrap.appendChild(el("div", "sub", tOr(`settings.field.${settingsFieldCatalogKey(field.key)}.help`, field.help)));
+  if (field.help) wrap.appendChild(el("div", "sub", fieldCatalogText(field, "help", field.help)));
   // The server port: show the LIVE bound port when it is known and differs
   // from the persisted default above (an explicit -p override, or an
   // auto-bump onto a different free port never gets written back to disk).
@@ -2469,7 +2483,7 @@ export async function buildTtsSection(form) {
       if (labels) labels.unshift("(inherit)");
     }
     const ctrl = buildSettingControl({
-      key: f.key, widget, label: f.label, help: f.help,
+      key: f.key, widget, label: f.label, help: f.help, catalog_scopes: ["tts"],
       default: f.value, options, min: f.min, max: f.max, step: f.step,
       is_set: f.is_set, is_override: f.is_override, env_set: f.env_set,
     });
@@ -3359,6 +3373,7 @@ export function renderMediaSubsection(name) {
   for (const f of (fields || [])) {
     const ctrl = buildSettingControl({
       key: f.key, widget: f.widget, label: f.label, help: f.help,
+      catalog_scopes: [name, "media"],
       default: f.value, options: f.options,
       is_set: f.is_set, is_override: f.is_override, env_set: f.env_set,
     });

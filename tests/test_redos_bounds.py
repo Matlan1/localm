@@ -851,6 +851,30 @@ def test_marker_variant_rescan_budget_keeps_cost_linear_not_quadratic():
         "full rescans")
 
 
+@pytest.mark.parametrize("runner", ["generator", "parse_tool_calls"])
+def test_marker_variant_stays_linear_when_every_marker_balances_but_none_closes(runner):
+    """The branch the witnesses above never reach: every marker's brace scan
+    SUCCEEDS (``("<tool_call>{" * n) + ("}" * n)`` balances from each marker) and
+    no closing marker follows, so the scan restarts one character later with no
+    rescan budget spent. A ratio, so it holds on a loaded box: 4x the input must
+    cost far less than 16x."""
+    def run(n):
+        text = ("<tool_call>{" * n) + ("}" * n)
+        if runner == "generator":
+            return list(_iter_marker_variant_calls(text))
+        return parse_tool_calls(text)
+
+    small_n, big_n = 1_500, 6_000
+    _, small_cpu = _timed_cpu(run, small_n)
+    calls, big_cpu = _timed_cpu(run, big_n)
+    assert calls == []
+    ratio = big_cpu / max(small_cpu, 1e-6)
+    assert ratio < 8.0 or big_cpu < 0.25, (
+        f"a {big_n // small_n}x input increase cost {ratio:.1f}x more CPU time "
+        f"({small_cpu:.3f}s -> {big_cpu:.3f}s): the scan from every marker that "
+        "balances is quadratic")
+
+
 # --------------------------------------------------------------------------- #
 #  gbnf.TOOL_CALL_TRIGGER - the lazy-grammar trigger                          #
 #                                                                             #

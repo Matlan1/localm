@@ -1050,7 +1050,9 @@ class _LoopMixin:
         try:
             from ..review_guard import classify_sensitive_changes, render_warning
             message = render_warning(classify_sensitive_changes(self.changed_files()))
-        except Exception:
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("sensitive-changes notice skipped: %r", e)   # See test_classify_sensitive_changes_tolerates_malformed_entries.
             return ""
         if not message:
             return ""
@@ -1078,8 +1080,9 @@ class _LoopMixin:
             from ..review_guard import classify_sensitive_changes, render_reviewer_note
             sensitive_note = render_reviewer_note(
                 classify_sensitive_changes(self.changed_files()))
-        except Exception:
-            pass
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("sensitive-changes reviewer note skipped: %r", e)   # See test_classify_sensitive_changes_tolerates_malformed_entries.
         result = self._reviewer.review(diff, self._review_task, sensitive_note=sensitive_note)
         warning = self._reviewer.failure_warning(result)
         if warning:

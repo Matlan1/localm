@@ -326,7 +326,12 @@ this section states the security properties and, more importantly, their edges.
   HuggingFace search, the vision-projector, voice, embedding-model, browser-build
   and TTS model fetches. It never applies to model-initiated access (the
   coder's `fetch_url` and `web_search`, chat web access), which stays governed
-  by `net_mode` alone. Nothing else opts out of `off`.
+  by `net_mode` alone. Some paths never consult `net_mode` at all: the
+  bug-report upload (sent only when you press Send), requests to your
+  configured ComfyUI (see *What it does not cover* above), and the native
+  runtime downloads (`localm setup-llama` and the native image and music
+  runtimes). Nothing else opts out of `off`; the issues list is refused under
+  it.
 - **Private-address guard.** Requests to loopback, link-local, CGNAT and
   private ranges are refused, and the check is re-applied to the resolved
   address rather than the name. It classifies by ADDRESS TYPE, so a service

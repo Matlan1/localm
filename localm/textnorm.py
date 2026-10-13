@@ -47,14 +47,33 @@ _THINK_BARE_OPEN_RE = re.compile(
 _THINK_BARE_CLOSE_RE = re.compile(
     r"<\s{0,4}/\s{0,4}(?:reasoning|thinking|thought|reflection)\s{0,4}>", re.IGNORECASE)
 
+# Markers that scrub to nothing wherever they sit. A turn-open marker followed by
+# one of these is left for the next pass, so the role word the marker owns is
+# adjacent to it once the inert marker is gone.
+_INERT_AHEAD = (
+    r"<\|\s{0,4}channel\s{0,4}\|?>(?!thought|thinking|analysis|reasoning|commentary"
+    r"|reflection|final)"
+    r"|<\s{0,4}channel\s{0,4}>(?!thought|thinking|analysis|reasoning|commentary"
+    r"|reflection|final)"
+    r"|<\|?\s{0,4}message\s{0,4}\|?>"
+    r"|<\|return\|>"
+    r"|<\|end\|>"
+    r"|<turn\|>"
+    r"|<\|tool>|<tool\|>"
+    r"|<\|think\|>|<think\|>"
+    r"|<unused\d{1,8}>?"
+    r"|\[TOOL_CALLS\]"
+    r"|<\|start_header_id\|>(?:user|model|assistant|system|tool|ipython)?<\|end_header_id\|>"
+)
+
 _MARKER_RE = re.compile(
     r"<\|?\s{0,4}channel\s{0,4}\|?>"                                  # leftover channel tag
     r"|<\s{0,4}channel\s{0,4}\|>"                                     # leftover gemma4 close
     r"|<\|?\s{0,4}message\s{0,4}\|?>"                                 # stray harmony separator
-    r"|<\|start\|>(assistant|user|system)?"
+    r"|<\|start\|>(?:(?:assistant|user|system)|(?!" + _INERT_AHEAD + r"))"
     r"|<\|return\|>"
     r"|<\|end\|>"                                              # harmony message end
-    r"|<\|turn>(user|model|assistant|system)?\n?"            # Gemma 4 turn open
+    r"|<\|turn>(?:(?:user|model|assistant|system)\n?|(?!" + _INERT_AHEAD + r")\n?)"  # Gemma 4 turn open
     r"|<turn\|>"                                              # Gemma 4 turn close
     # <|tool_call> / <|tool_response> are not scrubbed: the coder agent parses
     # them out of this same stream.
@@ -67,8 +86,8 @@ _MARKER_RE = re.compile(
     # the head of the reply. The matching turn-CLOSE markers are not listed
     # here: the backend handles those as stop strings, ending the turn rather
     # than editing the text.
-    r"|<start_of_turn>(?:user|model|assistant|system|tool)?\n?"   # Gemma 1-3 turn open
-    r"|<\|im_start\|>(?:user|model|assistant|system|tool)?\n?"    # ChatML turn open
+    r"|<start_of_turn>(?:(?:user|model|assistant|system|tool)\n?|(?!" + _INERT_AHEAD + r")\n?)"
+    r"|<\|im_start\|>(?:(?:user|model|assistant|system|tool)\n?|(?!" + _INERT_AHEAD + r")\n?)"
     r"|<\|start_header_id\|>"
     r"(?:user|model|assistant|system|tool|ipython)?"
     r"<\|end_header_id\|>\n?"                                 # Llama 3 role header
@@ -104,15 +123,49 @@ _SCRUB_RE = re.compile("|".join(
 _SCRUB_REPLACEMENTS = {f"s{i}": replacement
                        for i, (_rx, replacement) in enumerate(_SCRUB_SUBS)}
 
+# The same alternation with every turn-open marker matched bare, as one marker
+# pass matched it before a turn-open marker waited out the inert markers after
+# it. ScrubMap maps this one pass.
+_ONE_PASS_RE = re.compile(_SCRUB_RE.pattern.replace("(?!" + _INERT_AHEAD + ")", ""))
+
+
+_MAX_SCRUB_PASSES = 32
+
+
+def _scrub_once(text: str) -> str:
+    return _SCRUB_RE.sub(lambda m: _SCRUB_REPLACEMENTS[m.lastgroup], text)
+
 
 def scrub_text(text: str) -> str:
-    """Apply marker normalisation/removal to a complete text chunk."""
-    return _SCRUB_RE.sub(lambda m: _SCRUB_REPLACEMENTS[m.lastgroup], text)
+    """Apply marker normalisation/removal to a complete text chunk.
+
+    Repeats the single marker pass until the text stops changing, so removing a
+    marker that sat inside another one (``<|start_header_id|><|message|>
+    <|end_header_id|>``) also removes the marker it exposed, and the result is
+    a fixed point. Gives up after ``_MAX_SCRUB_PASSES`` passes and logs a
+    warning; the text returned then still holds markers nested that deep."""
+    for _ in range(_MAX_SCRUB_PASSES):
+        out = _scrub_once(text)
+        if out is text or out == text:
+            return out
+        text = out
+    from localm.debuglog import logger
+    logger.warning(
+        "scrub_text still changed the text after %d passes; markers nested that "
+        "deep were left in the reply", _MAX_SCRUB_PASSES)
+    return text
 
 
 class ScrubMap:
     """Where each part of :func:`scrub_text`'s output came from, for a text
     that only grows.
+
+    Maps one marker pass in which a turn-open marker is matched bare. For a text
+    that needs another pass (a marker nested inside another marker, or a
+    turn-open marker followed by inert markers and then its role word) the
+    spans rebuild the first pass's output, which differs from
+    :func:`scrub_text`'s; LogprobAligner then refuses the reply with
+    LogprobAlignmentError instead of aligning against the wrong text.
 
     :meth:`spans` takes the text so far (each call's text must extend the
     previous call's) and returns ``(src_start, src_end, out_start, out_end,
@@ -135,7 +188,7 @@ class ScrubMap:
             return self._spans
         tail: list[tuple[int, int, int, int, Optional[str]]] = []
         src, out = self._src, self._out
-        for m in _SCRUB_RE.finditer(text, src):
+        for m in _ONE_PASS_RE.finditer(text, src):
             if m.start() > src:
                 tail.append((src, m.start(), out, out + m.start() - src, None))
                 out += m.start() - src
@@ -226,6 +279,8 @@ def _prefix_fits(items: list, s: str, k: int) -> bool:
         return _char_in_class(s[k], av, ignorecase) and _prefix_fits(rest, s, k + 1)
     if op == c.BRANCH:
         return any(_prefix_fits(_tagged(alt, ignorecase) + rest, s, k) for alt in av[1])
+    if op == c.ASSERT_NOT:
+        return _prefix_fits(rest, s, k)
     if op == c.SUBPATTERN:
         _group, add_flags, _del_flags, sub = av
         inner = ignorecase or bool(add_flags & re.IGNORECASE)
@@ -472,6 +527,22 @@ def _commit_point(buf: str) -> int:
     return cut
 
 
+def _scrub_released(chunk: str) -> Optional[str]:
+    """``scrub_text(chunk)``, or None when text that follows *chunk* could still
+    change it: the end of the text is held back (:func:`_commit_point`) before
+    the first marker pass or after any pass, as a marker removed in one pass can
+    leave the end of the text open to a marker in the next."""
+    text = chunk
+    for _ in range(_MAX_SCRUB_PASSES):
+        if _commit_point(text) < len(text):
+            return None
+        out = _scrub_once(text)
+        if out is text or out == text:
+            return out
+        text = out
+    return scrub_text(chunk)
+
+
 def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     """Normalise/remove internal model markers in a text stream.
 
@@ -494,10 +565,12 @@ def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
         cut = _commit_point(buf)
         if cut <= 0:
             continue
-        chunk = buf[:cut]
+        chunk, counted, flooded = _cut_marker_flood(buf[:cut], seen)
+        out = scrub_text(chunk) if flooded else _scrub_released(chunk)
+        if out is None:
+            continue
         buf = buf[cut:]
-        chunk, seen, flooded = _cut_marker_flood(chunk, seen)
-        out = scrub_text(chunk)
+        seen = counted
         if out:
             yield out
         if flooded:

@@ -79,6 +79,13 @@ export function tOr(key, fallback, params) {
   return hasKey(key) ? t(key, params) : fallback;
 }
 
+/** The translation of the first key in `keys` the catalog carries, else
+ *  fallback verbatim (no console.warn, as for tOr). */
+export function tOrFirst(keys, fallback) {
+  for (const key of keys) if (hasKey(key)) return t(key);
+  return fallback;
+}
+
 /** The CLDR plural category `count` selects in the active language. Falls back
  *  to the English one/other split where Intl.PluralRules is unavailable. */
 export function pluralCategory(count) {

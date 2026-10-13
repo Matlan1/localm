@@ -137,6 +137,25 @@ def _conv_meta(p: Path) -> dict:
     return dict(meta)
 
 
+_UNREADABLE_LOGGED: set = set()
+
+
+def _log_unreadable(p: Path, err: Exception) -> None:
+    """Warn once per (file, mtime, size) that a chat file could not be listed.
+    The conversation id and error type are logged, never the title or body."""
+    try:
+        st = p.stat()
+        key = (str(p), st.st_mtime, st.st_size)
+    except OSError:
+        key = (str(p), None, None)
+    if key in _UNREADABLE_LOGGED:
+        return
+    _UNREADABLE_LOGGED.add(key)
+    from localm.debuglog import logger
+    logger.warning("chat store: conversation %s is unreadable and not listed (%s)",
+                   p.stem, type(err).__name__)
+
+
 @_router.get("/api/conversations")
 async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0):
     """List conversations newest-first.
@@ -146,11 +165,16 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
     GUI sidebar uses this and lazy-loads each conversation's messages on open via
     ``GET /api/conversations/{id}``. ``limit``/``offset`` paginate. With no
     params, returns the full payload capped at 200 items.
+
+    A chat file that cannot be read or parsed is left out of ``conversations``
+    and ``total`` and its id is listed in ``unreadable``; a warning naming the
+    id is logged once per file version.
     """
     if not _persist_enabled():
         return {"enabled": False, "conversations": []}
     chats_dir = _home() / "chats"
     rows = []
+    unreadable: list[str] = []
     if chats_dir.is_dir():
         for p in chats_dir.glob("*.json"):
             try:
@@ -160,8 +184,10 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
                     data = json.loads(p.read_text(encoding="utf-8"))
                     data["id"] = p.stem
                     rows.append(data)
-            except Exception:
-                continue   # corrupt file - skip, never block the list
+            except Exception as e:
+                unreadable.append(p.stem)
+                _log_unreadable(p, e)
+    unreadable.sort()
     rows.sort(key=lambda c: c.get("updated_at", 0), reverse=True)
     total = len(rows)
     if limit and limit > 0:
@@ -170,7 +196,8 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
         rows = rows[offset:]
     else:
         rows = rows[:200]   # default cap when unpaginated
-    return {"enabled": True, "conversations": rows, "total": total}
+    return {"enabled": True, "conversations": rows, "total": total,
+            "unreadable": unreadable}
 
 
 @_router.get("/api/conversations/{conv_id}")

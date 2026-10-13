@@ -105,6 +105,70 @@ def test_crlf_preserved():
     assert "\r\n" in result
 
 
+_ONE_LINE_EDIT = "@@ -1,1 +1,1 @@\n-a = 1\n+a = 2\n"
+
+
+@pytest.mark.parametrize("sep", [
+    "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ",
+])
+def test_unicode_line_separators_outside_the_hunk_are_untouched(sep):
+    original = f'a = 1\nb = "x{sep}y"\nc = 3\n'
+    assert apply_diff(original, _ONE_LINE_EDIT) == f'a = 2\nb = "x{sep}y"\nc = 3\n'
+
+
+@pytest.mark.parametrize("sep", ["\x0c", " ", "\x85"])
+def test_unicode_line_separator_inside_a_context_line_still_matches(sep):
+    original = f"a = 1\nb = x{sep}y\nc = 3\n"
+    diff = f"@@ -1,3 +1,3 @@\n-a = 1\n+a = 2\n b = x{sep}y\n c = 3\n"
+    assert apply_diff(original, diff) == f"a = 2\nb = x{sep}y\nc = 3\n"
+
+
+def test_mixed_endings_outside_the_hunk_are_untouched():
+    original = "a = 1\r\nb = 2\nc = 3\r\nd = 4\n"
+    assert apply_diff(original, _ONE_LINE_EDIT) == "a = 2\r\nb = 2\nc = 3\r\nd = 4\n"
+
+
+def test_mixed_endings_a_replaced_line_keeps_its_own_terminator():
+    original = "a = 1\nb = 2\r\nc = 3\n"
+    diff = "@@ -2,1 +2,1 @@\n-b = 2\n+b = 9\n"
+    assert apply_diff(original, diff) == "a = 1\nb = 9\r\nc = 3\n"
+
+
+def test_lone_cr_endings_are_preserved():
+    original = "a = 1\rb = 2\rc = 3\r"
+    assert apply_diff(original, _ONE_LINE_EDIT) == "a = 2\rb = 2\rc = 3\r"
+
+
+def test_inserted_lines_take_the_terminator_of_the_line_above():
+    original = "a = 1\r\nb = 2\r\n"
+    diff = "@@ -1,1 +1,3 @@\n a = 1\n+x\n+y\n"
+    assert apply_diff(original, diff) == "a = 1\r\nx\r\ny\r\nb = 2\r\n"
+
+
+def test_appending_after_an_unterminated_last_line_adds_a_separator():
+    diff = "@@ -2,1 +2,2 @@\n b\n+c\n"
+    assert apply_diff("a\nb", diff) == "a\nb\nc"
+    assert apply_diff("a\r\nb", diff) == "a\r\nb\r\nc"
+
+
+def test_untouched_bytes_are_identical_across_a_multi_hunk_edit():
+    original = (
+        "head\x0c\r\n"
+        "one\n"
+        "mid dle\r\n"
+        "two\n"
+        "tail\x85\n"
+    )
+    diff = "@@ -2,1 +2,1 @@\n-one\n+ONE\n@@ -4,1 +4,1 @@\n-two\n+TWO\n"
+    assert apply_diff(original, diff) == (
+        "head\x0c\r\n"
+        "ONE\n"
+        "mid dle\r\n"
+        "TWO\n"
+        "tail\x85\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 #  Fuzzy matching
 # ---------------------------------------------------------------------------
@@ -215,3 +279,10 @@ DIFF_PY = """\
 def test_realistic_python_patch():
     result = apply_diff(ORIGINAL_PY, DIFF_PY)
     assert result == PATCHED_PY
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+def test_trailing_blank_lines_survive_an_edit(eol):
+    original = eol.join(["a", "b", "", ""])
+    diff = "@@ -2,1 +2,1 @@\n-b\n+B\n"
+    assert apply_diff(original, diff) == eol.join(["a", "B", "", ""])

@@ -355,7 +355,11 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         fn=tool_read_env,
         description=(
             "Read the project's .env file and active environment variables. "
-            "Secret-looking values (keys, tokens, passwords) are redacted."
+            "Values are redacted when the variable name looks secret (key, token, "
+            "password, ...) or the value holds a recognised credential (a URL "
+            "password, an API key or token); home paths and the account name are "
+            "removed. A secret in an unrecognised format under an ordinary name "
+            "is not detected."
         ),
         params={
             "path": {"type": "string", "description": "Optional env-format file to read instead of .env", "required": False},

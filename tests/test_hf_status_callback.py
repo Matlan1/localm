@@ -129,6 +129,79 @@ def _fake_hf_child_with_status(r, stop, *, statuses: list[str], tokens: list[str
         return
 
 
+def _fake_hf_child_refusing(r, stop, *, tag: str):
+    while not stop.is_set():
+        try:
+            cmd = r._req_q.get(timeout=0.05)
+        except Exception:
+            continue
+        if cmd[0] != "chat_stream":
+            continue
+        r._resp_q.put(("error", "over the image limit", tag))
+        return
+
+
+class TestHFImageLimitCrossesTheWorkerBoundary:
+    def test_parent_reraises_the_image_limit_tag_as_its_type(self):
+        from localm.inference.backends.base import ImageLimitError
+
+        r = _make_hf_runner()
+        stop = threading.Event()
+        child = threading.Thread(target=_fake_hf_child_refusing, args=(r, stop),
+                                 kwargs=dict(tag="ImageLimitError"), daemon=True)
+        child.start()
+        try:
+            with pytest.raises(ImageLimitError, match="over the image limit"):
+                list(r.chat_stream(messages=[]))
+        finally:
+            stop.set()
+            child.join(2)
+
+    def test_child_tags_an_image_limit_and_keeps_serving(self, monkeypatch):
+        import queue
+
+        from localm.inference.backends import _hf_runner, _hf_worker
+        from localm.inference.backends.base import ImageLimitError
+
+        monkeypatch.setattr(_hf_runner, "prepare_worker_process", lambda: None)
+
+        class _Worker:
+            supports_images = True
+            processor_error = None
+            can_embed = False
+            resolved_device = "cpu"
+            last_finish_reason = "stop"
+
+            def __init__(self, **payload):
+                pass
+
+            def load(self):
+                return None
+
+            def chat_stream(self, cancel_event=None, on_status=None, **payload):
+                raise ImageLimitError("over the image limit")
+
+            def count_tokens(self, text):
+                return 7
+
+            def unload(self):
+                pass
+
+        monkeypatch.setattr(_hf_worker, "HFWorker", _Worker)
+        req_q, resp_q, ctrl_q = queue.Queue(), queue.Queue(), queue.Queue()
+        req_q.put(("load", {}))
+        req_q.put(("chat_stream", {"messages": []}, 1))
+        req_q.put(("count_tokens", "x"))
+        req_q.put(None)
+        try:
+            _hf_runner._runner_main(req_q, resp_q, ctrl_q)
+        finally:
+            ctrl_q.put(None)
+        assert resp_q.get_nowait()[0] == "ok"
+        assert resp_q.get_nowait() == ("error", "over the image limit", "ImageLimitError")
+        assert resp_q.get_nowait() == ("ok", 7)
+
+
 class TestHFRunnerChatStreamRelaysStatus:
     def test_relays_status_before_chunks(self):
         r = _make_hf_runner()
@@ -304,7 +377,7 @@ class TestHFWorkerChatStreamCallsOnStatus:
             "localm.inference.backends._hf_worker._grammar_processor",
             lambda *a, **k: None)
         monkeypatch.setattr(
-            "localm.inference.media.decode_image_url", lambda url: object())
+            "localm.inference.media.decode_image_url", lambda url, budget=None: object())
 
         model, tokenizer = _fake_model_and_tokenizer()
         processor = MagicMock()
@@ -331,6 +404,47 @@ class TestHFWorkerChatStreamCallsOnStatus:
         assert received == [
             "Encoding image...", "Processing prompt...", "Generating response...",
         ]
+
+    def test_images_past_the_request_count_limit_are_refused(self, monkeypatch):
+        pytest.importorskip("transformers", exc_type=ImportError)
+        import base64
+        import io
+
+        import transformers
+        from PIL import Image
+
+        from localm.inference import media
+        from localm.inference.backends.base import VisionInputError
+
+        monkeypatch.setattr(transformers, "TextIteratorStreamer", _FakeStreamer)
+        monkeypatch.setattr(
+            "localm.inference.backends._hf_worker._grammar_processor",
+            lambda *a, **k: None)
+        monkeypatch.setattr(media, "MAX_REQUEST_IMAGES", 2)
+        decoded: list = []
+        real_decode = media.decode_image_url
+
+        def recording_decode(url, budget=None):
+            decoded.append(budget)
+            return real_decode(url, budget=budget)
+
+        monkeypatch.setattr(media, "decode_image_url", recording_decode)
+
+        buf = io.BytesIO()
+        Image.new("RGB", (4, 4)).save(buf, format="PNG")
+        uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        part = {"type": "image_url", "image_url": {"url": uri}}
+
+        model, tokenizer = _fake_model_and_tokenizer()
+        worker = _make_hf_worker(
+            model, tokenizer, processor=MagicMock(), is_multimodal=True)
+        messages = [{"role": "user", "content": [part, part]},
+                    {"role": "user", "content": [part]}]
+        with pytest.raises(VisionInputError, match="more than 2 images"):
+            list(worker.chat_stream(messages))
+        assert len(decoded) == 3
+        assert decoded[0] is not None
+        assert all(b is decoded[0] for b in decoded)
 
     def test_no_status_fires_for_a_text_only_multimodal_capable_model(self, monkeypatch):
         # A model whose processor CAN see images gets no "Encoding image..."

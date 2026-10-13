@@ -184,7 +184,9 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
     Precedence: LOCALM_MODE env (set by --mode flags) > (coder only, when *cwd* is
     given) a project-local ``.localcoder/config.toml`` ``mode`` > per-surface
     config key ("chat_mode" / "coder_mode") > global config "mode" > privacy.
-    Invalid values fall through to the next level rather than crashing.
+    Invalid values fall through to the next level rather than crashing. With
+    *cwd*, a project config that exists but cannot be read or parsed, or a
+    project directory that cannot be searched for one, resolves to privacy.
     """
     env = os.environ.get(MODE_ENV_VAR, "").strip().lower()
     if env in _VALID_MODES:
@@ -206,8 +208,10 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
             # to privacy rather than write a transcript for a session that may
             # have been marked private.
             return SessionMode.PRIVACY
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("could not look for a project config under %s (%s); "
+                           "using privacy mode", cwd, e)
+            return SessionMode.PRIVACY
 
     try:
         from localm.config import load_config

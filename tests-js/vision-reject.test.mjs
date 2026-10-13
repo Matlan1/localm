@@ -11,8 +11,10 @@ import { loadApp } from "./harness.mjs";
 
 const IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg";
 
-/** A fetch that 400s the FIRST /v1/chat/completions (the image) then 200s. */
-function visionRejectFetch() {
+/** A fetch that answers the FIRST /v1/chat/completions (the image) with
+ *  *status* and *detail*, then 200s. */
+function visionRejectFetch(status = 400,
+  detail = "This model has no vision support; remove the image.") {
   const calls = [];
   let chatCalls = 0;
   const impl = async (url, opts = {}) => {
@@ -22,8 +24,7 @@ function visionRejectFetch() {
     if (String(url) === "/v1/chat/completions") {
       chatCalls += 1;
       if (chatCalls === 1) {
-        return { ok: false, status: 400, json: async () => ({}),
-          text: async () => "This model has no vision support; remove the image." };
+        return { ok: false, status, json: async () => ({}), text: async () => detail };
       }
       return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
     }
@@ -41,8 +42,8 @@ function imageConv() {
   ] };
 }
 
-async function setup() {
-  const { impl, calls } = visionRejectFetch();
+async function setup(status, detail) {
+  const { impl, calls } = visionRejectFetch(status, detail);
   const { window } = loadApp({ fetchImpl: impl });
   window.maybeCompactConversation = async () => {};
   window.readSSE = async (_r, onData) => {
@@ -86,4 +87,15 @@ test("VIS-1: the chat is recoverable - the next turn sends no image and answers"
   assert.equal(reSentImage, false, "the recovered turn re-sends no image");
   assert.ok(conv.messages.some((m) => m.role === "assistant" &&
     /ask me anything/.test(String(m.content))), "the model's reply is saved");
+});
+
+test("a 413 image-limit refusal keeps the conversation's images", async () => {
+  const { window } = await setup(413,
+    "The request attaches more than 64 images; send at most 64.");
+  const conv = imageConv();
+  await window.runCompletion(conv);
+
+  assert.equal(window.msgImages(conv.messages[0]).length, 1,
+    "the image stays in history");
+  assert.doesNotMatch(JSON.stringify(conv.messages[0].content), /\[Image removed/);
 });

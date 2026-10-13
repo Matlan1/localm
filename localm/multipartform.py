@@ -101,13 +101,17 @@ def _too_large(limit: int) -> str:
 
 
 async def read_form(request, *, max_bytes: int,
-                    too_large: Optional[str] = None) -> Form:
+                    too_large: Optional[str] = None,
+                    max_parts: int = MAX_FIELDS,
+                    max_field_bytes: int = MAX_FIELD_BYTES) -> Form:
     """Read and parse a multipart/form-data request body of at most
-    ``max_bytes`` bytes (``too_large`` replaces the 413 text). Raises
-    ``MultipartError``."""
+    ``max_bytes`` bytes (``too_large`` replaces the 413 text). ``max_parts``
+    and ``max_field_bytes`` override the default part-count and non-file
+    field-size caps. Raises ``MultipartError``."""
     boundary = boundary_of(request.headers.get("content-type", ""))
     body = await read_limited_body(request, max_bytes, too_large)
-    return parse_multipart(body, boundary)
+    return parse_multipart(body, boundary, max_parts=max_parts,
+                           max_field_bytes=max_field_bytes)
 
 
 def _delimiter_pattern(delim: bytes) -> re.Pattern[bytes]:
@@ -144,14 +148,16 @@ def _clean_filename(raw: str) -> str:
     return base[:MAX_FILENAME_CHARS]
 
 
-def parse_multipart(body: bytes, boundary: bytes) -> Form:
+def parse_multipart(body: bytes, boundary: bytes, *,
+                    max_parts: int = MAX_FIELDS,
+                    max_field_bytes: int = MAX_FIELD_BYTES) -> Form:
     """Parse a complete multipart/form-data body.
 
     Part data is taken byte-exact: only the single CRLF that precedes the next
     delimiter is removed, so binary content ending in CR or LF is preserved.
     Raises ``MultipartError`` (400) for a body that is not well-formed multipart
-    and (413) for a non-file field larger than ``MAX_FIELD_BYTES`` or a form with
-    more than ``MAX_FIELDS`` parts."""
+    and (413) for a non-file field larger than ``max_field_bytes`` or a form with
+    more than ``max_parts`` parts."""
     delim = b"--" + boundary
     delimiter = _delimiter_pattern(delim)
     if body.startswith(delim):
@@ -183,13 +189,15 @@ def parse_multipart(body: bytes, boundary: bytes) -> Form:
             raise MultipartError(
                 400, "The multipart body is truncated (no closing boundary).")
         parts += 1
-        if parts > MAX_FIELDS:
-            raise MultipartError(413, f"Too many form fields (max {MAX_FIELDS}).")
-        _store_part(form, _parse_headers(header_block), body[data_start:nxt])
+        if parts > max_parts:
+            raise MultipartError(413, f"Too many form fields (max {max_parts}).")
+        _store_part(form, _parse_headers(header_block), body[data_start:nxt],
+                    max_field_bytes)
         pos = nxt + 2
 
 
-def _store_part(form: Form, headers: Message, data: bytes) -> None:
+def _store_part(form: Form, headers: Message, data: bytes,
+                max_field_bytes: int = MAX_FIELD_BYTES) -> None:
     disposition = headers.get("content-disposition", "")
     if headers.get_content_disposition() != "form-data" or not disposition:
         raise MultipartError(
@@ -206,7 +214,7 @@ def _store_part(form: Form, headers: Message, data: bytes) -> None:
             if headers.get("content-type") else "application/octet-stream",
             data=data))
         return
-    if len(data) > MAX_FIELD_BYTES:
+    if len(data) > max_field_bytes:
         raise MultipartError(
-            413, f"Form field {name!r} is too large (max {MAX_FIELD_BYTES // 1024} KB).")
+            413, f"Form field {name!r} is too large (max {max_field_bytes // 1024} KB).")
     form.fields.setdefault(name, []).append(data.decode("utf-8", "replace"))
