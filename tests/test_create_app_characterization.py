@@ -686,7 +686,8 @@ def test_docs_and_debug_stacks_follow_app_state_bind_host(bind_host, served):
     stacks = client.get("/debug/stacks", headers=_shell_auth(app))
     if served:
         assert stacks.status_code == 200
-        assert set(stacks.json()) == {"pid", "loop_lag_s", "threads", "tasks", "executors"}
+        assert set(stacks.json()) == {"pid", "loop_lag_s", "threads", "tasks", "executors",
+                                      "executors_error"}
         assert client.get("/debug/stacks").status_code == 403
     else:
         assert (stacks.status_code, stacks.json()) == (404, {"detail": "Not Found"})

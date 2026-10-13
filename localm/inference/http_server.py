@@ -312,7 +312,10 @@ def _current_gpu_index() -> int:
         from localm.discover import last_gpu_reading, resolve_load_gpu_index
         return resolve_load_gpu_index(load_config(), gpus=last_gpu_reading() or [],
                                       quiet=True)
-    except Exception:
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("could not resolve the load GPU index, assuming device 0: %s",
+                     e, exc_info=True)
         return 0
 
 
@@ -2717,6 +2720,7 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
     def _run() -> None:
         fh = None
         last_dump = None
+        write_failed = False
         try:
             while not stop.wait(poll):
                 if _hb_monotonic is None:
@@ -2763,9 +2767,16 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
                             fh.write(f"\n--- thread {tid} ---\n")
                             fh.write("".join(traceback.format_stack(frame)))
                     fh.flush()
-                except Exception:
+                except Exception as e:
                     # The watchdog must never crash the process it is diagnosing.
-                    pass
+                    if not write_failed:
+                        write_failed = True
+                        try:
+                            from localm.debuglog import logger as _dbg
+                            _dbg.warning("hang watchdog: could not write the stall "
+                                         "trace to %s: %s", trace_path, e)
+                        except Exception:
+                            pass
         finally:
             if fh is not None:
                 try:
