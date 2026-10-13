@@ -29,27 +29,39 @@ def info_output(monkeypatch):
     return run
 
 
-def _line(output: str, label: str) -> str:
-    for line in output.splitlines():
-        if line.strip().startswith(label + " "):
-            return line
-    raise AssertionError(f"no {label!r} line in: {output!r}")
+def _squash(text: str) -> str:
+    return "".join(text.split())
+
+
+def _row(output: str, label: str) -> str:
+    """The ``localm info`` row labelled *label*, with the console's wrapping and
+    padding removed: the label line and the lines after it up to the next row."""
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == label or line.strip().startswith(label + " "):
+            rest = []
+            for follow in lines[i + 1:]:
+                if not follow.strip() or follow.startswith("  "):
+                    break
+                rest.append(follow)
+            return _squash(line + "".join(rest))
+    raise AssertionError(f"no {label!r} row in: {output!r}")
 
 
 class TestInfoPortableReport:
     def test_standard_install_reports_standard_and_system_temp(self, info_output, tmp_path):
         out = info_output(tmp_path / "data")
-        assert "standard" in _line(out, "mode")
-        assert "system temp folder" in _line(out, "temp dir")
+        assert _squash("standard") in _row(out, "mode")
+        assert _squash("system temp folder") in _row(out, "temp dir")
 
     def test_portable_install_reports_portable_and_data_tmp(self, info_output):
         home = _REPO_ROOT / "portable-info-probe"
         out = info_output(home)
-        assert "portable" in _line(out, "mode")
-        assert str(home / "tmp") in _line(out, "temp dir")
+        assert _squash("portable") in _row(out, "mode")
+        assert _squash(str(home / "tmp")) in _row(out, "temp dir")
 
     def test_temp_dir_override_is_reported(self, info_output, monkeypatch, tmp_path):
         override = tmp_path / "scratch"
         monkeypatch.setenv(config.TEMP_DIR_ENV, str(override))
         out = info_output(tmp_path / "data")
-        assert str(override) in _line(out, "temp dir")
+        assert _squash(str(override)) in _row(out, "temp dir")
