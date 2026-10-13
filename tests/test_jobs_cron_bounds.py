@@ -57,7 +57,7 @@ def test_full_enumeration_fits_under_the_cap():
     " " * 100_000 + "0 0 1 1 0",                 # whitespace pad, 5 valid fields
     "0," * 50_000 + "0 * * * *",                 # comma flood, minute set is {0}
     " " * (MAX_CRON_EXPR_CHARS - 8) + "0 0 1 1 0",   # one past the cap
-])
+], ids=["whitespace-pad", "comma-flood", "one-past-cap"])
 def test_overlong_cron_is_refused_at_the_write(expr):
     assert len(expr) > MAX_CRON_EXPR_CHARS
     with pytest.raises(ValueError, match="character limit") as ei:

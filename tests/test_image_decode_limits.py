@@ -96,7 +96,7 @@ def test_pixel_limit_boundary(monkeypatch):
 
 
 @pytest.mark.parametrize("fmt,mime", [
-    ("JPEG", "image/jpeg"), ("WEBP", "image/webp"), ("GIF", "image/gif"),
+    ("JPEG", "image/jpeg"), ("MPO", "image/jpeg"), ("WEBP", "image/webp"), ("GIF", "image/gif"),
     ("BMP", "image/bmp"), ("TIFF", "image/tiff"),
 ])
 def test_allowed_formats_decode(fmt, mime):
@@ -111,6 +111,11 @@ def test_ico_is_refused_without_decoding_its_pixels(load_calls):
     with pytest.raises(ImageLimitError, match="not in a supported format"):
         decode_image_url(_data_uri(raw, "image/x-icon"))
     assert load_calls["n"] == 0
+
+
+def test_bytes_no_format_recognises_keep_pillows_own_error():
+    with pytest.raises(Image.UnidentifiedImageError):
+        decode_image_url(_data_uri(b"not an image at all"))
 
 
 def test_pillow_decompression_bomb_is_an_image_limit_error(monkeypatch):

@@ -33,7 +33,7 @@ MAX_REQUEST_IMAGES = 64
 MAX_REQUEST_IMAGE_PIXELS = 800_000_000
 # Formats decoded. Each one's open reads only the header, so the size check
 # runs before any pixel data is decoded.
-IMAGE_FORMATS = ("PNG", "JPEG", "MPO", "WEBP", "GIF", "BMP", "TIFF")
+IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF")
 
 
 class ImageBudget:
@@ -66,6 +66,17 @@ class ImageBudget:
                 "pixels; send fewer or smaller images.")
 
 
+def _other_known_format(Image, raw: bytes) -> bool:
+    """True when a Pillow format outside ``IMAGE_FORMATS`` recognises the first
+    bytes of *raw*. Reads only that prefix; opens nothing."""
+    Image.init()
+    prefix = raw[:16]
+    for fmt, (_factory, accept) in Image.OPEN.items():
+        if fmt not in IMAGE_FORMATS and accept is not None and accept(prefix):
+            return True
+    return False
+
+
 def _open_bounded(Image, raw: bytes, budget: ImageBudget | None):
     """*raw* decoded by the ``PIL.Image`` module *Image* to an RGB image, after
     its declared size has been checked against ``MAX_IMAGE_PIXELS`` and
@@ -78,6 +89,8 @@ def _open_bounded(Image, raw: bytes, budget: ImageBudget | None):
         raise ImageLimitError(
             f"The attached image is too large to decode: {e}") from e
     except Image.UnidentifiedImageError as e:
+        if not _other_known_format(Image, raw):
+            raise
         raise ImageLimitError(
             "The attached image is not in a supported format "
             f"({', '.join(IMAGE_FORMATS)}).") from e
