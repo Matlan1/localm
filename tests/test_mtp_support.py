@@ -1242,6 +1242,59 @@ def test_auto_ctx_max_shrinks_the_budget_by_the_mtp_draft_context():
         f"({ctx_on} vs {ctx_off}) as one that reserves nothing for it")
 
 
+def test_auto_ctx_max_leaves_room_for_the_draft_kv_at_the_ceiling():
+    """The MTP draft context grows with the main one, so at the auto-sized
+    ceiling the main KV, the draft KV for every token of it and the draft
+    context's fixed part all fit the budget the ceiling was derived from."""
+    kv, draft_kv, model = 50_000, 12_000, 1 * 1024 ** 3
+    b = _mtp_sizing_backend(n_ctx=4096, ctx_auto=True)
+    b._model_bytes = lambda: model
+    b._kv_bytes_per_token = lambda: kv
+    free = model + GgufBackend._VRAM_OVERHEAD_BYTES + 2_000_000_000
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)), \
+         patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+               return_value=draft_kv), \
+         _mtp_vram_levels(free, free):
+        ceiling = b._auto_ctx_max(capped=False)
+        fixed = b._mtp_draft_context_vram_bytes() - b.n_ctx * draft_kv
+    assert fixed == GgufBackend._VRAM_OVERHEAD_BYTES
+    from localm.inference.backends.llamacpp._sizing import embedder_ctx_reservation_bytes
+    budget = (free - model - b._split_overhead_bytes(1) - embedder_ctx_reservation_bytes()
+              - b._recurrent_state_vram_bytes())
+    need = ceiling * (kv + draft_kv) + fixed
+    assert need <= budget, (
+        f"the auto ceiling {ceiling} needs {need} bytes with its draft KV, "
+        f"over the {budget}-byte budget it was sized from")
+    assert (ceiling + 1024) * (kv + draft_kv) + fixed > budget, (
+        f"the auto ceiling {ceiling} leaves a whole 1024-token step unused")
+
+
+@pytest.mark.parametrize("on_gpu", [True, False])
+def test_auto_ctx_max_leaves_room_for_a_gpu_draft_models_kv_at_the_ceiling(on_gpu):
+    """A draft model on the GPU has its own KV cache sized to the main context:
+    its KV per token joins the main one at the ceiling, and its weights and
+    buffers come off the budget once. On the CPU it charges nothing."""
+    kv, draft_kv, model = 50_000, 9_000, 1 * 1024 ** 3
+    draft_fixed = 300 * 1024 ** 2
+    b = _mtp_sizing_backend(mtp_enabled=False, n_ctx=4096, ctx_auto=True)
+    b.spec_source = "draft"
+    b.draft_model_on_gpu = on_gpu
+    b._model_bytes = lambda: model
+    b._kv_bytes_per_token = lambda: kv
+    b._draft_model_charge_bytes = lambda: draft_fixed + b.n_ctx * draft_kv
+    b._draft_kv_per_token_cached = draft_kv
+    free = model + GgufBackend._VRAM_OVERHEAD_BYTES + 2_000_000_000
+    with _mtp_vram_levels(free, free):
+        ceiling = b._auto_ctx_max(capped=False)
+    from localm.inference.backends.llamacpp._sizing import embedder_ctx_reservation_bytes
+    budget = (free - model - b._split_overhead_bytes(1) - embedder_ctx_reservation_bytes()
+              - b._recurrent_state_vram_bytes())
+    per_token, fixed = (kv + draft_kv, draft_fixed) if on_gpu else (kv, 0)
+    assert ceiling * per_token + fixed <= budget
+    assert (ceiling + 1024) * per_token + fixed > budget
+
+
 def test_auto_gpu_layers_offloads_fewer_when_mtp_will_allocate_a_draft_context():
     """End to end, through the real gate: an MTP-enabled, MTP-eligible load
     reserves the draft context's VRAM before deciding how many layers fit, so
