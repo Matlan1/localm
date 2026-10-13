@@ -880,7 +880,10 @@ class _DraftPacer:
     does not decide anything and every accepted draft counts. While
     speculating, one step in every ``probe_every`` (every ``bootstrap_every``
     until there are ``min_samples`` plain figures) runs plain so the plain
-    figure stays current. When both sides have ``min_samples`` figures and
+    figure stays current. Each plain figure recorded while speculation costs
+    at most ``clear_margin`` of the plain cost per token doubles that interval,
+    up to ``max_probe_every``; any other plain figure sets it back to
+    ``probe_every``. When both sides have ``min_samples`` figures and
     speculation is the slower one, ``speculate`` answers False for the next
     ``pause_steps`` steps, doubling on each consecutive pause up to
     ``max_pause_steps``; speculation is measured afresh after a pause.
@@ -888,8 +891,12 @@ class _DraftPacer:
 
     def __init__(self, probe_every: int = 24, bootstrap_every: int = 3,
                  min_samples: int = 6, window: int = 16, pause_steps: int = 32,
-                 max_pause_steps: int = 256) -> None:
+                 max_pause_steps: int = 256, max_probe_every: int = 96,
+                 clear_margin: float = 0.85) -> None:
         self.probe_every = probe_every
+        self.max_probe_every = max(probe_every, max_probe_every)
+        self.clear_margin = clear_margin
+        self._probe_now = probe_every
         self.bootstrap_every = bootstrap_every
         self.min_samples = min_samples
         self.first_pause = pause_steps
@@ -937,7 +944,7 @@ class _DraftPacer:
                 self._spec_tokens.clear()
             return False
         every = (self.bootstrap_every if self.n_plain < self.min_samples
-                 else self.probe_every)
+                 else self._probe_now)
         if self._since_plain >= every - 1:
             self._since_plain = 0
             return False
@@ -952,9 +959,16 @@ class _DraftPacer:
             self._spec_tokens.append(max(1, tokens))
         else:
             self._plain.append(seconds / max(1, tokens))
+            if self.n_spec >= self.min_samples and self.n_plain >= self.min_samples:
+                spec, plain = self.spec_cost, self.plain_cost
+                clear = (spec is not None and plain is not None
+                         and spec <= plain * self.clear_margin)
+                self._probe_now = (min(2 * self._probe_now, self.max_probe_every)
+                                   if clear else self.probe_every)
         if (speculative and self.n_spec >= self.min_samples
                 and self.n_plain >= self.min_samples):
             if self.spec_cost > self.plain_cost:
+                self._probe_now = self.probe_every
                 self._pause_left = self._pause_len
                 self._pause_len = min(self._pause_len * 2, self.max_pause_steps)
                 self.pauses += 1
