@@ -1820,6 +1820,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   (offline, or the API rate limit is hit), setup installs the pinned CUDA build and checks it
   against its pinned checksum. On a machine with GPUs of different generations, one Blackwell
   GPU now selects the CUDA 13 build.
+- **Stopping or timing out one ComfyUI job leaves the others alone.** Cancelling an image, video or
+  music generation interrupted whatever ComfyUI was rendering and emptied its whole queue, so another
+  job waiting there was dropped; a generation that timed out kept rendering in ComfyUI after localm had
+  given up on it. Both now stop only that job: it is interrupted if it is running and removed from the
+  queue if it is waiting. An image may also take up to 30 minutes instead of 10, so a slower GPU can
+  finish it.
 
 ### Security
 - **A plain `coder` API key can no longer run commands through the project's coder

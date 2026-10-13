@@ -2337,6 +2337,53 @@ def interrupt_comfy(api_url: str) -> bool:
     return ok
 
 
+def cancel_comfy_prompt(api_url: str, prompt_id: str) -> bool:
+    """Stop ComfyUI's work on *prompt_id* only: interrupt it when ``GET /queue``
+    lists it as running, and remove it from the pending queue (POST ``/queue
+    {"delete": [prompt_id]}``). Other jobs, running or queued, are left alone.
+    Best-effort; returns True when the prompt was found running or pending and
+    the matching request was accepted."""
+    try:
+        req = urllib.request.Request(f"{api_url}/queue")
+        with _comfy_urlopen(req, timeout=10) as response:
+            queue = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("reading the ComfyUI queue to cancel %s failed: %s", prompt_id, e)
+        return False
+
+    def _listed(key: str) -> bool:
+        return any(len(item) > 1 and item[1] == prompt_id
+                   for item in (queue.get(key) or []))
+
+    running, pending = _listed("queue_running"), _listed("queue_pending")
+    done = False
+    if running:
+        try:
+            body = json.dumps({"prompt_id": prompt_id}).encode()
+            req = urllib.request.Request(
+                f"{api_url}/interrupt", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with _comfy_urlopen(req, timeout=10):
+                done = True
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("interrupting ComfyUI prompt %s failed: %s", prompt_id, e)
+    if pending:
+        try:
+            body = json.dumps({"delete": [prompt_id]}).encode()
+            req = urllib.request.Request(
+                f"{api_url}/queue", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with _comfy_urlopen(req, timeout=10):
+                done = True
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("removing ComfyUI prompt %s from the queue failed: %s",
+                         prompt_id, e)
+    return done
+
+
 def _with_warning(message: str, warning: str) -> str:
     """Append a containment warning to a success message when present."""
     return f"{message}\n{warning}" if warning else message
@@ -2481,11 +2528,12 @@ def comfy_poll_until_done(
     errors, or times out. Returns ``(status, value)``:
 
       - ``POLL_CANCELLED``  -> value None. ``cancel_check()`` returned truthy; this
-        helper has already issued ``interrupt_comfy`` + ``clear_comfy_history``.
+        helper has already issued ``cancel_comfy_prompt`` + ``clear_comfy_history``.
       - ``POLL_EXEC_ERROR`` -> value is the ``history_execution_error`` detail (str).
       - ``POLL_FINISHED``   -> value is the finished ``history[prompt_id]`` entry
         (dict); the caller reads its ``"outputs"`` for the medium's artifact.
-      - ``POLL_TIMEOUT``    -> value is the last poll Exception (or None if none).
+      - ``POLL_TIMEOUT``    -> value is the last poll Exception (or None if none);
+        this helper has already issued ``cancel_comfy_prompt``.
 
     ``on_tick(elapsed_seconds)`` is called once per iteration BEFORE the /history
     request (``elapsed_seconds`` is ``time.time() - start_time``), so the caller can
@@ -2495,7 +2543,7 @@ def comfy_poll_until_done(
     last_poll_err: Optional[Exception] = None
     while time.time() - start_time < max_poll_seconds:
         if cancel_check and cancel_check():
-            interrupt_comfy(api_url)
+            cancel_comfy_prompt(api_url, prompt_id)
             clear_comfy_history(api_url, prompt_id)
             return POLL_CANCELLED, None
         if on_tick is not None:
@@ -2516,6 +2564,7 @@ def comfy_poll_until_done(
             # distinguishable from a merely slow one if we time out below.
             last_poll_err = e
         time.sleep(sleep_seconds)
+    cancel_comfy_prompt(api_url, prompt_id)
     return POLL_TIMEOUT, last_poll_err
 
 
