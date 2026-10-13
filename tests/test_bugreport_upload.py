@@ -20,6 +20,14 @@ from localm.inference.http_server import create_app
 from tests._fake_https import patch_https_transport
 
 
+@pytest.fixture(autouse=True)
+def _keep_diagnostics(monkeypatch):
+    """These tests exercise the saved-report flow, which an automatic report
+    reaches only when diagnostics are kept; privacy mode's own behaviour is in
+    tests/test_bugreport_contract.py."""
+    monkeypatch.setenv("LOCALM_KEEP_DIAGNOSTICS", "1")
+
+
 # ------------------------------- config gating --------------------------- #
 
 def test_upload_gate_off_when_url_absent(monkeypatch):
@@ -330,19 +338,31 @@ def _post(app, body):
                       headers={"Authorization": f"Bearer {app.state.shell_token}"})
 
 
+def _save_and_send(app, body):
+    """Save through POST /api/bug-report, then send through POST
+    /api/bug-report/send. Returns (save JSON, send response)."""
+    hdrs = {"Authorization": f"Bearer {app.state.shell_token}"}
+    with TestClient(app) as c:
+        saved = c.post("/api/bug-report", json=body, headers=hdrs)
+        assert saved.status_code == 200, saved.text
+        data = saved.json()
+        sent = c.post("/api/bug-report/send", headers=hdrs,
+                      json={"filename": data["filename"], "sha256": data["report_sha256"]})
+    return data, sent
+
+
 def test_endpoint_uploads_on_request(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     monkeypatch.setattr(bugreport, "upload_report",
                         lambda title, body: {"url": "https://github.com/x/localm/issues/12"})
-    r = _post(create_app(_engine()),
-              {"description": "the thing broke", "upload": True})
+    saved, r = _save_and_send(create_app(_engine()), {"description": "the thing broke"})
     assert r.status_code == 200
     data = r.json()
-    assert data["saved"] is True
+    assert saved["saved"] is True
     assert data["uploaded"] is True
     assert data["issue_url"].endswith("/issues/12")
-    assert Path(data["path"]).is_file()   # still saved to disk
+    assert Path(saved["path"]).is_file()   # still saved to disk
 
 
 def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
@@ -381,13 +401,13 @@ def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
     # The home path is on the FIRST line so it also flows into the derived title.
     desc = (r"Upload broke when I ran Z:\Users\bob\localm\gui\index.html"
             "\nClicked send five times, nothing happened.")
-    r = _post(create_app(_engine()), {"description": desc, "upload": True})
+    _, r = _save_and_send(create_app(_engine()), {"description": desc})
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["uploaded"] is True
     payload = json.loads(sent["data"].decode("utf-8"))
-    # The GUI route builds the title from the raw first line; the upload choke point
-    # scrubs it, so the username never reaches the public issue title OR the body.
+    # The title is the saved report's own H1 and passes the upload choke point,
+    # so the username never reaches the public issue title OR the body.
     assert "bob" not in payload["title"]
     assert "bob" not in payload["body"]
     assert "<redacted>" in payload["title"]
@@ -402,16 +422,15 @@ def test_endpoint_upload_failure_is_surfaced_not_hidden(monkeypatch):
                                     reason="timed out")
 
     monkeypatch.setattr(bugreport, "upload_report", boom)
-    r = _post(create_app(_engine()),
-              {"description": "broke again", "upload": True})
+    saved, r = _save_and_send(create_app(_engine()), {"description": "broke again"})
     # The save still succeeds (200), but the upload failure is reported honestly.
     assert r.status_code == 200
     data = r.json()
-    assert data["saved"] is True
+    assert saved["saved"] is True
     assert data["uploaded"] is False
     assert "could not reach" in data["upload_error"]
     assert "issue_url" not in data
-    assert Path(data["path"]).is_file()
+    assert Path(saved["path"]).is_file()
 
 
 def test_endpoint_does_not_upload_without_flag(monkeypatch):

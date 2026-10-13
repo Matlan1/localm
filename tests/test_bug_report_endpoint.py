@@ -19,13 +19,27 @@ def _engine():
     return e
 
 
+def _save_and_send(c, app, body):
+    """Save a report through POST /api/bug-report, then send it through POST
+    /api/bug-report/send by the filename and digest the save returned.
+    Returns (save JSON, send response)."""
+    hdrs = {"Authorization": f"Bearer {app.state.shell_token}"}
+    saved = c.post("/api/bug-report", json=body, headers=hdrs)
+    assert saved.status_code == 200, saved.text
+    data = saved.json()
+    sent = c.post("/api/bug-report/send", headers=hdrs,
+                  json={"filename": data["filename"], "sha256": data["report_sha256"]})
+    return data, sent
+
+
 def test_route_registered_and_gated():
     app = create_app(_engine())
     routes = {getattr(r, "path", None): r for r in app.routes}
-    assert "/api/bug-report" in routes
-    route = routes["/api/bug-report"]
-    assert "POST" in route.methods
-    assert route.dependencies, "bug-report endpoint must carry an auth dependency"
+    for path in ("/api/bug-report", "/api/bug-report/send"):
+        assert path in routes
+        route = routes[path]
+        assert "POST" in route.methods
+        assert route.dependencies, f"{path} must carry an auth dependency"
 
 
 def test_no_token_refused_in_open_mode(monkeypatch):
@@ -34,7 +48,10 @@ def test_no_token_refused_in_open_mode(monkeypatch):
     with TestClient(create_app(_engine())) as c:
         # A no-Origin/no-token client must not be able to drive it.
         r = c.post("/api/bug-report", json={"message": "x"})
+        sent = c.post("/api/bug-report/send",
+                      json={"filename": "bug-x.md", "sha256": "0" * 64})
     assert r.status_code == 403
+    assert sent.status_code == 403
 
 
 def test_save_does_not_run_on_the_event_loop(monkeypatch):
@@ -100,11 +117,7 @@ def test_upload_does_not_run_on_the_event_loop(monkeypatch):
     monkeypatch.setattr(bugreport, "upload_report", _probing_upload)
     app = create_app(_engine())
     with TestClient(app) as c:
-        r = c.post(
-            "/api/bug-report",
-            json={"description": "must not stall the loop", "upload": True},
-            headers={"Authorization": f"Bearer {app.state.shell_token}"},
-        )
+        _, r = _save_and_send(c, app, {"description": "must not stall the loop"})
     assert r.status_code == 200, r.text
     assert r.json().get("uploaded") is True
     assert seen.get("on_loop") is False, (
@@ -296,18 +309,13 @@ def test_gui_upload_does_not_publish_the_edit_disclaimer(monkeypatch):
 
     app = create_app(_engine())
     with TestClient(app) as c:
-        r = c.post(
-            "/api/bug-report",
-            json={"description": "leaks the disclaimer?", "upload": True},
-            headers={"Authorization": f"Bearer {app.state.shell_token}"},
-        )
+        saved, r = _save_and_send(c, app, {"description": "leaks the disclaimer?"})
     assert r.status_code == 200
-    data = r.json()
-    assert data["uploaded"] is True
+    assert r.json()["uploaded"] is True
 
     # Download copy: disclaimer present.
-    assert bugreport.MAINTAINER_EMAIL in data["report_markdown"]
-    assert "You can edit anything above before sending" in data["report_markdown"]
+    assert bugreport.MAINTAINER_EMAIL in saved["report_markdown"]
+    assert "You can edit anything above before sending" in saved["report_markdown"]
 
     # What reached the mocked GitHub transport: disclaimer gone.
     assert "body" in captured, "upload never reached the transport layer"
@@ -333,15 +341,10 @@ def test_upload_title_prefers_what_happened_over_description(monkeypatch):
     monkeypatch.setattr(bugreport, "upload_report", _fake_upload)
     app = create_app(_engine())
     with TestClient(app) as c:
-        r = c.post(
-            "/api/bug-report",
-            json={
-                "description": "clicked generate on the image tab",
-                "what_happened": "a blank grey square appeared instead",
-                "upload": True,
-            },
-            headers={"Authorization": f"Bearer {app.state.shell_token}"},
-        )
+        _, r = _save_and_send(c, app, {
+            "description": "clicked generate on the image tab",
+            "what_happened": "a blank grey square appeared instead",
+        })
     assert r.status_code == 200
     assert captured["title"].startswith("a blank grey square")
 
@@ -361,18 +364,14 @@ def test_upload_failure_returns_stage_and_message(monkeypatch):
     monkeypatch.setattr(bugreport, "upload_report", _boom)
     app = create_app(_engine())
     with TestClient(app) as c:
-        r = c.post(
-            "/api/bug-report",
-            json={"description": "send this", "upload": True},
-            headers={"Authorization": f"Bearer {app.state.shell_token}"},
-        )
+        saved, r = _save_and_send(c, app, {"description": "send this"})
     assert r.status_code == 200
     data = r.json()
-    assert data["saved"] is True and data["uploaded"] is False
+    assert data["uploaded"] is False
     assert data["upload_stage"] == "offline_or_dns"
     assert data["upload_message"] == "You may be offline."
-    assert "send this" in data["report_markdown"]     # still downloadable for retry
-    assert Path(data["path"]).is_file()               # file kept for manual send
+    assert "send this" in saved["report_markdown"]    # still downloadable for retry
+    assert Path(saved["path"]).is_file()              # file kept for manual send
 
 
 def test_browser_client_context_lands_in_report(monkeypatch):

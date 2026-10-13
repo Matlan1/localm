@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Process-wide handlers that turn an uncaught exception in the main thread, a
-background thread or an asyncio task into a saved report.
+"""Process-wide handlers that route an uncaught exception in the main thread, a
+background thread or an asyncio task through ``report_failure``, which saves a
+report only when automatic diagnostics are allowed (see its docstring).
 """
 
 from __future__ import annotations

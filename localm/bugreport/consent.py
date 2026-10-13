@@ -35,7 +35,12 @@ def report_failure(*, summary: str, reason: str = "",
     channel (no menu, no browser) - the caller's own explicit consent (e.g. the
     ``--send`` flag) stands in for picking option [1] interactively, so this is
     still an explicit user action, not automatic reporting. ``open_browser`` and
-    ``prompt`` are injectable for tests."""
+    ``prompt`` are injectable for tests.
+
+    When automatic diagnostics are not allowed (``_diagnostics_allowed()``
+    False: privacy mode without ``keep_diagnostics``) and ``auto_send`` is
+    False, no report is built or saved unless an interactive user answers yes
+    to a save prompt; otherwise this prints how to file one and returns None."""
     from localm.console import markup_safe
     console.print()
     if as_failure:
@@ -46,6 +51,11 @@ def report_failure(*, summary: str, reason: str = "",
         console.print(f"[bold]Filing a bug report:[/bold] {markup_safe(summary)}")
         if reason:
             console.print(f"[dim]{markup_safe(reason)}[/dim]")
+
+    if not auto_send and not _br._diagnostics_allowed():
+        if not _consents_to_save(interactive=interactive, assume_yes=assume_yes,
+                                 prompt=prompt):
+            return None
 
     text = build_report(summary, reason=reason, error=error, context=context)
     path = _br.save_report(text)
@@ -59,6 +69,33 @@ def report_failure(*, summary: str, reason: str = "",
                    assume_yes=assume_yes, auto_send=auto_send,
                    open_browser=open_browser, prompt=prompt)
     return path
+
+
+def _consents_to_save(*, interactive: bool, assume_yes: bool, prompt) -> bool:
+    """Whether to save an automatic report while diagnostics are off (privacy
+    mode without ``keep_diagnostics``). True only on an explicit yes at an
+    interactive prompt; otherwise prints that nothing was saved and returns
+    False. Nothing is built, read or written before this returns True."""
+    if interactive and not assume_yes:
+        ask = prompt
+        if ask is None:
+            import click
+
+            def ask(text_):  # noqa: E306
+                return click.prompt(text_, default="", show_default=False)
+        console.print("[dim]Privacy mode does not save bug reports on its own.[/dim]")
+        try:
+            answer = (ask("  Save a bug report for this error? [y/N]") or "")
+        except Exception:
+            # An unanswerable prompt is a no.
+            # See test_privacy_mode_save_prompt_that_cannot_be_answered_saves_nothing.
+            answer = ""
+        if answer.strip().lower() in ("y", "yes"):
+            return True
+    console.print("[dim]Privacy mode: no bug report was saved. Run[/dim] "
+                  "[bold]localm bug-report[/bold] [dim]to file one, or turn on "
+                  "\"Keep diagnostics for bug reports\" to keep these automatically.[/dim]")
+    return False
 
 
 def offer_to_send(summary: str, path: Optional[Path], text: str, *,

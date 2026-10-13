@@ -106,18 +106,27 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/bug-report",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def file_bug_report_ep(body: dict, request: Request):
-        """File a bug report from the GUI. Saves an editable markdown report (a
-        safe environment snapshot plus the user's note - never keys/config/chat
-        data; with ``include_log`` the home-scrubbed tail of the current run's
-        log) and returns its path so the GUI can point the user at the file to
-        edit/send. The ``path`` field is scrubbed (``http_server.path_formatter``)
-        for a caller other than the local operator.
+        """Save a bug report from the GUI and return it for review. Never sends.
+
+        Saves an editable markdown report (a safe environment snapshot plus the
+        user's note - never keys/config/chat data; with ``include_log`` the
+        scrubbed tail of the current run's log) and returns ``filename``,
+        ``path``, ``report_markdown`` (the saved text) and ``report_sha256``
+        (its digest). Sending is ``POST /api/bug-report/send`` with that
+        filename and digest. A body carrying ``upload`` is refused with 400
+        before anything is saved. The ``path`` field is scrubbed
+        (``http_server.path_formatter``) for a caller other than the local
+        operator.
         Owner / config-write scoped and same-origin gated like the other management
         routes (a report can carry local diagnostics)."""
         from localm import bugreport
+        if body.get("upload"):
+            raise HTTPException(
+                400, "A report is sent only after it has been reviewed: save it, "
+                     "then send it with POST /api/bug-report/send.")
         # The GUI "Report a bug" button sends ``description``; ``message`` is
         # accepted as an alias so the documented payload and CLI-shaped callers both
-        # work. This is the single canonical endpoint.
+        # work.
         description = (body.get("description") or body.get("message") or "").strip()
         # What the user expected and what actually happened are distinct optional
         # fields, not duplicates of description. A client sending only ``description``
@@ -149,63 +158,90 @@ def register(app: FastAPI, ctx) -> None:
         result = {"saved": True, "filename": path.name,
                   "path": _hs.path_formatter(request)(path),
                   "maintainer": bugreport.MAINTAINER_EMAIL}
-        # Return the saved report's markdown so the GUI can offer a browser download
-        # for manual sending. Best-effort: a read failure just hides the download
-        # button, the file is still on disk.
+        # The saved text for review and download, with the digest the send route
+        # checks. When it cannot be read back, neither is returned: the file is on
+        # disk, and the report cannot be sent from the GUI.
         try:
-            result["report_markdown"] = path.read_text(encoding="utf-8")
+            text = path.read_text(encoding="utf-8")
         except OSError:
-            pass
-        # Optional explicit upload: file the saved report as a GitHub issue via the
-        # configured proxy. Only ever user-initiated. A failed upload is reported with
-        # a diagnosed stage and message, never as success, and the file stays saved.
-        if body.get("upload"):
-            # Same title-derivation preference as save_user_report, so the uploaded
-            # issue title matches the report body's own H1.
-            title_source = what_happened or description
-            title = (title_source.splitlines()[0] if title_source else "")[:120] \
-                or "user-reported issue"
-            report_text = result.get("report_markdown") or path.read_text(encoding="utf-8")
+            return result
+        result["report_markdown"] = text
+        result["report_sha256"] = bugreport.report_digest(text)
+        return result
 
-            # Off the event loop: a blocking HTTPS POST to the upload proxy on
-            # upload_report's own 15s socket timeout.
-            def _upload():
-                return bugreport.upload_report(title, report_text)
+    @app.post("/api/bug-report/send",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def send_bug_report_ep(body: dict):
+        """Upload a report the user has reviewed, as a GitHub issue via the
+        configured proxy.
 
-            try:
-                up = await run_in_threadpool_bounded(
-                    _upload, timeout=_BUG_REPORT_UPLOAD_TIMEOUT_S)
-                result["uploaded"] = True
-                if isinstance(up, dict) and up.get("url"):
-                    result["issue_url"] = up["url"]
-            except bugreport.RateLimitedError as e:
-                # Rate limited: hand the GUI a structured signal so it can count down
-                # and auto-retry. The file is still saved.
-                result["uploaded"] = False
-                result["rate_limited"] = True
-                result["retry_after"] = e.retry_after
-                result["upload_stage"] = e.stage or "rate_limited"
-                result["upload_message"] = e.hint or f"rate limited; retry in {e.retry_after}s"
-                result["upload_error"] = f"rate limited; retry in {e.retry_after}s"
-            except bugreport.LocalmError as e:
-                result["uploaded"] = False
-                result["upload_stage"] = e.stage or "unknown"
-                result["upload_message"] = e.hint or e.summary
-                result["upload_error"] = format_localm_error(e)
-            except ThreadCallTimeout:
-                # The offload's own budget, not upload_report's. Reported in the same
-                # shape as every other upload failure rather than raised: the report is
-                # on disk and the GUI still offers the download and the retry.
-                result["uploaded"] = False
-                result["upload_stage"] = "upload"
-                result["upload_message"] = (
-                    "The upload did not complete in time. The report is saved - "
-                    "you can retry, or download it and send it by hand.")
-                # Not str(e): ThreadCallTimeout's message names the offloaded callable
-                # by __qualname__, which the client has no use for. The budget and the
-                # callable are already logged at WARNING by run_in_threadpool_bounded.
-                result["upload_error"] = (
-                    f"the upload did not finish within {_BUG_REPORT_UPLOAD_TIMEOUT_S:.0f}s")
+        *body* names a report saved by ``POST /api/bug-report``: ``filename``
+        and ``sha256``, the ``report_sha256`` that route returned. The saved
+        file is uploaded only when its current text has that digest, so what is
+        sent is the text the user was shown, without its closing edit note
+        (``upload_report`` strips it); the issue title is the report's own H1.
+        400 for a missing or invalid filename or digest, 404 when the file
+        cannot be read, 409 when its text no longer matches the digest. A
+        failed upload returns 200 with ``uploaded`` False and a diagnosed
+        ``upload_stage``/``upload_message``, never success, and the file stays
+        saved."""
+        from localm import bugreport
+        filename = body.get("filename")
+        digest = body.get("sha256")
+        if not isinstance(digest, str) or not digest:
+            raise HTTPException(400, "Missing the reviewed report's sha256.")
+        try:
+            text = bugreport.read_saved_report(filename)
+        except ValueError as e:
+            raise HTTPException(400, "Not a saved bug report file name.") from e
+        except OSError as e:
+            raise HTTPException(404, "That saved bug report could not be read.") from e
+        if bugreport.report_digest(text) != digest.strip().lower():
+            raise HTTPException(
+                409, "The saved report changed after it was shown. Review it again "
+                     "before sending.")
+        title = bugreport.report_title_from_markdown(text)
+        result: dict = {"filename": filename, "maintainer": bugreport.MAINTAINER_EMAIL}
+
+        # Off the event loop: a blocking HTTPS POST to the upload proxy on
+        # upload_report's own 15s socket timeout.
+        def _upload():
+            return bugreport.upload_report(title, text)
+
+        try:
+            up = await run_in_threadpool_bounded(
+                _upload, timeout=_BUG_REPORT_UPLOAD_TIMEOUT_S)
+            result["uploaded"] = True
+            if isinstance(up, dict) and up.get("url"):
+                result["issue_url"] = up["url"]
+        except bugreport.RateLimitedError as e:
+            # Rate limited: hand the GUI a structured signal so it can count down
+            # and auto-retry. The file is still saved.
+            result["uploaded"] = False
+            result["rate_limited"] = True
+            result["retry_after"] = e.retry_after
+            result["upload_stage"] = e.stage or "rate_limited"
+            result["upload_message"] = e.hint or f"rate limited; retry in {e.retry_after}s"
+            result["upload_error"] = f"rate limited; retry in {e.retry_after}s"
+        except bugreport.LocalmError as e:
+            result["uploaded"] = False
+            result["upload_stage"] = e.stage or "unknown"
+            result["upload_message"] = e.hint or e.summary
+            result["upload_error"] = format_localm_error(e)
+        except ThreadCallTimeout:
+            # The offload's own budget, not upload_report's. Reported in the same
+            # shape as every other upload failure rather than raised: the report is
+            # on disk and the GUI still offers the download and the retry.
+            result["uploaded"] = False
+            result["upload_stage"] = "upload"
+            result["upload_message"] = (
+                "The upload did not complete in time. The report is saved - "
+                "you can retry, or download it and send it by hand.")
+            # Not str(e): ThreadCallTimeout's message names the offloaded callable
+            # by __qualname__, which the client has no use for. The budget and the
+            # callable are already logged at WARNING by run_in_threadpool_bounded.
+            result["upload_error"] = (
+                f"the upload did not finish within {_BUG_REPORT_UPLOAD_TIMEOUT_S:.0f}s")
         return result
 
     @app.get("/api/issues", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])

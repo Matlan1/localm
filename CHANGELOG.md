@@ -2117,6 +2117,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   skipped the cross-origin refusal and the open-mode shell-token check without anyone listing it.
   Each now matches only its own path. A trailing-slash spelling of one of those paths is no longer
   exempt.
+- **A bug report is sent only after you have seen it.** In Settings > Report a bug, "Send to
+  maintainer" used to file the report as a public GitHub issue in one click, without showing it.
+  It now saves the report and shows its whole text, and nothing is sent until you press "Send this
+  report". What is sent is that saved text, without only its closing note about editing it;
+  Retry and the automatic retry after a rate limit send that same report again.
+- **Privacy mode no longer saves a bug report on its own.** An unexpected error used to write a
+  report (with the error, settings subset and recent activity) to the data folder in every mode.
+  In privacy mode without "Keep diagnostics for bug reports", nothing is written: a command that
+  fails at a terminal asks whether to save one, and a background error saves nothing.
+- **Bug reports remove more from what they carry.** The standalone reporters now remove your
+  account name from paths written with doubled backslashes (as in a Python or JSON error message)
+  and remove credential values from JSON keys such as `"api_key"`, as the in-app report already
+  did. The report's settings section now removes bearer tokens and API keys, and scrubs values
+  stored as a list or object, not only plain text.
 - **One request can no longer tie up the server with an oversized input.** A scheduled job's cron
   expression is limited to 512 characters (a longer one used to stop every scheduled job from firing
   while reporting the scheduler healthy, and the Jobs page now says when the scheduler is stuck); a
