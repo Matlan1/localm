@@ -406,6 +406,26 @@ test("a Settings switch into privacy mode while the page is open stops pushing "
     "nothing typed after the switch into privacy mode may reach the store");
 });
 
+test("a conversation save still waiting when the mode switches into privacy " +
+     "is not sent", async () => {
+  const { window } = loadApp({ fetchImpl: makeFetch({ instanceId: "backend-x" }) });
+  runScript(window, `window.__mode = "full";` + MODE_SWITCH_FETCH +
+            `refreshCtxLimit().then(initServerConversations);`);
+  await drain();
+  assert.equal(window.chatState.persist, true, "precondition: the store is in use");
+  runScript(window, `
+    pushConversation({ id: "queued", title: "x", updated_at: 1, pinned: false,
+      folder: null, branches: [], messages: [{ role: "user", content: "secret" }] });
+    window.__mode = "privacy";
+    refreshCtxLimit();
+  `);
+  await drain();
+  assert.equal(window.chatState.persist, false, "precondition: privacy took effect first");
+  await settle(700);
+  assert.equal(window.__puts.filter((u) => u.endsWith("/queued")).length, 0,
+    "a save queued before the switch must not reach the store after it");
+});
+
 test("reconcileInstanceId: a matching id returns \"confirmed\" (nothing wiped)", () => {
   const { window } = loadApp();
   window.localStorage.setItem("localm.instanceId", "same-id");

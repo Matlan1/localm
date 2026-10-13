@@ -782,6 +782,7 @@ export function pushConversation(conv) {
   clearTimeout(_convPushTimers.get(conv.id));
   _convPushTimers.set(conv.id, setTimeout(async () => {
     _convPushTimers.delete(conv.id);
+    if (!chat.persist) return;   // the mode switched to privacy while this waited
     try {
       const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
         method: "PUT",

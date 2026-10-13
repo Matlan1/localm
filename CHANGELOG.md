@@ -625,7 +625,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   started with until a restart, so switching to full or log saved the setting but recorded
   nothing and the chat page still said privacy mode, and switching to privacy kept writing the
   chat transcript. The next exchange now follows the saved mode, and the chat page updates its
-  hint and starts or stops saving conversations straight away.
+  hint and starts or stops saving conversations straight away. Switching to privacy also clears
+  the conversation list on the chat page, as a restart into privacy mode does; conversations
+  already saved come back when you leave privacy mode.
 - **Pulling a file whose name another repository's model already uses no longer calls it
   damaged.** The pull is still refused, since the models folder keeps one file per name, but the
   message now says the name is in use, names the registered model that holds it and how to

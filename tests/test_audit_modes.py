@@ -440,7 +440,27 @@ class TestSessionRecorder:
             assert mode == SessionMode.LOG and isinstance(audit, AuditLog)
             recorder.close()
 
-    def test_close_ends_the_log_and_records_nothing_after(self, tmp_path):
+    def test_full_to_log_keeps_the_open_log_and_drops_the_transcript(self, tmp_path):
+        from localm.audit import SessionRecorder
+        config = _Config("full")
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("localm.config.load_config", side_effect=config.load):
+            recorder = SessionRecorder("server", label="server")
+            audit_full, transcript_full, _ = recorder.current()
+            assert transcript_full is not None
+            config.set_mode("log")
+            with patch("localm.audit.AuditLog", side_effect=PermissionError("denied")):
+                audit, transcript, mode = recorder.current()
+            assert mode == SessionMode.LOG
+            assert audit is audit_full and transcript is None
+            config.set_mode("full")
+            audit, transcript, mode = recorder.current()
+            assert mode == SessionMode.FULL and audit is audit_full
+            assert transcript is not None and transcript is not transcript_full
+            recorder.close()
+        assert len(list(tmp_path.glob("*.jsonl"))) == 1
+
+    def test_close_ends_the_log_and_reports_privacy_after(self, tmp_path, caplog):
         from localm.audit import SessionRecorder
         config = _Config("log")
         with patch("localm.audit._SESSIONS_DIR", tmp_path), \
@@ -449,10 +469,15 @@ class TestSessionRecorder:
             path = recorder.current()[0].path
             recorder.close()
             recorder.close()
-            audit, transcript, _mode = recorder.current()
+            with caplog.at_level("WARNING", logger="localm"):
+                audit, transcript, mode = recorder.current()
+                config.set_mode("full")
+                again = recorder.current()
             assert isinstance(audit, NullAuditLog) and transcript is None
-            config.set_mode("full")
-            assert isinstance(recorder.current()[0], NullAuditLog)
+            assert mode == again[2] == SessionMode.PRIVACY
+            assert isinstance(again[0], NullAuditLog) and again[1] is None
+            closed = [r for r in caplog.records if "recording is closed" in r.getMessage()]
+            assert len(closed) == 1
         assert path.read_text(encoding="utf-8").count("session ended") == 1
         assert list(tmp_path.glob("*.jsonl")) == [path]
 

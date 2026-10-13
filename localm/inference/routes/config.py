@@ -89,8 +89,9 @@ def register(app: FastAPI, ctx) -> None:
             # so those nested values are scrubbed here as well.
             _scrub_media_admin_only(cfg)
         # Read-only extras for the frontend (skipped by the settings form).
-        # The server mode is fixed at startup (the audit log is opened then);
-        # the coder default is resolved per new session.
+        # The server mode is the one the configured mode resolves to now (the
+        # recorder switches its files on a change); the coder default is
+        # resolved per new session.
         cfg["effective_mode"] = ctx.mode.value
         cfg["effective_coder_mode"] = effective_mode("coder").value
         # Resolved context ceiling (VRAM-derived when ctx_auto) - the GUI
