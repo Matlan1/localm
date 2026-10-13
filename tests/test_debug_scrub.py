@@ -199,3 +199,47 @@ class TestDebugLog:
             assert "SECRETWORD" not in path.read_text(encoding="utf-8")
         finally:
             llm._tokenizer = None
+
+
+class TestHarmonyStopStrings:
+    """A gpt-oss reply ends its analysis message with "<|end|>" and continues
+    with the final channel, so "<|end|>" must not stop it there."""
+
+    RAW = ("<|channel|>analysis<|message|>We need 17*23=391.<|end|>"
+           "<|start|>assistant<|channel|>final<|message|>391")
+
+    class _Tok:
+        def __init__(self, eog_texts, single=True, fail=False):
+            self.eog_texts, self.single, self.fail = eog_texts, single, fail
+            self.ids = {}
+
+        def encode(self, text, add_bos=True):
+            if self.fail:
+                raise RuntimeError("no vocab")
+            ident = self.ids.setdefault(text, len(self.ids) + 100)
+            return [ident] if self.single else [ident, ident + 1]
+
+        def is_eog(self, token):
+            return any(self.ids.get(t) == token for t in self.eog_texts)
+
+    def test_a_harmony_vocabulary_drops_end_from_the_stop_strings(self):
+        from localm.inference.backends.llamacpp.llama import _STOP_STRINGS, model_stop_strings
+        stops = model_stop_strings(self._Tok(("<|return|>", "<|call|>")))
+        assert stops == _STOP_STRINGS - {"<|end|>"}
+
+    @pytest.mark.parametrize("tok_kw", [
+        {"eog_texts": ("<|return|>",)}, {"eog_texts": (), "single": False},
+        {"eog_texts": ("<|return|>", "<|call|>"), "fail": True}])
+    def test_other_vocabularies_keep_end_as_a_stop_string(self, tok_kw):
+        from localm.inference.backends.llamacpp.llama import _STOP_STRINGS, model_stop_strings
+        assert model_stop_strings(self._Tok(**tok_kw)) == _STOP_STRINGS
+
+    def test_a_harmony_reply_reaches_its_final_channel(self):
+        from localm.inference.backends.llamacpp.llama import _STOP_STRINGS
+        pieces = [self.RAW[i:i + 3] for i in range(0, len(self.RAW), 3)]
+        out = "".join(_scrub_stream(_filtered_stream(iter(pieces),
+                                                     _STOP_STRINGS - {"<|end|>"})))
+        assert out == "<think>\nWe need 17*23=391.\n</think>\n391"
+
+    def test_end_still_stops_a_reply_by_default(self):
+        assert "".join(_filtered_stream(iter(["Hi.<|end|>more"]))) == "Hi."

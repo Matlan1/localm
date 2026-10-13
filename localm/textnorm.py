@@ -53,6 +53,7 @@ _MARKER_RE = re.compile(
     r"|<\|?\s{0,4}message\s{0,4}\|?>"                                 # stray harmony separator
     r"|<\|start\|>(assistant|user|system)?"
     r"|<\|return\|>"
+    r"|<\|end\|>"                                              # harmony message end
     r"|<\|turn>(user|model|assistant|system)?\n?"            # Gemma 4 turn open
     r"|<turn\|>"                                              # Gemma 4 turn close
     # <|tool_call> / <|tool_response> are not scrubbed: the coder agent parses

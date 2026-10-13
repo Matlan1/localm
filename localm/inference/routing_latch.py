@@ -70,7 +70,8 @@ def _file_identity(path: object) -> list:
 
 def load_fingerprint(name: str) -> str:
     """A short digest of what decides whether loading model *name* can work:
-    its model and projector files (path, size, modification time), the
+    its model and projector files and, while ``spec_source`` is "draft", its
+    draft model file (path, size, modification time), the
     load-related config keys (``LOAD_CONFIG_KEYS``), the newest entry of
     ``llama_runtime_history`` and the identity of the provisioned runtime
     directory (``installed_runtime_identity``), which also changes when
@@ -106,6 +107,14 @@ def load_fingerprint(name: str) -> str:
     except Exception as exc:
         logger.debug("routing latch: model files unreadable for %s: %s", name, exc)
         parts["model"] = parts["mmproj"] = "unreadable"
+    if (isinstance(parts["config"], dict)
+            and str(parts["config"].get("spec_source") or "").strip().lower() == "draft"):
+        try:
+            from localm.inference.engine import resolve_spec_draft_model
+            parts["draft"] = _file_identity(resolve_spec_draft_model(parts["config"]))
+        except Exception as exc:
+            logger.debug("routing latch: draft model unreadable for %s: %s", name, exc)
+            parts["draft"] = "unreadable"
     blob = json.dumps(parts, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 

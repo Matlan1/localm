@@ -15,6 +15,19 @@ USE_MMAP_MODES = (USE_MMAP_AUTO, USE_MMAP_ON, USE_MMAP_OFF)
 
 MMAP_FROM_DISK_NOTE = ("model may not fit in available RAM, running from "
                        "disk-backed memory, first tokens slower")
+MMAP_CPU_FROM_DISK_NOTE = ("the weights kept in system RAM may not fit in "
+                           "available RAM, CPU layers read them from disk-backed "
+                           "memory, every token slower")
+
+
+def unmapped_exceeds_ram_note(host_bytes: int, ram_available: int) -> str:
+    """The warning for a ``use_mmap`` off load whose *host_bytes* of system-RAM
+    weights do not fit the *ram_available* bytes of available RAM."""
+    gib = 1024 ** 3
+    return (f"use_mmap is off and this load reads {host_bytes / gib:.1f} GB of "
+            f"weights into system RAM with {ram_available / gib:.1f} GB "
+            f"available: the load may fail or swap. Set use_mmap to auto to "
+            f"map them from disk instead.")
 
 
 def coerce_use_mmap(val) -> Optional[str]:
@@ -45,19 +58,24 @@ def resolve_use_mmap(cfg: dict) -> str:
 
 
 def describe_mmap(setting: str, effective: Optional[bool],
-                  forced_by_ram: bool = False) -> Optional[str]:
+                  forced_by_ram: bool = False, cpu_layers: bool = False) -> Optional[str]:
     """One plain line (no markup) for what a load did with memory-mapping, or
     None when there is nothing to say.
 
     *effective* is whether the load memory-mapped the model (None when the
-    loader did not report it). *forced_by_ram* marks an ``auto`` load that
-    turned mmap on because the model may not fit in available RAM. Nothing is said for
-    any other ``auto`` load, or when *effective* is unknown. An explicit ``on``
-    or ``off`` is confirmed, and a load that did the opposite says so."""
+    loader did not report it). *forced_by_ram* marks an ``auto`` load mapped
+    while the weights it keeps in system RAM may not fit available RAM, and
+    *cpu_layers* one of those whose CPU layers read them on every token
+    (``MMAP_CPU_FROM_DISK_NOTE`` instead of ``MMAP_FROM_DISK_NOTE``). Nothing
+    is said for any other ``auto`` load, or when *effective* is unknown. An
+    explicit ``on`` or ``off`` is confirmed, and a load that did the opposite
+    says so."""
     if effective is None:
         return None
     if setting == USE_MMAP_AUTO:
-        return f"mmap on: {MMAP_FROM_DISK_NOTE}" if effective and forced_by_ram else None
+        if not (effective and forced_by_ram):
+            return None
+        return f"mmap on: {MMAP_CPU_FROM_DISK_NOTE if cpu_layers else MMAP_FROM_DISK_NOTE}"
     if effective:
         return "mmap on" if setting == USE_MMAP_ON else "mmap on, although use_mmap is off"
     return "mmap off" if setting == USE_MMAP_OFF else "mmap off, although use_mmap is on"

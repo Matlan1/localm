@@ -274,6 +274,28 @@ def _enum_from_name(lib, kind: str, name):
     return value
 
 
+def _set_loras(b, p, payload):
+    """Fill *p*'s ``loras``/``lora_count`` from ``payload["loras"]`` (each
+    ``{"path", "multiplier", "is_high_noise"}``). Returns the ctypes objects
+    that must stay alive until generation returns."""
+    loras = payload.get("loras") or []
+    if not loras:
+        return None
+    arr = (b.sd_lora_t * len(loras))()
+    names = []
+    for i, lora in enumerate(loras):
+        enc = str(lora["path"]).encode("utf-8")
+        names.append(enc)
+        arr[i].path = enc
+        arr[i].multiplier = float(lora.get("multiplier", 1.0))
+        arr[i].is_high_noise = bool(lora.get("is_high_noise", False))
+    p.loras = ctypes.cast(arr, ctypes.POINTER(b.sd_lora_t))
+    p.lora_count = len(loras)
+    new = tuple(str(lora["path"]) for lora in loras if str(lora["path"]) not in _State.paths)
+    _State.paths = _State.paths + new
+    return arr, names
+
+
 def _do_generate_image(payload, cancel_event):
     from . import _binding as b
     lib, ctx = _State.lib, _State.ctx
@@ -288,6 +310,7 @@ def _do_generate_image(payload, cancel_event):
     p.width = int(payload["width"])
     p.height = int(payload["height"])
     p.batch_count = 1
+    lora_refs = _set_loras(b, p, payload)
     seed = payload.get("seed")
     p.seed = int(seed) if seed is not None else -1
     if payload.get("steps"):
@@ -327,7 +350,7 @@ def _do_generate_image(payload, cancel_event):
     finally:
         _State.generating = False
         _State.redact = ()
-        del keep
+        del keep, lora_refs
     cancelled = cancel_event.is_set()
     try:
         if not ok or count.value < 1 or not out:
@@ -366,6 +389,7 @@ def _do_generate_video(payload, cancel_event):
     p.height = int(payload["height"])
     p.video_frames = int(payload["video_frames"])
     p.fps = int(payload.get("fps") or 16)
+    lora_refs = _set_loras(b, p, payload)
     seed = payload.get("seed")
     p.seed = int(seed) if seed is not None else -1
     if payload.get("steps"):
@@ -400,7 +424,7 @@ def _do_generate_video(payload, cancel_event):
     finally:
         _State.generating = False
         _State.redact = ()
-        del keep
+        del keep, lora_refs
     cancelled = cancel_event.is_set()
     try:
         if not ok or count.value < 1 or not frames:

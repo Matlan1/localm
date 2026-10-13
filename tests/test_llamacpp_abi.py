@@ -1115,6 +1115,50 @@ def test_moe_probe_inconclusive_falls_back_to_v2_and_says_so():
     assert any("moe_cache_size" in n for n in notes), notes
 
 
+def _all_true_flags_off(builder):
+    cp = builder()
+    for flag in _TRUE_FLAGS:
+        setattr(cp, flag, False)
+    return cp
+
+
+@pytest.mark.parametrize("builder", [good_ctx_v2_real, good_ctx_v3])
+def test_undecided_v2_v3_split_is_refused(builder, monkeypatch):
+    """With every true-by-default flag off, V2 and V3 bytes satisfy evaluate()
+    under either class, so binding the V2 fallback could put flags and
+    pointers at the wrong offsets on a V3 runtime. verify_abi must refuse."""
+    monkeypatch.delenv(_abi.SKIP_ENV, raising=False)
+    cp = _all_true_flags_off(builder)
+    assert _abi._fingerprint_moe_layout(_raw(cp)) is None
+    as_v2 = _recast(cp, LlamaContextParamsV2)
+    assert evaluate(good_model_v3(), as_v2).status == "ok"
+    with pytest.raises(AbiMismatch) as ei:
+        verify_abi(_FakeLib(good_model_v3(), cp))
+    failures = ei.value.context["abi_failures"]
+    assert any("moe_cache_size" in f for f in failures), failures
+    assert _abi._last_verdict.status == "mismatch"
+    assert _abi._last_verdict.detail == "context_params layout undetermined"
+
+
+def test_undecided_v2_v3_split_is_bypassed_by_the_escape_hatch(monkeypatch):
+    monkeypatch.setenv(_abi.SKIP_ENV, "1")
+    v = verify_abi(_FakeLib(good_model_v3(), _all_true_flags_off(good_ctx_v3)))
+    assert v.status == "skipped"
+    assert v.context_layout == CONTEXT_PARAMS_V2
+    assert any("moe_cache_size" in d for d in v.diagnostics), v.diagnostics
+
+
+@pytest.mark.parametrize("builder,want", [
+    (good_ctx_v2_real, CONTEXT_PARAMS_V2), (good_ctx_v3, CONTEXT_PARAMS_V3)])
+def test_three_flags_off_still_decides_and_loads(builder, want, monkeypatch):
+    monkeypatch.delenv(_abi.SKIP_ENV, raising=False)
+    cp = builder()
+    for flag in _TRUE_FLAGS[:3]:
+        setattr(cp, flag, False)
+    v = verify_abi(_FakeLib(good_model_v3(), cp))
+    assert (v.status, v.context_layout) == ("ok", want), v.failures
+
+
 def test_ctx_v1_bytes_are_not_refined_by_the_moe_probe():
     """The moe probe runs only inside the V2 family: V1 bytes stay V1."""
     cp = _real_ctx_defaults(LlamaContextParamsV1)

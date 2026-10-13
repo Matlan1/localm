@@ -53,6 +53,37 @@ class TestNoThinkPrompt:
         assert no_think_prompt(p, "{{ messages }}") == p
         assert no_think_prompt(p, None) == p
 
+    HARMONY = ("<|start|>user<|message|>hi<|end|>"
+               "<|start|>assistant")
+
+    @pytest.mark.parametrize("template", [None, "<|start|>...<|channel|>"])
+    def test_harmony_prompt_goes_straight_to_the_final_channel(self, template):
+        assert (no_think_prompt(self.HARMONY, template)
+                == self.HARMONY + "<|channel|>final<|message|>")
+
+    def test_harmony_prompt_already_in_the_final_channel_is_unchanged(self):
+        p = self.HARMONY + "<|channel|>final<|message|>"
+        assert no_think_prompt(p, None) == p
+
+    def test_harmony_prompt_mid_conversation_is_not_prefilled(self):
+        p = self.HARMONY + "<|channel|>final<|message|>hello<|end|>"
+        assert no_think_prompt(p, None) == p
+
+    GEMMA4 = "<bos><|turn>user\nhi<turn|>\n<|turn>model\n"
+    GEMMA4_TEMPLATE = "{{- '<|channel>thought\\n' -}}"
+
+    def test_gemma4_open_thought_channel_is_closed_empty(self):
+        p = self.GEMMA4 + "<|channel>thought\n"
+        assert no_think_prompt(p, None) == p + "<channel|>"
+
+    def test_gemma4_prompt_with_an_empty_thought_is_unchanged(self):
+        p = self.GEMMA4 + "<|channel>thought\n<channel|>"
+        assert no_think_prompt(p, self.GEMMA4_TEMPLATE) == p
+
+    def test_gemma4_model_turn_is_not_prefilled(self):
+        assert no_think_prompt(self.GEMMA4, self.GEMMA4_TEMPLATE) == self.GEMMA4
+        assert no_think_prompt(self.GEMMA4, None) == self.GEMMA4
+
 
 # --------------------------------------------------------------------------- #
 #  Backend plumbing                                                            #
@@ -89,6 +120,15 @@ class TestGgufPrefill:
         llm.create_chat_completion([{"role": "user", "content": "summarise"}],
                                    stream=True, thinking=False)
         assert encoded == [self.RENDERED + "<think>\n\n</think>\n\n"]
+
+    def test_thinking_false_sends_a_harmony_prompt_to_the_final_channel(
+            self, monkeypatch):
+        rendered = "<|start|>user<|message|>summarise<|end|><|start|>assistant"
+        llm, encoded = _llama_with_template(
+            monkeypatch, rendered, "<|start|>{{ x }}<|channel|>")
+        llm.create_chat_completion([{"role": "user", "content": "summarise"}],
+                                   stream=True, thinking=False)
+        assert encoded == [rendered + "<|channel|>final<|message|>"]
 
     def test_default_prompt_is_unchanged(self, monkeypatch):
         llm, encoded = _llama_with_template(monkeypatch, self.RENDERED, "...<think>...")

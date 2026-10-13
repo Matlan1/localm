@@ -92,6 +92,20 @@ _NON_SOURCE_DIRS = (
 _TORCH_LABEL_RE = re.compile(
     r"^(?:torch|torchvision|torchaudio)==[^+\s]+\+([A-Za-z0-9.]+)", re.IGNORECASE)
 
+# AMD's multi-arch ROCm wheel index: the per-GPU device packages
+# (amd-torch-device-gfx1030, rocm-sdk-device-gfx1030, ...) and the torch builds
+# they pin are published there, not on download.pytorch.org.
+_AMD_MULTI_ARCH_INDEX = "https://repo.amd.com/rocm/whl-multi-arch/"
+_AMD_DEVICE_PACKAGE_RE = re.compile(
+    r"^(?:amd-torch(?:vision|audio)?-device|rocm-sdk-device)-[A-Za-z0-9-]+==",
+    re.IGNORECASE)
+# The packages a freeze with AMD device packages installs from AMD's index alone:
+# AMD's own rocm / rocm-* / amd-*-device-* names, and torch builds labelled +rocm.
+_AMD_ONLY_PACKAGE_RE = re.compile(
+    r"^(?:(?:amd-[A-Za-z0-9-]+-device-[A-Za-z0-9-]+|rocm|rocm-[A-Za-z0-9-]+)=="
+    r"|(?:torch|torchvision|torchaudio|triton)==[^+\s]+\+rocm)",
+    re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class UserComfyStack:
@@ -372,11 +386,18 @@ def read_user_freeze(venv_python: Path) -> Optional[list]:
 
 
 def torch_index_url_from_freeze(freeze_lines) -> Optional[str]:
-    """The PyTorch wheel index-url implied by a torch pin's local version label
+    """The PyTorch wheel index-url implied by *freeze_lines*: AMD's multi-arch
+    ROCm index when the freeze holds an AMD per-GPU device package
+    (``amd-torch-device-gfx1030==...``, ``rocm-sdk-device-gfx1030==...``), else
+    the one implied by a torch pin's local version label
     (``torch==2.4.1+rocm6.2`` -> ``https://download.pytorch.org/whl/rocm6.2``), or
     None when torch is a plain PyPI build (no ``+label``) or absent. pip does not
-    record the index a package came from, so this label is the only signal we have."""
-    for line in freeze_lines:
+    record the index a package came from, so these names and labels are the only
+    signal we have."""
+    lines = [line.strip() for line in freeze_lines]
+    if any(_AMD_DEVICE_PACKAGE_RE.match(line) for line in lines):
+        return _AMD_MULTI_ARCH_INDEX
+    for line in lines:
         m = _TORCH_LABEL_RE.match(line.strip())
         if m:
             return f"https://download.pytorch.org/whl/{m.group(1)}"
@@ -473,10 +494,29 @@ def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optiona
     """pip-install the user's exact package set into the managed venv. The freeze is
     written to a requirements file (kept as provenance) and installed with -r; the
     derived PyTorch index is added as an extra index so torch resolves to the same
-    wheel while everything else still comes from PyPI."""
+    wheel while everything else still comes from PyPI.
+
+    With AMD's multi-arch index, the AMD packages (``_AMD_ONLY_PACKAGE_RE``) are
+    installed first from that index alone, without dependencies, and the rest of
+    the freeze from PyPI alone, so no package can come from the other index."""
     req_file = managed_root / "localm-replicated-requirements.txt"
     req_file.write_text("\n".join(freeze_lines) + "\n", encoding="utf-8")
-    cmd = [str(managed_python), "-m", "pip", "install", "--disable-pip-version-check"]
+    pip = [str(managed_python), "-m", "pip", "install", "--disable-pip-version-check"]
+    if index_url == _AMD_MULTI_ARCH_INDEX:
+        amd = [ln for ln in freeze_lines if _AMD_ONLY_PACKAGE_RE.match(ln.strip())]
+        rest = [ln for ln in freeze_lines if not _AMD_ONLY_PACKAGE_RE.match(ln.strip())]
+        amd_file = managed_root / "localm-replicated-requirements-amd.txt"
+        rest_file = managed_root / "localm-replicated-requirements-pypi.txt"
+        amd_file.write_text("\n".join(amd) + "\n", encoding="utf-8")
+        rest_file.write_text("\n".join(rest) + "\n", encoding="utf-8")
+        ok, out = _run(pip + ["--index-url", index_url, "--no-deps", "-r", str(amd_file)],
+                       on_progress=on_progress, timeout=3600)
+        if not ok or not rest:
+            return ok, out
+        ok2, out2 = _run(pip + ["-r", str(rest_file)], on_progress=on_progress,
+                         timeout=3600)
+        return ok2, out + "\n" + out2
+    cmd = list(pip)
     if index_url:
         cmd += ["--extra-index-url", index_url]
     cmd += ["-r", str(req_file)]

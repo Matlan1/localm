@@ -561,3 +561,36 @@ def test_route_says_gpu_placement_is_comfyui_only_for_native(tmp_path, monkeypat
         end, lines = _wait_job(c, r.json()["job_id"], h)
         assert end and end["status"] == "done", lines
         assert any("GPU placement applies to ComfyUI only" in ln for ln in lines)
+
+
+def test_route_applies_the_pages_component_choice_for_one_job(tmp_path, monkeypatch, no_comfy,
+                                                              fake_generate):
+    from fastapi.testclient import TestClient
+
+    from localm.config import REGISTRY_FILE
+    dit = tmp_path / "my-dit.gguf"
+    dit.write_bytes(b"x")
+    REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REGISTRY_FILE.write_text(json.dumps({"my-dit": {
+        "path": str(dit), "model_type": "diffusion-unet", "architecture": "acestep-dit"}}),
+        encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(music, "prepare",
+                        lambda blk, *a, **k: seen.append(dict(blk)) or ("vulkan", None))
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
+    monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda *a, **k: None)
+    app = _music_app(tmp_path, monkeypatch)
+    h = _key(["music"])
+    with TestClient(app) as c:
+        opts = c.get("/api/music/native-models", headers=h).json()
+        r = c.post("/api/music", headers=h, json={
+            "tags": "lofi", "duration_seconds": 2, "native_models": {"dit": "my-dit"}})
+        _wait_job(c, r.json()["job_id"], h)
+        bad = c.post("/api/music", headers=h, json={
+            "tags": "lofi", "native_models": {"dit": "not-registered"}})
+        bad_slot = c.post("/api/music", headers=h, json={
+            "tags": "lofi", "native_models": {"model": "my-dit"}})
+    assert opts["components"]["dit"] == [{"name": "my-dit", "file": "my-dit.gguf"}]
+    assert seen and seen[0]["dit"] == "my-dit"
+    assert bad.status_code == 400 and "not a registered model" in bad.text
+    assert bad_slot.status_code == 400
