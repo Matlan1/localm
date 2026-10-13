@@ -903,6 +903,55 @@ NOT_MEASURED_BY_DESIGN = (
 )
 
 
+HEALTH_ISSUE_THRESHOLD = 3
+_PROVEN = {PASS, MERGED, NONE_NEWER, DRY_PASS, REVIEW, NOT_MEASURED, FAIL, NEEDS_UPDATE}
+_UNPROVEN = {INCONCLUSIVE, NOT_RUN, NOT_BUILT}
+
+
+def health_path() -> Path:
+    return pp.STATE_DIR / "weekly-health.json"
+
+
+def record_health(outcomes: list[Outcome], today: str | None = None) -> dict:
+    """Count, per runtime and kind of check, the consecutive weekly runs that ended without
+    a result (INCONCLUSIVE, NOT RUN, NOT BUILT) and log one issue entry when a count reaches
+    HEALTH_ISSUE_THRESHOLD. Any result (even a FAIL, which is logged on its own) resets the
+    count; SKIPPED leaves it as it was. Returns the new counts, keyed "<key>|<kind>"."""
+    today = today or _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d")
+    path = health_path()
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            raise ValueError("not an object")
+    except FileNotFoundError:
+        state = {}
+    except (OSError, ValueError) as e:
+        print(f"WARNING: {path.name} could not be read ({e}); the weekly counts start again")
+        state = {}
+    for o in outcomes:
+        key = f"{o.key}|{o.kind}"
+        entry = state.get(key) if isinstance(state.get(key), dict) else {"streak": 0}
+        if o.verdict in _PROVEN:
+            state[key] = {"streak": 0, "last": today, "last_verdict": o.verdict}
+            continue
+        if o.verdict not in _UNPROVEN:
+            continue
+        streak = int(entry.get("streak", 0)) + 1
+        since = entry.get("since") if entry.get("streak") else today
+        state[key] = {"streak": streak, "since": since, "last": today, "last_verdict": o.verdict,
+                      "detail": (o.detail or "")[:200]}
+        if streak == HEALTH_ISSUE_THRESHOLD:
+            what = "advancing" if o.kind == "advance" else "re-proving the pinned build of"
+            pp.append_fail_issue(
+                f"{o.key}-{o.kind}", f"{streak} weekly runs in a row ended without a result ({o.verdict})",
+                None, pin="health", kind="UNPROVEN-3-WEEKS",
+                summary=f"the weekly run has not been able to prove {what} {o.title} for {streak} runs "
+                        f"in a row (since {since}); last result {o.verdict}: {(o.detail or '-')[:200]}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    return {k: v.get("streak", 0) for k, v in state.items() if isinstance(v, dict)}
+
+
 def severity(outcomes: list[Outcome]) -> int:
     if any(o.verdict == FAIL for o in outcomes):
         return 1
@@ -911,7 +960,8 @@ def severity(outcomes: list[Outcome]) -> int:
     return 0
 
 
-def render_report(rows: list, outcomes: list[Outcome], started: _dt.datetime, dry_run: bool) -> str:
+def render_report(rows: list, outcomes: list[Outcome], started: _dt.datetime, dry_run: bool,
+                  health: dict | None = None) -> str:
     lines = [f"# Weekly pin run {started.strftime('%Y-%m-%d %H:%M UTC')}"
              + (" (dry run)" if dry_run else ""), ""]
     lines += ["## Advancing", "", "| runtime | result | pinned | candidate | detail |", "|---|---|---|---|---|"]
@@ -922,6 +972,10 @@ def render_report(rows: list, outcomes: list[Outcome], started: _dt.datetime, dr
               "| runtime | result | detail |", "|---|---|---|"]
     for o in (x for x in outcomes if x.kind == "verify-current"):
         lines.append(f"| {o.title} | {o.verdict} | {(o.detail or '-').replace('|', '/')[:240]} |")
+    waiting = sorted((k, n) for k, n in (health or {}).items() if n)
+    if waiting:
+        lines += ["", "## Weeks in a row without a result", "", "| runtime and check | weeks |", "|---|---|"]
+        lines += [f"| {k.replace('|', ' ')} | {n} |" for k, n in waiting]
     lines += ["", "## Not measured on this machine (by design)", "", "| what | why |", "|---|---|"]
     lines += [f"| {what} | {why} |" for what, why in NOT_MEASURED_BY_DESIGN]
     lines += ["", "## Currency of every pin", "", cp.format_table(rows)]
@@ -979,7 +1033,8 @@ def run_weekly(advancers: list[Advancer], *, dry_run: bool, verify: bool = True)
     except pp.PipelineError as e:
         print(f"WARNING: the main checkout could not be brought up to date before the currency table: {e}")
     rows = cp.run_checks(cp.build_registry(), _dt.datetime.now(_dt.UTC))
-    report = render_report(rows, outcomes, started, dry_run)
+    health = {} if dry_run else record_health(outcomes)
+    report = render_report(rows, outcomes, started, dry_run, health)
     path = write_report(report, outcomes, started)
     print(f"report: {path}")
     return max(severity(outcomes), cp.exit_code(rows)), path
