@@ -545,6 +545,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   leaves the model loaded without drafting. A crash while loading the draft model now names
   the draft model and `spec_source` instead of advising a smaller context, and replacing the
   draft model file clears the retry back-off.
+- **gpt-oss replies reach their answer.** A gpt-oss reply stopped at the end of its
+  reasoning, so the answer came back empty; it now continues into the answer.
+- **Thinking off on gpt-oss.** Asking a model to answer without reasoning
+  (`chat_template_kwargs: {"enable_thinking": false}`, `reasoning_effort: "none"`, and the
+  summary written when a long conversation is compacted) now starts a gpt-oss reply in its
+  final channel, with no analysis before it. Before, only models that reason in `<think>`
+  blocks were affected.
+- **A llama runtime whose context-parameter layout cannot be told apart is refused.** When
+  a provided llama.cpp build's default context parameters fit both the layout with and the
+  one without the MoE expert cache field, loading stops with the ABI mismatch message
+  instead of assuming the older layout.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's
