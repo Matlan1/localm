@@ -2094,8 +2094,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   being built instead of after hundreds of megabytes of work; a lazy grammar takes at most 64
   `grammar_triggers` and stops validating them after 10 seconds; and an attached image is refused,
   before it is decoded, above 50 megapixels, past 64 images or 800 megapixels in one request
-  (earlier images in the conversation included), or when it is not a PNG, JPEG, WebP, GIF, BMP or
-  TIFF. These refusals answer 413 with the reason, and the chat page keeps the conversation's
+  (earlier images in the conversation included), or when it is not a PNG, JPEG, WebP, GIF, BMP,
+  TIFF or AVIF. These refusals answer 413 with the reason, and the chat page keeps the conversation's
   images.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had

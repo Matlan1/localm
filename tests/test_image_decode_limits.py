@@ -104,6 +104,21 @@ def test_allowed_formats_decode(fmt, mime):
     assert img.size == (12, 8) and img.mode == "RGB"
 
 
+def test_avif_decodes_when_pillow_has_it():
+    from PIL import features
+    if not features.check("avif"):
+        pytest.skip("this Pillow build has no AVIF codec")
+    img = decode_image_url(_data_uri(_encoded(12, 8, "AVIF"), "image/avif"))
+    assert img.size == (12, 8) and img.mode == "RGB"
+
+
+def test_a_listed_format_this_pillow_lacks_is_skipped(monkeypatch):
+    monkeypatch.setattr(media, "IMAGE_FORMATS", ("NOSUCHFORMAT",) + media.IMAGE_FORMATS)
+    assert decode_image_url(_small_png()).size == (10, 10)
+    with pytest.raises(Image.UnidentifiedImageError):
+        decode_image_url(_data_uri(b"not an image at all"))
+
+
 def test_ico_is_refused_without_decoding_its_pixels(load_calls):
     raw = _encoded(32, 32, "ICO")
     assert Image.open(io.BytesIO(raw)).format == "ICO"

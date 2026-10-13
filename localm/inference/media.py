@@ -33,7 +33,7 @@ MAX_REQUEST_IMAGES = 64
 MAX_REQUEST_IMAGE_PIXELS = 800_000_000
 # Formats decoded. Each one's open reads only the header, so the size check
 # runs before any pixel data is decoded.
-IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF")
+IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF", "AVIF")
 
 
 class ImageBudget:
@@ -83,8 +83,10 @@ def _open_bounded(Image, raw: bytes, budget: ImageBudget | None):
     *budget*. Raises ImageLimitError for an image over either limit or in a
     format outside ``IMAGE_FORMATS``, before any pixel data is decoded."""
     from localm.inference.backends.base import ImageLimitError
+    Image.init()
+    available = [f for f in IMAGE_FORMATS if f in Image.OPEN]
     try:
-        img = Image.open(io.BytesIO(raw), formats=IMAGE_FORMATS)
+        img = Image.open(io.BytesIO(raw), formats=available)
     except Image.DecompressionBombError as e:
         raise ImageLimitError(
             f"The attached image is too large to decode: {e}") from e
