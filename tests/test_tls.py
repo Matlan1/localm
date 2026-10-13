@@ -44,6 +44,13 @@ def test_san_targets_always_includes_loopback():
     assert "::1" in ips
 
 
+def test_san_targets_lists_ipv4_addresses_before_ipv6_each_sorted(monkeypatch):
+    monkeypatch.setattr(tls, "_host_ips", lambda: [])
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "")
+    _, ips = tls.san_targets(extra_ips=["fe80::1", "10.0.0.9", "9.9.9.9", "2001:db8::1"])
+    assert ips == ["10.0.0.9", "127.0.0.1", "9.9.9.9", "2001:db8::1", "::1", "fe80::1"]
+
+
 def test_san_targets_routes_extras_and_drops_wildcard():
     hosts, ips = tls.san_targets(
         extra_hostnames=["phone.local", "10.0.0.5", "0.0.0.0"],
@@ -102,6 +109,21 @@ def test_ensure_cert_creates_ca_and_leaf(tmp_path):
     assert x509.oid.ExtendedKeyUsageOID.SERVER_AUTH in eku
     _, ips = _sans(leaf)
     assert {"127.0.0.1", "::1", "192.168.1.50"}.issubset(ips)
+
+
+def test_ensure_cert_reusing_the_leaf_returns_the_same_paths(tmp_path):
+    first = tls.ensure_cert(tmp_path, ips=["192.168.1.50"])
+    again = tls.ensure_cert(tmp_path, ips=["192.168.1.50"])
+    assert again == first
+    assert again == (str(tls._leaf_cert_path(tmp_path)), str(tls._leaf_key_path(tmp_path)))
+
+
+def test_the_ca_basic_constraints_extension_is_marked_critical(tmp_path):
+    tls.ensure_cert(tmp_path)
+    ca = _load(tls.ca_cert_path(tmp_path))
+    ext = ca.extensions.get_extension_for_class(x509.BasicConstraints)
+    assert ext.critical is True
+    assert ext.value.path_length == 0
 
 
 def test_ensure_cert_covers_a_hostname_and_an_ip_given_together(tmp_path):
@@ -332,6 +354,14 @@ def test_companion_addresses_picks_lan_and_tailscale(monkeypatch):
     monkeypatch.setattr(tls, "_iface_ips", lambda: ["100.101.102.103", "192.168.1.50"])
     addrs = tls.companion_addresses()
     assert addrs == {"lan": "192.168.1.50", "tailscale": "100.101.102.103"}
+
+
+def test_companion_addresses_keeps_the_primary_when_other_private_addresses_follow(monkeypatch):
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "192.168.1.50")
+    monkeypatch.setattr(tls, "_host_ips", lambda: ["10.0.0.7"])
+    monkeypatch.setattr(tls, "_iface_ips", lambda: ["172.16.4.4", "10.0.0.9"])
+    monkeypatch.setattr(tls, "_vpn_adapter_ips", lambda: set())
+    assert tls.companion_addresses()["lan"] == "192.168.1.50"
 
 
 def test_companion_addresses_tailscale_absent_is_empty(monkeypatch):
