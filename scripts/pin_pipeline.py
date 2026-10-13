@@ -25,7 +25,7 @@ WHAT THIS DOES, per run:
      - polling real per-check conclusions, never mergeable/mergeStateStatus.
   5. On FAIL/INCONCLUSIVE, or any refusal after that point: no PR is opened,
      the state file records why, and a genuine FAIL is also appended to
-     issues/issues.txt so a human or a later session actually sees it.
+     the maintainer's issue backlog so a human or a later session actually sees it.
 
 WHAT THIS NEVER DOES: touch the shared main checkout's branch or working tree
 (worktree isolation is checked, not assumed, and nothing in the write path
@@ -82,7 +82,7 @@ INCONCLUSIVE_ISSUE_THRESHOLD = 5
 
 # How long to wait for a merged branch's CI checks before giving up for this
 # run (leaving the PR open, never force-merging, never abandoning it).
-CI_WAIT_TIMEOUT_SECONDS = 45 * 60
+CI_WAIT_TIMEOUT_SECONDS = 75 * 60
 CI_POLL_INTERVAL_SECONDS = 20
 
 REQUIRE_BACKENDS = ("cpu", "vulkan")
@@ -111,7 +111,7 @@ class PipelineError(Exception):
     from a build-quality FAIL - this is an internal-consistency problem
     worth a human's attention regardless of build quality. Recorded as a
     permanent FAIL (never auto-retried without a newer upstream tag) and
-    logged to issues.txt."""
+    logged to the issue backlog."""
 
 
 class InfraError(PipelineError):
@@ -119,7 +119,7 @@ class InfraError(PipelineError):
     plumbing (a fetch, a push, `gh pr create`/`merge`) - never about the
     confirmed candidate build's own quality, which already passed real
     hardware confirm before any of these steps run. Recorded as INCONCLUSIVE
-    (cooldown retry, never logged to issues.txt) rather than FAIL."""
+    (cooldown retry, never logged to the issue backlog) rather than FAIL."""
 
 
 def gpu_lease_script() -> Path:
@@ -507,10 +507,10 @@ def insert_changelog_bullet(text: str, bullet: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-#  issues.txt - a genuine FAIL is logged where it will actually be seen       #
+#  Issue backlog - a genuine FAIL is logged where it will actually be seen    #
 # --------------------------------------------------------------------------- #
 
-# Matches the structural end of issues.txt's own intro paragraph (its first
+# Matches the structural end of the issue backlog's own intro paragraph (its first
 # blank line) without spelling out that paragraph's actual prose as a literal
 # string constant here - this file is tracked and public, and the prose
 # itself names a gitignored path (see test_no_gitignored_path_leak.py).
@@ -520,7 +520,7 @@ _ISSUES_INTRO_RE = re.compile(r"an entry lives\nin exactly one\..*?\n\n", re.S)
 def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
                       issues_path: Path | None = None, *, pin: str = "llama",
                       summary: str | None = None, kind: str = "CONFIRM-FAILED") -> bool:
-    """Append a new OPEN entry to issues/issues.txt for a genuine FAIL (never
+    """Append a new OPEN entry to the issue backlog for a genuine FAIL (never
     for an ordinary INCONCLUSIVE - that is not evidence of anything; a
     repeated-INCONCLUSIVE streak past INCONCLUSIVE_ISSUE_THRESHOLD and an
     uncaught-exception INCONCLUSIVE are both deliberate exceptions, logged
@@ -558,14 +558,17 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
         return True  # already logged for this exact candidate
     m = _ISSUES_INTRO_RE.search(text)
     if not m:
-        print(f"WARNING: issues.txt's intro anchor no longer matches; {title} was "
+        print(f"WARNING: the issue backlog's intro anchor no longer matches; {title} was "
               "NOT logged there (the FAIL above and the state file are still recorded)")
         return False
     receipt_note = f" (receipt: {receipt_path})" if receipt_path else ""
-    summary = summary or (
-        f"llama.cpp {candidate} FAILS to load and generate on this hardware\n"
-        f"    scripts/pin_pipeline.py ran scripts/confirm_llama_runtime.py against upstream's\n"
-        f"    {candidate} for real (cpu + vulkan) and it did not pass: {reason}{receipt_note}.")
+    if summary is None and pin == "llama":
+        summary = (
+            f"llama.cpp {candidate} FAILS to load and generate on this hardware\n"
+            f"    scripts/pin_pipeline.py ran scripts/confirm_llama_runtime.py against upstream's\n"
+            f"    {candidate} for real (cpu + vulkan) and it did not pass: {reason}{receipt_note}.")
+    elif summary is None:
+        summary = f"the {pin} pin could not be moved to {candidate}: {reason}{receipt_note}."
     entry = (
         f"{title} [OPEN - filed {today}] bug/setup - the automated pin pipeline confirmed "
         f"{summary}\n"
@@ -793,12 +796,19 @@ def reset_pipeline_worktree(worktree: Path) -> None:
             f"the pipeline worktree is not clean after a reset: {status.stdout or status.stderr}")
 
 
+def bump_branch_name(pin: str, candidate: str) -> str:
+    """The git branch a bump of *pin* to *candidate* lives on. Characters git refuses in a
+    ref name (a digest's colon, a version's plus or equals sign) become hyphens."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", candidate).strip(".-") or "candidate"
+    return f"claude/pin-pipeline-{pin}-{safe}"
+
+
 def prepare_bump_branch(worktree: Path, candidate: str, *, pin: str = "llama") -> str:
     """Reset the pipeline worktree to a fresh branch off origin/master, ready
     for this candidate's bump commit. Raises InfraError if the fetch or the
     detach fails, rather than branching off whatever the worktree was on
     before. See test_prepare_bump_branch_refuses_when_fetch_fails."""
-    branch = f"claude/pin-pipeline-{pin}-{candidate}"
+    branch = bump_branch_name(pin, candidate)
     reset_pipeline_worktree(worktree)
     check_free_space(worktree.parent)
     result = _run_git(["fetch", "origin"], cwd=worktree)

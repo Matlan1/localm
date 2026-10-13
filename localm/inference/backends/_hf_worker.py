@@ -642,7 +642,7 @@ def _untrusted_prompt_ranges(tokenizer, template_messages, text,
         return ()
 
     def render(sentinels):
-        probe = [dict(m, content=s) for m, s in zip(template_messages, sentinels, strict=False)]
+        probe = [dict(m, content=s) for m, s in zip(template_messages, sentinels, strict=True)]
         return tokenizer.apply_chat_template(
             probe, tokenize=False, add_generation_prompt=True,
             **(template_kwargs or {}))
@@ -1039,7 +1039,7 @@ def _join_image_features(entries: list[dict]) -> dict:
     if all("deepstack_features" in e for e in entries):
         joined["deepstack_features"] = [
             torch.cat(list(layer), dim=0)
-            for layer in zip(*(e["deepstack_features"] for e in entries), strict=False)]
+            for layer in zip(*(e["deepstack_features"] for e in entries), strict=True)]
     return joined
 
 

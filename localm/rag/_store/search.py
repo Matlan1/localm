@@ -7,7 +7,7 @@ import math
 import operator
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
 from localm.rag import store as _st
@@ -78,6 +78,8 @@ class _CollectionSearch:
     name: str
     dir: Path
     _chunks: list[dict]
+    _vectors: Optional[list]
+    _note_vector_degrade: Callable[..., None]
 
     def query(self, text: str, k: int = 4,
               embed_fn: Optional[EmbedFn] = None, *,
@@ -141,7 +143,7 @@ class _CollectionSearch:
         if cosines is not None:
             vec_scores = _maxnorm(cosines)
             scores = [0.5 * lex + 0.5 * vec
-                      for lex, vec in zip(scores, vec_scores, strict=False)]
+                      for lex, vec in zip(scores, vec_scores, strict=True)]
 
         k = max(1, k)
         pool = k if rerank_fn is None else max(k, rerank_candidates)
@@ -268,6 +270,11 @@ class _CollectionSearch:
         partial vectors, mixed or mismatched dimensions, a failed or non-finite
         query embedding), with the reason recorded by _note_vector_degrade."""
         if embed_fn is None or self._vectors is None:
+            return None
+        if len(self._vectors) != len(self._chunks):
+            self._note_vector_degrade(
+                f"{len(self._vectors)} stored vectors for {len(self._chunks)} chunks; "
+                "using BM25 lexical retrieval only", warn=True)
             return None
         present = [v for v in self._vectors if v]
         if not self._chunks or len(present) / len(self._chunks) < 0.8:

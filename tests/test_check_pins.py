@@ -423,6 +423,13 @@ def test_legacy_gate_exit_codes_map_to_statuses(monkeypatch, rc, out, status):
     assert check(NOW).status == status
 
 
+def test_a_legacy_gate_that_dies_with_only_stderr_still_explains_itself(monkeypatch):
+    monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="could not read pins.py: boom"))
+    row = cp._legacy_check("n", "g", "scripts/check_llama_pin.py", "a")(NOW)
+    assert row.status == cp.STALE and "exit code 1" in row.detail and "could not read pins.py: boom" in row.detail
+
+
 def test_legacy_gate_that_cannot_launch_is_unknown(monkeypatch):
     def boom(*a, **k):
         raise OSError("no python")
@@ -638,7 +645,7 @@ def test_only_pins_with_a_written_reason_are_blocked():
 
 def test_unchecked_sources_are_listed_every_run_with_their_reason():
     rows = cp.run_checks([s for s in cp.build_registry() if s.group == "unchecked"], NOW)
-    assert len(rows) == len(cp._NOT_CHECKABLE) >= 5
+    assert len(rows) == len(cp._NOT_CHECKABLE) >= 3
     assert all(r.status == cp.UNVERSIONED and len(r.detail) > 10 for r in rows)
 
 
@@ -1075,3 +1082,89 @@ def test_an_unreachable_hub_reads_unknown_for_the_kokoro_commit(monkeypatch):
     monkeypatch.setattr(cp, "_hf_linked_sha256", lambda repo, path, revision="main": None)
     spec = next(s for s in cp.build_registry() if s.name == cp._KOKORO_NAME)
     assert cp.run_checks([spec], NOW)[0].status == cp.UNKNOWN
+
+
+# ---- pins read from the product's own tables ----------------------------------
+
+
+def test_the_embedding_and_native_model_pins_are_read_from_the_product():
+    labels = {p[0] for p in cp.hf_file_pins()}
+    assert any(label.startswith("embedding ") for label in labels)
+    assert any(label.startswith("native image ") for label in labels)
+    assert any(label.startswith("native video ") and label.endswith(" vae") for label in labels)
+    for _label, repo, path, revision, sha in cp.hf_file_pins():
+        assert repo.count("/") == 1 and path and revision and cp._HEX64_RE.match(sha)
+
+
+def test_a_changed_native_model_digest_is_stale(monkeypatch):
+    victim = next(p for p in cp.hf_file_pins() if p[0].startswith("native image "))
+
+    def served(repo, path, revision="main"):
+        return "0" * 64 if (repo, path) == (victim[1], victim[2]) else next(
+            p[4] for p in cp.hf_file_pins() if (p[1], p[2]) == (repo, path))
+    row = _hf_row(monkeypatch, served)
+    assert row.status == cp.STALE and victim[0] in row.detail
+
+
+def test_a_constructor_entry_that_is_not_what_the_reader_expects_is_a_local_read_error(monkeypatch, tmp_path):
+    (tmp_path / "localm" / "plugins" / "builtin" / "image" / "backends").mkdir(parents=True)
+    (tmp_path / "localm" / "plugins" / "builtin" / "image" / "backends" / "native.py").write_text(
+        "RECOMMENDED_MODELS = (Model(name='x'),)\n", encoding="utf-8")
+    monkeypatch.setattr(cp, "REPO", tmp_path)
+    with pytest.raises(cp.LocalReadError, match="lacks"):
+        cp._hf_native_image_pins()
+
+
+# ---- torch in uv.lock ----------------------------------------------------------
+
+
+def _torch_row(monkeypatch, tmp_path, lock, latest):
+    (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
+    monkeypatch.setattr(cp, "REPO", tmp_path)
+    monkeypatch.setattr(cp, "_pypi_latest", latest)
+    return cp._check_torch_lock(NOW)
+
+
+def _lock(v):
+    return ('[[package]]\nname = "torch"\nversion = "2.11.0+rocm7.13.0"\nsource = { url = "https://x/t.whl" }\n\n'
+            f'[[package]]\nname = "torch"\nversion = "{v}"\nsource = {{ registry = "https://pypi.org/simple" }}\n')
+
+
+def test_torch_in_the_lock_is_current_behind_or_stale_against_pypi(monkeypatch, tmp_path):
+    row = _torch_row(monkeypatch, tmp_path, _lock("2.13.0"), lambda p: ("2.13.0", NOW))
+    assert row.status == cp.CURRENT and row.pinned == "2.13.0"
+    row = _torch_row(monkeypatch, tmp_path, _lock("2.13.0"), lambda p: ("2.14.1", NOW - dt.timedelta(days=13)))
+    assert row.status == cp.BEHIND and row.days == 13 and row.latest == "2.14.1"
+    row = _torch_row(monkeypatch, tmp_path, _lock("2.13.0"), lambda p: ("2.14.1", NOW - dt.timedelta(days=400)))
+    assert row.status == cp.STALE
+
+
+def test_torch_reads_the_pypi_entry_not_the_local_version_wheel(monkeypatch, tmp_path):
+    row = _torch_row(monkeypatch, tmp_path, _lock("2.13.0"), lambda p: ("2.13.0", NOW))
+    assert row.pinned == "2.13.0"
+
+
+def test_a_torch_entry_from_another_source_with_a_plain_version_is_not_taken_for_the_pypi_one(monkeypatch, tmp_path):
+    other = '[[package]]\nname = "torch"\nversion = "9.9.9"\nsource = { url = "https://example.invalid/t.whl" }\n\n'
+    lock = other + _lock("2.13.0")
+    row = _torch_row(monkeypatch, tmp_path, lock, lambda p: ("2.13.0", NOW))
+    assert row.pinned == "2.13.0" and row.status == cp.CURRENT
+
+
+def test_a_lock_without_a_pypi_torch_is_a_local_read_error_row(monkeypatch, tmp_path):
+    spec = next(s for s in cp.build_registry() if s.name == "torch (uv.lock)")
+    (tmp_path / "uv.lock").write_text('name = "torch"\nversion = "2.11.0+rocm7.13.0"\n', encoding="utf-8")
+    monkeypatch.setattr(cp, "REPO", tmp_path)
+    monkeypatch.setattr(cp, "_pypi_latest", lambda p: ("2.14.0", NOW))
+    row = cp.run_checks([spec], NOW)[0]
+    assert row.status == cp.INCONSISTENT and "no torch entry" in row.detail
+
+
+def test_an_unreachable_pypi_reads_unknown_for_torch(monkeypatch, tmp_path):
+    def down(p):
+        raise cp.FetchError("offline")
+    assert _torch_row(monkeypatch, tmp_path, _lock("2.13.0"), down).status == cp.UNKNOWN
+
+
+def test_the_real_lock_has_a_pypi_torch_entry():
+    assert cp._LOCK_TORCH_RE.search(cp._read_text("uv.lock")) is not None

@@ -537,6 +537,35 @@ def _check_llama_asset_checksums(now):
 _CUDA_RUNTIME_RE = re.compile(r'^_CUDA_RUNTIME_PIN = \{(.*?)^\}', re.MULTILINE | re.DOTALL)
 
 
+_LOCK_TORCH_RE = re.compile(
+    r'^name = "torch"\nversion = "([0-9][^"+]*)"\nsource = \{ registry = "https://pypi\.org/simple" \}',
+    re.MULTILINE)
+
+
+def _check_torch_lock(now):
+    """The PyPI torch release uv.lock pins against the newest PyPI release."""
+    name, group, advancer = "torch (uv.lock)", "tooling", "by hand (dependabot ignores torch)"
+    try:
+        m = _LOCK_TORCH_RE.search(_read_text("uv.lock"))
+        if not m:
+            raise LocalReadError("uv.lock: no torch entry from the PyPI registry found")
+        pinned = m.group(1)
+        latest, stamp = _pypi_latest("torch")
+    except FetchError as e:
+        return _unknown(name, group, advancer, e)
+    if _semver_key(pinned) is None or _semver_key(latest) is None:
+        return Row(name=name, status=INCONSISTENT, pinned=pinned, latest=latest, advancer=advancer,
+                   group=group, detail="a torch version is not a comparable release number")
+    if _semver_key(latest) <= _semver_key(pinned):
+        return Row(name=name, status=CURRENT, pinned=pinned, latest=latest, days=0,
+                   advancer=advancer, group=group)
+    days = (now - stamp).days if stamp else None
+    status = STALE if days is not None and days > SLOW_TOLERANCE_DAYS else BEHIND
+    return Row(name=name, status=status, pinned=pinned, latest=latest, days=days,
+               tolerance=SLOW_TOLERANCE_DAYS, advancer=advancer, group=group,
+               detail=f"PyPI has torch {latest}; uv.lock pins {pinned}")
+
+
 def _check_cuda_runtime_wheels(now):
     name, group = "Linux CUDA runtime wheels", "cuda"
     advancer = "pin_weekly.py (review PR)"
@@ -681,6 +710,8 @@ def _legacy_check(name, group, script, advancer, pinned_re=None, latest_re=None)
         lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
         verdict_lines = [line for line in lines if _VERDICT_LINE_RE.match(line)]
         tail = " | ".join(verdict_lines or lines[-3:])[:300]
+        if not tail:
+            tail = f"exit code {proc.returncode}: {(proc.stderr or '').strip()[-250:]}"
         status = {0: CURRENT, 1: STALE, 2: UNKNOWN}.get(proc.returncode, UNKNOWN)
         if proc.returncode == 0 and re.search(r"\bBEHIND\b", proc.stdout):
             status = BEHIND
@@ -814,7 +845,58 @@ def _hf_whisper_pins() -> list[tuple[str, str, str, str, str]]:
             for repo, (commit, sha) in table.items()]
 
 
-_HF_PIN_PROVIDERS = (_hf_music_pins, _hf_comfy_pins, _hf_whisper_pins, _hf_starter_pins)
+def _hf_embedding_pins() -> list[tuple[str, str, str, str, str]]:
+    table = _py_literal("localm/inference/embedder.py", "_EMBEDDING_PINS")
+    return [(f"embedding {filename}", repo, filename, commit, sha)
+            for (repo, filename), (commit, sha) in table.items()]
+
+
+def _call_args(call: ast.expr, rel: str, what: str) -> dict:
+    """The keyword arguments of a constructor call that are literals; others are left out."""
+    if not isinstance(call, ast.Call):
+        raise LocalReadError(f"{rel}: {what} is not a constructor call")
+    out = {}
+    for k in call.keywords:
+        try:
+            out[k.arg] = ast.literal_eval(k.value)
+        except ValueError:
+            continue
+    return out
+
+
+def _hf_native_image_pins() -> list[tuple[str, str, str, str, str]]:
+    rel = "localm/plugins/builtin/image/backends/native.py"
+    table = _py_value(rel, "RECOMMENDED_MODELS")
+    out = []
+    for call in getattr(table, "elts", []):
+        kw = _call_args(call, rel, "a RECOMMENDED_MODELS entry")
+        try:
+            out.append((f"native image {kw['name']}", kw["repo"], kw["file"], "main", kw["sha256"]))
+        except KeyError as e:
+            raise LocalReadError(f"{rel}: a RECOMMENDED_MODELS entry lacks {e}") from e
+    return out
+
+
+def _hf_native_video_pins() -> list[tuple[str, str, str, str, str]]:
+    rel = "localm/plugins/builtin/video/backends/native.py"
+    table = _py_value(rel, "RECOMMENDED_VIDEO_MODELS")
+    out = []
+    for call in getattr(table, "elts", []):
+        kw = _call_args(call, rel, "a RECOMMENDED_VIDEO_MODELS entry")
+        parts = call.keywords and next((k.value for k in call.keywords if k.arg == "parts"), None)
+        for part in getattr(parts, "elts", []):
+            try:
+                args = [ast.literal_eval(a) for a in part.args]
+                label, repo, path, _size, sha = args[:5]
+            except (ValueError, IndexError, AttributeError, TypeError) as e:
+                raise LocalReadError(f"{rel}: a RecommendedPart is not "
+                                     f"RecommendedPart(label, repo, path, size, sha256, kind): {e}") from e
+            out.append((f"native video {kw.get('name', '?')} {label}", repo, path, "main", sha))
+    return out
+
+
+_HF_PIN_PROVIDERS = (_hf_music_pins, _hf_comfy_pins, _hf_whisper_pins, _hf_starter_pins,
+                     _hf_embedding_pins, _hf_native_image_pins, _hf_native_video_pins)
 
 
 def hf_file_pins() -> list[tuple[str, str, str, str, str]]:
@@ -978,13 +1060,9 @@ def apply_blockers(rows: list[Row], now: _dt.datetime,
 # reason: (name, file that must still exist, why it is not checked).
 _NOT_CHECKABLE = (
     ("torch wheel indexes (cpu, cu126, cu130, xpu, rocm6.2)", "localm/hwdetect.py",
-     "floating package indexes; the torch version itself comes from uv.lock"),
+     "floating package indexes; the torch version itself is the uv.lock row"),
     ("libgomp package for the Linux bundle", "localm/setup_llama/native_deps.py",
      "pinned by sha256 against an immutable snapshot URL"),
-    ("native image and video model files", "localm/plugins/builtin/image/backends/native.py",
-     "pinned by sha256 and size on Hugging Face; the files are model weights, not runtimes"),
-    ("default embedding models", "localm/inference/embedder.py",
-     "Hugging Face model repositories chosen by name; no version to compare"),
     ("managed Python 3.12", "pyproject.toml",
      "uv installs the newest 3.12 patch; the floor is requires-python"),
 )
@@ -1014,6 +1092,7 @@ def build_registry() -> list[PinSpec]:
         PinSpec("Linux CUDA build source", "cuda", "rides the llama.cpp pin", _check_cuda_linux_source),
         PinSpec("ROCm CPU archive", "rocm", "rides the ROCm pin", _check_rocm_cpu_asset),
         PinSpec("Linux CUDA runtime wheels", "cuda", "pin_weekly.py (review PR)", _check_cuda_runtime_wheels),
+        PinSpec("torch (uv.lock)", "tooling", "by hand (dependabot ignores torch)", _check_torch_lock),
         PinSpec(_HF_PINS_NAME, "models", "by hand: re-read the digest on the hub and update the table",
                 _check_hf_file_digests),
         PinSpec(_KOKORO_NAME, "models",

@@ -744,7 +744,7 @@ def _paeth_predictor(a: int, b: int, c: int) -> int:
 # --------------------------------------------------------------------------- #
 
 def run_teardown_phase(workdir: Path) -> int:
-    """Never claims success on a silent partial failure (AGENTS.md rule 5): a
+    """Never claims success on a silent partial failure: a
     managed ComfyUI is a git checkout, and git marks its object store
     read-only, so a plain shutil.rmtree fails on Windows (WinError 5) and
     ignore_errors=True would then report "cleared" while custom_nodes/.git
