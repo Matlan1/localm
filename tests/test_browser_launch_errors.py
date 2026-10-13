@@ -876,3 +876,88 @@ def test_a_launch_that_fails_after_start_gave_up_is_logged(make_launch, caplog):
     assert launch.teardowns == ["t-late-failure"]
     assert any("no chromium here" in m for m in logged), (
         f"the launch's own failure was lost once start() had given up: {logged}")
+
+
+def test_stop_from_another_thread_while_start_waits_ends_the_start(make_launch):
+    launch = make_launch()
+    sess = launch.session("t-stop-during-start")
+    raised = []
+
+    def start():
+        try:
+            sess.start(timeout=30)
+        except BaseException as exc:                 # noqa: BLE001
+            raised.append(exc)
+
+    starter = threading.Thread(target=start, daemon=True)
+    starter.start()
+    deadline = time.monotonic() + 10
+    while sess._loop is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    stopper_done, stop_error = _run_within(5, lambda: sess.stop(timeout=0.2))
+    starter.join(5)
+    start_returned = not starter.is_alive()
+    closed_before_launch_ended = list(launch.teardowns)
+    launch.gate.set()
+    sess._thread.join(timeout=10)
+
+    assert stopper_done and stop_error is None, stop_error
+    assert start_returned, "start() kept waiting after stop() was called"
+    assert len(raised) == 1 and isinstance(
+        raised[0], bsession.BrowserUnavailableError), raised
+    assert "stopped while it was starting" in str(raised[0])
+    assert closed_before_launch_ended == [], (
+        "stop() tore the browser down while its launch was still running")
+    assert launch.teardowns == ["t-stop-during-start"], (
+        "a browser stopped while it was starting was left running")
+    assert not sess._thread.is_alive()
+    assert sess._loop.is_closed()
+
+
+def test_stop_during_start_waits_for_a_launch_that_finishes_quickly(make_launch):
+    launch = make_launch()
+    sess = launch.session("t-stop-quick")
+    raised = []
+
+    def start():
+        try:
+            sess.start(timeout=30)
+        except BaseException as exc:                 # noqa: BLE001
+            raised.append(exc)
+
+    starter = threading.Thread(target=start, daemon=True)
+    starter.start()
+    deadline = time.monotonic() + 10
+    while sess._loop is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    opener = threading.Timer(0.2, launch.gate.set)
+    opener.daemon = True
+    opener.start()
+
+    sess.stop(timeout=10)
+
+    assert launch.teardowns == ["t-stop-quick"], (
+        "stop() returned before the launch it ended had closed its browser")
+    assert not sess._thread.is_alive()
+    starter.join(5)
+    assert raised and isinstance(raised[0], bsession.BrowserUnavailableError)
+
+
+def test_a_second_stop_during_start_returns_at_once(make_launch):
+    launch = make_launch()
+    sess = launch.session("t-stop-twice")
+    starter = threading.Thread(
+        target=lambda: _run_within(30, lambda: sess.start(timeout=30)), daemon=True)
+    starter.start()
+    deadline = time.monotonic() + 10
+    while sess._loop is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    sess.stop(timeout=0.1)
+
+    finished, error = _run_within(2, lambda: sess.stop(timeout=30.0))
+    launch.gate.set()
+    sess._thread.join(timeout=10)
+
+    assert finished and error is None, error
+    assert launch.teardowns == ["t-stop-twice"]
