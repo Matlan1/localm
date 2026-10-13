@@ -522,6 +522,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   (offline, or the API rate limit is hit), setup installs the pinned CUDA build and checks it
   against its pinned checksum. On a machine with GPUs of different generations, one Blackwell
   GPU now selects the CUDA 13 build.
+- **Document attachments without the Knowledge plugin.** Attaching a text document, PDF or code file in
+  Chat or the Coder no longer fails with "Method Not Allowed" when the Knowledge plugin is not
+  installed: attachments are now converted to text by the built-in chat plugin
+  (`POST /api/chat/extract`), still entirely in memory. An API key needs the `chat` scope for
+  this, where the old route needed `rag`.
 - **A model split between GPU and system RAM says when its RAM part does not fit.** A load that keeps
   layers on the CPU (a partial offload, a machine with no GPU, or a draft model placed on the CPU) whose
   weights in system RAM do not fit available RAM now says in the load output, the GUI load toast and the
