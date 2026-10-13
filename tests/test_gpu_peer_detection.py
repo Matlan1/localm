@@ -509,7 +509,16 @@ class TestStatusRoute:
         assert body["instance_id"] == "self-1"
         assert body["pid"] == os.getpid()
         assert body["port"] == 8700 and body["scheme"] == "http"
-        assert set(body) >= {"model", "models", "vram_estimate_bytes", "gpu_index"}
+        assert set(body) >= {"model", "models", "vram_estimate_bytes", "gpu_index",
+                             "media"}
+
+    def test_names_the_native_media_runtimes_this_instance_holds(self, monkeypatch):
+        from localm.media.koboldcpp import server as kobold_server
+        client = TestClient(_coordinating_app())
+        assert client.get("/v1/instances/status").json()["media"] == []
+        monkeypatch.setattr(kobold_server, "running_pid", lambda: 4242)
+        assert client.get("/v1/instances/status").json()["media"] == [
+            "native music runtime"]
 
     def test_a_non_coordinating_instance_does_not_have_it(self):
         assert TestClient(create_app(None)).get("/v1/instances/status").status_code == 404

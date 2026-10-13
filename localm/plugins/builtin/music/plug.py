@@ -148,7 +148,8 @@ async def music(req: MusicRequest, request: Request):
         if not ok:
             return False
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
-                                 unload_chat_for_media)
+                                 note_other_vram_holders,
+                                 release_other_native_media, unload_chat_for_media)
         placement = None
         if s.get("backend") == "comfy":
             from localm.media.comfy_client import resolve_media_placement
@@ -162,6 +163,7 @@ async def music(req: MusicRequest, request: Request):
             job.push({"type": "line", "text":
                       "Per-component GPU placement applies to ComfyUI only; the native "
                       "backend loads each model on one GPU."})
+        release_other_native_media(job, s, "music")
         swap = decide_media_swap(s)
         # The gate reads COMBINED free VRAM across a configured GPU split, but
         # each media model component loads WHOLE onto ONE card (localm ORDERS the cards
@@ -185,6 +187,7 @@ async def music(req: MusicRequest, request: Request):
             job.push({"type": "line", "text":
                       "Both models fit in VRAM - keeping the chat model loaded "
                       "(no swap)."})
+        note_other_vram_holders(job, s, "music")
         if s.get("backend") == "native":
             job.push({"type": "line", "text":
                       f"Generating a {req.duration_seconds:.0f}s track with the native "

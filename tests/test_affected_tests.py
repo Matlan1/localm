@@ -531,6 +531,33 @@ def test_a_basedpyright_config_change_selects_only_the_tests_naming_pyproject(de
         "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
 
 
+def test_a_uv_config_change_selects_only_the_tests_naming_pyproject(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "pyproject.toml", "[tool.ruff.lint]",
+          "[tool.uv]\nenvironments = [\"sys_platform == 'linux'\"]\n\n[tool.ruff.lint]")
+    assert _select(mod, ["pyproject.toml"]) == {
+        "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
+
+
+def test_a_lock_fork_marker_change_selects_no_test_when_the_packages_are_unchanged(dep_repo):
+    mod, root = dep_repo
+    markers = "[\n    \"sys_platform == 'linux'\",\n]"
+    _edit(root, "uv.lock", 'requires-python = ">=3.12"',
+          f'requires-python = ">=3.12"\nresolution-markers = {markers}\nsupported-markers = {markers}')
+    assert _select(mod, ["uv.lock"]) == {}
+
+
+def test_a_uv_config_change_that_moves_a_locked_package_still_selects_its_tests(dep_repo):
+    mod, root = dep_repo
+    _edit(root, "pyproject.toml", "[tool.ruff.lint]",
+          '[tool.uv]\noverride-dependencies = ["webkit-srv>=1.1"]\n\n[tool.ruff.lint]')
+    _bump(root, "webkit-srv", "1.0.0", "1.1.0")
+    assert _select(mod, ["pyproject.toml", "uv.lock"]) == {
+        "tests/test_server.py": [
+            "imports localm.server, which imports webkit-srv: changed dependency webkit-srv"],
+        "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
+
+
 def test_a_lock_change_outside_the_packages_affects_every_test(dep_repo):
     mod, root = dep_repo
     _edit(root, "uv.lock", 'requires-python = ">=3.12"', 'requires-python = ">=3.13"')

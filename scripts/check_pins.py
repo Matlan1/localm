@@ -599,11 +599,17 @@ _UNVERSIONED_VENDORED = (
 
 
 _AUTO_VENDORED = ("marked", "DOMPurify", "highlight.js", "KaTeX")
+_TTS_BUNDLE = ("kokoro-js", "transformers.js")
 
 
 def _vendored_advancer(name: str) -> str:
-    return ("pin_weekly.py (GUI tests; review for a major)" if name in _AUTO_VENDORED
-            else "none (the TTS bundle is rebuilt by hand)")
+    if name in _AUTO_VENDORED:
+        return "pin_weekly.py (GUI tests; review for a major)"
+    if name in _TTS_BUNDLE:
+        return "pin_weekly.py (review PR; rebuilds the TTS bundle)"
+    if name == "onnxruntime-web":
+        return "rides the transformers.js pin"
+    return "none"
 
 
 def _check_vendored(spec):
@@ -779,7 +785,23 @@ def _hf_comfy_pins() -> list[tuple[str, str, str, str, str]]:
     return out
 
 
-_HF_PIN_PROVIDERS = (_hf_music_pins, _hf_comfy_pins)
+def _hf_starter_pins() -> list[tuple[str, str, str, str, str]]:
+    rel = "localm/model_manager/registry.py"
+    table = _py_literal(rel, "_STARTER_SHA256")
+    out = []
+    for spec, sha in table.items():
+        repo, path = spec.split(":", 1)
+        out.append((f"starter {path}", repo, path, "main", sha))
+    return out
+
+
+def _hf_whisper_pins() -> list[tuple[str, str, str, str, str]]:
+    table = _py_literal("localm/voice.py", "_STT_PINS")
+    return [(f"whisper {repo.rsplit('-', 1)[-1]}", repo, "model.bin", commit, sha)
+            for repo, (commit, sha) in table.items()]
+
+
+_HF_PIN_PROVIDERS = (_hf_music_pins, _hf_comfy_pins, _hf_whisper_pins, _hf_starter_pins)
 
 
 def hf_file_pins() -> list[tuple[str, str, str, str, str]]:
@@ -828,16 +850,54 @@ def _check_hf_file_digests(now):
                group=group, detail=f"{len(pins)} pinned digest(s) match what the hub serves")
 
 
+_HF_KERNEL_NAME = "finegrained-fp8 Hub kernel"
+
+
+def _check_hf_kernel(now):
+    """The commit pinned for the finegrained-fp8 Hub kernel against the commit its
+    kernel version points at now, and whether the pinned commit still exists."""
+    name, group = _HF_KERNEL_NAME, "models"
+    advancer = "by hand: read the version's commit from the kernel hub and update the pin"
+    worker = "localm/inference/backends/_hf_worker.py"
+    try:
+        repo = _read_const(worker, r'^FP8_KERNEL_REPO = "([^"]+)"')
+        version = _read_const(worker, r"^FP8_KERNEL_VERSION = (\d+)")
+        pinned = _read_const(worker, r'^FP8_KERNEL_REVISION = "([0-9a-f]{40})"')
+        base = f"https://huggingface.co/api/kernels/{repo}"
+        refs = _get_json(f"{base}/refs")
+        branches = {b.get("name"): b.get("targetCommit") for b in refs.get("branches", [])
+                    if isinstance(b, dict)} if isinstance(refs, dict) else {}
+        try:
+            _get_json(f"{base}/tree/{pinned}/build?recursive=false&expand=false")
+        except FetchError as e:
+            if e.status == 404:
+                return Row(name=name, status=INCONSISTENT, pinned=pinned[:12], advancer=advancer,
+                           group=group, detail="the pinned commit no longer exists on the kernel hub")
+            raise
+    except FetchError as e:
+        return _unknown(name, group, advancer, e)
+    current = branches.get(f"v{version}")
+    if current is None:
+        return Row(name=name, status=INCONSISTENT, pinned=pinned[:12], advancer=advancer, group=group,
+                   detail=f"the kernel hub has no v{version} branch of {repo}")
+    if current != pinned:
+        return Row(name=name, status=BEHIND, pinned=pinned[:12], latest=current[:12], advancer=advancer,
+                   group=group, detail=f"v{version} of {repo} now points at {current[:12]}")
+    return Row(name=name, status=CURRENT, pinned=pinned[:12], latest=current[:12], days=0,
+               advancer=advancer, group=group, detail=f"v{version} of {repo} is the pinned commit")
+
+
 # A pin that is stale for a known reason no automation can fix is reported as BLOCKED, with
 # the reason, until the expiry date; after it the row reads STALE again and has to be
 # decided afresh. name -> (expiry ISO date, reason).
 ACCEPTED_BLOCKERS: dict[str, tuple[str, str]] = {
     "vendored marked": ("2026-12-31", "marked 16 and later no longer ships the file the page "
                         "loads, so moving past 15.x needs a code change in the GUI"),
-    "vendored transformers.js": ("2026-12-31", "part of the TTS bundle, which has to be rebuilt "
-                                 "with a bundler; no automation rebuilds it"),
-    "vendored onnxruntime-web": ("2026-12-31", "part of the TTS bundle, which has to be rebuilt "
-                                 "with a bundler; no automation rebuilds it"),
+    "vendored transformers.js": ("2026-12-31", "3.8.1 is the last 3.x release and 4.x ships a "
+                                 "different onnxruntime runtime than the vendored one, so moving "
+                                 "needs a code change in the TTS plugin; bump_tts_bundle.py refuses it"),
+    "vendored onnxruntime-web": ("2026-12-31", "the version is whatever the vendored transformers.js "
+                                 "pins, so it moves only with that release"),
 }
 
 
@@ -902,6 +962,8 @@ def build_registry() -> list[PinSpec]:
         PinSpec("Linux CUDA runtime wheels", "cuda", "pin_weekly.py (review PR)", _check_cuda_runtime_wheels),
         PinSpec(_HF_PINS_NAME, "models", "by hand: re-read the digest on the hub and update the table",
                 _check_hf_file_digests),
+        PinSpec(_HF_KERNEL_NAME, "models", "by hand: read the version's commit from the kernel hub and update the pin",
+                _check_hf_kernel),
     ]
     for spec in _VENDORED:
         specs.append(PinSpec(f"vendored {spec[0]}", "vendored", _vendored_advancer(spec[0]),

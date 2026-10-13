@@ -52,6 +52,11 @@ BATCH_CAP = 2048          # most tokens one decode carries
 Entry = tuple[int, int, int, bool]
 
 
+class ExclusiveCancelled(Exception):
+    """Raised by :meth:`SlotScheduler.exclusive` when its stop check fired
+    before the section was taken."""
+
+
 class _Status:
     __slots__ = ("text",)
 
@@ -249,19 +254,27 @@ class SlotScheduler:
                     len(self._queue))
 
     @contextlib.contextmanager
-    def exclusive(self, on_wait: Optional[Callable[[], None]] = None) -> Iterator[None]:
+    def exclusive(self, on_wait: Optional[Callable[[], None]] = None,
+                  stop_requested: Optional[Callable[[], bool]] = None) -> Iterator[None]:
         """Hold the model alone: admits nothing new, waits until every active
         reply has ended, empties the KV cache when a slot used it since the last
         exclusive section, and on exit marks the cache as holding tokens no slot
         records. While it waits, *on_wait* is called at once and then every
-        ``WAIT_HEARTBEAT_S`` seconds. Raises RuntimeError once the scheduler is
-        closed."""
+        ``WAIT_HEARTBEAT_S`` seconds. *stop_requested*, when given, is polled
+        every ``POLL_S`` seconds on the calling thread, before the section is
+        taken and while waiting for it; once it returns True the call raises
+        :class:`ExclusiveCancelled` without entering the section. Raises
+        RuntimeError once the scheduler is closed. Neither callback runs while
+        the scheduler's lock is held."""
         with self._cond:
             if self._closed:
                 raise RuntimeError(UNLOADED_MESSAGE)
             self._exclusive_waiting += 1
         try:
+            last_beat = None
             while True:
+                if stop_requested is not None and stop_requested():
+                    raise ExclusiveCancelled()
                 with self._cond:
                     if self._closed:
                         self._cond.notify_all()
@@ -269,11 +282,14 @@ class SlotScheduler:
                     if not (self._exclusive_held or self._busy()):
                         self._exclusive_held = True
                         break
-                if on_wait is not None:
+                now = time.monotonic()
+                if on_wait is not None and (last_beat is None
+                                            or now - last_beat >= WAIT_HEARTBEAT_S):
                     on_wait()
+                    last_beat = now
                 with self._cond:
                     if self._exclusive_held or self._busy():
-                        self._cond.wait(WAIT_HEARTBEAT_S)
+                        self._cond.wait(WAIT_HEARTBEAT_S if stop_requested is None else POLL_S)
         finally:
             with self._cond:
                 self._exclusive_waiting -= 1
