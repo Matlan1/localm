@@ -544,3 +544,71 @@ def test_privacy_mode_writes_no_sidecar_for_a_batch_or_an_upscale(qol_app, tmp_p
     for name in [*names, up_job.result]:
         assert _gallery_file(name).is_file()
         assert not Path(str(_gallery_file(name)) + ".json").exists()
+
+
+def test_an_upscaled_batch_image_does_not_inherit_the_batch_record(qol_app, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    app, _runner = qol_app
+    up = tmp_path / "up.safetensors"
+    up.write_bytes(b"x")
+    _register("up4x", up, "upscaler")
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p", "size": "64x64", "batch": 2})
+        job = _wait_job(app, r.json()["job_id"])
+        second = [e["name"] for e in job._history if e.get("type") == "image"][1]
+        assert _sidecar(_gallery_file(second))["batch"] == {"index": 2, "count": 2}
+        r = c.post(f"/api/imagine/file/{second}/upscale", json={"upscaler": "up4x"})
+        up_job = _wait_job(app, r.json()["job_id"])
+    assert up_job.status == "done", _job_lines(up_job)
+    side = _sidecar(_gallery_file(up_job.result))
+    assert "batch" not in side and side["upscaled"]["from"] == second
+
+
+def test_batch_images_and_upscales_belong_to_the_key_that_made_them(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    from localm.media.sdcpp import runtime as sd_runtime
+    from localm.media.sdcpp import shared
+    from tests.test_media_gallery_ownership import _gallery_app, _h, _mk_keys
+    from tests.test_media_gallery_ownership import _wait_job as wait_stream
+
+    app = _gallery_app(tmp_path, monkeypatch, "image")
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"w")
+    up = tmp_path / "up.safetensors"
+    up.write_bytes(b"x")
+    update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault("image", {}).update(
+        {"backend": "native", "native": {"model": str(model)}}))
+    _register("up4x", up, "upscaler")
+    runner = _QolRunner()
+    monkeypatch.setattr(shared, "runner", runner)
+    monkeypatch.setattr(shared, "arm_idle_timer", lambda seconds=None: None)
+    rt = sd_runtime.Runtime(backend="vulkan", path=tmp_path / "rt")
+    monkeypatch.setattr(sd_runtime, "resolve", lambda choice="auto": rt)
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: False)
+    monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda s: None)
+    a, b = _mk_keys(["image"], ["image"])
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", headers=_h(a),
+                   json={"prompt": "p", "size": "64x64", "batch": 2})
+        assert r.status_code == 200, r.text
+        end = wait_stream(c, r.json()["job_id"], _h(a))
+        assert end and end["status"] == "done"
+        names = [i["name"] for i in c.get("/api/imagine/history", headers=_h(a)).json()["images"]]
+        assert len(names) == 2
+        for name in names:
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(b)).status_code == 404
+        r = c.post(f"/api/imagine/file/{names[0]}/upscale", headers=_h(b),
+                   json={"upscaler": "up4x"})
+        assert r.status_code == 404 and runner.upscales == []
+        r = c.post(f"/api/imagine/file/{names[0]}/upscale", headers=_h(a),
+                   json={"upscaler": "up4x"})
+        assert r.status_code == 200, r.text
+        end = wait_stream(c, r.json()["job_id"], _h(a))
+        assert end and end["status"] == "done"
+        assert c.get(f"/api/imagine/file/{end['result']}", headers=_h(a)).status_code == 200
+        assert c.get(f"/api/imagine/file/{end['result']}", headers=_h(b)).status_code == 404
+        assert all(i["name"] not in {*names, end["result"]} for i in
+                   c.get("/api/imagine/history", headers=_h(b)).json()["images"])
