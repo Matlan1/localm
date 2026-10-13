@@ -57,8 +57,10 @@ def test_debug_stacks_reports_a_failed_executor_snapshot(monkeypatch, caplog):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["executors"] == {}
-    assert body["executors_error"] == "AttributeError: _work_queue"
-    assert any("executor snapshot failed" in rec.getMessage() for rec in caplog.records)
+    assert body["executors_error"] == (
+        "the executor snapshot failed; the server log has the details")
+    assert any("executor snapshot failed" in rec.getMessage() and "_work_queue" in rec.getMessage()
+               for rec in caplog.records)
 
 
 def test_debug_stacks_executors_error_is_null_when_the_snapshot_works():
