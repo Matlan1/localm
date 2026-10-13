@@ -198,3 +198,45 @@ def test_a_saved_report_that_is_not_utf8_is_a_read_error(client):
 ])
 def test_report_title_from_markdown(text, title):
     assert bugreport.report_title_from_markdown(text) == title
+
+
+def test_an_upload_that_outruns_its_budget_is_reported_not_claimed(client, monkeypatch):
+    import threading
+
+    import localm.inference.routes.admin as admin
+
+    c, hdrs, _, _ = client
+    data = _save(c, hdrs)
+    release = threading.Event()
+
+    def _stuck(title, body, **kw):
+        release.wait(5)
+        return {"url": "x"}
+
+    monkeypatch.setattr(bugreport, "upload_report", _stuck)
+    monkeypatch.setattr(admin, "_BUG_REPORT_UPLOAD_TIMEOUT_S", 0.2)
+    try:
+        r = c.post("/api/bug-report/send", headers=hdrs,
+                   json={"filename": data["filename"], "sha256": data["report_sha256"]})
+    finally:
+        release.set()
+    assert r.status_code == 200
+    assert r.json()["uploaded"] is False
+    assert r.json()["upload_stage"] == "upload"
+    assert Path(data["path"]).is_file()
+
+
+def test_a_report_overwritten_by_a_later_save_is_not_sent_as_the_first(client, monkeypatch):
+    import time as _time
+
+    c, hdrs, uploads, _ = client
+    real = _time.strftime
+    monkeypatch.setattr(_time, "strftime", lambda fmt, *a: (
+        "20261014-000000" if fmt == "%Y%m%d-%H%M%S" else real(fmt, *a)))
+    first = _save(c, hdrs, what_happened="the first report")
+    second = _save(c, hdrs, what_happened="a different second report")
+    assert first["filename"] == second["filename"]
+    r = c.post("/api/bug-report/send", headers=hdrs,
+               json={"filename": first["filename"], "sha256": first["report_sha256"]})
+    assert r.status_code == 409
+    assert uploads == []
