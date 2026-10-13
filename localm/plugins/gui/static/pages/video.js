@@ -8,6 +8,7 @@
 import { MIB, $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
+import { createNativeModelPicker } from "../app/native-models.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -65,6 +66,9 @@ bindReloadToggle("video", "video-reload-llm");
    show the defaults of the backend that will run. */
 export const videoBackend = { active: null, choice: null };
 
+export const videoModelPicker = createNativeModelPicker(
+  { media: "video", prefix: "video", mountId: "video-native-models" });
+
 const COMFY_PLACEHOLDERS = [["video-width", "video.widthPlaceholder"],
                             ["video-height", "video.heightPlaceholder"],
                             ["video-cfg", "video.cfgPlaceholder"]];
@@ -93,6 +97,11 @@ export async function refreshVideoBackend() {
     }
     note.textContent = text;
     note.hidden = !text;
+  }
+  const picker = $("video-native-models");
+  if (picker) {
+    picker.hidden = !native;
+    if (native) videoModelPicker.refresh();
   }
   for (const [id, key] of COMFY_PLACEHOLDERS) {
     const input = $(id);
@@ -130,6 +139,8 @@ $("video-generate").onclick = async () => {
   if (!native && modelOverrides.video && Object.keys(modelOverrides.video).length) {
     body.model_overrides = modelOverrides.video;
   }
+  const nativeChoice = native ? videoModelPicker.choice() : {};
+  Object.assign(body, nativeChoice);
 
   $("video-generate").disabled = true;
   const log = $("video-log");
@@ -138,7 +149,8 @@ $("video-generate").onclick = async () => {
   $("video-result").replaceChildren();
   try {
     await checkModelsBeforeGenerate("video", log,
-      { model_overrides: native ? undefined : modelOverrides.video });
+      { model_overrides: native ? undefined : modelOverrides.video,
+        native_models: nativeChoice.native_models });
     if (native) refreshVideoBackend();
     const r = await fetch("/api/video", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),

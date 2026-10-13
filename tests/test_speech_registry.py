@@ -81,10 +81,30 @@ class TestProjectorAttachment:
     def test_a_tts_pull_fetches_the_same_repo_mmproj(self, tmp_path, monkeypatch):
         from localm.model_manager import pull
         seen = []
-        monkeypatch.setattr(pull, "_maybe_fetch_repo_mmproj",
-                            lambda repo, fn, base: (seen.append((repo, fn)), tmp_path / "mm.gguf")[1])
+        monkeypatch.setattr(
+            pull, "_maybe_fetch_repo_mmproj",
+            lambda repo, fn, base, speech=False: (seen.append((repo, fn, speech)),
+                                                  tmp_path / "mm.gguf")[1])
         got = pull._mmproj_for_registration("tts", "o/r", "m.gguf", tmp_path, None, None)
-        assert got == tmp_path / "mm.gguf" and seen == [("o/r", "m.gguf")]
+        assert got == tmp_path / "mm.gguf" and seen == [("o/r", "m.gguf", True)]
+        pull._mmproj_for_registration("llm", "o/r", "m.gguf", tmp_path, None, None)
+        assert seen[-1] == ("o/r", "m.gguf", False)
+
+    @pytest.mark.parametrize("files,model,speech_pick,vision_pick", [
+        (["Qwen3-TTS-12Hz-0.6B-Base.Q8_0.gguf", "Qwen3-TTS-12Hz-0.6B-Base.Q4_K_M.gguf",
+          "Qwen3-TTS-12Hz-0.6B-Base.mmproj-Q8_0.gguf", "Qwen3-TTS-12Hz-0.6B-Base.mmproj-f16.gguf"],
+         "Qwen3-TTS-12Hz-0.6B-Base.Q8_0.gguf",
+         "Qwen3-TTS-12Hz-0.6B-Base.mmproj-Q8_0.gguf", "Qwen3-TTS-12Hz-0.6B-Base.mmproj-f16.gguf"),
+        (["Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf", "mmproj-Qwen3-TTS-12Hz-1.7B-Base-bf16.gguf",
+          "mmproj-Qwen3-TTS-12Hz-1.7B-Base-f16.gguf"],
+         "Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf",
+         "mmproj-Qwen3-TTS-12Hz-1.7B-Base-bf16.gguf", "mmproj-Qwen3-TTS-12Hz-1.7B-Base-f16.gguf"),
+    ])
+    def test_a_speech_model_takes_the_q8_projector_over_f16(
+            self, tmp_path, files, model, speech_pick, vision_pick):
+        from localm.model_manager import pull
+        assert pull._pick_mmproj_from_listing(files, model, tmp_path, speech=True) == speech_pick
+        assert pull._pick_mmproj_from_listing(files, model, tmp_path) == vision_pick
 
     @pytest.mark.parametrize("kind", ["unknown", "embedding", "diffusion-unet"])
     def test_other_non_chat_kinds_fetch_no_mmproj(self, tmp_path, monkeypatch, kind):

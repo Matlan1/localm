@@ -12,6 +12,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Your own image and video models in the native backend.** The built-in stable-diffusion.cpp
+  backend now runs a diffusion model you pick, not only the ones localm downloads for you: a
+  FLUX.1, Chroma, SD3, SDXL, Qwen-Image, Z-Image or Wan model file is recognised from its
+  contents and gets its text encoders and VAE from your registered models automatically (a CLIP-L
+  fine-tune, a T5 or UMT5 encoder, a matching VAE). A choice you make for a component always wins,
+  and a component that is missing is offered as a download before generating. Steps, CFG and size
+  follow the model family when you leave them blank.
+- **LoRAs in the native backend.** Images and Video take one or more registered LoRAs with a
+  strength each; a LoRA made for another model family is applied with a note saying so.
+- **Model pickers on the Images, Video and Music pages.** With the native backend, each page has
+  a model dropdown plus the components and LoRAs that model uses, remembered per page and applied
+  to the next generation only. In Settings, the native model fields are dropdowns of your
+  registered models, with a custom path still possible.
+- **Register a single image model file.** `localm pull <file>.safetensors` now registers a lone diffusion model, text encoder, VAE or LoRA file, detecting its type,
+  instead of asking for a HuggingFace folder.
 - **A reply that depends only on the request.** `cache_prompt: false` on
   `/v1/chat/completions`, `/v1/completions`, `/v1/messages` and `/v1/responses` makes a GGUF
   model empty its prompt cache, process the whole prompt and answer on its own, after the
@@ -510,6 +525,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **`localm pull` of a Qwen3-TTS model fetches a projector that works.** In a repo that ships both a
+  Q8_0 and an f16 projector (such as `mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF`), the pull took the
+  f16 one, and speaking with it crashed the speech worker on the CPU and on AMD ROCm. A text-to-speech
+  pull now takes the Q8_0 projector, then bf16, and f16 only when nothing else is there.
 - **Brave Search failures named correctly.** When web search falls back to Brave and localm cannot read
   the page Brave sends, the message now says so instead of calling it a bot check (Brave's normal
   results page mentions captchas in its interface text).
