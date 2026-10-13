@@ -31,7 +31,7 @@ import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Sequence
 
 from localm.debuglog import logger
 
@@ -515,7 +515,7 @@ def _auto_device(torch, override: Optional[str] = None) -> str:
     return "cpu"
 
 
-def _bitmask_backend(device_type: str) -> str:
+def _bitmask_backend(device_type: str) -> Literal["torch_native", "cpu"]:
     """The ``xgrammar.apply_token_bitmask_inplace`` backend for logits on
     *device_type*: ``"torch_native"`` (plain torch tensor ops on the GPU) for
     ``"cuda"`` logits, which covers AMD ROCm, and ``"cpu"`` (xgrammar's bundled
@@ -542,7 +542,7 @@ class _XgrammarProcessor:
     def __init__(self, compiled):
         self._compiled = compiled
         self._matchers: Optional[list] = None
-        self._bitmask = None
+        self._bitmask: Any = None
         self._prefilled = False
 
     def __call__(self, input_ids, scores):
