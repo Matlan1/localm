@@ -77,6 +77,19 @@ keep, not a trace of a conversation. But if you are relying on privacy mode
 alone to leave nothing behind, know that a job you scheduled, a document you
 indexed, a persona you saved, or a file you uploaded still lands on disk.
 
+### Another localm instance answering for this one
+
+A chat can be answered by another localm instance on this machine that
+already has the model loaded: a route you accept in the GUI, a scheduled job
+on a routed model, or `localm mcp --share-loaded-models`. That instance would
+otherwise record the chat in its own session mode. So unless this instance
+records the chat in `full` mode, the other instance must first confirm that it
+records it no more than this instance's mode allows: it is in that mode or a
+more private one, or it is reached with its owner key and agrees to record
+less. If it does not confirm, nothing is sent to it: accepting the route and
+each routed request are refused with a message naming that instance and its
+mode, a routed job fails saying so, and the MCP server loads the model itself.
+
 ---
 
 ## 2. Diagnostics (crash/hang capture and the debug log)

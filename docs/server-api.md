@@ -439,6 +439,16 @@ answering or refuses the key it was given (the request that found out gets a
 process's memory and do not survive a restart; `GET /api/models` lists them
 under `peer_routes`.
 
+A route keeps this instance's session persistence. Unless the chat is recorded
+in `full` mode here, the other instance must confirm, when the route is
+accepted and again before every forwarded request, that it records the chat
+no more than this instance's mode allows (it reports this in the
+`request_session_mode` field of `GET /v1/config` for a request carrying the
+`X-Localm-Session-Mode` header; it agrees to record less only for its owner
+key). Otherwise accepting is a 409 and nothing is stored, and a forwarded
+request is a 409 naming that instance and its mode; nothing is sent and the
+route stays. A forwarded request carries `X-Localm-Session-Mode`.
+
 ### `POST /v1/completions`
 
 Scope: any valid key (no specific scope required once auth is enabled).

@@ -45,9 +45,11 @@ class HttpEngine:
 
     def __init__(self, base_url: str, *, token: Optional[str] = None,
                  model: Optional[str] = None, display_name: Optional[str] = None,
-                 pin_model: bool = True):
+                 pin_model: bool = True, extra_headers: Optional[dict] = None):
         self._base = base_url.rstrip("/")
         self._token = token
+        # Sent on every request, after Content-Type and Authorization.
+        self._extra_headers = dict(extra_headers or {})
         self._model = model
         self.display_name = display_name or model or "remote model"
         # False: *model* is only the preferred model, and the server answers a
@@ -112,6 +114,7 @@ class HttpEngine:
         h = {"Content-Type": "application/json"}
         if self._token:
             h["Authorization"] = f"Bearer {self._token}"
+        h.update(self._extra_headers)
         return h
 
     def chat_stream(self, messages: list[dict], *,

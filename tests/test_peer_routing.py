@@ -30,9 +30,12 @@ def _isolated_state(tmp_path, monkeypatch):
     clear peer_routing's in-memory route table - all reset before AND after every
     test so nothing leaks between tests in this file or into any other test file
     sharing the same process. Yields a throwaway directory the tests pass to
-    _write_peer as a namespace."""
+    _write_peer as a namespace. Runs in full session mode, where a forward
+    needs no session-mode confirmation from the peer (that is
+    tests/test_peer_routing_session_mode.py)."""
     d = tmp_path / "gpu"
     _PEERS.clear()
+    monkeypatch.setenv("LOCALM_MODE", "full")
 
     def _live(*, exclude_self_id=None, timeout=0.7):
         return [dict(p) for p in _PEERS

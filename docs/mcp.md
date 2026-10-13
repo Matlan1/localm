@@ -96,9 +96,11 @@ With `--share-loaded-models`, a model another localm instance on this machine
 instance instead of loading a second copy into VRAM. The match is by model
 file, not by name. An instance of the same install is reached with this
 install's own credential; an instance of another install only when it has no
-API key set. If that instance stops answering, or refuses the credential, the
-model is loaded here instead, and a `run_coder_task` already running on it
-carries on with the copy loaded here.
+API key set. It is used only while it confirms it records a chat no more
+than this machine's chat persistence allows (the more private of Session
+persistence and the chat override). If that instance stops answering, refuses
+the credential, or would record more, the model is loaded here instead, and a
+`run_coder_task` already running on it carries on with the copy loaded here.
 
 ## Quick start: expose localm to Claude Desktop
 

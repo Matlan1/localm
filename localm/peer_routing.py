@@ -17,7 +17,9 @@ Forwarding is a raw reverse proxy for a fixed, caller-specified path (never a
 path taken from the incoming request) - the request body and a minimal header
 set go to the peer unchanged, the peer's response comes back unchanged. Chat-
 pipeline hooks, audit/transcript logging, and per-request activity tracking
-configured on THIS instance do not run for a forwarded request."""
+configured on THIS instance do not run for a forwarded request. The peer
+records it no more than this instance's session mode for the request allows,
+or it is not forwarded (see :func:`forward`)."""
 
 from __future__ import annotations
 
@@ -37,6 +39,23 @@ from localm.debuglog import logger
 # connect side stays short.
 _CONNECT_TIMEOUT = 5.0
 _READ_TIMEOUT = 300.0
+
+SESSION_MODE_HEADER = "X-Localm-Session-Mode"
+
+
+def _local_request_mode(request):
+    """The session mode this instance records *request* under."""
+    from localm.audit import effective_mode
+    return effective_mode("server")
+
+
+def chat_route_mode():
+    """The session mode chat sent through a route must keep when no request
+    names one (accepting a route, a scheduled chat job, the MCP server): the
+    more private of the server mode and the chat mode."""
+    from localm.audit import effective_mode, mode_at_least_as_private
+    server, chat = effective_mode("server"), effective_mode("chat")
+    return chat if mode_at_least_as_private(chat, server) else server
 
 
 @dataclass
@@ -380,6 +399,69 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
         raise PeerCredentialError(f"the peer answered HTTP {resp.status_code}")
 
 
+class PeerWouldRecord(Exception):
+    """A peer would record a forwarded conversation more than this instance's
+    session mode allows. ``str()`` names the peer and why, for the user."""
+
+
+def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
+                        timeout: float = 5.0) -> Optional[str]:
+    """The session mode *peer* reports for a request that asks it to record no
+    more than *mode*: ``GET /v1/config`` with *api_key* and the session-mode
+    header, field ``request_session_mode``. None when the peer does not answer
+    with a valid mode (an older localm, a credential without ``config:read``, a
+    network error). Sends nothing to an endpoint that fails
+    :func:`is_routable_peer_endpoint`."""
+    from localm.audit import SessionMode
+    scheme = peer.get("scheme") or "http"
+    if not is_routable_peer_endpoint(peer.get("host"), scheme):
+        return None
+    probe = PeerRoute(model="", instance_id=str(peer.get("instance_id") or ""),
+                      host=peer.get("host"), port=int(peer.get("port")),
+                      scheme=scheme, api_key=api_key or "")
+    url = _peer_url(probe, "/v1/config")
+    import requests
+    try:
+        from localm.tls import requests_verify
+        verify = requests_verify(url)
+    except FileNotFoundError:
+        verify = False
+    headers = {**_auth_headers(api_key), SESSION_MODE_HEADER: SessionMode(mode).value}
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout, verify=verify,
+                            allow_redirects=False)
+        data = resp.json() if resp.status_code == 200 else None
+    except (requests.RequestException, ValueError, RecursionError) as e:
+        logger.info("peer_routing: could not read the session mode of peer %s "
+                    "(%s:%s): %s", peer.get("instance_id"), peer.get("host"),
+                    peer.get("port"), e)
+        return None
+    got = data.get("request_session_mode") if isinstance(data, dict) else None
+    try:
+        return SessionMode(got).value if isinstance(got, str) else None
+    except ValueError:
+        return None
+
+
+def ensure_peer_keeps_mode(peer: dict, api_key: Optional[str], mode) -> None:
+    """Return when *peer* will record a conversation forwarded with *api_key*
+    no more than *mode* allows; raise :class:`PeerWouldRecord` otherwise.
+    Full mode needs no check and sends nothing."""
+    from localm.audit import SessionMode, mode_at_least_as_private
+    mode = SessionMode(mode)
+    if mode == SessionMode.FULL:
+        return
+    where = f"the localm instance at {peer.get('host')}:{peer.get('port')}"
+    got = peer_recording_mode(peer, api_key, mode)
+    if got is None:
+        raise PeerWouldRecord(
+            f"{where} did not confirm it would record this conversation no more "
+            f"than {mode.value} mode allows")
+    if not mode_at_least_as_private(SessionMode(got), mode):
+        raise PeerWouldRecord(
+            f"{where} would record this conversation in {got} mode")
+
+
 async def forward(route: PeerRoute, request, path: str, *,
                   body: Optional[bytes] = None, headers: Optional[dict] = None):
     """Forward *request* to *route*'s peer at the fixed literal *path*
@@ -406,7 +488,13 @@ async def forward(route: PeerRoute, request, path: str, *,
     CLEARED, a WARNING is logged, and ``HTTPException(502, ...)`` is raised.
     ``find_offer`` already refuses to offer such a peer, so this is the second
     of two checks and holds however the ``PeerRoute`` was constructed. See
-    test_forward_refuses_a_non_loopback_route_without_sending_the_key."""
+    test_forward_refuses_a_non_loopback_route_without_sending_the_key.
+
+    Unless this request's own session mode is full, the peer must first confirm
+    (:func:`ensure_peer_keeps_mode`) that it records the request no more than
+    that mode allows. If it does not, nothing is sent, the route is KEPT, and
+    ``HTTPException(409, ...)`` names the peer and its mode. The forwarded
+    request carries the mode in the session-mode header."""
     from fastapi import HTTPException
     from fastapi.responses import StreamingResponse
 
@@ -423,15 +511,29 @@ async def forward(route: PeerRoute, request, path: str, *,
             "identity-verify; the route has been cleared. Retry to load a "
             "local copy.")
 
+    loop = asyncio.get_running_loop()
+    mode = _local_request_mode(request)
+    try:
+        await loop.run_in_executor(
+            None, ensure_peer_keeps_mode, route.safe_dict(), route.api_key, mode)
+    except PeerWouldRecord as e:
+        logger.info("peer_routing: not forwarding '%s' to peer %s: %s",
+                    route.model, route.instance_id, e)
+        raise HTTPException(
+            409, f"This localm records this conversation in {mode.value} mode, and "
+            f"{e}, so it was not sent there. Clear the route for '{route.model}' "
+            "to answer here, accept the route with that instance's owner key, or "
+            "change its Session persistence.") from e
+
     if body is None:
         body = await request.body()
     fwd_headers = _auth_headers(route.api_key)
+    fwd_headers[SESSION_MODE_HEADER] = mode.value
     content_type = request.headers.get("content-type")
     if content_type:
         fwd_headers["Content-Type"] = content_type
 
     url = _peer_url(route, path)
-    loop = asyncio.get_running_loop()
 
     import requests
     try:
