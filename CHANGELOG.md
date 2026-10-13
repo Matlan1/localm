@@ -514,6 +514,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Q8_0 and an f16 projector (such as `mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF`), the pull took the
   f16 one, and speaking with it crashed the speech worker on the CPU and on AMD ROCm. A text-to-speech
   pull now takes the Q8_0 projector, then bf16, and f16 only when nothing else is there.
+- **A failed image generation names the real reason.** `/v1/images/generations` answered a failed
+  generation with the chat model's reload note ("Reload deferred to the next message"), which comes
+  after it; the `502` now quotes what the image backend reported.
 - **`localm comfy setup` copies an AMD ROCm or StabilityMatrix ComfyUI.** Replicating a ComfyUI whose PyTorch came from
   AMD's per-GPU ROCm packages (`amd-torch-device-gfx1030` and similar, as StabilityMatrix installs on
   Windows) failed with "pip found no matching version"; those packages now install from AMD's own index.
