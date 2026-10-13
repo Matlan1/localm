@@ -623,6 +623,8 @@ class PluginManager:
         self._loaded: dict[str, tuple] = {}     # name -> (spec, module, host, uniq)
         self._errors: dict[str, str] = {}            # load/runtime errors (persist)
         self._discover_errors: dict[str, str] = {}   # bad manifests (reset each discover)
+        self._provision_errors: dict[str, str] = {}  # first-run copy / upgrade refresh
+        self._store_errors: dict[str, str] = {}      # unparsable bundled manifests
         self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
         self._dep_tasks_lock = threading.Lock()
         # (plugin name, callback) queued by Host.on_startup before the event
@@ -780,8 +782,12 @@ class PluginManager:
             try:
                 spec = parse_spec(child, builtin=True)
                 out[spec.name] = spec
-            except Exception:
-                pass
+                self._store_errors.pop(child.name, None)
+            except Exception as e:
+                msg = f"bundled manifest unreadable: {e}"
+                if self._store_errors.get(child.name) != msg:
+                    _log.warning("plugin %s: %s", child.name, msg)
+                self._store_errors[child.name] = msg
         return out
 
     def cli_entries(self) -> list[tuple[str, str]]:
@@ -880,20 +886,35 @@ class PluginManager:
         Best-effort: a missing store source (e.g. a synthetic test store) is
         recorded and skipped, never fatal."""
         from localm.plugins import catalog as _cat
+        protected = set(_cat.protected())
         for name in _cat.preinstalled():
             if (self._installed_dir(name) / "plugin.toml").is_file():
+                if name in protected and name not in self._enabled_set():
+                    try:
+                        self._set_enabled(name, True)
+                        self._provision_errors.pop(name, None)
+                    except Exception as e:
+                        self._note_provision_error(name, f"preinstall-enable: {e}")
                 continue                            # already installed on disk
             try:
                 self._provision_from_store(name)
             except Exception as e:                  # no store source / copy failed
-                self._discover_errors[name] = f"preinstall: {e}"
+                self._note_provision_error(name, f"preinstall: {e}")
                 continue
             try:
                 spec = parse_spec(self._installed_dir(name))
                 if spec.default_enabled and name not in self._enabled_set():
                     self._set_enabled(name, True)
-            except Exception as e:                  # record (don't swallow) a corrupt just-provisioned manifest
-                self._discover_errors[name] = f"preinstall-parse: {e}"
+                self._provision_errors.pop(name, None)
+            except Exception as e:
+                self._note_provision_error(name, f"preinstall-parse: {e}")
+
+    def _note_provision_error(self, name: str, msg: str) -> None:
+        """Record *msg* for *name* in api_state's errors (kept across discover())
+        and log it at WARNING when it is new or changed."""
+        if self._provision_errors.get(name) != msg:
+            _log.warning("plugin %s: %s", name, msg)
+        self._provision_errors[name] = msg
 
     def _safe_load(self, spec: PluginSpec) -> None:
         try:
@@ -961,8 +982,10 @@ class PluginManager:
             unreg = getattr(module, "unregister", None)
             if callable(unreg):
                 unreg()
-        except Exception:
-            pass            # teardown errors must not block the unmount
+        except Exception as e:
+            # Teardown errors do not block the unmount.
+            _log.warning("plugin %s: unregister failed during unload: %s", name, e,
+                         exc_info=True)
         host.unmount()
         _purge_plugin_modules(uniq)     # drop the whole namespace so a re-enable
         #                                 re-imports every module fresh from disk
@@ -1207,8 +1230,10 @@ class PluginManager:
         for name in sorted(self._installed_set()):
             try:
                 self._maybe_refresh_builtin(name)
+                if (self._provision_errors.get(name) or "").startswith("refresh: "):
+                    self._provision_errors.pop(name, None)
             except Exception as e:
-                self._discover_errors[name] = f"refresh: {e}"
+                self._note_provision_error(name, f"refresh: {e}")
 
     def refresh(self, name: Optional[str] = None) -> list:
         """Re-sync installed builtin plugins with the bundled store, re-copying
@@ -1609,6 +1634,7 @@ class PluginManager:
                     # dependency, reported by the enable guard and api_state.
                     _log.debug("could not fully disable dependent plugin %s during "
                                "cascade uninstall of %s: %s", dep, name, e)
+        hook_failed = False
         entry = self._loaded.get(name)
         if entry:
             module = entry[1]
@@ -1616,13 +1642,15 @@ class PluginManager:
             if callable(hook):
                 try:
                     hook(delete_data=delete_data)
-                except Exception:
-                    pass
+                except Exception as e:
+                    hook_failed = True
+                    _log.warning("plugin %s: on_uninstall(delete_data=%s) failed: %s",
+                                 name, delete_data, e, exc_info=True)
         self._unload(name)
         self._set_enabled(name, False)
-        data_deleted = True         # vacuously true: nothing was asked to go
+        data_deleted = not (delete_data and hook_failed)
         if delete_data and spec and spec.data_subdir:
-            data_deleted = self._delete_plugin_data(spec)
+            data_deleted = self._delete_plugin_data(spec) and data_deleted
         removed = self._remove_installed_dir(name)    # delete from the installed folder
         existed = was_installed or on_disk
         if existed and not removed:
@@ -1721,7 +1749,9 @@ class PluginManager:
                 "active": (name in installed) and (name in enabled),
                 "available": available,
                 "loaded": name in self._loaded,
-                "error": self._errors.get(name) or self._discover_errors.get(name),
+                "error": (self._errors.get(name) or self._discover_errors.get(name)
+                          or self._provision_errors.get(name)
+                          or self._store_errors.get(name)),
             }
 
         for name, spec in sorted(self._specs.items()):       # installed
@@ -1734,7 +1764,8 @@ class PluginManager:
         from localm.config import load_config
         _cfg = load_config()
         return {"plugins": plugins,
-                "errors": {**self._discover_errors, **self._errors},
+                "errors": {**self._store_errors, **self._provision_errors,
+                           **self._discover_errors, **self._errors},
                 "suggest_plugins": bool(_cfg.get("suggest_plugins", True)),
                 "auto_install_plugin_deps": bool(
                     _cfg.get("auto_install_plugin_deps", True))}

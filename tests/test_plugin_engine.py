@@ -1507,8 +1507,8 @@ def test_manifestless_chat_self_heals_through_discover(env):
 
     assert (inst / "chat" / "plugin.toml").is_file()
     assert not (inst / "chat" / "stale.py").exists()
-    assert "chat" not in mgr._discover_errors, (
-        f"chat failed to self-heal: {mgr._discover_errors.get('chat')!r}")
+    errors = mgr.api_state()["errors"]
+    assert "chat" not in errors, f"chat failed to self-heal: {errors.get('chat')!r}"
 
 
 def test_installed_dir_on_disk_refuses_a_unc_name_before_any_syscall(env, monkeypatch):
@@ -1579,3 +1579,118 @@ def test_provision_from_store_rmtree_failure_stays_honest(env, monkeypatch):
         mgr.install("p1")
     assert (inst / "p1" / "partial.py").exists()
     assert not (inst / "p1" / "plugin.toml").exists()
+
+
+def _teardown_plugin(name, *, unregister_raises=False, on_uninstall_raises=False):
+    unreg = "raise RuntimeError('teardown broke')" if unregister_raises else "pass"
+    hook = ("raise RuntimeError('cleanup broke')" if on_uninstall_raises else "pass")
+    return _ping(name).replace("def unregister():\n    pass",
+                               f"def unregister():\n    {unreg}") + (
+        f"\n\ndef on_uninstall(delete_data=False):\n    {hook}\n")
+
+
+def test_failed_first_run_provisioning_is_reported(env, monkeypatch, caplog):
+    from localm.plugins.engine import PluginManager
+
+    store, inst = env / "store", env / "installed"
+    _make_plugin(store, "chat", _ping("chat"))
+
+    def _boom(self, name):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(PluginManager, "_provision_from_store", _boom)
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        state = mgr.api_state()
+        mgr.api_state()
+
+    assert "No space left on device" in state["errors"].get("chat", "")
+    warned = [r for r in caplog.records if "chat" in r.getMessage()
+              and "No space left" in r.getMessage()]
+    assert len(warned) == 1
+
+
+def test_installed_protected_plugin_left_disabled_is_enabled_again(env):
+    from localm.config import load_config, update_config
+    from localm.plugins.engine import PluginManager
+
+    store, inst = env / "store", env / "installed"
+    _make_plugin(store, "chat", _ping("chat"))
+    _make_plugin(inst, "chat", _ping("chat"))
+    update_config(lambda cfg: cfg.__setitem__("plugins_enabled", []))
+
+    PluginManager(FastAPI(), store_root=store, installed_root=inst).discover()
+
+    assert "chat" in load_config().get("plugins_enabled", [])
+
+
+def test_failed_builtin_refresh_is_reported(env, monkeypatch, caplog):
+    from localm.plugins.engine import PluginManager
+
+    store, inst = env / "store", env / "installed"
+    _make_plugin(store, "chat", _ping("chat"))
+
+    def _boom(self, name):
+        raise RuntimeError("refresh exploded")
+    monkeypatch.setattr(PluginManager, "_maybe_refresh_builtin", _boom)
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        mgr.load_enabled()
+
+    assert "refresh exploded" in mgr.api_state()["errors"].get("chat", "")
+    assert any("refresh exploded" in r.getMessage() for r in caplog.records)
+
+
+def test_unregister_failure_is_logged_and_the_plugin_still_unloads(env, caplog):
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "tear", _teardown_plugin("tear", unregister_raises=True))
+    app = FastAPI()
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.discover()
+    mgr.install("tear")
+
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        mgr.disable("tear")
+
+    with TestClient(app) as c:
+        assert c.get("/api/tear/ping").status_code == 404
+    assert any("tear" in r.getMessage() and "teardown broke" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize("delete_data", [True, False])
+def test_on_uninstall_failure_is_logged_and_degrades_a_data_delete(env, caplog,
+                                                                    delete_data):
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "tear", _teardown_plugin("tear", on_uninstall_raises=True))
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.discover()
+    mgr.install("tear")
+
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        result = mgr.uninstall("tear", delete_data=delete_data)
+
+    assert result is (not delete_data)
+    assert any("on_uninstall" in r.getMessage() and "cleanup broke" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_unparsable_bundled_manifest_is_reported_once(env, caplog):
+    from localm.plugins.engine import PluginManager
+
+    store, inst = env / "store", env / "installed"
+    _make_plugin(store, "chat", _ping("chat"))
+    (store / "broken").mkdir()
+    (store / "broken" / "plugin.toml").write_text("[plugin\nname=", encoding="utf-8")
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        assert "broken" not in mgr.store_catalog()
+        mgr.store_catalog()
+        state = mgr.api_state()
+
+    assert "bundled manifest unreadable" in state["errors"].get("broken", "")
+    assert len([r for r in caplog.records if "broken" in r.getMessage()]) == 1
