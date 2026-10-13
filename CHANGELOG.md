@@ -600,6 +600,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **The coder no longer crashes on a project config whose `mcp` key is not a table.** A
+  `.localcoder/config.toml` with, for example, `mcp = "x"` stopped MCP setup with an error; it now
+  means no MCP servers are configured.
 - **A UNet-only SDXL model loads in the native image backend.** Choosing an SDXL file that holds
   only the UNet (a safetensors file in ComfyUI or diffusers layout) used to fail with "get sd
   version from file failed"; it now loads with its CLIP-L, CLIP-G and VAE from your registered
