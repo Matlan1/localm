@@ -1029,11 +1029,6 @@ def _check_kokoro_pin(now):
 ACCEPTED_BLOCKERS: dict[str, tuple[str, str]] = {
     "vendored marked": ("2026-12-31", "marked 16 and later no longer ships the file the page "
                         "loads, so moving past 15.x needs a code change in the GUI"),
-    "vendored transformers.js": ("2026-12-31", "3.8.1 is the last 3.x release and 4.x ships a "
-                                 "different onnxruntime runtime than the vendored one, so moving "
-                                 "needs a code change in the TTS plugin; bump_tts_bundle.py refuses it"),
-    "vendored onnxruntime-web": ("2026-12-31", "the version is whatever the vendored transformers.js "
-                                 "pins, so it moves only with that release"),
 }
 
 

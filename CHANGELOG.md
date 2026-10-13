@@ -603,6 +603,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   two months of upstream llama.cpp and a newer ROCm runtime. Run
   `localm setup-llama --force` to pick it up; an existing installation keeps
   working untouched until you do.
+- **Text-to-speech runs on a newer speech runtime.** The built-in Kokoro voice now uses
+  transformers.js 4.3.1 with onnxruntime-web 1.31, still served from your install so it needs
+  no network for the runtime.
 
 ### Fixed
 - **The coder's browser_close stops a browser that is still starting.** Closing the browser

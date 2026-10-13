@@ -24,7 +24,9 @@ WHAT IT REWRITES (with ``--write``; without it, a summary and diff are printed
 and nothing is touched):
 
   vendor/kokoro.min.js
-  vendor/onnxruntime/ort-wasm-simd-threaded.jsep.{mjs,wasm}  (transformers' dist/)
+  vendor/onnxruntime/<the glue .mjs and binary .wasm the bundle names>
+                              (transformers' dist/, or onnxruntime-web's dist/ when
+                              transformers does not ship them; stale files are removed)
   vendor/LICENSE.kokoro-js, LICENSE.transformers-js, LICENSE.onnxruntime-web
   vendor/NOTICE.md            the version table, the runtime provenance and sizes,
                               the onnxruntime licence source, the esbuild version
@@ -34,8 +36,10 @@ WHAT IT CHECKS BEFORE WRITING: the tag is a plain MAJOR.MINOR.PATCH release
 strictly newer than the pinned one; the installed packages are exactly the
 requested versions and onnxruntime-web is installed once; the bundle contains
 the transformers.js version string, exports exactly the expected names and loads;
-every onnxruntime runtime file the bundle names is in transformers' dist/ and the
-set equals the vendored one; every edited region is found exactly once. Nothing
+every onnxruntime runtime file the bundle names is in transformers' dist/ or in
+onnxruntime-web's dist/ (all from one package), and they are one glue and one binary;
+when they come from onnxruntime-web the bundle carries its version string; every
+edited region is found exactly once. Nothing
 is written unless every check passes, and a write that fails part way is rolled
 back.
 
@@ -100,14 +104,8 @@ _ROW_RES = {
     "phonemizer": re.compile(r"^(\| `phonemizer` \| )([^ |]+)( \|)", re.M),
 }
 _ESBUILD_RE = re.compile(r"(`esbuild` )(\d+\.\d+\.\d+)( bundles)")
-_COPIES_RE = re.compile(r"(Byte-exact copies of `dist/` from `@huggingface/transformers@)([^`]+)(`)")
-_ENV_VERSION_RE = re.compile(r"(\(its `env\.version` string\nreads `)([^`]+)(`)")
-_SIZE_RES = {
-    "ort-wasm-simd-threaded.jsep.mjs": re.compile(
-        r"(onnxruntime/ort-wasm-simd-threaded\.jsep\.mjs)( +)(\d+)( B)"),
-    "ort-wasm-simd-threaded.jsep.wasm": re.compile(
-        r"(onnxruntime/ort-wasm-simd-threaded\.jsep\.wasm)( +)(\d+)( B)"),
-}
+_PROVENANCE_RE = re.compile(r"Byte-exact copies of `dist/` from [^\n]+(?:\n[^\n]+)*")
+_SIZES_RE = re.compile(r"(?:^    onnxruntime/ort-wasm[\w.-]+\.(?:mjs|wasm) +\d+ B\n)+", re.M)
 _ORT_SOURCE_RE = re.compile(
     r"microsoft/onnxruntime repository at (?:commit|tag) `[^`]+`,\n"
     r"which is the (?:exact commit the pinned dev version|release the pinned version) names\.")
@@ -115,10 +113,13 @@ _ORT_REF_RE = re.compile(r"microsoft/onnxruntime repository at (commit|tag) `([^
 _ORT_DEV_RE = re.compile(r"-dev\.\d+-([0-9a-f]{7,40})$")
 _TEST_RES = {
     "version": re.compile(r'^(const VENDORED_TRANSFORMERS = ")([^"]+)(";)', re.M),
+    "ort": re.compile(r'^(const VENDORED_ORT = ")([^"]+)(";)', re.M),
+    "mjs_name": re.compile(r'^(const MJS = ")([^"]+)(";)', re.M),
+    "wasm_name": re.compile(r'^(const WASM = ")([^"]+)(";)', re.M),
     "mjs_hash": re.compile(r'^(const PINNED_MJS_HASH = ")([^"]+)(";)', re.M),
     "wasm_hash": re.compile(r'^(const PINNED_WASM_HASH = ")([^"]+)(";)', re.M),
     "wasm_bytes": re.compile(r"^(const EXPECTED_WASM_BYTES = )(\d+)(;)", re.M),
-    "pack": re.compile(r"(npm pack @huggingface/transformers@)([^ ]+)(  ->)"),
+    "pack": re.compile(r"(npm pack )(\S+@\S+)(  ->)"),
 }
 _WORKER_RE = re.compile(
     r"var ([\w$]+)=new Promise\(\(*([\w$]+)\)*=>\{([\w$]+)\.calledRun\?\2\(new \3\.eSpeakNGWorker\)")
@@ -154,6 +155,7 @@ class Built:
     kokoro_peer_range: str
     voices: set
     warnings: str = ""
+    runtime_package: str = "@huggingface/transformers"
 
 
 @dataclass
@@ -164,6 +166,7 @@ class Change:
     new: bytes
     text: bool
     newline: str = "\n"
+    remove: bool = False
 
     def on_disk(self) -> bytes:
         """The bytes this change writes, with the file's own newline style for text."""
@@ -479,19 +482,32 @@ def collect_artifacts(workdir: Path, bundle: bytes, pins: Pins, versions: dict, 
         raise Refused(f"the built bundle does not contain the version string \"{pins.transformers}\"; "
                       "it was not built from the requested transformers.js")
     nm = workdir / "node_modules"
-    dist = nm / "@huggingface" / "transformers" / "dist"
+    dists = {"@huggingface/transformers": nm / "@huggingface" / "transformers" / "dist",
+             "onnxruntime-web": nm / "onnxruntime-web" / "dist"}
     names = sorted({m for m in _RUNTIME_NAME_RE.findall(bundle.decode("utf-8", errors="replace"))
                     if m.endswith((".mjs", ".wasm"))})
     if not names:
         raise Refused("the built bundle names no onnxruntime runtime file")
     runtime = {}
+    packages = set()
     for name in names:
-        path = dist / name
-        if not path.is_file():
-            raise Refused(f"the bundle loads {name} but transformers {pins.transformers} does not "
-                          f"ship it in dist/; this release {NEEDS_CODE} (the runtime is no longer "
-                          "vendored from the package)")
-        runtime[name] = path.read_bytes()
+        owner = next((pkg for pkg, dist in dists.items() if (dist / name).is_file()), None)
+        if owner is None:
+            raise Refused(f"the bundle loads {name} but neither transformers {pins.transformers} "
+                          f"nor onnxruntime-web {versions['onnxruntime-web']} ships it in dist/; "
+                          f"this release {NEEDS_CODE} (the runtime is no longer vendored from "
+                          "the packages)")
+        packages.add(owner)
+        runtime[name] = (dists[owner] / name).read_bytes()
+    if len(packages) != 1:
+        raise Refused(f"the bundle's runtime files {names} come from more than one package "
+                      f"({sorted(packages)}); this release {NEEDS_CODE}")
+    runtime_package = packages.pop()
+    ort_version = versions["onnxruntime-web"]
+    if runtime_package == "onnxruntime-web" and ort_version.encode() not in bundle:
+        raise Refused(f"the built bundle does not contain the onnxruntime-web version string "
+                      f"\"{ort_version}\"; the runtime files taken from that package are not "
+                      f"the build the bundle was compiled with, so this release {NEEDS_CODE}")
 
     def _license(package_dir: Path) -> bytes:
         path = package_dir / "LICENSE"
@@ -505,7 +521,8 @@ def collect_artifacts(workdir: Path, bundle: bytes, pins: Pins, versions: dict, 
     voices = {p.stem for p in voices_dir.glob("*.bin")} if voices_dir.is_dir() else set()
     peer = (kokoro.get("dependencies") or {}).get("@huggingface/transformers", "")
     return Built(bundle=bundle, runtime=runtime, licenses=licenses, versions=versions,
-                 kokoro_peer_range=peer, voices=voices, warnings=warnings)
+                 kokoro_peer_range=peer, voices=voices, warnings=warnings,
+                 runtime_package=runtime_package)
 
 
 # --------------------------------------------------------------------------- #
@@ -525,6 +542,33 @@ def _change(repo: Path, rel: str, new: bytes, *, text: bool, newline: str | None
     return Change(rel=rel, path=path, old=old, new=new, text=text, newline=newline)
 
 
+def runtime_provenance(new: Pins, built: Built) -> str:
+    """The NOTICE.md paragraph naming the package the runtime files were copied from."""
+    if built.runtime_package == "onnxruntime-web":
+        return (f"Byte-exact copies of `dist/` from `onnxruntime-web@{new.ort}`,\n"
+                f"the runtime build that `@huggingface/transformers@{new.transformers}` pins and "
+                "compiles into\n`kokoro.min.js` (the bundle carries that version string and builds "
+                "its runtime URL\nfrom it). The transformers.js package does not ship these files "
+                "in its own `dist/`.")
+    return (f"Byte-exact copies of `dist/` from `@huggingface/transformers@{new.transformers}`, which "
+            "is the\ntransformers.js version compiled into `kokoro.min.js` (its `env.version` string\n"
+            f"reads `{new.transformers}`, and the bundle builds its runtime URL from that value).")
+
+
+def runtime_sizes(built: Built) -> str:
+    """The NOTICE.md listing of the vendored runtime files with their sizes, right-aligned."""
+    sizes = {name: str(len(data)) for name, data in sorted(built.runtime.items())}
+    width = max(len(name) + len(size) + 2 for name, size in sizes.items())
+    return "".join(f"    onnxruntime/{name}{size.rjust(width - len(name))} B\n"
+                   for name, size in sizes.items())
+
+
+def _removal(repo: Path, rel: str) -> Change:
+    """A Change deleting the file at *rel*."""
+    path = repo / rel
+    return Change(rel=rel, path=path, old=path.read_bytes(), new=b"", text=False, remove=True)
+
+
 def rewrite_notice(text: str, old: Pins, new: Pins, built: Built, ort_source: tuple | None) -> str:
     """NOTICE.md (LF text) with every region that names the moved versions rewritten."""
     for key, value in (("kokoro-js", new.kokoro), ("transformers", new.transformers),
@@ -533,17 +577,9 @@ def rewrite_notice(text: str, old: Pins, new: Pins, built: Built, ort_source: tu
                              f"NOTICE.md {key} row")
     text = _replace_once(_ESBUILD_RE, text, lambda m: m.group(1) + new.esbuild + m.group(3),
                          "NOTICE.md esbuild version")
-    text = _replace_once(_COPIES_RE, text, lambda m: m.group(1) + new.transformers + m.group(3),
+    text = _replace_once(_PROVENANCE_RE, text, lambda m: runtime_provenance(new, built),
                          "NOTICE.md runtime provenance")
-    text = _replace_once(_ENV_VERSION_RE, text, lambda m: m.group(1) + new.transformers + m.group(3),
-                         "NOTICE.md env.version")
-    for name, rx in _SIZE_RES.items():
-        size = str(len(built.runtime[name]))
-
-        def fit(m, size=size):
-            width = len(m.group(2)) + len(m.group(3))
-            return m.group(1) + " " * max(width - len(size), 2) + size + m.group(4)
-        text = _replace_once(rx, text, fit, f"NOTICE.md size of {name}")
+    text = _replace_once(_SIZES_RE, text, lambda m: runtime_sizes(built), "NOTICE.md runtime sizes")
     if ort_source is not None:
         kind, ref = ort_source
         tail = ("exact commit the pinned dev version" if kind == "commit"
@@ -554,11 +590,26 @@ def rewrite_notice(text: str, old: Pins, new: Pins, built: Built, ort_source: tu
     return text
 
 
+def runtime_pair(runtime: dict) -> tuple:
+    """(glue name, binary name) of a runtime set, which must be exactly one .mjs and one .wasm
+    because the guard test pins one of each."""
+    glue = [n for n in runtime if n.endswith(".mjs")]
+    binary = [n for n in runtime if n.endswith(".wasm")]
+    if len(glue) != 1 or len(binary) != 1 or len(runtime) != 2:
+        raise Refused(f"the bundle names the runtime files {sorted(runtime)}, not one .mjs and one "
+                      f".wasm; the guard test pins one pair, so this release {NEEDS_CODE}")
+    return glue[0], binary[0]
+
+
 def rewrite_guard_test(text: str, new: Pins, built: Built) -> str:
     """tests-js/vendor-onnxruntime.test.mjs (LF text) with the new version, hashes and size."""
-    mjs, wasm = built.runtime["ort-wasm-simd-threaded.jsep.mjs"], built.runtime["ort-wasm-simd-threaded.jsep.wasm"]
-    values = {"version": new.transformers, "mjs_hash": _sha256_b64(_lf(mjs)),
-              "wasm_hash": _sha256_b64(wasm), "wasm_bytes": str(len(wasm)), "pack": new.transformers}
+    mjs_name, wasm_name = runtime_pair(built.runtime)
+    mjs, wasm = built.runtime[mjs_name], built.runtime[wasm_name]
+    package = built.runtime_package
+    values = {"version": new.transformers, "ort": new.ort, "mjs_name": mjs_name,
+              "wasm_name": wasm_name, "mjs_hash": _sha256_b64(_lf(mjs)),
+              "wasm_hash": _sha256_b64(wasm), "wasm_bytes": str(len(wasm)),
+              "pack": f"{package}@{new.ort if package == 'onnxruntime-web' else new.transformers}"}
     for key, value in values.items():
         text = _replace_once(_TEST_RES[key], text, lambda m, v=value: m.group(1) + v + m.group(3),
                              f"{TEST_REL} {key}")
@@ -571,15 +622,9 @@ def build_plan(repo: Path, old: Pins, new: Pins, built: Built, *, license_fetch=
     *license_fetch* is called with the onnxruntime-web version and returns
     (licence bytes, kind, ref); it is only called when that version moved.
     """
+    runtime_pair(built.runtime)
     runtime_dir = repo / RUNTIME_REL
     vendored = {p.name for p in runtime_dir.iterdir() if p.is_file()} if runtime_dir.is_dir() else set()
-    if set(built.runtime) != vendored:
-        raise Refused(f"the bundle loads runtime files {sorted(built.runtime)} but {RUNTIME_REL} holds "
-                      f"{sorted(vendored)}; tts.js, the guard test and NOTICE.md name these files, "
-                      f"so this release {NEEDS_CODE}")
-    if set(built.runtime) != set(_SIZE_RES):
-        raise Refused(f"unexpected runtime files {sorted(built.runtime)}; the guard test pins "
-                      f"{sorted(_SIZE_RES)}, so this release {NEEDS_CODE}")
 
     ort_source = None
     ort_license = None
@@ -598,6 +643,8 @@ def build_plan(repo: Path, old: Pins, new: Pins, built: Built, *, license_fetch=
     add(_change(repo, BUNDLE_REL, built.bundle, text=True, newline="\n"))
     for name, data in built.runtime.items():
         add(_change(repo, f"{RUNTIME_REL}/{name}", data, text=name.endswith(".mjs")))
+    for name in sorted(vendored - set(built.runtime)):
+        add(_removal(repo, f"{RUNTIME_REL}/{name}"))
     add(_change(repo, LICENSE_RELS["kokoro-js"], built.licenses["kokoro-js"], text=True))
     add(_change(repo, LICENSE_RELS["transformers"], built.licenses["transformers"], text=True))
     if ort_license is not None:
@@ -640,12 +687,19 @@ def ort_source_problem(notice: str, version: str) -> str | None:
     return None if agrees else f"NOTICE.md names onnxruntime {kind} {ref} but the pinned version is {version}"
 
 
+VERIFIED_BEYOND_PEER_RANGE = frozenset({("1.2.1", 4)})
+
+
 def peer_mismatch(built: Built, new: Pins) -> str | None:
-    """A note when kokoro-js declares a transformers.js range the bundled version is outside."""
+    """A note when kokoro-js declares a transformers.js range the bundled version is outside.
+    A (kokoro-js version, transformers.js major) pair in VERIFIED_BEYOND_PEER_RANGE has been
+    run in a real browser and is not reported."""
     m = re.fullmatch(r"\^(\d+)\.(\d+)\.(\d+)", built.kokoro_peer_range or "")
     if not m:
         return None
     have = parse_version(new.transformers)
+    if (new.kokoro, have[0]) in VERIFIED_BEYOND_PEER_RANGE:
+        return None
     if int(m.group(1)) != have[0]:
         return (f"kokoro-js {new.kokoro} declares @huggingface/transformers {built.kokoro_peer_range} "
                 f"but the bundle carries {new.transformers}; this release {NEEDS_CODE}")
@@ -673,8 +727,11 @@ def apply_changes(changes: list) -> None:
     try:
         for change in changes:
             before = change.path.read_bytes() if change.path.is_file() else None
-            _write_atomic(change.path, change.on_disk())
             done.append((change.path, before))
+            if change.remove:
+                change.path.unlink(missing_ok=True)
+            else:
+                _write_atomic(change.path, change.on_disk())
     except BaseException:
         for path, before in reversed(done):
             if before is None:
@@ -689,6 +746,8 @@ def apply_changes(changes: list) -> None:
 # --------------------------------------------------------------------------- #
 
 def describe(change: Change) -> str:
+    if change.remove:
+        return f"  remove  {change.rel}  ({len(change.old)} bytes)"
     verb = "create " if change.old is None else "replace"
     size = f"{len(change.new)} bytes"
     if change.old is not None:
