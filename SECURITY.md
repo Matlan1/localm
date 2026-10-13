@@ -294,12 +294,16 @@ this section states the security properties and, more importantly, their edges.
   other state, and it changes nothing about `net_mode` for any other request.
   `net_mode = off` still refuses it unconditionally - this bypasses `ask`'s
   friction, never `off`'s kill switch.
-- **`off` has one documented exception, and it is not the one above.** An
-  admin-only setting (`update_ignore_net_policy`, off by default) lets the
-  update check run regardless of `off`. Two paths never consult `net_mode`
-  at all (see *What it does not cover* above): the bug-report upload, which
-  is sent only when you press Send, and requests to your configured ComfyUI.
-  Nothing else opts out of `off`; the issues list is refused under it.
+- **What still reaches the network under `off`, and it is not the one above.**
+  Two admin-only settings, both off by default, let a channel past `off`:
+  `update_ignore_net_policy` (the update check) and `net_allow_model_downloads`
+  (downloads you start yourself: model pulls and HuggingFace search, the
+  embedding, voice, TTS and vision-projector models, the browser build). Some paths
+  never consult `net_mode` at all: the bug-report upload (sent only when you
+  press Send), requests to your configured ComfyUI (see *What it does not
+  cover* above), and the native runtime downloads (`localm setup-llama` and the
+  native image and music runtimes). Nothing else opts out of `off`; the issues
+  list is refused under it.
 - **Private-address guard.** Requests to loopback, link-local, CGNAT and
   private ranges are refused, and the check is re-applied to the resolved
   address rather than the name. It classifies by ADDRESS TYPE, so a service

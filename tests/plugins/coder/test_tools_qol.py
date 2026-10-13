@@ -181,6 +181,8 @@ class TestReadEnvRedaction:
         ("JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJlMTIz", "c2lnbmF0dXJlMTIz"),
         ("MASTER_PASSPHRASE", "correct horse battery staple", "horse battery"),
         ("WALLET_MNEMONIC", "abandon abandon ability able", "abandon ability"),
+        ("WALLET_SEED", "zoo zoo zoo wrong", "zoo zoo"),
+        ("RECOVERY_PHRASE", "legal winner thank year", "winner thank"),
         ("DISCORD_WEBHOOK", "https://discord.com/api/webhooks/12345/AbCdEfGh", "AbCdEfGh"),
         ("NOTIFY", "https://discord.com/api/webhooks/12345/ZyXwVuTs", "ZyXwVuTs"),
         ("SEARX", "https://searx.local/search?api_key=QQQsecretQQQ", "QQQsecretQQQ"),
@@ -212,10 +214,18 @@ class TestReadEnvRedaction:
         monkeypatch.setenv("ZZ_WORKDIR", home + os.sep + "proj")
         monkeypatch.setenv("USERNAME", "zzaccountname")
         monkeypatch.setenv("COMPUTERNAME", "zzmachinename")
+        monkeypatch.setenv("HOMEPATH", r"\Users\zzaccountname")
+        monkeypatch.setenv("SUDO_USER", "zzaccountname")
+        monkeypatch.setenv("ZZ_SHARE", r"\\fileserver\zzaccountname\docs")
+        monkeypatch.setenv("ZZ_MAILBOX", "/var/mail/zzaccountname")
+        monkeypatch.setenv("ZZ_NOTE", "zzaccountnamesuffix-not-a-segment")
         r = tool_read_env(tmp_path)
         assert r.ok
         assert "Pw0rdZZ" not in r.output
-        assert "zzaccountname" not in r.output
+        assert "zzaccountname" not in r.output.replace("zzaccountnamesuffix", "")
+        assert r"ZZ_SHARE=\\fileserver\<user>\docs" in r.output
+        assert "ZZ_MAILBOX=/var/mail/<user>" in r.output
+        assert "ZZ_NOTE=zzaccountnamesuffix-not-a-segment" in r.output
         assert "zzmachinename" not in r.output
         assert "ZZ_WORKDIR=" in r.output
         assert home not in r.output

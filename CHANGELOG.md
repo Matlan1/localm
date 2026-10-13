@@ -2048,18 +2048,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   password in it, or an API key under an ordinary name, reached the model as is (an online model
   included) while the terminal said "secrets redacted". It now also removes URL passwords,
   credential query parameters, bearer tokens and common API key and token formats from every value,
-  removes the home directory and account name from the process environment, and its summary says how
+  removes the home directory and the account name (as a path segment, and in the variables that name
+  the account or the machine) from every value, and its summary says how
   many values it redacted instead of claiming every secret was.
 - **`net_mode = off` now stops the issues list.** Opening the issues list in Settings, or running
   `localm issues`, contacted the bug-report proxy even with the network switched off. It now says the
-  network is off and sends nothing. The bug-report upload (sent only when you press Send) and requests
-  to your configured ComfyUI never consult `net_mode`, and the security notes now say so.
+  network is off and sends nothing. The security notes now list everything that still reaches the
+  network under `off`: the two admin-only exemptions, the bug-report upload (sent only when you press
+  Send), requests to your configured ComfyUI, and the native runtime downloads.
 - **A scoped API key no longer receives this machine's absolute paths.** The memory page, the
-  image, music and video galleries (and a gallery move), the uploads list, the managed ComfyUI status,
+  image, music and video galleries (file paths and the saved generation settings, such as the source
+  image of an img2img), a gallery move, the uploads list, the managed ComfyUI status,
   a saved bug report and the diagnostics report returned full paths, carrying the account name and
   data directory, to any key that could reach them. A key other than the owner's now gets those paths
   with the data directory, home and install folders replaced by placeholders such as `<data>`; "Use
-  as input" accepts that form, so img2img from the gallery keeps working.
+  as input" and "Reuse settings" accept that form, so img2img from the gallery keeps working.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move

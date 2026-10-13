@@ -36,6 +36,7 @@ import time
 from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import diagnostics, scopes
+from localm.pathscrub import map_strings
 from localm.inference.http_server import (
     caller_is_operator, path_formatter, principal_id, require_scope,
 )
@@ -83,18 +84,6 @@ def _snapshot(app: FastAPI, jobs) -> dict:
     }
 
 
-def _map_strings(value, fn):
-    """*value* with *fn* applied to every string inside it, through nested
-    dicts and lists; other values are returned unchanged."""
-    if isinstance(value, str):
-        return fn(value)
-    if isinstance(value, dict):
-        return {k: _map_strings(v, fn) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_map_strings(v, fn) for v in value]
-    return value
-
-
 def register(app: FastAPI, ctx) -> None:
     jobs = ctx.jobs
     app.state.diagnostics_run = _blank_state()
@@ -110,7 +99,7 @@ def register(app: FastAPI, ctx) -> None:
         the local operator."""
         snap = _snapshot(request.app, jobs)
         if snap["report"] is not None and not caller_is_operator(request):
-            snap["report"] = _map_strings(snap["report"], path_formatter(request))
+            snap["report"] = map_strings(snap["report"], path_formatter(request))
         return snap
 
     @app.post("/api/doctor/run",

@@ -168,6 +168,19 @@ def path_scrubber() -> Callable[[str], str]:
     return scrub
 
 
+def map_strings(value, fn: Callable[[str], str]):
+    """*value* with *fn* applied to every string inside it, through nested
+    dicts, lists and tuples (tuples come back as lists); dict keys and other
+    values are returned unchanged."""
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, dict):
+        return {k: map_strings(v, fn) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [map_strings(v, fn) for v in value]
+    return value
+
+
 def scrub_paths(text: str) -> str:
     """``scrub_user_paths`` plus the localm data dir, install root and env
     prefix. Use for anything handed to a caller who is not the local operator.

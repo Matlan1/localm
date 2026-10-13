@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 from localm.bugreport.scrub import _scrub_secrets
@@ -16,7 +17,7 @@ from .base import ToolResult, _confine
 _SECRET_MARKERS = (
     "key", "token", "secret", "password", "passwd", "passphrase", "credential",
     "auth", "cookie", "private", "cert", "signature", "dsn", "mnemonic",
-    "seed_phrase", "webhook",
+    "phrase", "wallet", "webhook",
 )
 
 # Env var name segments (split on non-alphanumerics, case-insensitive) whose
@@ -26,7 +27,8 @@ _SECRET_NAME_SEGMENTS = frozenset({"pat", "sk"})
 # Env var names whose values identify the account or the machine.
 _IDENTITY_NAMES = frozenset({
     "user", "username", "logname", "userdomain", "userdomain_roamingprofile",
-    "computername", "hostname", "logonserver", "userdnsdomain",
+    "computername", "hostname", "logonserver", "userdnsdomain", "homepath",
+    "mail", "sudo_user",
 })
 
 # Credential value shapes recognised under any variable name: GitHub, GitLab,
@@ -50,7 +52,32 @@ def _redacted(value: str) -> str:
     return f"<redacted, {len(value)} chars>"
 
 
-def _redact_env_value(name: str, value: str) -> tuple[str, bool]:
+def _account_names() -> frozenset[str]:
+    """The account names to remove from values: the home directory's last
+    segment and the USERNAME / USER / LOGNAME values, at least 2 characters."""
+    names = set()
+    try:
+        names.add(Path.home().name)
+    except Exception:
+        pass
+    for var in ("USERNAME", "USER", "LOGNAME"):
+        names.add(os.environ.get(var, ""))
+    return frozenset(n for n in names if len(n) >= 2)
+
+
+def _strip_account(value: str, accounts: frozenset[str]) -> str:
+    """*value* with each of *accounts* replaced by ``<user>`` where it is a whole
+    path segment (bounded by a separator or the ends of the value);
+    case-insensitive on Windows."""
+    flags = re.IGNORECASE if sys.platform == "win32" else 0
+    for account in accounts:
+        value = re.sub(r"(?:(?<=[\\/])|^)" + re.escape(account) + r"(?=[\\/]|$)",
+                       "<user>", value, flags=flags)
+    return value
+
+
+def _redact_env_value(name: str, value: str,
+                      accounts: frozenset[str] = frozenset()) -> tuple[str, bool]:
     """Return ``(shown_value, redacted)`` for one variable.
 
     The whole value is replaced with a length marker when the NAME looks
@@ -59,15 +86,16 @@ def _redact_env_value(name: str, value: str) -> tuple[str, bool]:
     format. Otherwise the value is passed through ``_scrub_secrets``, which
     replaces URL ``user:pass@`` credentials, credential-named query
     parameters, bearer tokens, ``sk-`` API keys, email addresses and the home
-    directory / account name in paths. *redacted* is True when the shown value
-    differs from the original."""
+    directory / account name in paths, then each of *accounts* is replaced by
+    ``<user>`` where it is a whole path segment. *redacted* is True when the
+    shown value differs from the original."""
     lowered = name.lower()
     if (any(marker in lowered for marker in _SECRET_MARKERS)
             or _SECRET_NAME_SEGMENTS.intersection(re.split(r"[^a-z0-9]+", lowered))
             or lowered in _IDENTITY_NAMES
             or _TOKEN_VALUE_RE.search(value)):
         return _redacted(value), True
-    shown = _scrub_secrets(value)
+    shown = _strip_account(_scrub_secrets(value), accounts)
     return shown, shown != value
 
 
@@ -83,10 +111,11 @@ def tool_read_env(cwd: Path, path: str = "") -> ToolResult:
     """
     lines: list[str] = []
     n_redacted = 0
+    accounts = _account_names()
 
     def _add(name: str, value: str) -> None:
         nonlocal n_redacted
-        shown, redacted = _redact_env_value(name, value)
+        shown, redacted = _redact_env_value(name, value, accounts)
         n_redacted += redacted
         lines.append(f"{name}={shown}")
 

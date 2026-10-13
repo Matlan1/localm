@@ -37,6 +37,7 @@ from localm.media.native_models import (
     MAX_LORAS, LoraChoice, apply_choice, check_generation_extras, check_request,
 )
 from localm.pathsafe import confined_file, confined_name
+from localm.pathscrub import map_strings
 from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
 from . import backend as _backend
@@ -377,7 +378,7 @@ async def video_history(request: Request):
                     meta = json.loads(sidecar.read_text(encoding="utf-8"))
                 except Exception:
                     pass
-            items.append({"name": p.name, "meta": meta,
+            items.append({"name": p.name, "meta": map_strings(meta, show_path),
                           "path": show_path(p),
                           "size_bytes": p.stat().st_size,
                           "mtime": p.stat().st_mtime})

@@ -4,6 +4,7 @@ ADMIN key) gets them as they are; any other caller gets them through
 pathscrub.scrub_paths, so the data dir, home and account name never reach a
 scoped key."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -43,7 +44,7 @@ def _h(key):
 
 def _key(scopes):
     from localm import auth
-    return auth.create_key("k", scopes)["key"]
+    return auth.create_key("k", scopes, allow_privileged=True)["key"]
 
 
 def _gui_app(tmp_path, *plugins):
@@ -82,6 +83,10 @@ def test_gallery_history_path(home, tmp_path, plugin, route, field, dir_fn, fnam
     real = getattr(mod, dir_fn)() / fname
     real.parent.mkdir(parents=True, exist_ok=True)
     real.write_bytes(b"x")
+    source = home / "uploads" / "src.png"
+    real.with_suffix(real.suffix + ".json").write_text(json.dumps(
+        {"prompt": "a fox", "input_image": str(source), "steps": 4,
+         "extra": {"paths": [str(source)]}}), encoding="utf-8")
     scoped, admin = _key([plugin]), _key(["admin"])
     with TestClient(app) as c:
         mine = c.get(route, headers=_h(scoped)).json()[field]
@@ -90,6 +95,11 @@ def test_gallery_history_path(home, tmp_path, plugin, route, field, dir_fn, fnam
     _assert_scrubbed(mine[0]["path"], home, tmp_path)
     assert mine[0]["path"].endswith(fname)
     assert full[0]["path"] == str(real)
+    meta = mine[0]["meta"]
+    _assert_scrubbed(meta["input_image"], home, tmp_path)
+    _assert_scrubbed(meta["extra"]["paths"][0], home, tmp_path)
+    assert meta["prompt"] == "a fox" and meta["steps"] == 4
+    assert full[0]["meta"]["input_image"] == str(source)
 
 
 def test_gallery_move_result_path(home, tmp_path, monkeypatch):
@@ -166,8 +176,6 @@ def test_uploads_and_comfy_status_paths(home, tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "is_managed_comfy_installed", lambda: True)
     monkeypatch.setattr(mc, "managed_comfy_paths",
                         lambda: MagicMock(root=root, models_dir=root / "models"))
-    monkeypatch.setattr("localm.plugins.gui.routes.comfy._update_status",
-                        lambda _root: {})
     app = _gui_app(tmp_path)
     reader, admin = _key(["config:read"]), _key(["admin"])
     with TestClient(app) as c:
@@ -177,9 +185,11 @@ def test_uploads_and_comfy_status_paths(home, tmp_path, monkeypatch):
         cs_full = c.get("/api/comfy/managed-status", headers=_h(admin)).json()
     _assert_scrubbed(up_mine, home, tmp_path)
     assert up_full == str(home / "uploads")
+    assert cs_mine["state"] == "installed"
     _assert_scrubbed(cs_mine["path"], home, tmp_path)
     _assert_scrubbed(cs_mine["models_dir"], home, tmp_path)
     assert cs_full["path"] == str(root)
+    assert cs_full["models_dir"] == str(root / "models")
 
 
 def test_open_mode_keeps_full_paths(home, tmp_path):
@@ -211,6 +221,22 @@ class TestInputImageAcceptsTheScrubbedForm:
         if sep == "\\" and "\\" not in str(Path("a") / "b"):
             pytest.skip("backslash is not a separator on this platform")
         assert check_input_image(raw) == f.resolve()
+
+    def test_round_trip_from_a_scoped_history_meta(self, home, tmp_path):
+        from localm.media.paths import check_input_image
+        from localm.plugins.builtin.image import plug as image_plug
+        src = self._gallery_file(home)
+        out = image_plug._images_dir() / "made.png"
+        out.write_bytes(b"x")
+        out.with_suffix(".png.json").write_text(
+            json.dumps({"input_image": str(src)}), encoding="utf-8")
+        app = _gui_app(tmp_path, "image")
+        with TestClient(app) as c:
+            items = c.get("/api/imagine/history",
+                          headers=_h(_key(["image"]))).json()["images"]
+        shown = next(it for it in items if it["name"] == "made.png")["meta"]["input_image"]
+        _assert_scrubbed(shown, home, tmp_path)
+        assert check_input_image(shown) == src.resolve()
 
     def test_round_trip_from_the_scrubber(self, home):
         from localm.media.paths import check_input_image

@@ -55,6 +55,7 @@ from localm.media.native_models import (
     check_request, validate_upscaler,
 )
 from localm.pathsafe import confined_file, confined_name
+from localm.pathscrub import map_strings
 from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
 from . import backend as _backend
@@ -815,7 +816,7 @@ async def imagine_history(request: Request):
                     meta = json.loads(sidecar.read_text(encoding="utf-8"))
                 except Exception:
                     pass
-            items.append({"name": p.name, "meta": meta,
+            items.append({"name": p.name, "meta": map_strings(meta, show_path),
                           "path": show_path(p),
                           "mtime": p.stat().st_mtime})
     allowed = set(gallery.owned_names(request, "image", [it["name"] for it in items]))
