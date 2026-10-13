@@ -623,7 +623,7 @@ export async function refreshModelsPage() {
 
     const actions = el("td", "actions-cell");
     const detail = el("button", "secondary", t("models.action.info"));
-    detail.onclick = () => showModelDetail(m.name);
+    detail.onclick = () => whileBusy(detail, t("models.detail.loading"), () => showModelDetail(m.name));
     actions.appendChild(detail);
 
     // Not gated on isLlm below: any model type can be an externally-referenced
@@ -636,13 +636,15 @@ export async function refreshModelsPage() {
           t("models.relocate.prompt", { name: m.name }),
           m.last_path || "");
         if (!path || !path.trim()) return;
-        const r = await fetch("/api/models/relocate", {
-          method: "POST", headers: authHeaders(),
-          body: JSON.stringify({ model: m.name, new_path: path.trim() }),
+        await whileBusy(relocateBtn, t("models.relocate.working"), async () => {
+          const r = await fetch("/api/models/relocate", {
+            method: "POST", headers: authHeaders(),
+            body: JSON.stringify({ model: m.name, new_path: path.trim() }),
+          });
+          const data = await r.json().catch(() => ({}));
+          if (r.ok) { toast(t("models.relocate.toast", { name: m.name })); refreshModelsPage(); }
+          else toast(data.detail || t("models.relocate.failed"), true);
         });
-        const data = await r.json().catch(() => ({}));
-        if (r.ok) { toast(t("models.relocate.toast", { name: m.name })); refreshModelsPage(); }
-        else toast(data.detail || t("models.relocate.failed"), true);
       };
       actions.appendChild(relocateBtn);
     }
@@ -1641,6 +1643,8 @@ export async function refreshInstancesCard() {
   if (!box) return;
   const myGen = ++_instancesRenderGen;
   let rows;
+  const loading = el("div", "sub", t("settings.instances.loading"));
+  if (!box.firstChild) box.replaceChildren(loading);
   try {
     const r = await fetch("/api/instances", { headers: authHeaders() });
     if (myGen !== _instancesRenderGen) return;
@@ -1648,6 +1652,7 @@ export async function refreshInstancesCard() {
     const data = await r.json().catch(() => ({ instances: [] }));
     rows = (data.instances || []).filter((i) => !i.self);
   } catch {
+    loading.remove();
     return;   // transient error - leave the card as it was
   }
   if (myGen !== _instancesRenderGen) return;

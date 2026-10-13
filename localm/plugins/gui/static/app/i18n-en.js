@@ -1168,6 +1168,7 @@ export const I18N_EN = {
   "models.detail.statusActiveLoaded": "active, loaded",
   "models.detail.statusActiveNotLoaded": "active, not loaded",
   "models.detail.statusRegistered": "registered",
+  "models.detail.loading": "Loading…",
   "models.detail.title": "Model - {name}",
   "models.detail.type": "Type",
   "models.disc.addFullRepoButton": "add full repo",
@@ -1314,6 +1315,7 @@ export const I18N_EN = {
   "models.relocate.prompt":
     "New location for '{name}' (a .gguf file, or a HuggingFace model folder):",
   "models.relocate.title": "Point this entry at the file's new location",
+  "models.relocate.working": "Checking…",
   "models.relocate.toast": "Relocated '{name}'",
   "models.remove.confirmBody":
     "The file is deleted only when this is its last name and it lives in the data directory.",
@@ -1980,6 +1982,7 @@ export const I18N_EN = {
   "settings.instances.title": "Other running instances",
   "settings.instances.help":
     "Each <code>localm gui</code>/<code>localm serve</code> you start advertises itself, so other launches can find it instead of double-loading a model. This lists every one running on this machine right now (the server behind this page is not shown here - use Server controls above for that). A server started from a different LocaLM install keeps its own data folder, so it is listed as <b>other install</b> and has to be stopped from that install.",
+  "settings.instances.loading": "Looking for other instances…",
   "settings.instances.emptyTitle": "No other instances running",
   "settings.instances.emptyBody": "Only the server behind this page is running right now.",
   "settings.instances.colDirectory": "Directory",

@@ -165,3 +165,88 @@ test("the Settings page shows a loading line while its late sections build, then
   await tick(30);
   assert.doesNotMatch(doc.getElementById("settings-content").textContent, /Loading more settings/);
 });
+
+test("Info on a model row shows Loading... until the detail answers, then opens the dialog", async () => {
+  const g = gate();
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u === "/api/models" || u.startsWith("/api/models?")) return ok(MODELS);
+    if (u === "/v1/models/other-model") {
+      await g.wait;
+      return ok({ path: "/m/other.gguf", model_type: "llm", source: "local", size_bytes: 1,
+                  aliases: [], active: false, loaded: false });
+    }
+    return ok({});
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await win.refreshModelsPage();
+  await tick();
+  const row = [...win.document.querySelectorAll("#models-table tbody tr")]
+    .find((r) => r.querySelector(".name")?.textContent === "other-model");
+  const info = [...row.querySelectorAll("button")].find((b) => b.textContent === "info");
+  info.onclick();
+  await tick();
+  assert.equal(info.disabled, true);
+  assert.equal(info.textContent, "Loading…");
+  g.release();
+  await tick(8);
+  assert.equal(info.disabled, false);
+  assert.equal(info.textContent, "info");
+});
+
+test("relocate disables its button and shows Checking... while the path is validated", async () => {
+  const g = gate();
+  const missing = { models: [{ name: "gone-model", model_type: "llm", active: false,
+                               size_bytes: 1e9, missing: true, last_path: "/old/gone.gguf" }],
+                    active: "" };
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u === "/api/models" || u.startsWith("/api/models?")) return ok(missing);
+    if (u === "/api/models/relocate" && opts.method === "POST") { await g.wait; return ok({}); }
+    return ok({});
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  runScript(win, "promptText = async () => '/new/place/gone.gguf';");
+  await win.refreshModelsPage();
+  await tick();
+  const row = [...win.document.querySelectorAll("#models-table tbody tr")]
+    .find((r) => r.querySelector(".name")?.textContent === "gone-model");
+  const btn = [...row.querySelectorAll("button")].find((b) => b.textContent === "relocate");
+  assert.ok(btn);
+  btn.onclick();
+  await tick();
+  assert.equal(btn.disabled, true);
+  assert.equal(btn.textContent, "Checking…");
+  g.release();
+  await tick(8);
+  assert.match(win.document.getElementById("toast").textContent, /gone-model/);
+});
+
+test("the instances card shows a looking-for line until /api/instances answers", async () => {
+  const g = gate();
+  const fetchImpl = async (url) => {
+    if (String(url) === "/api/instances") { await g.wait; return ok({ instances: [] }); }
+    return ok({ models: [], active: "", conversations: [], plugins: [] });
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  const box = win.document.getElementById("instances-list");
+  box.replaceChildren();
+  const pending = win.refreshInstancesCard();
+  await tick();
+  assert.match(box.textContent, /Looking for other instances/);
+  g.release();
+  await pending;
+  assert.doesNotMatch(box.textContent, /Looking for other instances/);
+});
+
+test("a failed instances lookup removes the looking-for line", async () => {
+  const fetchImpl = async (url) => {
+    if (String(url) === "/api/instances") throw new Error("offline");
+    return ok({ models: [], active: "", conversations: [], plugins: [] });
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  const box = win.document.getElementById("instances-list");
+  box.replaceChildren();
+  await win.refreshInstancesCard();
+  assert.doesNotMatch(box.textContent, /Looking for other instances/);
+});
