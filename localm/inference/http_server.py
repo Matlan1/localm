@@ -41,6 +41,7 @@ from localm.inference.backends.base import (
     EmbedBatchTooLargeError,
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
+    ImageLimitError,
     AudioDecodeUnavailable,
     InvalidGrammarError,
     ModelLoadCancelled,
@@ -6561,6 +6562,7 @@ def _memory_used_header(ctx) -> dict:
 _BACKEND_ERROR_STATUS: tuple = (
     (ImageDecodeUnavailable, 501),
     (AudioDecodeUnavailable, 501),
+    (ImageLimitError, 413),
     (VisionInputError, 400),
     (UnsupportedInputError, 400),
     (ChatTemplateMissingError, 400),
