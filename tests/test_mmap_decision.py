@@ -158,10 +158,12 @@ class TestCpuHeldWeightBytes:
         assert b._cpu_held_weight_bytes(0) == b._model_bytes()
 
     def test_each_gpu_layer_takes_the_next_block_off_the_cpu(self, tmp_path):
-        b = _backend(_dense_model(tmp_path))
+        b = _backend(_moe_model(tmp_path))
         blocks = b._block_bytes()
+        assert len({total for total, _ in blocks.values()}) == len(blocks)
         assert b._cpu_held_weight_bytes(1) - b._cpu_held_weight_bytes(2) == blocks[3][0]
         assert b._cpu_held_weight_bytes(2) - b._cpu_held_weight_bytes(3) == blocks[2][0]
+        assert b._cpu_held_weight_bytes(4) - b._cpu_held_weight_bytes(5) == blocks[0][0]
 
     def test_every_block_on_the_gpu_leaves_the_input_layer(self, tmp_path):
         b = _backend(_dense_model(tmp_path))
