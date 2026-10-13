@@ -723,6 +723,7 @@ def _stub_main(monkeypatch, *, fingerprint_after):
     calls = []
     monkeypatch.setattr(pp, "pipeline_lock", lock)
     monkeypatch.setattr(pp, "sync_main_checkout", lambda: calls.append("sync"))
+    monkeypatch.setattr(pp, "clear_worktree_temp", lambda wt: calls.append("cleared"))
     monkeypatch.setattr(pw, "ensure_github_token", lambda: "env")
     monkeypatch.setattr(pw, "STARTUP_FINGERPRINT", "before")
     monkeypatch.setattr(pw, "script_fingerprint", lambda: fingerprint_after)
@@ -776,6 +777,19 @@ def test_main_does_not_restart_when_the_scripts_are_unchanged(monkeypatch):
     calls, execs = _stub_main(monkeypatch, fingerprint_after="before")
     assert pw.main(["--only", "uv"]) == 0
     assert execs == [] and "ran" in calls
+
+
+def test_main_empties_the_worktree_temp_dir_after_the_run_even_when_it_raises(monkeypatch):
+    calls, _ = _stub_main(monkeypatch, fingerprint_after="before")
+    assert pw.main(["--only", "uv"]) == 0
+    assert calls[-1] == "cleared"
+    calls.clear()
+
+    def boom(advs, **k):
+        raise pp.PipelineError("refused")
+    monkeypatch.setattr(pw, "run_weekly", boom)
+    assert pw.main(["--only", "uv"]) == 1
+    assert calls[-1] == "cleared"
 
 
 def test_main_sync_failure_before_the_lock_is_inconclusive(monkeypatch, capsys):

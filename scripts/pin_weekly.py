@@ -23,13 +23,18 @@ refused bump); 2 nothing failed but at least one result is INCONCLUSIVE, NOT BUI
 a PR opened for review.
 
 Script contract:
-  confirm_<x>_runtime.py  ``--tag X`` or ``--current``, plus ``--workdir`` and
-      ``--receipt``. Exit 0 PASS, 1 FAIL, 2 INCONCLUSIVE. Writes a schema-1 receipt
-      whose checks each carry a status and a required flag. A refusal that says the
-      build "needs a code update" is reported as NEEDS-CODE-UPDATE.
-  bump_<x>_pin.py  ``--tag X``, ``--receipt`` and ``--write``. Forward-only; every
-      region it rewrites must be found exactly once. A review-only bump has no
-      receipt and takes ``--tag`` (and ``--lib`` for a vendored library).
+  confirm_<x>_runtime.py  ``--tag X`` (a candidate) or ``--current`` (the pinned build),
+      plus ``--workdir`` and ``--receipt``. Exit 0 PASS, 1 FAIL, 2 INCONCLUSIVE; an
+      uncaught exception must also exit 2. Must write a JSON receipt whose top-level
+      ``verdict`` equals the exit code's verdict (a missing, unreadable or disagreeing
+      receipt turns a PASS or FAIL into INCONCLUSIVE), with schema 1 checks that each
+      carry a status and a required flag. A refusal or receipt that says the build
+      "needs a code update" is reported as NEEDS-CODE-UPDATE.
+  bump_<x>_pin.py  ``--tag X``, ``--receipt`` and ``--write`` (without ``--write`` it
+      only reports). Every region it rewrites must be found exactly once, and it exits
+      non-zero rather than rewriting a pin it cannot match. Where the pinned version
+      can be compared with the tag it refuses to move backwards. A review-only bump has
+      no receipt and takes ``--tag`` (and ``--lib`` for a vendored library).
 
 Usage (from the main checkout):
     python scripts/pin_weekly.py --dry-run     # confirm only, never bump, commit or merge
@@ -995,8 +1000,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with pp.pipeline_lock():
             pp.sync_main_checkout()
-            code, _ = run_weekly(advancers, dry_run=args.dry_run,
-                                 verify=not args.skip_verify_current)
+            try:
+                code, _ = run_weekly(advancers, dry_run=args.dry_run,
+                                     verify=not args.skip_verify_current)
+            finally:
+                pp.clear_worktree_temp(pp.pipeline_worktree_path())
             return code
     except pp.PipelineLockBusy as e:
         print(f"INCONCLUSIVE: {e}")

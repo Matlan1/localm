@@ -703,16 +703,59 @@ def test_too_little_free_disk_is_an_infra_error_naming_the_drive(monkeypatch, tm
     pipeline.check_free_space(tmp_path)
 
 
-def test_ensure_pipeline_worktree_refuses_before_touching_git_when_the_disk_is_full(monkeypatch, tmp_path):
+def test_a_full_disk_stops_a_bump_only_after_the_worktree_temp_dir_was_emptied(monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    temp = pipeline.worktree_temp_dir(worktree)
+    (temp / "pytest-of-x").mkdir(parents=True)
+    (temp / "pytest-of-x" / "big").write_text("x", encoding="utf-8")
+    calls = []
+
     def full(path, minimum=pipeline.MIN_FREE_BYTES):
+        calls.append(temp.exists())
         raise pipeline.InfraError("only 1 MiB free")
     monkeypatch.setattr(pipeline, "check_free_space", full)
-    calls = []
-    monkeypatch.setattr(pipeline, "_verify_main_checkout", lambda repo: calls.append("verified"))
-    monkeypatch.setattr(pipeline, "_run_git", lambda *a, **k: calls.append("git"))
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout=""))
     with pytest.raises(pipeline.InfraError, match="MiB free"):
-        pipeline.ensure_pipeline_worktree(tmp_path)
-    assert calls == ["verified"]
+        pipeline.prepare_bump_branch(worktree, "b999")
+    assert calls == [False]
+
+
+def test_clearing_the_temp_dir_removes_read_only_files_and_reports_what_it_cannot(monkeypatch, tmp_path, capsys):
+    worktree = tmp_path / "wt"
+    temp = pipeline.worktree_temp_dir(worktree)
+    (temp / "d").mkdir(parents=True)
+    locked = temp / "d" / "ro.txt"
+    locked.write_text("x", encoding="utf-8")
+    os.chmod(locked, 0o444)
+    pipeline.clear_worktree_temp(worktree)
+    assert not temp.exists() and capsys.readouterr().out == ""
+
+    (temp / "d").mkdir(parents=True)
+    (temp / "d" / "stuck.txt").write_text("x", encoding="utf-8")
+    real_unlink = os.unlink
+
+    def refuse(path, *a, **k):
+        if str(path).endswith("stuck.txt"):
+            raise PermissionError("in use")
+        return real_unlink(path, *a, **k)
+    monkeypatch.setattr(pipeline.os, "unlink", refuse)
+    pipeline.clear_worktree_temp(worktree)
+    assert "WARNING" in capsys.readouterr().out and (temp / "d" / "stuck.txt").exists()
+
+
+def test_an_issue_file_held_open_elsewhere_is_still_updated_in_place(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+
+    def locked(src, dst):
+        raise PermissionError("held open")
+    monkeypatch.setattr(pipeline.os, "replace", locked)
+    assert pipeline.append_fail_issue("b10999", "reason", None, issues_path=path) is True
+    assert "NEW-PIN-PIPELINE-LLAMA-B10999-CONFIRM-FAILED" in path.read_text(encoding="utf-8")
+    assert "SOME-EXISTING-ENTRY" in path.read_text(encoding="utf-8")
+    assert "held open elsewhere" in capsys.readouterr().out
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["issues.txt"]
 
 
 def test_reset_empties_the_worktree_temp_dir(monkeypatch, tmp_path):

@@ -569,10 +569,15 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
         "    The pin was NOT advanced. This candidate will not be retried automatically unless\n"
         "    a newer upstream release appears.\n\n"
     )
+    updated = text[:m.end()] + entry + text[m.end():]
     staged = issues_path.with_name(issues_path.name + ".pin-write.tmp")
     try:
-        staged.write_text(text[:m.end()] + entry + text[m.end():], encoding="utf-8")
-        os.replace(staged, issues_path)
+        staged.write_text(updated, encoding="utf-8")
+        try:
+            os.replace(staged, issues_path)
+        except PermissionError:
+            print(f"WARNING: {issues_path.name} is held open elsewhere; writing it in place")
+            issues_path.write_text(updated, encoding="utf-8")
     finally:
         staged.unlink(missing_ok=True)
     return True
@@ -695,13 +700,17 @@ def sync_main_checkout(repo: Path = REPO) -> None:
                          f"{result.stderr}")
 
 
+def pipeline_worktree_path(repo: Path = REPO) -> Path:
+    """Where the dedicated pipeline worktree for *repo* lives (it may not exist yet)."""
+    return repo.parent / f"{repo.name}-pin-pipeline-worktree"
+
+
 def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
     """The dedicated worktree this script's own branch operations run from,
     never the shared main checkout. Raises PipelineError unless *repo*
     resolves as its own git toplevel and is currently on master."""
     _verify_main_checkout(repo)
-    check_free_space(repo.parent)
-    worktree_path = repo.parent / f"{repo.name}-pin-pipeline-worktree"
+    worktree_path = pipeline_worktree_path(repo)
     existing = _run_git(["worktree", "list", "--porcelain"], cwd=repo).stdout
     if str(worktree_path) not in existing and str(worktree_path).replace("\\", "/") not in existing:
         _run_git(["fetch", "origin"], cwd=repo, check=False)
@@ -739,12 +748,32 @@ def close_stale_pr(branch: str, worktree: Path) -> None:
             raise InfraError(f"could not delete stale remote branch {branch}: {result.stderr}")
 
 
+def clear_worktree_temp(worktree: Path) -> None:
+    """Delete the worktree's temp directory, clearing read-only flags first. A file that
+    still cannot be removed is reported on stdout; the run continues."""
+    temp = worktree_temp_dir(worktree)
+    if not temp.exists():
+        return
+    failures: list[str] = []
+
+    def _force(func, path, exc):
+        try:
+            os.chmod(path, 0o700)
+            func(path)
+        except OSError as e:
+            failures.append(f"{path}: {e}")
+
+    shutil.rmtree(temp, onexc=_force)
+    if failures:
+        print(f"WARNING: could not remove {len(failures)} item(s) under {temp}, e.g. {failures[0]}")
+
+
 def reset_pipeline_worktree(worktree: Path) -> None:
     """Discard every uncommitted change and untracked file in the dedicated pipeline
     worktree, so one pin's leftover edit can never ride along in another pin's commit.
     Also empties the worktree's temp directory. Raises InfraError when git refuses or
     the tree is still not clean afterwards."""
-    shutil.rmtree(worktree_temp_dir(worktree), ignore_errors=True)
+    clear_worktree_temp(worktree)
     for args in (["reset", "--hard"], ["clean", "-fd"]):
         result = _run_git(args, cwd=worktree)
         if result.returncode != 0:
@@ -762,6 +791,7 @@ def prepare_bump_branch(worktree: Path, candidate: str, *, pin: str = "llama") -
     before. See test_prepare_bump_branch_refuses_when_fetch_fails."""
     branch = f"claude/pin-pipeline-{pin}-{candidate}"
     reset_pipeline_worktree(worktree)
+    check_free_space(worktree.parent)
     result = _run_git(["fetch", "origin"], cwd=worktree)
     if result.returncode != 0:
         raise InfraError(f"git fetch origin failed: {result.stderr}")

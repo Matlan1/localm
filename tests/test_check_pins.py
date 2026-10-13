@@ -725,14 +725,23 @@ def _pin_constant_files():
     """Every tracked source file that assigns a pin-like constant."""
     import subprocess
     out = subprocess.run(["git", "ls-files", "localm/*.py"], cwd=cp.REPO, capture_output=True, text=True).stdout
-    pattern = cp.re.compile(r"^_?[A-Z0-9_]*(?:PINNED|_PIN)[A-Z0-9_]*\s*(?::[^=]*)?=\s*[\"'(\{]|^(?:TAG|COMMIT)\s*=\s*\"",
-                            cp.re.MULTILINE)
+    pattern = cp.re.compile(
+        r"^_?[A-Z0-9_]*(?:PINNED|_PIN|PIN_|_SHA256|_COMMIT)[A-Z0-9_]*\s*(?::[^=]*)?="
+        r"|^_?[A-Z0-9_]*_TAG\s*(?::[^=]*)?=\s*[\"']|^(?:TAG|COMMIT)\s*=\s*\"", cp.re.MULTILINE)
     return {f for f in out.split() if pattern.search((cp.REPO / f).read_text(encoding="utf-8", errors="replace"))}
 
 
 # Files that assign something pin-shaped that is not a version to keep current, each with the reason.
 _NOT_A_VERSION_PIN = {
     "localm/config.py": "a marker name and a cache-pin tuple for GPU caches, not an upstream version",
+    "localm/inference/backends/llamacpp/_api.py": "the llama.cpp tag the MTP allowlist was derived from; the "
+                                                  "llama bump rewrites it with the pin and a test requires "
+                                                  "it to equal the pinned tag",
+    "localm/inference/residency.py": "a lock for pinned (resident) models",
+    "localm/netpolicy.py": "a limit on pinned network addresses",
+    "localm/media/koboldcpp/music.py": "a duration constant",
+    "localm/inference/tool_calling.py": "tag delimiters of a chat format",
+    "localm/plugins/builtin/voice/audio_model.py": "a tag of a chat format",
 }
 
 
@@ -762,7 +771,9 @@ def test_every_file_that_pins_a_version_is_read_by_the_registry_or_explained(mon
     pinned_files = _pin_constant_files()
     assert "localm/setup_llama/pins.py" in pinned_files and "localm/media/sdcpp/pins.py" in pinned_files
     read = _files_the_registry_reads(monkeypatch)
-    unaccounted = sorted(f for f in pinned_files if f not in read and f not in _NOT_A_VERSION_PIN)
+    reported = {rel for _name, rel, _why in cp._NOT_CHECKABLE}
+    unaccounted = sorted(f for f in pinned_files
+                         if f not in read and f not in reported and f not in _NOT_A_VERSION_PIN)
     assert unaccounted == [], f"pins nothing watches: {unaccounted}"
 
 
