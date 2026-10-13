@@ -34,6 +34,9 @@ INCLUDE_ACCEPTED = frozenset({
     "computer_call_output.output.image_url", "code_interpreter_call.outputs",
 })
 
+LOGPROBS_INCLUDE = "message.output_text.logprobs"
+MAX_TOP_LOGPROBS = 20
+
 # localm chat fields a Responses request may carry (for example through an SDK's
 # ``extra_body``); they are passed to the chat route unchanged.
 CHAT_EXTRAS = (
@@ -263,17 +266,20 @@ def text_format_to_chat(text: Optional[dict[str, Any]]) -> Optional[dict[str, An
 
 def refuse_unserved(req: ResponsesRequest) -> None:
     """Raise :class:`ResponsesError` (400) for a field whose meaning localm cannot
-    honour: ``background``, ``conversation``, ``prompt``, ``top_logprobs``, an
-    ``include`` value outside :data:`INCLUDE_ACCEPTED`, ``text.verbosity`` other
-    than ``medium``, and a ``truncation`` other than ``auto`` or ``disabled``."""
+    honour: ``background``, ``conversation``, ``prompt``, a ``top_logprobs``
+    outside 0 to :data:`MAX_TOP_LOGPROBS`, an ``include`` value outside
+    :data:`INCLUDE_ACCEPTED` and :data:`LOGPROBS_INCLUDE`, ``text.verbosity``
+    other than ``medium``, and a ``truncation`` other than ``auto`` or
+    ``disabled``."""
     for name, value in (("background", req.background), ("conversation", req.conversation),
                         ("prompt", req.prompt)):
         if value:
             raise ResponsesError(400, f"{name} is not supported", name)
-    if req.top_logprobs:
-        raise ResponsesError(400, "top_logprobs is not supported", "top_logprobs")
+    if req.top_logprobs is not None and not 0 <= req.top_logprobs <= MAX_TOP_LOGPROBS:
+        raise ResponsesError(
+            400, f"top_logprobs must be between 0 and {MAX_TOP_LOGPROBS}", "top_logprobs")
     for value in req.include or []:
-        if value not in INCLUDE_ACCEPTED:
+        if value not in INCLUDE_ACCEPTED and value != LOGPROBS_INCLUDE:
             raise ResponsesError(400, f"include {value!r} is not supported", "include")
     if req.truncation not in (None, "disabled", "auto"):
         raise ResponsesError(400, "truncation must be 'auto' or 'disabled'", "truncation")
@@ -287,6 +293,13 @@ def ignored_fields(req: ResponsesRequest) -> list[str]:
     """The names of the request's fields that are neither Responses fields nor
     :data:`CHAT_EXTRAS`; they have no effect."""
     return sorted(k for k in (req.model_extra or {}) if k not in CHAT_EXTRAS)
+
+
+def wants_logprobs(req: ResponsesRequest) -> bool:
+    """Whether *req* asks for the log probabilities of the reply's text: its
+    ``include`` names :data:`LOGPROBS_INCLUDE`. ``top_logprobs`` alone only sets
+    how many alternatives each entry lists once they are asked for."""
+    return LOGPROBS_INCLUDE in (req.include or [])
 
 
 def plan_chat(req: ResponsesRequest, history: list[dict[str, Any]]
@@ -325,6 +338,9 @@ def plan_chat(req: ResponsesRequest, history: list[dict[str, Any]]
     effort = (req.reasoning or {}).get("effort")
     if isinstance(effort, str):
         body["reasoning_effort"] = effort
+    if wants_logprobs(req):
+        body["logprobs"] = True
+        body["top_logprobs"] = req.top_logprobs or 0
     return body, conversation
 
 
@@ -341,10 +357,34 @@ def _usage(usage: Any) -> dict[str, Any]:
             "total_tokens": prompt + completion}
 
 
-def message_item(text: str, item_id: Optional[str] = None, status: str = "completed") -> dict:
+def logprob_entries(block: Any) -> list[dict[str, Any]]:
+    """The entries of a chat ``logprobs`` object (``{"content": [...]}``) as
+    Responses log probability entries: ``token``, ``logprob``, ``bytes`` and
+    ``top_logprobs`` (each ``token``, ``logprob``, ``bytes``). A ``null`` or
+    malformed object, as when a plugin rewrote the reply, gives no entries."""
+    content = block.get("content") if isinstance(block, dict) else None
+    out: list[dict[str, Any]] = []
+    for entry in content if isinstance(content, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        tops = entry.get("top_logprobs")
+        out.append({
+            "token": entry.get("token") or "", "logprob": entry.get("logprob"),
+            "bytes": list(entry.get("bytes") or []),
+            "top_logprobs": [
+                {"token": t.get("token") or "", "logprob": t.get("logprob"),
+                 "bytes": list(t.get("bytes") or [])}
+                for t in (tops if isinstance(tops, list) else []) if isinstance(t, dict)],
+        })
+    return out
+
+
+def message_item(text: str, item_id: Optional[str] = None, status: str = "completed",
+                 logprobs: Optional[list[dict[str, Any]]] = None) -> dict:
     return {"type": "message", "id": item_id or _new_id("msg"), "status": status,
             "role": "assistant",
-            "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}]}
+            "content": [{"type": "output_text", "text": text, "annotations": [],
+                         "logprobs": logprobs or []}]}
 
 
 def reasoning_item(text: str, item_id: Optional[str] = None) -> dict:
@@ -405,7 +445,9 @@ def response_from_completion(shell: Shell, data: dict[str, Any]) -> dict[str, An
     if message.get("reasoning_content"):
         output.append(reasoning_item(message["reasoning_content"]))
     if text:
-        output.append(message_item(text, status="incomplete" if finish == "length" else "completed"))
+        lp = logprob_entries(choice.get("logprobs")) if wants_logprobs(shell.req) else []
+        output.append(message_item(text, status="incomplete" if finish == "length" else "completed",
+                                   logprobs=lp))
     for call in message.get("tool_calls") or []:
         if isinstance(call, dict):
             output.append(call_item(call))
@@ -437,6 +479,14 @@ async def response_stream(shell: Shell, events: AsyncIterator[dict[str, Any]],
     usage: Any = None
     failure: Optional[str] = None
     held: Optional[str] = None
+    held_lp: list[dict[str, Any]] = []
+    waiting: list[dict[str, Any]] = []
+    wants = wants_logprobs(shell.req)
+
+    def take() -> list[dict[str, Any]]:
+        nonlocal waiting
+        taken, waiting = waiting, []
+        return taken
 
     def start() -> list[bytes]:
         created = shell.response(model=model, status="in_progress", output=[])
@@ -451,9 +501,9 @@ async def response_stream(shell: Shell, events: AsyncIterator[dict[str, Any]],
         item, idx = cur["item"], cur["index"]
         if item["type"] == "message":
             text = cur["text"]
-            item = message_item(text, item["id"], status)
+            item = message_item(text, item["id"], status, cur["logprobs"])
             out.append(ev("response.output_text.done", item_id=item["id"], output_index=idx,
-                          content_index=0, text=text, logprobs=[]))
+                          content_index=0, text=text, logprobs=cur["logprobs"]))
             out.append(ev("response.content_part.done", item_id=item["id"], output_index=idx,
                           content_index=0, part=item["content"][0]))
         elif item["type"] == "reasoning":
@@ -480,18 +530,21 @@ async def response_stream(shell: Shell, events: AsyncIterator[dict[str, Any]],
             item = reasoning_item("")
             item["content"] = []
             part = {"type": "reasoning_text", "text": ""}
-        cur = {"item": item, "index": idx, "text": ""}
+        cur = {"item": item, "index": idx, "text": "", "logprobs": []}
         out.append(ev("response.output_item.added", output_index=idx, item=item))
         out.append(ev("response.content_part.added", item_id=item["id"], output_index=idx,
                       content_index=0, part=part))
         return out
 
-    def text_delta(kind: str, text: str) -> list[bytes]:
+    def text_delta(kind: str, text: str,
+                   entries: Optional[list[dict[str, Any]]] = None) -> list[bytes]:
         out = [] if cur is not None and cur["item"]["type"] == kind else open_item(kind)
         assert cur is not None
         cur["text"] += text
         name = "response.output_text.delta" if kind == "message" else "response.reasoning_text.delta"
-        extra = {"logprobs": []} if kind == "message" else {}
+        if kind == "message":
+            cur["logprobs"].extend(entries or [])
+        extra = {"logprobs": list(entries or [])} if kind == "message" else {}
         out.append(ev(name, item_id=cur["item"]["id"], output_index=cur["index"],
                       content_index=0, delta=text, **extra))
         return out
@@ -515,16 +568,18 @@ async def response_stream(shell: Shell, events: AsyncIterator[dict[str, Any]],
             if delta.get("reasoning_content"):
                 for line in text_delta("reasoning", delta["reasoning_content"]):
                     yield line
+            if wants:
+                waiting.extend(logprob_entries(choice.get("logprobs")))
             text = delta.get("content")
             if text:
                 if held is not None:
-                    for line in text_delta("message", held):
+                    for line in text_delta("message", held, held_lp):
                         yield line
-                    held = None
+                    held, held_lp = None, []
                 if text.lstrip().startswith(_ERROR_TEXT_PREFIX):
-                    held = text
+                    held, held_lp = text, take()
                 else:
-                    for line in text_delta("message", text):
+                    for line in text_delta("message", text, take()):
                         yield line
             for call in delta.get("tool_calls") or []:
                 if not isinstance(call, dict):
@@ -562,8 +617,10 @@ async def response_stream(shell: Shell, events: AsyncIterator[dict[str, Any]],
         yield ev("response.failed", response=final)
         return
     if held is not None:
-        for line in text_delta("message", held):
+        for line in text_delta("message", held, held_lp):
             yield line
+    if waiting and cur is not None and cur["item"]["type"] == "message":
+        cur["logprobs"].extend(take())
     incomplete = finish == "length"
     for line in close_current("incomplete" if incomplete else "completed"):
         yield line

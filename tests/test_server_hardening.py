@@ -80,7 +80,7 @@ class TestExposedBindWarning:
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         warning = _exposed_bind_warning("0.0.0.0")
         assert warning is not None
-        assert "LOCALM_API_KEY" in warning
+        assert "localm key generate" in warning
 
     def test_lan_bind_with_key_is_silent(self, monkeypatch):
         # A strong key (>= MIN_KEY_LEN) silences the warning.

@@ -148,6 +148,7 @@ export const I18N_EN = {
   "chat.conv.delete": "Delete conversation",
   "chat.conv.empty": "No conversations yet",
   "chat.conv.empty.hint": "Start one with the + above.",
+  "chat.conv.tooLarge": "This conversation is too large to save on the server (large attachments) - it is kept only in this browser",
   "chat.conv.deleteFailed": "Could not delete the conversation on the server - it may reappear",
   "chat.conv.noMatches": "no matching chats",
   "chat.conv.unsaved": "not saved - history is only in this tab",

@@ -45,13 +45,14 @@ class _Engine:
     supports_images = False
 
     def __init__(self, reply=REPLY, *, audio=True, finish="stop", tokens=10,
-                 capacity=4096, fail=None, delay=0.0):
+                 capacity=4096, fail=None, delay=0.0, generated=None):
         self.supports_audio = audio
         self.last_finish_reason = finish
         self.active_requests = 0
         self._backend = SimpleNamespace(mmproj_path="p.gguf", model_path=None)
         self.reply = reply
         self.tokens = tokens
+        self.generated = generated
         self.capacity = capacity
         self.fail = fail
         self.delay = delay
@@ -67,6 +68,11 @@ class _Engine:
 
     def count_messages_tokens(self, messages):
         return self.tokens
+
+    def count_tokens(self, text):
+        if self.generated is None:
+            raise NotImplementedError("this engine cannot count tokens")
+        return self.generated
 
     def chat_stream(self, messages, **kwargs):
         from localm.inference.backends.llamacpp.llama import LlamaCpp
@@ -373,6 +379,21 @@ class TestFailures:
         state.engine = _Engine(finish="length")
         r = _post(client)
         assert r.status_code == 502 and "cut off" in r.json()["detail"]
+
+    def test_the_cut_off_message_reports_the_tokens_the_model_generated(
+            self, client, state):
+        state.engine = _Engine(finish="length", generated=37, capacity=4096)
+        r = _post(client)
+        detail = r.json()["detail"]
+        assert r.status_code == 502 and "cut off at 37 tokens" in detail
+        assert str(audio_model.REPLY_TOKEN_CEILING) not in detail
+
+    def test_the_cut_off_message_names_the_requested_budget_when_tokens_cannot_be_counted(
+            self, client, state):
+        state.engine = _Engine(finish="length", capacity=4096, tokens=96)
+        r = _post(client)
+        expected = min(audio_model.REPLY_TOKEN_CEILING, 4096 - 96)
+        assert f"cut off at {expected} tokens" in r.json()["detail"]
 
     def test_a_generation_interrupted_midway_is_an_error_not_a_short_text(
             self, client, state):

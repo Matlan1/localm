@@ -97,6 +97,16 @@ def build_messages(data: bytes, label: str, language: Optional[str],
     ]}]
 
 
+def _generated_tokens(engine, text: str, budget: int) -> int:
+    """The token count of the *text* a model generated, or *budget* when the
+    engine cannot count them."""
+    try:
+        count = engine.count_tokens(text)
+    except Exception:
+        return budget
+    return count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else budget
+
+
 async def transcribe(request: Request, model: str, data: bytes, label: str, *,
                      language: Optional[str], prompt: Optional[str],
                      temperature: Optional[float]) -> str:
@@ -149,9 +159,10 @@ async def transcribe(request: Request, model: str, data: bytes, label: str, *,
             raise HTTPException(502, f"Transcription failed: {scrub_paths(str(e))}") from e
         finish = (timing.get("outcome") or {}).get("finish_reason")
         if finish == "length":
+            generated = await loop.run_in_executor(None, _generated_tokens, engine, text, budget)
             raise HTTPException(
                 502, f"The transcript from '{engine.display_name}' was cut off at "
-                     f"{budget} tokens. Send a shorter clip.")
+                     f"{generated} tokens. Send a shorter clip.")
         if finish == "error":
             raise HTTPException(
                 502, f"The transcription by '{engine.display_name}' was interrupted "

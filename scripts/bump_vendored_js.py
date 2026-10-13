@@ -312,7 +312,8 @@ def read_tarball(data: bytes, wanted: tuple, font_prefix: str | None,
             offered = sorted(m.name for m in members
                              if m.isfile() and re.search(r"\.(min|umd)\.[cm]?js$", m.name))
             raise Refused(f"the tarball has no {', '.join(missing)}; the minified or UMD "
-                          f"files it does carry: {', '.join(offered) or 'none'}")
+                          f"files it does carry: {', '.join(offered) or 'none'}. This release "
+                          "needs a code update to choose which file index.html loads")
     return found, fonts
 
 
@@ -466,7 +467,8 @@ def build_plan(lib: Lib, tag: str, tar_files: dict, tar_fonts: dict, shasum: str
     new_bytes = {}
     for member, dest in lib.files:
         if member not in tar_files:
-            raise Refused(f"the {lib.npm}@{new} tarball has no {member}")
+            raise Refused(f"the {lib.npm}@{new} tarball has no {member}; this release "
+                          "needs a code update to choose which file index.html loads")
         new_bytes[dest] = tar_files[member]
     for member, dest in lib.extra_files:
         if member in tar_files:

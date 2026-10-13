@@ -31,6 +31,24 @@ class TestRequireChatTemplate:
         with pytest.raises(ChatTemplateMissingError):
             _hf_worker._require_chat_template(object())
 
+    def test_a_named_template_dict_without_a_default_is_refused_with_its_own_message(self):
+        with pytest.raises(ChatTemplateMissingError) as ei:
+            _hf_worker._require_chat_template(
+                _Templated({"rag": "{{ messages }}", "tool_use": "{{ tools }}"}))
+        assert str(ei.value) == _hf_worker.CHAT_TEMPLATE_NO_DEFAULT_MESSAGE
+
+    def test_a_template_dict_with_an_empty_default_is_refused(self):
+        with pytest.raises(ChatTemplateMissingError):
+            _hf_worker._require_chat_template(_Templated({"default": ""}))
+
+    def test_a_template_dict_with_a_default_passes(self):
+        _hf_worker._require_chat_template(
+            _Templated({"default": "{{ messages }}", "rag": "{{ docs }}"}))
+
+    def test_a_default_dict_on_the_processor_alone_passes(self):
+        _hf_worker._require_chat_template(
+            _Templated({"default": "{{ messages }}"}), _Templated(None))
+
     def test_a_template_on_the_tokenizer_passes(self):
         _hf_worker._require_chat_template(_Templated("{{ messages }}"))
 

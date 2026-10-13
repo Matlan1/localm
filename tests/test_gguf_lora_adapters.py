@@ -497,6 +497,7 @@ class TestCli:
         assert listed.exit_code == 0 and "adp" in listed.output and "base" in listed.output
         res = self._invoke("detach", "adp")
         assert res.exit_code == 0, res.output
+        assert "next time" in res.output and "localm unload" in res.output
         assert mm.get_model_adapters("base") == []
         assert self._invoke("detach", "adp").exit_code == 1
 

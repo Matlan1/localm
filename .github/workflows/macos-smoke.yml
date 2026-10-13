@@ -3,7 +3,8 @@ name: macOS smoke
 # Installs localm on an Apple Silicon runner the way setup.sh does for a user,
 # then checks the pieces a Mac user meets first: `localm doctor`, the backend
 # auto-pick (Metal), a server that starts with no model and answers
-# /v1/models, and a small platform-neutral test selection.
+# /v1/models, a tiny GGUF model that loads and generates on the CPU, and a
+# small platform-neutral test selection.
 #
 # Not a required check: it is not in the merge-policy job's needs. It joins
 # that list only after it has been green on several consecutive scheduled runs
@@ -95,6 +96,19 @@ jobs:
           cat models.json
           .venv/bin/python -c "import json; d = json.load(open('models.json')); assert d['object'] == 'list' and isinstance(d['data'], list), d"
 
+      - name: A tiny GGUF model loads and generates on the CPU
+        env:
+          MODEL_URL: https://huggingface.co/ggml-org/tiny-llamas/resolve/99dd1a73db5a37100bd4ae633f4cfce6560e1567/stories260K.gguf
+          MODEL_SHA256: 047bf46455a544931cff6fef14d7910154c56afbc23ab1c5e56a72e69912c04b
+        run: |
+          set -euo pipefail
+          export LOCALM_HOME="$RUNNER_TEMP/localm-model-home"
+          mkdir -p "$LOCALM_HOME"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/tiny.gguf" "$MODEL_URL"
+          echo "$MODEL_SHA256  $RUNNER_TEMP/tiny.gguf" | shasum -a 256 -c -
+          .venv/bin/localm run "$RUNNER_TEMP/tiny.gguf" -p "Once upon a time" -m 12 -g 0 --no-server -t 0 | tee generate.log
+          grep -Eq "^[0-9]+ tokens" generate.log
+
       - name: Stop the server this job started
         if: always()
         run: |
@@ -119,6 +133,7 @@ jobs:
           path: |
             doctor.log
             serve.log
+            generate.log
             models.json
           if-no-files-found: ignore
           retention-days: 14

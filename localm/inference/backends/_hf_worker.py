@@ -484,16 +484,35 @@ CHAT_TEMPLATE_MISSING_MESSAGE = (
     "an instruct or chat variant of it instead.")
 
 
+CHAT_TEMPLATE_NO_DEFAULT_MESSAGE = (
+    "This model defines several named chat templates but none is called "
+    "'default', so localm cannot choose one to turn a conversation into a "
+    "prompt for it.")
+
+
+def _has_usable_template(obj) -> bool:
+    """Whether *obj*'s ``chat_template`` is a non-empty string, or a dict with a
+    non-empty ``default`` entry (the one ``apply_chat_template`` picks when
+    given no name)."""
+    template = getattr(obj, "chat_template", None)
+    if isinstance(template, dict):
+        return bool(template.get("default"))
+    return bool(template)
+
+
 def _require_chat_template(*templated) -> None:
     """Raise :class:`ChatTemplateMissingError` unless one of *templated* (a
-    tokenizer or processor) carries a ``chat_template``.
+    tokenizer or processor) carries a usable ``chat_template``: a non-empty
+    string, or a dict with a ``default`` entry.
 
     Raised before ``apply_chat_template``, which would otherwise raise a bare
     ``ValueError`` that the worker loop treats as a native fault and dies on.
     """
-    if any(getattr(obj, "chat_template", None) for obj in templated):
+    if any(_has_usable_template(obj) for obj in templated):
         return
     from .base import ChatTemplateMissingError
+    if any(getattr(obj, "chat_template", None) for obj in templated):
+        raise ChatTemplateMissingError(CHAT_TEMPLATE_NO_DEFAULT_MESSAGE)
     raise ChatTemplateMissingError(CHAT_TEMPLATE_MISSING_MESSAGE)
 
 

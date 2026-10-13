@@ -992,7 +992,7 @@ def _build_sampler(
     """
     from localm.inference.backends.base import (
         GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE,
-        GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
+        GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE,
         GrammarUnsupportedError,
         InvalidGrammarError,
         UnsupportedInputError,
@@ -1050,7 +1050,7 @@ def _build_sampler(
             api.llama_sampler_free(chain)
             raise GrammarUnsupportedError(
                 GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE if not grammar_triggers
-                else GRAMMAR_LAZY_UNSUPPORTED_MESSAGE)
+                else GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE)
     elif grammar:
         gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
         if gsampler is None:

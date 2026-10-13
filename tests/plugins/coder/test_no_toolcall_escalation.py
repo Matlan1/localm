@@ -646,7 +646,9 @@ def test_identity_line_states_capability_not_deployment(tmp_path, model_name):
 #  The server can refuse the LAZY form specifically - degrade NARROWLY          #
 # --------------------------------------------------------------------------- #
 
-def test_lazy_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
+@pytest.mark.parametrize("message_name", ["GRAMMAR_LAZY_UNSUPPORTED_MESSAGE",
+                                          "GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE"])
+def test_lazy_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path, message_name):
     """A lazy-grammar refusal must be recognised, not propagated.
 
     A lazy refusal is a SECOND, distinct refusal message.
@@ -655,9 +657,10 @@ def test_lazy_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
     crashing the whole task. Every ordinary tool-call turn sends
     grammar_lazy=True, so against an HF-backed server that is the FIRST turn.
     """
-    from localm.inference.backends.base import GRAMMAR_LAZY_UNSUPPORTED_MESSAGE
+    from localm.inference.backends import base
     from localm.plugins.coder.backends.http import CoderServerError
 
+    message = getattr(base, message_name)
     agent = _make_agent(tmp_path)
     calls = []
 
@@ -665,8 +668,7 @@ def test_lazy_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
         calls.append(kw)
         if len(calls) == 1:
             raise CoderServerError(
-                "HTTP 400 error from http://x/v1/chat/completions: "
-                + GRAMMAR_LAZY_UNSUPPORTED_MESSAGE)
+                "HTTP 400 error from http://x/v1/chat/completions: " + message)
         return "ok"
 
     agent.backend.chat = _chat

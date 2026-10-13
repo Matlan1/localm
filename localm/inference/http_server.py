@@ -32,6 +32,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
 
+from localm import __version__ as _LOCALM_VERSION
 from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.inference.backends.base import (
@@ -4709,7 +4710,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # 2. The app, with the lifespan that runs the background services.
     app = FastAPI(
         title="localm inference server",
-        version="0.2.0",
+        version=_LOCALM_VERSION,
         lifespan=_make_lifespan(),
         **diagnostics.fastapi_telemetry_off(),
     )
@@ -5544,7 +5545,8 @@ async def _stream_sse_body(
             from localm.debuglog import logger as _dbg
             _dbg.exception("generation thread failed")
             loop.call_soon_threadsafe(
-                token_queue.put_nowait, RuntimeError(str(e)))
+                token_queue.put_nowait,
+                e if backend_error_status(e) is not None else RuntimeError(str(e)))
         finally:
             # Close the generator chain from THIS thread (it is suspended at its
             # yield right now, so close() is safe here - closing it from the
@@ -5653,7 +5655,15 @@ async def _stream_sse_body(
     if gen_error is not None:
         error_text = inference_error_text(gen_error)
         err_chunk = ChatChunk.token(error_text, model_id, chunk_id, ts)
-        yield f"data: {err_chunk.model_dump_json()}\n\n"
+        err_status = backend_error_status(gen_error)
+        if err_status is not None and not completion_parts:
+            from localm.pathscrub import scrub_paths
+            err_body = err_chunk.model_dump(mode="json")
+            err_body["localm_error"] = {"status": err_status,
+                                        "detail": scrub_paths(str(gen_error))}
+            yield f"data: {json.dumps(err_body, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        else:
+            yield f"data: {err_chunk.model_dump_json()}\n\n"
 
     streamed = "".join(completion_parts)
     if router.stopped:

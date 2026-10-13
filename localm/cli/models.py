@@ -1119,6 +1119,10 @@ def adapter_detach_cmd(adapter):
         console.print(f"[red]'{escape(adapter)}' is not an attached adapter.[/red]")
         sys.exit(1)
     console.print(f"[green]✓[/green] [bold]{escape(adapter)}[/bold] is detached.")
+    console.print(
+        "[dim]It stops being applied the next time its base model loads; if that "
+        "model is loaded in a running server, run 'localm unload <base model>' "
+        "first.[/dim]")
 
 
 @adapter_group.command("list")

@@ -36,7 +36,7 @@ def _exposed_bind_warning(host: str) -> Optional[str]:
         return (
             f"⚠ Binding to {host} WITHOUT authentication - anyone on the network "
             f"can use this server, unload your model, and read every response.\n"
-            f"  Set an API key first:  $env:LOCALM_API_KEY = \"<secret>\"  "
+            f"  Set an API key first:  localm key generate  "
             f"(clients send it as a Bearer token)"
         )
     key = get_api_key() or ""
@@ -489,7 +489,8 @@ def _read_version_for_cli() -> str:
         from localm._version import read_version
         return read_version()
     except Exception:
-        return "0.2.0"
+        from localm import __version__
+        return __version__
 
 
 

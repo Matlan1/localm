@@ -33,10 +33,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as _dt
+import hashlib
 import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -58,6 +60,8 @@ NOT_BUILT = "NOT BUILT"
 SKIPPED = "SKIPPED"
 NOT_RUN = "NOT RUN"
 NOT_MEASURED = "NOT MEASURED"
+NEEDS_UPDATE = "NEEDS CODE UPDATE"
+CODE_UPDATE_MARKER = "needs a code update"
 
 CONFIRM_TIMEOUT_SECONDS = 3 * 3600
 TEST_TIMEOUT_SECONDS = 30 * 60
@@ -71,6 +75,35 @@ def _load(name: str, path: Path):
     spec.loader.exec_module(mod)
     return mod
 
+
+REEXEC_ENV = "LOCALM_PIN_WEEKLY_REEXEC"
+_SELF_SCRIPTS = ("pin_weekly.py", "pin_pipeline.py", "check_pins.py")
+
+
+def _reexec(args: list[str], *, windows: bool | None = None) -> int | None:
+    """Restart this script on the new code. POSIX replaces the process (never returns);
+    Windows cannot, so the child runs to completion and its exit code is returned."""
+    command = [sys.executable, str(SCRIPTS / "pin_weekly.py"), *args]
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        return subprocess.run(command).returncode
+    os.execv(sys.executable, command)
+    return None
+
+
+def script_fingerprint() -> str:
+    """A digest of the scripts a weekly run is made of, as they are on disk now."""
+    digest = hashlib.sha256()
+    for name in _SELF_SCRIPTS:
+        try:
+            digest.update((SCRIPTS / name).read_bytes())
+        except OSError:
+            digest.update(b"missing:" + name.encode())
+    return digest.hexdigest()
+
+
+STARTUP_FINGERPRINT = script_fingerprint()
 
 pp = _load("pin_pipeline", SCRIPTS / "pin_pipeline.py")
 cp = _load("check_pins", SCRIPTS / "check_pins.py")
@@ -105,16 +138,44 @@ class Advancer:
     delegate: Callable[[bool], int] | None = None
     verify_current_cmd: Callable[[Path, Path], list[str]] | None = None
     bump_args: tuple[str, ...] = ()
+    post_bump_cmds: tuple[tuple[str, ...], ...] = ()
     extra: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        if self.confirm_script is None:
+        if self.confirm_script is None and not self.post_bump_cmds:
             self.auto_merge = lambda old, new: False
 
 
 # --------------------------------------------------------------------------- #
 #  Process helpers                                                            #
 # --------------------------------------------------------------------------- #
+
+def ensure_github_token() -> str:
+    """Export GITHUB_TOKEN for this process and every child from `gh auth token` when it is
+    not already set, so the many API calls of a weekly run are not rate limited as an
+    anonymous client. Returns where the token came from: "env", "gh" or "none"."""
+    if os.environ.get("GITHUB_TOKEN"):
+        return "env"
+    try:
+        proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return "none"
+    token = proc.stdout.strip()
+    if proc.returncode != 0 or not token:
+        return "none"
+    os.environ["GITHUB_TOKEN"] = token
+    return "gh"
+
+
+def _without_token(env: dict) -> dict:
+    return {k: v for k, v in env.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+
+
+def _resolve_exe(cmd: list[str]) -> list[str]:
+    """Replace the program name with its full path (Windows needs npm.cmd resolved)."""
+    exe = shutil.which(cmd[0])
+    return [exe, *cmd[1:]] if exe else cmd
+
 
 def _kill_tree(pid: int) -> None:
     if os.name == "nt":
@@ -171,13 +232,41 @@ def run_confirm(adv: Advancer, args: list[str], receipt: Path) -> tuple[str, str
     rc, out = run_cmd(cmd, cwd=REPO, timeout=CONFIRM_TIMEOUT_SECONDS)
     if rc == LEASE_BUSY_EXIT:
         return NOT_RUN, "GPU busy this run (lease wait elapsed)"
-    return _verdict_from_rc(rc), out[-1500:]
+    verdict = _verdict_from_rc(rc)
+    if verdict in (PASS, FAIL):
+        problem = receipt_problem(receipt, verdict)
+        if problem:
+            return INCONCLUSIVE, f"{adv.confirm_script} exited {rc} but {problem}; {out[-300:]}"
+    return verdict, out[-1500:]
 
 
 def _receipt_path(key: str, tag: str) -> Path:
     path = pp.STATE_DIR / "receipts" / f"{key}-{tag}-{int(time.time())}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def receipt_problem(receipt: Path, verdict: str) -> str:
+    """Why *receipt* does not back a *verdict* exit code, or "" when it does."""
+    try:
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+    except OSError:
+        return "wrote no receipt"
+    except ValueError:
+        return "wrote a receipt that is not JSON"
+    if not isinstance(data, dict) or data.get("verdict") != verdict:
+        return f"its receipt says {data.get('verdict') if isinstance(data, dict) else 'nothing'}"
+    return ""
+
+
+def receipt_needs_code_update(receipt: Path) -> bool:
+    """True when the receipt's failure says the candidate is fine but localm's own code must
+    change before the pin can move (for example a C struct layout the binding does not know)."""
+    try:
+        text = receipt.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return CODE_UPDATE_MARKER in text
 
 
 def _receipt_summary(receipt: Path) -> str:
@@ -190,7 +279,7 @@ def _receipt_summary(receipt: Path) -> str:
         return str(data.get("why", "")) if isinstance(data, dict) else ""
     parts = []
     for name, c in checks.items():
-        status = c.get("status") if isinstance(c, dict) else c
+        status = (c.get("status") or c.get("verdict")) if isinstance(c, dict) else c
         parts.append(f"{name}={status}")
     return ", ".join(parts)
 
@@ -240,6 +329,17 @@ def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
         out.verdict, out.detail = INCONCLUSIVE, detail
         return out
     out.detail = _receipt_summary(receipt) or detail[-300:]
+    if verdict == FAIL and receipt_needs_code_update(receipt):
+        reason = f"{new} needs a change to localm's own code before the pin can move"
+        pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
+                       "receipt_path": str(receipt), "reason": reason}, pin=adv.key)
+        pp.append_fail_issue(
+            "binding", reason, receipt, pin=adv.key, kind="NEEDS-CODE-UPDATE",
+            summary=f"{adv.title} releases newer than the pin need a code change in localm\n"
+                    f"    scripts/pin_weekly.py confirmed {new}: {out.detail}. The pin stays where it "
+                    f"is until the binding is updated by hand.")
+        out.verdict, out.detail = NEEDS_UPDATE, f"{reason} ({out.detail})"
+        return out
     if verdict == FAIL:
         reason = f"{adv.confirm_script} reported FAIL"
         pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
@@ -263,19 +363,40 @@ def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
     return _bump_with_error_handling(adv, out, old, new, receipt, now_iso)
 
 
+def discard_worktree_changes() -> None:
+    """Best effort: leave the shared pipeline worktree clean after a failed bump."""
+    try:
+        pp.reset_pipeline_worktree(pp.ensure_pipeline_worktree())
+    except Exception as e:  # noqa: BLE001 - the next branch preparation resets again and reports
+        print(f"(could not clean the pipeline worktree: {e})")
+
+
 def _bump_with_error_handling(adv: Advancer, out: Outcome, old: str, new: str,
                               receipt: Path | None, now_iso: str) -> Outcome:
     try:
         return _bump_and_merge(adv, out, old, new, receipt, now_iso)
     except pp.InfraError as e:
+        discard_worktree_changes()
         pp._record_inconclusive(new, receipt, pin=adv.key, reason=str(e))
         out.verdict, out.detail = INCONCLUSIVE, f"infra: {e}"
     except pp.PipelineError as e:
+        discard_worktree_changes()
+        if CODE_UPDATE_MARKER in str(e):
+            reason = f"{new} needs a change to localm's own code before the pin can move"
+            pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
+                           "receipt_path": str(receipt or ""), "reason": reason}, pin=adv.key)
+            pp.append_fail_issue(
+                "binding", reason, receipt, pin=adv.key, kind="NEEDS-CODE-UPDATE",
+                summary=f"{adv.title} releases newer than the pin need a code change in localm\n"
+                        f"    scripts/pin_weekly.py tried to bump to {new}: {str(e)[-400:]}")
+            out.verdict, out.detail = NEEDS_UPDATE, f"{reason}: {str(e)[-300:]}"
+            return out
         pp.save_state({"last_tag_tried": new, "verdict": "FAIL", "timestamp": now_iso,
                        "receipt_path": str(receipt or ""), "reason": str(e)}, pin=adv.key)
         pp.append_fail_issue(new, str(e), receipt, pin=adv.key)
         out.verdict, out.detail = FAIL, str(e)
     except Exception as e:  # noqa: BLE001 - a tooling crash after a PASS is logged, never a build FAIL
+        discard_worktree_changes()
         reason = f"unexpected error after a PASS confirm: {type(e).__name__}: {e}"
         pp._record_inconclusive(new, receipt, pin=adv.key, reason=reason, force_issue=True,
                                 issue_summary=f"{adv.title} {new}: unexpected pipeline error "
@@ -332,6 +453,12 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
             pp.insert_changelog_bullet(changelog.read_text(encoding="utf-8"), bullet),
             encoding="utf-8")
 
+    for cmd in adv.post_bump_cmds:
+        rc, cmd_out = run_cmd(_resolve_exe(list(cmd)), cwd=worktree, timeout=TEST_TIMEOUT_SECONDS,
+                              env=_without_token(pp._worktree_env(worktree)))
+        if rc != 0:
+            raise pp.PipelineError(f"`{' '.join(cmd)}` failed after the bump:\n{cmd_out[-2000:]}")
+
     if adv.tests:
         rc, test_out = run_cmd(
             [sys.executable, "-m", "pytest", *adv.tests, "-m", "not integration", "-q"],
@@ -340,9 +467,12 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
             raise pp.PipelineError(f"targeted tests failed after the bump:\n{test_out[-2000:]}")
 
     title = f"Advance the bundled {adv.title} to {new}"
-    tested = ("The new build was installed and exercised on real hardware before the pin changed."
-              if adv.confirm_script else
-              "This build could not be exercised on this machine; review before merging.")
+    if adv.confirm_script:
+        tested = "The new build was installed and exercised on real hardware before the pin changed."
+    elif adv.post_bump_cmds and adv.auto_merge(old, new):
+        tested = "The GUI test suite was run against the new files before this pull request was opened."
+    else:
+        tested = "This build could not be exercised on this machine; review before merging."
     body = (f"Moves the bundled {adv.title} from {old} to {new}. {tested}\n\n"
             "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
     how = (f"confirmed with {adv.confirm_script}" if adv.confirm_script
@@ -381,25 +511,46 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
 
 
 def advance_delegated(adv: Advancer, *, dry_run: bool) -> Outcome:
-    """llama.cpp and ComfyUI: pin_pipeline.py owns the whole flow and its state."""
+    """llama.cpp and ComfyUI: pin_pipeline.py owns the whole flow and its state. The
+    candidate is looked up here first so the report names it, a pin with nothing newer is
+    never handed to the pipeline, and an outcome is read from state only when the pipeline
+    wrote it during THIS run."""
     out = Outcome(adv.key, adv.title, "advance", NONE_NEWER)
+    started = _dt.datetime.now(_dt.UTC).replace(microsecond=0)
+    try:
+        found = adv.candidate()
+    except (pp.PipelineError, cp.FetchError, OSError, ValueError) as e:
+        out.verdict, out.detail = INCONCLUSIVE, f"could not determine a candidate: {e}"
+        return out
+    if found is None:
+        return out
+    out.pinned, out.candidate = found
+    skip = pp.should_skip(pp.load_state(pin=adv.key), out.candidate)
+    if skip:
+        out.verdict, out.detail = SKIPPED, skip
+        return out
     try:
         rc = adv.delegate(dry_run)
     except pp.PipelineError as e:
         out.verdict, out.detail = FAIL, str(e)
         return out
     state = pp.load_state(pin=adv.key)
-    out.candidate = str(state.get("last_tag_tried", ""))
-    out.receipt = str(state.get("receipt_path", ""))
+    stamped = pp._parse_iso(state.get("timestamp", ""))
+    fresh = state.get("last_tag_tried") == out.candidate and stamped is not None and stamped >= started
+    out.receipt = str(state.get("receipt_path", "")) if fresh else ""
     if rc == 1:
-        out.verdict, out.detail = FAIL, str(state.get("reason", "see the pipeline output"))
+        out.verdict, out.detail = FAIL, str(state.get("reason", "see the pipeline output")) if fresh else "see the pipeline output"
     elif rc == 2:
-        out.verdict, out.detail = INCONCLUSIVE, str(state.get("reason", "could not reach a verdict"))
-    elif state.get("merged_pr") and state.get("verdict") == "PASS":
-        out.verdict = MERGED
-        out.pr = state.get("merged_pr")
-    elif dry_run and state.get("verdict") == "PASS":
-        out.verdict = DRY_PASS
+        out.verdict = INCONCLUSIVE
+        out.detail = str(state.get("reason", "could not reach a verdict")) if fresh else "could not reach a verdict"
+    elif dry_run:
+        out.verdict, out.detail = DRY_PASS, "the pipeline confirmed the candidate and stopped before the bump"
+    elif fresh and state.get("verdict") == "PASS" and state.get("merged_pr"):
+        out.verdict, out.pr = MERGED, state.get("merged_pr")
+        out.detail = f"PR #{out.pr}: {out.pinned} -> {out.candidate}"
+    else:
+        out.verdict = SKIPPED
+        out.detail = "the pipeline exited 0 without recording a result for this candidate"
     return out
 
 
@@ -457,6 +608,13 @@ def _report_current_failure(out: Outcome) -> None:
 #  Candidate detection                                                        #
 # --------------------------------------------------------------------------- #
 
+def _prefer_current_major(pin_key: tuple, keyed: list) -> str:
+    """The newest release inside the pin's own major line when there is one (so a blocked
+    newest major cannot hold back a safe bump), else the newest release overall."""
+    inside = [(k, t) for k, t in keyed if k[0] == pin_key[0] and (pin_key[0] != 0 or k[1] == pin_key[1])]
+    return max(inside or keyed)[1]
+
+
 def _github_candidate(repo: str, pin_file: str, pin_pattern: str, key) -> Callable[[], tuple[str, str] | None]:
     def find():
         pinned = cp._read_const(pin_file, pin_pattern)
@@ -467,7 +625,7 @@ def _github_candidate(repo: str, pin_file: str, pin_pattern: str, key) -> Callab
         keyed = [(k, t) for k, t in keyed if k is not None and k > pin_key]
         if not keyed:
             return None
-        return pinned, max(keyed)[1]
+        return pinned, _prefer_current_major(pin_key, keyed)
     return find
 
 
@@ -483,7 +641,7 @@ def _vendored_candidate(name: str) -> Callable[[], tuple[str, str] | None]:
         newer = [(k, t) for k, t in newer if k is not None and k > pin_key]
         if not newer:
             return None
-        return pinned, re.sub(r"^v", "", max(newer)[1])
+        return pinned, re.sub(r"^v", "", _prefer_current_major(pin_key, newer))
     return find
 
 
@@ -523,6 +681,33 @@ def _docker_base_candidate() -> tuple[str, str] | None:
     return None if current == pinned else (pinned, current)
 
 
+def _amd_wheels_candidate(mod=None) -> tuple[str, str] | None:
+    """The four AMD ROCm wheel pins as ``pkg==version`` lists: (pinned, newest published)
+    when any package has a newer wheel on AMD's index, else None."""
+    mod = mod or _load("check_amd_rocm_wheels_pin", SCRIPTS / "check_amd_rocm_wheels_pin.py")
+    old, new, moved = [], [], False
+    for pkg in mod._PACKAGES:
+        hrefs = mod._fetch_index(pkg)
+        if hrefs is None:
+            raise cp.FetchError(f"the AMD wheel index is unreachable for {pkg}")
+        wheels = [w for w in (mod._parse_wheel(h) for h in hrefs) if w is not None]
+        pinned = (mod._pinned_torch_stack_version(pkg) if pkg in mod._TORCH_STACK
+                  else mod._pinned_rocm_sdk_version(pkg))
+        newest = mod.newest_win_amd64_version(
+            wheels, pytag="cp312" if pkg in mod._TORCH_STACK else None)
+        pinned_tuple = mod._base_version_tuple(pinned) if pinned else None
+        if pinned is None or newest is None or pinned_tuple is None:
+            raise cp.FetchError(f"cannot compare the pinned and published {pkg} versions")
+        newest_raw, newest_tuple = newest
+        old.append(f"{pkg}=={pinned}")
+        if newest_tuple > pinned_tuple:
+            moved = True
+            new.append(f"{pkg}=={newest_raw}")
+        else:
+            new.append(f"{pkg}=={pinned}")
+    return (",".join(old), ",".join(new)) if moved else None
+
+
 def _rocm_candidate() -> tuple[str, str] | None:
     mod = _load("check_llama_rocm_pin", SCRIPTS / "check_llama_rocm_pin.py")
     pin = mod.pinned_tag()
@@ -542,8 +727,46 @@ def _semver_major(tag: str) -> int | None:
     return key[0] if key else None
 
 
-def _same_major_only(old: str, new: str) -> bool:
-    return _semver_major(old) is not None and _semver_major(old) == _semver_major(new)
+def _no_major_boundary(old: str, new: str) -> bool:
+    """True unless the move from *old* to *new* crosses a MAJOR boundary (a 0.x minor counts)."""
+    a, b = cp._semver_key(old), cp._semver_key(new)
+    if a is None or b is None:
+        return False
+    if a[0] == 0 or b[0] == 0:
+        return a[:2] == b[:2]
+    return a[0] == b[0]
+
+
+def _llama_candidate() -> tuple[str, str] | None:
+    """(pinned, newest) for llama.cpp; raises FetchError when upstream cannot be read, so an
+    outage is never reported as "nothing newer"."""
+    mod = _load("check_llama_pin", SCRIPTS / "check_llama_pin.py")
+    releases, err = mod.upstream_releases()
+    if err or not releases:
+        raise cp.FetchError(f"llama.cpp releases unreadable: {err or 'empty'}")
+    return pp.newest_candidate()
+
+
+def _comfyui_candidate() -> tuple[str, str] | None:
+    """(pinned, newest) for ComfyUI; raises FetchError when upstream or the tag's commit
+    cannot be read."""
+    mod = _load("check_comfyui_pin", SCRIPTS / "check_comfyui_pin.py")
+    try:
+        pin = mod._pinned_version()
+    except SystemExit as e:
+        raise cp.FetchError(f"cannot read the ComfyUI pin: {e}") from e
+    releases = mod._fetch_releases()
+    if releases is None:
+        raise cp.FetchError("ComfyUI releases unreadable")
+    status = mod._compare(pin, releases)["status"]
+    if status in ("no_data", "unparseable_pin"):
+        raise cp.FetchError(f"ComfyUI release data unusable ({status})")
+    if status == "current":
+        return None
+    found = pp.newest_comfyui_candidate()
+    if found is None:
+        raise cp.FetchError("could not resolve the newest ComfyUI tag to a commit")
+    return found[0], found[1]
 
 
 def _llama_delegate(dry_run: bool) -> int:
@@ -579,10 +802,10 @@ def _bullet(what: str, how: str) -> Callable[[str, str], str]:
 def build_advancers() -> list[Advancer]:
     return [
         Advancer("llama", "llama.cpp", "scripts/confirm_llama_runtime.py",
-                 "scripts/bump_llama_pin.py", candidate=lambda: None,
+                 "scripts/bump_llama_pin.py", candidate=_llama_candidate,
                  delegate=_llama_delegate, verify_current_cmd=_llama_verify_cmd),
         Advancer("comfyui", "ComfyUI", "scripts/confirm_comfyui_runtime.py",
-                 "scripts/bump_comfyui_pin.py", candidate=lambda: None,
+                 "scripts/bump_comfyui_pin.py", candidate=_comfyui_candidate,
                  delegate=_comfyui_delegate, verify_current_cmd=_comfyui_verify_cmd),
         Advancer("rocm", "AMD ROCm llama.cpp build", "scripts/confirm_rocm_runtime.py",
                  "scripts/bump_rocm_pin.py", candidate=_rocm_candidate,
@@ -621,13 +844,16 @@ def _review_only_advancers() -> list[Advancer]:
     vendored = [
         Advancer(f"vendored-{name.lower().replace('.', '')}", f"vendored {name}", None,
                  "scripts/bump_vendored_js.py", candidate=_vendored_candidate(name),
-                 bump_args=("--lib", name), gpu=False)
+                 bump_args=("--lib", name), gpu=False, auto_merge=_no_major_boundary,
+                 post_bump_cmds=(("npm", "ci"), ("npm", "test")))
         for name in ("marked", "DOMPurify", "highlight.js", "KaTeX")
     ]
     return [
         *vendored,
         Advancer("cuda-runtime", "Linux CUDA runtime wheels", None,
                  "scripts/bump_cuda_runtime_pin.py", candidate=_cuda_runtime_candidate, gpu=False),
+        Advancer("amd-wheels", "AMD ROCm torch and SDK wheels", None,
+                 "scripts/bump_amd_wheels_pin.py", candidate=_amd_wheels_candidate, gpu=False),
         Advancer("gguf-node", "ComfyUI-GGUF node", None, "scripts/bump_gguf_node_pin.py",
                  candidate=_gguf_node_candidate, gpu=False),
         Advancer("docker-base", "Docker base image", None, "scripts/bump_docker_base_pin.py",
@@ -639,10 +865,22 @@ def _review_only_advancers() -> list[Advancer]:
 #  Report                                                                     #
 # --------------------------------------------------------------------------- #
 
+NOT_MEASURED_BY_DESIGN = (
+    ("llama.cpp CUDA, HIP, SYCL, Metal, OpenVINO and Android builds",
+     "no such hardware here; they share one llama library with the measured cpu and vulkan builds"),
+    ("koboldcpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
+    ("stable-diffusion.cpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
+    ("AMD ROCm builds for gfx110X, gfx120X and other families", "only this machine's gfx103X family can be run"),
+    ("Linux CUDA runtime wheels, the Docker image, the ComfyUI-GGUF node under load",
+     "loaded or built only on other machines; a pull request is opened and CI runs"),
+    ("vendored browser libraries", "no runtime check beyond the GUI test suite and CI"),
+)
+
+
 def severity(outcomes: list[Outcome]) -> int:
     if any(o.verdict == FAIL for o in outcomes):
         return 1
-    if any(o.verdict in (INCONCLUSIVE, NOT_BUILT, REVIEW) for o in outcomes):
+    if any(o.verdict in (INCONCLUSIVE, NOT_BUILT, REVIEW, NEEDS_UPDATE) for o in outcomes):
         return 2
     return 0
 
@@ -658,6 +896,8 @@ def render_report(rows: list, outcomes: list[Outcome], started: _dt.datetime, dr
               "| runtime | result | detail |", "|---|---|---|"]
     for o in (x for x in outcomes if x.kind == "verify-current"):
         lines.append(f"| {o.title} | {o.verdict} | {(o.detail or '-').replace('|', '/')[:240]} |")
+    lines += ["", "## Not measured on this machine (by design)", "", "| what | why |", "|---|---|"]
+    lines += [f"| {what} | {why} |" for what, why in NOT_MEASURED_BY_DESIGN]
     lines += ["", "## Currency of every pin", "", cp.format_table(rows)]
     return "\n".join(lines) + "\n"
 
@@ -677,31 +917,42 @@ def write_report(text: str, outcomes: list[Outcome], started: _dt.datetime) -> P
 #  Entry point                                                                #
 # --------------------------------------------------------------------------- #
 
+def _isolated(label: str, adv: Advancer, kind: str, fn) -> Outcome:
+    """Run one step for one runtime; an exception (SystemExit included) becomes an
+    INCONCLUSIVE outcome so the remaining runtimes still run and the report is written."""
+    try:
+        return fn()
+    except (Exception, SystemExit) as e:
+        print(f"[{label}] {adv.title}: unexpected {type(e).__name__}: {e}")
+        return Outcome(adv.key, adv.title, kind, INCONCLUSIVE,
+                       f"unexpected {type(e).__name__}: {str(e)[:300]}")
+
+
 def run_weekly(advancers: list[Advancer], *, dry_run: bool, verify: bool = True) -> tuple[int, Path]:
     started = _dt.datetime.now(_dt.UTC)
-    rows = cp.run_checks(cp.build_registry(), started)
     outcomes: list[Outcome] = []
     for adv in advancers:
-        out = (advance_delegated(adv, dry_run=dry_run) if adv.delegate
-               else advance(adv, dry_run=dry_run))
+        out = _isolated("advance", adv, "advance", lambda adv=adv: (
+            advance_delegated(adv, dry_run=dry_run) if adv.delegate else advance(adv, dry_run=dry_run)))
         print(f"[advance] {adv.title}: {out.verdict} {out.detail[:160]}")
         outcomes.append(out)
     if verify:
         for adv in advancers:
             advanced = next((o for o in outcomes if o.key == adv.key and o.kind == "advance"), None)
-            if advanced is not None and advanced.verdict == MERGED:
+            if advanced is not None and advanced.verdict == MERGED and adv.confirm_script:
                 outcomes.append(Outcome(adv.key, adv.title, "verify-current", PASS,
                                         "confirmed moments ago as the candidate that was just merged"))
                 continue
-            out = verify_current(adv)
+            out = _isolated("verify-current", adv, "verify-current", lambda adv=adv: verify_current(adv))
             print(f"[verify-current] {adv.title}: {out.verdict} {out.detail[:160]}")
             if out.verdict == FAIL:
                 _report_current_failure(out)
             outcomes.append(out)
+    rows = cp.run_checks(cp.build_registry(), _dt.datetime.now(_dt.UTC))
     report = render_report(rows, outcomes, started, dry_run)
     path = write_report(report, outcomes, started)
     print(f"report: {path}")
-    return severity(outcomes), path
+    return max(severity(outcomes), cp.exit_code(rows)), path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -722,6 +973,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no runtime matches --only {args.only!r}", file=sys.stderr)
             return 2
 
+    source = ensure_github_token()
+    print(f"GitHub API auth: {source}" + (" (anonymous requests are rate limited)" if source == "none" else ""))
+    try:
+        pp.sync_main_checkout()
+    except pp.InfraError as e:
+        print(f"INCONCLUSIVE (infra, before any runtime was examined): {e}")
+        return 2
+    except pp.PipelineError as e:
+        print(f"FAIL: {e}")
+        return 1
+    if script_fingerprint() != STARTUP_FINGERPRINT and not os.environ.get(REEXEC_ENV):
+        print("the scripts changed while syncing the main checkout; restarting on the new code")
+        os.environ[REEXEC_ENV] = "1"
+        sys.stdout.flush()
+        rc = _reexec(list(argv if argv is not None else sys.argv[1:]))
+        if rc is not None:
+            return rc
     try:
         with pp.pipeline_lock():
             pp.sync_main_checkout()

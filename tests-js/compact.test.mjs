@@ -286,7 +286,7 @@ test("F5: pruneBranches returns 0 and archives nothing when every fork still rea
 test("compaction shows a Compacting status while the summary is written, then removes it", async () => {
   let seen = null;
   let win = null;
-  const impl = async (url, opts = {}) => {
+  const impl = async (url) => {
     if (String(url) === "/v1/chat/completions") {
       const ind = win.document.querySelector("#chat-messages .msg-status-indicator");
       seen = ind ? ind.textContent : "";

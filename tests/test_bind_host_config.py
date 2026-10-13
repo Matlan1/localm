@@ -121,6 +121,20 @@ class TestValidateUpdate:
         with pytest.raises(ValueError, match="file not found"):
             ss.validate_update({"tls_key": str(tmp_path / "missing.pem")})
 
+    @pytest.mark.parametrize("key", ["tls_cert", "tls_key"])
+    def test_tls_path_the_os_cannot_stat_is_file_not_found(self, key, monkeypatch):
+        """An over-long name makes stat raise ENAMETOOLONG on POSIX; it must
+        surface as the same ValueError as a missing file."""
+        import errno
+        import pathlib
+
+        def too_long(self, *a, **k):
+            raise OSError(errno.ENAMETOOLONG, "File name too long")
+
+        monkeypatch.setattr(pathlib.Path, "stat", too_long)
+        with pytest.raises(ValueError, match="file not found"):
+            ss.validate_update({key: "x" * 10000})
+
     def test_tls_enabled_is_a_bool(self):
         assert ss.validate_update({"tls_enabled": "off"})["tls_enabled"] is False
         assert ss.validate_update({"tls_enabled": True})["tls_enabled"] is True

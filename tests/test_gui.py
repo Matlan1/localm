@@ -1711,6 +1711,7 @@ class TestBackendEndpoint:
         from localm import hwdetect
         from localm.inference.backends.llamacpp import _loader
         self._reset_loader_warnings(monkeypatch)
+        monkeypatch.setattr(_loader, "_candidate_dirs", lambda: [])
         monkeypatch.setattr(_loader, "_last_broken_runtime_warning",
                             "localm_llama_runtime is installed but broken", raising=False)
         app, _ = gui_app

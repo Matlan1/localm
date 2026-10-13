@@ -51,8 +51,8 @@ from localm.media.managed_comfy_provision import (
 # A tagged, known-version ComfyUI to clone fresh. A fixed CONSTANT here; advancing
 # it and carrying localm's own patches on top of it is stage S4's job.
 COMFYUI_REPO = "https://github.com/comfyanonymous/ComfyUI.git"
-COMFYUI_PINNED_COMMIT = "fe4195f7f4275f2626cbafc703acc3ddde1e5490"
-COMFYUI_PINNED_VERSION = "v0.31.1"
+COMFYUI_PINNED_COMMIT = "b0b743566f65daafc423b4fea8a2fbda94b3384a"
+COMFYUI_PINNED_VERSION = "v0.39.0"
 
 # The FIRST upstream release tag carrying comfy_extras/nodes_multigpu.py, i.e. the
 # per-component placement nodes (SelectModelDevice/SelectCLIPDevice/SelectVAEDevice).

@@ -149,13 +149,11 @@ class TestMcpProgress:
         import threading
         from localm.plugins.mcpserver.tools import chat as chat_tool
         live = sys.modules["localm.plugins.mcpserver.server"]
-        tool_server = chat_tool.report_progress.__globals__
-        assert tool_server is live.__dict__, (
+        assert chat_tool._srv is live, (
             "the chat tool reads its progress sink from a different copy of "
             "localm.plugins.mcpserver.server than the one serving the call "
-            f"(tool: {tool_server.get('__name__')} id {id(tool_server)}, live: "
-            f"id {id(live.__dict__)}); an earlier test in this process removed "
-            "or re-imported the module")
+            f"(tool: id {id(chat_tool._srv.__dict__)}, live: id {id(live.__dict__)}); "
+            "an earlier test in this process removed or re-imported the module")
         engine = MagicMock()
 
         def _chat_stream(messages, on_status=None, **kw):
@@ -177,3 +175,51 @@ class TestMcpProgress:
         assert notes == ["Processing prompt..."], (
             f"sink after the call: {live._progress_sink!r}; other threads alive: {others}")
         assert msgs[-1]["result"]["content"] == [{"type": "text", "text": "answer"}]
+
+
+_FIRST_IMPORT_UNDER_PATCH = """
+import io, json, sys
+from unittest.mock import MagicMock
+import localm.plugins.mcpserver.server as srv
+
+real = srv.report_progress
+patched = []
+srv.report_progress = patched.append
+from localm.plugins.mcpserver.tools import chat as chat_tool
+srv.report_progress = real
+
+engine = MagicMock()
+def _stream(messages, on_status=None, **kw):
+    on_status("Processing prompt...")
+    yield "answer"
+engine.chat_stream.side_effect = _stream
+engines = MagicMock()
+engines.route.return_value = MagicMock(routed=False, current="m", resolved="m",
+                                       pinned=True, skipped=(), load_errors=())
+engines.get_loaded_chat.return_value = engine
+engines.is_peer.return_value = False
+server = srv.MCPStdioServer({"chat": chat_tool.build(engines)["chat"]})
+req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                  "params": {"name": "chat", "arguments": {"prompt": "hi"},
+                             "_meta": {"progressToken": 1}}}) + "\\n"
+out = io.StringIO()
+server.run_stdio(stdin=io.StringIO(req), stdout=out)
+notes = [json.loads(l)["params"]["message"] for l in out.getvalue().splitlines()
+         if json.loads(l).get("method") == "notifications/progress"]
+print(json.dumps({"notes": notes, "patched": patched}))
+"""
+
+
+class TestMcpChatToolProgressSurvivesAPatchedFirstImport:
+    def test_a_progress_function_patched_while_the_chat_tool_is_first_imported_is_not_kept(self):
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+        repo = str(Path(__file__).resolve().parents[1])
+        env = {**os.environ, "PYTHONPATH": repo + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        proc = subprocess.run([sys.executable, "-c", _FIRST_IMPORT_UNDER_PATCH],
+                              capture_output=True, text=True, timeout=120, env=env)
+        assert proc.returncode == 0, proc.stderr
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert result == {"notes": ["Processing prompt..."], "patched": []}, result

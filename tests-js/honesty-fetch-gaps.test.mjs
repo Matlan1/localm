@@ -78,6 +78,30 @@ test("a resolved-but-failed conversation save is logged once, not per save", asy
   assert.equal(lines.length, 1, "the breakage is logged once, not per debounce tick");
 });
 
+test("a 413 on the conversation save toasts once per conversation", async () => {
+  let puts = 0;
+  const { window } = loadApp({ fetchImpl: async (url, opts) => {
+    if (opts && opts.method === "PUT") {
+      puts++;
+      return { ok: false, status: 413, json: async () => ({}), text: async () => "" };
+    }
+    return OK;
+  } });
+  runScript(window, `
+    chat.persist = true;
+    window.__conv = { id: "cz", title: "T", pinned: false, folder: null,
+                      branches: [], messages: [{ role: "user", content: "hi" }] };
+    pushConversation(window.__conv);
+  `);
+  await new Promise((r) => setTimeout(r, 1000));
+  const toastEl = () => window.document.getElementById("toast").textContent;
+  assert.match(toastEl(), /too large to save on the server/);
+  runScript(window, "toast('cleared'); pushConversation(window.__conv);");
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.equal(puts, 2);
+  assert.equal(toastEl(), "cleared", "the second 413 for the same conversation stays quiet");
+});
+
 test("a network exception on the conversation save is surfaced, not silently swallowed", async () => {
   const { window } = loadApp({ fetchImpl: async (url, opts) => {
     if (opts && opts.method === "PUT") throw new Error("network unreachable");

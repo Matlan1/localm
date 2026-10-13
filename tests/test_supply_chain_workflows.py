@@ -115,6 +115,16 @@ def test_release_attest_attests_every_file_it_attaches():
     assert "out/*.zip" in subjects
 
 
+def test_release_attest_attaches_the_provenance_bundle_as_intoto_jsonl():
+    steps = _steps(_load("release-attest.yml"), "attest")
+    attest = next(s for s in steps if "attest-build-provenance" in s.get("uses", ""))
+    upload = next(s for s in steps if "gh release upload" in s.get("run", ""))
+    assert attest["id"] == "attest"
+    assert upload["env"]["BUNDLE_PATH"] == "${{ steps.attest.outputs.bundle-path }}"
+    assert 'cp "${BUNDLE_PATH}" "out/localm-${VERSION}.intoto.jsonl"' in upload["run"]
+    assert "out/*.intoto.jsonl" in upload["run"]
+
+
 def test_scorecard_shape_accepted_for_publishing():
     doc = _load("scorecard.yml")
     assert "env" not in doc and "defaults" not in doc

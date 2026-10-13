@@ -1,0 +1,72 @@
+name: Wheel smoke
+
+# Builds the wheel from the checkout, installs it into a fresh virtual environment
+# next to its hash-pinned locked dependencies, starts `localm gui --no-model
+# --no-browser` from that installation and checks the server answers /whoami,
+# /health, /v1/models and the packaged GUI page, then stops it.
+#
+# Not a required check: it is not in the merge-policy job's needs.
+on:
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - "scripts/smoke_installed_localm.py"
+      - ".github/workflows/wheel-smoke.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 2"
+
+concurrency:
+  group: wheel-smoke-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  wheel-smoke:
+    name: installed wheel serves (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
+      - name: Build the wheel
+        run: uvx --from "build==1.6.1" pyproject-build --wheel --outdir dist/
+
+      - name: Install the wheel with its locked dependencies
+        env:
+          BIN_DIR: ${{ runner.os == 'Windows' && 'Scripts' || 'bin' }}
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/smoke-venv"
+          uv export --quiet --locked --no-dev --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
+          "$RUNNER_TEMP/smoke-venv/$BIN_DIR/python" -m pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
+          "$RUNNER_TEMP/smoke-venv/$BIN_DIR/python" -m pip install --no-deps dist/*.whl
+
+      - name: Start the installed server and check it answers
+        env:
+          BIN_DIR: ${{ runner.os == 'Windows' && 'Scripts' || 'bin' }}
+          EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/smoke-venv/$BIN_DIR/python" "$GITHUB_WORKSPACE/scripts/smoke_installed_localm.py" \
+            --localm "$RUNNER_TEMP/smoke-venv/$BIN_DIR/localm$EXE"

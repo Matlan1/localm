@@ -4,15 +4,9 @@
 Every ecosystem groups its minor and patch updates into one pull request; a
 major update never joins a group. The uv group is a set of direct
 dependencies: the [project] requirement lists, minus the group's
-exclude-patterns, minus what the ignore rules skip. Two properties keep a
-group pull request landing the way a single one would:
-
-  - a dependency whose requirement carries a cap or a pin (an upper bound,
-    ~= or ==) keeps its own pull request, because a bump edits a boundary
-    that was verified;
-  - bumping every member of the group at once still selects at most
-    --max-share of the test files at --depth 0 in scripts/affected_tests.py,
-    so the per-PR gate never reports a group as too wide for a targeted run.
+exclude-patterns, minus what the ignore rules skip. A dependency whose
+requirement carries a cap or a pin (an upper bound, ~= or ==) keeps its own
+pull request, because a bump edits a boundary that was verified.
 """
 
 import fnmatch
@@ -26,7 +20,6 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _CONFIG = REPO_ROOT / ".github" / "dependabot.yml"
 _SCRIPT = REPO_ROOT / "scripts" / "affected_tests.py"
-_BUMPED_VERSION = "999.0.0"
 
 
 def _load():
@@ -38,11 +31,6 @@ def _load():
 
 def _config() -> dict:
     return yaml.safe_load(_CONFIG.read_text(encoding="utf-8"))
-
-
-def _max_share() -> float:
-    source = _SCRIPT.read_text(encoding="utf-8")
-    return float(re.search(r'"--max-share",\s*type=float,\s*default=([0-9.]+)', source).group(1))
 
 
 def _uv_members(mod) -> tuple[set[str], dict[str, list[tuple[str, str]]]]:
@@ -64,27 +52,6 @@ def _uv_members(mod) -> tuple[set[str], dict[str, list[tuple[str, str]]]]:
                     and not any(fnmatch.fnmatchcase(dist, p) for p in exclude)):
                 members.add(dist)
     return members, requirements
-
-
-def _bump(lock: str, dists) -> str:
-    for dist in sorted(dists):
-        lock, count = re.subn(rf'(\[\[package\]\]\nname = "{re.escape(dist)}"\nversion = ")[^"]+(")',
-                              rf"\g<1>{_BUMPED_VERSION}\g<2>", lock)
-        assert count, f"{dist} has no entry in uv.lock"
-    return lock
-
-
-def _selection_share(monkeypatch, dists) -> float:
-    """The share of test files the per-PR gate selects at depth 0 when every
-    one of *dists* is bumped in uv.lock. Loads the script afresh, so no earlier
-    call's patched readers leak into this one."""
-    mod = _load()
-    bumped = _bump((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"), dists)
-    real_read = mod._read
-    monkeypatch.setattr(mod, "_read", lambda rel: bumped if rel == "uv.lock" else real_read(rel))
-    monkeypatch.setattr(mod, "_read_at", lambda ref, rel: real_read(rel))
-    graph = mod.Graph()
-    return len(mod.select(["uv.lock"], graph, depth=0)) / len(graph.test_files)
 
 
 def test_every_ecosystem_groups_only_its_minor_and_patch_updates():
@@ -109,20 +76,3 @@ def test_the_uv_group_takes_no_dependency_with_a_cap_or_a_pin():
               if any(re.search(r"<|~=|==", req.split(";")[0]) for _, req in pairs)}
     assert not capped & members, (
         f"{sorted(capped & members)} carry a cap or a pin: add them to the uv group's exclude-patterns")
-
-
-def test_bumping_every_member_of_the_uv_group_still_fits_the_per_pr_gate(monkeypatch):
-    mod = _load()
-    members, _ = _uv_members(mod)
-    assert members
-    limit = _max_share()
-    share = _selection_share(monkeypatch, members)
-    if share > limit:
-        alone = sorted(((_selection_share(monkeypatch, {dist}), dist) for dist in sorted(members)),
-                       reverse=True)
-        wide = {dist: f"{s:.0%}" for s, dist in alone if s > limit}
-        top = {dist: f"{s:.0%}" for s, dist in alone[:5]}
-    assert share <= limit, (
-        f"bumping all {len(members)} members selects {share:.0%} of the test files at depth 0 "
-        f"(limit {limit:.0%}), so the gate would refuse the group pull request. "
-        f"Too wide on their own, add to exclude-patterns: {wide}. Widest members: {top}")

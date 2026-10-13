@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 
 from localm.inference.backends.base import (
     GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE,
+    GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE,
+    GRAMMAR_LAZY_UNSUPPORTED_HEAD,
     GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
     GrammarUnsupportedError,
 )
@@ -57,7 +59,9 @@ class TestBuildSamplerLazySelection:
             with pytest.raises(GrammarUnsupportedError) as ei:
                 _build_sampler(vocab=1, grammar="root ::= \"x\"", grammar_lazy=True,
                                grammar_triggers=["p"])
-        assert GRAMMAR_LAZY_UNSUPPORTED_MESSAGE in str(ei.value)
+        assert GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE in str(ei.value)
+        assert "setup-llama" in str(ei.value)
+        assert "Use a GGUF-format model" not in str(ei.value)
         mock_api.llama_sampler_init_grammar_lazy_patterns.assert_not_called()
         mock_api.llama_sampler_init_grammar.assert_not_called()
 
@@ -83,11 +87,13 @@ class TestBuildSamplerLazySelection:
         for the whole session, blaming the backend."""
         from localm.inference.backends.base import GRAMMAR_UNSUPPORTED_MESSAGE
         msgs = [GRAMMAR_UNSUPPORTED_MESSAGE, GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
-                GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE]
+                GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE, GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE]
         for a in msgs:
             for b in msgs:
                 if a is not b:
                     assert a not in b, f"{a!r} is a substring of {b!r}"
+        assert GRAMMAR_LAZY_UNSUPPORTED_HEAD not in GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE
+        assert GRAMMAR_LAZY_UNSUPPORTED_HEAD not in GRAMMAR_UNSUPPORTED_MESSAGE
 
     def test_strict_path_unchanged(self):
         mock_api = self._mock_api()

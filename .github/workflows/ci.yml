@@ -18,8 +18,9 @@ on:
   #                  labelled PR gets the matrix instead. merge-policy runs
   #                  on every pull_request after those jobs and sums them up
   #                  into one check - see that job below.
-  #   push           paths-scoped to the two native-binding files below, and it
-  #                  runs abi-check ONLY. It never starts the test matrix.
+  #   push           paths-scoped to the two native-binding files below. It
+  #                  runs abi-check and the two pin checks. It never starts the
+  #                  test matrix.
   #   workflow_dispatch   runs the matrix unconditionally, plus the mutation
   #                  shards (and so the mutation-test gate); never on push.
   #   schedule       two crons. The nightly one ("23 3 * * *") runs test,

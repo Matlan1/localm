@@ -18,11 +18,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   path returns `json` and `text`; `srt`, `vtt` and `verbose_json` need timestamps it does not
   have and are refused with a message saying so.
 - **Attach an audio clip in the chat composer.** The attach button and drag-and-drop now take audio files (WAV, and MP3, FLAC, OGG, M4A or AAC with the voice extra) next to images and documents. The clip appears as its own chip with its length, plays back in the conversation, and is sent as an `input_audio` part, so a model that can hear audio, such as Qwen3-ASR, transcribes it. A file over 50 MB or a WAV over 10 minutes is refused before it is sent, and when the server refuses a clip (for example a model that cannot hear audio) its message is shown and the clip is dropped so the chat stays usable.
+- **Audio clips in long chats.** A clip the model cannot decode now drops out of the chat with the server's message, instead of failing on every later turn. Compaction counts and names audio clips like images. Conversations with large clips save to the server up to 96 MB, and a conversation too big even for that tells you it is kept only in this browser.
 - **Token log probabilities.** For GGUF models, `/v1/chat/completions` returns `logprobs` and
   up to 20 `top_logprobs` for each token of the reply's content, streamed or not, and
   `/v1/completions` returns the legacy `logprobs` object. In a chat reply, the tokens of the
   reasoning, of tool calls and of text cut by a stop sequence are left out. A model that
   cannot report them refuses the request with a 400 instead of answering without them.
+- **Log probabilities on `/v1/responses`.** A request with
+  `include: ["message.output_text.logprobs"]` (and `top_logprobs`, 0 to 20) now returns the
+  log probability of each token of the reply's text, with its alternatives, in the `output_text`
+  part and, when streamed, in the `response.output_text.delta` and `.done` events. They were a
+  400 before; a model that cannot report them still refuses the request with a 400.
 - **Send audio to GGUF models that can hear it.** A chat message can carry an OpenAI
   `input_audio` part, and `localm run MODEL --audio clip.wav -p "Transcribe this."` does the
   same from the command line. A GGUF model whose projector has an audio encoder (for example
@@ -393,6 +399,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **localm's managed ComfyUI now installs v0.39.0, up from v0.31.1.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
+- **The bundled llama.cpp runtime moved from b11118 to b11541.** An existing install picks it up with `localm setup-llama --force`.
 - **Linux CUDA setup installs fixed NVIDIA runtime libraries.** `localm setup-llama` on Linux now fetches a pinned, checksum-verified version of the CUDA runtime and cuBLAS libraries instead of whichever version PyPI lists as newest.
 - **Mixture-of-Experts models that do not fit in VRAM run much faster.** With GPU
   layers auto-sized (the default), such a model now keeps the experts of as few
@@ -495,6 +503,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
+  loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
+  without a key points at `localm key generate` instead of a PowerShell-only command. The coder's
+  "Unattended one-shot" warning goes to stderr, so the JSON on stdout stays a lone document. The server,
+  its MCP server and the coder's MCP client report the installed localm version.
+- **A cut-off transcript reports the tokens actually generated.** The `502` for a transcript that hit the
+  reply limit no longer quotes the requested budget when the backend used a lower one.
+- **A Hugging Face model whose chat templates have no `default` is refused with a clear `400`.** Before, it
+  failed later with a generic worker error.
+- **A llama.cpp runtime without lazy grammar support says to run `localm setup-llama`.** Tool calling with
+  `tool_choice` `auto` used to tell a GGUF user to use a GGUF-format model.
+- **A GGUF file with a bad `general.alignment` is refused.** When localm rewrites a model file's
+  metadata, an alignment that is not a power of two is now refused up front, as the GGUF loader
+  already refuses it, instead of producing a file the loader would reject.
+- **A deeply nested JSON body no longer causes a server error on speech and Responses.** `POST /v1/audio/speech` answers a body nested thousands of levels deep with a 400 saying it is not valid JSON, and `POST /v1/responses` answers a nested reply from the chat route with a 502 instead of a 500. The TLS certificate and key settings also report a path too long for the operating system as a missing file instead of failing the save.
 - **A native image job now says GPU placement is ComfyUI-only.** With per-component GPU placement turned on
   and the native image backend in use, the job log now says the setting applies to ComfyUI only and that each
   model loads on one GPU. Before, the setting was silently ignored.

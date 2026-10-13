@@ -7,7 +7,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from ..server import EngineCache, _log, _quiet_stdout, _text_result, report_progress
+from .. import server as _srv
+from ..server import EngineCache, _quiet_stdout, _text_result
 from ._common import MODEL_PARAM
 
 # Largest image file the chat tool reads from disk.
@@ -93,7 +94,7 @@ def answer_with(engines: EngineCache, decision, run):
                 if not engines.is_peer(engine):
                     raise
                 engines.drop_peer(name)
-                _log(f"the instance answering {name} failed ({e}); loading it here")
+                _srv._log(f"the instance answering {name} failed ({e}); loading it here")
                 with _quiet_stdout():
                     engine = engines.get_loaded(name)
                 result = run(engine, name)
@@ -101,7 +102,7 @@ def answer_with(engines: EngineCache, decision, run):
             if name == decision.current:
                 raise
             errors.append(f"{name}: {e}")
-            _log(f"warning: could not answer with {name}: {e}")
+            _srv._log(f"warning: could not answer with {name}: {e}")
             continue
         if name == decision.resolved:
             return result, decision
@@ -145,7 +146,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
         def _run(engine, _name):
             with engines.serving(engine):
                 return "".join(engine.chat_stream(
-                    messages, on_status=report_progress, **gen))
+                    messages, on_status=_srv.report_progress, **gen))
 
         text, decision = answer_with(engines, decision, _run)
         result = _text_result(text)

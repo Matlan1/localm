@@ -48,6 +48,24 @@ def test_a_test_that_changes_tmpdir_fails_and_the_next_test_sees_the_original(
     result.stdout.fnmatch_lines(["*left the process environment changed*TMPDIR*"])
 
 
+def test_a_failing_finalizer_still_gets_the_environment_restored(pytester, subrun_env):
+    _with_real_conftest(pytester, "pytest_runtest_logstart", "pytest_runtest_teardown")
+    pytester.makepyfile(
+        "import os, pytest\n"
+        "START = os.environ.get('TMPDIR')\n"
+        "@pytest.fixture\n"
+        "def broken():\n"
+        "    yield\n"
+        "    os.environ['TMPDIR'] = os.path.join(os.getcwd(), 'gone')\n"
+        "    raise RuntimeError('finalizer failed')\n"
+        "def test_a_leaks_then_fails_teardown(broken):\n"
+        "    pass\n"
+        "def test_b_sees_the_original():\n"
+        "    assert os.environ.get('TMPDIR') == START\n")
+    result = pytester.runpytest_subprocess("-q", "-p", "no:cacheprovider", "-p", "no:randomly")
+    result.assert_outcomes(passed=2, errors=1)
+
+
 def test_a_change_scoped_with_monkeypatch_is_not_a_leak(pytester, subrun_env):
     _with_real_conftest(pytester, "pytest_runtest_logstart", "pytest_runtest_teardown")
     pytester.makepyfile(

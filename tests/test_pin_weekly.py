@@ -37,8 +37,8 @@ if os.environ.get("FAKE_CONFIRM_SLEEP"):
     time.sleep(float(os.environ["FAKE_CONFIRM_SLEEP"]))
 open(os.environ.get("FAKE_CONFIRM_LOG", os.devnull), "a").write(" ".join(args) + "\\n")
 verdict = {0: "PASS", 1: "FAIL"}.get(rc, "INCONCLUSIVE")
-json.dump({"schema": 1, "verdict": verdict, "checks": {"load": {"status": verdict}}},
-          open(receipt, "w"))
+json.dump({"schema": 1, "verdict": verdict, "why": os.environ.get("FAKE_CONFIRM_WHY", ""),
+           "checks": {"load": {"status": verdict}}}, open(receipt, "w"))
 sys.exit(rc)
 """
 
@@ -88,10 +88,14 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(pw, "WEEKLY_DIR", state / "weekly")
     monkeypatch.setattr(pp, "STATE_DIR", state)
     monkeypatch.setattr(pp, "ISSUES_PATH", issues)
-    for name in ("FAKE_CONFIRM_RC", "FAKE_CONFIRM_SLEEP", "FAKE_BUMP_RC", "FAKE_CONFIRM_LOG"):
+    for name in ("FAKE_CONFIRM_RC", "FAKE_CONFIRM_SLEEP", "FAKE_BUMP_RC", "FAKE_CONFIRM_LOG",
+                 "FAKE_CONFIRM_WHY"):
         monkeypatch.delenv(name, raising=False)
 
     spies = Spies()
+    spies.resets = []
+    monkeypatch.setattr(pp, "reset_pipeline_worktree", lambda wt: spies.resets.append(wt))
+    monkeypatch.setattr(pp, "sync_main_checkout", lambda: None)
     monkeypatch.setattr(pp, "ensure_pipeline_worktree", lambda: worktree)
     monkeypatch.setattr(pp, "prepare_bump_branch",
                         lambda wt, cand, pin: spies.calls.append(("branch", cand, pin)) or "br")
@@ -204,6 +208,26 @@ def test_failing_targeted_tests_stop_before_any_push(env):
     assert "push" not in [c[0] for c in env.calls]
 
 
+def test_a_candidate_that_needs_a_code_change_is_reported_once_not_as_a_build_fail(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CONFIRM_RC", "1")
+    monkeypatch.setenv("FAKE_CONFIRM_WHY", "binding needs a code update, not an automatic bump")
+    out = pw.advance(_adv(candidate=lambda: ("v1", "v2")), dry_run=False)
+    assert out.verdict == pw.NEEDS_UPDATE and "needs a change to localm's own code" in out.detail
+    text = env.issues.read_text(encoding="utf-8")
+    assert "NEW-PIN-PIPELINE-FAKE-BINDING-NEEDS-CODE-UPDATE" in text
+    assert "CONFIRM-FAILED" not in text
+    again = pw.advance(_adv(candidate=lambda: ("v1", "v3")), dry_run=False)
+    assert again.verdict == pw.NEEDS_UPDATE
+    assert env.issues.read_text(encoding="utf-8").count("NEEDS-CODE-UPDATE [OPEN") == 1
+    assert env.calls == []
+
+
+def test_an_ordinary_fail_is_still_a_build_fail(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CONFIRM_RC", "1")
+    out = pw.advance(_adv(), dry_run=False)
+    assert out.verdict == pw.FAIL
+
+
 def test_red_ci_is_a_fail_and_never_merges(env):
     env.ci = "RED"
     out = pw.advance(_adv(), dry_run=False)
@@ -256,6 +280,42 @@ def test_review_only_bump_opens_a_pr_without_a_receipt_and_never_merges(env, mon
     assert "--write" in flat
     assert (env.worktree / "bumped.txt").read_text(encoding="utf-8") == "v2"
     assert pp.load_state(pin="fake")["verdict"] == "REVIEW"
+
+
+@pytest.mark.parametrize("old,new,expected", [
+    ("3.4.13", "3.4.16", True), ("12.0.2", "12.1.0", True), ("12.0.2", "13.0.0", False),
+    ("0.18.4", "0.18.5", True), ("0.18.4", "0.19.0", False), ("0.18.4", "1.0.0", False),
+    ("11.12.0", "11.13.0", True), ("bad", "1.0.0", False)])
+def test_a_bump_that_stays_inside_one_major_line_may_auto_merge(old, new, expected):
+    assert pw._no_major_boundary(old, new) is expected
+
+
+def test_tested_review_pins_merge_on_green_ci_when_no_major_boundary_is_crossed(env):
+    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "print('suite ok')"),),
+                                 auto_merge=lambda o, n: True), dry_run=False)
+    assert out.verdict == pw.MERGED
+    assert [c[0] for c in env.calls] == ["supersede", "branch", "push", "pr", "ci", "merge"]
+
+
+def test_a_tested_pin_that_crosses_a_major_boundary_still_waits_for_review(env):
+    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "print('suite ok')"),),
+                                 auto_merge=lambda o, n: False), dry_run=False)
+    assert out.verdict == pw.REVIEW and "merge" not in [c[0] for c in env.calls]
+
+
+def test_a_failing_post_bump_command_stops_before_any_push(env):
+    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "raise SystemExit(3)"),),
+                                 auto_merge=lambda o, n: True), dry_run=False)
+    assert out.verdict == pw.FAIL and "failed after the bump" in out.detail
+    assert "push" not in [c[0] for c in env.calls]
+
+
+def test_shipped_vendored_advancers_run_the_gui_suite_and_gate_the_merge_on_the_boundary():
+    for adv in pw.build_advancers():
+        if adv.key.startswith("vendored-"):
+            assert adv.post_bump_cmds == (("npm", "ci"), ("npm", "test"))
+            assert adv.auto_merge("1.2.3", "1.2.4") is True
+            assert adv.auto_merge("1.2.3", "2.0.0") is False
 
 
 def test_review_only_dry_run_changes_nothing(env):
@@ -435,28 +495,101 @@ def test_a_broken_current_pin_is_logged_to_issues(env):
 #  Delegated pipelines                                                        #
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("rc,state,verdict", [
-    (1, {"reason": "bad"}, pw.FAIL),
-    (2, {"reason": "busy"}, pw.INCONCLUSIVE),
-    (0, {"verdict": "PASS", "merged_pr": 5, "last_tag_tried": "b2"}, pw.MERGED),
-    (0, {}, pw.NONE_NEWER),
-])
-def test_delegated_outcome_comes_from_exit_code_and_state(env, rc, state, verdict):
-    pp.save_state(state, pin="deleg")
-    adv = _adv(key="deleg", delegate=lambda dry: rc)
-    assert pw.advance_delegated(adv, dry_run=False).verdict == verdict
+def _deleg(rc, *, candidate=("b1", "b2"), key="deleg", on_run=None):
+    def run(dry):
+        if on_run:
+            on_run(dry)
+        return rc
+    return _adv(key=key, candidate=lambda: candidate, delegate=run)
 
 
-def test_delegated_dry_run_pass(env):
-    pp.save_state({"verdict": "PASS", "last_tag_tried": "b2"}, pin="deleg")
-    assert pw.advance_delegated(_adv(key="deleg", delegate=lambda dry: 0), dry_run=True).verdict == pw.DRY_PASS
+def _now_iso(offset_seconds=0):
+    when = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=offset_seconds)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_delegated_nothing_newer_never_calls_the_pipeline():
+    called = []
+    adv = _deleg(0, candidate=None, on_run=lambda d: called.append(d))
+    adv.candidate = lambda: None
+    out = pw.advance_delegated(adv, dry_run=False)
+    assert out.verdict == pw.NONE_NEWER and called == []
+
+
+def test_delegated_names_the_pinned_and_candidate_versions(env):
+    out = pw.advance_delegated(_deleg(0), dry_run=True)
+    assert (out.pinned, out.candidate) == ("b1", "b2")
+
+
+def test_delegated_old_merged_state_is_not_read_as_a_merge_in_this_run(env):
+    """A stale PASS with a merged PR from an earlier run must not make a run that merged
+    nothing report MERGED."""
+    pp.save_state({"last_tag_tried": "b2", "verdict": "PASS", "merged_pr": 5,
+                   "timestamp": "2020-01-01T00:00:00Z"}, pin="deleg")
+    out = pw.advance_delegated(_deleg(0), dry_run=False)
+    assert out.verdict == pw.SKIPPED and "without recording a result" in out.detail
+
+
+def test_delegated_a_merge_recorded_during_this_run_is_reported(env):
+    def record(dry):
+        pp.save_state({"last_tag_tried": "b2", "verdict": "PASS", "merged_pr": 9,
+                       "timestamp": _now_iso(5)}, pin="deleg")
+    out = pw.advance_delegated(_deleg(0, on_run=record), dry_run=False)
+    assert out.verdict == pw.MERGED and out.pr == 9 and "b1 -> b2" in out.detail
+
+
+def test_delegated_dry_run_pass_is_reported_without_any_state(env):
+    out = pw.advance_delegated(_deleg(0), dry_run=True)
+    assert out.verdict == pw.DRY_PASS
+
+
+@pytest.mark.parametrize("rc,verdict", [(1, pw.FAIL), (2, pw.INCONCLUSIVE)])
+def test_delegated_failure_codes(env, rc, verdict):
+    def record(dry):
+        pp.save_state({"last_tag_tried": "b2", "verdict": "FAIL", "reason": "bad build",
+                       "timestamp": _now_iso(5)}, pin="deleg")
+    out = pw.advance_delegated(_deleg(rc, on_run=record), dry_run=False)
+    assert out.verdict == verdict
+    if rc == 1:
+        assert out.detail == "bad build"
+
+
+def test_delegated_failure_does_not_borrow_a_stale_reason(env):
+    pp.save_state({"last_tag_tried": "b2", "verdict": "INCONCLUSIVE", "reason": "an old reason",
+                   "timestamp": "2020-01-01T00:00:00Z"}, pin="deleg")
+    out = pw.advance_delegated(_deleg(2), dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE and "old reason" not in out.detail
+
+
+def test_delegated_a_candidate_already_recorded_fail_is_skipped(env):
+    pp.save_state({"last_tag_tried": "b2", "verdict": "FAIL", "timestamp": "2020-01-01T00:00:00Z"},
+                  pin="deleg")
+    called = []
+    out = pw.advance_delegated(_deleg(0, on_run=lambda d: called.append(d)), dry_run=False)
+    assert out.verdict == pw.SKIPPED and called == []
+
+
+def test_delegated_candidate_lookup_failure_is_inconclusive(env):
+    def boom():
+        raise pp.PipelineError("pin constant renamed")
+    adv = _deleg(0)
+    adv.candidate = boom
+    out = pw.advance_delegated(adv, dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE and "renamed" in out.detail
 
 
 def test_delegated_pipeline_error_is_a_fail(env):
     def boom(dry):
-        raise pp.PipelineError("pin constant renamed")
-    out = pw.advance_delegated(_adv(key="deleg", delegate=boom), dry_run=False)
-    assert out.verdict == pw.FAIL and "renamed" in out.detail
+        raise pp.PipelineError("worktree refused")
+    out = pw.advance_delegated(_deleg(0, on_run=boom), dry_run=False)
+    assert out.verdict == pw.FAIL and "worktree refused" in out.detail
+
+
+def test_receipt_summary_reads_status_or_verdict_keys(tmp_path):
+    path = tmp_path / "r.json"
+    path.write_text('{"checks": {"a": {"status": "PASS"}, "b": {"verdict": "FAIL"}, "c": "SKIP"}}',
+                    encoding="utf-8")
+    assert pw._receipt_summary(path) == "a=PASS, b=FAIL, c=SKIP"
 
 
 # --------------------------------------------------------------------------- #
@@ -475,6 +608,7 @@ def test_severity_ordering():
     assert pw.severity([o(pw.INCONCLUSIVE), o(pw.FAIL)]) == 1
     assert pw.severity([o(pw.REVIEW)]) == 2
     assert pw.severity([o(pw.NOT_MEASURED)]) == 0
+    assert pw.severity([o(pw.NEEDS_UPDATE)]) == 2
     assert pw.severity([]) == 0
 
 
@@ -521,6 +655,350 @@ def test_run_weekly_skip_verify_current(env, monkeypatch, tmp_path):
     monkeypatch.setenv("FAKE_CONFIRM_LOG", str(log))
     pw.run_weekly([_adv(candidate=lambda: None)], dry_run=False, verify=False)
     assert not log.exists()
+
+
+def test_ensure_github_token_keeps_an_existing_token(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "from-env")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("gh must not be asked when GITHUB_TOKEN is set")
+    monkeypatch.setattr(pw.subprocess, "run", must_not_run)
+    assert pw.ensure_github_token() == "env"
+
+
+def test_ensure_github_token_exports_the_gh_token_to_children(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(pw.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(
+        cmd, 0, stdout="tok-123\n", stderr=""))
+    assert pw.ensure_github_token() == "gh"
+    assert pw.os.environ["GITHUB_TOKEN"] == "tok-123"
+    monkeypatch.delenv("GITHUB_TOKEN")
+
+
+@pytest.mark.parametrize("result", [
+    subprocess.CompletedProcess([], 1, stdout="", stderr="not logged in"),
+    subprocess.CompletedProcess([], 0, stdout="  \n", stderr="")])
+def test_ensure_github_token_without_a_usable_gh_token_is_none(monkeypatch, result):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(pw.subprocess, "run", lambda cmd, **k: result)
+    assert pw.ensure_github_token() == "none" and "GITHUB_TOKEN" not in pw.os.environ
+
+
+def test_ensure_github_token_when_gh_is_missing_is_none(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def missing(*a, **k):
+        raise FileNotFoundError("gh")
+    monkeypatch.setattr(pw.subprocess, "run", missing)
+    assert pw.ensure_github_token() == "none"
+
+
+def test_script_fingerprint_changes_when_a_script_changes(tmp_path, monkeypatch):
+    for name in pw._SELF_SCRIPTS:
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    monkeypatch.setattr(pw, "SCRIPTS", tmp_path)
+    before = pw.script_fingerprint()
+    (tmp_path / "check_pins.py").write_text("changed", encoding="utf-8")
+    assert pw.script_fingerprint() != before
+
+
+def _stub_main(monkeypatch, *, fingerprint_after):
+    import contextlib
+
+    @contextlib.contextmanager
+    def lock():
+        yield
+    calls = []
+    monkeypatch.setattr(pp, "pipeline_lock", lock)
+    monkeypatch.setattr(pp, "sync_main_checkout", lambda: calls.append("sync"))
+    monkeypatch.setattr(pw, "ensure_github_token", lambda: "env")
+    monkeypatch.setattr(pw, "STARTUP_FINGERPRINT", "before")
+    monkeypatch.setattr(pw, "script_fingerprint", lambda: fingerprint_after)
+    monkeypatch.setattr(pw, "run_weekly", lambda advs, **k: calls.append("ran") or (0, Path("r.md")))
+    execs = []
+    monkeypatch.setattr(pw, "_reexec", lambda args, **k: execs.append([sys.executable, "pin_weekly.py", *args]))
+    monkeypatch.delenv(pw.REEXEC_ENV, raising=False)
+    return calls, execs
+
+
+def test_main_restarts_on_the_new_code_when_the_sync_changed_the_scripts(monkeypatch):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="after")
+    pw.main(["--only", "uv"])
+    assert len(execs) == 1 and execs[0][-2:] == ["--only", "uv"]
+    assert pw.os.environ.get(pw.REEXEC_ENV) == "1"
+    monkeypatch.delenv(pw.REEXEC_ENV)
+
+
+def test_main_returns_the_restarted_runs_exit_code_when_the_restart_runs_to_completion(monkeypatch):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="after")
+    monkeypatch.setattr(pw, "_reexec", lambda args, **k: 7)
+    assert pw.main(["--only", "uv"]) == 7
+    assert "ran" not in calls
+    monkeypatch.delenv(pw.REEXEC_ENV)
+
+
+def test_reexec_on_windows_runs_a_child_and_returns_its_exit_code(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pw.subprocess, "run", lambda cmd, **k: seen.append(cmd) or subprocess.CompletedProcess(cmd, 5))
+    monkeypatch.setattr(pw.os, "execv", lambda *a: (_ for _ in ()).throw(AssertionError("execv on windows")))
+    assert pw._reexec(["--only", "uv"], windows=True) == 5
+    assert seen[0][1].endswith("pin_weekly.py") and seen[0][-2:] == ["--only", "uv"]
+
+
+def test_reexec_on_posix_replaces_the_process(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pw.os, "execv", lambda exe, argv: seen.append((exe, argv)))
+    monkeypatch.setattr(pw.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("run on posix")))
+    assert pw._reexec(["--dry-run"], windows=False) is None
+    assert seen[0][0] == sys.executable and seen[0][1][-1] == "--dry-run"
+
+
+def test_main_does_not_restart_twice(monkeypatch):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="after")
+    monkeypatch.setenv(pw.REEXEC_ENV, "1")
+    pw.main(["--only", "uv"])
+    assert execs == [] and "ran" in calls
+
+
+def test_main_does_not_restart_when_the_scripts_are_unchanged(monkeypatch):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="before")
+    assert pw.main(["--only", "uv"]) == 0
+    assert execs == [] and "ran" in calls
+
+
+def test_main_sync_failure_before_the_lock_is_inconclusive(monkeypatch, capsys):
+    calls, execs = _stub_main(monkeypatch, fingerprint_after="before")
+
+    def boom():
+        raise pp.InfraError("git fetch failed")
+    monkeypatch.setattr(pp, "sync_main_checkout", boom)
+    assert pw.main(["--only", "uv"]) == 2
+    assert "ran" not in calls and execs == []
+
+
+def test_a_failed_bump_leaves_the_shared_worktree_clean(env, monkeypatch):
+    monkeypatch.setenv("FAKE_BUMP_RC", "1")
+    pw.advance(_adv(), dry_run=False)
+    assert env.resets == [env.worktree]
+
+
+def test_failing_targeted_tests_leave_the_shared_worktree_clean(env):
+    pw.advance(_adv(tests=("tests/test_that_does_not_exist.py",)), dry_run=False)
+    assert env.resets == [env.worktree]
+
+
+def test_an_infra_error_leaves_the_shared_worktree_clean(env, monkeypatch):
+    def boom(wt, br, cand, old, message=None):
+        raise pp.InfraError("push failed")
+    monkeypatch.setattr(pp, "commit_and_push", boom)
+    pw.advance(_adv(), dry_run=False)
+    assert env.resets == [env.worktree]
+
+
+def test_a_successful_bump_does_not_reset_the_worktree(env):
+    assert pw.advance(_adv(), dry_run=False).verdict == pw.MERGED
+    assert env.resets == []
+
+
+def test_a_failing_reset_does_not_hide_the_original_failure(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BUMP_RC", "1")
+
+    def refuse(wt):
+        raise pp.InfraError("git reset failed")
+    monkeypatch.setattr(pp, "reset_pipeline_worktree", refuse)
+    out = pw.advance(_adv(), dry_run=False)
+    assert out.verdict == pw.FAIL and "REFUSED: bad receipt" in out.detail
+    assert "could not clean the pipeline worktree" in capsys.readouterr().out
+
+
+def test_one_runtime_raising_does_not_stop_the_others_or_the_report(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+
+    def renamed():
+        raise SystemExit("constant renamed")
+
+    def broken():
+        raise KeyError("boom")
+    advs = [_adv(key="a", title="A", candidate=renamed, verify_current_cmd=lambda w, r: renamed()),
+            _adv(key="b", title="B", candidate=broken),
+            _adv(key="c", title="C", candidate=lambda: None)]
+    code, path = pw.run_weekly(advs, dry_run=False)
+    assert code == 2
+    assert path.is_file()
+    by = {(r["key"], r["kind"]): r for r in json_rows(path)}
+    assert by[("a", "advance")]["verdict"] == pw.INCONCLUSIVE and "SystemExit" in by[("a", "advance")]["detail"]
+    assert by[("b", "advance")]["verdict"] == pw.INCONCLUSIVE and "KeyError" in by[("b", "advance")]["detail"]
+    assert by[("c", "advance")]["verdict"] == pw.NONE_NEWER
+    assert ("c", "verify-current") in by and by[("a", "verify-current")]["verdict"] == pw.INCONCLUSIVE
+
+
+def json_rows(path):
+    import json
+    return json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+
+
+def test_a_stale_currency_row_makes_the_run_exit_nonzero_even_when_every_step_passed(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    monkeypatch.setattr(cp, "run_checks", lambda specs, now=None: [cp.Row(name="x", status=cp.STALE)])
+    code, _ = pw.run_weekly([_adv(candidate=lambda: None)], dry_run=False)
+    assert code == 1
+
+
+def test_an_unreadable_currency_row_makes_the_run_exit_two(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    monkeypatch.setattr(cp, "run_checks", lambda specs, now=None: [cp.Row(name="x", status=cp.UNKNOWN)])
+    code, _ = pw.run_weekly([_adv(candidate=lambda: None)], dry_run=False)
+    assert code == 2
+
+
+def test_the_currency_table_is_computed_after_the_advances(env, monkeypatch):
+    order = []
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    monkeypatch.setattr(cp, "run_checks", lambda specs, now=None: order.append("currency") or [])
+    pw.run_weekly([_adv(candidate=lambda: order.append("candidate") or None)], dry_run=False)
+    assert order.index("candidate") < order.index("currency")
+
+
+def test_a_merge_without_a_runtime_confirm_is_not_reported_as_confirmed(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    adv = _review_adv(post_bump_cmds=((sys.executable, "-c", "print('ok')"),),
+                      auto_merge=lambda o, n: True)
+    code, path = pw.run_weekly([adv], dry_run=False)
+    by = {(r["key"], r["kind"]): r for r in json_rows(path)}
+    assert by[("fake", "advance")]["verdict"] == pw.MERGED
+    assert by[("fake", "verify-current")]["verdict"] == pw.NOT_MEASURED
+
+
+def test_the_post_bump_commands_do_not_see_the_github_token(env, monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
+    monkeypatch.setenv("GH_TOKEN", "secret-token-2")
+    seen = tmp_path / "env.txt"
+    code = (f"import os; open({str(seen)!r}, 'w').write("
+            "repr((os.environ.get('GITHUB_TOKEN'), os.environ.get('GH_TOKEN'))))")
+    pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", code),),
+                           auto_merge=lambda o, n: False), dry_run=False)
+    assert seen.read_text(encoding="utf-8") == "(None, None)"
+
+
+def _confirm_adv_with_receipt(env, monkeypatch, *, rc, receipt_json=None, write=True):
+    """A confirm script that exits *rc* and writes *receipt_json* (or nothing)."""
+    script = env.repo / "scripts" / "confirm_fake_runtime.py"
+    body = ["import sys, json"]
+    if write:
+        body.append("receipt = sys.argv[sys.argv.index('--receipt') + 1]")
+        body.append(f"open(receipt, 'w').write({receipt_json!r})")
+    body.append(f"sys.exit({rc})")
+    script.write_text("\n".join(body) + "\n", encoding="utf-8")
+    env.state.mkdir(parents=True, exist_ok=True)
+    return _adv(), env.state / "r.json"
+
+
+@pytest.mark.parametrize("rc,receipt,expected", [
+    (1, None, pw.INCONCLUSIVE), (0, None, pw.INCONCLUSIVE),
+    (1, "not json", pw.INCONCLUSIVE), (0, '{"verdict": "FAIL"}', pw.INCONCLUSIVE),
+    (1, '{"verdict": "PASS"}', pw.INCONCLUSIVE), (1, '[1]', pw.INCONCLUSIVE),
+    (1, '{"verdict": "FAIL"}', pw.FAIL), (0, '{"verdict": "PASS"}', pw.PASS)])
+def test_a_confirm_exit_code_needs_a_receipt_that_agrees_with_it(env, monkeypatch, rc, receipt, expected):
+    adv, path = _confirm_adv_with_receipt(env, monkeypatch, rc=rc, receipt_json=receipt, write=receipt is not None)
+    verdict, detail = pw.run_confirm(adv, ["--tag", "v2"], path)
+    assert verdict == expected
+    if expected == pw.INCONCLUSIVE:
+        assert "exited" in detail
+
+
+def test_a_crashing_confirm_is_not_filed_as_a_build_failure(env, monkeypatch):
+    adv, _ = _confirm_adv_with_receipt(env, monkeypatch, rc=1, write=False)
+    out = pw.advance(adv, dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE
+    assert "CONFIRM-FAILED" not in env.issues.read_text(encoding="utf-8")
+
+
+def test_the_report_lists_what_is_not_measured_by_design(env, monkeypatch):
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    _, path = pw.run_weekly([_adv(candidate=lambda: None)], dry_run=False)
+    text = path.read_text(encoding="utf-8")
+    assert "## Not measured on this machine (by design)" in text
+    assert all(what in text for what, _ in pw.NOT_MEASURED_BY_DESIGN)
+
+
+def _fake_check_module(releases, err="", pin="b1"):
+    class Mod:
+        def pinned_tag(self):
+            return pin
+
+        def upstream_releases(self):
+            return releases, err
+    return Mod()
+
+
+def test_llama_candidate_raises_when_upstream_is_unreadable(monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _fake_check_module([], err="rate limited"))
+    with pytest.raises(cp.FetchError, match="rate limited"):
+        pw._llama_candidate()
+
+
+def test_llama_candidate_raises_on_an_empty_listing(monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _fake_check_module([]))
+    with pytest.raises(cp.FetchError, match="empty"):
+        pw._llama_candidate()
+
+
+def test_llama_candidate_delegates_when_upstream_is_readable(monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _fake_check_module([{"tag": "b2"}]))
+    monkeypatch.setattr(pp, "newest_candidate", lambda: ("b1", "b2"))
+    assert pw._llama_candidate() == ("b1", "b2")
+
+
+class _FakeComfy:
+    def __init__(self, releases, status, pin="v0.31.1"):
+        self.releases, self.status, self.pin = releases, status, pin
+
+    def _pinned_version(self):
+        if self.pin is None:
+            raise SystemExit("renamed")
+        return self.pin
+
+    def _fetch_releases(self):
+        return self.releases
+
+    def _compare(self, pin, releases):
+        return {"status": self.status}
+
+
+@pytest.mark.parametrize("fake,message", [
+    (_FakeComfy(None, "stale"), "unreadable"), (_FakeComfy([{}], "no_data"), "unusable"),
+    (_FakeComfy([{}], "unparseable_pin"), "unusable"), (_FakeComfy([{}], "stale", pin=None), "cannot read")])
+def test_comfyui_candidate_raises_instead_of_reporting_nothing_newer(monkeypatch, fake, message):
+    monkeypatch.setattr(pw, "_load", lambda name, path: fake)
+    with pytest.raises(cp.FetchError, match=message):
+        pw._comfyui_candidate()
+
+
+def test_comfyui_candidate_current_is_none_and_an_unresolved_commit_raises(monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _FakeComfy([{}], "current"))
+    assert pw._comfyui_candidate() is None
+    monkeypatch.setattr(pw, "_load", lambda name, path: _FakeComfy([{}], "stale"))
+    monkeypatch.setattr(pp, "newest_comfyui_candidate", lambda: None)
+    with pytest.raises(cp.FetchError, match="commit"):
+        pw._comfyui_candidate()
+    monkeypatch.setattr(pp, "newest_comfyui_candidate", lambda: ("v0.31.1", "v0.39.0", "a" * 40))
+    assert pw._comfyui_candidate() == ("v0.31.1", "v0.39.0")
+
+
+def test_an_unreadable_llama_upstream_is_inconclusive_not_nothing_newer(env, monkeypatch):
+    monkeypatch.setattr(pw, "_load", lambda name, path: _fake_check_module([], err="403"))
+    adv = next(a for a in pw.build_advancers() if a.key == "llama")
+    out = pw.advance_delegated(adv, dry_run=True)
+    assert out.verdict == pw.INCONCLUSIVE and "unreadable" in out.detail
+
+
+@pytest.mark.parametrize("pin,newer,expected", [
+    ((12, 0, 2, 0), [((18, 1, 0, 0), "18.1.0"), ((12, 1, 0, 0), "12.1.0"), ((12, 0, 3, 0), "12.0.3")], "12.1.0"),
+    ((12, 0, 2, 0), [((18, 1, 0, 0), "18.1.0"), ((13, 0, 0, 0), "13.0.0")], "18.1.0"),
+    ((0, 18, 4, 0), [((0, 19, 0, 0), "0.19.0"), ((0, 18, 6, 0), "0.18.6")], "0.18.6"),
+    ((0, 18, 4, 0), [((0, 19, 0, 0), "0.19.0")], "0.19.0")])
+def test_the_newest_release_inside_the_pinned_major_is_preferred(pin, newer, expected):
+    assert pw._prefer_current_major(pin, newer) == expected
 
 
 def test_main_rejects_an_unknown_only_name(capsys):
@@ -585,13 +1063,87 @@ def test_github_candidate_unparseable_pin_raises(monkeypatch):
         find()
 
 
+class _FakeAmd:
+    _TORCH_STACK = ("torch", "torchvision")
+    _PACKAGES = ("torch", "torchvision", "rocm-sdk-core")
+
+    def __init__(self, published, pinned):
+        self.published, self.pinned = published, pinned
+
+    def _fetch_index(self, pkg):
+        return None if self.published.get(pkg) == "down" else [pkg]
+
+    def _parse_wheel(self, href):
+        return {"pkg": href}
+
+    def _pinned_torch_stack_version(self, pkg):
+        return self.pinned[pkg]
+
+    def _pinned_rocm_sdk_version(self, pkg):
+        return self.pinned[pkg]
+
+    def newest_win_amd64_version(self, wheels, pytag=None):
+        raw = self.published[wheels[0]["pkg"]]
+        return raw, tuple(int(p) for p in raw.split("+")[0].split("."))
+
+    def _base_version_tuple(self, version):
+        return tuple(int(p) for p in version.split("+")[0].split("."))
+
+
+_AMD_PINNED = {"torch": "2.11.0+rocm7.13.0", "torchvision": "0.26.0+rocm7.13.0",
+               "rocm-sdk-core": "7.13.0"}
+
+
+def test_amd_wheels_candidate_is_none_when_nothing_is_newer():
+    assert pw._amd_wheels_candidate(_FakeAmd(dict(_AMD_PINNED), _AMD_PINNED)) is None
+
+
+def test_amd_wheels_candidate_lists_all_packages_with_only_the_moved_ones_changed():
+    published = {**_AMD_PINNED, "torch": "2.12.0+rocm7.14.0"}
+    old, new = pw._amd_wheels_candidate(_FakeAmd(published, _AMD_PINNED))
+    assert old == "torch==2.11.0+rocm7.13.0,torchvision==0.26.0+rocm7.13.0,rocm-sdk-core==7.13.0"
+    assert new == "torch==2.12.0+rocm7.14.0,torchvision==0.26.0+rocm7.13.0,rocm-sdk-core==7.13.0"
+
+
+def test_amd_wheels_candidate_keeps_the_pinned_string_for_a_package_that_did_not_move():
+    published = {**_AMD_PINNED, "torch": "2.12.0+rocm7.14.0", "torchvision": "0.26.0+rocm7.12.0"}
+    _, new = pw._amd_wheels_candidate(_FakeAmd(published, _AMD_PINNED))
+    assert "torchvision==0.26.0+rocm7.13.0" in new and "rocm7.12.0" not in new
+
+
+def test_amd_wheels_candidate_raises_when_the_index_is_unreachable():
+    published = {**_AMD_PINNED, "torchvision": "down"}
+    with pytest.raises(cp.FetchError):
+        pw._amd_wheels_candidate(_FakeAmd(published, _AMD_PINNED))
+
+
+def test_amd_wheels_candidate_raises_when_a_pin_cannot_be_read():
+    with pytest.raises(cp.FetchError):
+        pw._amd_wheels_candidate(_FakeAmd(dict(_AMD_PINNED), {**_AMD_PINNED, "torch": None}))
+
+
+def test_a_bump_refusal_that_names_a_code_update_is_reported_once(env, monkeypatch):
+    (env.worktree / "scripts" / "bump_fake_pin.py").write_text(
+        "import sys\nprint('REFUSED: this release needs a code update to choose a file')\nsys.exit(1)\n",
+        encoding="utf-8")
+    out = pw.advance(_review_adv(), dry_run=False)
+    assert out.verdict == pw.NEEDS_UPDATE
+    text = env.issues.read_text(encoding="utf-8")
+    assert text.count("NEEDS-CODE-UPDATE [OPEN") == 1 and "CONFIRM-FAILED" not in text
+    again = pw.advance(_review_adv(candidate=lambda: ("v1", "v3")), dry_run=False)
+    assert again.verdict == pw.NEEDS_UPDATE
+    assert env.issues.read_text(encoding="utf-8").count("NEEDS-CODE-UPDATE [OPEN") == 1
+    assert "push" not in [c[0] for c in env.calls]
+
+
 def test_shipped_advancers_cover_every_runtime_with_a_pipeline_or_a_named_gap():
     advs = pw.build_advancers()
     assert [a.key for a in advs] == [
         "llama", "comfyui", "rocm", "koboldcpp", "sdcpp", "uv", "vendored-marked",
         "vendored-dompurify", "vendored-highlightjs", "vendored-katex", "cuda-runtime",
-        "gguf-node", "docker-base"]
-    assert all(a.auto_merge("1.0.0", "1.0.1") is False for a in advs if a.confirm_script is None)
+        "amd-wheels", "gguf-node", "docker-base"]
+    assert all(a.auto_merge("1.0.0", "1.0.1") is False for a in advs
+               if a.confirm_script is None and not a.post_bump_cmds)
     assert len({a.key for a in advs}) == len(advs)
     for a in advs:
         assert a.confirm_script is None or a.confirm_script.startswith("scripts/confirm_")

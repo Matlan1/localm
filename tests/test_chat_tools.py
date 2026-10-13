@@ -318,6 +318,45 @@ def test_a_backend_without_grammar_support_still_answers_auto_but_not_required(h
     assert refused.status_code == 400 and "grammar" in refused.json()["detail"]
 
 
+def _served_on_a_runtime_without_lazy_grammar():
+    from unittest.mock import patch
+
+    from localm.inference.backends.llamacpp.llama import _build_sampler
+
+    served = Served(["ok"])
+
+    def refuse(messages, **kwargs):
+        api = MagicMock()
+        api.has_lazy_grammar.return_value = False
+        with patch("localm.inference.backends.llamacpp.llama.api", api):
+            _build_sampler(vocab=1, grammar=kwargs["grammar"],
+                           grammar_lazy=kwargs["grammar_lazy"],
+                           grammar_triggers=kwargs["grammar_triggers"])
+        yield "unreachable"
+
+    served.engine.chat_stream.side_effect = refuse
+    return served
+
+
+def test_auto_on_a_runtime_without_lazy_grammar_is_a_400_that_names_setup_llama(home):
+    from localm.inference.backends.base import GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE
+    r = _served_on_a_runtime_without_lazy_grammar().chat(tools=[WEATHER])
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE in detail
+    assert "setup-llama" in detail and "Use a GGUF-format model" not in detail
+
+
+def test_streamed_auto_on_a_runtime_without_lazy_grammar_ends_in_an_error_that_names_setup_llama(home):
+    from localm.inference.backends.base import GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE
+    r = _served_on_a_runtime_without_lazy_grammar().chat(tools=[WEATHER], stream=True)
+    assert r.status_code == 200
+    text = "".join(d.get("content") or "" for d in deltas(r))
+    assert GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE in text and "[inference error:" in text
+    assert "Use a GGUF-format model" not in text
+    assert finish_of(r) == "error"
+
+
 # ------------------------------------------------------------------ stop sequences
 
 

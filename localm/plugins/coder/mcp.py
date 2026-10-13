@@ -37,6 +37,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from localm import __version__ as _LOCALM_VERSION
+
 from .proc_tail import StderrTail
 from .provenance import neutralise
 from .tool_registration import register_foreign_tool
@@ -103,7 +105,7 @@ class MCPServer:
         init = self._request("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": {"name": "localcoder", "version": "0.2.0"},
+            "clientInfo": {"name": "localcoder", "version": _LOCALM_VERSION},
         }, timeout=_INIT_TIMEOUT)
         if "error" in init:
             raise MCPError(self._with_tail(

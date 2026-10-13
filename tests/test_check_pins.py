@@ -45,6 +45,8 @@ def _router(monkeypatch, routes: dict):
         seen.append(url)
         for needle, value in routes.items():
             if needle in url:
+                if isinstance(value, cp.FetchError):
+                    raise value
                 if isinstance(value, Exception):
                     raise cp.FetchError(str(value))
                 return value
@@ -144,14 +146,15 @@ def test_gate_is_unknown_never_current_when_the_api_fails(monkeypatch):
     assert row.status == cp.UNKNOWN and "rate limited" in row.detail
 
 
-def test_a_renamed_constant_is_unknown_not_current(monkeypatch, tmp_path):
+def test_a_renamed_constant_is_inconsistent_not_unknown_and_not_current(monkeypatch, tmp_path):
     (tmp_path / "localm/media/koboldcpp").mkdir(parents=True)
     (tmp_path / "localm/media/koboldcpp/pins.py").write_text("TAGG = 'v1'\n", encoding="utf-8")
     monkeypatch.setattr(cp, "REPO", tmp_path)
     _router(monkeypatch, {"api.github.com": [_rel("v2.0.0", 1)]})
     spec = next(s for s in cp.build_registry() if s.name == "koboldcpp")
     row = spec.check(NOW)
-    assert row.status == cp.UNKNOWN and "not found" in row.detail
+    assert row.status == cp.INCONSISTENT and "cannot read the pin" in row.detail and "not found" in row.detail
+    assert cp.exit_code([row]) == cp.EXIT_STALE
 
 
 def test_gguf_node_current_when_head_is_the_pinned_commit(monkeypatch):
@@ -235,14 +238,84 @@ def test_docker_base_registry_failure_is_unknown_never_current(monkeypatch):
 
 
 class _FakeResp:
-    def __init__(self, headers):
+    def __init__(self, headers, body=b''):
         self.headers = headers
+        self._body = body
+
+    def read(self):
+        return self._body
 
     def __enter__(self):
         return self
 
     def __exit__(self, *a):
         return False
+
+
+def _no_sleep(monkeypatch):
+    waits = []
+    monkeypatch.setattr(cp.time, "sleep", lambda s: waits.append(s))
+    return waits
+
+
+def _http_error(code):
+    return cp.urllib.error.HTTPError("https://x", code, "boom", {}, None)
+
+
+def test_a_server_error_is_retried_and_then_succeeds(monkeypatch):
+    waits = _no_sleep(monkeypatch)
+    calls = []
+
+    def flaky(req, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            raise _http_error(500)
+        return _FakeResp({}, b'{"ok": true}')
+    monkeypatch.setattr(cp.urllib.request, "urlopen", flaky)
+    assert cp._get_json("https://example.org/x") == {"ok": True}
+    assert len(calls) == 3 and waits == list(cp._RETRY_DELAYS)
+
+
+def test_a_server_error_that_never_clears_is_a_fetch_error_after_the_retries(monkeypatch):
+    _no_sleep(monkeypatch)
+    calls = []
+
+    def down(req, timeout=None):
+        calls.append(1)
+        raise _http_error(503)
+    monkeypatch.setattr(cp.urllib.request, "urlopen", down)
+    with pytest.raises(cp.FetchError):
+        cp._get_json("https://example.org/x")
+    assert len(calls) == len(cp._RETRY_DELAYS) + 1
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+def test_a_client_error_is_not_retried(monkeypatch, code):
+    waits = _no_sleep(monkeypatch)
+    calls = []
+
+    def refuse(req, timeout=None):
+        calls.append(1)
+        raise _http_error(code)
+    monkeypatch.setattr(cp.urllib.request, "urlopen", refuse)
+    with pytest.raises(cp.FetchError):
+        cp._get_json("https://example.org/x")
+    assert len(calls) == 1 and waits == []
+
+
+def test_registry_digest_retries_a_transient_registry_error(monkeypatch):
+    _no_sleep(monkeypatch)
+    _router(monkeypatch, {"auth.docker.io/token": {"token": "t"}})
+    calls = []
+
+    def flaky(req, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _http_error(502)
+        return _FakeResp({"Docker-Content-Digest": "sha256:" + "b" * 64})
+    monkeypatch.setattr(cp.urllib.request, "urlopen", flaky)
+    assert cp._registry_digest("ubuntu", "24.04") == "sha256:" + "b" * 64
+    assert len(calls) == 2
 
 
 def test_registry_digest_asks_the_registry_with_a_pull_token_and_reads_the_header(monkeypatch):
@@ -281,7 +354,7 @@ def test_parse_date_ignores_fractional_seconds():
 
 
 def test_cuda_linux_source_stale_when_it_lacks_the_pinned_tag(monkeypatch):
-    _router(monkeypatch, {"/releases/tags/": cp.FetchError("HTTP Error 404: Not Found")})
+    _router(monkeypatch, {"/releases/tags/": cp.FetchError("HTTP Error 404: Not Found", status=404)})
     row = next(s for s in cp.build_registry() if s.name == "Linux CUDA build source").check(NOW)
     assert row.status == cp.STALE and "fall back to vulkan" in row.detail
 
@@ -357,8 +430,19 @@ def test_legacy_gate_that_cannot_launch_is_unknown(monkeypatch):
     assert cp._legacy_check("n", "g", "scripts/check_llama_pin.py", "a")(NOW).status == cp.UNKNOWN
 
 
+def test_legacy_rows_extract_pinned_and_newest_and_a_readable_detail(monkeypatch):
+    out = ("localm pins llama.cpp b11118\n  pinned release date: 2026-09-23\n"
+           "upstream newest with assets: b11541 (released 2026-10-10)\n"
+           "BEHIND: 423 builds\nwithin the 21-day tolerance.\n")
+    monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: _fake_proc(0, out))
+    spec = next(s for s in cp.build_registry() if s.name == "llama.cpp")
+    row = spec.check(NOW)
+    assert (row.pinned, row.latest, row.status) == ("b11118", "b11541", cp.BEHIND)
+    assert row.detail.startswith("BEHIND: 423 builds") and "pinned release date" not in row.detail
+
+
 def test_every_legacy_script_exists_and_accepts_gate():
-    for _name, _group, script, _adv in cp._LEGACY:
+    for _name, _group, script, _adv, _p, _l in cp._LEGACY:
         text = (cp.REPO / script).read_text(encoding="utf-8")
         assert '"--gate"' in text, script
 
@@ -420,13 +504,15 @@ def test_main_new_only_skips_legacy_and_writes_json(monkeypatch, tmp_path, capsy
 def test_main_exclude_drops_named_pins_and_rejects_unknown_names(monkeypatch, capsys):
     _stub_registry(monkeypatch, [cp.CURRENT, cp.STALE])
     assert cp.main(["--gate", "--exclude", "p1"]) == 0
-    assert cp.main(["--gate", "--exclude", "not-a-pin"]) == 2
+    assert cp.main(["--gate", "--exclude", "not-a-pin"]) == cp.EXIT_USAGE == 3
+    assert cp.main(["--exclude", "not-a-pin"]) == 3
     assert "no known pin" in capsys.readouterr().err
 
 
 def test_main_only_with_no_match_is_not_a_pass(monkeypatch, capsys):
     _stub_registry(monkeypatch, [cp.CURRENT])
-    assert cp.main(["--gate", "--only", "nope"]) == 2
+    assert cp.main(["--gate", "--only", "nope"]) == 3
+    assert cp.main(["--only", "nope"]) == 3
 
 
 def test_annotations_and_summary_only_under_github_actions(monkeypatch, tmp_path, capsys):
@@ -439,6 +525,111 @@ def test_annotations_and_summary_only_under_github_actions(monkeypatch, tmp_path
     cp.main(["--gate"])
     assert "::error::" in capsys.readouterr().out
     assert "| pin | status |" in summary.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("url,sent", [
+    ("https://api.github.com/repos/o/r/releases", True),
+    ("https://auth.docker.io/token?service=registry.docker.io", False),
+    ("https://registry-1.docker.io/v2/library/ubuntu/manifests/24.04", False),
+    ("https://pypi.org/pypi/nvidia-cublas/json", False),
+    ("https://registry.npmjs.org/marked", False),
+    ("https://api.github.com.evil.example/x", False),
+    ("", False)])
+def test_the_github_token_is_sent_to_api_github_com_only(monkeypatch, url, sent):
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-1")
+    headers = cp._headers(url)
+    assert ("Authorization" in headers) is sent
+    if sent:
+        assert headers["Authorization"] == "Bearer tok-1"
+
+
+def test_get_json_does_not_leak_the_github_token_to_other_hosts(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-1")
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req.get_header("Authorization"))
+        return _FakeResp({}, b"{}")
+    monkeypatch.setattr(cp.urllib.request, "urlopen", fake_urlopen)
+    cp._get_json("https://auth.docker.io/token?x=1")
+    cp._get_json("https://api.github.com/repos/o/r")
+    assert seen == [None, "Bearer tok-1"]
+
+
+def test_a_404_in_the_tag_name_is_not_a_missing_release(monkeypatch):
+    """The pinned tag may contain "404"; only the HTTP status decides."""
+    monkeypatch.setattr(cp, "_read_const", lambda rel, pattern: "b11404")
+    _router(monkeypatch, {"/releases/tags/": cp.FetchError("https://x/b11404: timed out", status=None)})
+    row = next(s for s in cp.build_registry() if s.name == "Linux CUDA build source").check(NOW)
+    assert row.status == cp.UNKNOWN
+
+
+def test_a_semver_key_keeps_a_fourth_component():
+    assert cp._semver_key("12.9.2.10") < cp._semver_key("12.9.2.11")
+    assert cp._semver_key("v1.122.1") == (1, 122, 1, 0)
+    assert cp._semver_key("1.2") == (1, 2, 0, 0)
+
+
+def test_the_cuda_wheel_age_comes_from_the_packages_that_are_behind_only(monkeypatch):
+    pins_text = cp._read_text("localm/setup_llama/cuda.py")
+    m = cp._CUDA_RUNTIME_RE.search(pins_text)
+    pinned = dict(cp.re.findall(r'"([a-z0-9._-]+)":\s*\(\s*"([^"]+)"', m.group(1)))
+    packages = list(pinned)
+    behind = packages[0]
+    old, fresh = NOW - dt.timedelta(days=900), NOW - dt.timedelta(days=2)
+    monkeypatch.setattr(cp, "_pypi_latest", lambda package: (
+        ("999.0.0", fresh) if package == behind else (pinned[package], old)))
+    row = next(s for s in cp.build_registry() if s.name == "Linux CUDA runtime wheels").check(NOW)
+    assert row.days == 2 and row.status == cp.BEHIND
+
+
+def test_a_fourth_component_bump_of_a_cuda_wheel_is_seen(monkeypatch):
+    pins_text = cp._read_text("localm/setup_llama/cuda.py")
+    m = cp._CUDA_RUNTIME_RE.search(pins_text)
+    pinned = dict(cp.re.findall(r'"([a-z0-9._-]+)":\s*\(\s*"([^"]+)"', m.group(1)))
+    package = next(p for p, v in pinned.items() if v.count(".") == 3)
+    major, minor, patch, build = pinned[package].split(".")
+    newer = f"{major}.{minor}.{patch}.{int(build) + 1}"
+    monkeypatch.setattr(cp, "_pypi_latest", lambda p: (newer if p == package else pinned[p], NOW))
+    row = next(s for s in cp.build_registry() if s.name == "Linux CUDA runtime wheels").check(NOW)
+    assert row.status == cp.BEHIND and newer in row.detail
+
+
+def test_an_accepted_blocker_turns_a_stale_row_into_blocked_until_it_expires():
+    rows = [cp.Row(name="vendored marked", status=cp.STALE, detail="56 newer release(s)")]
+    cp.apply_blockers(rows, NOW)
+    assert rows[0].status == cp.BLOCKED and "accepted until" in rows[0].detail and "56 newer" in rows[0].detail
+    assert cp.exit_code(rows) == cp.EXIT_OK
+
+
+def test_an_expired_blocker_is_stale_again():
+    rows = [cp.Row(name="vendored marked", status=cp.STALE)]
+    cp.apply_blockers(rows, dt.datetime(2027, 6, 1, tzinfo=dt.UTC))
+    assert rows[0].status == cp.STALE and cp.exit_code(rows) == cp.EXIT_STALE
+
+
+def test_a_blocker_never_hides_a_row_that_is_not_stale_or_behind():
+    rows = [cp.Row(name="vendored marked", status=cp.UNKNOWN), cp.Row(name="vendored marked", status=cp.INCONSISTENT)]
+    cp.apply_blockers(rows, NOW)
+    assert [r.status for r in rows] == [cp.UNKNOWN, cp.INCONSISTENT]
+
+
+def test_only_pins_with_a_written_reason_are_blocked():
+    for name, (expiry, reason) in cp.ACCEPTED_BLOCKERS.items():
+        assert name in {s.name for s in cp.build_registry()}
+        assert len(reason) > 20 and dt.datetime.strptime(expiry, "%Y-%m-%d")
+
+
+def test_unchecked_sources_are_listed_every_run_with_their_reason():
+    rows = cp.run_checks([s for s in cp.build_registry() if s.group == "unchecked"], NOW)
+    assert len(rows) == len(cp._NOT_CHECKABLE) >= 5
+    assert all(r.status == cp.UNVERSIONED and len(r.detail) > 10 for r in rows)
+
+
+def test_an_unchecked_source_whose_file_moved_is_inconsistent_not_silently_dropped(monkeypatch, tmp_path):
+    monkeypatch.setattr(cp, "REPO", tmp_path)
+    rows = cp.run_checks([s for s in cp.build_registry() if s.group == "unchecked"], NOW)
+    assert all(r.status == cp.INCONSISTENT and "is missing" in r.detail for r in rows)
 
 
 def test_registry_covers_every_inventory_group():
