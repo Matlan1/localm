@@ -88,7 +88,7 @@ class TestSecondRepoSharingAFileName:
         assert "File name already in use" in out
         assert f"'{NAME}' (hf:a/vae)" in out
         assert f"localm rm {NAME}" in out
-        for blamed in ("damaged", "incomplete", "SHA256 mismatch"):
+        for blamed in ("damaged", "incomplete", "SHA256 mismatch", "Already downloaded"):
             assert blamed not in out
 
     def test_a_file_registered_from_the_same_repo_still_reads_as_damaged(self, hub, capsys):

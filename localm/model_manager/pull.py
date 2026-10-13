@@ -1536,7 +1536,6 @@ def _pull_gguf_file(
 
     missing = [p for p in all_parts if not (base_dir / p).exists()]
     if not missing:
-        console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         # If the user asserted a hash, verify the file actually on disk before
         # treating it as the requested model.
         if want:
@@ -1582,6 +1581,7 @@ def _pull_gguf_file(
                     "incomplete, damaged or another version. Delete it and pull again."
                 )
                 return False
+        console.print(f"[yellow]Already downloaded:[/yellow] {escape(filename)}")
         if register:
             unusable = _mm.gguf_unusable_reason(dest)
             if unusable is not None:
