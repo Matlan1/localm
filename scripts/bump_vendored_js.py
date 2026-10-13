@@ -10,7 +10,7 @@ person reads the diff and the printed checklist, then merges.
 WHAT IT REWRITES (with ``--write``; without it, a summary and a unified diff
 are printed and nothing is touched):
 
-  marked        vendor/marked.min.js
+  marked        vendor/marked.min.js  (the release's lib/marked.umd.js)
                 tests-js/vendor-marked.test.mjs        VENDORED_VERSION,
                   PINNED_HASH, the dist.shasum and ``npm pack`` provenance
                   comments, the banner test title
@@ -116,7 +116,7 @@ class Lib:
 LIBS = {
     "marked": Lib(
         key="marked", npm="marked", test="vendor-marked.test.mjs",
-        files=(("package/marked.min.js", "marked.min.js"),),
+        files=(("package/lib/marked.umd.js", "marked.min.js"),),
         banner_re=r"marked v(\d+\.\d+\.\d+)", banner_file="marked.min.js",
         pinned=True, shasum_comment=True,
         title_re=r'(the banner comment says )(\d+\.\d+\.\d+)(")'),
