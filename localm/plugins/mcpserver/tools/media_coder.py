@@ -161,7 +161,8 @@ def coder_engine(engines: EngineCache, decision):
     for name in names:
         try:
             with _quiet_stdout():
-                engine = engines.get_loaded_chat(name)
+                engine = engines.get_loaded_chat(
+                    name, skip_if_latched=name != decision.current)
         except Exception as e:
             load_errors.append(f"{name}: {e}")
             _srv._log(f"warning: could not load {name} for a coder task: {e}")

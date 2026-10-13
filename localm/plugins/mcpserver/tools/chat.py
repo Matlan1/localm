@@ -87,7 +87,8 @@ def answer_with(engines: EngineCache, decision, run):
             # A load prints native sizing diagnostics straight to stdout, the
             # stream the JSON-RPC frames travel on.
             with _quiet_stdout():
-                engine = engines.get_loaded_chat(name)
+                engine = engines.get_loaded_chat(
+                    name, skip_if_latched=name != decision.current)
             try:
                 result = run(engine, name)
             except RuntimeError as e:

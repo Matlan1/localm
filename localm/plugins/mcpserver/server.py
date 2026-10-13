@@ -78,6 +78,16 @@ class ModelBusyError(RuntimeError):
     request past BUSY_WAIT_SECONDS."""
 
 
+class ModelLoadSkipped(RuntimeError):
+    """A load capability routing chose was refused because the model's last
+    load failed and that failure still applies. ``skipped`` is the latch's
+    record for the model."""
+
+    def __init__(self, skipped) -> None:
+        super().__init__(skipped.describe())
+        self.skipped = skipped
+
+
 def _log(msg: str) -> None:
     """Server-side logging - stderr only, stdout belongs to the protocol."""
     print(f"[localm-mcp] {msg}", file=sys.stderr, flush=True)
@@ -354,18 +364,39 @@ class EngineCache:
             self._peers.pop(name, None)
             self._peer_targets.pop(name, None)
 
-    def get_loaded_chat(self, name: str):
+    def get_loaded_chat(self, name: str, *, skip_if_latched: bool = False):
         """get_chat() with the model ready to answer. Another instance's copy
         found by an earlier call is used only while that instance still
         answers and accepts the credential it was verified with; otherwise it
         is dropped, and another instance's copy is looked for or the model is
         loaded here. This server's own engine is loaded before it is returned;
         one that fails to load is removed from the cache and the load error
-        raised."""
+        raised.
+
+        With *skip_if_latched* (a model capability routing chose, not one the
+        request named), a model that is neither loaded here nor another
+        instance's copy in use is not loaded while ``routing_latch()`` holds
+        it: ModelLoadSkipped is raised before anything is evicted. The latch
+        is read under the cache lock, after the route was planned."""
         with self._lock:
             if name in self._peers and not self._peer_still_answers(name):
                 self.drop_peer(name)
+            if skip_if_latched:
+                self._refuse_if_latched(name)
             return self._loaded(name, self.get_chat(name))
+
+    def _refuse_if_latched(self, name: str) -> None:
+        """Raise ModelLoadSkipped when *name* would have to be loaded here and
+        ``routing_latch()`` holds it. Caller must hold ``_lock``."""
+        own = self._engines.get(name)
+        if (own is not None and getattr(own, "loaded", False) is True
+                and getattr(own, "unloading", False) is not True):
+            return
+        if name in self._peers:
+            return
+        latched = self.routing_latch().skipped([name])
+        if name in latched:
+            raise ModelLoadSkipped(latched[name])
 
     def get_loaded(self, name: str):
         """This server's own engine for *name* (see get), loaded before it is
