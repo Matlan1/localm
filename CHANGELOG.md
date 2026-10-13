@@ -514,6 +514,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Q8_0 and an f16 projector (such as `mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF`), the pull took the
   f16 one, and speaking with it crashed the speech worker on the CPU and on AMD ROCm. A text-to-speech
   pull now takes the Q8_0 projector, then bf16, and f16 only when nothing else is there.
+- **Brave Search failures named correctly.** When web search falls back to Brave and localm cannot read
+  the page Brave sends, the message now says so instead of calling it a bot check (Brave's normal
+  results page mentions captchas in its interface text).
 - **A failed image generation names the real reason.** `/v1/images/generations` answered a failed
   generation with the chat model's reload note ("Reload deferred to the next message"), which comes
   after it; the `502` now quotes what the image backend reported.
@@ -549,6 +552,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   leaves the model loaded without drafting. A crash while loading the draft model now names
   the draft model and `spec_source` instead of advising a smaller context, and replacing the
   draft model file clears the retry back-off.
+- **gpt-oss replies reach their answer.** A gpt-oss reply stopped at the end of its
+  reasoning, so the answer came back empty; it now continues into the answer.
+- **Thinking off on gpt-oss.** Asking a model to answer without reasoning
+  (`chat_template_kwargs: {"enable_thinking": false}`, `reasoning_effort: "none"`, and the
+  summary written when a long conversation is compacted) now starts a gpt-oss reply in its
+  final channel, with no analysis before it. Before, only models that reason in `<think>`
+  blocks were affected.
+- **A llama runtime whose context-parameter layout cannot be told apart is refused.** When
+  a provided llama.cpp build's default context parameters fit both the layout with and the
+  one without the MoE expert cache field, loading stops with the ABI mismatch message
+  instead of assuming the older layout.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's
@@ -1792,6 +1806,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a model's info and relocate buttons show that they are working, the Models page and the
   instances card show a loading line on first open, and Settings shows that its remaining
   sections are still loading.
+- **Adding one Ollama model folder keeps its vision projector.** `localm add` on a single
+  Ollama manifest folder now attaches the model's vision projector, as adding the whole Ollama
+  store already did.
+- **A Hugging Face cache whose `blobs` folder is a link to another drive** now registers the
+  model from its snapshot path, not from the hash-named blob.
+- **Quantizations localm cannot load are named.** A Hugging Face folder quantized with a
+  method the loader has no support for (for example `squeezellm`) is registered with a note
+  naming the method and refused at load, instead of having its packed weights read as plain
+  ones. Old-format LoRA adapters and llama.cpp session files are now recognised and explained,
+  and a text file named `.plan`, `.task` or `.engine` is no longer described as a TensorRT or
+  MediaPipe file.
+- **Memory estimates for split GGUF models and LoRA adapters.** An embedding table stored in
+  a later part of a split GGUF now counts as host memory, and attached LoRA adapters now count
+  toward the VRAM estimate.
+- **Linux CUDA setup without the GitHub API.** When the release listing cannot be read
+  (offline, or the API rate limit is hit), setup installs the pinned CUDA build and checks it
+  against its pinned checksum. On a machine with GPUs of different generations, one Blackwell
+  GPU now selects the CUDA 13 build.
 
 ### Security
 - **A plain `coder` API key can no longer run commands through the project's coder

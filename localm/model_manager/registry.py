@@ -52,7 +52,7 @@ from .gguf import gguf_adapter_incompatibility, gguf_adapter_kind
 from .gguf import gguf_capability_metadata, gguf_registry_metadata
 from .gguf import _gguf_metadata_probe
 from .gguf import HubCacheScan
-from .gguf import is_hub_blob
+from .gguf import is_hub_blob_link
 from .gguf import hub_snapshot_repo_id
 from .gguf import logical_model_path
 from .gguf import scan_hub_cache
@@ -3571,10 +3571,7 @@ _HUB_MOVE_REFUSAL = (
 
 def _is_hub_cache_link(path: Path) -> bool:
     """True when *path* is a symlink into a Hugging Face hub cache blob."""
-    try:
-        return path.is_symlink() and is_hub_blob(path.resolve())
-    except OSError:
-        return False
+    return is_hub_blob_link(path)
 
 
 def _primary_name_collision(gguf: Path, claimed: dict) -> Optional[str]:
@@ -4194,16 +4191,52 @@ def _scan_ollama_root(root: Path):
         if not _has_gguf_magic(blob):
             problems.append(f"{label}: the model is not a GGUF file")
             continue
-        projector, proj_problem = _ollama_layer_blob(blobs, layers, _OLLAMA_PROJECTOR_LAYER)
+        projector, proj_problem = _ollama_checked_projector(blobs, layers)
         if proj_problem:
             problems.append(f"{label}: no vision projector attached, {proj_problem}")
-        elif projector is not None and not (
-                _has_gguf_magic(projector) and gguf_is_mmproj(projector)):
-            problems.append(f"{label}: no vision projector attached, "
-                            "its projector layer is not a GGUF projector")
-            projector = None
         models.append(_OllamaModel(label, blob, projector))
     return models, problems
+
+
+def _ollama_checked_projector(blobs: Path, layers: list):
+    """``(projector_blob, problem)`` for the projector layer in *layers*: the blob
+    when it is a GGUF vision projector, else None and the reason. ``(None, None)``
+    when there is no projector layer."""
+    projector, problem = _ollama_layer_blob(blobs, layers, _OLLAMA_PROJECTOR_LAYER)
+    if problem:
+        return None, problem
+    if projector is not None and not (_has_gguf_magic(projector) and gguf_is_mmproj(projector)):
+        return None, "its projector layer is not a GGUF projector"
+    return projector, None
+
+
+def _ollama_manifest_projector(manifest_dir: Path, blob: Path) -> Optional[Path]:
+    """The vision projector blob of the tag in *manifest_dir* whose model layer is
+    *blob* (a file in the store's ``blobs`` folder), or None when that tag has no
+    usable projector. A projector that is present but unusable is reported."""
+    import json as _json
+    from rich.markup import escape
+
+    try:
+        tag_files = sorted(f for f in manifest_dir.iterdir() if f.is_file())
+    except OSError:
+        return None
+    for tag_file in tag_files:
+        try:
+            manifest = _json.loads(tag_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        layers = manifest.get("layers") if isinstance(manifest, dict) else None
+        if not isinstance(layers, list):
+            continue
+        model_blob, _problem = _ollama_layer_blob(blob.parent, layers, _OLLAMA_MODEL_LAYER)
+        if model_blob != blob:
+            continue
+        projector, problem = _ollama_checked_projector(blob.parent, layers)
+        if problem:
+            console.print(f"[yellow]No vision projector attached:[/yellow] {escape(problem)}")
+        return projector
+    return None
 
 
 def _add_local_ollama_root(
@@ -4384,10 +4417,12 @@ def add_local(
         # sync_models_dir uses, so a '../evil' or 'a/b' name can never become a
         # raw registry key.
         model_name = _sanitize_name(name) if name else suggested
+        effective = model_type if model_type is not None else "llm"
         return _register_ollama_blob(
             blob_path, model_name, on_duplicate=on_duplicate,
-            model_type=(model_type if model_type is not None else "llm"),
-            store=store,
+            model_type=effective, store=store,
+            projector=(_ollama_manifest_projector(p, blob_path)
+                       if effective == "llm" else None),
         )
 
     # A llamafile (an executable with a ZIP of its weights appended) is unpacked

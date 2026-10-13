@@ -21,6 +21,7 @@ see ``_free_total_vram_bytes``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -1098,11 +1099,29 @@ class VramSizingMixin:
         return sum(size for layer, size in self._moe_expert_bytes_by_layer().items()
                    if layer < n_cpu_moe)
 
+    def _adapter_bytes(self) -> int:
+        """Bytes on disk of the LoRA adapters attached to this load; a missing
+        or unreadable adapter file counts as 0."""
+        total = 0
+        for adapter in getattr(self, "adapters", None) or ():
+            try:
+                total += os.path.getsize(adapter[0])
+            except OSError:
+                continue
+        return total
+
     def _vram_model_bytes(self, n_cpu_moe: int) -> int:
         """VRAM-resident weight bytes for a load that keeps the routed experts
-        of the first *n_cpu_moe* layers in system RAM: ``_model_bytes()`` minus
-        the input-layer tensors (every load) and those experts. See
-        :meth:`_effective_model_bytes_for_vram`."""
+        of the first *n_cpu_moe* layers in system RAM: the base model's
+        (:meth:`_base_vram_model_bytes`) plus the attached LoRA adapters'
+        (:meth:`_adapter_bytes`). See :meth:`_effective_model_bytes_for_vram`."""
+        return self._base_vram_model_bytes(n_cpu_moe) + self._adapter_bytes()
+
+    def _base_vram_model_bytes(self, n_cpu_moe: int) -> int:
+        """The model file's VRAM-resident weight bytes for a load that keeps the
+        routed experts of the first *n_cpu_moe* layers in system RAM:
+        ``_model_bytes()`` minus the input-layer tensors (every load) and those
+        experts."""
         model_bytes = self._model_bytes()
         parsed = self._gguf_parsed_tensor_entries()
 
@@ -1813,7 +1832,7 @@ class VramSizingMixin:
         n_cpu_moe = self._load_n_cpu_moe()
         if n_cpu_moe > 0 and not self._block_bytes():
             return None
-        return max(0, model_bytes - self._vram_model_bytes(n_cpu_moe))
+        return max(0, model_bytes - self._base_vram_model_bytes(n_cpu_moe))
 
     def _cpu_held_weight_bytes(self, gpu_layers: int) -> Optional[int]:
         """Weight bytes a load with *gpu_layers* below 99 keeps in system RAM:

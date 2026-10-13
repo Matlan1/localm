@@ -4264,14 +4264,6 @@
                 }
             },
             {
-                "code": "reportGeneralTypeIssues",
-                "range": {
-                    "startColumn": 37,
-                    "endColumn": 43,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportIndexIssue",
                 "range": {
                     "startColumn": 58,
@@ -10652,14 +10644,6 @@
                 "range": {
                     "startColumn": 39,
                     "endColumn": 43,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 43,
-                    "endColumn": 48,
                     "lineCount": 1
                 }
             },
