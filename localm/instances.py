@@ -188,6 +188,41 @@ def unregister_instance(path) -> None:
         pass
 
 
+#: Registry files written by advertise() in this process, by instance id.
+_OWN_PATHS: dict = {}
+
+
+def unregister_own(instance_id: Optional[str]) -> Optional[dict]:
+    """Remove the registry entry advertise() wrote in this process for
+    *instance_id*. For a process that leaves without advertise()'s exit
+    (``os._exit``, ``os.execv``). Returns the removed entry, for
+    :func:`restore_own`, or None when this process wrote none for that id.
+    Never touches a file another process wrote."""
+    if not instance_id:
+        return None
+    path = _OWN_PATHS.pop(instance_id, None)
+    if path is None:
+        return None
+    entry = read_entry(path)
+    if entry is not None:
+        entry["_path"] = str(path)
+    unregister_instance(path)
+    return entry
+
+
+def restore_own(entry: Optional[dict]) -> None:
+    """Write back, at the path it was removed from, an entry
+    :func:`unregister_own` removed, for a process that is still serving after
+    all. No-op for None."""
+    if not entry or not entry.get("_path") or not entry.get("instance_id"):
+        return
+    path = Path(entry["_path"])
+    body = {k: v for k, v in entry.items() if k != "_path"}
+    from localm.config import atomic_write_private
+    atomic_write_private(path, json.dumps(body, indent=2))
+    _OWN_PATHS[entry["instance_id"]] = path
+
+
 def set_mode(home: Path, instance_id: str, mode: str) -> bool:
     """Update the SURFACE mode of this instance's registry entry in place
     (e.g. ``api`` -> ``full`` after an on-demand GUI mount), atomically.
@@ -980,9 +1015,11 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
             home, instance_id=instance_id, port=port, host=host,
             root_dir=root_dir, mode=mode, token=token, scheme=scheme,
         )
+        _OWN_PATHS[instance_id] = path
     try:
         yield {"instance_id": instance_id, "root_dir": root_dir, "port": port,
                "token": token, "path": str(path) if path else None}
     finally:
         if path is not None:
+            _OWN_PATHS.pop(instance_id, None)
             unregister_instance(path)

@@ -605,6 +605,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **`localm ps` no longer lists a stopped or restarted server.** Stopping a server, or
+  restarting it from Settings, used to leave its entry behind, so after a restart `localm ps`
+  showed the same process twice and `localm stop <old id>` stopped the running server. The
+  entry is now removed on stop and restart, and `localm stop` on an entry a restart left behind
+  only removes the entry.
 - **Pulling a file whose name another repository's model already uses no longer calls it
   damaged.** The pull is still refused, since the models folder keeps one file per name, but the
   message now says the name is in use, names the registered model that holds it and how to

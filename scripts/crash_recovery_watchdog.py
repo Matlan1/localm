@@ -12,6 +12,10 @@ meant to recover from one - the same reasoning as ``update_watchdog.py``.
 It watches exactly one pid/instance and returns as soon as ONE of these is
 true, and never follows a transition to a different pid:
 
+* the watched instance's crash marker is gone while its pid still runs: the
+  instance restarted in place (os.execv keeps the pid on POSIX) or is stopping
+  cleanly. The restarted instance spawns its own watchdog.
+
 * the watched pid answers ``GET /whoami`` with an instance_id other than its
   own within the grace window after exiting: an ordinary restart or update
   was already in flight. Nothing to do - that instance's own run_server()
@@ -306,7 +310,7 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
        crash_dir: Path, relaunch_argv: list, restart_history: list,
        poll_interval: float, grace_s: float, request_timeout: float,
        log_path: Optional[Path]) -> int:
-    """Watch exactly one pid/instance until ONE of three things happens, then
+    """Watch exactly one pid/instance until ONE of the module's conditions holds, then
     return - this watchdog never follows a transition to a new pid. Whatever
     replaces the watched instance (a relaunch this call performs, or an
     ordinary restart/update already in flight) goes through run_server()
@@ -327,9 +331,16 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
         except Exception:
             pass
 
+    marker = marker_path(crash_dir, instance_id)
     try:
         watch_started = time.monotonic()
         while pid_alive(pid):
+            if not marker.exists():
+                _log(log_path,
+                    f"{marker.name} is gone while pid {pid} is still running - "
+                    "the instance restarted in place or is stopping cleanly. "
+                    "Nothing to watch.")
+                return EXIT_OK
             time.sleep(poll_interval)
         watched_for = time.monotonic() - watch_started
 
@@ -351,7 +362,6 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
             except Exception:
                 pass
 
-    marker = marker_path(crash_dir, instance_id)
     if not marker.exists():
         _log(log_path,
             f"pid {pid} is gone and {marker.name} is gone - this was "
