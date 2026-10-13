@@ -330,16 +330,6 @@ def test_a_video_queued_behind_another_job_says_so_and_cancels_at_once(fake_vide
     assert not (tmp_path / "q.mp4").exists()
 
 
-def test_a_video_queued_behind_another_job_says_so_and_cancels_at_once(fake_video, tmp_path):
-    from tests.test_image_native_backend import _cancel_while_queued
-    runner, s = fake_video
-    lines = _cancel_while_queued(
-        lambda cancel, say: native.generate(s, "p", tmp_path / "q.mp4", write_sidecar=False,
-                                            cancel_check=cancel, on_progress=say), runner)
-    assert len(lines) == 1
-    assert not (tmp_path / "q.mp4").exists()
-
-
 def test_missing_pyav_is_a_clear_error(fake_video, monkeypatch):
     _runner, s = fake_video
     monkeypatch.setitem(sys.modules, "av", None)

@@ -249,19 +249,6 @@ def test_an_upscale_queued_behind_another_job_cancels_at_once(qol, tmp_path):
     assert runner.upscales == [] and not (tmp_path / "o.png").exists()
 
 
-def test_an_upscale_queued_behind_another_job_cancels_at_once(qol, tmp_path):
-    from tests.test_image_native_backend import _cancel_while_queued
-    runner, s = qol
-    up = tmp_path / "up.safetensors"
-    up.write_bytes(b"x")
-    _register("up4x", up, "upscaler")
-    src = _png(tmp_path / "src.png")
-    _cancel_while_queued(
-        lambda cancel, say: native.upscale(s, src, "up4x", tmp_path / "o.png",
-                                           cancel_check=cancel, on_progress=say), runner)
-    assert runner.upscales == [] and not (tmp_path / "o.png").exists()
-
-
 def test_upscale_keeps_the_alpha_channel(qol, tmp_path):
     runner, s = qol
     up = tmp_path / "up.safetensors"
