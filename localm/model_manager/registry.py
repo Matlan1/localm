@@ -346,6 +346,7 @@ class ComfySource:
     model_type: str       # "diffusion-unet" | "text-encoder" | "vae" | "lora"
     comfy_subfolder: str  # ComfyUI models/<subfolder> this file belongs in
     size_bytes: int
+    sha256: Optional[str] = None  # passed to the pull as --sha256 when set
 
 
 # filename (exact, as ComfyUI's /object_info reports it) -> curated download source
@@ -357,38 +358,43 @@ class ComfySource:
 # (exact-filename lookup, no fuzzy/heuristic matching) - see
 # resolve_comfy_model_source().
 #
-# ae.safetensors is sourced from the ungated Apache-2.0 FLUX.1-schnell repo rather
-# than the gated (license-click-through) FLUX.1-dev repo: the file is
-# byte-identical in both, and sourcing it from the ungated repo avoids a
-# HuggingFace license-gate failure for users who have not accepted the FLUX.1-dev
-# non-commercial license.
+# Every entry carries the sha256 the downloaded file must have; a pull whose
+# bytes differ is deleted.
 COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
     "flux1-dev-Q8_0.gguf": ComfySource(
         "city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf",
-        "diffusion-unet", "unet", 12_708_281_504),
+        "diffusion-unet", "unet", 12_708_281_504,
+        "129032f32224bf7138f16e18673d8008ba5f84c1ec74063bf4511a8bb4cf553d"),
     "clip_l.safetensors": ComfySource(
         "comfyanonymous/flux_text_encoders:clip_l.safetensors",
-        "text-encoder", "clip", 246_144_152),
+        "text-encoder", "clip", 246_144_152,
+        "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"),
     "t5xxl_fp8_e4m3fn.safetensors": ComfySource(
         "comfyanonymous/flux_text_encoders:t5xxl_fp8_e4m3fn.safetensors",
-        "text-encoder", "clip", 4_893_934_904),
+        "text-encoder", "clip", 4_893_934_904,
+        "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"),
     "ae.safetensors": ComfySource(
-        "black-forest-labs/FLUX.1-schnell:ae.safetensors",
-        "vae", "vae", 335_304_388),
+        "Comfy-Org/z_image_turbo:split_files/vae/ae.safetensors",
+        "vae", "vae", 335_304_388,
+        "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"),
     "ace_step_v1_3.5b.safetensors": ComfySource(
         "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors",
-        "diffusion-unet", "checkpoints", 7_699_743_341),
+        "diffusion-unet", "checkpoints", 7_699_743_341,
+        "f07cad74c4adce52ca14ca1bdf74cf3c14cbafb0823b95eca4459467fa369f40"),
     "wan2.2_ti2v_5B_fp16.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
         "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
-        "diffusion-unet", "diffusion_models", 9_999_658_848),
+        "diffusion-unet", "diffusion_models", 9_999_658_848,
+        "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e"),
     "umt5_xxl_fp8_e4m3fn_scaled.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
         "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-        "text-encoder", "text_encoders", 6_735_906_897),
+        "text-encoder", "text_encoders", 6_735_906_897,
+        "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"),
     "wan2.2_vae.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:split_files/vae/wan2.2_vae.safetensors",
-        "vae", "vae", 1_409_400_960),
+        "vae", "vae", 1_409_400_960,
+        "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"),
 }
 
 

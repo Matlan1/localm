@@ -548,6 +548,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **The FLUX VAE offered for a missing ComfyUI workflow file downloads again.** `ae.safetensors`
+  came from a Hugging Face repository that now requires a licence click-through and answers
+  401 to an anonymous download. It now comes from an open repository that holds the same file.
 - **A half-copied GGUF file is no longer registered by a folder import.** `localm add
   <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
   whose header declares more tensor data than the file holds, and one named `incomplete-...`
@@ -2013,9 +2016,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Querying or deleting a RAG collection that does not exist, with an API key confined to
   specific folders, now returns 404 like it does for every other caller**, instead of a 403
   that implied the collection exists but is off-limits.
-- **The default music models are checked against a fixed sha256.** Downloading the four
-  ACE-Step 1.5 files from the Music page or with `localm setup-music` now fails and
-  deletes the file when its bytes are not the expected ones.
+- **The default music models and the curated ComfyUI models are checked against a fixed
+  sha256.** Downloading the four ACE-Step 1.5 files (Music page, `localm setup-music`) or one
+  of the eight models offered when a ComfyUI workflow is missing a file now fails and deletes
+  the file when its bytes are not the expected ones. The weekly pin report lists these digests
+  and flags one the hub no longer serves.
 
 ## [0.2.0] - 2026-09-04
 

@@ -465,7 +465,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 "'ComfyUI folder' field in Settings > Media (per-plugin or "
                 "shared), or enable the managed ComfyUI instance.")
         args = ["pull", "--type", source.model_type, "--comfy-dest-dir", str(dest_dir),
-                "--no-register", "--", source.spec]
+                "--no-register"]
+        if source.sha256:
+            args += ["--sha256", source.sha256]
+        args += ["--", source.spec]
         job = jobs.start_cli("pull", args, extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
