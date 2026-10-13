@@ -50,6 +50,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -354,9 +355,34 @@ def run_comfyui_confirm(tag: str, commit: str, receipt_path: Path) -> int:
 #  See test_run_bump_uses_the_worktrees_own_copy_not_the_main_checkout.      #
 # --------------------------------------------------------------------------- #
 
+MIN_FREE_BYTES = 4 * 1024 ** 3
+
+
+def check_free_space(path: Path, minimum: int = MIN_FREE_BYTES) -> None:
+    """Raise InfraError when the drive holding *path* has less than *minimum* bytes free."""
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    free = shutil.disk_usage(probe).free
+    if free < minimum:
+        raise InfraError(f"only {free // 1024 ** 2} MiB free on the drive holding {probe}; "
+                         f"at least {minimum // 1024 ** 2} MiB is needed to build and test a bump")
+
+
+def worktree_temp_dir(worktree: Path) -> Path:
+    """Scratch directory beside the pipeline worktree (same drive) that every test and
+    npm process started for it uses as its temp and cache location."""
+    return worktree.parent / f"{worktree.name}-tmp"
+
+
 def _worktree_env(worktree: Path) -> dict:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(worktree)
+    temp = worktree_temp_dir(worktree)
+    temp.mkdir(parents=True, exist_ok=True)
+    for name in ("TMP", "TEMP", "TMPDIR"):
+        env[name] = str(temp)
+    env["npm_config_cache"] = str(temp / "npm-cache")
     return env
 
 
@@ -543,7 +569,17 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
         "    The pin was NOT advanced. This candidate will not be retried automatically unless\n"
         "    a newer upstream release appears.\n\n"
     )
-    issues_path.write_text(text[:m.end()] + entry + text[m.end():], encoding="utf-8")
+    updated = text[:m.end()] + entry + text[m.end():]
+    staged = issues_path.with_name(issues_path.name + ".pin-write.tmp")
+    try:
+        staged.write_text(updated, encoding="utf-8")
+        try:
+            os.replace(staged, issues_path)
+        except PermissionError:
+            print(f"WARNING: {issues_path.name} is held open elsewhere; writing it in place")
+            issues_path.write_text(updated, encoding="utf-8")
+    finally:
+        staged.unlink(missing_ok=True)
     return True
 
 
@@ -664,12 +700,17 @@ def sync_main_checkout(repo: Path = REPO) -> None:
                          f"{result.stderr}")
 
 
+def pipeline_worktree_path(repo: Path = REPO) -> Path:
+    """Where the dedicated pipeline worktree for *repo* lives (it may not exist yet)."""
+    return repo.parent / f"{repo.name}-pin-pipeline-worktree"
+
+
 def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
     """The dedicated worktree this script's own branch operations run from,
     never the shared main checkout. Raises PipelineError unless *repo*
     resolves as its own git toplevel and is currently on master."""
     _verify_main_checkout(repo)
-    worktree_path = repo.parent / f"{repo.name}-pin-pipeline-worktree"
+    worktree_path = pipeline_worktree_path(repo)
     existing = _run_git(["worktree", "list", "--porcelain"], cwd=repo).stdout
     if str(worktree_path) not in existing and str(worktree_path).replace("\\", "/") not in existing:
         _run_git(["fetch", "origin"], cwd=repo, check=False)
@@ -707,10 +748,32 @@ def close_stale_pr(branch: str, worktree: Path) -> None:
             raise InfraError(f"could not delete stale remote branch {branch}: {result.stderr}")
 
 
+def clear_worktree_temp(worktree: Path) -> None:
+    """Delete the worktree's temp directory, clearing read-only flags first. A file that
+    still cannot be removed is reported on stdout; the run continues."""
+    temp = worktree_temp_dir(worktree)
+    if not temp.exists():
+        return
+    failures: list[str] = []
+
+    def _force(func, path, exc):
+        try:
+            os.chmod(path, 0o700)
+            func(path)
+        except OSError as e:
+            failures.append(f"{path}: {e}")
+
+    shutil.rmtree(temp, onexc=_force)
+    if failures:
+        print(f"WARNING: could not remove {len(failures)} item(s) under {temp}, e.g. {failures[0]}")
+
+
 def reset_pipeline_worktree(worktree: Path) -> None:
     """Discard every uncommitted change and untracked file in the dedicated pipeline
     worktree, so one pin's leftover edit can never ride along in another pin's commit.
-    Raises InfraError when git refuses or the tree is still not clean afterwards."""
+    Also empties the worktree's temp directory. Raises InfraError when git refuses or
+    the tree is still not clean afterwards."""
+    clear_worktree_temp(worktree)
     for args in (["reset", "--hard"], ["clean", "-fd"]):
         result = _run_git(args, cwd=worktree)
         if result.returncode != 0:
@@ -728,6 +791,7 @@ def prepare_bump_branch(worktree: Path, candidate: str, *, pin: str = "llama") -
     before. See test_prepare_bump_branch_refuses_when_fetch_fails."""
     branch = f"claude/pin-pipeline-{pin}-{candidate}"
     reset_pipeline_worktree(worktree)
+    check_free_space(worktree.parent)
     result = _run_git(["fetch", "origin"], cwd=worktree)
     if result.returncode != 0:
         raise InfraError(f"git fetch origin failed: {result.stderr}")
@@ -761,8 +825,7 @@ def commit_and_push(worktree: Path, branch: str, candidate: str, old_tag: str,
     text so the llama call site needs no change."""
     commit_msg = message or (
         f"chore(llamacpp): advance the pinned build to {candidate}\n\n"
-        f"Automated: confirmed via scripts/confirm_llama_runtime.py on cpu+vulkan "
-        f"(real hardware, this machine) before advancing from {old_tag}.\n\n"
+        f"Moves the bundled llama.cpp build from {old_tag} to {candidate}.\n\n"
         "Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>\n")
     _run_git(["add", "-u"], cwd=worktree)
     result = _run_git(["commit", "-m", commit_msg], cwd=worktree)
@@ -780,10 +843,8 @@ def open_pr(worktree: Path, branch: str, candidate: str, old_tag: str,
     change."""
     title = title or f"chore(llamacpp): advance the pinned build to {candidate}"
     body = body or (
-        f"Automated: confirmed llama.cpp {candidate} loads and generates on cpu and "
-        f"vulkan (real hardware) before advancing the pin from {old_tag}. See "
-        "scripts/confirm_llama_runtime.py and scripts/bump_llama_pin.py for what was "
-        "checked. The bundled-runtime CHANGELOG bullet is included in this diff.\n\n"
+        f"Moves the bundled llama.cpp build from {old_tag} to {candidate}. "
+        "The bundled-runtime CHANGELOG bullet is included in this diff.\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
     result = _run_gh(["pr", "create", "--title", title, "--body", body, "--head", branch], worktree)
     if result.returncode != 0:
@@ -858,8 +919,7 @@ def merge_pr(pr_number: int, worktree: Path, branch: str, candidate: str, old_ta
     as open_pr()."""
     title = title or f"chore(llamacpp): advance the pinned build to {candidate}"
     body = body or (
-        f"Automated: confirmed llama.cpp {candidate} loads and generates on cpu and "
-        f"vulkan (real hardware) before advancing the pin from {old_tag}.\n\n"
+        f"Moves the bundled llama.cpp build from {old_tag} to {candidate}.\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
     head_sha = _run_git(["rev-parse", "HEAD"], cwd=worktree).stdout.strip()
     result = _run_gh(["pr", "merge", str(pr_number), "--squash", "--match-head-commit", head_sha,
@@ -1171,17 +1231,12 @@ def run_comfyui_pipeline(*, dry_run: bool) -> int:
             raise PipelineError(f"targeted tests failed after the bump:\n{test_out[-2000:]}")
 
         commit_msg = (f"chore(comfyui): advance the pinned build to {candidate}\n\n"
-                     f"Automated: confirmed via scripts/confirm_comfyui_runtime.py "
-                     f"(real ROCm hardware, this machine) before advancing from "
-                     f"{old_tag}.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>\n")
+                     f"Moves the bundled ComfyUI build from {old_tag} to {candidate}.\n\n"
+                     f"Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>\n")
         commit_and_push(worktree, branch, candidate, old_tag, message=commit_msg)
 
-        pr_body = (f"Automated: confirmed ComfyUI {candidate} ({commit[:12]}) installs and "
-                  f"runs (real GPU kernel, real ROCm hardware) before advancing the pin "
-                  f"from {old_tag}. See scripts/confirm_comfyui_runtime.py and "
-                  f"scripts/bump_comfyui_pin.py for what was checked; this confirm is "
-                  f"deliberately model-free (see the receipt's own not_covered list). "
-                  f"The CHANGELOG bullet is included in this diff.\n\n"
+        pr_body = (f"Moves the bundled ComfyUI build from {old_tag} to {candidate} "
+                  f"({commit[:12]}). The CHANGELOG bullet is included in this diff.\n\n"
                   f"🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
         pr_title = f"chore(comfyui): advance the pinned build to {candidate}"
         pr_number = open_pr(worktree, branch, candidate, old_tag, title=pr_title, body=pr_body)
