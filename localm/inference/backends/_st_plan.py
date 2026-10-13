@@ -72,7 +72,7 @@ def _pooling_modes(config: dict) -> tuple:
     elif isinstance(mode, list):
         modes = tuple(m for m in mode if isinstance(m, str))
     else:
-        modes = tuple(name for flag, name in _LEGACY_POOLING_FLAGS if config.get(flag))
+        modes = tuple(name for flag, name in _LEGACY_POOLING_FLAGS if config.get(flag)) or ("mean",)
     unknown = [m for m in modes if m not in _POOLING_MODES]
     if unknown or not modes:
         raise StUnsupportedError(
@@ -82,7 +82,11 @@ def _pooling_modes(config: dict) -> tuple:
 
 
 def _activation(config: dict, stage: str) -> str:
-    name = str(config.get("activation_function") or "torch.nn.modules.linear.Identity")
+    name = config.get("activation_function")
+    if not isinstance(name, str) or not name:
+        raise StUnsupportedError(
+            f"the Dense stage {stage!r} of this sentence-transformers folder names no "
+            "activation_function")
     short = name.rsplit(".", 1)[-1]
     if short not in _ACTIVATIONS:
         raise StUnsupportedError(
@@ -123,6 +127,14 @@ def load_plan(model_path: str) -> Optional[StPlan]:
             config = _read_json(folder / sub / "config.json")
             if not isinstance(config, dict):
                 raise StUnsupportedError(f"{sub}/config.json of the Dense stage is missing")
+            if config.get("use_residual"):
+                raise StUnsupportedError(
+                    f"the Dense stage {sub!r} of this sentence-transformers folder adds a "
+                    "residual connection, which localm does not run")
+            if config.get("module_input_name", "sentence_embedding") != "sentence_embedding":
+                raise StUnsupportedError(
+                    f"the Dense stage {sub!r} of this sentence-transformers folder reads "
+                    f"{config.get('module_input_name')!r}, not the sentence embedding")
             weights = folder / sub / "model.safetensors"
             if not weights.is_file():
                 raise StUnsupportedError(
@@ -198,6 +210,7 @@ def apply_plan(torch, plan: StPlan, hidden, mask, cache: dict):
     states *hidden* (1, seq, dim) under the attention *mask* (1, seq). *cache*
     holds the Dense weights already read from disk, keyed by file."""
     vector = None
+    hidden = hidden.float()
     for stage in plan.stages:
         if stage.kind == "pooling":
             vector = _pool(torch, hidden, mask, stage.pooling_modes)

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -636,7 +637,9 @@ def register(app: FastAPI, ctx) -> None:
                 raise HTTPException(
                     422, f"Model {resolved_model!r} is a reranker, not an embedding "
                     "model: it scores query and document pairs (POST /v1/rerank).")
-        if _is_registered_embedder or _is_configured_embedder:
+        _is_folder_model = (isinstance(_entry, dict)
+                            and Path(str(_entry.get("path") or "")).is_dir())
+        if (_is_registered_embedder or _is_configured_embedder) and not _is_folder_model:
             from localm.inference.embedder import embed_texts, last_error
             loop = asyncio.get_running_loop()
             texts_emb = [req.input] if isinstance(req.input, str) else req.input

@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import types
 
 import pytest
 
@@ -98,10 +99,26 @@ class TestPlanParsing:
         with pytest.raises(StUnsupportedError, match="attention"):
             load_plan(str(tmp_path))
 
-    def test_no_pooling_flag_set_is_refused(self, tmp_path):
+    @pytest.mark.parametrize("config", [
+        {"pooling_mode_cls_token": False}, {"word_embedding_dimension": 8}])
+    def test_no_pooling_mode_set_means_mean_pooling_like_the_library(self, tmp_path, config):
         _write(tmp_path, "modules.json", _modules("transformer", "pooling"))
-        _write(tmp_path, "1_Pooling/config.json", {"pooling_mode_cls_token": False})
-        with pytest.raises(StUnsupportedError):
+        _write(tmp_path, "1_Pooling/config.json", config)
+        assert load_plan(str(tmp_path)).stages[0].pooling_modes == ("mean",)
+
+    @pytest.mark.parametrize("dense_config, why", [
+        ({"activation_function": "torch.nn.modules.activation.Tanh", "use_residual": True},
+         "residual"),
+        ({"activation_function": "torch.nn.modules.activation.Tanh",
+          "module_input_name": "token_embeddings"}, "token_embeddings"),
+        ({"in_features": 8}, "activation_function"),
+    ])
+    def test_a_dense_stage_localm_cannot_reproduce_is_refused(self, tmp_path, dense_config, why):
+        _write(tmp_path, "modules.json", _modules("transformer", "pooling", "dense"))
+        _write(tmp_path, "1_Pooling/config.json", {"pooling_mode": "mean"})
+        _write(tmp_path, "2_Dense/config.json", dense_config)
+        (tmp_path / "2_Dense" / "model.safetensors").write_bytes(b"x")
+        with pytest.raises(StUnsupportedError, match=why):
             load_plan(str(tmp_path))
 
     def test_a_dense_stage_with_only_a_pickle_is_refused_by_name(self, tmp_path):
@@ -302,6 +319,30 @@ class TestEmbeddingThroughTheStages:
         assert cut == pytest.approx(three_words, abs=1e-6)
         assert cut != pytest.approx(two_words, abs=1e-6)
 
+    def test_a_folder_declaring_a_generative_architecture_still_counts_as_an_embedder(
+            self, bert_folder, tmp_path):
+        from localm.inference.backends._hf_worker import HFWorker
+        folder = _variant(bert_folder, tmp_path, ("transformer", "pooling"),
+                          {"pooling_mode": "lasttoken"})
+        config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+        config["architectures"] = ["BertLMHeadModel"]
+        (folder / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        worker = HFWorker(str(folder), device="cpu")
+        worker.load()
+        try:
+            assert worker.can_embed is True
+        finally:
+            worker.unload()
+
+    def test_a_roberta_style_model_loses_two_positions_from_the_window(self):
+        from localm.inference.backends._hf_worker import HFWorker
+        worker = HFWorker("nowhere", device="cpu")
+        worker.context_capacity = 514
+        worker._model = types.SimpleNamespace(config=types.SimpleNamespace(model_type="roberta"))
+        assert worker._usable_positions() == 512
+        worker._model = types.SimpleNamespace(config=types.SimpleNamespace(model_type="bert"))
+        assert worker._usable_positions() == 514
+
     def test_the_encoder_is_loaded_without_a_language_model_head(self, bert_folder, tmp_path):
         from localm.inference.backends._hf_worker import HFWorker
         folder = _variant(bert_folder, tmp_path, ("transformer", "pooling"),
@@ -332,9 +373,26 @@ class TestPlainEncoder:
         _close(_embed(bert_folder), expected)
 
 
-def test_the_stdout_filter_passes_through_what_a_terminal_probe_asks():
+def test_the_stdout_filter_passes_through_what_a_terminal_probe_asks(monkeypatch):
+    import io
+
     from localm.inference.backends._hf_worker import _filter_docstring_leak
 
+    class Tty(io.StringIO):
+        encoding = "latin-1"
+
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(sys, "stdout", Tty())
     with _filter_docstring_leak():
-        assert sys.stdout.isatty() in (True, False)
-        assert hasattr(sys.stdout, "write")
+        assert sys.stdout.isatty() is True
+        assert sys.stdout.encoding == "latin-1"
+
+
+def test_a_stdout_filter_without_a_target_raises_attribute_error_not_recursion():
+    from localm.inference.backends._hf_worker import _DocstringLeakFilter
+
+    bare = object.__new__(_DocstringLeakFilter)
+    with pytest.raises(AttributeError):
+        _ = bare.isatty

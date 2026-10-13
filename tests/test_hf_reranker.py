@@ -125,6 +125,11 @@ class TestHeadCheck:
         b = self._safetensors(tmp_path / "b.safetensors", ["classifier.bias"])
         assert classifier_head_present([a, b]) is True
 
+    @pytest.mark.parametrize("name", ["classification_head.out_proj.weight", "logits_proj.weight"])
+    def test_other_families_name_their_head_differently(self, tmp_path, name):
+        a = self._safetensors(tmp_path / "a.safetensors", ["model.x", name])
+        assert classifier_head_present([a]) is True
+
     def test_no_files_or_an_unreadable_one_is_unknown(self, tmp_path):
         assert classifier_head_present([]) is None
         bad = tmp_path / "bad.safetensors"
@@ -222,9 +227,22 @@ class TestRealCrossEncoder:
 
     def test_a_second_call_reuses_the_resident_worker(self, cross_encoder):
         reranker.rerank(str(cross_encoder), _QUERY, ["w3"])
-        first = reranker.reranker_info()
+        resident, pid = reranker._RERANKER, reranker._RERANKER._runner._proc.pid
         reranker.rerank(str(cross_encoder), _QUERY, ["w4"])
-        assert reranker.reranker_info() == first and first["path"] == str(cross_encoder)
+        assert reranker._RERANKER is resident
+        assert resident._runner._proc.pid == pid
+        assert reranker.reranker_info()["path"] == str(cross_encoder)
+
+    def test_a_dead_worker_is_started_again_on_the_next_call(self, cross_encoder):
+        before = reranker.rerank(str(cross_encoder), _QUERY, _DOCS)
+        resident = reranker._RERANKER
+        old = resident._runner._proc
+        old.kill()
+        old.join(10)
+        after = reranker.rerank(str(cross_encoder), _QUERY, _DOCS)
+        assert reranker._RERANKER is resident
+        assert resident._runner._proc.pid != old.pid
+        assert after.scored == before.scored
 
     def test_more_than_one_chunk_of_documents_keeps_the_request_order(self, cross_encoder):
         docs = [f"w{i} w{i + 1}" for i in range(1, 41)]

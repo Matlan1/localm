@@ -60,9 +60,17 @@ class RerankerUnavailableError(RuntimeError):
 
 
 def _file_key(path: str) -> tuple[str, int, int]:
+    """Identity of the model at *path*: its resolved path with the mtime and size
+    of the file, or for a model folder the newest mtime and the total size of the
+    files directly in it."""
     try:
-        st = Path(path).stat()
-        return (str(Path(path).resolve()), st.st_mtime_ns, st.st_size)
+        p = Path(path)
+        if p.is_dir():
+            stats = [c.stat() for c in p.iterdir() if c.is_file()]
+            return (str(p.resolve()), max((s.st_mtime_ns for s in stats), default=0),
+                    sum(s.st_size for s in stats))
+        st = p.stat()
+        return (str(p.resolve()), st.st_mtime_ns, st.st_size)
     except OSError:
         return (str(path), 0, 0)
 
@@ -214,15 +222,24 @@ class HFReranker:
         from localm.inference.backends.hf import HFBackend
         self.model_path = path
         self.active_requests = 0
+        self._call_lock = threading.Lock()
         self._backend = HFBackend(path, device=device, task="rerank")
         self._backend.load()
         self.cls_labels = list(self._backend.rerank_labels)
         self._runner = self._backend._runner
 
     def rerank(self, pairs: list[tuple[str, str]]) -> list[dict]:
+        """Score *pairs*, starting the worker again first when it has died."""
         self.active_requests += 1
         try:
-            return self._backend.rerank(pairs)
+            with self._call_lock:
+                if not self._backend.loaded:
+                    logger.warning("reranker worker is not running; reloading %s",
+                                   self.model_path)
+                    self._backend.unload()
+                    self._backend.load()
+                    self._runner = self._backend._runner
+                return self._backend.rerank(pairs)
         finally:
             self.active_requests = max(0, self.active_requests - 1)
 

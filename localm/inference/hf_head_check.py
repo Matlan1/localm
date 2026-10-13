@@ -16,8 +16,9 @@ from localm.debuglog import logger
 
 # Tensor-name prefixes of a sequence-classification head: ``classifier.*`` for the
 # BERT, RoBERTa, XLM-R, DeBERTa and ModernBERT families, ``score.*`` for the
-# decoder-based ones (Qwen2, Llama, Gemma).
-HEAD_PREFIXES = ("classifier.", "score.")
+# decoder-based ones (Qwen2, Llama, Gemma), ``classification_head.*`` for Bart,
+# MBart and T5, ``logits_proj.*`` for XLNet and XLM.
+HEAD_PREFIXES = ("classifier.", "score.", "classification_head.", "logits_proj.")
 
 
 def classifier_head_present(files: list) -> Optional[bool]:

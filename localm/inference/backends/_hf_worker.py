@@ -125,6 +125,8 @@ class _DocstringLeakFilter:
         return bool(getattr(self._target, "isatty", lambda: False)())
 
     def __getattr__(self, name: str):
+        if name == "_target":
+            raise AttributeError(name)
         return getattr(self._target, name)
 
 
@@ -1596,7 +1598,7 @@ class HFWorker:
         model = self._model
         if model is None:
             return True                      # unknown until loaded; the load decides
-        if hasattr(model, "encode"):
+        if hasattr(model, "encode") or self._st_plan is not None:
             return True                      # sentence-transformer: purpose-built
         declared = self._declared_generative()
         if declared is not None:
@@ -1651,8 +1653,9 @@ class HFWorker:
         max_length = 512
         if plan is not None:
             max_length = plan.max_seq_length
-            if self.context_capacity:
-                max_length = min(max_length, self.context_capacity)
+            positions = self._usable_positions()
+            if positions:
+                max_length = min(max_length, positions)
         model.train(False)
         with torch.no_grad():
             for text in texts:
@@ -1674,6 +1677,15 @@ class HFWorker:
                     vec = (hidden * mask).sum(1) / mask.sum(1)
                 embeddings.append(vec[0].cpu().tolist())
         return embeddings
+
+    def _usable_positions(self) -> Optional[int]:
+        """The most tokens the model's position table holds (less the two positions
+        a RoBERTa-style model reserves), or None when the model declares none."""
+        if not self.context_capacity:
+            return None
+        config = getattr(self._model, "config", None)
+        reserved = 2 if getattr(config, "model_type", "") in _OFFSET_POSITION_MODELS else 0
+        return self.context_capacity - reserved
 
     def _rerank_window(self) -> int:
         """The most tokens one query and document pair may take: the smallest of
