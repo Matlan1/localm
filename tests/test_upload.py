@@ -176,15 +176,39 @@ def _raw_multipart(filename: bytes, data: bytes, boundary: bytes = b"BoUnDaRy"):
 def test_upload_rejects_illegal_filename_chars(scoped_app):
     key = _writer_key()
     with TestClient(scoped_app) as c:
-        # A Windows ADS name ("x.txt:stream") and a literal NUL must be rejected
-        # (skipped), never written and never a bare 500.
-        for fname in [b"real.txt:stream", b"ev\x00il.txt", b"n<o>.txt"]:
+        # A Windows ADS name ("x.txt:stream") and an illegal-character name must
+        # be rejected (skipped), never written and never a bare 500.
+        for fname in [b"real.txt:stream", b"n<o>.txt"]:
             body, ct = _raw_multipart(fname, b"payload")
             r = c.post("/api/upload", headers={**_hdr(key), "Content-Type": ct},
                        content=body)
             assert r.status_code == 400, f"{fname!r} -> {r.status_code} {r.text}"
     up = scoped_app.state._home / "uploads"
     assert not up.exists() or list(up.iterdir()) == [], "no illegal-named file written"
+
+
+def test_upload_strips_a_nul_from_the_name_never_writes_it(scoped_app):
+    key = _writer_key()
+    with TestClient(scoped_app) as c:
+        body, ct = _raw_multipart(b"ev\x00il.txt", b"payload")
+        r = c.post("/api/upload", headers={**_hdr(key), "Content-Type": ct},
+                   content=body)
+        assert r.status_code == 200, r.text
+    up = scoped_app.state._home / "uploads"
+    assert [p.name for p in up.iterdir()] == ["evil.txt"]
+
+
+def test_upload_refuses_a_malformed_multipart_body(scoped_app):
+    key = _writer_key()
+    with TestClient(scoped_app) as c:
+        ct = "multipart/form-data; boundary=BoUnDaRy"
+        for body in (b"--BoUnDaRy\r\n" * 3, b"no delimiter at all"):
+            r = c.post("/api/upload", headers={**_hdr(key), "Content-Type": ct},
+                       content=body)
+            assert r.status_code == 400, r.text
+        r = c.post("/api/upload", headers={**_hdr(key), "Content-Type": "text/plain"},
+                   content=b"x")
+        assert r.status_code == 415, r.text
 
 
 def test_confined_upload_path_rejects_illegal_chars(scoped_app):
