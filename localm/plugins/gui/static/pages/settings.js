@@ -5,6 +5,7 @@
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
+import { refreshCtxLimit } from "../app/chat.js";
 import { t, tOr } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
@@ -212,6 +213,8 @@ function settingsFieldCatalogKey(fieldKey) {
 
 /** Build one labelled control for a schema field. Returns { field, read } or
  *  null for HIDDEN fields (never rendered). */
+let _settingControlSeq = 0;
+
 export function buildSettingControl(field) {
   if (field.widget === "hidden") return null;
   const value = field.default;     // current value (omitted for secrets)
@@ -532,6 +535,9 @@ export function buildSettingControl(field) {
     }
   }
   input.dataset.key = field.key;
+  // Ties the label to this control, so the label names it for assistive tech.
+  input.id = `setting-${++_settingControlSeq}-${field.key}`;
+  label.htmlFor = input.id;
   // R10: editing any control marks the page dirty (programmatic value-setting
   // above does not fire these events, so building a control stays clean).
   input.addEventListener("input", () => markSettingDirty(input));
@@ -1525,6 +1531,8 @@ export async function saveSettingsSection(secId) {
     // security decision behind a diff.
     clearImageProxyCache();
     refreshSettingsPage();   // re-render to reflect server-normalized values
+    // Re-reads the session mode and the other chat values a save can change.
+    refreshCtxLimit();
   } else {
     toast(data.detail || "Save failed", true);
   }

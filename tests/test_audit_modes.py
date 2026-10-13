@@ -3,6 +3,7 @@
 
 import json
 import sys
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -244,12 +245,32 @@ def _engine():
     return engine
 
 
-def _make_app(tmp_path, mode):
+class _Config:
+    """A config whose session mode a test can change while the server runs."""
+
+    def __init__(self, mode):
+        self.cfg = _cfg(mode=mode, n_ctx_max=16384)
+
+    def set_mode(self, mode):
+        self.cfg = {**self.cfg, "mode": mode}
+
+    def load(self):
+        return dict(self.cfg)
+
+
+@contextmanager
+def _server(tmp_path, mode, engine=None):
+    """A TestClient for a server whose config starts in *mode*, with its session
+    files in *tmp_path*. Yields ``(client, config)``; ``config.set_mode`` changes
+    the configured mode for every later read."""
     from localm.inference.http_server import create_app
+    config = _Config(mode)
     with patch("localm.audit._SESSIONS_DIR", tmp_path), \
-         patch("localm.config.load_config",
-               return_value=_cfg(mode=mode, n_ctx_max=16384)):
-        return create_app(_engine())
+         patch("localm.config.load_config", side_effect=config.load):
+        app = create_app(engine or _engine())
+        with TestClient(app) as client:
+            client.headers["Authorization"] = f"Bearer {app.state.shell_token}"
+            yield client, config
 
 
 _CHAT_BODY = {
@@ -258,27 +279,32 @@ _CHAT_BODY = {
 }
 
 
+def _chat(client, text):
+    r = client.post("/v1/chat/completions", json={
+        "model": "test-model", "messages": [{"role": "user", "content": text}]})
+    assert r.status_code == 200
+    return r
+
+
+def _session_text(tmp_path, pattern):
+    return "".join(p.read_text(encoding="utf-8") for p in sorted(tmp_path.glob(pattern)))
+
+
 class TestServerModes:
     @pytest.fixture(autouse=True)
     def _no_env(self, monkeypatch):
         monkeypatch.delenv("LOCALM_MODE", raising=False)
 
     def test_privacy_writes_nothing(self, tmp_path):
-        app = _make_app(tmp_path, "privacy")
-        with patch("localm.audit._SESSIONS_DIR", tmp_path):
-            with TestClient(app) as client:
-                r = client.post("/v1/chat/completions", json=_CHAT_BODY)
-        assert r.status_code == 200
+        with _server(tmp_path, "privacy") as (client, _config):
+            _chat(client, "what is up")
         entries = list(tmp_path.iterdir())
         assert [p.name for p in entries if p.is_file()] == []
         assert [p.name for p in entries if p.is_dir()] == [".localm"]
 
     def test_log_mode_audits_exchange(self, tmp_path):
-        app = _make_app(tmp_path, "log")
-        with patch("localm.audit._SESSIONS_DIR", tmp_path):
-            with TestClient(app) as client:
-                r = client.post("/v1/chat/completions", json=_CHAT_BODY)
-        assert r.status_code == 200
+        with _server(tmp_path, "log") as (client, _config):
+            _chat(client, "what is up")
         files = list(tmp_path.glob("*_server.jsonl"))
         assert len(files) == 1
         text = files[0].read_text(encoding="utf-8")
@@ -288,41 +314,147 @@ class TestServerModes:
         assert not list(tmp_path.glob("*.md"))
 
     def test_log_mode_audits_streamed_exchange(self, tmp_path):
-        app = _make_app(tmp_path, "log")
-        with patch("localm.audit._SESSIONS_DIR", tmp_path):
-            with TestClient(app) as client:
-                with client.stream("POST", "/v1/chat/completions",
-                                   json={**_CHAT_BODY, "stream": True}) as r:
-                    assert r.status_code == 200
-                    for _ in r.iter_lines():
-                        pass
+        with _server(tmp_path, "log") as (client, _config):
+            with client.stream("POST", "/v1/chat/completions",
+                               json={**_CHAT_BODY, "stream": True}) as r:
+                assert r.status_code == 200
+                for _ in r.iter_lines():
+                    pass
         files = list(tmp_path.glob("*_server.jsonl"))
         assert len(files) == 1
         text = files[0].read_text(encoding="utf-8")
         assert "what is up" in text and "Hi there" in text
 
     def test_full_mode_also_writes_markdown(self, tmp_path):
-        app = _make_app(tmp_path, "full")
-        with patch("localm.audit._SESSIONS_DIR", tmp_path):
-            with TestClient(app) as client:
-                r = client.post("/v1/chat/completions", json=_CHAT_BODY)
-        assert r.status_code == 200
+        with _server(tmp_path, "full") as (client, _config):
+            _chat(client, "what is up")
         md = list(tmp_path.glob("*_server.md"))
         assert len(md) == 1
         text = md[0].read_text(encoding="utf-8")
         assert "what is up" in text and "Hi there" in text
 
     def test_config_reports_effective_mode(self, tmp_path):
-        app = _make_app(tmp_path, "log")
-        with TestClient(app) as client:
-            with patch("localm.config.load_config",
-                       return_value=_cfg(mode="log")):
-                data = client.get("/v1/config", headers={"Authorization": f"Bearer {app.state.shell_token}"}).json()
+        with _server(tmp_path, "log") as (client, _config):
+            data = client.get("/v1/config").json()
         assert data["effective_mode"] == "log"
         # /v1/config always carries a stable per-data-directory id so the GUI can
         # tell a restart of THIS install apart from a different install on the
         # same browser origin.
         assert data["instance_id"], "instance_id must be present and non-empty"
+
+
+class TestServerModeFollowsTheConfig:
+    """A change of the configured mode applies to the running server at once."""
+
+    @pytest.fixture(autouse=True)
+    def _no_env(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_MODE", raising=False)
+
+    def test_switching_privacy_to_full_records_the_next_exchange(self, tmp_path):
+        with _server(tmp_path, "privacy") as (client, config):
+            _chat(client, "said in privacy")
+            config.set_mode("full")
+            assert client.get("/v1/config").json()["effective_mode"] == "full"
+            _chat(client, "said in full")
+        log = _session_text(tmp_path, "*_server.jsonl")
+        md = _session_text(tmp_path, "*_server.md")
+        assert "said in full" in log and "said in full" in md
+        assert "said in privacy" not in log + md
+
+    def test_switching_full_to_privacy_stops_recording_at_once(self, tmp_path):
+        with _server(tmp_path, "full") as (client, config):
+            _chat(client, "said in full")
+            config.set_mode("privacy")
+            assert client.get("/v1/config").json()["effective_mode"] == "privacy"
+            _chat(client, "said in privacy")
+        log = _session_text(tmp_path, "*_server.jsonl")
+        md = _session_text(tmp_path, "*_server.md")
+        assert "said in full" in log and "said in full" in md
+        assert "said in privacy" not in log + md
+        assert log.rstrip().endswith('"data": {"msg": "session ended"}}')
+
+    def test_switching_full_to_privacy_mid_stream_does_not_record_that_reply(self, tmp_path):
+        engine = _engine()
+        holder = {}
+
+        def _tokens(messages, **kw):
+            yield "Hi"
+            holder["config"].set_mode("privacy")
+            yield " there"
+
+        engine.chat_stream.side_effect = _tokens
+        with _server(tmp_path, "full", engine=engine) as (client, config):
+            holder["config"] = config
+            with client.stream("POST", "/v1/chat/completions", json={
+                    "model": "test-model", "stream": True,
+                    "messages": [{"role": "user", "content": "streamed secret"}]}) as r:
+                assert r.status_code == 200
+                body = "".join(r.iter_lines())
+        assert "there" in body
+        assert config.load()["mode"] == "privacy"
+        assert "streamed secret" not in _session_text(tmp_path, "*_server.*")
+
+    def test_a_settings_save_of_the_mode_applies_without_a_restart(self, tmp_path):
+        """The real PATCH /v1/config path the Settings page uses, against the
+        real config file, not a patched load_config."""
+        from localm.inference.http_server import create_app
+        with patch("localm.audit._SESSIONS_DIR", tmp_path):
+            app = create_app(_engine())
+            with TestClient(app) as client:
+                client.headers["Authorization"] = f"Bearer {app.state.shell_token}"
+                assert client.get("/v1/config").json()["effective_mode"] == "privacy"
+                r = client.patch("/v1/config", json={"mode": "full"})
+                assert r.status_code == 200, r.text
+                cfg = client.get("/v1/config").json()
+                assert (cfg["mode"], cfg["effective_mode"]) == ("full", "full")
+                _chat(client, "after the save")
+                r = client.patch("/v1/config", json={"mode": "privacy"})
+                assert r.status_code == 200, r.text
+        assert "after the save" in _session_text(tmp_path, "*_server.md")
+
+
+class TestSessionRecorder:
+    @pytest.fixture(autouse=True)
+    def _no_env(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_MODE", raising=False)
+
+    def test_a_mode_whose_files_cannot_open_keeps_the_previous_mode_and_warns_once(
+            self, tmp_path, caplog):
+        from localm.audit import SessionRecorder
+        config = _Config("privacy")
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("localm.config.load_config", side_effect=config.load):
+            recorder = SessionRecorder("server", label="server")
+            config.set_mode("log")
+            with patch("localm.audit.AuditLog", side_effect=PermissionError("denied")), \
+                 caplog.at_level("WARNING", logger="localm"):
+                first = recorder.current()
+                second = recorder.current()
+            warnings = [r for r in caplog.records
+                        if "could not take effect" in r.getMessage()]
+            assert len(warnings) == 1
+            assert "denied" in warnings[0].getMessage()
+            assert first[2] == second[2] == SessionMode.PRIVACY
+            assert isinstance(second[0], NullAuditLog)
+            audit, _transcript, mode = recorder.current()
+            assert mode == SessionMode.LOG and isinstance(audit, AuditLog)
+            recorder.close()
+
+    def test_close_ends_the_log_and_records_nothing_after(self, tmp_path):
+        from localm.audit import SessionRecorder
+        config = _Config("log")
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("localm.config.load_config", side_effect=config.load):
+            recorder = SessionRecorder("server", label="server")
+            path = recorder.current()[0].path
+            recorder.close()
+            recorder.close()
+            audit, transcript, _mode = recorder.current()
+            assert isinstance(audit, NullAuditLog) and transcript is None
+            config.set_mode("full")
+            assert isinstance(recorder.current()[0], NullAuditLog)
+        assert path.read_text(encoding="utf-8").count("session ended") == 1
+        assert list(tmp_path.glob("*.jsonl")) == [path]
 
 
 # ------------------------------------------------------------------ #

@@ -317,6 +317,95 @@ test("GUI-LIVE-WIPE: leaving privacy mode re-arms the wipe latch, so a LATER " +
     "the sidebar must be repainted clean on the second privacy confirmation too");
 });
 
+// Answers /v1/config with window.__mode and records every PUT to the
+// conversation store in window.__puts.
+const MODE_SWITCH_FETCH = `
+  window.__puts = [];
+  window.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u === "/v1/config") {
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => ({ effective_mode: window.__mode, n_ctx_max: 16384,
+                              instance_id: "backend-x" }) };
+    }
+    if (u.startsWith("/api/conversations/") && opts && opts.method === "PUT") {
+      window.__puts.push(u);
+    }
+    if (u.startsWith("/api/conversations")) {
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => ({ enabled: window.__mode !== "privacy", conversations: [] }) };
+    }
+    return { ok: true, status: 200, text: async () => "",
+      json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  window.chatState = chat;
+`;
+
+test("a Settings switch out of privacy mode while the page is open saves the " +
+     "conversation on screen and drops the privacy hint", async () => {
+  const { window } = loadApp({ fetchImpl: makeFetch({ instanceId: "backend-x" }) });
+  runScript(window, `window.__mode = "privacy";` + MODE_SWITCH_FETCH + `refreshCtxLimit();`);
+  await drain();
+  assert.equal(window.chatState.privacy, true);
+  assert.ok(window.document.getElementById("privacy-hint"),
+    "precondition: privacy mode shows its hint");
+
+  runScript(window, `
+    chat.conversations.push({
+      id: "typed-in-privacy", title: "Typed in privacy", updated_at: 1000,
+      pinned: false, folder: null, branches: [],
+      messages: [{ role: "user", content: "keep me" }, { role: "assistant", content: "ok" }],
+    });
+    chat.activeId = "typed-in-privacy";
+    saveConversations();
+  `);
+  assert.equal(window.localStorage.getItem("localm.conversations"), null,
+    "precondition: nothing is stored while in privacy mode");
+
+  runScript(window, `window.__mode = "full"; refreshCtxLimit();`);
+  await drain();
+
+  assert.equal(window.chatState.privacy, false);
+  assert.equal(window.document.getElementById("privacy-hint"), null,
+    "the privacy hint must go once the server reports a non-privacy mode");
+  const stored = window.localStorage.getItem("localm.conversations") || "";
+  assert.ok(stored.includes("keep me"),
+    "the conversation on screen must be saved once the mode leaves privacy");
+  assert.ok(await waitFor(() => window.__puts.some((u) => u.endsWith("/typed-in-privacy"))),
+    "the conversation must reach the server store once it reports enabled");
+});
+
+test("a Settings switch into privacy mode while the page is open stops pushing " +
+     "to the server store and drops the history-saved hint", async () => {
+  const { window } = loadApp({ fetchImpl: makeFetch({ instanceId: "backend-x" }) });
+  runScript(window, `window.__mode = "full";` + MODE_SWITCH_FETCH +
+            `refreshCtxLimit().then(initServerConversations);`);
+  await drain();
+  assert.equal(window.chatState.persist, true, "precondition: the store is in use");
+  assert.ok(window.document.getElementById("persist-hint"),
+    "precondition: full mode shows the history-saved hint");
+  runScript(window, `
+    pushConversation({ id: "before-switch", title: "x", updated_at: 1, pinned: false,
+      folder: null, branches: [], messages: [{ role: "user", content: "hi" }] });
+  `);
+  assert.ok(await waitFor(() => window.__puts.some((u) => u.endsWith("/before-switch"))),
+    "positive control: a push before the switch reaches the store");
+
+  runScript(window, `window.__mode = "privacy"; refreshCtxLimit();`);
+  await drain();
+
+  assert.equal(window.chatState.privacy, true);
+  assert.equal(window.chatState.persist, false);
+  assert.equal(window.document.getElementById("persist-hint"), null);
+  runScript(window, `
+    pushConversation({ id: "after-switch", title: "x", updated_at: 1, pinned: false,
+      folder: null, branches: [], messages: [{ role: "user", content: "secret" }] });
+  `);
+  await settle(700);
+  assert.equal(window.__puts.filter((u) => u.endsWith("/after-switch")).length, 0,
+    "nothing typed after the switch into privacy mode may reach the store");
+});
+
 test("reconcileInstanceId: a matching id returns \"confirmed\" (nothing wiped)", () => {
   const { window } = loadApp();
   window.localStorage.setItem("localm.instanceId", "same-id");
