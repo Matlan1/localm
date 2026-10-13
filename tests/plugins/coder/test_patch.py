@@ -279,3 +279,10 @@ DIFF_PY = """\
 def test_realistic_python_patch():
     result = apply_diff(ORIGINAL_PY, DIFF_PY)
     assert result == PATCHED_PY
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+def test_trailing_blank_lines_survive_an_edit(eol):
+    original = eol.join(["a", "b", "", ""])
+    diff = "@@ -2,1 +2,1 @@\n-b\n+B\n"
+    assert apply_diff(original, diff) == eol.join(["a", "B", "", ""])

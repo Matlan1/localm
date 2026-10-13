@@ -21,6 +21,10 @@ from localm.inference.http_server import require_scope
 from localm.multipartform import MultipartError, read_form
 
 
+# Most file parts one upload request may carry.
+_MAX_UPLOAD_PARTS = 1000
+
+
 def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/upload", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
@@ -34,6 +38,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             form = await read_form(
                 request, max_bytes=_web._MAX_UPLOAD_BYTES,
+                max_parts=_MAX_UPLOAD_PARTS,
                 too_large=f"Upload too large (max {cap_mb} MB per request).")
         except MultipartError as e:
             raise HTTPException(e.status, e.message) from e

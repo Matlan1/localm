@@ -103,7 +103,8 @@ def register(app: FastAPI, ctx) -> None:
         try:
             form = await read_form(
                 request, max_bytes=_SHARE_MAX_BYTES + _SHARE_FORM_OVERHEAD_BYTES,
-                too_large="Shared content is too large.")
+                too_large="Shared content is too large.",
+                max_field_bytes=_SHARE_MAX_BYTES)
         except MultipartError as e:
             raise HTTPException(e.status, e.message) from e
         _sweep_expired(app, _web._share_inbox(create=False))
@@ -121,9 +122,8 @@ def register(app: FastAPI, ctx) -> None:
             safe = Path(filename or "shared").name[:80] or "shared"
             # Path().name alone is NOT a sufficient sanitizer: it leaves
             # "photo:stream.png" intact, which on NTFS writes into an alternate
-            # data stream that /api/share/pending cannot list, and leaves an
-            # embedded NUL intact, which raises ValueError out of write_bytes as
-            # a bare 500. Reuses /api/upload's guard. This route REFUSES where
+            # data stream that /api/share/pending cannot list. Reuses
+            # /api/upload's guard. This route REFUSES where
             # /api/upload skips: it returns only a redirect carrying a count, so
             # a silent skip would be invisible to the caller.
             if not _web._name_is_safe(safe):

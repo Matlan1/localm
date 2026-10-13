@@ -241,6 +241,24 @@ class TestMalformedBodies:
         form = parse_multipart(_manual([part] * MAX_FIELDS), b"BOUND")
         assert len(form.fields["a"]) == MAX_FIELDS
 
+    def test_max_parts_override_raises_and_lowers_the_cap(self):
+        part = b'Content-Disposition: form-data; name="a"\r\n\r\nx'
+        body = _manual([part] * (MAX_FIELDS + 1))
+        form = parse_multipart(body, b"BOUND", max_parts=MAX_FIELDS + 1)
+        assert len(form.fields["a"]) == MAX_FIELDS + 1
+        with pytest.raises(MultipartError) as e:
+            parse_multipart(body, b"BOUND", max_parts=MAX_FIELDS)
+        assert e.value.status == 413
+
+    def test_max_field_bytes_override_raises_and_lowers_the_cap(self):
+        body = _manual([b'Content-Disposition: form-data; name="a"\r\n\r\n'
+                        + b"x" * (MAX_FIELD_BYTES + 1)])
+        form = parse_multipart(body, b"BOUND", max_field_bytes=MAX_FIELD_BYTES + 1)
+        assert len(form.first("a")) == MAX_FIELD_BYTES + 1
+        with pytest.raises(MultipartError) as e:
+            parse_multipart(body, b"BOUND", max_field_bytes=MAX_FIELD_BYTES)
+        assert e.value.status == 413
+
 
 class TestReadLimitedBody:
     def test_declared_length_over_limit_is_refused_before_reading(self):

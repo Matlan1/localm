@@ -324,3 +324,14 @@ class TestConfinedUploadPathAliasSubstitution:
             r = c.delete("/api/uploads/LongModelNameThatIsVeryLong.gguf", headers=_hdr(key))
             assert r.status_code == 200, r.text
         assert not (up / "LongModelNameThatIsVeryLong.gguf").exists()
+
+
+def test_upload_accepts_more_files_than_the_default_form_part_cap(scoped_app):
+    from localm.multipartform import MAX_FIELDS
+    key = _writer_key()
+    n = MAX_FIELDS + 8
+    with TestClient(scoped_app) as c:
+        r = c.post("/api/upload", headers=_hdr(key),
+                   files=[("file", (f"f{i}.txt", b"x")) for i in range(n)])
+        assert r.status_code == 200, r.text
+        assert len(r.json()["uploaded"]) == n

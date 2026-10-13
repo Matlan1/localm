@@ -596,3 +596,18 @@ def test_the_gui_carries_no_second_multipart_parser():
     from localm.plugins.gui import web
     assert not hasattr(web, "_parse_multipart")
     assert not hasattr(web, "_multipart_boundary")
+
+
+def test_a_long_shared_text_is_accepted_and_truncated(share_client):
+    from localm.multipartform import MAX_FIELD_BYTES
+    text = "t" * (MAX_FIELD_BYTES + 6000)
+    r = share_client.post(
+        "/share-target", data={"text": text},
+        files={"_": ("", b"", "application/octet-stream")},
+        follow_redirects=False)
+    assert r.status_code == 303
+    items = share_client.get("/api/share/pending").json()["items"]
+    assert [i["name"] for i in items] == ["shared.txt"]
+    import base64
+    payload = items[0]["data_uri"].split(",", 1)[1]
+    assert len(base64.b64decode(payload)) == 20000
