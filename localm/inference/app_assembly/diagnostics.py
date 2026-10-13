@@ -131,7 +131,7 @@ def add_debug_stacks(app: FastAPI) -> None:
             from localm.debuglog import logger as _dbg
             _dbg.warning("/debug/stacks: executor snapshot failed: %s", e, exc_info=True)
             executors = {}
-            executors_error = f"{type(e).__name__}: {e}"
+            executors_error = "the executor snapshot failed; the server log has the details"
         # None (cold start, before the heartbeat's first tick) renders as
         # JSON null, never as 0.0, so a stack dump taken during startup is not
         # reported as identically healthy to one taken with a real lag
