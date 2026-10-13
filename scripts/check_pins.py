@@ -470,6 +470,64 @@ def _check_docker_base(now):
     return row
 
 
+_ASSET_TABLE_RE = re.compile(r"^_PINNED_FALLBACK_SHA256 = \{\n(.*?)^\}", re.MULTILINE | re.DOTALL)
+_ASSET_ENTRY_RE = re.compile(r'"([^"]+\.(?:zip|tar\.gz))":\s*"([0-9a-f]{64})"')
+_LEMONADE_REPO = "lemonade-sdk/llamacpp-rocm"
+
+
+def _check_llama_asset_checksums(now):
+    """Every sha256 pinned for a llama.cpp or ROCm build against the digest GitHub now
+    publishes for that asset, so a re-uploaded asset or a mistyped checksum is seen."""
+    name, group, advancer = "llama.cpp asset checksums", "llama", "pin_weekly.py (llama, rocm)"
+    pins = "localm/setup_llama/pins.py"
+    try:
+        tag = _read_const(pins, r'^_PINNED_TAG = "([^"]+)"')
+        rocm_tag = _read_const(pins, r'^_ROCM_TAG = "([^"]+)"')
+        cpu_tag = _read_const(pins, r'^_ROCM_CPU_TAG = "([^"]+)"')
+        upstream = _read_const(pins, r'^_UPSTREAM_REPO = "([^"]+)"')
+        block = _ASSET_TABLE_RE.search(_read_text(pins))
+        if not block:
+            raise LocalReadError(f"{pins}: _PINNED_FALLBACK_SHA256 table not found")
+        table = dict(_ASSET_ENTRY_RE.findall(block.group(1)))
+        if not table:
+            raise LocalReadError(f"{pins}: _PINNED_FALLBACK_SHA256 table is empty")
+        sources = {(upstream, tag): {}, (upstream, cpu_tag): {}, (_LEMONADE_REPO, rocm_tag): {}}
+        for asset, sha in table.items():
+            if asset.startswith(f"llama-{rocm_tag}-"):
+                sources[(_LEMONADE_REPO, rocm_tag)][asset] = sha
+            elif asset.startswith(f"llama-{cpu_tag}-"):
+                sources[(upstream, cpu_tag)][asset] = sha
+            else:
+                sources[(upstream, tag)][asset] = sha
+        wrong, missing, checked = [], [], 0
+        for (repo, release_tag), pinned in sources.items():
+            if not pinned:
+                continue
+            release = _get_json(f"https://api.github.com/repos/{repo}/releases/tags/{release_tag}")
+            published = {a.get("name"): str(a.get("digest") or "").removeprefix("sha256:").lower()
+                         for a in release.get("assets", []) if isinstance(a, dict)}
+            for asset, sha in pinned.items():
+                if asset not in published:
+                    if release_tag in asset:
+                        missing.append(asset)
+                    continue
+                checked += 1
+                if published[asset] != sha:
+                    wrong.append(asset)
+    except FetchError as e:
+        return _unknown(name, group, advancer, e)
+    pinned_label = f"{tag}, {cpu_tag}, {rocm_tag}"
+    if wrong or missing:
+        return Row(name=name, status=STALE if wrong else INCONSISTENT, pinned=pinned_label,
+                   advancer=advancer, group=group,
+                   detail=(f"{len(wrong)} checksum(s) differ from the published digest: "
+                           f"{', '.join(wrong[:3])}" if wrong else "")
+                   + (f" {len(missing)} pinned asset(s) are not in the release: {', '.join(missing[:3])}"
+                      if missing else ""))
+    return Row(name=name, status=CURRENT, pinned=pinned_label, latest=pinned_label, days=0,
+               advancer=advancer, group=group, detail=f"{checked} pinned checksum(s) match the published digests")
+
+
 _CUDA_RUNTIME_RE = re.compile(r'^_CUDA_RUNTIME_PIN = \{(.*?)^\}', re.MULTILINE | re.DOTALL)
 
 
@@ -688,6 +746,7 @@ def build_registry() -> list[PinSpec]:
         PinSpec("ComfyUI-GGUF node", "comfyui", "pin_weekly.py (review PR)", _check_gguf_node),
         PinSpec("uv (installers + Docker)", "tooling", "pin_weekly.py", _check_uv),
         PinSpec("Docker base image", "tooling", "pin_weekly.py (review PR)", _check_docker_base),
+        PinSpec("llama.cpp asset checksums", "llama", "pin_weekly.py (llama, rocm)", _check_llama_asset_checksums),
         PinSpec("Linux CUDA build source", "cuda", "rides the llama.cpp pin", _check_cuda_linux_source),
         PinSpec("ROCm CPU archive", "rocm", "rides the ROCm pin", _check_rocm_cpu_asset),
         PinSpec("Linux CUDA runtime wheels", "cuda", "pin_weekly.py (review PR)", _check_cuda_runtime_wheels),

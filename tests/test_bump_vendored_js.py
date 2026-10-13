@@ -294,10 +294,10 @@ def test_marked_bump_moves_every_pin_and_only_the_pins(bump, tree, capsys):
     assert f"MAJOR BOUNDARY: marked {MARKED} -> {NEW_MARKED}" in out
 
     new_text = test_path.read_bytes().decode("utf-8")
-    new_file = reg_files(reg)["package/marked.min.js"]
+    new_file = reg_files(reg)["package/lib/marked.umd.js"]
     assert f'const VENDORED_VERSION = "{NEW_MARKED}";' in new_text
     assert f'const PINNED_HASH = "{n64(new_file)}";' in new_text
-    assert f"npm pack marked@{NEW_MARKED}  ->  package/marked.min.js" in new_text
+    assert f"npm pack marked@{NEW_MARKED}  ->  package/lib/marked.umd.js" in new_text
     assert f"dist.shasum ({reg.body['dist']['shasum']})" in new_text
     assert f'test("the banner comment says {NEW_MARKED}"' in new_text
     old_lines, new_lines = old_text.splitlines(), new_text.splitlines()
@@ -489,11 +489,11 @@ def test_a_tarball_that_is_not_a_tarball_is_refused(bump, tree, capsys):
 
 
 def test_a_missing_member_names_what_the_tarball_does_carry(bump, tree, capsys):
-    files = {"package/lib/marked.umd.js": b"umd", "package/README.md": b"x"}
+    files = {"package/marked.min.js": b"min", "package/README.md": b"x"}
     reg = Registry(bump, "marked", NEW_MARKED, make_tarball(files))
     assert run(bump, ["--lib", "marked", "--tag", NEW_MARKED, "--write"], reg) == 1
     out = capsys.readouterr().out
-    assert "no package/marked.min.js" in out and "package/lib/marked.umd.js" in out
+    assert "no package/lib/marked.umd.js" in out and "package/marked.min.js" in out
 
 
 def test_a_duplicated_member_is_refused(bump, tree, capsys):
