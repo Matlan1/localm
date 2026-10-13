@@ -1094,12 +1094,10 @@ for chunk in stream:
   one on the CPU), so the same request can get a different reply depending on
   the requests before it, even at temperature 0 or with a fixed `seed`.
   Greedy output changes where the two most likely tokens are close.
-- **Speculative drafting**: with a draft source on (`spec_source` `mtp`,
-  `ngram` or `draft`), the number of tokens each verification step decodes
-  depends on measured step timings, which vary from run to run. The same
-  batch-size effect then applies, so the same requests in the same order can
-  get a different reply on two runs, even at temperature 0 or with a fixed
-  `seed`. `spec_source: off` removes this source.
+- **Speculative drafting**: with `spec_source` set to `ngram`, the same request at
+  temperature 0 can get a different reply from one server run to the next, and two
+  identical requests in a row can differ. With `spec_source` `off` that did not
+  happen. The `mtp` and `draft` sources have not been tested for this.
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context window section of
   [architecture.md](architecture.md)). Conversations that outgrow the
