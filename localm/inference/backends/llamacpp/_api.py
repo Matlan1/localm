@@ -152,6 +152,9 @@ def llama_init_from_model(
     model: ctypes.c_void_p,
     params,
 ) -> Optional[ctypes.c_void_p]:
+    """A new context for *model*, or None when the runtime refuses. Sets
+    ``params.swa_full`` to True on the caller's *params* before creating it.
+    Raises TypeError when *params* is not the loaded build's layout."""
     cls = _context_params_class()
     if not isinstance(params, cls):
         # Same corruption risk llama_load_model_from_file guards against
@@ -163,6 +166,10 @@ def llama_init_from_model(
             f"context params are {type(params).__name__} but the loaded "
             f"llama runtime uses {cls.__name__}; build them with "
             "_api.llama_context_default_params()")
+    # Every context keeps the full-size sliding-window cache: KV prefix reuse
+    # cuts the cache at any earlier position. See
+    # test_every_context_is_created_with_the_full_swa_cache.
+    params.swa_full = True
     fn = _bind(
         "llama_init_from_model",
         LlamaContext,
