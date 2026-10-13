@@ -92,7 +92,7 @@ def test_honor_env_debug_opens_log_on_env_request(tmp_path, monkeypatch):
 
 def test_honor_env_debug_noop_when_unset(monkeypatch):
     from localm import debuglog
-    monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+    monkeypatch.setenv("LOCALM_DEBUG", "")
     before = list(debuglog.logger.handlers)
     debuglog.honor_env_debug()
     assert list(debuglog.logger.handlers) == before        # nothing opened

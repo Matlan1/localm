@@ -43,10 +43,6 @@ os.environ["LOCALM_PEER_DETECTION"] = "off"
 # flag is inherited by spawned subprocesses.
 os.environ["LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"] = "1"
 
-# Debug mode off for the suite: an inherited LOCALM_DEBUG is removed, so no test
-# starts with a debug log. Tests of debug mode set it themselves.
-os.environ.pop("LOCALM_DEBUG", None)
-
 
 def pytest_sessionfinish(session, exitstatus):
     _cleanup_test_home()
@@ -448,30 +444,28 @@ def _no_system_path_touches(request):
                     + _format_syspath_hits(new) + "\n" + _SYSPATH_ADVICE)
 
 
-_GUARDED_ENV_NAMES = ("TMPDIR", "TEMP", "TMP", "LOCALM_DEBUG")
+_TEMP_ENV_NAMES = ("TMPDIR", "TEMP", "TMP")
 _temp_env_at_start: dict = {}
 
 
 def pytest_runtest_logstart(nodeid, location):
     _temp_env_at_start.clear()
-    _temp_env_at_start.update({name: os.environ.get(name) for name in _GUARDED_ENV_NAMES})
+    _temp_env_at_start.update({name: os.environ.get(name) for name in _TEMP_ENV_NAMES})
 
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown(item, nextitem):
-    """Fail the test that left TMPDIR, TEMP, TMP or LOCALM_DEBUG changed in the
-    process environment, and put the original values back.
+    """Fail the test that left TMPDIR, TEMP or TMP changed in the process
+    environment, and put the original values back.
 
     Runs after every fixture finalizer, so a change scoped with
     ``monkeypatch.setenv`` is already undone. Every later test on the same
     worker inherits a leaked value: a subprocess it spawns, or a tempfile
-    call, then uses a directory that may no longer exist, and a leaked
-    LOCALM_DEBUG keeps debug mode on and points every worker process a later
-    test spawns at this test's log file."""
+    call, then uses a directory that may no longer exist."""
     try:
         result = yield
     finally:
-        leaked = {name: os.environ.get(name) for name in _GUARDED_ENV_NAMES
+        leaked = {name: os.environ.get(name) for name in _TEMP_ENV_NAMES
                   if os.environ.get(name) != _temp_env_at_start.get(name)}
         for name in leaked:
             original = _temp_env_at_start.get(name)
