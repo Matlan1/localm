@@ -219,8 +219,9 @@ localm process's own permissions rather than a sandbox:
   media routes that can name a path on the server: pulling a model by naming a
   path that already exists there, scanning for ComfyUI models, downloading a
   curated ComfyUI model, re-pointing a registered model at a moved file by
-  naming its new server-side path, and moving a generated media file out of the data directory (see
-  above). Without it, a key holding those scopes is confined to
+  naming its new server-side path, and moving a generated media file out of
+  the data directory (see above). Without it, a key holding those scopes is
+  confined to
   HuggingFace-by-name pulls and the folders localm already manages. It is a
   per-route gate on those routes, not a blanket property of every scope.
 - **Installing a plugin** (a store name, or a third-party directory via

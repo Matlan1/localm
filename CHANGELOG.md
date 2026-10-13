@@ -608,6 +608,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Two command-line hints no longer mislead.** `localm memory list` on an empty store says that
+  `localm memory add` does not work in privacy mode, and `localm mcp --help` now names the `rerank`
+  tool and each plugin tool.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
@@ -2034,6 +2037,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **The cross-origin exemptions match exact paths only.** The inference routes that browsers may
+  call cross-origin (chat completions, embeddings, rerank, speech, images and the surface and
+  instance routes) were matched as path prefixes, so a route added under one of them would have
+  skipped the cross-origin refusal and the open-mode shell-token check without anyone listing it.
+  Each now matches only its own path. A trailing-slash spelling of one of those paths is no longer
+  exempt.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move
