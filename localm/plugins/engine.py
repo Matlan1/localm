@@ -893,7 +893,7 @@ class PluginManager:
                 if name in protected and name not in self._enabled_set():
                     try:
                         self._set_enabled(name, True)
-                        self._provision_errors.pop(name, None)
+                        self._clear_provision_error(name, "preinstall")
                     except Exception as e:
                         self._note_provision_error(name, f"preinstall-enable: {e}")
                 continue                            # already installed on disk
@@ -906,9 +906,15 @@ class PluginManager:
                 spec = parse_spec(self._installed_dir(name))
                 if spec.default_enabled and name not in self._enabled_set():
                     self._set_enabled(name, True)
-                self._provision_errors.pop(name, None)
+                self._clear_provision_error(name, "preinstall")
             except Exception as e:
                 self._note_provision_error(name, f"preinstall-parse: {e}")
+
+    def _clear_provision_error(self, name: str, kind: str) -> None:
+        """Drop *name*'s recorded provisioning error when it is of *kind*
+        ("preinstall" or "refresh")."""
+        if (self._provision_errors.get(name) or "").startswith(kind):
+            self._provision_errors.pop(name, None)
 
     def _note_provision_error(self, name: str, msg: str) -> None:
         """Record *msg* for *name* in api_state's errors (kept across discover())
@@ -1236,8 +1242,7 @@ class PluginManager:
         for name in sorted(self._installed_set()):
             try:
                 self._maybe_refresh_builtin(name)
-                if (self._provision_errors.get(name) or "").startswith("refresh: "):
-                    self._provision_errors.pop(name, None)
+                self._clear_provision_error(name, "refresh")
             except Exception as e:
                 self._note_provision_error(name, f"refresh: {e}")
 
@@ -1412,7 +1417,11 @@ class PluginManager:
         if name not in self._specs:
             raise self._resolve_missing_plugin_error(name)
         self._require_deps_installed(name)
-        self._maybe_refresh_builtin(name)             # pick up an upgraded builtin
+        try:
+            self._maybe_refresh_builtin(name)         # pick up an upgraded builtin
+        except RuntimeError as e:
+            # The installed copy is intact; enable it as it is.
+            self._note_provision_error(name, f"refresh: {e}")
         self.discover()                               # re-read the refreshed spec
         if name not in self._loaded:
             self._load(self._specs[name])             # load first; surface errors

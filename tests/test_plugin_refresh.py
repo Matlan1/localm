@@ -305,3 +305,21 @@ def test_refresh_routes_report_a_failed_swap(env, monkeypatch):
         assert one.status_code == 500 and "could not be swapped in" in one.json()["detail"]
         every = c.post("/api/plugins/refresh").json()
         assert every["status"] == "partial" and "ref9" in every["failed"]
+
+
+def test_enable_keeps_the_installed_copy_when_the_refresh_swap_fails(env, monkeypatch):
+    from localm.plugins.engine import PluginManager
+    store, inst = env / "store", env / "installed"
+    _valued_plugin(store, "ref9", 2)
+    _valued_plugin(inst, "ref9", 1)
+    monkeypatch.setattr(PluginManager, "_swap_in_store_copy",
+                        lambda self, *a, **kw: False)
+    app = FastAPI()
+    mgr = PluginManager(app, store_root=store, installed_root=inst)
+    mgr.discover()
+
+    mgr.enable("ref9")
+
+    with TestClient(app) as c:
+        assert c.get("/api/ref9/val").json()["val"] == 1
+    assert "could not be swapped in" in mgr.api_state()["errors"].get("ref9", "")
