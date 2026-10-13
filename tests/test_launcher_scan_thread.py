@@ -16,7 +16,7 @@ import threading
 import time
 from pathlib import Path
 
-from tests._tk_root import build_tk_root
+from tests._tk_root import build_tk_root, collect_tk_garbage  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 

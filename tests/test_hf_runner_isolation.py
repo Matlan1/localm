@@ -135,6 +135,18 @@ class TestLoadCrashContainment:
         finally:
             r.shutdown(grace=0)
 
+    def test_a_debug_log_the_worker_cannot_open_does_not_crash_it(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setenv("LOCALM_DEBUG", str(tmp_path / "gone" / "localm.log"))
+        r = HFRunner()
+        bad_params = dict(_DUMMY_LOAD_PARAMS, this_kwarg_does_not_exist=True)
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                r.spawn_and_load(bad_params, timeout=30.0)
+            assert "unexpected keyword argument" in str(ei.value).lower(), str(ei.value)
+        finally:
+            r.shutdown(grace=0)
+
 
 class TestLoadFailureReapsWorker:
     """engine.py's chat_stream retries HFBackend.load() on EVERY request

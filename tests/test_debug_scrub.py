@@ -122,7 +122,7 @@ class TestMarkerScrub:
 class TestDebugLog:
     @pytest.fixture(autouse=True)
     def _clean(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+        monkeypatch.setenv("LOCALM_DEBUG", "")   # debug off; teardown restores the old value
         monkeypatch.setattr(debuglog, "logs_dir", lambda: tmp_path / "logs")
         saved = list(debuglog.logger.handlers)
         yield
@@ -147,6 +147,25 @@ class TestDebugLog:
             if isinstance(h, logging.FileHandler):
                 h.flush()
         assert "hello from test" in path.read_text(encoding="utf-8")
+
+    def test_attach_child_logging_survives_a_log_it_cannot_open(
+            self, monkeypatch, tmp_path):
+        missing = tmp_path / "gone" / "localm.log"
+        monkeypatch.setenv("LOCALM_DEBUG", str(missing))
+        seen = []
+        recorder = logging.Handler()
+        recorder.emit = seen.append
+        debuglog.logger.addHandler(recorder)
+        try:
+            debuglog.attach_child_logging()
+        finally:
+            debuglog.logger.removeHandler(recorder)
+        assert not any(isinstance(h, logging.FileHandler)
+                       and h.baseFilename == str(missing)
+                       for h in debuglog.logger.handlers)
+        warnings = [r for r in seen if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert str(missing) in warnings[0].getMessage()
 
     def test_enable_is_idempotent(self):
         first = debuglog.enable_debug()
