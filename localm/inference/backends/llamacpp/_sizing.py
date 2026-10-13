@@ -882,30 +882,10 @@ class VramSizingMixin:
 
     def _draft_model_rejected_by_metadata(self, path: Path) -> bool:
         """Whether *path*'s GGUF metadata already shows the load would reject it
-        as this model's draft model: not a causal chat model
-        (``draft_role_refusal``), recurrent-state layers, or a vocabulary
-        ``draft_vocab_mismatch`` refuses against this model's. False when the
+        as this model's draft model (``draft_metadata_refusal``). False when the
         metadata cannot be read. Never raises."""
-        try:
-            from localm.inference.backends.llamacpp._draftmodel import (
-                draft_role_refusal, draft_vocab_mismatch, gguf_vocab_view)
-            from localm.model_manager.gguf import (
-                gguf_recurrent_state_bytes, gguf_vocab_signature)
-            if draft_role_refusal(path) is not None:
-                return True
-            if gguf_recurrent_state_bytes(path) > 0:
-                return True
-            target = gguf_vocab_signature(Path(self.model_path))
-            draft = gguf_vocab_signature(path)
-            if target is None or draft is None:
-                return False
-            return draft_vocab_mismatch(gguf_vocab_view(target),
-                                        gguf_vocab_view(draft)) is not None
-        except Exception as exc:
-            from localm.debuglog import logger as _dbg
-            _dbg.debug("draft-model metadata check failed (%s); charging it",
-                       type(exc).__name__)
-            return False
+        from localm.inference.backends.llamacpp._draftmodel import draft_metadata_refusal
+        return draft_metadata_refusal(self.model_path, path) is not None
 
     def _draft_model_vram_bytes(self) -> int:
         """VRAM the draft model takes for THIS load: ``_draft_model_charge_bytes``

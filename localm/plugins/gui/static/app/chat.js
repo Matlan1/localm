@@ -237,7 +237,7 @@ export function truncateAtWord(text, max) {
 export function archiveCopy(m) {
   if (isToolEvent(m)) return { ...m };
   const out = { role: m.role, content: msgText(m) };
-  for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "webUnfinished", "bridge"]) {
+  for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "webUnfinished", "noWebEvidence", "bridge"]) {
     if (m[k] !== undefined) out[k] = m[k];
   }
   const media = msgImages(m).length + msgAudioClips(m).length +
@@ -1993,7 +1993,10 @@ export function renderChat() {
       : m.webUnfinished
       ? "\n\n*[" + t("chat.web.unfinished") + "]*"
       : "";
-    addMessageRow(box, m.role, msgText(m) + noteSuffix, {
+    const evidenceSuffix = m.noWebEvidence
+      ? "\n\n*[" + t("chat.web.noEvidence") + "]*"
+      : "";
+    addMessageRow(box, m.role, msgText(m) + noteSuffix + evidenceSuffix, {
       images: msgImages(m),
       clips: msgAudioClips(m),
       audio: m.audio ? [m.audio] : [],
