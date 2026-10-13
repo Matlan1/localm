@@ -816,6 +816,10 @@ def test_the_pinned_hf_files_cover_music_comfyui_and_starter_models_and_every_di
     assert sum(label.startswith("music ") for label in labels) == 4
     assert sum(label.startswith("ComfyUI ") for label in labels) == 8
     assert sum(label.startswith("starter ") for label in labels) == 11
+    assert sum(label.startswith("whisper ") for label in labels) == 4
+    from localm import voice
+    assert {p[3] for p in pins if p[0].startswith("whisper ")} == {
+        commit for commit, _ in voice._STT_PINS.values()}
     assert all(cp._HEX64_RE.match(p[4]) for p in pins)
     assert len({(p[1], p[2]) for p in pins}) == len(pins)
 
