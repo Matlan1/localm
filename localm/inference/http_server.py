@@ -357,6 +357,7 @@ def _gpu_status() -> Optional[dict]:
         return None
     try:
         import os as _os
+        from localm.vram import loaded_native_media_runtimes
         loaded = [n for n, e in list(_engines.items()) if getattr(e, "loaded", False)]
         model = _active_model_name or (loaded[0] if loaded else None)
         vram_bytes = None
@@ -376,6 +377,7 @@ def _gpu_status() -> Optional[dict]:
             "models": _loaded_model_identities(),
             "vram_estimate_bytes": vram_bytes,
             "gpu_index": gpu_index,
+            "media": loaded_native_media_runtimes(),
         }
     except Exception as e:
         from localm.debuglog import logger as _dbg

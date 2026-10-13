@@ -42,13 +42,16 @@ and respawns the worker for the next request.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import importlib.util
 import itertools
 import os
 import queue as _queue
+import shutil
 import threading
 import time
-from typing import Optional
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 import multiprocessing as mp
 
@@ -160,6 +163,81 @@ def _stt_repo_for(name: str) -> str:
     return name if "/" in name else f"Systran/faster-whisper-{name}"
 
 
+# Whisper repository -> (commit, sha256 of model.bin). A model of one of these
+# repositories is fetched at that commit and its model.bin must hash to that
+# digest, else the fetched files are deleted and the load fails.
+_STT_PINS: dict[str, tuple[str, str]] = {
+    "Systran/faster-whisper-tiny": (
+        "d90ca5fe260221311c53c58e660288d3deb8d356",
+        "dcb76c6586fc06cbdac6dd21f14cfd129cc4cdd9dce19bf4ffa62e59cbe6e6d1"),
+    "Systran/faster-whisper-base": (
+        "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
+        "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9"),
+    "Systran/faster-whisper-small": (
+        "536b0662742c02347bc0e980a01041f333bce120",
+        "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671"),
+    "Systran/faster-whisper-medium": (
+        "08e178d48790749d25932bbc082711ddcfdfbc4f",
+        "9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae"),
+}
+
+_STT_HUB_ENDPOINT = "https://huggingface.co"
+
+
+def _stt_pin(name: str) -> Optional[tuple[str, str]]:
+    """``(commit, model.bin sha256)`` pinned for the Whisper model *name*, or
+    None for a model that is not one of the pinned repositories."""
+    return _STT_PINS.get(_stt_repo_for(name))
+
+
+def _stt_repo_cache_dir(repo: str, cache_root) -> Path:
+    return Path(cache_root) / ("models--" + repo.replace("/", "--"))
+
+
+def _stt_revision(name: str, cache_root, local_files_only: bool) -> Optional[str]:
+    """The commit a load of the Whisper model *name* is made at. A download is
+    made at the pinned commit. A load from the cache is made at it when the
+    pinned snapshot is there, and otherwise at whatever the cache's own default
+    reference names (None): a cache filled before the pin existed holds a
+    snapshot under another commit, which must keep loading offline."""
+    pin = _stt_pin(name)
+    if pin is None:
+        return None
+    if not local_files_only:
+        return pin[0]
+    snapshot = _stt_repo_cache_dir(_stt_repo_for(name), cache_root) / "snapshots" / pin[0]
+    return pin[0] if (snapshot / "model.bin").is_file() else None
+
+
+def _sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _verify_pinned_model(name: str, cache_root) -> Optional[str]:
+    """Check the pinned snapshot of the Whisper model *name* in *cache_root*:
+    None when its model.bin hashes to the pinned digest (or *name* is not
+    pinned), else the reason it does not. A snapshot that fails is removed with
+    the rest of the repository's cache, so the next fetch starts clean."""
+    pin = _stt_pin(name)
+    if pin is None:
+        return None
+    repo = _stt_repo_for(name)
+    repo_dir = _stt_repo_cache_dir(repo, cache_root)
+    model_bin = repo_dir / "snapshots" / pin[0] / "model.bin"
+    if not model_bin.is_file():
+        return f"Whisper model '{name}' was fetched but the pinned snapshot has no model.bin."
+    actual = _sha256_of(model_bin)
+    if actual == pin[1]:
+        return None
+    shutil.rmtree(repo_dir, ignore_errors=True)
+    return (f"Whisper model '{name}' failed its integrity check (sha256 {actual[:16]}..., "
+            f"expected {pin[1][:16]}...); the downloaded files were deleted.")
+
+
 def stt_model_cached() -> tuple[bool, str]:
     """(cached, model_name) - is the configured Whisper model already in localm's
     own model cache (``stt_cache_dir()``)? First use otherwise downloads it; the GUI
@@ -255,8 +333,11 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
         from huggingface_hub import snapshot_download
         root.mkdir(parents=True, exist_ok=True)
         logger.info("downloading Whisper STT model %s (one-time)...", repo)
+        pin = _stt_pin(name)
+        at_pin: dict[str, Any] = {"revision": pin[0]} if pin else {}
         snapshot_download(repo, cache_dir=str(root),
-                          allow_patterns=list(_STT_ALLOW_PATTERNS))
+                          allow_patterns=list(_STT_ALLOW_PATTERNS),
+                          endpoint=_STT_HUB_ENDPOINT, **at_pin)
     except Exception as e:
         reason = f"Whisper model '{name}' download failed ({e})"
         logger.warning(reason)
@@ -271,6 +352,10 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
                   "(CTranslate2) model repo.")
         logger.warning(reason)
         return False, reason
+    integrity = _verify_pinned_model(name, root)
+    if integrity is not None:
+        logger.warning(integrity)
+        return False, integrity
     logger.info("Whisper STT model '%s' is cached; transcription now runs "
                 "fully offline.", name)
     return True, ""
@@ -294,6 +379,32 @@ def _silence_native_crash_dialogs() -> None:
         ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002)
     except Exception:
         pass
+
+
+def _fetch_pinned(name: str, cache_root, revision: str) -> str:
+    """Download the Whisper model *name* at *revision* with faster-whisper's own
+    file selection and return the snapshot directory."""
+    from faster_whisper.utils import download_model
+    return download_model(name, cache_dir=str(cache_root), revision=revision)
+
+
+def _load_whisper(model_cls: Callable[..., Any], name: str, download_root, local_files_only: bool,
+                  fetch: Callable[[str, Any, str], str] = _fetch_pinned) -> Any:
+    """Construct the Whisper model *name* with *model_cls* (faster-whisper's
+    WhisperModel). A pinned model that has to be downloaded is fetched at its
+    pinned commit and its model.bin is checked before it is loaded; a failed
+    check raises. A cached model loads offline, from the pinned snapshot when it
+    is there and from the cache's default snapshot otherwise."""
+    revision = _stt_revision(name, download_root, local_files_only)
+    if revision is not None and not local_files_only:
+        path = fetch(name, download_root, revision)
+        integrity = _verify_pinned_model(name, download_root)
+        if integrity is not None:
+            raise RuntimeError(integrity)
+        return model_cls(path, device="cpu", compute_type="int8")
+    extra = {"revision": revision} if revision else {}
+    return model_cls(name, device="cpu", compute_type="int8",
+                     download_root=download_root, local_files_only=local_files_only, **extra)
 
 
 def _is_media_error(exc: BaseException) -> bool:
@@ -573,9 +684,7 @@ def _worker_main(req_q, resp_q) -> None:
                 # than the global HF cache. Both it and local_files_only are
                 # resolved by the parent and sent with the request, so the child
                 # cannot download past the parent's network-policy decision.
-                model = WhisperModel(name, device="cpu", compute_type="int8",
-                                     download_root=download_root,
-                                     local_files_only=local_files_only)
+                model = _load_whisper(WhisperModel, name, download_root, local_files_only)
                 model_name = name
         except Exception as e:
             model = None

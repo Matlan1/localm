@@ -218,6 +218,43 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
     return p
 
 
+def hf_reranker_state(folder: Path) -> Optional[bool]:
+    """Whether the Hugging Face model folder *folder* is a cross-encoder reranker:
+    its config.json declares a ``*ForSequenceClassification`` architecture with a
+    single output label. None when config.json cannot be read.
+
+    A head with several labels is a classifier (sentiment, NLI), not a reranker,
+    and answers False."""
+    try:
+        config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    archs = config.get("architectures")
+    if not (isinstance(archs, list) and any(
+            isinstance(a, str) and a.endswith("ForSequenceClassification") for a in archs)):
+        return False
+    id2label = config.get("id2label")
+    num_labels = config.get("num_labels")
+    if isinstance(id2label, dict):
+        return len(id2label) == 1
+    return num_labels == 1
+
+
+def _is_sentence_transformers_folder(path: Path) -> bool:
+    """Whether *path* holds a sentence-transformers ``modules.json`` listing a
+    Transformer module followed by a Pooling module."""
+    try:
+        modules = json.loads((path / "modules.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    if not isinstance(modules, list):
+        return False
+    kinds = [str(m.get("type") or "").rsplit(".", 1)[-1] for m in modules if isinstance(m, dict)]
+    return "Transformer" in kinds and "Pooling" in kinds
+
+
 _MEDIA_KIND_TYPES = {
     "diffusion": "diffusion-unet", "checkpoint": "diffusion-unet", "vae": "vae",
     "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
@@ -262,7 +299,9 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     'mmproj'; then an embedding/pooling signal (``gguf_embedding_signal`` -
     architecture or a ``*.pooling_type`` key) -> 'embedding'; otherwise it is a
     llama.cpp text model -> 'llm'. An HF directory is classified from
-    config.json: a LoRA/adapter dir -> 'lora'; an ``architectures`` class ending
+    config.json: a LoRA/adapter dir -> 'lora'; a sentence-transformers folder
+    (``modules.json`` with a Transformer and a Pooling module) or a single-score
+    ``*ForSequenceClassification`` cross-encoder -> 'embedding'; an ``architectures`` class ending
     in ForCausalLM / LMHeadModel / ForConditionalGeneration -> 'llm'; anything we
     cannot resolve -> 'unknown' (never a silent 'llm').
 
@@ -292,6 +331,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
         if is_hf:
             if (path / "adapter_config.json").exists():
                 return "lora", {}
+            if _is_sentence_transformers_folder(path) or hf_reranker_state(path):
+                return "embedding", {}
             cfg_path = path / "config.json"
             if cfg_path.exists():
                 conf = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -328,6 +369,40 @@ MODEL_SHORTCUTS: dict[str, str] = {
 
 
 
+# starter model spec (a MODEL_SHORTCUTS value) -> sha256 of the file a pull of it
+# must produce. A pull that downloads anything else is refused.
+_STARTER_SHA256: dict[str, str] = {
+    "bartowski/Llama-3.2-1B-Instruct-GGUF:Llama-3.2-1B-Instruct-Q4_K_M.gguf":
+        "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
+    "bartowski/Llama-3.2-3B-Instruct-GGUF:Llama-3.2-3B-Instruct-Q4_K_M.gguf":
+        "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+    "bartowski/microsoft_Phi-4-mini-instruct-GGUF:microsoft_Phi-4-mini-instruct-Q4_K_M.gguf":
+        "01999f17c39cc3074afae5e9c539bc82d45f2dd7faa3917c66cbef76fce8c0c2",
+    "bartowski/Mistral-7B-Instruct-v0.3-GGUF:Mistral-7B-Instruct-v0.3-Q4_K_M.gguf":
+        "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
+    "bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf":
+        "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423",
+    "bartowski/Qwen2.5-14B-Instruct-GGUF:Qwen2.5-14B-Instruct-Q4_K_M.gguf":
+        "e47ad95dad6ff848b431053b375adb5d39321290ea2c638682577dafca87c008",
+    "bartowski/google_gemma-3-4b-it-GGUF:google_gemma-3-4b-it-Q4_K_M.gguf":
+        "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+    "bartowski/google_gemma-3-12b-it-GGUF:google_gemma-3-12b-it-Q4_K_M.gguf":
+        "fc57f67efa46d711c346e587cbef7d049e95f3df8db2eb2271153343ef0acc7b",
+    "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF:DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf":
+        "731ece8d06dc7eda6f6572997feb9ee1258db0784827e642909d9b565641937b",
+    "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF:DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf":
+        "0b319bd0572f2730bfe11cc751defe82045fad5085b4e60591ac2cd2d9633181",
+    "bartowski/SmolLM2-1.7B-Instruct-GGUF:SmolLM2-1.7B-Instruct-Q4_K_M.gguf":
+        "77665ea4815999596525c636fbeb56ba8b080b46ae85efef4f0d986a139834d7",
+}
+
+
+def starter_model_sha256(spec: str) -> Optional[str]:
+    """The sha256 pinned for the starter model *spec* (``owner/repo:file``), or
+    None when *spec* is not one of the starter models."""
+    return _STARTER_SHA256.get(spec)
+
+
 _SHORTCUT_SIZES: dict[str, str] = {
     "llama3.2-1b": "~0.7 GB", "llama3.2-3b": "~2 GB",
     "phi4-mini": "~2.5 GB",   "mistral-7b": "~4.1 GB",
@@ -346,6 +421,7 @@ class ComfySource:
     model_type: str       # "diffusion-unet" | "text-encoder" | "vae" | "lora"
     comfy_subfolder: str  # ComfyUI models/<subfolder> this file belongs in
     size_bytes: int
+    sha256: Optional[str] = None  # passed to the pull as --sha256 when set
 
 
 # filename (exact, as ComfyUI's /object_info reports it) -> curated download source
@@ -357,38 +433,43 @@ class ComfySource:
 # (exact-filename lookup, no fuzzy/heuristic matching) - see
 # resolve_comfy_model_source().
 #
-# ae.safetensors is sourced from the ungated Apache-2.0 FLUX.1-schnell repo rather
-# than the gated (license-click-through) FLUX.1-dev repo: the file is
-# byte-identical in both, and sourcing it from the ungated repo avoids a
-# HuggingFace license-gate failure for users who have not accepted the FLUX.1-dev
-# non-commercial license.
+# Every entry carries the sha256 the downloaded file must have; a pull whose
+# bytes differ is deleted.
 COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
     "flux1-dev-Q8_0.gguf": ComfySource(
         "city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf",
-        "diffusion-unet", "unet", 12_708_281_504),
+        "diffusion-unet", "unet", 12_708_281_504,
+        "129032f32224bf7138f16e18673d8008ba5f84c1ec74063bf4511a8bb4cf553d"),
     "clip_l.safetensors": ComfySource(
         "comfyanonymous/flux_text_encoders:clip_l.safetensors",
-        "text-encoder", "clip", 246_144_152),
+        "text-encoder", "clip", 246_144_152,
+        "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"),
     "t5xxl_fp8_e4m3fn.safetensors": ComfySource(
         "comfyanonymous/flux_text_encoders:t5xxl_fp8_e4m3fn.safetensors",
-        "text-encoder", "clip", 4_893_934_904),
+        "text-encoder", "clip", 4_893_934_904,
+        "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"),
     "ae.safetensors": ComfySource(
-        "black-forest-labs/FLUX.1-schnell:ae.safetensors",
-        "vae", "vae", 335_304_388),
+        "Comfy-Org/z_image_turbo:split_files/vae/ae.safetensors",
+        "vae", "vae", 335_304_388,
+        "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"),
     "ace_step_v1_3.5b.safetensors": ComfySource(
         "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors",
-        "diffusion-unet", "checkpoints", 7_699_743_341),
+        "diffusion-unet", "checkpoints", 7_699_743_341,
+        "f07cad74c4adce52ca14ca1bdf74cf3c14cbafb0823b95eca4459467fa369f40"),
     "wan2.2_ti2v_5B_fp16.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
         "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
-        "diffusion-unet", "diffusion_models", 9_999_658_848),
+        "diffusion-unet", "diffusion_models", 9_999_658_848,
+        "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e"),
     "umt5_xxl_fp8_e4m3fn_scaled.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
         "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-        "text-encoder", "text_encoders", 6_735_906_897),
+        "text-encoder", "text_encoders", 6_735_906_897,
+        "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"),
     "wan2.2_vae.safetensors": ComfySource(
         "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:split_files/vae/wan2.2_vae.safetensors",
-        "vae", "vae", 1_409_400_960),
+        "vae", "vae", 1_409_400_960,
+        "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"),
 }
 
 
@@ -2015,6 +2096,10 @@ def _register(
         reranker = gguf_reranker_state(path)
         if reranker is not None:
             entry["reranker"] = reranker
+    elif model_type == "embedding" and path.is_dir():
+        reranker = hf_reranker_state(path)
+        if reranker is not None:
+            entry["reranker"] = reranker
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
     # a parallel pull, sync_models_dir) can't clobber this entry.
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
@@ -2023,7 +2108,8 @@ def _register(
 def entry_is_reranker(name: str, entry: dict) -> bool:
     """True when the registered model *name* is a reranker or classifier: an
     ``embedding``-type model whose GGUF header marks it so (see
-    ``gguf_reranker_state``).
+    ``gguf_reranker_state``) or whose Hugging Face config declares a single-score
+    sequence-classification head (see ``hf_reranker_state``).
 
     Reads the stored ``reranker`` flag. An entry registered before the flag
     existed has none, so the GGUF is classified once here and the answer is
@@ -2036,9 +2122,14 @@ def entry_is_reranker(name: str, entry: dict) -> bool:
     if isinstance(flag, bool):
         return flag
     path = _entry_path(entry)
-    if path is None or not Path(path).is_file():
+    if path is None:
         return False
-    flag = gguf_reranker_state(Path(path))
+    if Path(path).is_dir():
+        flag = hf_reranker_state(Path(path))
+    elif Path(path).is_file():
+        flag = gguf_reranker_state(Path(path))
+    else:
+        return False
     if flag is None:
         return False
 

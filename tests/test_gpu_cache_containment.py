@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The AMD GPU compiler caches stay inside the data folder.
+"""The GPU driver caches stay inside the data folder.
 
 The HIP runtime's comgr and MIOpen write kernel caches under the user profile unless
-AMD_COMGR_CACHE_DIR, MIOPEN_USER_DB_PATH and MIOPEN_CUSTOM_CACHE_DIR are set.
+AMD_COMGR_CACHE_DIR, MIOPEN_USER_DB_PATH and MIOPEN_CUSTOM_CACHE_DIR are set, and Mesa and
+the NVIDIA Linux driver write shader caches under ~/.cache unless MESA_SHADER_CACHE_DIR and
+__GL_SHADER_DISK_CACHE_PATH are set.
 config.contain_gpu_caches() pins them inside the data dir when localm.config is imported.
 """
 import os
@@ -18,6 +20,8 @@ _PINNED = {
     "AMD_COMGR_CACHE_DIR": ("cache", "comgr"),
     "MIOPEN_USER_DB_PATH": ("cache", "miopen", "db"),
     "MIOPEN_CUSTOM_CACHE_DIR": ("cache", "miopen", "cache"),
+    "MESA_SHADER_CACHE_DIR": ("cache", "mesa"),
+    "__GL_SHADER_DISK_CACHE_PATH": ("cache", "glcache"),
 }
 _VARS = tuple(_PINNED) + tuple(config._gpu_pin_marker(v) for v in _PINNED)
 
@@ -111,12 +115,10 @@ def _fresh_interpreter(tmp_path: Path, code: str, extra_env=None) -> str:
 
 
 def test_a_child_process_inherits_the_pins(tmp_path):
+    child = "import os; " + "; ".join(f'print(os.environ["{var}"])' for var in _PINNED)
     out = _fresh_interpreter(tmp_path, (
         "import localm.config, subprocess, sys\n"
-        "r = subprocess.run([sys.executable, '-c', 'import os; "
-        "print(os.environ[\"AMD_COMGR_CACHE_DIR\"]); "
-        "print(os.environ[\"MIOPEN_USER_DB_PATH\"]); "
-        "print(os.environ[\"MIOPEN_CUSTOM_CACHE_DIR\"])'], capture_output=True, text=True)\n"
+        f"r = subprocess.run([sys.executable, '-c', {child!r}], capture_output=True, text=True)\n"
         "print(r.stdout.strip())\n"))
     got = [_norm(line) for line in out.splitlines()]
     assert got == [_norm(tmp_path.joinpath("data", *parts)) for parts in _PINNED.values()]

@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as _dt
 import json
 import os
@@ -689,6 +690,166 @@ def _legacy_check(name, group, script, advancer, pinned_re=None, latest_re=None)
     return check
 
 
+# --------------------------------------------------------------------------- #
+#  Pinned Hugging Face file digests                                           #
+# --------------------------------------------------------------------------- #
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_HF_PINS_NAME = "Hugging Face file digests"
+
+
+def _hf_linked_sha256(repo: str, path: str, revision: str = "main") -> str | None:
+    """The sha256 Hugging Face reports for *path* of *repo* at *revision* (the
+    ``X-Linked-ETag`` of the unredirected resolve response), or None for a file
+    that is not stored as LFS. Raises FetchError on any failure, with the HTTP
+    status for 4xx/5xx. Tests replace this function; nothing else opens a socket."""
+    url = (f"https://huggingface.co/{repo}/resolve/{urllib.parse.quote(revision, safe='')}/"
+           f"{urllib.parse.quote(path)}")
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "localm-check-pins"})
+    opener = urllib.request.build_opener(_NoRedirect)
+    headers = None
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            with opener.open(req, timeout=_TIMEOUT) as r:
+                headers = r.headers
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (301, 302, 303, 307, 308):
+                headers = e.headers
+                break
+            if attempt < len(_RETRY_DELAYS) and _is_transient(e):
+                time.sleep(_RETRY_DELAYS[attempt])
+                continue
+            raise FetchError(f"{url}: HTTP {e.code}", status=e.code) from e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if attempt < len(_RETRY_DELAYS) and _is_transient(e):
+                time.sleep(_RETRY_DELAYS[attempt])
+                continue
+            raise FetchError(f"{url}: {e}") from e
+    etag = str((headers or {}).get("X-Linked-ETag") or "").strip().strip('"').lower()
+    return etag if _HEX64_RE.match(etag) else None
+
+
+def _py_value(rel: str, name: str) -> ast.expr:
+    """The value expression of the module-level assignment to *name* in *rel*,
+    read without importing the module (this script runs without localm's
+    dependencies installed). Raises LocalReadError when it is missing."""
+    try:
+        tree = ast.parse(_read_text(rel))
+    except (OSError, SyntaxError) as e:
+        raise LocalReadError(f"cannot read {rel}: {e}") from e
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return node.value
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)                 and node.target.id == name and node.value is not None:
+            return node.value
+    raise LocalReadError(f"{rel}: {name} not found (renamed?)")
+
+
+def _py_literal(rel: str, name: str):
+    try:
+        return ast.literal_eval(_py_value(rel, name))
+    except ValueError as e:
+        raise LocalReadError(f"{rel}: {name} is not a literal: {e}") from e
+
+
+def _hf_music_pins() -> list[tuple[str, str, str, str, str]]:
+    rel = "localm/media/koboldcpp/models.py"
+    repo, revision = _py_literal(rel, "DEFAULT_REPO"), _py_literal(rel, "DEFAULT_REVISION")
+    files, shas = _py_literal(rel, "DEFAULT_FILES"), _py_literal(rel, "DEFAULT_SHA256")
+    return [(f"music {comp}", repo, files[comp], revision, shas[comp]) for comp in files]
+
+
+def _hf_comfy_pins() -> list[tuple[str, str, str, str, str]]:
+    rel = "localm/model_manager/registry.py"
+    table = _py_value(rel, "COMFY_MODEL_SOURCES")
+    if not isinstance(table, ast.Dict):
+        raise LocalReadError(f"{rel}: COMFY_MODEL_SOURCES is not a dict literal")
+    out = []
+    for key, call in zip(table.keys, table.values, strict=True):
+        try:
+            filename = ast.literal_eval(key)
+            args = [ast.literal_eval(a) for a in call.args]
+            repo, path = args[0].split(":", 1)
+            sha = args[4]
+        except (ValueError, IndexError, AttributeError, TypeError) as e:
+            raise LocalReadError(f"{rel}: a COMFY_MODEL_SOURCES entry is not "
+                                 f"ComfySource(spec, type, folder, size, sha256): {e}") from e
+        out.append((f"ComfyUI {filename}", repo, path, "main", sha))
+    return out
+
+
+def _hf_starter_pins() -> list[tuple[str, str, str, str, str]]:
+    rel = "localm/model_manager/registry.py"
+    table = _py_literal(rel, "_STARTER_SHA256")
+    out = []
+    for spec, sha in table.items():
+        repo, path = spec.split(":", 1)
+        out.append((f"starter {path}", repo, path, "main", sha))
+    return out
+
+
+def _hf_whisper_pins() -> list[tuple[str, str, str, str, str]]:
+    table = _py_literal("localm/voice.py", "_STT_PINS")
+    return [(f"whisper {repo.rsplit('-', 1)[-1]}", repo, "model.bin", commit, sha)
+            for repo, (commit, sha) in table.items()]
+
+
+_HF_PIN_PROVIDERS = (_hf_music_pins, _hf_comfy_pins, _hf_whisper_pins, _hf_starter_pins)
+
+
+def hf_file_pins() -> list[tuple[str, str, str, str, str]]:
+    """``(label, repo, path, revision, sha256)`` for every Hugging Face file whose
+    digest the product pins."""
+    pins = []
+    for provider in _HF_PIN_PROVIDERS:
+        pins += provider()
+    return pins
+
+
+def _check_hf_file_digests(now):
+    """Every pinned Hugging Face file digest against what the hub serves now, so a
+    re-uploaded file or a removed or gated source is seen before a user's pull
+    fails closed on it."""
+    name, group, advancer = _HF_PINS_NAME, "models", "by hand: re-read the digest on the hub and update the table"
+    try:
+        pins = hf_file_pins()
+        if not pins:
+            raise LocalReadError("no pinned Hugging Face file found")
+        differ, gone = [], []
+        for label, repo, path, revision, sha in pins:
+            if not _HEX64_RE.match(str(sha)):
+                raise LocalReadError(f"{label}: the pinned digest is not 64 lowercase hex characters")
+            try:
+                served = _hf_linked_sha256(repo, path, revision)
+            except FetchError as e:
+                if e.status in (401, 403, 404):
+                    gone.append(f"{label} (HTTP {e.status})")
+                    continue
+                raise
+            if served != sha:
+                differ.append(label)
+    except FetchError as e:
+        return _unknown(name, group, advancer, e)
+    label = f"{len(pins)} files"
+    if differ or gone:
+        parts = []
+        if differ:
+            parts.append(f"{len(differ)} file(s) now have another digest: {', '.join(differ[:4])}")
+        if gone:
+            parts.append(f"{len(gone)} file(s) cannot be fetched anonymously: {', '.join(gone[:4])}")
+        return Row(name=name, status=STALE if differ else INCONSISTENT, pinned=label, advancer=advancer,
+                   group=group, detail="; ".join(parts))
+    return Row(name=name, status=CURRENT, pinned=label, latest=label, days=0, advancer=advancer,
+               group=group, detail=f"{len(pins)} pinned digest(s) match what the hub serves")
+
+
 # A pin that is stale for a known reason no automation can fix is reported as BLOCKED, with
 # the reason, until the expiry date; after it the row reads STALE again and has to be
 # decided afresh. name -> (expiry ISO date, reason).
@@ -762,6 +923,8 @@ def build_registry() -> list[PinSpec]:
         PinSpec("Linux CUDA build source", "cuda", "rides the llama.cpp pin", _check_cuda_linux_source),
         PinSpec("ROCm CPU archive", "rocm", "rides the ROCm pin", _check_rocm_cpu_asset),
         PinSpec("Linux CUDA runtime wheels", "cuda", "pin_weekly.py (review PR)", _check_cuda_runtime_wheels),
+        PinSpec(_HF_PINS_NAME, "models", "by hand: re-read the digest on the hub and update the table",
+                _check_hf_file_digests),
     ]
     for spec in _VENDORED:
         specs.append(PinSpec(f"vendored {spec[0]}", "vendored", _vendored_advancer(spec[0]),

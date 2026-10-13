@@ -264,6 +264,7 @@ def test_status_lists_the_defaults_to_download(no_comfy):
     for m in st["missing"]:
         assert m["spec"] == f"{models.DEFAULT_REPO}:{models.DEFAULT_FILES[m['component']]}"
         assert m["size_bytes"] == models.DEFAULT_SIZES[m["component"]]
+        assert m["sha256"] == models.DEFAULT_SHA256[m["component"]]
         assert m["model_type"] == models.REGISTRY_TYPES[m["component"]]
     assert set(st["models"].values()) == {None}
     no_plan = native.status(_s(plan=False))
@@ -402,6 +403,9 @@ def test_preflight_offers_the_default_models_for_native(tmp_path, monkeypatch, n
         assert all(m["native"] and m["source"]["spec"].startswith(models.DEFAULT_REPO)
                    for m in data["missing"])
         assert data["status"] == "verified" and data["warning"] is None
+        by_file = {m["filename"]: m["source"]["sha256"] for m in data["missing"]}
+        assert by_file == {models.DEFAULT_FILES[c]: models.DEFAULT_SHA256[c]
+                           for c in models.COMPONENTS}
     assert comfy_checked == []
 
 

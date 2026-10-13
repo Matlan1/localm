@@ -508,8 +508,8 @@ def missing_message(model_label: str, family: Optional[str], missing: list,
     parts = []
     for m in missing:
         dl = m.get("download")
-        how = (f"download it with 'localm pull {dl['spec']} --type {dl['model_type']}'"
-               if dl else f"set it in {where}")
+        how = (f"download it with 'localm pull {dl['spec']} --type {dl['model_type']}"
+               f" --sha256 {dl['sha256']}'" if dl else f"set it in {where}")
         parts.append(f"a {m['label']} ({how})")
     return (f"{model_label} is a {fam} model and needs " + "; ".join(parts)
             + f". None is registered on this machine. Or choose one in {where}.")

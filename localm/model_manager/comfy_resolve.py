@@ -102,13 +102,15 @@ class ComfyDownload:
     goes: ``models/<comfy_subfolder>/<subdir>/``. ``spec`` is
     ``owner/repo:path/in/repo`` as ``pull_model`` takes it; ``size_bytes`` is
     None when the size could not be read; ``subdir`` is ``""`` or the
-    ``/``-joined subfolder the workflow names the file under."""
+    ``/``-joined subfolder the workflow names the file under; ``sha256`` is the
+    digest the file must have, None when no digest is known."""
     spec: str
     model_type: str
     comfy_subfolder: str
     size_bytes: Optional[int]
     origin: str
     subdir: str = ""
+    sha256: Optional[str] = None
 
     @property
     def repo(self) -> str:
@@ -262,7 +264,7 @@ def curated_comfy_download(filename: str) -> Optional[ComfyDownload]:
     if source is None:
         return None
     return ComfyDownload(source.spec, source.model_type, source.comfy_subfolder,
-                         source.size_bytes, ORIGIN_CURATED, split[0])
+                         source.size_bytes, ORIGIN_CURATED, split[0], source.sha256)
 
 
 def _cache_key(filename: str, folder: str) -> str:
