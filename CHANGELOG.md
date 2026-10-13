@@ -503,6 +503,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **gpt-oss replies reach their answer.** A gpt-oss reply stopped at the end of its
+  reasoning, so the answer came back empty; it now continues into the answer.
 - **Thinking off on gpt-oss and Gemma 4.** Asking a model to answer without reasoning
   (`chat_template_kwargs: {"enable_thinking": false}`, `reasoning_effort: "none"`, and the
   summary written when a long conversation is compacted) now starts a gpt-oss reply in its

@@ -461,6 +461,25 @@ _STOP_STRINGS: frozenset = frozenset({
     "<|end|>",          # Phi
 })
 
+# A harmony (gpt-oss) vocabulary ends a reply with these end-of-generation
+# tokens; "<|end|>" there ends one message of a reply, not the reply.
+_HARMONY_EOG_TEXTS = ("<|return|>", "<|call|>")
+
+
+def model_stop_strings(tokenizer) -> frozenset:
+    """The stop strings for the model behind *tokenizer*: ``_STOP_STRINGS``
+    without "<|end|>" when every ``_HARMONY_EOG_TEXTS`` entry tokenizes to a
+    single end-of-generation token. Never raises; a tokenizer error keeps
+    ``_STOP_STRINGS``."""
+    try:
+        for text in _HARMONY_EOG_TEXTS:
+            ids = tokenizer.encode(text, add_bos=False)
+            if len(ids) != 1 or not tokenizer.is_eog(ids[0]):
+                return _STOP_STRINGS
+    except Exception:
+        return _STOP_STRINGS
+    return _STOP_STRINGS - {"<|end|>"}
+
 
 def _extract_text(content) -> str:
     """Return the plain-text portion of a message content field."""
@@ -726,10 +745,11 @@ def _utf8_pieces(token_bytes: Iterator[bytes]) -> Iterator[str]:
 _MAX_STOP_LEN: int = max(len(s) for s in _STOP_STRINGS)
 
 
-def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
+def _filtered_stream(pieces: Iterator[str],
+                     stops: frozenset = _STOP_STRINGS) -> Iterator[str]:
     """
-    Pass text pieces through, halting the stream the moment any ``_STOP_STRINGS``
-    entry appears in the accumulated output.
+    Pass text pieces through, halting the stream the moment any entry of
+    *stops* (default ``_STOP_STRINGS``) appears in the accumulated output.
 
     We buffer the last ``_MAX_STOP_LEN - 1`` characters because a stop string
     may straddle two consecutive pieces.  The safe prefix is yielded immediately;
@@ -743,7 +763,7 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
 
         # Check for any complete stop string in the buffer
         stop_idx = -1
-        for stop in _STOP_STRINGS:
+        for stop in stops:
             idx = buf.find(stop)
             if idx != -1 and (stop_idx == -1 or idx < stop_idx):
                 stop_idx = idx
@@ -1697,6 +1717,7 @@ class LlamaCpp:
             self._set_up_spec_source(spec_draft_model, n_threads, verbose, spec_draft_gpu)
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
+        self._stop_strings = model_stop_strings(self._tokenizer)
         if self.n_parallel > 1:
             from ._slots import LlamaSlotOps, SlotScheduler
             self._draft_source()
@@ -4759,6 +4780,7 @@ class LlamaCpp:
         # Decode token BYTES through one UTF-8-safe stream so a character split
         # across a token boundary is reassembled, not turned into U+FFFD.
         raw = _utf8_pieces(self._tokenizer.token_to_piece_bytes(t) for t in gen)
+        stops = getattr(self, "_stop_strings", _STOP_STRINGS)
         if debug_content_enabled():
             captured: list = []
 
@@ -4768,12 +4790,12 @@ class LlamaCpp:
                     yield p
 
             try:
-                yield from _scrub_stream(_filtered_stream(_tee(raw)))
+                yield from _scrub_stream(_filtered_stream(_tee(raw), stops))
             finally:
                 if captured:
                     logger.debug("raw model output:\n%s", "".join(captured))
         else:
-            yield from _scrub_stream(_filtered_stream(raw))
+            yield from _scrub_stream(_filtered_stream(raw, stops))
 
     def _stream_chunks(self, gen: Iterator[int]) -> Generator:
         chunk_id = _make_chunk_id()
