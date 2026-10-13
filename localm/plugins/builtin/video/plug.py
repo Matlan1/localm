@@ -58,7 +58,7 @@ class VideoRequest(BaseModel):
     # Native backend only: {"model"|slot: registered name or "" for automatic}
     # laid over Settings > Video for this job, and registered LoRAs.
     native_models: dict[str, str] | None = None
-    loras: list[LoraChoice] | None = Field(None, max_length=MAX_LORAS)
+    loras: list[LoraChoice] | None = Field(default=None, max_length=MAX_LORAS)
 
 
 class MoveFileRequest(BaseModel):

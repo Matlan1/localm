@@ -238,9 +238,11 @@ def _read_safetensors(path: Path) -> Optional[dict]:
         if name == "__metadata__" or not isinstance(meta, dict):
             continue
         shape = meta.get("shape")
-        ok = isinstance(shape, list) and all(isinstance(d, int) and not isinstance(d, bool)
-                                             for d in shape)
-        out[str(name)] = tuple(shape) if ok else ()
+        if isinstance(shape, list) and all(isinstance(d, int) and not isinstance(d, bool)
+                                           for d in shape):
+            out[str(name)] = tuple(shape)
+        else:
+            out[str(name)] = ()
     return out
 
 

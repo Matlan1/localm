@@ -31,7 +31,7 @@ def media_keys(media: str) -> tuple:
 
 class LoraChoice(BaseModel):
     name: str
-    strength: float = Field(1.0, ge=-4.0, le=4.0, allow_inf_nan=False)
+    strength: float = Field(default=1.0, ge=-4.0, le=4.0, allow_inf_nan=False)
 
 
 def validate_choice(native_models: Optional[dict], media: str,
