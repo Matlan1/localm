@@ -500,6 +500,24 @@ def test_the_upscale_route_adds_a_new_gallery_image_keeping_the_source_settings(
     assert len(runner.upscales) == 1
 
 
+def test_the_upscale_route_ignores_a_deeply_nested_source_sidecar(qol_app, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    app, runner = qol_app
+    up = tmp_path / "up.safetensors"
+    up.write_bytes(b"x")
+    _register("up4x", up, "upscaler")
+    with TestClient(app) as c:
+        name = _generate_one(c, app)
+        Path(str(_gallery_file(name)) + ".json").write_text(
+            "[" * 200_000 + "]" * 200_000, encoding="utf-8")
+        r = c.post(f"/api/imagine/file/{name}/upscale", json={"upscaler": "up4x"})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "done", _job_lines(job)
+    assert len(runner.upscales) == 1
+
+
 @pytest.mark.parametrize("upscaler", ["ghost", "", "lora-file"])
 def test_the_upscale_route_only_takes_a_registered_upscaler(qol_app, tmp_path, upscaler):
     from fastapi.testclient import TestClient
