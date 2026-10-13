@@ -392,6 +392,7 @@ def test_the_worker_receives_lora_structs():
 class _Runner:
     def __init__(self):
         self.loads, self.generates, self.alive, self.loaded_key = [], [], False, None
+        self.fill = b"\x10"
 
     def is_alive(self):
         return self.alive
@@ -404,7 +405,7 @@ class _Runner:
     def generate_image(self, params, **kw):
         self.generates.append(params)
         w, h = params["width"], params["height"]
-        return {"width": w, "height": h, "channel": 3, "data": b"\x10" * (w * h * 3),
+        return {"width": w, "height": h, "channel": 3, "data": self.fill * (w * h * 3),
                 "seed": params["seed"]}
 
     def shutdown(self, grace=5.0):
@@ -440,6 +441,19 @@ def test_flux_generates_with_its_family_defaults_loras_and_records_them(flux_set
     side = json.loads(out.with_suffix(".png.json").read_text(encoding="utf-8"))
     assert side["components"] == {"clip_l": "clip_l", "t5xxl": "t5xxl_fp8_e4m3fn", "vae": "ae"}
     assert side["loras"] == [{"name": "aidma-flux", "strength": 0.7}]
+
+
+def test_a_pure_white_result_is_reported_as_a_failure_and_not_saved(flux_set, runner, tmp_path):
+    runner.fill = b"\xff"
+    out = tmp_path / "white.png"
+    ok, msg = image_native.generate({"backend": "native", "native": {"model": "fluxunchained"}},
+                                    "a cat", out, width=64, height=64, seed=7)
+    assert not ok and "pure white" in msg and "VAE" in msg
+    assert not out.exists()
+    runner.fill = b"\x10"
+    ok, msg = image_native.generate({"backend": "native", "native": {"model": "fluxunchained"}},
+                                    "a cat", out, width=64, height=64, seed=7)
+    assert ok and out.exists()
 
 
 def test_an_unregistered_lora_fails_before_any_load(flux_set, runner, tmp_path):
