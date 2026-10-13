@@ -47,7 +47,9 @@ def register(app: FastAPI, ctx) -> None:
                 "there is nothing to log into.")
         # verify() reads the keystore and can take the cross-process lock on it
         # (last-used stamping, legacy-row marking), so it runs off the event loop.
-        held = await run_in_threadpool(verify, presented) if presented else None
+        if not presented:
+            raise HTTPException(401, "Invalid API key")
+        held = await run_in_threadpool(verify, presented)
         if held is None:
             raise HTTPException(401, "Invalid API key")
         # Mint an OPAQUE server-side session; the cookie carries the session id,
@@ -67,10 +69,12 @@ def register(app: FastAPI, ctx) -> None:
         # _is_owner_key is a constant-time plaintext compare against the live owner
         # key: a POSITIVE proof that reads no keystore, so a corrupt auth.json
         # cannot flip it, and holding ADMIN cannot earn it.
+        key_hash = _hash_key(presented)
+        owner_key_minted = _is_owner_key(presented)
         sid = await run_in_threadpool(
-            lambda: sessions.create(scopes=held, key_hash=_hash_key(presented),
+            lambda: sessions.create(scopes=held, key_hash=key_hash,
                                     fs_access=fs, rag_roots=rag_roots,
-                                    owner_key_minted=_is_owner_key(presented)))
+                                    owner_key_minted=owner_key_minted))
         secure = request.url.scheme == "https"
         response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                             secure=secure, samesite="strict", path="/",
