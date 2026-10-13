@@ -251,7 +251,7 @@ def run_confirm(adv: Advancer, args: list[str], receipt: Path) -> tuple[str, str
         problem = receipt_problem(receipt, verdict)
         if problem:
             return INCONCLUSIVE, f"{adv.confirm_script} exited {rc} but {problem}; {out[-300:]}"
-    return verdict, out[-1500:]
+    return verdict, f"exit code {rc}: {out[-1500:]}"
 
 
 def _receipt_path(key: str, tag: str) -> Path:
@@ -287,7 +287,7 @@ def _receipt_summary(receipt: Path) -> str:
     try:
         data = json.loads(receipt.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return "no readable receipt"
+        return ""
     checks = data.get("checks") if isinstance(data, dict) else None
     if not isinstance(checks, dict):
         return str(data.get("why", "")) if isinstance(data, dict) else ""
@@ -585,7 +585,7 @@ def verify_current(adv: Advancer) -> Outcome:
             out.detail = "GPU busy this run (lease wait elapsed)"
             return out
         out.verdict = _verdict_from_rc(rc)
-        out.detail = _receipt_summary(receipt) if receipt.exists() else text[-400:]
+        out.detail = (_receipt_summary(receipt) if receipt.exists() else "") or f"exit code {rc}: {text[-400:]}"
         return out
     if adv.confirm_script is None:
         out.verdict = NOT_MEASURED
@@ -598,7 +598,7 @@ def verify_current(adv: Advancer) -> Outcome:
     if out.verdict == NOT_RUN:
         out.verdict = INCONCLUSIVE
     elif receipt.exists():
-        out.detail = _receipt_summary(receipt)
+        out.detail = _receipt_summary(receipt) or out.detail
     return out
 
 

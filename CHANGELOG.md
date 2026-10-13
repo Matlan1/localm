@@ -12,6 +12,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Sentence-transformers folders embed the way their model defines.** A Hugging Face folder
+  with a `modules.json` is registered as an embedding model, and its Pooling (mean, CLS, max,
+  last token and the other modes), Dense and Normalize modules are applied, so a CLS-pooled
+  model such as bge no longer gets mean-pooled vectors. A folder that lists any other module,
+  or keeps its Dense weights in a pickle file, is refused with the module named.
+- **Cross-encoder rerankers in Hugging Face format.** A folder whose model is a
+  `*ForSequenceClassification` with a single output (for example bge-reranker-v2-m3) is
+  registered as a reranker and scores `POST /v1/rerank`, `localm rerank` and Knowledge
+  reranking with the head's raw logit, on the CPU or the GPU like the GGUF rerankers. A
+  checkpoint saved without its classification head is refused, and a classifier with several
+  labels is not offered as a reranker.
 - **Add models from Jan.** `localm add` on Jan's data folder (or its `llamacpp/models`
   folder) registers every downloaded model under its Jan id, with its vision projector
   attached, and follows a model that Jan only links to a file kept elsewhere. A download
@@ -554,6 +565,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `cache/glcache` inside it. A location you set yourself with `MESA_SHADER_CACHE_DIR` or
   `__GL_SHADER_DISK_CACHE_PATH` is used as you set it. Files already in the old location are
   left where they are.
+- **Hugging Face encoder models load.** Loading a plain encoder such as bge or MiniLM
+  failed with `'_DocstringLeakFilter' object has no attribute 'isatty'` whenever transformers
+  printed a weight-loading report. They load now, and a sentence-transformers folder
+  loads as the encoder it is instead of as a language model.
+- **SmolVLM2 image chats no longer log a processor warning.** Each image turn logged
+  "Kwargs passed to `processor.__call__` have to be in `processor_kwargs` dict" twice.
 - **A half-copied GGUF file is no longer registered by a folder import.** `localm add
   <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
   whose header declares more tensor data than the file holds, and one named `incomplete-...`
