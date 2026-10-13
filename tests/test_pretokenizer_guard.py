@@ -614,7 +614,7 @@ class TestVisionPathIsGuardedToo:
 
         prompt = _letters(400)
         obj = self._vision_llama("qwen2", prompt)
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError, match="the stub stops at mtmd"):
             self._drive(obj, prompt)
         neutralise_fake_pointers()
         assert obj._model_ptr is None and obj._ctx_ptr is None

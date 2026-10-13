@@ -36,6 +36,7 @@ import time
 import pytest
 
 from localm.media import comfy_client
+from tests._popen_scope import ignore_background_threads
 
 URL = "http://127.0.0.1:8188"
 
@@ -114,7 +115,7 @@ def test_stale_confirmation_does_not_block_auto_relaunch(monkeypatch, tmp_path):
         launched.append(argv)
         return _Proc()
 
-    monkeypatch.setattr("subprocess.Popen", _popen)
+    monkeypatch.setattr("subprocess.Popen", ignore_background_threads(_popen))
     monkeypatch.setattr(comfy_client, "_comfy_alive",
                         lambda api_url, timeout=3.0: bool(launched))
     monkeypatch.setattr(time, "sleep", lambda s: None)
