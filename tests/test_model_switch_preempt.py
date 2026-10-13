@@ -335,12 +335,11 @@ def test_a_switch_superseded_before_its_load_begins_never_loads():
 
     async def scenario():
         _reset_switch_state()
-        never = threading.Event()
-        engine = FakeEngine("B", load_gate=never)
+        ready = threading.Event(); ready.set()
+        engine = FakeEngine("B", load_gate=ready)
         hs._switch_desired = "C"
         loop = asyncio.get_running_loop()
-        res = await asyncio.wait_for(
-            hs._switch_load(loop, "B", engine, preempt=True), timeout=5)
+        res = await hs._switch_load(loop, "B", engine, preempt=True)
         return res, engine, hs._switch_cancel, hs._switch_loading
 
     res, engine, published_cancel, loading = asyncio.run(scenario())
