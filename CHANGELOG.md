@@ -485,6 +485,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 - **The bundled koboldcpp runtime (native music generation) moved from v1.122.1 to v1.123.** An existing install picks it up the next time music generation starts.
+- **Speculative drafting measures the verification cost of 4, 8 and 16 tokens.** On several MoE and
+  hybrid models a batch of 5, 9 or 17 tokens costs much more than one token fewer, and the load-time
+  measurement used to see only the larger size, so it priced 4- and 8-token drafts too high and drafted
+  shorter than paid. With n-gram drafting, copy-heavy replies decode 5-10% faster on Qwen3-30B-A3B and
+  Qwen3.5-9B.
 - **MTP keeps more of its speedup.** While speculation is clearly faster than plain decoding, MTP
   now checks plain decoding every 48 to 96 steps instead of every 24, which recovers about 2% of
   decoding speed on Qwen3.5-4B. It still pauses drafting as soon as speculation stops paying.
@@ -614,6 +619,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A damaged native image runtime says so instead of failing obscurely.** A runtime folder that
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
+- **The coder's browser_close stops a browser that is still starting.** Closing the browser
+  while it was still starting used to report that no browser was open and leave it to finish
+  starting; it now cancels the start, the browser is closed as soon as it is up, and the calls
+  waiting for it get an error.
+- **The coder no longer crashes on a project config whose `mcp` key is not a table.** A
+  `.localcoder/config.toml` with, for example, `mcp = "x"` stopped MCP setup with an error; it now
+  means no MCP servers are configured.
 - **A UNet-only SDXL model loads in the native image backend.** Choosing an SDXL file that holds
   only the UNet (a safetensors file in ComfyUI or diffusers layout) used to fail with "get sd
   version from file failed"; it now loads with its CLIP-L, CLIP-G and VAE from your registered

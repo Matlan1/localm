@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.media import comfy_client
+from tests._popen_scope import ignore_background_threads
 from localm.media import managed_comfy as mc
 from localm.plugins.builtin.image import backend as image_backend
 from localm.plugins.builtin.music import backend as music_backend
@@ -178,7 +179,7 @@ def test_backend_ensure_available_launches_managed_instance_end_to_end(backend_m
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
          patch.object(mc, "managed_comfy_active", return_value=True), \
          patch.object(mc, "managed_comfy_paths", return_value=fake_paths), \
-         patch("subprocess.Popen", side_effect=fake_popen):
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)):
         s = backend_mod.settings(full_config)
         ok, msg = backend_mod._comfy_ensure_available(s)
 

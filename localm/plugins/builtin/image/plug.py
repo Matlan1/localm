@@ -778,7 +778,7 @@ async def imagine_upscale(name: str, req: UpscaleRequest, request: Request):
     if sidecar.is_file():
         try:
             loaded = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             loaded = {}
         if isinstance(loaded, dict):
             extra_meta = {k: v for k, v in loaded.items() if k not in _UPSCALE_DROPPED_META}

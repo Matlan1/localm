@@ -447,13 +447,36 @@ def test_paying_is_judged_at_the_given_acceptance():
 
 
 @pytest.mark.parametrize("probe,top,plan", [
-    (0.01, 9, (3, 5, [2, 3, 5, 9])), (0.02, 5, (3, 5, [2, 3, 5])),
-    (0.01, 17, (3, 5, [2, 3, 5, 9, 17])), (0.01, 12, (3, 5, [2, 3, 5, 9, 12])),
-    (0.03, 9, (1, 3, [2, 3, 5, 9])), (0.05, 5, (1, 3, [2, 3, 5])),
+    (0.01, 9, (3, 5, [2, 3, 4, 5, 8, 9])), (0.02, 5, (3, 5, [2, 3, 4, 5])),
+    (0.01, 17, (3, 5, [2, 3, 4, 5, 8, 9, 16, 17])),
+    (0.01, 12, (3, 5, [2, 3, 4, 5, 8, 9, 12])),
+    (0.03, 9, (1, 3, [2, 3, 4, 5, 8, 9])), (0.05, 5, (1, 3, [2, 3, 4, 5])),
     (0.06, 9, (1, 1, [2, 9])), (2.0, 2, (1, 1, [2])), (0.01, 1, (1, 1, []))])
 def test_a_slow_target_is_measured_with_fewer_decodes(probe, top, plan):
     from localm.inference.backends.llamacpp._stepcosts import measure_plan
     assert measure_plan(probe, top) == plan
+
+
+# Verification batch milliseconds of Qwen3-30B-A3B IQ2_XXS on an RX 6900 XT (ROCm),
+# 1..17 tokens: the cost steps up after 4, 8 and 16 tokens.
+_STEPPED_VERIFY_MS = (7.28, 8.79, 10.20, 11.39, 18.06, 18.96, 19.25, 20.43, 27.07,
+                      27.73, 28.68, 29.14, 29.15, 30.71, 31.20, 31.46, 35.45)
+
+
+def _stepped_costs(top):
+    from localm.inference.backends.llamacpp._stepcosts import StepCosts, measure_plan
+    _, _, sizes = measure_plan(0.007, top)
+    ms = dict(enumerate(_STEPPED_VERIFY_MS, start=1))
+    return StepCosts(target=ms[1], verify={k: ms[k] for k in sizes})
+
+
+@pytest.mark.parametrize("n", [4, 8, 16])
+def test_a_stepped_verify_curve_is_measured_below_each_step(n):
+    assert _stepped_costs(17).verify_cost(n) == pytest.approx(_STEPPED_VERIFY_MS[n - 1])
+
+
+def test_a_stepped_verify_curve_drafts_up_to_the_step():
+    assert _stepped_costs(9).best_length(0.9, 8) == 3
 
 
 def _measured_llama(draft_max=8, costs=None):
@@ -844,10 +867,10 @@ def test_a_fast_target_is_measured_at_every_verify_size():
         fake.install(api)
         api.llama_vocab_n_tokens.return_value = 1000
         costs = llm._measure_step_costs(llm._source)
-    assert sorted(costs.verify) == [2, 3, 5]
+    assert sorted(costs.verify) == [2, 3, 4, 5]
     assert costs.verify[3] == pytest.approx(0.012)
     timed_main = [d for d in fake.main_decodes if d[0][0] == 32]
-    assert len(timed_main) == 2 + 8 * 4
+    assert len(timed_main) == 2 + 8 * 5
 
 
 def test_a_target_measured_at_no_time_gives_no_costs():

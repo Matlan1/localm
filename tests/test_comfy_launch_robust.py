@@ -14,6 +14,7 @@ from localm.image_gen import comfy
 # the comfy re-export.
 from localm.media import comfy_client
 from localm.media import managed_comfy as mc
+from tests._popen_scope import ignore_background_threads
 
 
 def test_derive_workdir_from_full_bat_path(tmp_path):
@@ -163,7 +164,7 @@ def test_ensure_comfy_delegates_to_the_shared_helper(monkeypatch, tmp_path):
         def poll(self):
             return None
 
-    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr("subprocess.Popen", ignore_background_threads(lambda *a, **k: _Proc()))
 
     cfg = {"comfy_launch_timeout": 45}
     with patch("localm.config.load_config", return_value=cfg):
@@ -239,7 +240,7 @@ def test_ensure_comfy_discovers_launcher_in_workdir(tmp_path):
 
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
-         patch("subprocess.Popen", side_effect=fake_popen):
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is True, msg
     assert spawned["cwd"] == str(tmp_path)
@@ -263,7 +264,7 @@ def test_ensure_comfy_reports_launcher_immediate_exit(tmp_path):
 
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: False), \
-         patch("subprocess.Popen", side_effect=fake_popen):
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is False
     assert "exited immediately with code 1" in msg
@@ -296,7 +297,7 @@ def test_ensure_comfy_immediate_exit_includes_the_launch_log_tail(tmp_path):
 
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: False), \
-         patch("subprocess.Popen", side_effect=fake_popen):
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is False
     assert "exited immediately with code 1" in msg
@@ -339,7 +340,7 @@ def test_ensure_comfy_timeout_message_includes_the_launch_log_tail(monkeypatch, 
 
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: False), \
-         patch("subprocess.Popen", side_effect=fake_popen):
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is False
     assert "did not come up within" in msg
@@ -373,7 +374,7 @@ def _spawn_with_cfg(tmp_path, cfg):
 
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
-         patch("subprocess.Popen", side_effect=fake_popen):
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is True, msg
     return spawned["argv"]
@@ -430,7 +431,7 @@ def test_ensure_comfy_launches_the_managed_instance_when_active(tmp_path):
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
          patch("localm.media.managed_comfy.managed_comfy_active", return_value=True), \
          patch("localm.media.managed_comfy.managed_comfy_paths", return_value=fake_paths), \
-         patch("subprocess.Popen", side_effect=fake_popen):
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8189")
 
     assert ok is True, msg
@@ -464,7 +465,7 @@ def test_ensure_comfy_caller_override_beats_managed_routing(tmp_path):
     with patch("localm.config.load_config", return_value={"comfy_launch_timeout": 30}), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
          patch("localm.media.managed_comfy.managed_comfy_active", return_value=True), \
-         patch("subprocess.Popen", side_effect=fake_popen):
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188", workdir=str(tmp_path))
 
     assert ok is True, msg
@@ -495,6 +496,7 @@ def test_managed_workdir_resolution_is_atomic_if_launch_cmd_raises(tmp_path):
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
            "comfy_launch_timeout": 30}
 
+    popen = MagicMock()
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy_client, "_comfy_alive", return_value=False), \
          patch("localm.media.managed_comfy.managed_comfy_active", return_value=True), \
@@ -502,7 +504,7 @@ def test_managed_workdir_resolution_is_atomic_if_launch_cmd_raises(tmp_path):
                return_value=str(managed_root)), \
          patch("localm.media.managed_comfy.managed_comfy_launch_cmd",
                side_effect=RuntimeError("simulated failure")), \
-         patch("subprocess.Popen") as popen:
+         patch("subprocess.Popen", ignore_background_threads(popen)):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8189")
 
     assert ok is False
@@ -567,7 +569,7 @@ def test_concurrent_ensure_comfy_calls_spawn_only_one_process(tmp_path):
     # both workers merely READ the same already-substituted functions.
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy_client, "_comfy_alive", side_effect=fake_alive), \
-         patch("subprocess.Popen", side_effect=fake_popen):
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)):
         threads = [threading.Thread(target=_call, args=(i,)) for i in range(2)]
         for t in threads:
             t.start()
@@ -663,7 +665,7 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
     # dead, dead-under-lock (the double-checked re-check), then up after spawn.
     alive_1 = iter([False, False, True])
     with patch("localm.config.load_config", return_value=cfg), \
-         patch("subprocess.Popen", side_effect=fake_popen), \
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive_1)):
         comfy.ensure_comfy("http://127.0.0.1:8188")
         
@@ -681,7 +683,7 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
     # dead, dead-under-lock, then up after spawn (see the note above).
     alive_2 = iter([False, False, True])
     with patch("localm.config.load_config", return_value=cfg_bat), \
-         patch("subprocess.Popen", side_effect=fake_popen), \
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)), \
          patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive_2)):
         comfy.ensure_comfy("http://127.0.0.1:8188")
         

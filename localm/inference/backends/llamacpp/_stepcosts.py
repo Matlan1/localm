@@ -12,8 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-# Target batch sizes the load-time measurement times; others are interpolated.
-VERIFY_MEASURE_SIZES = (2, 3, 5, 9, 17)
+# Target batch sizes the load-time measurement times, on both sides of the 4-,
+# 8- and 16-token batches; others are interpolated.
+VERIFY_MEASURE_SIZES = (2, 3, 4, 5, 8, 9, 16, 17)
 # A one-token target decode at most this slow is measured with 3 warm-up and 5
 # timed decodes per figure, at most MEASURE_MEDIUM_DECODE_S with 1 and 3.
 MEASURE_FAST_DECODE_S = 0.02

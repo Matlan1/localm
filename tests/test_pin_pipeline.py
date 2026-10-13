@@ -246,7 +246,7 @@ def test_append_fail_issue_warns_and_returns_false_when_anchor_no_longer_matches
 
 
 def test_issues_intro_anchor_matches_the_real_shipped_file(tmp_path):
-    """Bound to the real issues/issues.txt, not only a synthetic fixture -
+    """Bound to the real maintainer backlog file, not only a synthetic fixture -
     proves _ISSUES_INTRO_RE still matches the real file's actual current
     shape, per diff-review-discipline item 19's remedy for fixture blindness."""
     real = pipeline.REPO / "issues" / "issues.txt"

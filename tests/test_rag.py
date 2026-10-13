@@ -770,6 +770,18 @@ class TestCollection:
         c = Collection("kb", base=tmp_path / "rag").create()
         assert c.query("anything") == []
 
+    def test_vectors_not_lining_up_with_chunks_rank_every_chunk_lexically(self, tmp_path):
+        """A vectors list of a different length than the chunks is not zipped
+        against the lexical scores: the query degrades to BM25 with the reason
+        recorded, and the chunk past the end of the vectors is still ranked."""
+        c = Collection("kb", base=tmp_path / "rag").create()
+        c._chunks = [{"text": f"filler sentence number {i}", "source": "d"} for i in range(9)]
+        c._chunks.append({"text": "the zebra crossing", "source": "z"})
+        c._vectors = [[1.0, 0.0, 0.0]] * 9
+        hits = c.query("zebra", k=1, embed_fn=lambda texts: [[1.0, 0.0, 0.0] for _ in texts])
+        assert [h["source"] for h in hits] == ["z"]
+        assert "9 stored vectors for 10 chunks" in (c.vector_degrade_reason or "")
+
 
 # ---------------------------------------------------------------------------
 #  Retrieved chunks are untrusted content: control/frame tokens in a malicious

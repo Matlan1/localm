@@ -11,8 +11,8 @@ One invocation, per run:
   3. For each runtime with a confirm script: re-confirms the build pinned TODAY
      (``--current``), so a regression in the driver, the OS or a dependency shows up
      even when upstream did not move.
-  4. Writes a dated report under dev-notes/pin-pipeline/weekly/ and logs a genuine
-     failure to issues/issues.txt.
+  4. Writes a dated report under the pin-pipeline state directory and logs a genuine
+     failure to the maintainer's issue backlog.
 
 A runtime whose confirm or bump script does not exist yet is reported as NOT BUILT,
 never skipped silently and never counted as current.
