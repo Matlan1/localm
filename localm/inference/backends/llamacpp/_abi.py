@@ -426,8 +426,9 @@ def detect_context_params_layout(
     ``assumed`` is True when a fingerprint was inconclusive and a fallback was
     taken: CONTEXT_PARAMS_V1 when the first one was, CONTEXT_PARAMS_V2 when only
     the second one was. Callers must not treat that as a determination, same
-    caveat as :func:`detect_model_params_layout`'s ``assumed``. Never raises: a
-    mechanism failure yields the V1 fallback plus a note."""
+    caveat as :func:`detect_model_params_layout`'s ``assumed``;
+    :func:`verify_abi` refuses the assumed CONTEXT_PARAMS_V2 case. Never raises:
+    a mechanism failure yields the V1 fallback plus a note."""
     notes: list[str] = []
     layout: Optional[str] = None
     raw = b""
@@ -806,7 +807,10 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
       checked fields (a build whose ctx_type is itself -1) put both
       candidate windows inside one run, and every reading then satisfies
       evaluate(). A V2/V3 misbind reads the flag block at a NULL-default
-      pointer (abort_callback_data or samplers) and refuses.
+      pointer (abort_callback_data or samplers) and refuses. Bytes in the V2
+      family whose flag block cannot tell V2 from V3 (all four
+      true-by-default flags read false) satisfy evaluate() under either
+      class, so an undecided V2/V3 split is itself a refusal.
 
     * ``model_params`` - the second layer buys NOTHING. evaluate()'s
       model_params checks are RANGE checks over fields whose plausible
@@ -832,8 +836,9 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     global _detected_context_layout, _context_layout_assumed
 
     # Detection runs BEFORE the skip check and never raises: the escape hatch
-    # suppresses the refusal, not the choice of struct class. `contradiction` is
-    # the one detection outcome that is itself a refusal.
+    # suppresses the refusal, not the choice of struct class. Two detection
+    # outcomes are themselves refusals: a model_params `contradiction` and an
+    # undecided context_params V2/V3 split (`ctx_undecided`).
     #
     # Two independent layout decisions: model_params (symbol probe plus value
     # fingerprint) and context_params (value fingerprint only). Only
@@ -850,6 +855,12 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     for note in ctx_notes:
         _log(f"llama context_params layout probe: {note}", warn=True)
     notes = notes + ctx_notes
+    ctx_undecided = None
+    if ctx_assumed and context_layout == CONTEXT_PARAMS_V2:
+        ctx_undecided = (
+            "context_params layout cannot be determined: the default flag "
+            f"block fits both {CONTEXT_PARAMS_V2} and {CONTEXT_PARAMS_V3} "
+            "(without and with moe_cache_size)")
 
     # Log the contradiction BEFORE the skip check and carry it into the skipped
     # verdict, so the escape hatch suppresses the refusal but not the finding.
@@ -857,6 +868,10 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
         _log("llama model_params layout probes DISAGREE: " + contradiction
              + f"; proceeding with {layout} - if the model loads on the wrong "
                "GPU or memory behaviour looks wrong, this is why.", warn=True)
+    if ctx_undecided:
+        _log(ctx_undecided + f"; the load is refused unless {SKIP_ENV} is set.",
+             warn=True)
+    refusals = [r for r in (contradiction, ctx_undecided) if r]
 
     if os.environ.get(SKIP_ENV):
         _log(f"{SKIP_ENV} is set - skipping the llama ABI self-check. A mismatched "
@@ -864,14 +879,15 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
              warn=True)
         return _remember(AbiVerdict(
             status="skipped", layout=layout, context_layout=context_layout,
-            diagnostics=notes + ([contradiction] if contradiction else []),
+            diagnostics=notes + refusals,
             detail=f"skipped via {SKIP_ENV}"))
 
-    if contradiction:
+    if refusals:
         verdict = _remember(AbiVerdict(
-            status="mismatch", failures=[contradiction], diagnostics=notes,
+            status="mismatch", failures=refusals, diagnostics=notes,
             layout=layout, context_layout=context_layout,
-            detail="model_params layout probes disagree"))
+            detail=("model_params layout probes disagree" if contradiction
+                    else "context_params layout undetermined")))
         raise _mismatch_error(verdict, lib_path)
 
     try:

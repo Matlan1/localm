@@ -12,7 +12,7 @@ CDN. Each keeps its own license:
 
 | Component | Used for | License | Copyright |
 |---|---|---|---|
-| marked | Markdown rendering | MIT | (c) 2011-2024 Christopher Jeffrey and contributors |
+| marked | Markdown rendering | MIT | (c) 2018-2026 MarkedJS, (c) 2011-2018 Christopher Jeffrey |
 | DOMPurify (`purify`) | HTML sanitizing | Apache-2.0 OR MPL-2.0 | (c) Cure53 and contributors |
 | highlight.js (`highlight` + `github-dark` theme) | Code highlighting | BSD-3-Clause | (c) 2006 Ivan Sagalaev and contributors |
 | KaTeX (`katex`, `auto-render`, `KaTeX_*` fonts) | Math rendering | MIT | (c) 2013-2020 Khan Academy and other contributors |

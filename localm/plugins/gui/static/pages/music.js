@@ -8,6 +8,7 @@
 import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
+import { createMusicModelPicker } from "../app/native-models.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -60,6 +61,8 @@ bindReloadToggle("music", "music-reload-llm");
    backend runs. */
 export const musicBackend = { active: null, choice: null };
 
+export const musicModelPicker = createMusicModelPicker({ mountId: "music-native-models" });
+
 export async function refreshMusicBackend() {
   let data;
   try {
@@ -97,6 +100,11 @@ export async function refreshMusicBackend() {
   }
   const card = $("music-workflow-card");
   if (card) card.hidden = native;
+  const picker = $("music-native-models");
+  if (picker) {
+    picker.hidden = !native;
+    if (native) musicModelPicker.refresh();
+  }
   for (const [id, key] of [["music-steps", "music.stepsPlaceholder"],
                            ["music-cfg", "music.cfgPlaceholder"]]) {
     const input = $(id);
@@ -128,6 +136,8 @@ $("music-generate").onclick = async () => {
   if (!native && modelOverrides.music && Object.keys(modelOverrides.music).length) {
     body.model_overrides = modelOverrides.music;
   }
+  const nativeChoice = native ? musicModelPicker.choice() : {};
+  Object.assign(body, nativeChoice);
 
   $("music-generate").disabled = true;
   const log = $("music-log");
@@ -136,7 +146,7 @@ $("music-generate").onclick = async () => {
   $("music-result").replaceChildren();
   try {
     await checkModelsBeforeGenerate("music", log,
-      native ? {} : { model_overrides: modelOverrides.music });
+      native ? nativeChoice : { model_overrides: modelOverrides.music });
     const r = await fetch("/api/music", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });

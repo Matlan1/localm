@@ -14,9 +14,9 @@ import click
 
 from localm.debuglog import logger
 from localm.setup_llama._common import console
-from localm.setup_llama.pins import (_AMD_ROCM_ASSET_TAG, _ASSET_MATCH, _CUDA_LINUX_REPO,
-                                     _PINNED_FALLBACK_SHA256, _ROCM_TAG, _UPSTREAM_REPO,
-                                     DEFAULT_URL, DEFAULT_URL_SHA256)
+from localm.setup_llama.pins import (_AMD_ROCM_ASSET_TAG, _ASSET_MATCH, _CUDA_LINUX_PINNED_SHA256,
+                                     _CUDA_LINUX_REPO, _PINNED_FALLBACK_SHA256, _ROCM_TAG,
+                                     _UPSTREAM_REPO, DEFAULT_URL, DEFAULT_URL_SHA256)
 from localm.setup_llama.versions import _tag_for
 from localm.setup_llama.cuda import _CUDA_LINE
 import localm.setup_llama as _sl
@@ -199,8 +199,10 @@ def _resolve_amd_rocm_asset() -> tuple[str, Optional[str], None]:
 def _resolve_linux_cuda_asset(backend: str, cuda_line: str,
                               tag: Optional[str]) -> tuple[str, Optional[str], str]:
     """The (url, sha256, tag) triple for the Linux CUDA build of *cuda_line*
-    from hybridgroup/llama-cpp-builder's release listing. Raises
-    ``click.ClickException`` when that listing has no matching asset."""
+    from hybridgroup/llama-cpp-builder's release listing. When the listing is
+    unavailable (offline, rate-limited) and *tag* is the pinned build, the pinned
+    download URL and checksum are returned instead. Raises
+    ``click.ClickException`` when neither resolves."""
     # Upstream (ggml-org/llama.cpp) publishes no bare Linux CUDA binary at
     # all, so the generic _ASSET_MATCH path in _resolve_backend_asset would only
     # ever construct a guessed URL that 404s. Resolve against
@@ -222,6 +224,13 @@ def _resolve_linux_cuda_asset(backend: str, cuda_line: str,
             digest = a.get("digest")
             sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
             return url, sha, tag
+    pinned_name = f"llama-{tag}-bin-ubuntu{suffix}"
+    pinned_sha = _CUDA_LINUX_PINNED_SHA256.get(pinned_name)
+    if not assets and pinned_sha:
+        console.print(f"[yellow]Could not read the {_CUDA_LINUX_REPO} release listing for "
+                      f"{tag}; using its pinned {cuda_line} build and checksum.[/yellow]")
+        return (f"https://github.com/{_CUDA_LINUX_REPO}/releases/download/{tag}/{pinned_name}",
+                pinned_sha, tag)
     # Genuinely unresolvable (hybridgroup has not built that exact
     # upstream tag yet): raise click.ClickException, which
     # _provision_with_fallback's caller already catches and turns into the

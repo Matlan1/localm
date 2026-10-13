@@ -302,7 +302,14 @@ output, the GUI load toast and the load response (`mmap`, `mmap_from_disk`)
 then say it runs from disk-backed memory and that first tokens are slower. A
 model split between GPU and CPU, a machine with no GPU, and a load where
 available RAM cannot be read use llama.cpp's own default, which memory-maps the
-file wherever the device supports it. `on` and `off` are used as given. The
+file wherever the device supports it; when the weights such a load keeps in
+system RAM (its CPU layers, plus a draft model placed on the CPU) do not fit
+available RAM with 2 GiB to spare, the same three places say the CPU layers read
+them from disk-backed memory and every token is slower (`mmap_cpu_from_disk` in
+the load response). `on` and `off` are used as given; with `off`, a load whose
+weights do not fit available RAM warns before it starts that it may fail or
+swap, and the GUI load toast and the load response (`mmap_ram_short`,
+`mmap_note`) carry the same warning. The
 Settings page has the same field ("Memory-map model files").
 
 ## Vision projector (image understanding) placement
