@@ -35,12 +35,12 @@ def hub(tmp_path, monkeypatch):
     monkeypatch.setattr(mm, "MODELS_DIR", models_dir)
     monkeypatch.setattr(mm, "ensure_dirs", lambda: None)
     monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: True)
-    state = SimpleNamespace(files={}, digests={}, commit=None, metadata_revisions=[],
-                            download_revisions=[], models_dir=models_dir)
+    state = SimpleNamespace(files={}, digests={}, commit=None, download_revisions=[],
+                            models_dir=models_dir)
 
-    def fake_sha(repo, filename, token=None, revision=None):
-        state.metadata_revisions.append(revision)
-        return state.digests.get(filename)
+    def fake_sha(repo, filename, token=None):
+        digest = state.digests.get(filename)
+        return pull_mod._PublishedDigest(digest, state.commit) if digest else None
 
     def fake_download(repo_id, filename, local_dir, revision=None, **kw):
         state.download_revisions.append(revision)
@@ -56,7 +56,6 @@ def hub(tmp_path, monkeypatch):
 
     import huggingface_hub
     monkeypatch.setattr(mm, "_hf_file_sha256", fake_sha)
-    monkeypatch.setattr(mm, "_hf_repo_commit", lambda repo_id, token=None: state.commit)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
     monkeypatch.setattr("requests.head", fake_head)
     return state
@@ -109,13 +108,12 @@ class TestNoPublishedDigest:
 
 
 class TestOneCommit:
-    def test_the_metadata_and_the_bytes_are_read_at_the_commit(self, hub):
+    def test_each_file_is_downloaded_at_the_commit_its_digest_was_read_at(self, hub):
         hub.commit = COMMIT
         hub.files["a.safetensors"] = BODY
         hub.digests["a.safetensors"] = _sha(BODY)
         ok, _dest = _pull(hub, "o/r:a.safetensors")
         assert ok is True
-        assert hub.metadata_revisions == [COMMIT]
         assert hub.download_revisions == [COMMIT]
 
     def test_without_a_known_commit_nothing_is_pinned(self, hub):
@@ -123,36 +121,35 @@ class TestOneCommit:
         hub.digests["a.safetensors"] = _sha(BODY)
         ok, _dest = _pull(hub, "o/r:a.safetensors")
         assert ok is True
-        assert hub.metadata_revisions == [None] and hub.download_revisions == [None]
+        assert hub.download_revisions == [None]
 
-    def test_the_commit_lookup_accepts_only_a_full_commit_id(self, monkeypatch):
+    def test_the_metadata_call_reports_the_files_last_commit(self, monkeypatch):
         import huggingface_hub
-
-        def api(sha):
-            class Api:
-                def __init__(self, *a, **k):
-                    pass
-
-                def model_info(self, repo_id, token=None):
-                    return SimpleNamespace(sha=sha)
-            return Api
-
-        for sha, want in ((COMMIT, COMMIT), ("main", None), (None, None), ("A" * 40, None)):
-            monkeypatch.setattr(huggingface_hub, "HfApi", api(sha))
-            assert pull_mod._hf_repo_commit("o/r") == want
-
-    def test_a_failed_commit_lookup_is_none(self, monkeypatch):
-        import huggingface_hub
+        asked = {}
 
         class Api:
             def __init__(self, *a, **k):
                 pass
 
-            def model_info(self, *a, **k):
-                raise OSError("offline")
+            def get_paths_info(self, repo_id, paths, expand=False, token=None, **kw):
+                asked["expand"] = expand
+                return [SimpleNamespace(lfs=SimpleNamespace(sha256="AB" * 32),
+                                        last_commit=SimpleNamespace(oid=COMMIT))]
 
         monkeypatch.setattr(huggingface_hub, "HfApi", Api)
-        assert pull_mod._hf_repo_commit("o/r") is None
+        digest = pull_mod._hf_file_sha256("o/r", "f.gguf")
+        assert digest == "ab" * 32 and digest.commit == COMMIT
+        assert asked == {"expand": True}
+
+    @pytest.mark.parametrize("oid", ["main", None, "A" * 40, "abc"])
+    def test_a_commit_that_is_not_a_full_commit_id_is_dropped(self, oid):
+        digest = pull_mod._PublishedDigest("ab" * 32, oid)
+        assert digest == "ab" * 32 and digest.commit is None
+        assert pull_mod._at_commit(digest) == {}
+
+    def test_a_plain_string_digest_pins_nothing(self):
+        assert pull_mod._at_commit("ab" * 32) == {}
+        assert pull_mod._at_commit(None) == {}
 
 
 class TestSplitGguf:
@@ -240,7 +237,7 @@ class TestVisionProjector:
         hub.files["mmproj-f16.gguf"] = BODY
         hub.digests["mmproj-f16.gguf"] = _sha(BODY)
         self._download(hub, tmp_path)
-        assert hub.metadata_revisions == [COMMIT] and hub.download_revisions == [COMMIT]
+        assert hub.download_revisions == [COMMIT]
 
 
 class TestSnapshot:

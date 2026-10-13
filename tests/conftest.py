@@ -904,16 +904,6 @@ def _reset_vram_probe_cache():
 
 
 @pytest.fixture(autouse=True)
-def _no_hub_commit_lookup(monkeypatch):
-    """A model pull reads the repository's current commit from the hub before it
-    downloads. Tests answer "unknown" (the download is not pinned to a commit)
-    unless a test installs its own reader, so none of them reaches the network."""
-    import localm.model_manager as mm
-    monkeypatch.setattr(mm, "_hf_repo_commit", lambda *a, **k: None)
-    yield
-
-
-@pytest.fixture(autouse=True)
 def _neutralise_quick_vram_seed(monkeypatch):
     """sysstats._quick_vram() reads the display-adapter registry and ADL/PDH on
     Windows. Hardware-free tests must not see the host's GPU, so it answers

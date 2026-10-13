@@ -895,60 +895,59 @@ def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
 
 
 
+_FULL_GIT_ID_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _valid_commit(value: object) -> Optional[str]:
+    """*value* when it is a full 40-hex commit id, else None."""
+    return value if isinstance(value, str) and _FULL_GIT_ID_RE.match(value) else None
+
+
+class _PublishedDigest(str):
+    """A sha256 hex digest that also carries, in ``commit``, the repository
+    commit that last changed the file it describes (None when unknown). The
+    file at that commit is the file the digest describes, so a download made at
+    it cannot disagree with the digest because the repository changed
+    meanwhile."""
+
+    commit: Optional[str]
+
+    def __new__(cls, digest: str, commit: Optional[str] = None) -> "_PublishedDigest":
+        obj = super().__new__(cls, digest)
+        obj.commit = _valid_commit(commit)
+        return obj
+
+
+def _at_commit(published: Optional[str]) -> dict[str, Any]:
+    """The ``revision`` keyword for a hub download of the file *published*
+    describes; nothing when no commit is known, which leaves the call on the
+    default branch."""
+    commit = getattr(published, "commit", None)
+    return {"revision": commit} if commit else {}
+
+
 def _hf_file_sha256(repo_id: str, filename: str,
-                     token: Optional[str] = None,
-                     revision: Optional[str] = None) -> Optional[str]:
+                     token: Optional[str] = None) -> Optional[str]:
     """
     Ask the HuggingFace API for a file's LFS sha256 without downloading it.
-    Returns None when offline, on any API error (logged at debug), or for
-    non-LFS files.
+    Returns a :class:`_PublishedDigest`, or None when offline, on any API error
+    (logged at debug), or for non-LFS files.
 
     *token*: optional HF API token - needed for a gated repo's metadata.
-    *revision*: commit to read the metadata at; the default branch when None.
     """
     try:
         from huggingface_hub import HfApi
         info = HfApi(endpoint=_HF_ENDPOINT).get_paths_info(
-            repo_id, [filename], token=token, **_at_commit(revision))
+            repo_id, [filename], token=token, expand=True)
         if info:
             lfs = getattr(info[0], "lfs", None)
             digest = getattr(lfs, "sha256", None) if lfs else None
-            return digest.lower() if digest else None
+            if digest:
+                last = getattr(info[0], "last_commit", None)
+                return _PublishedDigest(digest.lower(), getattr(last, "oid", None))
     except Exception as e:
         logger.debug("could not read the sha256 of %s from %s: %s", filename, repo_id, e)
     return None
-
-
-_FULL_GIT_ID_RE = re.compile(r"^[0-9a-f]{40}$")
-
-
-def _at_commit(commit: Optional[str]) -> dict[str, Any]:
-    """The ``revision`` keyword for a hub call that reads at *commit*; nothing
-    when no commit is known, which leaves the call on the default branch."""
-    return {"revision": commit} if commit else {}
-
-
-def _hf_repo_commit(repo_id: str, token: Optional[str] = None) -> Optional[str]:
-    """The commit *repo_id*'s default branch points at now, or None when it
-    could not be read (offline, an API error, a malformed answer). A pull that
-    reads the file metadata and the bytes at this one commit cannot see them
-    disagree because the repository changed in between."""
-    try:
-        from huggingface_hub import HfApi
-        sha = HfApi(endpoint=_HF_ENDPOINT).model_info(repo_id, token=token).sha
-    except Exception as e:
-        logger.debug("could not read the current commit of %s: %s", repo_id, e)
-        return None
-    return sha if isinstance(sha, str) and _FULL_GIT_ID_RE.match(sha) else None
-
-
-def _published_sha256(repo_id: str, filename: str,
-                      commit: Optional[str]) -> Optional[str]:
-    """The sha256 Hugging Face publishes for *filename*, read at *commit* when
-    one is known."""
-    if commit:
-        return _mm._hf_file_sha256(repo_id, filename, revision=commit)
-    return _mm._hf_file_sha256(repo_id, filename)
 
 
 def _note_unverified(repo_id: str, names: list[str]) -> None:
@@ -1146,9 +1145,8 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
     *dest*."""
     from huggingface_hub import hf_hub_download
     _ensure_hf_resumable_download()
-    commit = _mm._hf_repo_commit(repo_id)
-    expected = _published_sha256(repo_id, remote_name, commit)
-    extra = _at_commit(commit)
+    expected = _mm._hf_file_sha256(repo_id, remote_name)
+    extra = _at_commit(expected)
     plain = base_dir / remote_name
     if dest == plain:
         local = hf_hub_download(repo_id=repo_id, filename=remote_name,
@@ -1486,16 +1484,15 @@ def _pull_gguf_file(
     model_name = _sanitize_name(name or filename.removesuffix(".gguf"))
     dest = base_dir / filename
 
-    # Expected digest from HF metadata - free, no download needed. The metadata
-    # and the bytes are both read at the commit the default branch points at now.
-    commit = _mm._hf_repo_commit(repo_id)
-    at_commit = _at_commit(commit)
-    expected = _published_sha256(repo_id, _remote(filename), commit)
+    # Expected digest from HF metadata - free, no download needed. Each file is
+    # downloaded at the commit its digest was read at.
+    expected = _mm._hf_file_sha256(repo_id, _remote(filename))
     part_digests = {}
     for part in all_parts[1:]:
-        part_digest = _published_sha256(repo_id, _remote(part), commit)
+        part_digest = _mm._hf_file_sha256(repo_id, _remote(part))
         if part_digest:
             part_digests[part] = part_digest
+    published = {filename: expected, **part_digests}
 
     # Honour a user-supplied --sha256: when HF's own metadata digest is known
     # and disagrees with it, the bytes can never match, so refuse up front
@@ -1615,7 +1612,8 @@ def _pull_gguf_file(
         import requests as _req
         total_size = 0
         for part in missing:
-            cdn_url = hf_hub_url(repo_id, _remote(part), endpoint=_HF_ENDPOINT, **at_commit)
+            cdn_url = hf_hub_url(repo_id, _remote(part), endpoint=_HF_ENDPOINT,
+                                 **_at_commit(published.get(part)))
             head    = _req.head(cdn_url, allow_redirects=True, timeout=10)
             size = int(head.headers.get("content-length", 0))
             part_sizes[part] = size
@@ -1688,7 +1686,7 @@ def _pull_gguf_file(
                     filename=_remote(part),
                     local_dir=str(stage_dir),
                     endpoint=_HF_ENDPOINT,
-                    **at_commit,
+                    **_at_commit(published.get(part)),
                 )
                 final = base_dir / part
                 if Path(local) != final:
@@ -1984,7 +1982,7 @@ def _pull_hf_snapshot(
         repo_siblings = info.siblings
         total_size = sum(getattr(s, "size", None) or 0 for s in repo_siblings)
         info_sha = getattr(info, "sha", None)
-        commit = info_sha if isinstance(info_sha, str) and _FULL_GIT_ID_RE.match(info_sha) else None
+        commit = _valid_commit(info_sha)
     except Exception as e:
         # Offline or API error: fall back to a config.json-only completeness
         # check below and an indeterminate (0) progress total.
@@ -2096,7 +2094,7 @@ def _pull_hf_snapshot(
                 repo_id=repo_id,
                 local_dir=str(dest),
                 endpoint=_HF_ENDPOINT,
-                **_at_commit(commit),
+                **({"revision": commit} if commit else {}),
             )
             _prog.ok()
     except Exception as e:
