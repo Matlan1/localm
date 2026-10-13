@@ -14,7 +14,7 @@
  * net_mode=ask requires a one-time confirmation) before it is ever made.
  */
 
-import { NetGateError, classifyLoadError, loadToast, planModelFetch, pickDevice, pickDtype, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
+import { NetGateError, classifyLoadError, loadToast, planModelFetch, pickDevice, pickDtype, pinnedRemotePathTemplate, rekeyCachedModel, KOKORO_PINNED_REVISION, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
 import { isNonEnglishVoice, streamNonEnglish } from "./g2p.js";
 
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
@@ -178,6 +178,17 @@ export async function register(ctx) {
     const mod = await import(libraryURL);
     Splitter = mod.TextSplitterStream || null;
     kokoroMod = mod;
+    const pinnedTemplate = pinnedRemotePathTemplate(model);
+    if (pinnedTemplate && mod.env) {
+      mod.env.remotePathTemplate = pinnedTemplate;
+      if (typeof caches !== "undefined") {
+        try {
+          await rekeyCachedModel(await caches.open("transformers-cache"), model, KOKORO_PINNED_REVISION);
+        } catch (e) {
+          console.warn("[tts] could not move the cached voice model to the pinned version:", e);
+        }
+      }
+    }
     const onnx = mod.env && mod.env.backends && mod.env.backends.onnx;
     // The onnxruntime runtime is VENDORED (see vendor/NOTICE.md), and this
     // fallback is where the default has to live rather than only in

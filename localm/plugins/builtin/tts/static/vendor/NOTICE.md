@@ -82,6 +82,24 @@ names are minifier output and differ in every rebuilt bundle, so
 bundle that drops the line fails `tests-js/tts-g2p.test.mjs` rather than breaking
 speech at runtime.
 
+### `kokoro.min.js` fetches the voices at the pinned commit
+
+The upstream bundle fetches a voice from `.../Kokoro-82M-v1.0-ONNX/resolve/main/voices/<voice>.bin`
+and caches the response under that same URL. One call in that function is changed to request the
+URL with `/resolve/main/` replaced by `/resolve/<KOKORO_PINNED_REVISION>/` (the commit in
+`tts-util.js`), so the voices are fetched at the pinned commit while the cache key, and so every
+voice already cached in a browser, stays the same:
+
+    let C=await fetch(d),b=await C.arrayBuffer();
+    let C=await fetch(d.replace("/resolve/main/","/resolve/<commit>/")),b=await C.arrayBuffer();
+
+The model files need no patch: `tts.js` sets transformers.js's `env.remotePathTemplate` to the
+pinned commit, and first moves any file the browser cached under `/resolve/main/` to the pinned
+URL (transformers.js keys its cache by URL) so a model already downloaded is not fetched again. `scripts/bump_tts_bundle.py` applies the change to every build (it finds the call by
+the `resolve/main/voices/` string, because the variable names differ in minifier output), so
+`--verify` reproduces this file. `tests-js/tts-pin.test.mjs` and the weekly pin report's "Kokoro
+voice model commit" row fail when it is missing.
+
 ### Re-vendoring
 
     python scripts/bump_tts_bundle.py --lib transformers.js --tag <version>
