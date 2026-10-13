@@ -810,18 +810,19 @@ def _hub_serving_the_pins():
     return lambda repo, path, revision="main": pins[(repo, path)]
 
 
-def test_the_pinned_hf_files_cover_music_and_comfyui_and_every_digest_is_64_hex():
+def test_the_pinned_hf_files_cover_music_comfyui_and_starter_models_and_every_digest_is_64_hex():
     pins = cp.hf_file_pins()
     labels = [p[0] for p in pins]
     assert sum(label.startswith("music ") for label in labels) == 4
     assert sum(label.startswith("ComfyUI ") for label in labels) == 8
+    assert sum(label.startswith("starter ") for label in labels) == 11
     assert all(cp._HEX64_RE.match(p[4]) for p in pins)
     assert len({(p[1], p[2]) for p in pins}) == len(pins)
 
 
 def test_a_hub_serving_the_pinned_digests_reads_current(monkeypatch):
     row = _hf_row(monkeypatch, _hub_serving_the_pins())
-    assert row.status == cp.CURRENT and "12 pinned digest(s)" in row.detail
+    assert row.status == cp.CURRENT and "23 pinned digest(s)" in row.detail
 
 
 def test_a_reuploaded_file_reads_stale_and_names_it(monkeypatch):

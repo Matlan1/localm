@@ -814,10 +814,12 @@ def pull_model(
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
-            res = _mm._pull_gguf_file(spec, name, expected_sha256=expected_sha256,
+            starter_pin = None if expected_sha256 else _mm.starter_model_sha256(spec)
+            res = _mm._pull_gguf_file(spec, name, expected_sha256=expected_sha256 or starter_pin,
                                    redownload=redownload, model_type=detected_type,
                                    dest_dir=dest_dir, register=register,
-                                   type_is_auto=type_is_auto, mmproj_spec=mmproj_spec)
+                                   type_is_auto=type_is_auto, mmproj_spec=mmproj_spec,
+                                   pinned_starter=bool(starter_pin))
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
             res = _mm._pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
@@ -1341,6 +1343,7 @@ def _pull_gguf_file(
     dest_dir: Optional[Path] = None,
     type_is_auto: bool = False,
     mmproj_spec: Optional[str] = None,
+    pinned_starter: bool = False,
 ) -> bool:
     """Download a single file from a HuggingFace repo (despite the name, not
     restricted to .gguf - any single-file ``owner/repo:filename`` spec dispatches
@@ -1357,6 +1360,10 @@ def _pull_gguf_file(
     controls whether the download is added to localm's own model registry -
     a file routed elsewhere (e.g. for ComfyUI, not for localm's own chat-model
     catalog) should normally pass ``register=False``.
+
+    ``pinned_starter`` marks *expected_sha256* as the digest localm pins for a
+    starter model rather than one the user typed, which changes only the
+    message printed when the hub now serves a different file.
 
     ``mmproj_spec``, when given, is the user's explicit ``--mmproj
     owner/repo:file.gguf`` choice and always wins over the automatic same-repo
@@ -1435,6 +1442,14 @@ def _pull_gguf_file(
     # rather than spending a download to discover the mismatch.
     want = expected_sha256.lower() if expected_sha256 else None
     if want and expected and want != expected.lower():
+        if pinned_starter:
+            console.print(
+                f"[red]{escape(filename)} has changed on Hugging Face.[/red] This release "
+                f"of localm pins it at sha256 {escape(want)}, and the hub now serves "
+                f"{escape(expected)}. Refusing to download it. Update localm, or accept "
+                f"the file the hub serves now with [bold]--sha256 {escape(expected)}[/bold]."
+            )
+            return False
         console.print(
             f"[red]SHA256 mismatch (before download):[/red] --sha256 "
             f"{escape(want[:16])}… does not match HuggingFace's metadata for "
@@ -1456,7 +1471,10 @@ def _pull_gguf_file(
                 console.print(
                     f"[red]SHA256 mismatch![/red] The file already at "
                     f"{escape(filename)} ({escape(on_disk[:16])}…) does not "
-                    f"match --sha256 ({escape(want[:16])}…)."
+                    + (f"match the digest localm pins for this starter model ({escape(want[:16])}…). "
+                       "Delete it and pull again."
+                       if pinned_starter else
+                       f"match --sha256 ({escape(want[:16])}…).")
                 )
                 return False
         if register:
