@@ -175,12 +175,13 @@ def register(app: FastAPI, ctx) -> None:
         *body* names a report saved by ``POST /api/bug-report``: ``filename``
         and ``sha256``, the ``report_sha256`` that route returned. The saved
         file is uploaded only when its current text has that digest, so what is
-        sent is exactly the text the user was shown; the issue title is the
-        report's own H1. 400 for a missing or invalid filename or digest, 404
-        when the file cannot be read, 409 when its text no longer matches the
-        digest. A failed upload returns 200 with ``uploaded`` False and a
-        diagnosed ``upload_stage``/``upload_message``, never success, and the
-        file stays saved."""
+        sent is the text the user was shown, without its closing edit note
+        (``upload_report`` strips it); the issue title is the report's own H1.
+        400 for a missing or invalid filename or digest, 404 when the file
+        cannot be read, 409 when its text no longer matches the digest. A
+        failed upload returns 200 with ``uploaded`` False and a diagnosed
+        ``upload_stage``/``upload_message``, never success, and the file stays
+        saved."""
         from localm import bugreport
         filename = body.get("filename")
         digest = body.get("sha256")

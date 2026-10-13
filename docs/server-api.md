@@ -928,8 +928,9 @@ Scope: `config:write`.
 Takes `{"filename": ..., "sha256": ...}`: a report saved by `POST
 /api/bug-report`, and the `report_sha256` that route returned for it. The saved
 file is filed as an issue through the configured proxy only when its current
-text still has that digest, so what is filed is exactly the text that was
-shown. The issue title is the report's own heading.
+text still has that digest, so what is filed is the text that was shown,
+without only its closing note about editing the report. The issue title is the
+report's own heading.
 
 - A missing digest, or a filename that is not a bare saved-report name
   (`bug-<stamp>.md`), returns `400`. A file that cannot be read returns `404`.

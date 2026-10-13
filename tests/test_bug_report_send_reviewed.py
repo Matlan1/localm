@@ -162,6 +162,33 @@ def test_a_failed_send_can_be_retried_with_the_same_reviewed_file(client, monkey
     assert calls == [data["report_markdown"], data["report_markdown"]]
 
 
+def test_a_rate_limited_send_is_reported_not_claimed(client, monkeypatch):
+    c, hdrs, _, _ = client
+    data = _save(c, hdrs)
+
+    def _limited(title, body, **kw):
+        raise bugreport.RateLimitedError(12, reason="slow down")
+
+    monkeypatch.setattr(bugreport, "upload_report", _limited)
+    r = c.post("/api/bug-report/send", headers=hdrs,
+               json={"filename": data["filename"], "sha256": data["report_sha256"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["uploaded"] is False
+    assert body["rate_limited"] is True
+    assert body["retry_after"] == 12
+
+
+def test_a_saved_report_that_is_not_utf8_is_a_read_error(client):
+    c, hdrs, uploads, _ = client
+    data = _save(c, hdrs)
+    Path(data["path"]).write_bytes("# localm bug report: caf\u00e9\n".encode("cp1252"))
+    r = c.post("/api/bug-report/send", headers=hdrs,
+               json={"filename": data["filename"], "sha256": data["report_sha256"]})
+    assert r.status_code == 404
+    assert uploads == []
+
+
 @pytest.mark.parametrize("text,title", [
     ("# localm bug report: the grey square\n\nbody", "the grey square"),
     ("# My own heading\nbody", "My own heading"),

@@ -57,7 +57,8 @@ def read_saved_report(filename: str) -> str:
 
     *filename* must be a bare ``bug-<stamp>.md`` name as ``save_report``
     writes it. Raises ValueError for any other name (a path, a separator, a
-    different extension) and OSError when the file cannot be read."""
+    different extension) and OSError when the file cannot be read or is not
+    valid UTF-8."""
     if not isinstance(filename, str) or not _SAVED_REPORT_NAME.fullmatch(filename):
         raise ValueError("not a saved bug-report file name")
     from localm.config import home_dir
@@ -65,7 +66,10 @@ def read_saved_report(filename: str) -> str:
     path = (base / filename).resolve()
     if path.parent != base:
         raise ValueError("not a saved bug-report file name")
-    return path.read_text(encoding="utf-8")
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise OSError(f"{filename} is not valid UTF-8") from e
 
 
 def report_digest(text: str) -> str:

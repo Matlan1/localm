@@ -164,7 +164,8 @@ localm will not start at all on a pip install, file an
 **You always see the full report before anything is sent, and sending needs
 your explicit OK.** In the GUI, "Send to maintainer" saves the report and
 shows its whole text; nothing is uploaded until you press "Send this
-report", and what is uploaded is that saved text, unchanged. The standalone
+report", and what is uploaded is that saved text, without only its closing
+note about editing the report. The standalone
 reporter and `localm bug-report` preview the
 same text at a terminal prompt - and when there is no terminal to prompt
 (piped/redirected stdin, or run non-interactively), both the Python and

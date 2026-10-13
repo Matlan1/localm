@@ -1340,7 +1340,7 @@
   "settings.bug.rateLimitedToast": "Ratenbegrenzung; warten Sie kurz und klicken Sie erneut auf Senden",
   "settings.bug.retryButton": "Senden erneut versuchen",
   "settings.bug.retrying": "Erneuter Versuch...",
-  "settings.bug.reviewHelp": "Dies ist der ganze Bericht, genau so, wie er gesendet wird. Er wird zu einem öffentlichen GitHub-Issue. Es wurde noch nichts gesendet.",
+  "settings.bug.reviewHelp": "Dies ist der ganze Bericht, so wie er gesendet wird, ohne den abschließenden Hinweis zum Bearbeiten, der weggelassen wird. Er wird zu einem öffentlichen GitHub-Issue. Es wurde noch nichts gesendet.",
   "settings.bug.previewLabel": "Zu sendender Fehlerbericht",
   "settings.bug.confirmSendButton": "Diesen Bericht senden",
   "settings.bug.cancelSendButton": "Nicht senden",

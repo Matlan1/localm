@@ -255,6 +255,10 @@ test("R47: Retry re-sends the SAME reviewed report and Download hands back its m
   await flush();
   doc.getElementById("bug-confirm-send").click();
   await flush();
+  assert.equal(doc.getElementById("bug-download").hidden, false, "Download offered after a failed send");
+  doc.getElementById("bug-download").click();
+  assert.equal(blobs.length, 1, "download built a blob from the saved report");
+  assert.equal(await blobs[0].text(), SAVED.report_markdown, "the download is the reviewed text");
   doc.getElementById("bug-retry").click();
   await flush();
   assert.deepEqual(calls.map((c) => c.url),
@@ -262,8 +266,8 @@ test("R47: Retry re-sends the SAME reviewed report and Download hands back its m
     "Retry re-sent without saving a fresh report");
   assert.deepEqual(calls[2].body, calls[1].body, "the retry names the same reviewed file");
   assert.match(doc.getElementById("bug-result").textContent, /^Sent\./);
-  doc.getElementById("bug-download").click();
-  assert.equal(blobs.length, 0, "Download is hidden once sent");
+  assert.equal(doc.getElementById("bug-download").hidden, true, "Download hidden once sent");
+  assert.equal(doc.getElementById("bug-retry").hidden, true, "Retry hidden once sent");
 });
 
 test("R47: a 2xx send with no issue_url still reports 'Sent' (matches the toast)", async () => {
@@ -296,4 +300,54 @@ test("Download after a plain Save hands back the saved markdown", async () => {
   assert.equal(doc.getElementById("bug-review").hidden, true, "Save shows no send prompt");
   doc.getElementById("bug-download").click();
   assert.equal(blobs.length, 1);
+});
+
+test("a rate-limited send is retried once, automatically, with the SAME confirmed report", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [
+    { uploaded: false, rate_limited: true, retry_after: 1, upload_error: "rate limited" },
+    { uploaded: true, issue_url: "https://github.com/Matlan1/localm/issues/7" },
+  ]) });
+  const doc = window.document;
+  doc.getElementById("bug-upload").hidden = false;
+  doc.getElementById("bug-desc").value = "slow down";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  doc.getElementById("bug-confirm-send").click();
+  await flush();
+  assert.match(doc.getElementById("bug-result").textContent, /retrying in 1s/);
+  for (const id of ["bug-send", "bug-upload", "bug-confirm-send", "bug-cancel-send"]) {
+    assert.equal(doc.getElementById(id).disabled, true, `${id} is locked during the countdown`);
+  }
+  await new Promise((r) => setTimeout(r, 1300));
+  await flush();
+  assert.deepEqual(calls.map((c) => c.url),
+    ["/api/bug-report", "/api/bug-report/send", "/api/bug-report/send"]);
+  assert.deepEqual(calls[2].body, calls[1].body, "the retry sends the confirmed report");
+  assert.match(doc.getElementById("bug-result").textContent, /issues\/7/);
+  assert.equal(doc.getElementById("bug-send").disabled, false, "buttons unlocked afterwards");
+});
+
+test("the automatic retry sends nothing once the confirmed report is no longer on review", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [
+    { uploaded: false, rate_limited: true, retry_after: 1, upload_error: "rate limited" },
+    { uploaded: true },
+  ]) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "first report";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  doc.getElementById("bug-confirm-send").click();
+  await flush();
+  // A new review replaces the confirmed one during the countdown.
+  doc.getElementById("bug-upload").disabled = false;
+  doc.getElementById("bug-upload").click();
+  await flush();
+  await new Promise((r) => setTimeout(r, 1300));
+  await flush();
+  assert.deepEqual(calls.map((c) => c.url),
+    ["/api/bug-report", "/api/bug-report/send", "/api/bug-report"],
+    "nothing was sent for the report that was never confirmed");
+  assert.match(doc.getElementById("bug-result").textContent, /Not sent\./);
 });

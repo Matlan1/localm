@@ -2132,7 +2132,7 @@ export const I18N_EN = {
   "settings.bug.retryingIn": "Rate limited - retrying in {secs}s...",
   "settings.bug.retrying": "Retrying...",
   "settings.bug.reviewHelp":
-    "This is the whole report, exactly as it will be sent. It becomes a public GitHub issue. Nothing has been sent yet.",
+    "This is the whole report as it will be sent, except the closing note about editing it, which is left out. It becomes a public GitHub issue. Nothing has been sent yet.",
   "settings.bug.previewLabel": "Bug report to send",
   "settings.bug.confirmSendButton": "Send this report",
   "settings.bug.cancelSendButton": "Don't send",

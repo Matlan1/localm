@@ -2093,7 +2093,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A bug report is sent only after you have seen it.** In Settings > Report a bug, "Send to
   maintainer" used to file the report as a public GitHub issue in one click, without showing it.
   It now saves the report and shows its whole text, and nothing is sent until you press "Send this
-  report". What is sent is that saved text, unchanged; Retry sends the same report again.
+  report". What is sent is that saved text, without only its closing note about editing it;
+  Retry and the automatic retry after a rate limit send that same report again.
 - **Privacy mode no longer saves a bug report on its own.** An unexpected error used to write a
   report (with the error, settings subset and recent activity) to the data folder in every mode.
   In privacy mode without "Keep diagnostics for bug reports", nothing is written: a command that

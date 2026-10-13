@@ -1848,16 +1848,15 @@ export async function submitBugReport(review) {
   }
 }
 
-// Send the report on review: exactly the saved file that was shown, named by
-// its filename and digest. isRetry marks the one automatic rate-limit retry.
-export async function sendReviewedBugReport(isRetry = false) {
-  const rep = _reviewedBugReport;
-  if (!rep) return;
-  const confirmBtn = $("bug-confirm-send"), cancelBtn = $("bug-cancel-send");
-  const retryBtn = $("bug-retry");
-  if (confirmBtn) confirmBtn.disabled = true;
-  if (cancelBtn) cancelBtn.disabled = true;
-  if (retryBtn) retryBtn.disabled = true;
+// Send the report on review: the saved file that was shown, named by its
+// filename and digest. isRetry marks the one automatic rate-limit retry, which
+// passes the report that was confirmed as rep; it is sent only while that
+// report is still the one on review.
+export async function sendReviewedBugReport(isRetry = false, rep = _reviewedBugReport) {
+  if (!rep || rep !== _reviewedBugReport) return;
+  const buttons = ["bug-confirm-send", "bug-cancel-send", "bug-retry", "bug-send", "bug-upload"]
+    .map((id) => $(id)).filter(Boolean);
+  for (const b of buttons) b.disabled = true;
   const out = $("bug-result");
   try {
     const r = await fetch("/api/bug-report/send", {
@@ -1872,7 +1871,7 @@ export async function sendReviewedBugReport(isRetry = false) {
     const autoRetry = !$("bug-autoretry") || $("bug-autoretry").checked;
     if (data.rate_limited && !isRetry && autoRetry) {
       const secs = Math.max(1, parseInt(data.retry_after, 10) || 30);
-      await countdownRetryBugReport(secs, out);
+      await countdownRetryBugReport(secs, out, rep);
       return;
     }
     const sent = !!data.uploaded;
@@ -1908,9 +1907,7 @@ export async function sendReviewedBugReport(isRetry = false) {
   } catch (e) {
     toast(t("settings.bug.fileFailed", { message: e.message }), true);
   } finally {
-    if (confirmBtn) confirmBtn.disabled = false;
-    if (cancelBtn) cancelBtn.disabled = false;
-    if (retryBtn) retryBtn.disabled = false;
+    for (const b of buttons) b.disabled = false;
   }
 }
 
@@ -1927,9 +1924,10 @@ function cancelBugReview() {
   }
 }
 
-// Show a live countdown in the bug-report result line, then auto-retry the send
-// once (isRetry=true, so it never loops).
-async function countdownRetryBugReport(secs, out) {
+// Show a live countdown in the bug-report result line, then auto-retry sending
+// rep once (isRetry=true, so it never loops). When rep is no longer the report
+// on review, nothing is sent and the result line says so.
+async function countdownRetryBugReport(secs, out, rep) {
   for (let s = secs; s > 0; s--) {
     if (out) {
       out.hidden = false;
@@ -1937,8 +1935,12 @@ async function countdownRetryBugReport(secs, out) {
     }
     await new Promise((res) => setTimeout(res, 1000));
   }
+  if (rep !== _reviewedBugReport) {
+    if (out) out.textContent = t("settings.bug.notSent", { where: rep.where });
+    return;
+  }
   if (out) out.textContent = t("settings.bug.retrying");
-  await sendReviewedBugReport(true);
+  await sendReviewedBugReport(true, rep);
 }
 
 if ($("bug-send")) $("bug-send").onclick = () => submitBugReport(false);
