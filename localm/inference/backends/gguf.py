@@ -1260,6 +1260,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         frequency_penalty: Optional[float] = None,
         logprobs: Optional[int] = None,
         on_logprobs: Optional[Callable[[list], None]] = None,
+        cache_prompt: bool = True,
     ) -> Iterator[str]:
         # Image and audio input: with an mmproj loaded they flow through to
         # create_chat_completion's media path. A model without the encoder
@@ -1311,6 +1312,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             kwargs["thinking"] = thinking
         if logprobs is not None:
             kwargs["logprobs"] = logprobs
+        if not cache_prompt:
+            kwargs["cache_prompt"] = False
         kwargs.update(sampling)
 
         # The grammar-fault retry-without-grammar logic runs inside the isolated

@@ -203,6 +203,9 @@ class CompletionRequest(SamplingFields):
     grammar_lazy: bool = False
     grammar_triggers: Optional[list[str]] = None
     seed: Optional[int] = None
+    # False: the reply is computed from a full prefill into an emptied KV cache,
+    # alone, so it depends only on this request (GGUF models).
+    cache_prompt: bool = True
     # Text that ends the reply when generated: one string or a list. The reply
     # is cut before the first match and finish_reason is "stop".
     stop: Optional[list[str]] = None
@@ -251,6 +254,9 @@ class ChatRequest(SamplingFields):
     grammar_lazy: bool = False
     grammar_triggers: Optional[list[str]] = None
     seed: Optional[int] = None     # RNG seed for reproducible generation
+    # False: the reply is computed from a full prefill into an emptied KV cache,
+    # alone, so it depends only on this request (GGUF models).
+    cache_prompt: bool = True
     # Text that ends the reply when generated: one string or a list. The reply
     # is cut before the first match and finish_reason is "stop".
     stop: Optional[list[str]] = None

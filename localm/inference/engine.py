@@ -730,14 +730,16 @@ class Engine:
         frequency_penalty: Optional[float] = None,
         logprobs: Optional[int] = None,
         on_logprobs: Optional[Callable[[list], None]] = None,
+        cache_prompt: Optional[bool] = None,
     ) -> Iterator[str]:
         """Stream the reply to *messages*. ``thinking=False`` asks a reasoning
         model to answer without its reasoning channel; ``None`` leaves the
         model's default. *min_p*, *presence_penalty* and *frequency_penalty* are
         passed to the backend only when set; check :meth:`unsupported_sampling`
         first. *logprobs* and *on_logprobs* are passed only when *logprobs* is
-        set; check :attr:`supports_logprobs` first. The other parameters default
-        to the config values."""
+        set; check :attr:`supports_logprobs` first. ``cache_prompt=False`` is
+        passed on (see the backend's ``chat_stream``); ``None`` and ``True`` keep
+        the prompt cache. The other parameters default to the config values."""
         # Auto-reload if the model was unloaded. Holds the process-global load
         # lock so a reload cannot race another load onto the GPU, and
         # double-checks inside the lock so a model another thread just brought
@@ -762,6 +764,8 @@ class Engine:
         if logprobs is not None:
             extra["logprobs"] = logprobs
             extra["on_logprobs"] = on_logprobs
+        if cache_prompt is False:
+            extra["cache_prompt"] = False
         # Normalise model-internal control markers (harmony and Gemma channel
         # tags, and similar) once here, so every backend inherits it. The GGUF
         # backend also scrubs internally and scrub_stream is idempotent; the HF
