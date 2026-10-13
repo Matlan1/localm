@@ -121,6 +121,10 @@ _FAMILY_LLM_ARCH = {
     "hunyuan-video": ("qwen2vl", "qwen25vl", "qwen2"),
 }
 
+# Hidden sizes of the LLM text encoders a family's models were trained with
+# (Qwen2.5-VL-7B: 3584, Qwen3-4B: 2560).
+_FAMILY_LLM_HIDDEN = {"qwen-image": (3584,), "z-image": (2560,), "hunyuan-video": (3584,)}
+
 _GGUF_DIFFUSION_ARCH = {"flux": "flux", "sd3": "sd3", "wan": None, "lumina2": "z-image",
                         "sdxl": "sdxl", "sd1": "sd1", "hyvid": "hunyuan-video"}
 
@@ -197,7 +201,11 @@ def accepts(slot: str, family: Optional[str], cand: FileInfo,
             return False
         archs = _FAMILY_LLM_ARCH.get(family or "")
         arch = cand.detail.get("arch")
-        return archs is None or arch is None or arch in archs
+        if archs is not None and arch is not None and arch not in archs:
+            return False
+        hidden = _FAMILY_LLM_HIDDEN.get(family or "")
+        got = cand.detail.get("hidden")
+        return hidden is None or got is None or got in hidden
     if slot == "vae":
         if cand.kind != "vae":
             return False
@@ -230,7 +238,9 @@ def _read_safetensors(path: Path) -> Optional[dict]:
         if name == "__metadata__" or not isinstance(meta, dict):
             continue
         shape = meta.get("shape")
-        out[str(name)] = tuple(int(d) for d in shape) if isinstance(shape, list) else ()
+        ok = isinstance(shape, list) and all(isinstance(d, int) and not isinstance(d, bool)
+                                             for d in shape)
+        out[str(name)] = tuple(shape) if ok else ()
     return out
 
 
@@ -279,7 +289,8 @@ def read_tensors(path: Path) -> Optional[tuple[dict, Optional[str]]]:
         if path.suffix.lower() in (".safetensors", ".sft"):
             t = _read_safetensors(path)
             return None if t is None else (t, None)
-    except (OSError, ValueError, struct.error, UnicodeDecodeError, RecursionError):
+    except (OSError, ValueError, TypeError, OverflowError, MemoryError, struct.error,
+            UnicodeDecodeError, RecursionError):
         return None
     return None
 
@@ -323,6 +334,8 @@ def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
         return "ovis-image", {}
     if _has(names, p + "nerf_final_layer_conv."):
         return "chroma", {"radiance": True}
+    if _has(names, p + "txt_in.individual_token_refiner.blocks.0.adaLN_modulation.1.weight"):
+        return "hunyuan-video", {}
     if _has(names, p + "double_blocks.", p + "single_transformer_blocks."):
         if _has(names, p + "distilled_guidance_layer."):
             return "chroma", {}
@@ -331,8 +344,6 @@ def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
         return "qwen-image", {}
     if _has(names, p + "cap_embedder.0.weight"):
         return "z-image", {}
-    if _has(names, p + "txt_in.individual_token_refiner.blocks.0.adaLN_modulation.1.weight"):
-        return "hunyuan-video", {}
     if _has(names, "llm_adapter.blocks.0.cross_attn.q_proj.weight"):
         return "anima", {}
     if _has(names, p + "layers.0.adaLN_sa_ln.weight"):
@@ -400,6 +411,11 @@ def _lora_info(t: dict) -> Optional[FileInfo]:
         return None
     flat = " ".join(names[:4000]).replace(".", "_")
     fam = None
+    image_markers = ("lora_unet", "lora_te", "text_model", "diffusion_model",
+                     "transformer_blocks", "double_blocks", "single_blocks", "joint_blocks")
+    if ("model_layers_" in flat and ("self_attn_q_proj" in flat or "mlp_gate_proj" in flat)
+            and not any(m in flat for m in image_markers)):
+        return FileInfo("lora", "llm")
     if "double_blocks" in flat or "single_blocks" in flat or "single_transformer_blocks" in flat:
         fam = "flux"
     elif "joint_blocks" in flat:
@@ -425,7 +441,8 @@ def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:
             return FileInfo("byt5" if vocab and vocab < 1000 else "t5xxl", detail={"dim": dim})
         return FileInfo("umt5" if vocab and vocab > 200_000 else "t5xxl", detail={"dim": dim})
     if arch in _LLM_GGUF_ARCHS:
-        return FileInfo("llm", detail={"arch": arch})
+        tok = _shape(t, "token_embd.weight") or ()
+        return FileInfo("llm", detail={"arch": arch, "hidden": tok[1] if len(tok) > 1 else None})
     for pre in ("", "text_encoders.t5xxl.transformer.", "t5xxl.transformer."):
         shared = _shape(t, pre + "shared.weight", pre + "encoder.embed_tokens.weight")
         if shared and _has(names, pre + "encoder.block."):
@@ -447,7 +464,10 @@ def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:
         return FileInfo("clip_vision")
     if _has(names, "model.layers.0.self_attn.q_proj.weight", "layers.0.self_attn.q_proj.weight",
             "model.language_model.layers.0.", "language_model.model.layers.0."):
-        return FileInfo("llm", detail={"arch": None})
+        emb = _shape(t, "model.embed_tokens.weight", "embed_tokens.weight",
+                     "model.language_model.embed_tokens.weight") or ()
+        return FileInfo("llm", detail={"arch": None,
+                                       "hidden": emb[1] if len(emb) > 1 else None})
     return None
 
 

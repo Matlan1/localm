@@ -271,9 +271,12 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             st = native.status(s)
             if not st["missing"]:
                 return {"status": "verified", "missing": [], "warning": None}
-            parts = [p for p in st.get("missing_components") or [] if p.get("download")]
+            all_parts = st.get("missing_components") or []
+            parts = [p for p in all_parts if p.get("download")]
             if parts:
-                return {"status": "verified", "warning": None, "missing": [{
+                return {"status": "verified",
+                        "warning": st["missing"] if len(parts) < len(all_parts) else None,
+                        "missing": [{
                     "filename": p["download"]["filename"], "native": True,
                     "searchable": False, "slot": p["slot"],
                     "source": {**p["download"], "name": None, "origin": "curated"},

@@ -78,11 +78,17 @@ def validate_loras(loras: Optional[list], reg: Optional[dict] = None) -> list:
 
 
 def apply_choice(s: dict, choice: dict) -> dict:
-    """Settings *s* with *choice* laid over its ``native`` block (a copy)."""
+    """Settings *s* with *choice* laid over its ``native`` block (a copy).
+    When *choice* names a different main ``model`` than the settings, the
+    settings' component slots are dropped, so only the choice's own slots and
+    the automatic pick apply to that model."""
     if not choice:
         return s
     out = dict(s)
     blk = dict(s.get("native") or {}) if isinstance(s.get("native"), dict) else {}
+    if "model" in choice and choice["model"] != str(blk.get("model") or "").strip():
+        for slot in set(MEDIA_SLOTS["image"]) | set(MEDIA_SLOTS["video"]):
+            blk.pop(slot, None)
     blk.update(choice)
     out["native"] = blk
     return out
@@ -173,7 +179,9 @@ def make_router(media: str, prefix: str, plugin_backend) -> APIRouter:
             cands = pairing.registry_candidates()
             out = pairing.native_options(media, cands)
             out["current"] = {k: display_name(v) if v else "" for k, v in configured.items()}
-            picked = {k: query.get(k, configured[k]) for k in keys}
+            other_model = "model" in query and query["model"] != configured["model"]
+            picked = {k: query.get(k, "" if other_model and k != "model" else configured[k])
+                      for k in keys}
             model = picked.pop("model", "")
             out["preview"] = (pairing.preview(media, model, picked, cands) if model
                               else None)

@@ -116,7 +116,7 @@ _DOWNLOADS: dict[tuple[str, str], Download] = {
     ("clip_g", "sd3"): _CLIP_G, ("clip_g", "sdxl"): _CLIP_G,
     ("t5xxl", "flux"): _T5XXL, ("t5xxl", "sd3"): _T5XXL, ("t5xxl", "chroma"): _T5XXL,
     ("t5xxl", "wan2.1"): _UMT5, ("t5xxl", "wan2.2"): _UMT5,
-    ("vae", "flux"): _FLUX_AE, ("vae", "chroma"): _FLUX_AE, ("vae", "sd3"): _FLUX_AE,
+    ("vae", "flux"): _FLUX_AE, ("vae", "chroma"): _FLUX_AE,
     ("vae", "z-image"): _FLUX_AE, ("vae", "ovis-image"): _FLUX_AE,
     ("vae", "flux2"): _FLUX2_VAE, ("vae", "wan2.1"): _WAN21_VAE,
     ("vae", "qwen-image"): _QWEN_VAE, ("vae", "sdxl"): _SDXL_VAE, ("vae", "sd1"): _SD_VAE,
@@ -197,14 +197,32 @@ def _hint_rank(slot: str, family: Optional[str], cand: Candidate) -> int:
     return len(hints)
 
 
+def _name_fits(slot: str, family: Optional[str], cand: Candidate) -> bool:
+    """Name rules for VAEs whose layout several families share: an SD3 VAE
+    must say sd3; an SDXL model takes a VAE named for XL; an SD 1.x/2.x model
+    never takes one named for XL or SD3."""
+    if slot != "vae":
+        return True
+    text = f"{cand.name} {cand.path.name}".lower()
+    xl = "xl" in text
+    if family == "sd3":
+        return "sd3" in text
+    if family == "sdxl":
+        return xl
+    if family in ("sd1", "sd2"):
+        return not xl and "sd3" not in text
+    return True
+
+
 def fitting(slot: str, family: Optional[str], cands: list[Candidate],
-            variant: Optional[str] = None) -> list[Candidate]:
+            variant: Optional[str] = None, *, auto: bool = False) -> list[Candidate]:
     """The candidates that fit *slot* of a *family* model, best first: name
-    hints first, then text-encoder registry entries before chat models, then
-    by name."""
-    fit = [c for c in cands if families.accepts(slot, family, c.info, variant)]
-    return sorted(fit, key=lambda c: (_hint_rank(slot, family, c),
-                                      c.model_type == "llm", c.name.lower()))
+    hints first, then by name. With *auto* (an automatic pick) chat models
+    (registry type ``llm``) are left out: they are offered for an explicit
+    choice only."""
+    fit = [c for c in cands if families.accepts(slot, family, c.info, variant)
+           and _name_fits(slot, family, c) and not (auto and c.model_type == "llm")]
+    return sorted(fit, key=lambda c: (_hint_rank(slot, family, c), c.name.lower()))
 
 
 @dataclass
@@ -213,7 +231,8 @@ class Pairing:
 
     ``chosen``: slot -> ``{"name", "path", "auto"}``; ``missing``: slots no
     file fills, each with its ``download`` (or None); ``mismatched``: explicit
-    choices that do not look right for the family, as user-facing notes."""
+    choices that do not look right for the family or that it does not use, as
+    user-facing notes."""
     chosen: dict
     missing: list
     mismatched: list
@@ -223,15 +242,21 @@ def pair_components(info: FileInfo, explicit: dict, cands: list[Candidate]) -> P
     """Fill each slot *info* needs. *explicit* maps a slot to the
     ``(name, path)`` the user chose; those are kept even when they do not look
     right for the family (noted in ``mismatched``). Slots *info* does not
-    need but *explicit* names are passed through as chosen."""
+    need but *explicit* names are left out for a known family (noted) and
+    passed through for an unknown one."""
     chosen: dict = {}
     missing: list = []
     mismatched: list = []
     family = info.family
     variant = info.detail.get("variant")
+    need = {r.slot for r in families.requirements(info)}
     for slot, (name, path) in explicit.items():
+        if families.known_family(family) and slot not in need:
+            mismatched.append(
+                f"{families.FAMILY_LABELS.get(family or '', family)} models do not use a "
+                f"{SLOT_LABELS.get(slot, slot)}; '{name}' is left out.")
+            continue
         chosen[slot] = {"name": name, "path": str(path), "auto": False}
-        need = {r.slot for r in families.requirements(info)}
         if slot in need:
             got = families.inspect_file(path)
             if got.kind != "unknown" and not families.accepts(slot, family, got, variant):
@@ -243,7 +268,7 @@ def pair_components(info: FileInfo, explicit: dict, cands: list[Candidate]) -> P
     for req in families.requirements(info):
         if req.slot in chosen:
             continue
-        best = fitting(req.slot, family, cands, variant)
+        best = fitting(req.slot, family, cands, variant, auto=True)
         if best:
             c = best[0]
             chosen[req.slot] = {"name": c.name, "path": str(c.path), "auto": True}

@@ -231,17 +231,21 @@ def _media_component_type(path: Path, model_type: Optional[str]) -> Optional[str
     an image/video model file (a diffusion model, text encoder, VAE or LoRA),
     or None when it is not one. An explicit media *model_type* is taken as
     given; otherwise the file's tensor layout decides
-    (``localm.media.sdcpp.families``). A file inside a HuggingFace model
-    directory is never one unless *model_type* says so."""
+    (``localm.media.sdcpp.families``). A file inside a HuggingFace model or
+    PEFT adapter directory, and an LLM LoRA, is never one unless *model_type*
+    says so."""
     if model_type in _MEDIA_COMPONENT_TYPES:
         return model_type
     if model_type is not None:
         return None
     from localm.inference.engine import _is_hf_dir
-    if _is_hf_dir(str(path.parent)):
+    if _is_hf_dir(str(path.parent)) or (path.parent / "adapter_config.json").exists():
         return None
     from localm.media.sdcpp.families import inspect_file
-    return _MEDIA_KIND_TYPES.get(inspect_file(path).kind)
+    info = inspect_file(path)
+    if info.kind == "lora" and info.family == "llm":
+        return None
+    return _MEDIA_KIND_TYPES.get(info.kind)
 
 
 def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,

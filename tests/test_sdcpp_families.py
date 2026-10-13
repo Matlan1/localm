@@ -457,3 +457,122 @@ def test_a_safetensors_inside_an_hf_folder_still_registers_the_folder(tmp_path):
     assert mm.add_local(str(d / "model.safetensors"), no_hash=True) is True
     reg = mm.load_registry()
     assert Path(reg["t5-encoder"]["path"]) == d
+
+
+# --------------------------------------------------------------------------- #
+#  review follow-ups                                                          #
+# --------------------------------------------------------------------------- #
+
+def test_hunyuan_video_is_not_read_as_flux(tmp_path):
+    shapes = {"double_blocks.0.img_attn_qkv.weight": (9216, 3072),
+              "txt_in.individual_token_refiner.blocks.0.adaLN_modulation.1.weight": (6144, 3072)}
+    info = families.inspect_file(write_safetensors(tmp_path / "hy.safetensors", shapes))
+    assert (info.kind, info.family) == ("diffusion", "hunyuan-video")
+
+
+@pytest.mark.parametrize("shape", [[[1]], [None], [{}], [1e400], [True], "x"])
+def test_malformed_shapes_never_raise(tmp_path, shape):
+    f = tmp_path / "bad.safetensors"
+    raw = json.dumps({"a": {"dtype": "F16", "shape": shape, "data_offsets": [0, 0]}})
+    raw = raw.replace("Infinity", "1e400")
+    f.write_bytes(struct.pack("<Q", len(raw)) + raw.encode() + b"\0" * 8)
+    assert families.inspect_file(f) is families.UNKNOWN
+
+
+def test_a_chat_model_is_never_picked_automatically_as_an_llm_encoder(tmp_path):
+    zi = write_safetensors(tmp_path / "z_image.safetensors", Z_IMAGE)
+    vae = write_safetensors(tmp_path / "ae.safetensors", FLUX_AE)
+    chat = write_gguf(tmp_path / "Qwen3-8B.gguf", {"token_embd.weight": (151936, 4096)}, "qwen3")
+    _register("z", zi, "diffusion-unet")
+    _register("ae", vae, "vae")
+    _register("Qwen3-8B-Instruct", chat, "llm", architecture="qwen3")
+    with pytest.raises(pairing.MissingComponents) as ei:
+        image_native.resolve_models({"native": {"model": "z"}})
+    assert [m["slot"] for m in ei.value.missing] == ["llm"]
+    assert ei.value.missing[0]["download"]["filename"] == "qwen_3_4b.safetensors"
+
+
+def test_an_llm_encoder_of_the_wrong_size_does_not_fit(tmp_path):
+    big = write_gguf(tmp_path / "q8b.gguf", {"token_embd.weight": (151936, 4096)}, "qwen3")
+    ok = write_gguf(tmp_path / "q4b.gguf", {"token_embd.weight": (151936, 2560)}, "qwen3")
+    cands = [pairing.Candidate(p.stem, p, families.inspect_file(p), "text-encoder")
+             for p in (big, ok)]
+    assert [c.name for c in pairing.fitting("llm", "z-image", cands, auto=True)] == ["q4b"]
+
+
+def test_a_page_choice_of_another_model_drops_the_settings_components():
+    from localm.media.native_models import apply_choice
+    s = {"native": {"model": "flux", "t5xxl": "t5", "vae": "ae", "steps": 20}}
+    out = apply_choice(s, {"model": "sdxl-unet"})
+    assert out["native"] == {"model": "sdxl-unet", "steps": 20}
+    same = apply_choice(s, {"model": "flux", "clip_l": "vit"})
+    assert same["native"]["t5xxl"] == "t5" and same["native"]["clip_l"] == "vit"
+    assert s["native"]["t5xxl"] == "t5"
+
+
+def test_a_slot_the_family_does_not_use_is_left_out_with_a_note(flux_set):
+    m = video_native.resolve_models({"native": {"model": "wan2.1_t2v", "llm": "clip_l"}})
+    assert "llm_path" not in m["ctx"]
+    assert any("do not use" in n for n in m["notes"])
+
+
+def test_sd_family_vaes_follow_their_names(tmp_path):
+    xl = write_safetensors(tmp_path / "sdxl_vae.safetensors", SD_VAE)
+    sd = write_safetensors(tmp_path / "vae-ft-mse.safetensors", SD_VAE)
+    cands = [pairing.Candidate(p.stem, p, families.inspect_file(p), "vae") for p in (xl, sd)]
+    assert [c.name for c in pairing.fitting("vae", "sdxl", cands)] == ["sdxl_vae"]
+    assert [c.name for c in pairing.fitting("vae", "sd1", cands)] == ["vae-ft-mse"]
+    ae = write_safetensors(tmp_path / "ae.safetensors", FLUX_AE)
+    assert pairing.fitting("vae", "sd3", [pairing.Candidate("ae", ae,
+                                                            families.inspect_file(ae), "vae")]) == []
+
+
+LLM_LORA = {"base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": (8, 4096),
+            "base_model.model.model.layers.0.mlp.gate_proj.lora_B.weight": (11008, 8)}
+SD_LORA_WITH_TE = {"lora_te_text_model_encoder_layers_0_self_attn_q_proj.lora_down.weight": (4, 768),
+                   "lora_unet_input_blocks_4_1_proj_in.lora_down.weight": (4, 320)}
+
+
+def test_llm_adapters_are_not_image_loras(tmp_path):
+    import localm.model_manager as mm
+    info = families.inspect_file(write_safetensors(tmp_path / "a.safetensors", LLM_LORA))
+    assert (info.kind, info.family) == ("lora", "llm")
+    assert families.inspect_file(
+        write_safetensors(tmp_path / "s.safetensors", SD_LORA_WITH_TE)).family == "sd1"
+    d = tmp_path / "peft"
+    d.mkdir()
+    (d / "adapter_config.json").write_text("{}", encoding="utf-8")
+    write_safetensors(d / "adapter_model.safetensors", SDXL_LORA)
+    assert mm.add_local(str(d / "adapter_model.safetensors"), no_hash=True) is False
+    assert mm.add_local(str(tmp_path / "a.safetensors"), no_hash=True) is False
+    assert mm.load_registry() == {}
+
+
+def test_preflight_names_a_missing_part_that_has_no_download(flux_set, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    from localm.media import backend_choice
+    from localm.plugins.engine import attach_engine
+    from localm.plugins.gui.web import attach_gui
+    monkeypatch.setattr(backend_choice, "managed_comfy_active", lambda cfg=None: False)
+    monkeypatch.setattr("localm.media.comfy_client.is_comfy_confirmed", lambda api_url=None: False)
+    from localm.config import REGISTRY_FILE
+    reg = json.loads(REGISTRY_FILE.read_text(encoding="utf-8"))
+    for name in ("t5xxl_fp8_e4m3fn", "ae", "sd-vae"):
+        del reg[name]
+    REGISTRY_FILE.write_text(json.dumps(reg), encoding="utf-8")
+    update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault("image", {}).update(
+        {"backend": "native"}))
+    app = FastAPI()
+    attach_engine(app)
+    attach_gui(app, self_url="http://127.0.0.1:9/v1", switch_model=lambda name: None,
+               active_model=lambda: "m")
+    with TestClient(app) as c:
+        data = c.post("/api/media/image/preflight",
+                      json={"native_models": {"model": "fluxunchained"}}).json()
+        bad = c.post("/api/media/image/preflight", json={"native_models": {"model": "nope"}})
+    assert sorted(m["slot"] for m in data["missing"]) == ["t5xxl", "vae"]
+    assert all(m["source"]["sha256"] for m in data["missing"])
+    assert bad.status_code == 400
