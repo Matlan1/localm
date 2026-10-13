@@ -95,9 +95,10 @@ voice already cached in a browser, stays the same:
 
 The model files need no patch: `tts.js` sets transformers.js's `env.remotePathTemplate` to the
 pinned commit, and first moves any file the browser cached under `/resolve/main/` to the pinned
-URL (transformers.js keys its cache by URL) so a model already downloaded is not fetched again. A rebuilt bundle needs the voices change re-applied (the variable names differ in
-minifier output; find it by the `resolve/main/voices/` string). `tests-js/tts-pin.test.mjs` and the
-weekly pin report's "Kokoro voice model commit" row fail when it is missing.
+URL (transformers.js keys its cache by URL) so a model already downloaded is not fetched again. `scripts/bump_tts_bundle.py` applies the change to every build (it finds the call by
+the `resolve/main/voices/` string, because the variable names differ in minifier output), so
+`--verify` reproduces this file. `tests-js/tts-pin.test.mjs` and the weekly pin report's "Kokoro
+voice model commit" row fail when it is missing.
 
 ### Re-vendoring
 
