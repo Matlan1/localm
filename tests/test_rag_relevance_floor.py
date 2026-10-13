@@ -208,7 +208,7 @@ class TestConversationReference:
         "ok and what about the second one?", "summarize what we just talked about",
         "why did my last message not get through", "can you say that again",
         "what time is it", "the thing you said about the cache", "go back to what you mentioned",
-        "I did not follow the part you wrote about ports", "as you said, how long does it take",
+        "I did not follow the part you wrote about ports", "as I said, how long does it take",
         "can you expand the example above", "you just said the opposite", "explain the previous one",
         "what was the point you made earlier",
     ])
