@@ -1741,8 +1741,8 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 /* Camera button: only useful on a device with a camera + touch (a phone). The
    attach button already offers camera+gallery on mobile via the OS picker, so
    hide the dedicated one on a mouse-pointer (desktop) device to avoid clutter. */
-.chat-camera { display: none; }
-@media (pointer: coarse) { .chat-camera { display: inline-flex; } }
+.composer .chat-camera { display: none; }
+@media (pointer: coarse) { .composer .chat-camera { display: flex; } }
 
 /* "download" button on a coder changed-file row (pull output onto a phone). */
 .file-dl { margin-left: 8px; }

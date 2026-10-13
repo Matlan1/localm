@@ -1881,6 +1881,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instead of 10, so a slower GPU can finish it, and a cancelled coder run now stops the image its
   `generate_image` tool is rendering instead of letting it run on. Ctrl-C in `localm image`, `music` or `video` still
   stops everything ComfyUI is doing, as it says.
+- **A PC with touch input opens straight into the app.** A Windows PC that reports touch points (a
+  touchscreen, a pen, or a remote-desktop session from a phone) got the phone onboarding screen, and every
+  desktop showed the camera button. Both now follow the browser's own mobile flag, a phone or tablet
+  user agent, or a coarse primary pointer.
 
 ### Security
 - **A plain `coder` API key can no longer run commands through the project's coder
