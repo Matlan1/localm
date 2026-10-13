@@ -11,10 +11,10 @@ from __future__ import annotations
 
 REPO = "LostRuins/koboldcpp"
 
-TAG = "v1.122.1"
+TAG = "v1.123"
 
 # What ``koboldcpp-launcher --version`` prints for this tag.
-VERSION = "1.122.1"
+VERSION = "1.123"
 
 _BASE_URL = f"https://github.com/{REPO}/releases/download/{TAG}/"
 
@@ -24,20 +24,20 @@ _BASE_URL = f"https://github.com/{REPO}/releases/download/{TAG}/"
 # Silicon build.
 ASSETS: dict[tuple[str, str], tuple[str, int, str]] = {
     ("windows", "cuda"): (
-        "koboldcpp.exe", 636192312,
-        "c0955f60aac10d139cfdb3ffbd73ad5c7045bfff32656b4a971363d08ff31289"),
+        "koboldcpp.exe", 642223685,
+        "ec20acbad449aaef75e44eac8b585b11cffb681eea7b98b74230f980f30fab38"),
     ("windows", "nocuda"): (
-        "koboldcpp-nocuda.exe", 117328777,
-        "c314724e02b310c4db066a8dade8890a1628bc4b65aa9c2b658309219ca7a779"),
+        "koboldcpp-nocuda.exe", 117318959,
+        "226410e2e412764b494bd12c52eba1cf3de43f5657f447242201df430ad7ae58"),
     ("linux", "cuda"): (
-        "koboldcpp-linux-x64", 641836648,
-        "724b81ad4d0557e6cf6b1e634c1b973e9a56c0a99b5164a9cf1ecbb8c9ad53d8"),
+        "koboldcpp-linux-x64", 648386296,
+        "a86d140d5895ad88aeef0fb9e3c500202287072d8ceba0c45108953da09d5ff3"),
     ("linux", "nocuda"): (
-        "koboldcpp-linux-x64-nocuda", 136689280,
-        "5532ead66f460a59c744fc74a45715bf2b0ef2fe2fb05a6c146a6d2df2145d29"),
+        "koboldcpp-linux-x64-nocuda", 137030248,
+        "89bf9b17ea6a43533a170d2db516acf25e0763363ed4f9825a61efb201ac8be7"),
     ("macos-arm64", "metal"): (
-        "koboldcpp-mac-arm64", 67057424,
-        "4dc85e7f0414812ec5b1fd810b2009a73844ff17347edac41ff85ffe7fc70412"),
+        "koboldcpp-mac-arm64", 64490784,
+        "c82fd647c5a56188575c7e978ce13d3441fe52ce9159f93c4b8422dcf0df1377"),
 }
 
 
