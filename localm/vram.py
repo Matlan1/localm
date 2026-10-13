@@ -717,7 +717,7 @@ def release_other_native_media(
             why = (f"this job needs about {need / 1024 ** 3:.1f} GB and "
                    f"{measured / 1024 ** 3:.1f} GB is free")
         job.push({"type": "line", "text":
-                  f"Freeing VRAM: stopping the idle {name} ({why})."})
+                  f"Freeing VRAM: stopping the {name} ({why})."})
         try:
             stopped = _native_runtime_free(key)
         except Exception as e:

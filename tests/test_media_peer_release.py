@@ -82,7 +82,7 @@ def _settings(need_gb=12.0, backend="native"):
 
 
 def _release(job, label, settings, reading, **kw):
-    kw.setdefault("read_free", lambda: None)
+    kw.setdefault("read_free", lambda: 64 * GB)
     return vram.release_other_native_media(job, settings, label,
                                            read_reading=reading, **kw)
 
