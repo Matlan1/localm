@@ -4,15 +4,18 @@ setting, the parent's request (auto sizing against VRAM for recurrent state),
 what LlamaCpp holds for a given model, and how the load reaches the worker."""
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import struct
 from unittest.mock import PropertyMock, patch
 
 import pytest
 
+from localm.inference.backends.base import stream_stop_check, stream_stop_requested
 from localm.inference.backends.gguf import GgufBackend
 from localm.inference.backends.llamacpp import llama as llama_mod
 from localm.inference.backends.llamacpp._sizing import _AutoLayerBudget
+from localm.inference.backends.llamacpp._slots import ExclusiveCancelled
 from localm.inference.parallel_setting import (
     PARALLEL_AUTO, PARALLEL_AUTO_SLOTS, coerce_parallel_slots, resolve_parallel_slots)
 from tests._bare_llama import make_bare_llama
@@ -391,3 +394,52 @@ def test_a_malformed_grammar_is_refused_before_the_scheduler():
                       side_effect=InvalidGrammarError("bad grammar")):
         with pytest.raises(InvalidGrammarError):
             list(llm._generate_slots([1, 2, 3], 10, 0.0, 40, 0.9, 1.0, grammar="nope"))
+
+
+class _CancellableSlots:
+    def __init__(self, fire):
+        self.fire = fire
+        self.given = []
+
+    @contextlib.contextmanager
+    def exclusive(self, on_wait=None, stop_requested=None):
+        self.given.append(stop_requested)
+        if stop_requested is not None and stop_requested():
+            raise ExclusiveCancelled()
+        yield
+
+    def submit(self, *args, **kw):
+        raise AssertionError("an uncached reply does not use a slot")
+
+
+def _run_exclusive_caller(kind, llm):
+    if kind == "text":
+        return llm._generate([1, 2, 3], 5, 0.0, 40, 0.9, 1.0, cache_prompt=False)
+    return llm._generate_image(
+        [{"role": "user", "content": "hi"}], 5, 0.0, 40, 0.9, 1.0)
+
+
+@pytest.mark.parametrize("kind", ["text", "image"])
+def test_an_exclusive_wait_cancelled_by_the_stream_stop_check_yields_nothing(kind):
+    llm = _llm()
+    llm._model_ptr = None
+    llm._slots = _CancellableSlots(True)
+    llm.last_finish_reason = "length"
+    with patch.object(llama_mod, "api") as api, stream_stop_check(lambda: True):
+        assert list(_run_exclusive_caller(kind, llm)) == []
+    assert llm._slots.given == [stream_stop_requested]
+    assert llm.last_finish_reason == "stop"
+    api.llama_decode.assert_not_called()
+    assert not llm._inference_lock.locked()
+
+
+@pytest.mark.parametrize("kind, message", [("text", "Model not loaded"),
+                                           ("image", "vision is not available")])
+def test_an_exclusive_wait_not_cancelled_enters_the_section(kind, message):
+    llm = _llm()
+    llm._model_ptr = None
+    llm._slots = _CancellableSlots(False)
+    with patch.object(llama_mod, "api"), stream_stop_check(lambda: False):
+        with pytest.raises(RuntimeError, match=message):
+            list(_run_exclusive_caller(kind, llm))
+    assert llm._slots.given == [stream_stop_requested]

@@ -19,7 +19,7 @@ import pytest
 from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
 from localm.inference.backends.llamacpp import _slots
 from localm.inference.backends.llamacpp._slots import (
-    RESERVE_PAD, UNLIMITED_STEP, UNLOADED_MESSAGE, SlotScheduler)
+    RESERVE_PAD, UNLIMITED_STEP, UNLOADED_MESSAGE, ExclusiveCancelled, SlotScheduler)
 
 EOG = 0
 VOCAB = 97
@@ -691,3 +691,77 @@ def test_a_cancelled_reply_closes_its_scorer(made):
     _drain(running)
     _drain(queued)
     assert scorer.closed == 1
+
+
+def test_an_exclusive_wait_cancelled_by_its_stop_check_never_takes_the_section(made):
+    ctx = _SimContext()
+    ctx.step_delay = 0.01
+    sched = made(ctx, 2)
+    running = sched.submit(PROMPTS[0], 120, _Sampler())
+    head = next(running)
+    stop = threading.Event()
+    outcome = {}
+
+    def wait_for_section():
+        try:
+            with sched.exclusive(stop_requested=stop.is_set):
+                outcome["entered"] = True
+        except ExclusiveCancelled:
+            outcome["cancelled"] = True
+    waiter = threading.Thread(target=wait_for_section, daemon=True)
+    waiter.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and sched._exclusive_waiting == 0:
+        time.sleep(0.01)
+    assert sched._exclusive_waiting == 1
+    time.sleep(0.1)
+    assert waiter.is_alive(), "the section was taken while a reply was still running"
+    t0 = time.monotonic()
+    stop.set()
+    waiter.join(5)
+    waited = time.monotonic() - t0
+    assert not waiter.is_alive()
+    assert outcome == {"cancelled": True}
+    assert waited < 1, f"the cancel waited {waited:.1f}s for the exclusive section"
+    assert (sched._exclusive_waiting, sched._exclusive_held) == (0, False)
+    out, reason = _drain(running)
+    assert ([head] + out, reason) == _reference(PROMPTS[0], 120)
+    assert _collect(sched, PROMPTS[1], 5)["out"] == _reference(PROMPTS[1], 5)[0]
+
+
+def test_an_exclusive_call_whose_stop_check_already_fired_does_not_wait(made):
+    sched = made(_SimContext(), 2)
+    with pytest.raises(ExclusiveCancelled):
+        with sched.exclusive(stop_requested=lambda: True):
+            raise AssertionError("entered the section")
+    assert (sched._exclusive_waiting, sched._exclusive_held) == (0, False)
+    with sched.exclusive(stop_requested=lambda: False):
+        assert sched._exclusive_held
+
+
+def test_the_stop_check_and_the_wait_status_run_without_the_scheduler_lock(made, monkeypatch):
+    monkeypatch.setattr(_slots, "WAIT_HEARTBEAT_S", 0.05)
+    ctx = _SimContext()
+    ctx.step_delay = 0.01
+    sched = made(ctx, 1)
+    running = sched.submit(PROMPTS[0], 400, _Sampler())
+    next(running)
+    held_during = []
+    beats = []
+    polls = []
+
+    def check():
+        polls.append(1)
+        held_during.append(sched._cond._is_owned())
+        return len(polls) > 3
+
+    def beat():
+        held_during.append(sched._cond._is_owned())
+        beats.append(1)
+    with pytest.raises(ExclusiveCancelled):
+        with sched.exclusive(on_wait=beat, stop_requested=check):
+            pass
+    running.close()
+    _drain(running)
+    assert beats and polls
+    assert held_during and not any(held_during)

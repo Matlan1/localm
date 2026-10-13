@@ -548,6 +548,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A request cancelled behind an image turn now stops at once.** An image reply, and a
+  reply sent with `cache_prompt: false`, wait for every running reply to finish before they
+  start. A client that disconnected or cancelled during that wait was not noticed until the
+  wait ended and the reply had already processed its prompt. The cancel is now seen within
+  a fraction of a second, and the request ends with no output and no error.
 - **A half-copied GGUF file is no longer registered by a folder import.** `localm add
   <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
   whose header declares more tensor data than the file holds, and one named `incomplete-...`
