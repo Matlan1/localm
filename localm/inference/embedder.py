@@ -551,9 +551,9 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         from huggingface_hub import hf_hub_download
         dest.parent.mkdir(parents=True, exist_ok=True)
         logger.info("downloading embedding model %s/%s (one-time)...", repo, filename)
-        extra = ({"tqdm_class": _download_progress_class(
-                     f"the embedding model {name}", on_progress)}
-                 if on_progress is not None else {})
+        extra: dict = ({"tqdm_class": _download_progress_class(
+                           f"the embedding model {name}", on_progress)}
+                       if on_progress is not None else {})
         pin = _EMBEDDING_PINS.get((repo, filename))
         if pin is not None:
             extra["revision"] = pin[0]
