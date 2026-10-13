@@ -15,9 +15,13 @@ running configuration resolves; set ``LOCALM_HOME`` to a throwaway home)::
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
+import hashlib
 import json
 import math
 import re
+import struct
 import sys
 import tempfile
 import time
@@ -28,6 +32,8 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "rag_rerank_eval"
 CORPUS_DIR = FIXTURE_DIR / "corpus"
 QUERIES_FILE = FIXTURE_DIR / "queries.json"
 OFFTOPIC_FILE = FIXTURE_DIR / "offtopic.json"
+FOLLOWUPS_FILE = FIXTURE_DIR / "followups.json"
+REPLAY_FILE = FIXTURE_DIR / "replay.json.gz"
 COLLECTION_NAME = "rerank-eval"
 
 _WS = re.compile(r"\s+")
@@ -41,6 +47,23 @@ def load_queries() -> list[dict]:
 def load_offtopic() -> list[dict]:
     """Questions the corpus does not answer: ``{id, category, query}`` dicts."""
     return json.loads(OFFTOPIC_FILE.read_text(encoding="utf-8"))["queries"]
+
+
+def load_followups() -> dict:
+    """Follow-up questions with their previous message: ``{"on": [...], "off": [...]}``.
+    An ``on`` item carries ``prior`` (the text of the labelled on-topic question it
+    follows) and that question's ``doc`` and ``gold``; an ``off`` item carries the
+    off-topic ``prior`` text."""
+    raw = json.loads(FOLLOWUPS_FILE.read_text(encoding="utf-8"))
+    on_by_id = {q["id"]: q for q in load_queries()}
+    off_by_id = {q["id"]: q for q in load_offtopic()}
+    return {
+        "on": [{**f, "prior": on_by_id[f["prior_id"]]["query"],
+                "doc": on_by_id[f["prior_id"]]["doc"],
+                "gold": on_by_id[f["prior_id"]]["gold"]} for f in raw["on"]],
+        "off": [{**f, "prior": off_by_id[f["prior_id"]]["query"]}
+                for f in raw["off"]],
+    }
 
 
 def _collapse(text: str) -> str:
@@ -175,6 +198,190 @@ def evaluate_gate(coll, queries: list[dict], offtopic: list[dict], *,
     }
 
 
+def evaluate_followups(coll, followups: dict, *, embed_fn: Optional[Callable] = None,
+                       rerank_fn: Optional[Callable] = None,
+                       min_score: Optional[float] = None, k: int = 4,
+                       candidates: int = 20, use_context: bool = True) -> dict:
+    """How ``relevant_only`` treats follow-up questions that refer back to the
+    previous message. ``recall`` is the share of ``on`` follow-ups with a relevant
+    chunk of the previous question's document among the hits and ``precision`` the
+    share of ``off`` follow-ups that return nothing. *use_context* sends the
+    previous message as ``context``."""
+    def ask(item: dict) -> list[dict]:
+        return coll.query(item["query"], k=k, embed_fn=embed_fn, relevant_only=True,
+                          rerank_fn=rerank_fn, rerank_candidates=candidates,
+                          rerank_min_score=min_score,
+                          context=item["prior"] if use_context else None)
+
+    on = [(f, ask(f)) for f in followups["on"]]
+    off = [(f, ask(f)) for f in followups["off"]]
+    return {
+        "recall": sum(any(relevance_vector(h, f)) for f, h in on) / len(on),
+        "precision": sum(1 for _, h in off if not h) / len(off),
+        "leaks": [f["id"] for f, h in off if h],
+        "misses": [f["id"] for f, h in on if not any(relevance_vector(h, f))],
+    }
+
+
+def gate_suite(coll, queries: list[dict], offtopic: list[dict], followups: dict, *,
+               embed_fn: Optional[Callable], rerankers: dict, k: int = 4,
+               candidates: int = 20) -> dict:
+    """Every gate this harness compares, as ``{"gates": {name: evaluate_gate()},
+    "followups": {name: evaluate_followups()}}``. *rerankers* maps a name to
+    ``(rerank function, minimum score or None)``."""
+    gates = {"floor only": evaluate_gate(coll, queries, offtopic, embed_fn=embed_fn,
+                                         k=k)}
+    follow = {"floor only, no context": evaluate_followups(
+                  coll, followups, embed_fn=embed_fn, k=k, use_context=False),
+              "floor only, context": evaluate_followups(
+                  coll, followups, embed_fn=embed_fn, k=k)}
+    for name, (fn, min_score) in rerankers.items():
+        gates[f"{name}: floor, then rerank"] = evaluate_gate(
+            coll, queries, offtopic, embed_fn=embed_fn, rerank_fn=fn, k=k,
+            candidates=candidates)
+        if min_score is None:
+            continue
+        gates[f"{name}: score >= {min_score:g}"] = evaluate_gate(
+            coll, queries, offtopic, embed_fn=embed_fn, rerank_fn=fn,
+            min_score=min_score, k=k, candidates=candidates)
+        for label, use_context in (("no context", False), ("context", True)):
+            follow[f"{name}: score >= {min_score:g}, {label}"] = evaluate_followups(
+                coll, followups, embed_fn=embed_fn, rerank_fn=fn,
+                min_score=min_score, k=k, candidates=candidates,
+                use_context=use_context)
+    return {"gates": gates, "followups": follow}
+
+
+def _text_key(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+
+
+def _call_key(query: str, texts: list[str]) -> str:
+    """Identity of one reranker call: its query and the texts in order."""
+    body = "\x00".join([query, *map(_text_key, texts)])
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:24]
+
+
+def _pack(vector: list[float]) -> str:
+    return base64.b64encode(struct.pack(f"<{len(vector)}e", *vector)).decode("ascii")
+
+
+def _unpack(blob: str) -> list[float]:
+    raw = base64.b64decode(blob)
+    return list(struct.unpack(f"<{len(raw) // 2}e", raw))
+
+
+class ReplayMiss(KeyError):
+    """A replayed embedding or reranker call that the recording does not hold."""
+
+
+class Replay:
+    """The recorded embeddings and reranker scores of a real-model run (see
+    :func:`record_replay`), served back deterministically: with them the real
+    ``Collection.query`` runs its gates without any model."""
+
+    def __init__(self, data: dict) -> None:
+        self.data = data
+        self.vectors = {k: _unpack(v) for k, v in data["vectors"].items()}
+        #: Every embedding or reranker call the recording did not hold.
+        self.misses: list[str] = []
+
+    def embed_fn(self, texts: list[str]) -> list[list[float]]:
+        out = []
+        for text in texts:
+            vec = self.vectors.get(_text_key(text))
+            if vec is None:
+                self.misses.append(f"embedding: {text[:60]}")
+                raise ReplayMiss(f"no recorded embedding for {text[:60]!r}")
+            out.append(vec)
+        return out
+
+    def rerank_fn(self, name: str) -> Callable:
+        calls = self.data["rerank"][name]["calls"]
+
+        def fn(query: str, texts: list[str]) -> list[float]:
+            scores = calls.get(_call_key(query, texts))
+            if scores is None:
+                self.misses.append(f"{name}: {query[:60]} over {len(texts)} texts")
+                raise ReplayMiss(f"no recorded {name} call for {query[:60]!r} "
+                                 f"over {len(texts)} texts")
+            return scores
+
+        return fn
+
+    def rerankers(self) -> dict:
+        return {name: (self.rerank_fn(name), info["min_score"])
+                for name, info in self.data["rerank"].items()}
+
+
+def load_replay(path: Optional[Path] = None) -> Replay:
+    with gzip.open(path or REPLAY_FILE, "rt", encoding="utf-8") as fh:
+        return Replay(json.load(fh))
+
+
+def chunk_digest(coll) -> str:
+    """Identity of the chunks a collection holds, in order."""
+    return hashlib.sha256("\x00".join(_text_key(c["text"]) for c in coll._chunks)
+                          .encode("ascii")).hexdigest()[:24]
+
+
+def replay_suite(replay: Replay, base: Path) -> tuple:
+    """Run :func:`gate_suite` over *replay*: ``(suite, collection)``. The
+    collection is built with the replayed embeddings under the recorded embedding
+    model name, so the relevance floors of that model apply."""
+    data = replay.data
+    coll = build_collection(base, replay.embed_fn, data["embedding_model"])
+    suite = gate_suite(coll, load_queries(), load_offtopic(), load_followups(),
+                       embed_fn=replay.embed_fn, rerankers=replay.rerankers(),
+                       k=data["k"], candidates=data["candidates"])
+    return suite, coll
+
+
+def record_replay(path: Path, embed_fn: Callable, rerankers: dict, *,
+                  model_name: str, k: int = 4, candidates: int = 20) -> dict:
+    """Record the real *embed_fn* and *rerankers* (``{name: (fn, sha256,
+    min_score)}``) over every question and chunk the gates ask about, and write
+    them to *path* with the gate results they reproduce. Vectors are stored as
+    half-precision floats and the recorded collection is built from those values."""
+    queries, offtopic, followups = load_queries(), load_offtopic(), load_followups()
+    with tempfile.TemporaryDirectory(prefix="rerank-record-") as tmp:
+        lexical = build_collection(Path(tmp) / "lexical", None)
+        texts = [c["text"] for c in lexical._chunks]
+        asked = [q["query"] for q in queries] + [q["query"] for q in offtopic]
+        for f in followups["on"] + followups["off"]:
+            asked += [f["query"], f"{f['prior'].strip()} {f['query']}"]
+        unique = list(dict.fromkeys(texts + asked))
+        vectors: dict[str, str] = {}
+        for i in range(0, len(unique), 32):
+            batch = unique[i:i + 32]
+            for text, vec in zip(batch, embed_fn(batch), strict=True):
+                vectors[_text_key(text)] = _pack([float(x) for x in vec])
+        data = {"version": 1, "embedding_model": model_name, "k": k,
+                "candidates": candidates, "chunk_digest": chunk_digest(lexical),
+                "vectors": vectors, "rerank": {}}
+        replay = Replay(data)
+        recorded = {}
+        for name, (fn, sha, min_score) in rerankers.items():
+            calls: dict = {}
+            data["rerank"][name] = {"sha256": sha, "min_score": min_score,
+                                    "calls": calls}
+
+            def recorder(query, texts, fn=fn, calls=calls):
+                scores = [round(float(v), 4) for v in fn(query, texts)]
+                calls[_call_key(query, texts)] = scores
+                return scores
+
+            recorded[name] = (recorder, min_score)
+        coll = build_collection(Path(tmp) / "hybrid", replay.embed_fn, model_name)
+        gate_suite(coll, queries, offtopic, followups, embed_fn=replay.embed_fn,
+                   rerankers=recorded, k=k, candidates=candidates)
+        suite, _ = replay_suite(Replay(data), Path(tmp) / "check")
+        data["expected"] = suite
+    with gzip.open(path, "wt", encoding="utf-8", compresslevel=9) as fh:
+        json.dump(data, fh, separators=(",", ":"))
+    return suite
+
+
 def format_gate_table(results: dict[str, dict]) -> str:
     """A fixed-width comparison of named gates from :func:`evaluate_gate`."""
     cats = sorted({c for r in results.values() for c in r["categories"]})
@@ -186,6 +393,20 @@ def format_gate_table(results: dict[str, dict]) -> str:
                    + "".join(f"{res['categories'].get(c, float('nan')):>14.2f}"
                              for c in cats))
     return chr(10).join(out)
+
+
+def print_suite(suite: dict) -> None:
+    """Print the tables of a :func:`gate_suite` result."""
+    print(format_gate_table(suite["gates"]))
+    for name, res in suite["gates"].items():
+        if res["leaks"]:
+            print(f"leaks [{name}]: {', '.join(res['leaks'])}")
+    print()
+    print(f"{'follow-ups':<56}{'recall':>8}{'precision':>11}")
+    for name, res in suite["followups"].items():
+        print(f"{name:<56}{res['recall']:>8.3f}{res['precision']:>11.3f}")
+        if res["leaks"]:
+            print(f"  leaks: {', '.join(res['leaks'])}")
 
 
 def format_table(results: dict[str, dict]) -> str:
@@ -222,7 +443,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "calibrated value of each --reranker, if any)")
     ap.add_argument("--json", dest="json_out", default=None,
                     help="write the full per-query results to this file")
+    ap.add_argument("--record", default=None, metavar="PATH",
+                    help="with --embed and --reranker: record the real models' "
+                         "embeddings and reranker scores to PATH (the committed "
+                         "replay is %s) and print the gate tables they reproduce"
+                         % REPLAY_FILE.name)
+    ap.add_argument("--replay", action="store_true",
+                    help="print the gate tables of the committed replay, with no "
+                         "model")
     args = ap.parse_args(argv)
+
+    if args.replay:
+        with tempfile.TemporaryDirectory(prefix="rerank-replay-") as tmp:
+            suite, _ = replay_suite(load_replay(), Path(tmp))
+        print_suite(suite)
+        return 0
 
     embed_fn = None
     model_name = None
@@ -241,6 +476,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.reranker:
         from localm.rag.rerank import make_rerank_fn
         rerankers = {name: make_rerank_fn(name)[1] for name in args.reranker}
+    if args.record:
+        if embed_fn is None or not args.reranker:
+            ap.error("--record needs --embed and at least one --reranker")
+        from localm.config import load_registry
+        from localm.rag.rerank import calibrated_min_score
+        registry = load_registry()
+        suite = record_replay(
+            Path(args.record), embed_fn,
+            {name: (fn, str(registry[name].get("sha256") or ""),
+                    calibrated_min_score(name))
+             for name, fn in rerankers.items()},
+            model_name=model_name or "", k=args.k,
+            candidates=int(args.candidates.split(",")[0]))
+        print_suite(suite)
+        return 0
     gates: dict[str, dict] = {}
 
     queries = load_queries()
