@@ -48,7 +48,7 @@ function loadReal({ ok = true, status = 403, detail = "" } = {}) {
     tag.textContent = fs.readFileSync(new URL(f, VENDOR), "utf8");
     win.document.head.appendChild(tag);
   }
-  win.marked.setOptions({ breaks: true, mangle: false, headerIds: false });
+  win.marked.setOptions({ breaks: true });
   if (!win.URL.createObjectURL) {
     win.URL.createObjectURL = () => "blob:mock/1";
     win.URL.revokeObjectURL = () => {};
@@ -361,7 +361,7 @@ function loadAsking() {
     tag.textContent = fs.readFileSync(new URL(f, VENDOR), "utf8");
     win.document.head.appendChild(tag);
   }
-  win.marked.setOptions({ breaks: true, mangle: false, headerIds: false });
+  win.marked.setOptions({ breaks: true });
   if (!win.URL.createObjectURL) {
     win.URL.createObjectURL = () => "blob:mock/1";
     win.URL.revokeObjectURL = () => {};
