@@ -2016,7 +2016,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   touchscreen, a pen, or a remote-desktop session from a phone) got the phone onboarding screen, and every
   desktop showed the camera button. Both now follow the browser's own mobile flag, a phone or tablet
   user agent, or a coarse primary pointer.
-
+- **Signing in no longer freezes the server while another localm process is writing.** The
+  browser sign-in, the GUI mount and the pairing-QR route verified a key on the server's event
+  loop, so while a second localm process (a `pull`, a `key create`, another server) held the
+  key store's lock, every other request, log stream and running generation stopped for as long
+  as that wait, up to ten seconds. Key verification now runs off the loop, as it already did on
+  every other route.
+- **Two localm processes can no longer both take the settings lock after a crash.** A lock file
+  left behind by a crashed process is reclaimed as before, but the file is re-checked right
+  before it is removed, so two processes that notice the same abandoned lock at the same moment
+  cannot both delete it and both proceed, which could lose one of their writes to settings, the
+  model registry or the key store.
+- **A damaged native image runtime says so instead of failing obscurely.** A runtime folder that
+  still holds its main library but has lost its compute-backend files loaded with no device at
+  all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
 - **The default embedding models are downloaded from a fixed version and checked.** The
   first use of semantic search, `localm setup-embeddings` and the Knowledge page fetch
