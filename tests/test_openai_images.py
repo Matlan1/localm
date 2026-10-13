@@ -288,6 +288,19 @@ class TestRefusals:
         detail = r.json()["detail"]
         assert "unet_name not in list" in detail and "Reload deferred" not in detail
 
+    def test_an_error_after_a_successful_availability_check_is_the_reason(
+            self, client, backend, monkeypatch):
+        mod = sys.modules["_localm_plugin_image.backend"]
+
+        def _boom(*a, **k):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(mod, "generate", _boom)
+        r = client.post(URL, json={"prompt": "p"})
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert "kaboom" in detail and "ComfyUI is up" not in detail
+
     def test_unavailable_backend_is_a_502_with_its_message(
             self, client, backend, image_app, monkeypatch):
         mod = sys.modules["_localm_plugin_image.backend"]

@@ -123,7 +123,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
-        job.push({"type": "line", "outcome": True, "text": msg})
+        job.push({"type": "line", "outcome": not ok, "text": msg})
         if not ok:
             return False
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
