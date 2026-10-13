@@ -210,6 +210,14 @@ class TestConfigLoading:
             '[mcp.servers.bad]\nargs = ["x"]\n', encoding="utf-8")
         assert load_mcp_config(tmp_path) == {}   # no command key
 
+    @pytest.mark.parametrize("body", ['mcp = "x"\n', "mcp = [1, 2]\n",
+                                      'mcp = {servers = "y"}\n'])
+    def test_mcp_key_of_the_wrong_type_yields_no_servers(self, tmp_path, body):
+        cfg_dir = tmp_path / ".localcoder"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.toml").write_text(body, encoding="utf-8")
+        assert load_mcp_config(tmp_path) == {}
+
 
 class TestRegistration:
     def test_end_to_end_register_and_call(self, tmp_path, fake_server_path):
