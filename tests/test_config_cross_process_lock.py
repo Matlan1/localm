@@ -456,3 +456,38 @@ def test_an_unreadable_stale_lock_is_still_reclaimed(home, monkeypatch):
     monkeypatch.setattr(type(lockpath), "read_bytes", refuse)
     assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
     assert not lockpath.exists()
+
+
+def test_a_stale_lock_touched_since_it_was_judged_is_not_reclaimed(home, monkeypatch):
+    """The mtime check alone must decide this one: the bytes are unchanged, only
+    the timestamp moved, which is a holder that is alive after all."""
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    token, mtime = _stale(lockpath)
+    now = cfg.time.time()
+    os.utime(lockpath, (now, now))
+    assert cfg._reclaim_stale_lock(lockpath, token, mtime) is False
+    assert lockpath.read_bytes() == token
+
+
+def test_the_acquirer_waits_when_the_stale_reclaim_refuses(home, monkeypatch):
+    """The call site must go THROUGH the reclaim and respect its answer. When the
+    reclaim refuses (the lock changed under it), the acquirer waits and times out
+    rather than deleting the file and taking the lock anyway."""
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.6)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    token, _ = _stale(lockpath)
+    calls = []
+
+    def refuse(path, judged, judged_mtime):
+        calls.append(path)
+        return False
+
+    monkeypatch.setattr(cfg, "_reclaim_stale_lock", refuse)
+    with pytest.raises(TimeoutError):
+        with cfg._cross_process_lock(cfg.CONFIG_FILE):
+            pass
+    assert calls, "the acquirer never consulted the stale-lock reclaim"
+    assert lockpath.read_bytes() == token, (
+        "the acquirer deleted a lock the reclaim had refused to remove")
