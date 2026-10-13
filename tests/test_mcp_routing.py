@@ -521,6 +521,19 @@ class TestAFailureRecordedAfterTheRouteIsSeenBeforeTheLoad:
         assert "tooly" not in engines.loads, engines.loads
         assert "tooly" not in engines.made_room, (
             "room was made for a model the latch refused")
+        assert [s.model for s in answered.skipped] == ["tooly"]
+        assert "tooly was skipped because its last load failed" in answered.describe()
+
+    def test_the_coder_says_why_when_it_falls_back_to_the_default(self, reg):
+        from localm.plugins.mcpserver.tools.media_coder import coder_engine
+        engines = self._engines(reg)
+        decision = engines.route(None, [], required=("tool_use",), pinned=False)
+        self._fail_later(engines, "tooly", "tooly2")
+        with self._room(engines):
+            engine, name, answered = coder_engine(engines, decision)
+        assert name == decision.current
+        assert sorted(s.model for s in answered.skipped) == ["tooly", "tooly2"]
+        assert engines.loads == [decision.current]
 
     def test_chat_moves_on_without_loading_it(self, reg):
         from localm.plugins.mcpserver.tools.chat import answer_with, routing_note
