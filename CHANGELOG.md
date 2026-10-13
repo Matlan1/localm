@@ -503,6 +503,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A failed image generation names the real reason.** `/v1/images/generations` answered a failed
+  generation with the chat model's reload note ("Reload deferred to the next message"), which comes
+  after it; the `502` now quotes what the image backend reported.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's

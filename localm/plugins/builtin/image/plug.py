@@ -119,11 +119,11 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             refused = native.refusal(model_overrides=req.model_overrides,
                                      lora_name=lora_name, width=width, height=height)
             if refused:
-                job.push({"type": "line", "text": refused})
+                job.push({"type": "line", "outcome": True, "text": refused})
                 return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
-        job.push({"type": "line", "text": msg})
+        job.push({"type": "line", "outcome": True, "text": msg})
         if not ok:
             return False
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
@@ -198,7 +198,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             on_progress=lambda t: job.push({"type": "line", "text": t}),
             **size_kwargs,
         )
-        job.push({"type": "line", "text": message})
+        job.push({"type": "line", "outcome": True, "text": message})
         if ok:
             job.result = out_path.name
             if in_gallery:
@@ -345,7 +345,9 @@ JOB_POLL_SECONDS = 1.0
 
 
 async def _await_job(job, request: Request) -> tuple[str, str]:
-    """Wait for a background job to end and return ``(status, last_line)``.
+    """Wait for a background job to end and return ``(status, reason)``:
+    the text of the last ``line`` event flagged ``outcome``, else of the last
+    ``line`` event.
 
     When the client goes away while it runs, cancels the job, waits up to
     ``CANCEL_SETTLE_SECONDS`` for it to finish writing and stop, then raises
@@ -353,6 +355,7 @@ async def _await_job(job, request: Request) -> tuple[str, str]:
     queue = job.subscribe()
     poll = _resolve_disconnect_poll(request)
     last_line = ""
+    outcome = ""
     deadline = None
     try:
         while True:
@@ -369,10 +372,12 @@ async def _await_job(job, request: Request) -> tuple[str, str]:
             kind = event.get("type")
             if kind == "line":
                 last_line = str(event.get("text", ""))
+                if event.get("outcome"):
+                    outcome = last_line
             elif kind == "end":
                 if deadline is not None:
                     raise asyncio.CancelledError()
-                return str(event.get("status", "failed")), last_line
+                return str(event.get("status", "failed")), outcome or last_line
     finally:
         job.unsubscribe(queue)
 
