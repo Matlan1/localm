@@ -765,3 +765,47 @@ def test_the_stop_check_and_the_wait_status_run_without_the_scheduler_lock(made,
     _drain(running)
     assert beats and polls
     assert held_during and not any(held_during)
+
+
+@pytest.mark.parametrize("where", ["stop_requested", "on_wait"])
+def test_a_callback_that_raises_leaves_the_exclusive_counters_clean(made, where):
+    ctx = _SimContext()
+    ctx.step_delay = 0.01
+    sched = made(ctx, 2)
+    running = sched.submit(PROMPTS[0], 400, _Sampler())
+    next(running)
+
+    def boom(*_args):
+        raise ValueError("callback failed")
+    kw = {"stop_requested": lambda: False, "on_wait": None}
+    kw[where] = boom
+    with pytest.raises(ValueError, match="callback failed"):
+        with sched.exclusive(**kw):
+            raise AssertionError("entered the section")
+    assert (sched._exclusive_waiting, sched._exclusive_held) == (0, False)
+    running.close()
+    _drain(running)
+    assert _collect(sched, PROMPTS[1], 5)["out"] == _reference(PROMPTS[1], 5)[0]
+
+
+def test_the_wait_status_repeats_only_once_per_heartbeat_while_polling_the_stop_check(
+        made, monkeypatch):
+    monkeypatch.setattr(_slots, "WAIT_HEARTBEAT_S", 30.0)
+    ctx = _SimContext()
+    ctx.step_delay = 0.01
+    sched = made(ctx, 1)
+    running = sched.submit(PROMPTS[0], 400, _Sampler())
+    next(running)
+    polls = []
+    beats = []
+
+    def check():
+        polls.append(1)
+        return len(polls) > 4
+    with pytest.raises(ExclusiveCancelled):
+        with sched.exclusive(on_wait=lambda: beats.append(1), stop_requested=check):
+            pass
+    running.close()
+    _drain(running)
+    assert len(polls) > 4
+    assert len(beats) == 1
