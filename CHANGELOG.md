@@ -605,6 +605,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
+  that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
+  plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
+  refresh that could not replace the old copy is reported as failed (not "up to date"), and
+  `localm plugin refresh` exits with an error for it. If chat was left installed but disabled by a
+  failed first-run setup, it is enabled again.
+- **Uninstalling a plugin with "delete its data" reports when the plugin's own cleanup failed.**
+  The uninstall still completes, but it no longer claims the data is gone.
 - **The coder's browser_close stops a browser that is still starting.** Closing the browser
   while it was still starting used to report that no browser was open and leave it to finish
   starting; it now cancels the start, the browser is closed as soon as it is up, and the calls
