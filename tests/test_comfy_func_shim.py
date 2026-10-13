@@ -23,6 +23,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tests._popen_scope import ignore_background_threads
 
 
 # --- fixtures: fake ComfyUI internals written to real files so getsource works ----
@@ -320,7 +321,7 @@ def _capture_spawn_env(monkeypatch, tmp_path, *, once=False, remember=False,
     # minimum before a launch is confirmed.
     alive = iter([False, False, True])
     with patch("localm.config.load_config", return_value=cfg), \
-         patch("subprocess.Popen", side_effect=fake_popen), \
+         patch("subprocess.Popen", ignore_background_threads(fake_popen)), \
          patch.object(comfy_client, "_comfy_alive",
                       side_effect=lambda *a, **k: next(alive)):
         comfy.ensure_comfy("http://127.0.0.1:8188")
