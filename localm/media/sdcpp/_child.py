@@ -290,6 +290,7 @@ _CTX_STRING_FIELDS = ("model_path", "clip_l_path", "clip_g_path", "clip_vision_p
                       "high_noise_diffusion_model_path", "vae_path", "taesd_path",
                       "backend", "params_backend", "max_vram", "tokenizer")
 _CTX_BOOL_FIELDS = ("flash_attn", "diffusion_flash_attn", "enable_mmap", "vae_conv_direct",
+                    "force_sdxl_vae_conv_scale",
                     "diffusion_conv_direct", "auto_fit")
 
 

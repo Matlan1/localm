@@ -290,10 +290,12 @@ def test_red_ci_is_a_fail_and_never_merges(env):
     assert "merge" not in [c[0] for c in env.calls]
 
 
-def test_pending_ci_is_inconclusive_and_never_merges(env):
+def test_pending_ci_is_inconclusive_and_never_merges(env, monkeypatch):
     env.ci = "PENDING"
+    monkeypatch.setattr(pp, "CI_WAIT_NOTE", "9 polls; last: 4 check-runs on abc, not completed: build")
     out = pw.advance(_adv(), dry_run=False)
     assert out.verdict == pw.INCONCLUSIVE
+    assert "not completed: build" in out.detail
     assert "merge" not in [c[0] for c in env.calls]
 
 
