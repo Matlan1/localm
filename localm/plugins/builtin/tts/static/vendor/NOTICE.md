@@ -6,8 +6,8 @@ npm packages so the plugin runs offline without a CDN:
 | Package | Version | License | Text |
 |---|---|---|---|
 | `kokoro-js` | 1.2.1 | Apache-2.0 | `LICENSE.kokoro-js` |
-| `@huggingface/transformers` (transformers.js) | 3.8.1 | Apache-2.0 | `LICENSE.transformers-js` |
-| `onnxruntime-web` | 1.22.0-dev.20250409-89f8206ba4 | MIT (c) Microsoft Corporation | `LICENSE.onnxruntime-web` |
+| `@huggingface/transformers` (transformers.js) | 4.3.1 | Apache-2.0 | `LICENSE.transformers-js` |
+| `onnxruntime-web` | 1.31.0-dev.20260914-8d85527a0 | MIT (c) Microsoft Corporation | `LICENSE.onnxruntime-web` |
 | `phonemizer` | 1.2.1 | Apache-2.0 | (bundled, see the kokoro-js notice) |
 | eSpeak NG (compiled into `phonemizer`) | see below | GPL-3.0-or-later | `LICENSE.espeak-ng` |
 
@@ -32,14 +32,16 @@ required.
 
 ## `onnxruntime/` - the ONNX runtime, vendored so TTS works OFFLINE
 
-    onnxruntime/ort-wasm-simd-threaded.jsep.mjs      44484 B
-    onnxruntime/ort-wasm-simd-threaded.jsep.wasm  21596019 B
+    onnxruntime/ort-wasm-simd-threaded.asyncify.mjs      53057 B
+    onnxruntime/ort-wasm-simd-threaded.asyncify.wasm  26861777 B
 
-Byte-exact copies of `dist/` from `@huggingface/transformers@3.8.1`, which is the
-transformers.js version compiled into `kokoro.min.js` (its `env.version` string
-reads `3.8.1`, and the bundle builds its runtime URL from that value). Those two
-filenames are the ONLY runtime artefacts the bundle names, confirmed by reading
-it rather than assumed. The `.mjs` is emscripten glue that loads the `.wasm`
+Byte-exact copies of `dist/` from `onnxruntime-web@1.31.0-dev.20260914-8d85527a0`,
+the runtime build that `@huggingface/transformers@4.3.1` pins and compiles into
+`kokoro.min.js` (the bundle carries that version string and builds its runtime URL
+from it). The transformers.js package does not ship these files in its own `dist/`.
+
+Those two filenames are the ONLY runtime artefacts the bundle names, confirmed by
+reading it rather than assumed. The `.mjs` is emscripten glue that loads the `.wasm`
 beside it and spawns its own pthread workers from its own module URL, so the two
 must stay in one directory together.
 
@@ -112,15 +114,16 @@ registry integrity hash on install), refreshes this file and
 `tests-js/vendor-onnxruntime.test.mjs`, and prints what is left for a person. The
 first form only reports. Do not hand-edit or re-minify.
 
-**The version MUST match the transformers.js compiled into `kokoro.min.js`.** The
+**The runtime MUST be the onnxruntime-web build compiled into `kokoro.min.js`.** The
 emscripten glue and the JS that drives it are one build; pairing a newer runtime
 with an older bundle is the same half-bump hazard the GUI's KaTeX note describes,
-except it fails at model-load time rather than visibly. If you rebuild
-`kokoro.min.js`, re-read its `env.version` and re-vendor to match.
+except it fails at model-load time rather than visibly. The script takes the files
+from the package that ships them and checks the pairing; if you rebuild
+`kokoro.min.js` by any other means, re-vendor the runtime to match.
 
 `onnxruntime-web` publishes no `LICENSE` file in its npm package (checked: the
 tarball contains none), so `LICENSE.onnxruntime-web` is the text from the
-microsoft/onnxruntime repository at commit `89f8206ba4f1c22c39e0297fb55272e8ce8cd7d0`,
+microsoft/onnxruntime repository at commit `8d85527a010e294a26b274749f74294b2a32cec5`,
 which is the exact commit the pinned dev version names.
 
 ### These are invisible to dependency tooling

@@ -26,7 +26,7 @@ from . import pins, runtime
 @click.option("--status", is_flag=True, help="Show what is installed and exit.")
 def main(backend: str, no_models: bool, no_test: bool, force: bool, status: bool) -> None:
     """Install native music generation (ACE-Step 1.5 through KoboldCpp)."""
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
     console = Console()
 

@@ -954,8 +954,9 @@ def dedup_native_stderr(swap_lock=None):
 
     def _emit(text: str) -> None:
         if console is not None:
+            from localm.console import strip_controls
             with contextlib.suppress(OSError, ValueError):
-                console.write(text + "\n")
+                console.write(strip_controls(text) + "\n")
                 console.flush()
         record_native_line(text)
 

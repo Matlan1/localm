@@ -339,7 +339,7 @@ def _print_qr(url: str) -> None:
     import io
     import sys
 
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     con = Console()
     try:
         import qrcode

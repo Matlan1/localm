@@ -603,12 +603,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   two months of upstream llama.cpp and a newer ROCm runtime. Run
   `localm setup-llama --force` to pick it up; an existing installation keeps
   working untouched until you do.
+- **Text-to-speech runs on a newer speech runtime.** The built-in Kokoro voice now uses
+  transformers.js 4.3.1 with onnxruntime-web 1.31, still served from your install so it needs
+  no network for the runtime.
 
 ### Fixed
 - **A worker process starts even when the debug log it inherits cannot be opened.** In debug
   mode, a model, embedding, speech or image worker whose debug log folder was missing or not
   writable exited before answering, and the load was reported as a crash with no reason; it
   now logs one warning to the console and carries on.
+- **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
+  that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
+  plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
+  refresh that could not replace the old copy is reported as failed (not "up to date"), and
+  `localm plugin refresh` exits with an error for it. If chat was left installed but disabled by a
+  failed first-run setup, it is enabled again.
+- **Uninstalling a plugin with "delete its data" reports when the plugin's own cleanup failed.**
+  The uninstall still completes, but it no longer claims the data is gone.
 - **`localm ps` no longer lists a stopped or restarted server.** Stopping a server, or
   restarting it from Settings, used to leave its entry behind, so after a restart `localm ps`
   showed the same process twice and `localm stop <old id>` stopped the running server. The
@@ -2012,8 +2023,28 @@ permanent public record of what shipped and are never rewritten; the in-progress
   touchscreen, a pen, or a remote-desktop session from a phone) got the phone onboarding screen, and every
   desktop showed the camera button. Both now follow the browser's own mobile flag, a phone or tablet
   user agent, or a coarse primary pointer.
-
+- **Signing in no longer freezes the server while another localm process is writing.** The
+  browser sign-in, the GUI mount and the pairing-QR route verified a key on the server's event
+  loop, so while a second localm process (a `pull`, a `key create`, another server) held the
+  key store's lock, every other request, log stream and running generation stopped for as long
+  as that wait, up to ten seconds. Key verification now runs off the loop, as it already did on
+  every other route.
+- **Two localm processes can no longer both take the settings lock after a crash.** A lock file
+  left behind by a crashed process is reclaimed as before, but the file is re-checked right
+  before it is removed, so two processes that notice the same abandoned lock at the same moment
+  cannot both delete it and both proceed, which could lose one of their writes to settings, the
+  model registry or the key store.
+- **A damaged native image runtime says so instead of failing obscurely.** A runtime folder that
+  still holds its main library but has lost its compute-backend files loaded with no device at
+  all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **Text localm did not write can no longer drive your terminal.** Model output, server replies,
+  model and plugin metadata, search results and error messages printed by the CLI and the coder had
+  their terminal control characters passed through, so a crafted reply could clear the screen, move
+  the cursor to hide lines of a diff before you approved it, set the window title or write to the
+  clipboard. Every console localm prints through now removes those characters, and text interpolated
+  into styled output is escaped so it cannot restyle or break it. Streamed chat output is cleaned on a
+  terminal and left exact when piped.
 - **The default embedding models are downloaded from a fixed version and checked.** The
   first use of semantic search, `localm setup-embeddings` and the Knowledge page fetch
   bge-small (or nomic-embed) from a pinned commit, delete the file and report the failure

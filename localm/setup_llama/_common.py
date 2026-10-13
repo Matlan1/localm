@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sys
 
-from rich.console import Console
+from localm.console import SafeConsole as Console
 
 console = Console(highlight=False)
 

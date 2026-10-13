@@ -740,7 +740,7 @@ def search_cmd(query, limit, list_files, source, nsfw, legacy_formats):
       localm search --source civitai detail tweaker
       localm search --source civitai --files 135867
     """
-    from rich.console import Console
+    from localm.console import SafeConsole as Console
     from rich.markup import escape
 
     console = Console()

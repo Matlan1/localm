@@ -1,21 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Guards the HAND-VENDORED onnxruntime-web runtime at
 // localm/plugins/builtin/tts/static/vendor/onnxruntime/. Two files, and they
-// are one build: ort-wasm-simd-threaded.jsep.mjs is emscripten glue that loads
-// ort-wasm-simd-threaded.jsep.wasm sitting beside it.
+// are one build: the .mjs is emscripten glue that loads the .wasm sitting
+// beside it (see the MJS and WASM constants below for the names).
 //
 // WHY THIS FILE EXISTS. Same reason as vendor-dompurify / vendor-katex /
 // vendor-jsqr / vendor-highlightjs: nothing in package.json names any of this,
 // so no dependency scanner can ever see a vulnerable version sitting here, and
 // "nothing happened" is indistinguishable from "we are up to date". A vendored
 // WebAssembly runtime is the worst member of that set to leave unguarded,
-// because it is 21 MB of opaque binary that no reviewer reads.
+// because it is tens of megabytes of opaque binary that no reviewer reads.
 //
 // AND ONE THING THE OTHER GUARDS DO NOT HAVE TO CHECK: THE PAIRING. The glue
 // and the JS that drives it ship as one release. kokoro.min.js has
-// @huggingface/transformers compiled INTO it and builds its runtime URL from
-// its own env.version, so vendoring a runtime from a different transformers
-// release pairs mismatched halves. That failure surfaces at model-load time as
+// @huggingface/transformers and onnxruntime-web compiled INTO it and builds its
+// runtime URL from the onnxruntime-web version, so vendoring a runtime from a
+// different onnxruntime-web build pairs mismatched halves. That failure surfaces
+// at model-load time as
 // "no available backend found", which reads exactly like the CDN outage this
 // vendoring replaced, so the test asserts the version agreement directly
 // rather than leaving it to be rediscovered.
@@ -39,13 +40,14 @@ const RUNTIME = new URL("onnxruntime/", VENDOR);
 
 // Provenance pin. Recorded from the npm registry artefact, whose integrity hash
 // npm verifies during `npm pack`:
-//   npm pack @huggingface/transformers@3.8.1  ->  package/dist/
-const VENDORED_TRANSFORMERS = "3.8.1";
-const MJS = "ort-wasm-simd-threaded.jsep.mjs";
-const WASM = "ort-wasm-simd-threaded.jsep.wasm";
-const PINNED_MJS_HASH = "CPuG7EM8eL+wMsXYSmi46OWo2BJo+jniQxQXmldnpbk=";   // CRLF-normalised
-const PINNED_WASM_HASH = "xGZV6KlK/EUzjUyyuEBHX4jlAS1SRQmRblBQecAL+jk="; // raw bytes
-const EXPECTED_WASM_BYTES = 21596019;
+//   npm pack onnxruntime-web@1.31.0-dev.20260914-8d85527a0  ->  package/dist/
+const VENDORED_TRANSFORMERS = "4.3.1";
+const VENDORED_ORT = "1.31.0-dev.20260914-8d85527a0";
+const MJS = "ort-wasm-simd-threaded.asyncify.mjs";
+const WASM = "ort-wasm-simd-threaded.asyncify.wasm";
+const PINNED_MJS_HASH = "CWa2EFzZNnREmKpg33oiy9R68zdNvGSpq1YcCKceNhE=";   // CRLF-normalised
+const PINNED_WASM_HASH = "SYcfWkQJUZeX4SdECGim0ZIzOdkYWQfzAaWyodkK8II="; // raw bytes
+const EXPECTED_WASM_BYTES = 26861777;
 
 function readRuntime(name) {
   return fs.readFileSync(new URL(name, RUNTIME));
@@ -63,10 +65,10 @@ function rawHash(buf) {
 test("the vendored runtime glue is the recorded upstream artefact", () => {
   const got = normalisedHash(readRuntime(MJS));
   assert.equal(got, PINNED_MJS_HASH,
-    `${MJS} does not match the pinned @huggingface/transformers@`
-    + `${VENDORED_TRANSFORMERS} dist artefact. If this was a deliberate bump, `
+    `${MJS} does not match the pinned onnxruntime-web ${VENDORED_ORT} `
+    + "artefact recorded in vendor/NOTICE.md. If this was a deliberate bump, "
     + "move BOTH runtime files together and update VENDORED_TRANSFORMERS, "
-    + "PINNED_MJS_HASH, PINNED_WASM_HASH and vendor/NOTICE.md; if not, the "
+    + "VENDORED_ORT, PINNED_MJS_HASH, PINNED_WASM_HASH and vendor/NOTICE.md; if not, the "
     + "vendored file has been modified or corrupted.");
 });
 
@@ -82,7 +84,7 @@ test("the vendored binary is a real WebAssembly module, not a placeholder", () =
   // A hash pin alone would happily pin a truncated or stub file forever. This
   // reads the format's own header, and then hands the bytes to the engine that
   // will actually run them: WebAssembly.validate is the only check here that
-  // the 21 MB is a loadable module rather than 21 MB of the right hash.
+  // the file is a loadable module rather than a pile of bytes with the right hash.
   const buf = readRuntime(WASM);
   assert.deepEqual([...buf.subarray(0, 4)], [0x00, 0x61, 0x73, 0x6d],
     "no \\0asm magic: this is not a WebAssembly binary");
@@ -106,13 +108,17 @@ test("the glue loads its wasm from beside itself, by the vendored name", () => {
     + "would not come from this directory");
 });
 
-test("the vendored runtime matches the transformers.js compiled into the bundle", () => {
-  // THE PAIRING CHECK. kokoro.min.js carries transformers.js inside it and
-  // derives its runtime URL from env.version; the vendored files come from that
-  // same npm release. Reading the version out of the shipped bundle means this
+test("the vendored runtime matches the transformers.js and onnxruntime-web compiled into the bundle", () => {
+  // THE PAIRING CHECK. kokoro.min.js carries transformers.js and onnxruntime-web
+  // inside it and derives its runtime URL from the onnxruntime-web version; the
+  // vendored files come from that same build. Reading the versions out of the shipped bundle means this
   // fails when someone rebuilds the bundle and forgets the runtime, which is
   // the realistic way these two drift.
   const bundle = fs.readFileSync(new URL("kokoro.min.js", VENDOR)).toString("latin1");
+  assert.ok(bundle.includes(VENDORED_ORT),
+    `kokoro.min.js does not contain the onnxruntime-web version ${VENDORED_ORT}, `
+    + "so the vendored runtime under vendor/onnxruntime/ is not the build the "
+    + "bundle was compiled with. Re-vendor both together (see vendor/NOTICE.md).");
   assert.ok(bundle.includes(`"${VENDORED_TRANSFORMERS}"`),
     `kokoro.min.js does not contain the version string `
     + `"${VENDORED_TRANSFORMERS}". The bundle was rebuilt against a different `

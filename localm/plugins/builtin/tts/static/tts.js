@@ -203,7 +203,7 @@ export async function register(ctx) {
     // A user value still wins (never silently override an explicit choice).
     // The trailing slash is not cosmetic: onnxruntime concatenates the filename
     // straight onto this prefix, so "vendor/onnxruntime" (no slash) would
-    // request ".../vendor/onnxruntimeort-wasm-simd-threaded.jsep.wasm" and 404.
+    // request ".../vendor/onnxruntimeort-wasm-simd-threaded.asyncify.wasm" and 404.
     // The settings validator accepts the value with or without it, so normalise
     // here rather than trusting the way it was typed.
     if (onnx) {
