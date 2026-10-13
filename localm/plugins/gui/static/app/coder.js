@@ -1244,7 +1244,7 @@ export async function reattachSessions() {
 }
 
 /* coder file attachments - extracted to text server-side (same in-memory
- * /api/rag/extract path as chat docs) and prepended to the task message,
+ * /api/chat/extract path as chat docs) and prepended to the task message,
  * so the agent sees the content without needing the file inside cwd. */
 
 export function renderCoderAttachChips() {
@@ -1275,7 +1275,7 @@ export async function attachCoderDocument(file) {
     reader.onerror = () => reject(new Error(t("coder.attach.readError")));
     reader.readAsDataURL(file);
   });
-  const r = await fetch("/api/rag/extract", {
+  const r = await fetch("/api/chat/extract", {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify({ filename: file.name, content_b64: b64 }),
   });

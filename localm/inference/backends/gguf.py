@@ -78,7 +78,8 @@ def _load_failure_message(exc: BaseException, hint: str = "") -> str:
     *exc*, plus *hint* (extra sentences, may be empty).
 
     Advice to provision or repair the runtime is added only when nothing shows
-    the runtime works: a crash the runner placed in context creation, or a
+    the runtime works: a crash the runner placed in context creation or in the
+    draft-model load, or a
     context the runtime created as NULL after loading the weights, is about the
     model's context size, split or memory instead. A crash report from the
     runner already carries its own advice, so none is appended to it."""
@@ -88,7 +89,7 @@ def _load_failure_message(exc: BaseException, hint: str = "") -> str:
     if reason and reason[-1] not in ".!?":
         reason += "."
     if isinstance(exc, NativeLoadCrashError):
-        prefix = ("The model failed to load" if exc.phase == "context"
+        prefix = ("The model failed to load" if exc.phase in ("context", "draft")
                   else "Native llama runtime failed to load")
         return f"{prefix}: {reason}{hint}"
     unknown_arch = _UNKNOWN_ARCH_RE.search(reason)
@@ -143,6 +144,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     parallel_copies = 1
     parallel_slots = 1
     parallel_note = ""
+    draft_status = ""
 
     def __init__(
         self,
@@ -174,9 +176,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # Opt-in MoE expert placement: keep the expert weights of the first N
         # layers in system RAM (llama.cpp's --n-cpu-moe). 0 = off, the default.
         self.n_cpu_moe = n_cpu_moe
-        # The use_mmap mode (auto, on, off). effective_use_mmap and
-        # mmap_forced_by_ram are what the last load did with it: None / False
-        # until a load reports them.
+        # The use_mmap mode (auto, on, off). effective_use_mmap,
+        # mmap_forced_by_ram, mmap_cpu_from_disk and mmap_ram_short_note are
+        # what the last load did with it: None / False / "" until a load
+        # reports them.
         from localm.inference.mmap_setting import coerce_use_mmap
         mode = coerce_use_mmap(use_mmap)
         if mode is None:
@@ -184,6 +187,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.use_mmap = mode
         self.effective_use_mmap: Optional[bool] = None
         self.mmap_forced_by_ram = False
+        self.mmap_cpu_from_disk = False
+        self.mmap_ram_short_note = ""
         # The draft source (off, mtp, ngram); None follows mtp_enabled. MTP is
         # enabled exactly when the source is mtp.
         from .llamacpp._drafting import SPEC_MTP, resolve_spec_source
@@ -738,6 +743,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # Whether the worker memory-maps the model file (VramSizingMixin.
         # _resolve_use_mmap): forced on, forced off, or the build's default.
         mmap_decision = self._resolve_use_mmap(gpu_layers, vram_before)
+        self.mmap_ram_short_note = self._warn_unmapped_weights_exceed_ram(mmap_decision)
 
         # Record what this load applies, for the GUI's loaded-model status: the
         # auto override when computed, else the config ratios, else equal, through
@@ -831,6 +837,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         slots = meta.get("parallel_slots")
         self.parallel_slots = slots if isinstance(slots, int) and slots > 0 else 1
         self.parallel_note = str(meta.get("parallel_note") or "")
+        self._apply_speculation_report(meta.get("speculation"))
         reported = meta.get("adapters")
         self.applied_adapters = list(reported) if isinstance(reported, list) else []
         if meta.get("diffusion") is True:
@@ -851,13 +858,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         # Whether the model is memory-mapped: the worker's report from the
         # native load log, else the forced mode, else None (not known).
-        # mmap_forced_by_ram marks an auto load mapped because its host-resident
-        # weights do not fit available system RAM.
+        # mmap_forced_by_ram marks an auto load mapped while the weights it
+        # keeps in system RAM do not fit available RAM; mmap_cpu_from_disk marks
+        # one of those whose CPU layers read those weights on every token.
         reported = meta.get("mmap")
         self.effective_use_mmap = (reported if isinstance(reported, bool)
                                    else mmap_decision.use_mmap)
         self.mmap_forced_by_ram = (self.effective_use_mmap is True
-                                   and mmap_decision.reason == "exceeds_ram")
+                                   and mmap_decision.reason in ("exceeds_ram",
+                                                                "cpu_exceeds_ram"))
+        self.mmap_cpu_from_disk = (self.mmap_forced_by_ram
+                                   and mmap_decision.reason == "cpu_exceeds_ram")
 
         # Record the model's true transformer layer count, reported once by the
         # child, so the next load and the GUI VRAM estimate can size a partial GPU
@@ -956,11 +967,38 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         self._print_mmap_note()
         self._print_parallel_note()
+        self._print_draft_note()
         if self.encoder_decoder:
             console.print(
                 f"[dim]  encoder-decoder model: each request reads its messages "
                 f"as plain text, up to {self.effective_ctx_max} tokens[/dim]")
         console.print("[green]✓[/green] Model loaded")
+
+    def _apply_speculation_report(self, report) -> None:
+        """Record the loaded model's draft-model status from the worker's
+        speculation report in ``draft_status`` ("" without a draft source),
+        and set ``draft_model_on_gpu`` False when no draft model stayed
+        loaded. A status other than "ok" / "ok-cpu" is logged as a warning."""
+        self.draft_status = ""
+        if not isinstance(report, dict) or report.get("source") != "draft":
+            return
+        status = str(report.get("status") or "")
+        self.draft_status = status
+        if status not in ("ok", "ok-cpu"):
+            self.draft_model_on_gpu = False
+            from localm.debuglog import logger
+
+            from .llamacpp._draftmodel import draft_status_message
+            logger.warning("draft model is off for %s: %s (%s)", Path(self.model_path).name,
+                           draft_status_message(status), status)
+
+    def _print_draft_note(self) -> None:
+        """Print why the configured draft model is not drafting, or nothing."""
+        status = self.draft_status
+        if status and status not in ("ok", "ok-cpu"):
+            from .llamacpp._draftmodel import draft_status_message
+            console.print(f"[yellow]  drafting :[/yellow] draft model off: "
+                          f"{draft_status_message(status)} ({status})")
 
     def _print_parallel_note(self) -> None:
         """Print how many requests the loaded model answers at once, when more
@@ -979,9 +1017,27 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         ``mmap_setting.describe_mmap``), or nothing when there is none."""
         from localm.inference.mmap_setting import describe_mmap
         note = describe_mmap(self.use_mmap, self.effective_use_mmap,
-                             self.mmap_forced_by_ram)
+                             self.mmap_forced_by_ram, self.mmap_cpu_from_disk)
         if note:
             console.print(f"[dim]  {note}[/dim]")
+
+    @staticmethod
+    def _warn_unmapped_weights_exceed_ram(decision) -> str:
+        """Before a ``use_mmap`` off load whose weights read into system RAM
+        (``decision.host_bytes``) plus the RAM headroom exceed the available
+        RAM the decision read: print the warning, log it at WARNING and return
+        it. "" otherwise."""
+        from .llamacpp._sizing import HOST_RAM_HEADROOM_BYTES
+        if (decision.reason != "user_off" or decision.host_bytes is None
+                or decision.ram_available is None
+                or decision.host_bytes + HOST_RAM_HEADROOM_BYTES <= decision.ram_available):
+            return ""
+        from localm.inference.mmap_setting import unmapped_exceeds_ram_note
+        note = unmapped_exceeds_ram_note(decision.host_bytes, decision.ram_available)
+        console.print(f"[yellow]  {note}[/yellow]")
+        from localm.debuglog import logger as _dbg
+        _dbg.warning(note)
+        return note
 
     @staticmethod
     def _load_timeout_seconds() -> float:
@@ -1260,6 +1316,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         frequency_penalty: Optional[float] = None,
         logprobs: Optional[int] = None,
         on_logprobs: Optional[Callable[[list], None]] = None,
+        cache_prompt: bool = True,
     ) -> Iterator[str]:
         # Image and audio input: with an mmproj loaded they flow through to
         # create_chat_completion's media path. A model without the encoder
@@ -1311,6 +1368,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             kwargs["thinking"] = thinking
         if logprobs is not None:
             kwargs["logprobs"] = logprobs
+        if not cache_prompt:
+            kwargs["cache_prompt"] = False
         kwargs.update(sampling)
 
         # The grammar-fault retry-without-grammar logic runs inside the isolated

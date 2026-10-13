@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
+import { $, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -892,7 +892,8 @@ export function parseWebCalls(text, limit = Infinity) {
   // first (the name may live in a "call:NAME" prefix, Gemma-style), then
   // fences, then any bare top-level JSON object naming a web tool.
   const bodies = [];
-  const wrap = /<\|?\/?tool_call\|?>\s*(?:call:(\w+)\s*)?([\s\S]*?)\s*<\|?\/?tool_call\|?>/g;
+  const wrap = new RegExp(
+    TOOL_CALL_DELIM + "\\s*(?:call:(\\w+)\\s*)?([\\s\\S]*?)\\s*" + TOOL_CALL_DELIM, "g");
   for (const mm of clean.matchAll(wrap)) bodies.push({ name: mm[1], body: mm[2] });
   const fence = /```[ \t]*[A-Za-z_]*[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
   for (const mm of clean.matchAll(fence)) bodies.push({ name: undefined, body: mm[1] });
@@ -958,7 +959,7 @@ export function ignoredCallsNote(calls) {
  *  un-grounded answer. */
 export function looksLikeWebToolAttempt(text) {
   const clean = stripThink(text);
-  if (/<\|?\/?tool_call\|?>/.test(clean) || /```[ \t]*tool_call\b/.test(clean)) return true;
+  if (_TOOL_CALL_TAG.test(clean) || /```[ \t]*tool_call\b/.test(clean)) return true;
   if (/<\/?(web_search|fetch_url)\b/.test(clean)) return true;
   if (_WEB_MARKER_LINE_TEST.test(clean)) return true;
   return /"name"\s*:/.test(clean) && /web_search|fetch_url/.test(clean);
@@ -970,8 +971,12 @@ export function looksLikeWebToolAttempt(text) {
 const _WEB_MARKER_LINE_TEST = /^[ \t]*>[ \t]*\u{1F310}[ \t]*\*/mu;
 const _WEB_MARKER_LINES = /^[ \t]*>[ \t]*\u{1F310}[ \t]*\*[^\n]*(?:\n|$)/gmu;
 
-// A closed tool-call wrapper in any dialect parseWebCalls reads.
-const _TOOL_CALL_BLOCK = /<\|?\/?tool_call\|?>[\s\S]*?<\|?\/?tool_call\|?>/g;
+// One tool-call wrapper tag, and a closed wrapper, in any dialect parseWebCalls reads.
+const _TOOL_CALL_TAG = new RegExp(TOOL_CALL_DELIM);
+const _TOOL_CALL_BLOCK = new RegExp(TOOL_CALL_DELIM + "[\\s\\S]*?" + TOOL_CALL_DELIM, "g");
+const _TOOL_CALL_OPEN_TO_END =
+  new RegExp("(?:<\\|?tool_call\\|?>|\\[[Tt][Oo][Oo][Ll]_[Cc][Aa][Ll][Ll]\\])[\\s\\S]*$");
+const _TOOL_CALL_TAGS = new RegExp(TOOL_CALL_DELIM, "g");
 
 // How the server's text for a failed generation begins (inference_error_text,
 // localm/inference/http_server.py).
@@ -984,7 +989,7 @@ const _INFERENCE_ERROR_MARK = "[inference error:";
  *  result is trimmed. */
 export function stripWebCallText(text) {
   let s = String(text || "").replace(_TOOL_CALL_BLOCK, "");
-  s = s.replace(/<\|?tool_call\|?>[\s\S]*$/, "").replace(/<\|?\/?tool_call\|?>/g, "");
+  s = s.replace(_TOOL_CALL_OPEN_TO_END, "").replace(_TOOL_CALL_TAGS, "");
   s = s.replace(_WEB_TOOL_TAG_RE, "");
   s = s.replace(/```[ \t]*[A-Za-z_]*[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g,
     (whole, body) => (_asWebCall(_lenientJSON(body.trim())) ? "" : whole));
@@ -1063,6 +1068,16 @@ export function webEventAddsNew(ev, seen) {
     }
   }
   return fresh;
+}
+
+/** True when the completed tool event *ev* gave the model something to answer
+ *  from: a search whose grounding is not "failed", or a page read with text. A
+ *  failed, denied, duplicate or skipped event and an empty result give none. */
+export function webEventHasEvidence(ev) {
+  if (!ev || ev.status !== "done") return false;
+  if (ev.tool === "search") return (ev.grounding || "failed") !== "failed";
+  if (ev.tool === "fetch") return !!((ev.page || {}).text || "").trim();
+  return false;
 }
 
 const _ACTION_VERBS =
@@ -2364,7 +2379,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   if (!web) {
     web = { seen: new Set(), found: new Set(), lookups: 0, stale: 0,
             formatRepairs: 0, ask: null, repaired: false, final: false,
-            max: webMaxLookups() };
+            evidence: false, max: webMaxLookups() };
   }
   const contextRouting = await maybeCompactConversation(conv, signal);
   if (signal.aborted) return { stopped: true, liveRow: null };
@@ -2581,13 +2596,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         removeStatusIndicator(liveBody);
         full += cDelta;
         reasoning += rDelta;
-        if (webEnabled && cDelta && full.includes("tool_call")) {
+        if (webEnabled && cDelta && /tool_call/i.test(full)) {
           const end = firstToolCallEnd(full);
           const rest = end >= 0 ? full.slice(end) : "";
           const after = rest.trimStart();
           let cutAt = -1;
           if (end >= 0 && web.final) {
-            const next = rest.search(/<\|?\/?tool_call\|?>/);
+            const next = rest.search(_TOOL_CALL_TAG);
             if (next >= 0) cutAt = end + next;
           } else if (after &&
                      !_INFERENCE_ERROR_MARK.startsWith(after.slice(0, _INFERENCE_ERROR_MARK.length))) {
@@ -2877,6 +2892,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // The ignored-call notice rides on the RESULT message, and only here.
       const ignored = ignoredCallsNote(webCalls);
       const ev = await runWebCall(conv, nextCall, ignored, ignored ? "ignored" : "");
+      if (webEventHasEvidence(ev)) web.evidence = true;
       web.stale = webEventAddsNew(ev, web.found) ? 0 : web.stale + 1;
       if (web.stale >= WEB_MAX_STALE_ROUNDS) web.final = true;
       return runCompletion(conv, webDepth + 1, web);
@@ -2924,6 +2940,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       renderChat();
       return runCompletion(conv, webDepth + 1, web);
     }
+  }
+  if (webEnabled && web.lookups > 0 && !web.evidence && finalText.trim()) {
+    reply.noWebEvidence = true;
+    saveConversations(conv);
+    renderChat();
   }
   if ($("p-speak").checked && finalText) {
     speak(finalText);   // read the finished reply aloud (offline browser voices)

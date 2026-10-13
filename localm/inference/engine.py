@@ -154,15 +154,18 @@ def _resolve_spec_draft_tokens(cfg: dict, override: Optional[int]) -> Optional[i
 def resolve_spec_draft_model(cfg: dict, override: Optional[str] = None) -> Optional[str]:
     """The draft GGUF path for the draft source: *override* when given, else
     the ``spec_draft_model`` config key, as a registered model name or a path
-    (``get_operator_model_info``). None when unset; a name that resolves to
-    nothing is returned as given, so the load reports the draft model missing."""
+    (``get_operator_model_info``), else an existing path on disk as given,
+    made absolute. None when unset or when the name resolves to nothing, so the
+    load reports the draft model missing."""
     raw = override if override is not None else cfg.get("spec_draft_model")
     name = str(raw or "").strip()
     if not name:
         return None
     from localm.model_manager.registry import get_operator_model_info
     info = get_operator_model_info(name)
-    return str(info[0]) if info is not None else name
+    if info is not None:
+        return os.path.abspath(str(info[0]))
+    return os.path.abspath(name) if os.path.exists(name) else None
 
 
 def create_backend(
@@ -496,20 +499,28 @@ class Engine:
     def mmap_state(self) -> Optional[dict]:
         """What the last load did with memory-mapping, or None when the backend
         did not report it: ``use_mmap`` (the setting: auto, on or off), ``mmap``
-        (bool, whether the model was memory-mapped) and ``mmap_from_disk`` (bool,
-        True when ``auto`` mapped it because the model may not fit in available
-        RAM). ``mmap_note`` is the one-line description
+        (bool, whether the model was memory-mapped), ``mmap_from_disk`` (bool,
+        True when ``auto`` mapped it while the weights it keeps in system RAM
+        may not fit in available RAM) and ``mmap_cpu_from_disk`` (bool, True
+        when those weights are read by CPU layers on every token). ``mmap_note``
+        is the one-line description
         (``mmap_setting.describe_mmap``), present only when there is something
-        to say."""
+        to say. A ``use_mmap`` off load whose weights did not fit available RAM
+        also carries ``mmap_ram_short`` True, and its warning as ``mmap_note``."""
         effective = getattr(self._backend, "effective_use_mmap", None)
         if effective is None:
             return None
         setting = getattr(self._backend, "use_mmap", "auto")
         forced = (setting == "auto" and bool(effective) and bool(
             getattr(self._backend, "mmap_forced_by_ram", False)))
+        cpu = forced and bool(getattr(self._backend, "mmap_cpu_from_disk", False))
         state = {"use_mmap": setting, "mmap": bool(effective),
-                 "mmap_from_disk": forced}
-        note = describe_mmap(setting, bool(effective), forced)
+                 "mmap_from_disk": forced, "mmap_cpu_from_disk": cpu}
+        note = describe_mmap(setting, bool(effective), forced, cpu)
+        short = getattr(self._backend, "mmap_ram_short_note", "")
+        if setting == "off" and isinstance(short, str) and short:
+            state["mmap_ram_short"] = True
+            note = short
         if note:
             state["mmap_note"] = note
         return state
@@ -560,9 +571,16 @@ class Engine:
 
     def draft_model_on_gpu(self) -> Optional[bool]:
         """Where the loaded backend placed its draft model: True on the GPU,
-        False on the CPU, None when the backend has no draft placement."""
+        False on the CPU or when no draft model stayed loaded, None when the
+        backend has no draft placement."""
         placed = getattr(self._backend, "draft_model_on_gpu", None)
         return placed if isinstance(placed, bool) else None
+
+    def draft_model_status(self) -> str:
+        """The loaded backend's draft-model source status ("ok", "ok-cpu" or
+        why the draft model is off), "" without a draft source."""
+        status = getattr(self._backend, "draft_status", "")
+        return status if isinstance(status, str) else ""
 
     def draft_step_costs(self) -> Optional[dict]:
         """The step costs the loaded backend measured for its n-gram or
@@ -730,14 +748,16 @@ class Engine:
         frequency_penalty: Optional[float] = None,
         logprobs: Optional[int] = None,
         on_logprobs: Optional[Callable[[list], None]] = None,
+        cache_prompt: Optional[bool] = None,
     ) -> Iterator[str]:
         """Stream the reply to *messages*. ``thinking=False`` asks a reasoning
         model to answer without its reasoning channel; ``None`` leaves the
         model's default. *min_p*, *presence_penalty* and *frequency_penalty* are
         passed to the backend only when set; check :meth:`unsupported_sampling`
         first. *logprobs* and *on_logprobs* are passed only when *logprobs* is
-        set; check :attr:`supports_logprobs` first. The other parameters default
-        to the config values."""
+        set; check :attr:`supports_logprobs` first. ``cache_prompt=False`` is
+        passed on (see the backend's ``chat_stream``); ``None`` and ``True`` keep
+        the prompt cache. The other parameters default to the config values."""
         # Auto-reload if the model was unloaded. Holds the process-global load
         # lock so a reload cannot race another load onto the GPU, and
         # double-checks inside the lock so a model another thread just brought
@@ -762,6 +782,8 @@ class Engine:
         if logprobs is not None:
             extra["logprobs"] = logprobs
             extra["on_logprobs"] = on_logprobs
+        if cache_prompt is False:
+            extra["cache_prompt"] = False
         # Normalise model-internal control markers (harmony and Gemma channel
         # tags, and similar) once here, so every backend inherits it. The GGUF
         # backend also scrubs internally and scrub_stream is idempotent; the HF

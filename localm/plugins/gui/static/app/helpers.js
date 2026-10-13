@@ -195,6 +195,26 @@ export async function refreshCsrf() {
   }
 }
 
+/** Run the async *work* with *btn* disabled and showing *label*; the button's
+ *  text and enabled state are restored afterwards, also when *work* throws, and
+ *  left alone when the button has left the page. With no button, runs *work*
+ *  as is. Returns what *work* returns. */
+export async function whileBusy(btn, label, work) {
+  if (!btn) return work();
+  const prevText = btn.textContent;
+  const prevDisabled = btn.disabled;
+  btn.disabled = true;
+  btn.textContent = label;
+  try {
+    return await work();
+  } finally {
+    if (btn.isConnected) {
+      btn.disabled = prevDisabled;
+      btn.textContent = prevText;
+    }
+  }
+}
+
 export function toast(msg, isError = false) {
   const el = $("toast");
   el.textContent = msg;
@@ -203,7 +223,7 @@ export function toast(msg, isError = false) {
   el._t = setTimeout(() => (el.className = ""), 3500);
 }
 
-marked.setOptions({ breaks: true, mangle: false, headerIds: false });
+marked.setOptions({ breaks: true });
 
 /** Split leading <think>…</think> reasoning from the visible reply.
  *  Handles a still-open block during streaming. */
@@ -225,6 +245,13 @@ export function stripThink(text) {
   return (text || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
 }
 
+/** Regex source of one tool-call wrapper tag: `<tool_call>`, `</tool_call>`, the
+ *  |-piped finetune forms (`<|tool_call|>`, `<tool_call|>`) and the bracket tags
+ *  `[tool_call]` / `[/tool_call]` in any letter case. An opening tag of one form
+ *  pairs with a closing tag of any other. */
+export const TOOL_CALL_DELIM =
+  String.raw`(?:<\|?\/?tool_call\|?>|\[\/?[Tt][Oo][Oo][Ll]_[Cc][Aa][Ll][Ll]\])`;
+
 /** Replace a raw tool-call block with a compact note. Runs in the DISPLAY and on
  *  the assistant history RE-SENT to the model, so a model never sees its own raw
  *  control tokens echoed back (feeding `<|tool_call>` markers back destabilised
@@ -234,7 +261,7 @@ export function stripThink(text) {
  *  often single-quoted / trailing-comma'd) so anything that ran is defanged too. */
 export function formatToolCalls(text) {
   return (text || "").replace(
-    /<\|?\/?tool_call\|?>[\s\S]*?<\|?\/?tool_call\|?>/g,
+    new RegExp(TOOL_CALL_DELIM + "[\\s\\S]*?" + TOOL_CALL_DELIM, "g"),
     (block) => {
       const name = (block.match(/"name"\s*:\s*"(\w+)"/) || [])[1] || "";
       const arg = (block.match(/"(?:query|url)"\s*:\s*"([^"]*)"/) || [])[1] || "";
