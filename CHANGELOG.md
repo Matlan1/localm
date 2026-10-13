@@ -525,6 +525,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Zed lists localm's models even when one model's file is gone.** `/api/tags` and `/api/show` gave
+  such a model a `null` `modified_at`, and Zed rejects the whole model list on a `null` there; the
+  field is now always a date (1970-01-01 when the file's time cannot be read).
 - **`localm pull` of a Qwen3-TTS model fetches a projector that works.** In a repo that ships both a
   Q8_0 and an f16 projector (such as `mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF`), the pull took the
   f16 one, and speaking with it crashed the speech worker on the CPU and on AMD ROCm. A text-to-speech
