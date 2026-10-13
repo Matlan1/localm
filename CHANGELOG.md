@@ -567,6 +567,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   start. A client that disconnected or cancelled during that wait was not noticed until the
   wait ended and the reply had already processed its prompt. The cancel is now seen within
   a fraction of a second, and the request ends with no output and no error.
+- **The FLUX VAE offered for a missing ComfyUI workflow file downloads again.** `ae.safetensors`
+  came from a Hugging Face repository that now requires a licence click-through and answers
+  401 to an anonymous download. It now comes from an open repository that holds the same file.
 - **OpenGL shader caches stay in the data folder.** Mesa and the NVIDIA Linux driver wrote
   compiled shaders to `~/.cache/mesa_shader_cache` and `~/.cache/nvidia`, outside the data
   folder, so "delete saved data" never removed them. They now go to `cache/mesa` and
@@ -2053,6 +2056,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Querying or deleting a RAG collection that does not exist, with an API key confined to
   specific folders, now returns 404 like it does for every other caller**, instead of a 403
   that implied the collection exists but is off-limits.
+- **The default music models and the curated ComfyUI models are checked against a fixed
+  sha256.** Downloading the four ACE-Step 1.5 files (Music page, `localm setup-music`) or one
+  of the eight models offered when a ComfyUI workflow is missing a file now fails and deletes
+  the file when its bytes are not the expected ones. The weekly pin report lists these digests
+  and flags one the hub no longer serves.
 
 ## [0.2.0] - 2026-09-04
 

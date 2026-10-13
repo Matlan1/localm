@@ -315,7 +315,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             return {"status": "verified", "warning": warning, "missing": [{
                 "filename": m["file"], "native": True, "searchable": False,
                 "source": {"repo": m["repo"], "file": m["file"], "spec": m["spec"],
-                           "sha256": None, "name": m["name"], "size_bytes": m["size_bytes"],
+                           "sha256": m["sha256"], "name": m["name"], "size_bytes": m["size_bytes"],
                            "model_type": m["model_type"], "origin": "curated"},
             } for m in st["missing"]]}
 
@@ -465,7 +465,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 "'ComfyUI folder' field in Settings > Media (per-plugin or "
                 "shared), or enable the managed ComfyUI instance.")
         args = ["pull", "--type", source.model_type, "--comfy-dest-dir", str(dest_dir),
-                "--no-register", "--", source.spec]
+                "--no-register"]
+        if source.sha256:
+            args += ["--sha256", source.sha256]
+        args += ["--", source.spec]
         job = jobs.start_cli("pull", args, extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",

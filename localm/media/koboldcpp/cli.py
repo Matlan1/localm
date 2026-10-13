@@ -36,7 +36,7 @@ def main(backend: str, no_models: bool, no_test: bool, force: bool, status: bool
     if status:
         _status(console)
         return
-    from .models import COMPONENTS, DEFAULT_FILES, default_pull, find_default
+    from .models import COMPONENTS, DEFAULT_FILES, DEFAULT_SHA256, default_pull, find_default
     from .music import NativeMusicError, backend_order
     if force:
         runtime.clear_backend_records()
@@ -57,7 +57,7 @@ def main(backend: str, no_models: bool, no_test: bool, force: bool, status: bool
         fname = DEFAULT_FILES[comp]
         spec, name = default_pull(comp)
         console.print(f"Downloading the default music {comp.replace('_', ' ')} model ({fname})")
-        if not mm.pull_model(spec, name=name) or find_default(comp) is None:
+        if not mm.pull_model(spec, name=name, expected_sha256=DEFAULT_SHA256[comp]) or find_default(comp) is None:
             console.print(f"[red]Could not download {escape(fname)}.[/red]")
             sys.exit(1)
     if no_test:
