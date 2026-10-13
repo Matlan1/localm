@@ -632,6 +632,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Settings labels and help translate for every field.** Forty-six settings had no German text and
   showed English in the German interface: the reranker, diffusion, parallel-request and metrics
   settings, every image, music and video generation setting, and the text-to-speech settings.
+- **Signing out every device and disabling a job stick while the server is running.** `localm key
+  recover`, `localm key clear` and `localm job disable` could be undone by the running server saving
+  a browser session or a job result at the same moment, so revoked sessions kept working or a disabled
+  job ran again. Writes to the session and job stores now wait for each other across processes.
+- **Disabling the coder plugin ends its open sessions.** A coder session kept running after the plugin
+  was disabled, with its stop button gone. Disabling or uninstalling the plugin now stops and closes
+  every live coder session.
+- **A background task no longer reloads a model that is being unloaded.** A scheduled job or a memory
+  consolidation that started on a model just as it was unloaded or evicted could load it again where
+  the Models page and idle unload could not see it. It now fails with a message to retry.
 - **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
   its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
   localm is reported as such instead of with advice to repair the llama.cpp runtime.
