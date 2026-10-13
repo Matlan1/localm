@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A one-file tensor-name hint that lets stable-diffusion.cpp recognise a
-UNet-only SDXL model.
+"""A tensor-name hint file that makes stable-diffusion.cpp recognise a UNet-only
+SDXL model.
 
-stable-diffusion.cpp calls a UNet an SDXL model only when some loaded tensor
-is named like a second text encoder (``conditioner.embedders.1``), and takes a
-diffusers-layout UNet for SD 1.x without a ``middle_block.1`` tensor. A
-UNet-only file loaded with separate CLIP-L and CLIP-G files carries neither
-name, so the load fails with "get sd version from file failed". The hint file
-holds four one-element tensors with those names and is passed as the context's
-``model_path`` beside the real ``diffusion_model_path``; stable-diffusion.cpp
-never reads their values.
+The file holds four one-element tensors named like a second text encoder
+(``conditioner.embedders.1``), ``middle_block.1``, ``output_blocks.3.1`` and
+``input_blocks``. It is passed as the context's ``model_path`` beside the real
+``diffusion_model_path``; stable-diffusion.cpp reads only the tensor names, never
+their values. Without it a UNet-only SDXL file fails to load with "get sd version
+from file failed". See test_an_sdxl_unet_alone_gets_its_parts_and_the_version_hint.
 """
 
 from __future__ import annotations
