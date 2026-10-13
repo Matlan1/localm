@@ -5,7 +5,7 @@ user-initiated report.
 
 from __future__ import annotations
 
-import re
+import string
 import threading
 from pathlib import Path
 from typing import Optional
@@ -49,7 +49,19 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         return None
 
 
-_SAVED_REPORT_NAME = re.compile(r"bug-[A-Za-z0-9_-]+\.md")
+_SAVED_REPORT_STAMP_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+_SAVED_REPORT_NAME_MAX = 128
+
+
+def _is_saved_report_name(name: object) -> bool:
+    """True for ``bug-<stamp>.md`` where <stamp> is one or more ASCII letters,
+    digits, ``_`` or ``-``, and the whole name is at most 128 characters."""
+    if not isinstance(name, str) or len(name) > _SAVED_REPORT_NAME_MAX:
+        return False
+    if not (name.startswith("bug-") and name.endswith(".md")):
+        return False
+    stamp = name[len("bug-"):-len(".md")]
+    return bool(stamp) and all(c in _SAVED_REPORT_STAMP_CHARS for c in stamp)
 
 
 def read_saved_report(filename: object) -> str:
@@ -59,7 +71,7 @@ def read_saved_report(filename: object) -> str:
     writes it. Raises ValueError for anything else (a non-string, a path, a
     separator, a different extension) and OSError when the file cannot be read or is not
     valid UTF-8."""
-    if not isinstance(filename, str) or not _SAVED_REPORT_NAME.fullmatch(filename):
+    if not _is_saved_report_name(filename):
         raise ValueError("not a saved bug-report file name")
     from localm.config import home_dir
     base = (home_dir() / "bug-reports").resolve()

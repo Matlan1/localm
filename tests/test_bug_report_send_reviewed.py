@@ -119,7 +119,7 @@ def test_send_without_a_digest_is_refused(client, body):
 @pytest.mark.parametrize("filename", [
     "../config.json", "..\\config.json", "bug-x.md/../../config.json",
     "bug-../x.md", "bug-x.txt", "x/bug-x.md", "C:\\x\\bug-1.md", "/tmp/bug-1.md",
-    "bug-.md", "", None, 12,
+    "bug-.md", "", None, 12, "bug-" + "a" * 200 + ".md", "bug-x.md.md", "bug-xé.md",
 ])
 def test_send_refuses_anything_but_a_saved_report_name(client, filename):
     c, hdrs, uploads, home = client
