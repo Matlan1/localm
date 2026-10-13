@@ -39,8 +39,8 @@ def hint_bytes() -> bytes:
 def sdxl_hint_path() -> Path:
     """The SDXL hint file under the data directory, written when missing or
     different. Raises ``OSError`` when it cannot be written."""
-    from localm.config import home_dir
-    path = home_dir() / "cache" / "sdcpp" / "sdxl-version-hint.safetensors"
+    from localm.config import cache_dir
+    path = cache_dir() / "sdcpp" / "sdxl-version-hint.safetensors"
     want = hint_bytes()
     try:
         if path.read_bytes() == want:
