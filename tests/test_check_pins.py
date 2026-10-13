@@ -906,6 +906,74 @@ def test_a_missing_file_raises_with_the_status(monkeypatch):
     assert caught.value.status == 404
 
 
+def _opener_failing(statuses, retry_after=None, ok_headers=None):
+    import email.message
+    import urllib.error
+    calls = []
+
+    class Opener:
+        def open(self, req, timeout=None):
+            calls.append(req.full_url)
+            n = len(calls) - 1
+            if n < len(statuses):
+                headers = email.message.Message()
+                if retry_after is not None:
+                    headers["Retry-After"] = retry_after
+                raise urllib.error.HTTPError(req.full_url, statuses[n], "x", headers, None)
+
+            class Resp:
+                headers = ok_headers or {"X-Linked-ETag": '"' + "cd" * 32 + '"'}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+            return Resp()
+    return Opener(), calls
+
+
+def test_a_rate_limited_hub_is_retried_after_the_wait_it_asks_for(monkeypatch):
+    opener, calls = _opener_failing([429, 429], retry_after="7")
+    waits = []
+    monkeypatch.setattr(cp.urllib.request, "build_opener", lambda *handlers: opener)
+    monkeypatch.setattr(cp.time, "sleep", waits.append)
+    assert cp._hf_linked_sha256("o/r", "f") == "cd" * 32
+    assert waits == [7.0, 7.0] and len(calls) == 3
+
+
+def test_a_huge_retry_after_is_capped_and_a_missing_one_uses_the_default_waits(monkeypatch):
+    opener, _ = _opener_failing([429], retry_after="9999")
+    waits = []
+    monkeypatch.setattr(cp.urllib.request, "build_opener", lambda *handlers: opener)
+    monkeypatch.setattr(cp.time, "sleep", waits.append)
+    cp._hf_linked_sha256("o/r", "f")
+    assert waits == [cp._HF_RETRY_AFTER_CAP]
+    opener, _ = _opener_failing([503, 503, 503])
+    waits.clear()
+    monkeypatch.setattr(cp.urllib.request, "build_opener", lambda *handlers: opener)
+    cp._hf_linked_sha256("o/r", "f")
+    assert waits == list(cp._HF_RETRY_DELAYS)
+
+
+def test_a_hub_that_keeps_rate_limiting_ends_as_a_fetch_error_with_the_status(monkeypatch):
+    opener, calls = _opener_failing([429] * 10)
+    monkeypatch.setattr(cp.urllib.request, "build_opener", lambda *handlers: opener)
+    monkeypatch.setattr(cp.time, "sleep", lambda s: None)
+    with pytest.raises(cp.FetchError) as caught:
+        cp._hf_linked_sha256("o/r", "f")
+    assert caught.value.status == 429 and len(calls) == len(cp._HF_RETRY_DELAYS) + 1
+
+
+def test_a_missing_file_is_not_retried(monkeypatch):
+    opener, calls = _opener_failing([404] * 10)
+    monkeypatch.setattr(cp.urllib.request, "build_opener", lambda *handlers: opener)
+    monkeypatch.setattr(cp.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("slept")))
+    with pytest.raises(cp.FetchError) as caught:
+        cp._hf_linked_sha256("o/r", "f")
+    assert caught.value.status == 404 and len(calls) == 1
+
+
 # ---- the finegrained-fp8 Hub kernel pin ---------------------------------------
 
 

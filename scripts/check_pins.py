@@ -703,6 +703,19 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _HF_PINS_NAME = "Hugging Face file digests"
 
 
+_HF_RETRY_DELAYS = (3.0, 10.0, 30.0)
+_HF_RETRY_AFTER_CAP = 60.0
+
+
+def _hf_retry_wait(error: urllib.error.HTTPError, default: float) -> float:
+    """Seconds to wait before retrying: the server's Retry-After (whole seconds, at most
+    _HF_RETRY_AFTER_CAP) when it sends one, else *default*."""
+    raw = str(error.headers.get("Retry-After") or "").strip() if error.headers else ""
+    if raw.isdigit():
+        return min(float(raw), _HF_RETRY_AFTER_CAP)
+    return default
+
+
 def _hf_linked_sha256(repo: str, path: str, revision: str = "main") -> str | None:
     """The sha256 Hugging Face reports for *path* of *repo* at *revision* (the
     ``X-Linked-ETag`` of the unredirected resolve response), or None for a file
@@ -713,7 +726,7 @@ def _hf_linked_sha256(repo: str, path: str, revision: str = "main") -> str | Non
     req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "localm-check-pins"})
     opener = urllib.request.build_opener(_NoRedirect)
     headers = None
-    for attempt in range(len(_RETRY_DELAYS) + 1):
+    for attempt in range(len(_HF_RETRY_DELAYS) + 1):
         try:
             with opener.open(req, timeout=_TIMEOUT) as r:
                 headers = r.headers
@@ -722,13 +735,13 @@ def _hf_linked_sha256(repo: str, path: str, revision: str = "main") -> str | Non
             if e.code in (301, 302, 303, 307, 308):
                 headers = e.headers
                 break
-            if attempt < len(_RETRY_DELAYS) and _is_transient(e):
-                time.sleep(_RETRY_DELAYS[attempt])
+            if attempt < len(_HF_RETRY_DELAYS) and _is_transient(e):
+                time.sleep(_hf_retry_wait(e, _HF_RETRY_DELAYS[attempt]))
                 continue
             raise FetchError(f"{url}: HTTP {e.code}", status=e.code) from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            if attempt < len(_RETRY_DELAYS) and _is_transient(e):
-                time.sleep(_RETRY_DELAYS[attempt])
+            if attempt < len(_HF_RETRY_DELAYS) and _is_transient(e):
+                time.sleep(_HF_RETRY_DELAYS[attempt])
                 continue
             raise FetchError(f"{url}: {e}") from e
     etag = str((headers or {}).get("X-Linked-ETag") or "").strip().strip('"').lower()
