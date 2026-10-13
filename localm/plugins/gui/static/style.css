@@ -3155,3 +3155,11 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 
 
+
+/* Native media model pickers (app/native-models.js). */
+.native-models { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin: 6px 0 10px; }
+.native-models > .sub, .native-models > .native-loras { grid-column: 1 / -1; }
+.native-lora-row { display: grid; grid-template-columns: 1fr 90px auto; gap: 8px; margin-bottom: 6px; }
+@media (max-width: 640px) {
+  .native-models { grid-template-columns: 1fr; }
+}

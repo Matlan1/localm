@@ -43,6 +43,7 @@ from localm.image_gen.comfy import is_safe_lora_name
 from localm.inference.http_server import _resolve_disconnect_poll, principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
+from localm.media.native_models import MAX_LORAS, LoraChoice, apply_choice, check_request
 from localm.pathsafe import confined_file, confined_name
 from localm.selfclient import resolve_self_url
 from . import backend as _backend
@@ -65,6 +66,10 @@ class ImagineRequest(BaseModel):
     lora_strength_model: float | None = Field(None, allow_inf_nan=False)  # None keeps generate_image()'s default (1.0)
     lora_strength_clip: float | None = Field(None, allow_inf_nan=False)   # None keeps generate_image()'s default (0.5)
     size: str | None = None                   # WIDTHxHEIGHT, or None for the backend's default
+    # Native backend only: {"model"|slot: registered name or "" for automatic}
+    # laid over Settings > Images for this job, and registered LoRAs.
+    native_models: dict[str, str] | None = None
+    loras: list[LoraChoice] | None = Field(None, max_length=MAX_LORAS)
 
 
 class MoveFileRequest(BaseModel):
@@ -98,12 +103,15 @@ def _validate_lora_name(raw: str) -> str:
 
 
 def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
-                   instance_token, width=None, height=None, in_gallery=True):
+                   instance_token, width=None, height=None, in_gallery=True,
+                   native_choice=None, native_loras=None):
     """The background-job body for one image generation of ``req`` into
     ``out_path``: backend availability, VRAM handover, generation, and the
     chat-model reload on every exit path. ``width``/``height`` are forwarded to
     the backend only when both are set. ``in_gallery=False`` skips recording
-    ``out_path`` as a gallery artifact owned by ``owner``."""
+    ``out_path`` as a gallery artifact owned by ``owner``. ``native_choice``
+    and ``native_loras`` (from ``native_models.check_request``) apply to the
+    native backend only; a ComfyUI job given LoRAs that way is refused."""
     def _generate(job):
         from localm.audit import SessionMode, effective_mode
         from localm.config import load_config
@@ -121,6 +129,12 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             if refused:
                 job.push({"type": "line", "text": refused})
                 return False
+            s = apply_choice(s, native_choice or {})
+        elif native_loras:
+            job.push({"type": "line", "text":
+                      "Several LoRAs per job apply to the native backend; with ComfyUI "
+                      "use the LoRA picker."})
+            return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
         job.push({"type": "line", "text": msg})
@@ -197,6 +211,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             placement=placement,
             on_progress=lambda t: job.push({"type": "line", "text": t}),
             **size_kwargs,
+            **({"loras": native_loras} if native_loras else {}),
         )
         job.push({"type": "line", "text": message})
         if ok:
@@ -228,6 +243,7 @@ async def imagine(req: ImagineRequest, request: Request):
         input_image = media_paths.confined_input_image(req.input_image)
     lora_name = _validate_lora_name(req.lora_name) if req.lora_name else None
     width, height = parse_image_size(req.size) or (None, None)
+    native_choice, native_loras = check_request(req.native_models, req.loras, "image")
 
     # Any app built through attach_engine has a background-job registry, so
     # reaching this branch means the router was mounted on an app that never ran
@@ -259,7 +275,8 @@ async def imagine(req: ImagineRequest, request: Request):
         "imagine",
         _make_generate(req, input_image=input_image, lora_name=lora_name,
                        out_path=out_path, owner=owner, self_url=self_url,
-                       instance_token=instance_token, width=width, height=height),
+                       instance_token=instance_token, width=width, height=height,
+                       native_choice=native_choice, native_loras=native_loras),
         result_path=out_path.name, owner=owner)
     return {"job_id": job.id}
 
@@ -692,6 +709,8 @@ def register(host) -> None:
     # to this plugin's capability.
     from localm.media_workflows import make_workflow_router, migrate_legacy_override
     host.mount_router(make_workflow_router("image"))
+    from localm.media.native_models import make_router as make_native_models_router
+    host.mount_router(make_native_models_router("image", "imagine", _backend))
     # One-time: rescue any legacy personal override left INSIDE the package
     # (localm/image_gen/flux_workflow.json) into home/workflows, which survives a
     # self-update (the localm/ dir is whole-tree-replaced). No-op when absent.

@@ -217,6 +217,33 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
     return p
 
 
+_MEDIA_KIND_TYPES = {
+    "diffusion": "diffusion-unet", "checkpoint": "diffusion-unet", "vae": "vae",
+    "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
+    "t5xxl": "text-encoder", "umt5": "text-encoder", "byt5": "text-encoder",
+    "clip_vision": "text-encoder",
+}
+_MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora"})
+
+
+def _media_component_type(path: Path, model_type: Optional[str]) -> Optional[str]:
+    """The registry type a single ``.safetensors`` file registers as when it is
+    an image/video model file (a diffusion model, text encoder, VAE or LoRA),
+    or None when it is not one. An explicit media *model_type* is taken as
+    given; otherwise the file's tensor layout decides
+    (``localm.media.sdcpp.families``). A file inside a HuggingFace model
+    directory is never one unless *model_type* says so."""
+    if model_type in _MEDIA_COMPONENT_TYPES:
+        return model_type
+    if model_type is not None:
+        return None
+    from localm.inference.engine import _is_hf_dir
+    if _is_hf_dir(str(path.parent)):
+        return None
+    from localm.media.sdcpp.families import inspect_file
+    return _MEDIA_KIND_TYPES.get(inspect_file(path).kind)
+
+
 def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                              is_blob: bool = False) -> tuple[str, dict]:
     """Deterministically classify a LOCAL model's type from HARD metadata only.
@@ -4415,7 +4442,14 @@ def add_local(
     # the file sits inside a real HF model dir, register that DIRECTORY
     # (deterministic type detection below then classifies it); otherwise reject
     # with a precise, actionable reason instead of the bare "Not a model".
-    if p.is_file() and p.suffix.lower() == ".safetensors" and not (is_gguf or is_hf or is_blob):
+    media_type = None
+    if p.is_file() and p.suffix.lower() in (".safetensors", ".sft") and not (is_gguf or is_hf
+                                                                           or is_blob):
+        media_type = _media_component_type(p, model_type)
+    if media_type is not None:
+        if model_type is None:
+            model_type = media_type
+    elif p.is_file() and p.suffix.lower() == ".safetensors" and not (is_gguf or is_hf or is_blob):
         parent = p.parent
         if _is_hf_dir(str(parent)):
             p = parent
@@ -4477,7 +4511,7 @@ def add_local(
                 ) or registered_any
             return registered_any
 
-    if not (is_gguf or is_hf or is_blob):
+    if not (is_gguf or is_hf or is_blob or media_type):
         detail = explain_unsupported_model(p)
         if detail is None:
             detail = ("Expected a .gguf file or a HuggingFace model directory "

@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from localm.inference.http_server import principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
+from localm.media.native_models import MAX_LORAS, LoraChoice, apply_choice, check_request
 from localm.pathsafe import confined_file, confined_name
 from localm.selfclient import resolve_self_url
 from . import backend as _backend
@@ -54,6 +55,10 @@ class VideoRequest(BaseModel):
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
     # apply_model_overrides. Picked from the Workflow panel's model dropdowns.
     model_overrides: dict[str, dict[str, str]] | None = None
+    # Native backend only: {"model"|slot: registered name or "" for automatic}
+    # laid over Settings > Video for this job, and registered LoRAs.
+    native_models: dict[str, str] | None = None
+    loras: list[LoraChoice] | None = Field(None, max_length=MAX_LORAS)
 
 
 class MoveFileRequest(BaseModel):
@@ -89,6 +94,7 @@ async def video(req: VideoRequest, request: Request):
     input_image = None
     if req.input_image:
         input_image = media_paths.confined_input_image(req.input_image)
+    native_choice, native_loras = check_request(req.native_models, req.loras, "video")
 
     # The job registry is kernel-level; the precondition here is knowing this
     # server's own address for the VRAM handover, not the GUI being attached.
@@ -126,10 +132,15 @@ async def video(req: VideoRequest, request: Request):
             refused = native.refusal(model_overrides=req.model_overrides,
                                      width=req.width, height=req.height,
                                      seconds=req.seconds, fps=req.fps,
-                                     input_image=input_image, s=s)
+                                     input_image=input_image, s=apply_choice(s, native_choice))
             if refused:
                 job.push({"type": "line", "text": refused})
                 return False
+            s = apply_choice(s, native_choice)
+        elif native_loras:
+            job.push({"type": "line", "text":
+                      "LoRAs chosen this way apply to the native backend only."})
+            return False
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
         job.push({"type": "line", "text": msg})
@@ -181,6 +192,8 @@ async def video(req: VideoRequest, request: Request):
                 kwargs[field] = value
         if req.model_overrides:
             kwargs["model_overrides"] = req.model_overrides
+        if native_loras:
+            kwargs["loras"] = native_loras
         is_privacy = effective_mode("server") == SessionMode.PRIVACY
         # privacy mode forces deletion of ComfyUI's own output copy: no traces
         # left anywhere, regardless of the configured delete_outputs preference.
@@ -422,6 +435,8 @@ def register(host) -> None:
     # to this plugin's capability.
     from localm.media_workflows import make_workflow_router, migrate_legacy_override
     host.mount_router(make_workflow_router("video"))
+    from localm.media.native_models import make_router as make_native_models_router
+    host.mount_router(make_native_models_router("video", "video", _backend))
     # One-time: rescue any legacy personal override left INSIDE the package
     # (localm/video_gen/wan_workflow_local.json) into home/workflows, which
     # survives a self-update (the localm/ dir is whole-tree-replaced). No-op when absent.

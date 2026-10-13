@@ -12,6 +12,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Your own image and video models in the native backend.** The built-in stable-diffusion.cpp
+  backend now runs a diffusion model you pick, not only the ones localm downloads for you: a
+  FLUX.1, Chroma, SD3, SDXL, Qwen-Image, Z-Image or Wan model file is recognised from its
+  contents and gets its text encoders and VAE from your registered models automatically (a CLIP-L
+  fine-tune, a T5 or UMT5 encoder, a matching VAE). A choice you make for a component always wins,
+  and a component that is missing is offered as a download before generating. Steps, CFG and size
+  follow the model family when you leave them blank.
+- **LoRAs in the native backend.** Images and Video take one or more registered LoRAs with a
+  strength each; a LoRA made for another model family is applied with a note saying so.
+- **Model pickers on the Images, Video and Music pages.** With the native backend, each page has
+  a model dropdown plus the components and LoRAs that model uses, remembered per page and applied
+  to the next generation only. In Settings, the native model fields are dropdowns of your
+  registered models, with a custom path still possible.
+- **Register a single image model file.** `localm pull <file>.safetensors` now registers a lone diffusion model, text encoder, VAE or LoRA file, detecting its type,
+  instead of asking for a HuggingFace folder.
 - **Transcription without Whisper.** `POST /v1/audio/transcriptions` now answers with an
   installed GGUF model that hears audio (for example Qwen3-ASR) when faster-whisper is not
   installed, or when `model` names one. Whisper stays the default when it is installed. This
