@@ -435,7 +435,7 @@ def test_a_tested_pin_that_crosses_a_major_boundary_still_waits_for_review(env):
 
 
 def test_a_failing_post_bump_command_stops_before_any_push(env):
-    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "raise SystemExit(3)"),),
+    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "raise SystemExit(1)"),),
                                  auto_merge=lambda o, n: True), dry_run=False)
     assert out.verdict == pw.FAIL and "failed after the bump" in out.detail
     assert "push" not in [c[0] for c in env.calls]
