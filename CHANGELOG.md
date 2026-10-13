@@ -399,6 +399,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **The chat's Markdown renderer moved from marked 12 to marked 18.** Messages render the same; the visible differences are a half-typed list marker (`- `, `1. `) showing as an empty list while a reply streams in, and no stray blank line between consecutive HTML blocks.
 - **localm's managed ComfyUI now installs v0.39.0, up from v0.31.1.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **The bundled llama.cpp runtime moved from b11118 to b11541.** An existing install picks it up with `localm setup-llama --force`.
 - **Linux CUDA setup installs fixed NVIDIA runtime libraries.** `localm setup-llama` on Linux now fetches a pinned, checksum-verified version of the CUDA runtime and cuBLAS libraries instead of whichever version PyPI lists as newest.
@@ -503,6 +504,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Document attachments without the Knowledge plugin.** Attaching a text document, PDF or code file in
+  Chat or the Coder no longer fails with "Method Not Allowed" when the Knowledge plugin is not
+  installed: attachments are now converted to text by the built-in chat plugin
+  (`POST /api/chat/extract`), still entirely in memory. An API key needs the `chat` scope for
+  this, where the old route needed `rag`.
+- **A model split between GPU and system RAM says when its RAM part does not fit.** A load that keeps
+  layers on the CPU (a partial offload, a machine with no GPU, or a draft model placed on the CPU) whose
+  weights in system RAM do not fit available RAM now says in the load output, the GUI load toast and the
+  load response (`mmap_cpu_from_disk`) that its CPU layers read from disk-backed memory and every token is
+  slower. With `use_mmap off`, such a load warns before it starts that it may fail or swap.
+- **One CPU backend, the best match for the CPU, on upstream llama.cpp builds.** With a Vulkan, CUDA or
+  CPU build from llama.cpp's releases, localm registered every CPU variant the processor supports and
+  ran CPU work on the first one by name; it now lets the build pick the single variant it scores best for
+  the processor.
+- **MTP leaves room for its draft cache at the automatic context ceiling.** With MTP or a draft model on
+  the GPU, the automatic context ceiling now counts the draft context's cache, which grows with the
+  context, so a reply that fills the window no longer moves the cache to system RAM and slows down.
 - **gpt-oss replies reach their answer.** A gpt-oss reply stopped at the end of its
   reasoning, so the answer came back empty; it now continues into the answer.
 - **Thinking off on gpt-oss.** Asking a model to answer without reasoning
@@ -538,7 +556,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   part of a prompt its KV cache does not already hold from earlier requests, and that can
   change the reply, even at temperature 0. The coder's Seed tooltip, `localcoder --seed` and
   the docs said the same seed, model, prompt and settings always give the same output; they
-  now say a reply can also depend on what the model answered before.
+  now say a reply can also depend on what the model answered before, or on n-gram
+  speculative drafting when it is on.
 - **"Delete saved data" now also removes the voices folder.** The named reference voices
   for text-to-speech were left behind. A legacy data folder with no record of what was in it
   before LocaLM keeps a voices folder.

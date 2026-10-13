@@ -65,8 +65,8 @@ yourself - and are written in every session mode, privacy included:
   output, so this is not gated on session mode.
 - **Knowledge (RAG) collections.** Indexing a document into a collection
   writes to `<data dir>/rag/`, the same way saving a generated image does.
-  The one RAG operation that stays in memory only is one-off attachment
-  extraction (`/api/rag/extract`), which never touches disk.
+  One-off attachment extraction (`/api/chat/extract`, and `/api/rag/extract`
+  with the Knowledge plugin) stays in memory only and never touches disk.
 - **The prompt library.** A persona you save (a system prompt plus sampling
   defaults) is written to `prompts.json`.
 - **GUI uploads.** A file you upload for a model or tool to read is written

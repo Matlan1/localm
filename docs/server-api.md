@@ -1029,7 +1029,7 @@ design, indexing confinement, and CLI equivalents.
 | `POST /api/rag/collections/{name}/reembed` | Recompute the collection's vectors with the currently-loaded embedding model, from the stored chunk text (no re-read of the source files). Job-backed. |
 | `POST /api/rag/collections/{name}/repair` | Re-index every rebuildable document (mirrors `localm rag repair`). Upload-only documents cannot be rebuilt (the uploaded bytes are never retained) and are reported, not silently dropped. Returns `{"needs_confirm": true, ...}` instead of starting a job when repairing without embeddings would remove existing vectors; re-POST with `confirm: true` to proceed. |
 | `POST /api/rag/collections/{name}/remove-doc` | Remove one indexed document (`{"path": ...}`) from a collection. 404 if it is not indexed there. |
-| `POST /api/rag/extract` | Extract plain text from an uploaded chat attachment, entirely in memory (30 MB cap). Used by the chat attachment flow, not by collection indexing. |
+| `POST /api/rag/extract` | Extract plain text from an uploaded chat attachment, entirely in memory (30 MB cap). Not used by collection indexing. The GUI's Chat and Coder attachments use `POST /api/chat/extract` instead: the same request and answer, served by the built-in chat plugin (`chat` scope), so it works without this plugin. |
 | `GET /api/rag/embedding` | Current embedding-model config and availability (`installed`, `dim`, `can_download`, any load error). Never loads a model. A non-owner caller gets a withheld/generic answer for a model that is not one of localm's known internal ones or a registered model. |
 | `POST /api/rag/embedding/download` | One-time download of the currently-configured embedding model, when the network policy would otherwise not fetch it automatically (`net_mode: ask`). Needs `config:write` - the same scope that governs `net_mode` itself. Writes nothing to config; `net_mode: off` always refuses it. Job-backed. See [network.md](network.md). |
 | `POST /api/rag/embedding` | Select the embedding model (and install it, if it is one of localm's known internal models and not yet on disk). Two-step by `confirm`: without it, this is a dry run - no job starts, and the response is `{"needs_confirm": true, "model", "collections", "note"}` describing what switching would affect. Re-POST with `confirm: true` to actually switch; that starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key. |
@@ -1094,6 +1094,10 @@ for chunk in stream:
   one on the CPU), so the same request can get a different reply depending on
   the requests before it, even at temperature 0 or with a fixed `seed`.
   Greedy output changes where the two most likely tokens are close.
+- **Speculative drafting**: with `spec_source` set to `ngram`, the same request at
+  temperature 0 can get a different reply from one server run to the next, and two
+  identical requests in a row can differ. With `spec_source` `off` that did not
+  happen. The `mtp` and `draft` sources have not been tested for this.
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context window section of
   [architecture.md](architecture.md)). Conversations that outgrow the
