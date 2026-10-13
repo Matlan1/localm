@@ -560,9 +560,10 @@ def test_share_refuses_a_body_with_more_parts_than_the_form_cap(share_client, tm
 
 
 @pytest.mark.parametrize("body", [
-    b"--BOUND" * 5000,
-    b"--BOUND\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nx",
-    b"not multipart at all",
+    pytest.param(b"--BOUND\r\n" * 5000, id="delimiter-flood"),
+    pytest.param(b"--BOUND\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nx",
+                 id="no-closing-boundary"),
+    pytest.param(b"not multipart at all", id="no-delimiter"),
 ])
 def test_share_refuses_a_malformed_body_with_a_400(share_client, tmp_path, body):
     r = _post_body(share_client, body)
