@@ -82,6 +82,29 @@ def test_a_load_reads_the_model_directory_and_builds_the_engine_off_the_loop(mon
     assert loop_thread not in seen["factory"], "the engine was built on the event loop"
 
 
+@pytest.mark.parametrize("install_kwargs", [
+    {"suffix": ".safetensors"},
+    {"registered": ()},
+], ids=["not-a-gguf", "empty-registry"])
+def test_a_load_without_a_split_check_builds_the_engine_off_the_loop(
+        monkeypatch, install_kwargs):
+    b = GatedEngine("model-b")
+    env = _install(monkeypatch, {"model-b": b}, **install_kwargs)
+    seen = {}
+    factory = _record_threads(monkeypatch, env, seen)
+
+    async def _go():
+        loop_thread = threading.get_ident()
+        res = await hs.switch_engine("model-b", factory, preempt=False)
+        return loop_thread, res
+
+    loop_thread, res = asyncio.run(_go())
+
+    assert res["status"] == "loaded"
+    assert env.built == ["model-b"]
+    assert loop_thread not in seen["factory"], "the engine was built on the event loop"
+
+
 def test_a_load_that_needs_the_split_check_builds_once_and_off_the_loop(monkeypatch):
     b = GatedEngine("model-b")
     env = _install(monkeypatch, {"model-b": b})
