@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Add models from Jan.** `localm add` on Jan's data folder (or its `llamacpp/models`
+  folder) registers every downloaded model under its Jan id, with its vision projector
+  attached, and follows a model that Jan only links to a file kept elsewhere. A download
+  still in progress is skipped. A copy or move out of Jan's folder is refused, because every
+  weights file in it is named `model.gguf`.
 - **Models quantized with compressed-tensors load.** A Hugging Face checkpoint whose
   `config.json` declares `quant_method: compressed-tensors` is expanded to full precision
   when it loads, the way FP8 checkpoints are, and the load output says so. The `hf` and `gpu`
@@ -543,6 +548,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **A half-copied GGUF file is no longer registered by a folder import.** `localm add
+  <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
+  whose header declares more tensor data than the file holds, and one named `incomplete-...`
+  (how GPT4All names a download in progress), and says why. A file named `incomplete-...`
+  still registers when it is added by its own path.
+- **A Diffusers pipeline or a CTranslate2 folder is named instead of rejected as "not a
+  model".** Adding one, or finding one in the Hugging Face cache, now says what it is and
+  what to use instead.
 - **Zed lists localm's models even when one model's file is gone.** `/api/tags` and `/api/show` gave
   such a model a `null` `modified_at`, and Zed rejects the whole model list on a `null` there; the
   field is now always a date (1970-01-01 when the file's time cannot be read).
