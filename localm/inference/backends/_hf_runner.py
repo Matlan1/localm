@@ -62,6 +62,7 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
     ("count_tokens", text)
     ("count_messages_tokens", messages)
     ("embed", texts)
+    ("rerank", pairs)
     ("shutdown", None)
 
 ``ctrl_q`` (parent -> child):
@@ -79,7 +80,8 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
                                   "GrammarUnsupportedError",
                                   "InvalidGrammarError",
                                   "ContextCapacityExceededError",
-                                  "ChatTemplateMissingError". "WorkerFault"
+                                  "ChatTemplateMissingError",
+                                  "RerankInputError". "WorkerFault"
                                   carries the text of an exception the child
                                   is dying on. An UNTAGGED error becomes
                                   a RuntimeError, which callers read as "the
@@ -317,6 +319,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
         ContextCapacityExceededError,
         GrammarUnsupportedError,
         InvalidGrammarError,
+        RerankInputError,
         UnsupportedInputError,
     )
 
@@ -382,6 +385,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     "device": worker.resolved_device,
                     "context_capacity": getattr(worker, "context_capacity", None),
                     "load_notes": list(getattr(worker, "load_notes", None) or []),
+                    "rerank_labels": list(getattr(worker, "rerank_labels", None) or []),
                 }))
             except Exception as e:
                 resp_q.put(("error", str(e)))
@@ -466,6 +470,17 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 resp_q.put(("error", str(e)))
             # Same as chat_stream/load: an uncaught native fault here (a
             # torch forward-pass crash) propagates uncaught.
+            continue
+
+        if name == "rerank":
+            try:
+                resp_q.put(("ok", worker.rerank(payload)))
+            except RerankInputError as e:
+                # Raised before the forward pass, so the model is unharmed and
+                # the worker keeps serving.
+                resp_q.put(("error", str(e), "RerankInputError"))
+            except Exception as e:
+                resp_q.put(("error", str(e)))
             continue
 
         # An unrecognized command is a bug in this module's own parent-side
@@ -958,6 +973,9 @@ class HFRunner:
             if kind == "ok":
                 return result[1]
             if kind == "error":
+                if len(result) > 2 and result[2] == "RerankInputError":
+                    from .base import RerankInputError
+                    raise RerankInputError(result[1])
                 raise RuntimeError(result[1])
             raise RuntimeError(f"Unexpected response for '{name}': {result!r}")
         finally:
@@ -976,6 +994,11 @@ class HFRunner:
         # fallback value - a caller that needs it must wait, mirroring
         # IsolatedEmbedder.embed()'s plain blocking _rpc_lock.
         return self._simple_request("embed", texts, timeout=timeout, try_lock=False)
+
+    def rerank(self, pairs: list, timeout: float = EMBED_TIMEOUT_DEFAULT) -> list[dict]:
+        """Score ``(query, document)`` pairs on the worker (see ``HFWorker.rerank``).
+        Blocks behind any other request, like :meth:`embed`."""
+        return self._simple_request("rerank", pairs, timeout=timeout, try_lock=False)
 
     def shutdown(self, grace: float = 5.0) -> None:
         """Best-effort teardown: ask the worker to close cleanly, then kill it

@@ -12,6 +12,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Sentence-transformers folders embed the way their model defines.** A Hugging Face folder
+  with a `modules.json` is registered as an embedding model, and its Pooling (mean, CLS, max,
+  last token and the other modes), Dense and Normalize modules are applied, so a CLS-pooled
+  model such as bge no longer gets mean-pooled vectors. A folder that lists any other module,
+  or keeps its Dense weights in a pickle file, is refused with the module named.
+- **Cross-encoder rerankers in Hugging Face format.** A folder whose model is a
+  `*ForSequenceClassification` with a single output (for example bge-reranker-v2-m3) is
+  registered as a reranker and scores `POST /v1/rerank`, `localm rerank` and Knowledge
+  reranking with the head's raw logit, on the CPU or the GPU like the GGUF rerankers. A
+  checkpoint saved without its classification head is refused, and a classifier with several
+  labels is not offered as a reranker.
 - **Transcription without Whisper.** `POST /v1/audio/transcriptions` now answers with an
   installed GGUF model that hears audio (for example Qwen3-ASR) when faster-whisper is not
   installed, or when `model` names one. Whisper stays the default when it is installed. This
@@ -503,6 +514,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Hugging Face encoder models load.** Loading a plain encoder such as bge or MiniLM
+  failed with `'_DocstringLeakFilter' object has no attribute 'isatty'` whenever transformers
+  printed a weight-loading report. They load now, and a sentence-transformers folder
+  loads as the encoder it is instead of as a language model.
+- **SmolVLM2 image chats no longer log a processor warning.** Each image turn logged
+  "Kwargs passed to `processor.__call__` have to be in `processor_kwargs` dict" twice.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's
