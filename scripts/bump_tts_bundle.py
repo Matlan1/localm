@@ -110,6 +110,7 @@ _SIZE_RES = {
 _ORT_SOURCE_RE = re.compile(
     r"microsoft/onnxruntime repository at (?:commit|tag) `[^`]+`,\n"
     r"which is the (?:exact commit the pinned dev version|release the pinned version) names\.")
+_ORT_REF_RE = re.compile(r"microsoft/onnxruntime repository at (commit|tag) `([^`]+)`")
 _ORT_DEV_RE = re.compile(r"-dev\.\d+-([0-9a-f]{7,40})$")
 _TEST_RES = {
     "version": re.compile(r'^(const VENDORED_TRANSFORMERS = ")([^"]+)(";)', re.M),
@@ -314,8 +315,9 @@ def _tool(name: str) -> str:
 
 
 def _run(cmd: list, cwd: Path, what: str) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
     try:
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+        proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True,
                               timeout=BUILD_TIMEOUT_SECONDS, encoding="utf-8", errors="replace")
     except (OSError, subprocess.TimeoutExpired) as e:
         raise Refused(f"{what} could not run: {type(e).__name__}: {e}") from e
@@ -363,17 +365,25 @@ def append_exports(upstream: bytes) -> bytes:
 
 
 def smoke_check(node: str, bundle_path: Path) -> None:
-    """Import the built bundle in Node and require exactly the expected export names."""
-    script = ("import(process.argv[1]).then(m=>console.log(JSON.stringify(Object.keys(m).sort())))"
+    """Import the built bundle in Node and require exactly the expected export names, with
+    ``espeakFS`` carrying ``createDataFile`` and ``espeakWorker`` being a Promise."""
+    script = ("import(process.argv[1]).then(m=>console.log(JSON.stringify({names:Object.keys(m).sort(),"
+              "fs:typeof (m.espeakFS&&m.espeakFS.createDataFile),"
+              "worker:m.espeakWorker instanceof Promise})))"
               ".catch(e=>{console.error(String(e&&e.stack||e));process.exit(3)})")
     proc = _run([node, "-e", script, bundle_path.as_uri()], bundle_path.parent, "importing the built bundle")
     try:
-        names = set(json.loads(proc.stdout.strip().splitlines()[-1]))
-    except (ValueError, IndexError) as e:
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+        names = set(data["names"])
+    except (ValueError, IndexError, KeyError, TypeError) as e:
         raise Refused(f"importing the built bundle printed no export list: {proc.stdout!r}") from e
     if names != BUNDLE_EXPORTS:
         raise Refused(f"the built bundle exports {sorted(names)}, expected {sorted(BUNDLE_EXPORTS)}; "
                       f"this release {NEEDS_CODE}")
+    if data.get("fs") != "function" or data.get("worker") is not True:
+        raise Refused("the appended exports are not the eSpeak NG handles (espeakFS.createDataFile is "
+                      f"{data.get('fs')}, espeakWorker is a Promise: {data.get('worker')}); "
+                      f"this release {NEEDS_CODE} to the export locator")
 
 
 def build_bundle(pins: Pins, workdir: Path) -> Built:
@@ -391,6 +401,22 @@ def build_bundle(pins: Pins, workdir: Path) -> Built:
     _run([npm, "install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
          workdir, "npm install")
 
+    versions, kokoro = check_install(workdir, pins)
+
+    esbuild_js = workdir / "node_modules" / "esbuild" / "bin" / "esbuild"
+    proc = _run([node, str(esbuild_js), "entry.js", *ESBUILD_ARGS, "--outfile=out.js",
+                 "--log-level=warning"], workdir, "esbuild")
+    bundle = append_exports((workdir / "out.js").read_bytes())
+    final = workdir / "kokoro.min.js"
+    final.write_bytes(bundle)
+    smoke_check(node, final)
+    return collect_artifacts(workdir, bundle, pins, versions, kokoro, proc.stderr.strip())
+
+
+def check_install(workdir: Path, pins: Pins) -> tuple:
+    """(installed versions, kokoro-js package.json) after requiring that each of the four
+    packages is installed at exactly the pinned version and exactly once, so esbuild cannot
+    have bundled a different copy."""
     kokoro = _installed(workdir, "kokoro-js")
     versions = {"kokoro-js": kokoro.get("version"),
                 "transformers": _installed(workdir, "@huggingface/transformers").get("version"),
@@ -402,24 +428,25 @@ def build_bundle(pins: Pins, workdir: Path) -> Built:
     for key, want in wanted.items():
         if versions[key] != want:
             raise Refused(f"npm installed {key} {versions[key]}, not the requested {want}")
-    copies = [p for p in (workdir / "node_modules").rglob("package.json")
-              if p.parent.name == "onnxruntime-web" and p.parent.parent.name == "node_modules"]
-    if len(copies) != 1:
-        raise Refused(f"expected onnxruntime-web installed once, found {len(copies)}")
+    modules = workdir / "node_modules"
+    for package in ("kokoro-js", "@huggingface/transformers", "phonemizer", "onnxruntime-web"):
+        name = package.rsplit("/", 1)[-1]
+        copies = [p for p in modules.rglob("package.json")
+                  if p.parent.name == name and p.parent.parent.name in ("node_modules", "@huggingface")]
+        if len(copies) != 1:
+            raise Refused(f"expected {package} installed once, found {len(copies)}")
+    return versions, kokoro
 
-    esbuild_js = workdir / "node_modules" / "esbuild" / "bin" / "esbuild"
-    proc = _run([node, str(esbuild_js), "entry.js", *ESBUILD_ARGS, "--outfile=out.js",
-                 "--log-level=warning"], workdir, "esbuild")
-    upstream = (workdir / "out.js").read_bytes()
-    bundle = append_exports(upstream)
+
+def collect_artifacts(workdir: Path, bundle: bytes, pins: Pins, versions: dict, kokoro: dict,
+                      warnings: str = "") -> Built:
+    """The files a bump copies out of the installed packages, after requiring that the bundle
+    carries the transformers.js version string and that every runtime file it names exists."""
     if f'"{pins.transformers}"'.encode() not in bundle:
         raise Refused(f"the built bundle does not contain the version string \"{pins.transformers}\"; "
                       "it was not built from the requested transformers.js")
-    final = workdir / "kokoro.min.js"
-    final.write_bytes(bundle)
-    smoke_check(node, final)
-
-    dist = workdir / "node_modules" / "@huggingface" / "transformers" / "dist"
+    nm = workdir / "node_modules"
+    dist = nm / "@huggingface" / "transformers" / "dist"
     names = sorted({m for m in _RUNTIME_NAME_RE.findall(bundle.decode("utf-8", errors="replace"))
                     if m.endswith((".mjs", ".wasm"))})
     if not names:
@@ -439,14 +466,13 @@ def build_bundle(pins: Pins, workdir: Path) -> Built:
             raise Refused(f"{package_dir.name} ships no LICENSE file")
         return path.read_bytes()
 
-    nm = workdir / "node_modules"
     licenses = {"kokoro-js": _license(nm / "kokoro-js"),
                 "transformers": _license(nm / "@huggingface" / "transformers")}
     voices_dir = nm / "kokoro-js" / "voices"
     voices = {p.stem for p in voices_dir.glob("*.bin")} if voices_dir.is_dir() else set()
     peer = (kokoro.get("dependencies") or {}).get("@huggingface/transformers", "")
     return Built(bundle=bundle, runtime=runtime, licenses=licenses, versions=versions,
-                 kokoro_peer_range=peer, voices=voices, warnings=proc.stderr.strip())
+                 kokoro_peer_range=peer, voices=voices, warnings=warnings)
 
 
 # --------------------------------------------------------------------------- #
@@ -457,7 +483,9 @@ def _change(repo: Path, rel: str, new: bytes, *, text: bool, newline: str | None
     """A Change turning the file at *rel* into *new*, or None when it already is *new*."""
     path = repo / rel
     old = path.read_bytes() if path.is_file() else None
-    if old is not None and (_lf(old) == _lf(new) if text else old == new):
+    if text:
+        new = _lf(new)
+    if old is not None and (_lf(old) == new if text else old == new):
         return None
     if newline is None:
         newline = "\r\n" if (old is not None and b"\r\n" in old and text) else "\n"
@@ -552,19 +580,31 @@ def build_plan(repo: Path, old: Pins, new: Pins, built: Built, *, license_fetch=
 
 
 def check_voices(repo: Path, built: Built) -> list:
-    """Voice ids that differ between the kokoro-js package and the shipped voices.json."""
+    """Notes on voice ids the kokoro-js package has that voices.json does not list. Raises
+    Refused when voices.json lists a voice the package no longer ships."""
     try:
         shipped = set(json.loads((repo / VOICES_REL).read_text(encoding="utf-8")))
     except (OSError, ValueError) as e:
-        return [f"{VOICES_REL} could not be read: {e}"]
-    notes = []
-    if built.voices - shipped:
-        notes.append("voices in the kokoro-js package but not in voices.json: "
-                     + ", ".join(sorted(built.voices - shipped)))
+        raise Refused(f"{VOICES_REL} could not be read: {e}") from e
     if shipped - built.voices:
-        notes.append("voices in voices.json but not in the kokoro-js package: "
-                     + ", ".join(sorted(shipped - built.voices)))
-    return notes
+        raise Refused("voices.json lists voices the kokoro-js package does not ship: "
+                      + ", ".join(sorted(shipped - built.voices)) + f"; this release {NEEDS_CODE}")
+    if built.voices - shipped:
+        return ["voices in the kokoro-js package but not in voices.json: "
+                + ", ".join(sorted(built.voices - shipped))]
+    return []
+
+
+def ort_source_problem(notice: str, version: str) -> str | None:
+    """A description of how the licence source NOTICE.md names disagrees with the
+    onnxruntime-web *version*, or None when it agrees."""
+    m = _ORT_REF_RE.search(notice)
+    if not m:
+        return "NOTICE.md names no onnxruntime licence source"
+    kind, ref = m.groups()
+    dev = _ORT_DEV_RE.search(version)
+    agrees = (kind == "commit" and ref.startswith(dev.group(1))) if dev else (kind == "tag" and ref == f"v{version}")
+    return None if agrees else f"NOTICE.md names onnxruntime {kind} {ref} but the pinned version is {version}"
 
 
 def peer_mismatch(built: Built, new: Pins) -> str | None:
@@ -575,7 +615,7 @@ def peer_mismatch(built: Built, new: Pins) -> str | None:
     have = parse_version(new.transformers)
     if int(m.group(1)) != have[0]:
         return (f"kokoro-js {new.kokoro} declares @huggingface/transformers {built.kokoro_peer_range} "
-                f"but the bundle carries {new.transformers}")
+                f"but the bundle carries {new.transformers}; this release {NEEDS_CODE}")
     return None
 
 
@@ -607,7 +647,7 @@ def apply_changes(changes: list) -> None:
             if before is None:
                 path.unlink(missing_ok=True)
             else:
-                path.write_bytes(before)
+                _write_atomic(path, before)
         raise
 
 
@@ -715,25 +755,29 @@ def main(argv=None, *, build_fn=build_bundle, fetch_json_fn=fetch_json,
             extra = _change(repo, LICENSE_RELS["onnxruntime-web"], ort_license, text=True)
             if extra is not None:
                 plan["changes"].append(extra)
+        else:
+            notes = check_voices(repo, built)
+            mismatch = peer_mismatch(built, new)
+            if mismatch:
+                raise Refused(mismatch)
     except Refused as e:
         print(f"REFUSED: {e}")
         return 1
 
     changes = plan["changes"]
     if args.verify:
-        if changes:
-            print(f"NOT IDENTICAL: rebuilding the pinned versions differs from the tree in {len(changes)} file(s):")
+        source_problem = ort_source_problem(_read_text(repo / NOTICE_REL)[0], old.ort)
+        if changes or source_problem:
+            print("NOT IDENTICAL: rebuilding the pinned versions differs from the tree:")
             for change in changes:
                 print(describe(change))
+            if source_problem:
+                print(f"  {source_problem}")
             return 1
         print("IDENTICAL: rebuilding the pinned versions reproduces every vendored file byte for byte")
         return 0
 
     olds = {old.kokoro, old.transformers, old.ort} - {new.kokoro, new.transformers, new.ort}
-    notes = check_voices(repo, built)
-    mismatch = peer_mismatch(built, new)
-    if mismatch:
-        notes.append(mismatch)
     notice_now, _ = _read_text(repo / NOTICE_REL)
     new_notice = next((c.new.decode("utf-8") for c in changes if c.rel == NOTICE_REL), notice_now)
     mentions = find_mentions(new_notice.replace("\r\n", "\n"), olds)
