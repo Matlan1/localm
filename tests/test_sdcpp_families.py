@@ -668,3 +668,47 @@ def test_native_models_route_lists_and_previews_without_paths(media_app, flux_se
     assert prev["components"]["vae"] == {"name": "ae", "auto": True}
     shown = json.dumps(data).replace("\\\\", "/")
     assert str(flux_set["ae"].parent).replace("\\", "/") not in shown
+
+
+def test_native_models_route_lists_fitting_components_first_and_the_family_defaults(
+        media_app, flux_set):
+    from fastapi.testclient import TestClient
+    with TestClient(media_app) as c:
+        data = c.get("/api/imagine/native-models", params={"model": "fluxunchained"}).json()
+    vae = data["slots"]["vae"]
+    assert vae[0]["name"] == "ae" and vae[0]["fits"] is True
+    assert {o["name"] for o in vae if o["fits"] is False} == {"sd-vae", "wan_2.1_vae"}
+    assert all(o["fits"] is False for o in vae[1:])
+    assert data["preview"]["defaults"] == {"steps": 20, "cfg_scale": 1.0, "width": 1024,
+                                           "height": 1024}
+
+
+def test_the_steps_placeholder_follows_settings_then_the_curated_model_then_the_family(
+        media_app, flux_set):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    from localm.media.sdcpp import pairing
+    rec = {"fluxunchained-dev-q8-0-v2.gguf": {"steps": 2, "cfg_scale": 1.0, "width": 512,
+                                              "height": 512}}
+    assert pairing.preview("image", "fluxunchained")["defaults"]["steps"] == 20
+    assert pairing.preview("image", "fluxunchained", None, None, rec)["defaults"]["steps"] == 2
+    update_config(lambda cfg: cfg["plugins"]["image"]["native"].update(
+        {"steps": 9, "cfg_scale": 2.5}))
+    with TestClient(media_app) as c:
+        other = c.get("/api/imagine/native-models", params={"model": "fluxunchained"}).json()
+        own = c.get("/api/imagine/native-models").json()
+    for data in (other, own):
+        assert data["preview"]["defaults"]["steps"] == 9
+        assert data["preview"]["defaults"]["cfg_scale"] == 2.5
+
+
+def test_native_models_route_without_a_model_marks_nothing(media_app, flux_set):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    update_config(lambda cfg: cfg["plugins"]["image"].update({"native": {}}))
+    with TestClient(media_app) as c:
+        data = c.get("/api/imagine/native-models").json()
+    assert data["preview"] is None
+    assert all("fits" not in o for o in data["slots"]["vae"])

@@ -543,6 +543,53 @@ def test_the_pin_report_names_the_advancer_of_each_bundle_row():
 
 
 # --------------------------------------------------------------------------- #
+#  The voices pin                                                             #
+# --------------------------------------------------------------------------- #
+
+_VOICES = ("let d=`https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/${o}.bin`,m;"
+           'try{m=await caches.open("kokoro-voices");let w=await m.match(d);if(w)return await w.arrayBuffer()}'
+           'catch(w){console.warn("Unable to open cache",w)}let C=await fetch(d),b=await C.arrayBuffer();'
+           "if(m)try{await m.put(d,new Response(b,{headers:C.headers}))}catch(w){}\n")
+_REV = "1" * 40
+
+
+def test_the_voices_fetch_is_pinned_and_the_cache_key_is_left_alone(bump):
+    out = bump.pin_voices_fetch(_VOICES.encode(), _REV).decode()
+    assert f'let C=await fetch(d.replace("/resolve/main/","/resolve/{_REV}/")),b=' in out
+    assert "m.match(d)" in out and "m.put(d," in out
+
+
+def test_the_voices_pin_follows_the_names_the_minifier_chose(bump):
+    renamed = _VOICES.replace("d", "z").replace("C", "Q").replace("zeclare", "declare")
+    assert bump.pin_voices_fetch(renamed.encode(), _REV).decode().count(f"/resolve/{_REV}/") == 1
+
+
+@pytest.mark.parametrize("upstream", [_VOICES.replace("await fetch(d)", "await fetch(x)"),
+                                      _VOICES + _VOICES, "no voices here\n"])
+def test_a_bundle_without_exactly_one_voices_fetch_is_refused(bump, upstream):
+    with pytest.raises(bump.Refused, match="exactly one voices fetch"):
+        bump.pin_voices_fetch(upstream.encode(), _REV)
+
+
+def test_the_shipped_bundle_is_the_unpinned_one_with_the_voices_pin_applied(bump):
+    shipped = (_ROOT / bump.BUNDLE_REL).read_bytes()
+    revision = bump.pinned_kokoro_revision()
+    pinned_call = f'fetch(d.replace("/resolve/main/","/resolve/{revision}/"))'.encode()
+    assert shipped.count(pinned_call) == 1
+    assert bump.pin_voices_fetch(shipped.replace(pinned_call, b"fetch(d)"), revision) == shipped
+
+
+def test_the_pinned_revision_is_read_from_tts_util(bump, tmp_path):
+    assert bump.pinned_kokoro_revision() == bump.pinned_kokoro_revision(_ROOT)
+    (tmp_path / "localm/plugins/builtin/tts/static").mkdir(parents=True)
+    with pytest.raises(bump.Refused, match="cannot read"):
+        bump.pinned_kokoro_revision(tmp_path)
+    (tmp_path / bump.TTS_UTIL_REL).write_text("no pin\n", encoding="utf-8")
+    with pytest.raises(bump.Refused, match="exactly one KOKORO_PINNED_REVISION"):
+        bump.pinned_kokoro_revision(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
 #  The real thing (npm, network)                                              #
 # --------------------------------------------------------------------------- #
 

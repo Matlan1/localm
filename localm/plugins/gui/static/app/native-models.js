@@ -7,8 +7,9 @@
 
 "use strict";
 
-import { authHeaders, el } from "./helpers.js";
+import { authHeaders, el, toast } from "./helpers.js";
 import { t } from "./i18n.js";
+import { modelCache, refreshModels } from "./models-sidebar.js";
 
 const NM_SLOT_KEYS = {
   clip_l: "nativeModels.slot.clipL",
@@ -38,6 +39,10 @@ function nmSave(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
 }
 
+function nmStem(value) {
+  return String(value || "").trim().toLowerCase().replace(/\.(safetensors|gguf|ckpt|sft|pt)$/, "");
+}
+
 function nmOption(value, text) {
   const o = document.createElement("option");
   o.value = value;
@@ -51,8 +56,9 @@ function nmOption(value, text) {
 export function nativeModelSelect(items, current, firstText) {
   const sel = document.createElement("select");
   sel.appendChild(nmOption("", firstText));
+  const others = items.filter((it) => it.fits === false);
   const groups = new Map();
-  for (const it of items) {
+  for (const it of items.filter((x) => x.fits !== false)) {
     const g = it.family_label || "";
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push(it);
@@ -64,6 +70,10 @@ export function nativeModelSelect(items, current, firstText) {
       parent.appendChild(nmOption(it.name, it.file && it.file !== it.name
         ? `${it.name} (${it.file})` : it.name));
     }
+  }
+  for (const it of others) {
+    const text = it.file && it.file !== it.name ? `${it.name} (${it.file})` : it.name;
+    sel.appendChild(nmOption(it.name, t("nativeModels.otherFamily", { name: text })));
   }
   if (current && ![...sel.options].some((o) => o.value === current)) {
     sel.appendChild(nmOption(current, t("nativeModels.notRegistered", { name: current })));
@@ -81,7 +91,7 @@ function nmField(labelText, control) {
 
 /** The image/video picker mounted in #mountId. `choice()` returns
  * `{native_models, loras}` for the request body (empty values left out). */
-export function createNativeModelPicker({ media, prefix, mountId }) {
+export function createNativeModelPicker({ media, prefix, mountId, onData }) {
   const storeKey = `localm.nativeModels.${media}`;
   let state = nmLoad(storeKey, { models: {}, loras: [] });
   if (!state.models || typeof state.models !== "object") state.models = {};
@@ -115,6 +125,7 @@ export function createNativeModelPicker({ media, prefix, mountId }) {
     data = await r.json();
     if (mine !== seq) return;
     render(mount);
+    if (onData) onData(data);
   }
 
   function render(mount) {
@@ -246,7 +257,26 @@ export function createNativeModelPicker({ media, prefix, mountId }) {
     return refresh();
   }
 
-  return { refresh, choice, setLoras, setModels, get state() { return state; } };
+  // The registered model or LoRA whose name or file stem equals *wanted* (an
+  // imported image names its model by file or display name), or "".
+  async function matchOption(kind, wanted) {
+    if (!data) await refresh();
+    const list = (data && (kind === "lora" ? data.loras : data.models)) || [];
+    const w = nmStem(wanted);
+    if (!w) return "";
+    const hit = list.find((x) => nmStem(x.name) === w || nmStem(x.file) === w);
+    return hit ? hit.name : "";
+  }
+
+  return {
+    refresh, choice, setLoras, setModels,
+    matchModel: (name) => matchOption("model", name),
+    matchLora: (name) => matchOption("lora", name),
+    // The family of the model a job would load (from the preview), or "".
+    family: () => (data && data.preview && data.preview.family) || "",
+    familyLabel: () => (data && data.preview && data.preview.family_label) || "",
+    get state() { return state; },
+  };
 }
 
 /** The music picker: one select per ACE-Step component. */
@@ -278,6 +308,16 @@ export function createMusicModelPicker({ mountId }) {
       };
       box.appendChild(nmField(t(NM_MUSIC_KEYS[key]), sel));
     }
+    const unsupported = data.unsupported || [];
+    if (unsupported.length) {
+      const list = el("div", "sub native-models-unsupported");
+      list.appendChild(el("div", null, t("nativeModels.music.unsupported")));
+      for (const u of unsupported) {
+        const file = u.file && u.file !== u.name ? ` (${u.file})` : "";
+        list.appendChild(el("div", null, `${u.name}${file}: ${u.reason}`));
+      }
+      box.appendChild(list);
+    }
     mount.replaceChildren(box);
   }
 
@@ -288,4 +328,137 @@ export function createMusicModelPicker({ mountId }) {
   }
 
   return { refresh, choice };
+}
+
+/* ================================================================ */
+/*  Enhance prompt                                                   */
+/* ================================================================ */
+
+// Image families whose text encoders read tag lists; every other image family
+// reads natural language.
+const PE_TAG_FAMILIES = new Set(["sd1", "sd2", "sdxl"]);
+const PE_REPLY_RULES = "Reply with the rewritten prompt only: no preface, no explanation, no quotation marks, " +
+  "no markdown. Keep every subject, detail and constraint the user gave; add only what the style needs.";
+
+/** The system prompt that rewrites a short idea for *media* ("image", "video"
+ *  or "music") and the model *family* ("" when unknown). */
+export function enhanceSystemPrompt(media, family, label) {
+  const name = label || family || "";
+  if (media === "music") {
+    return "You write style tags for an AI music generator (ACE-Step). Turn the user's idea into one line of " +
+      "comma-separated tags: genre and sub-genre, mood, instruments, tempo as a bpm number, vocal type " +
+      "(or instrumental), era and production style. At most 15 tags, no lyrics. " + PE_REPLY_RULES;
+  }
+  if (media === "video") {
+    const target = name ? ` for the text-to-video model ${name}` : " for a text-to-video model";
+    return `You rewrite short video ideas into a prompt${target}. Write one to three sentences in the present ` +
+      "tense that state the subject, the motion (use concrete motion verbs), the camera movement, the lighting " +
+      "and the setting. " + PE_REPLY_RULES;
+  }
+  if (PE_TAG_FAMILIES.has(family)) {
+    return `You rewrite short image ideas into prompts for ${name || "Stable Diffusion"}, which reads tag-style ` +
+      "prompts. Write one line of comma-separated phrases: subject, medium or style, composition, lighting, " +
+      "colour palette, then quality terms. Do not write full sentences. " + PE_REPLY_RULES;
+  }
+  const target = name ? ` for ${name}` : " for a text-to-image model";
+  return `You rewrite short image ideas into prompts${target}, which understands natural language. Write one or ` +
+    "two descriptive sentences covering the subject, setting, composition, lighting, colour and style. " +
+    "Do not use tag lists or quality keywords. " + PE_REPLY_RULES;
+}
+
+/** The enhanced prompt text from a chat reply: reasoning blocks and wrapping
+ *  quotes or code fences removed. */
+export function cleanEnhancedPrompt(raw) {
+  let text = String(raw || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  const fence = text.match(/^```[a-z]*\n([\s\S]*?)\n?```$/i);
+  if (fence) text = fence[1].trim();
+  for (const [open, close] of [['"', '"'], ["'", "'"], ["“", "”"]]) {
+    if (text.length > 1 && text.startsWith(open) && text.endsWith(close)) {
+      text = text.slice(1, -1).trim();
+      break;
+    }
+  }
+  return text;
+}
+
+/** Asks the loaded chat model to rewrite *prompt*. Throws an Error whose
+ *  message is for the user when no chat model is loaded, the request fails or
+ *  the reply is empty. */
+export async function requestEnhancedPrompt({ media, prompt, family = "", familyLabel = "" }) {
+  await refreshModels();
+  const model = modelCache.active;
+  if (!model) throw new Error(t("enhance.noModel"));
+  const r = await fetch("/v1/chat/completions", {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      model,
+      pin_model: true,
+      messages: [
+        { role: "system", content: enhanceSystemPrompt(media, family, familyLabel) },
+        { role: "user", origin: "client", content: prompt },
+      ],
+      max_tokens: 512,
+      temperature: 0.7,
+      stream: false,
+    }),
+  });
+  let data = null;
+  try { data = await r.json(); } catch { /* reported below by status */ }
+  if (!r.ok) {
+    const detail = data && data.detail
+      ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : r.statusText;
+    throw new Error(detail || String(r.status));
+  }
+  const choice = data && data.choices && data.choices[0];
+  const text = cleanEnhancedPrompt(choice && choice.message && choice.message.content);
+  if (!text) throw new Error(t("enhance.empty", { model }));
+  return text;
+}
+
+/** Adds an "Enhance prompt" button under the textarea *fieldId*. *familyOf*
+ *  returns `{family, label}` for the model that will generate. The result
+ *  replaces the field's text (still editable) and Undo puts the original back.
+ *  Returns the row the buttons sit in, or null when the field is missing. */
+export function mountEnhanceButton({ media, fieldId, familyOf }) {
+  const field = document.getElementById(fieldId);
+  if (!field) return null;
+  const row = el("div", "enhance-row");
+  const button = el("button", "btn-secondary btn-sm", t("enhance.button"));
+  button.type = "button";
+  button.title = t("enhance.title");
+  const undo = el("button", "btn-secondary btn-sm", t("enhance.undo"));
+  undo.type = "button";
+  undo.hidden = true;
+  row.append(button, undo);
+  field.insertAdjacentElement("afterend", row);
+
+  let original = "";
+  button.onclick = async () => {
+    const prompt = field.value.trim();
+    if (!prompt) { toast(t("enhance.enterPrompt"), true); return; }
+    button.disabled = true;
+    button.textContent = t("enhance.working");
+    try {
+      const fam = (familyOf && familyOf()) || {};
+      const text = await requestEnhancedPrompt({
+        media, prompt, family: fam.family || "", familyLabel: fam.label || "" });
+      original = field.value;
+      field.value = text;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      undo.hidden = false;
+      toast(t("enhance.done"));
+    } catch (e) {
+      toast(t("enhance.failed", { message: e.message }), true);
+    } finally {
+      button.disabled = false;
+      button.textContent = t("enhance.button");
+    }
+  };
+  undo.onclick = () => {
+    field.value = original;
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    undo.hidden = true;
+  };
+  return row;
 }

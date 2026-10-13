@@ -525,6 +525,8 @@
               <div><label data-i18n="images.guidanceLabel">Guidance</label><input type="number" id="img-guidance" step="0.1" placeholder="default (~3.5)" data-i18n-placeholder="images.guidancePlaceholder"></div>
               <div><label data-i18n="images.denoiseLabel">Denoise (img2img)</label><input type="number" id="img-denoise" step="0.05" min="0" max="1" placeholder="default" data-i18n-placeholder="mediaGallery.defaultPlaceholder"></div>
               <div><label data-i18n="mediaGallery.cfgLabel">CFG</label><input type="number" id="img-cfg" step="0.5" placeholder="default 3.5, only with negative prompt" data-i18n-placeholder="images.cfgPlaceholder"></div>
+              <div class="img-native-only" hidden><label data-i18n="mediaGallery.stepsLabel">Steps</label><input type="number" id="img-steps" min="1" max="200" step="1" placeholder="model default" data-i18n-placeholder="images.stepsPlaceholder"></div>
+              <div class="img-native-only" hidden><label data-i18n="images.clipSkipLabel">Clip skip</label><input type="number" id="img-clip-skip" min="1" max="12" step="1" placeholder="model default (automatic)" data-i18n-placeholder="images.clipSkipPlaceholder"></div>
               <div class="img-comfy-only"><label data-i18n="images.loraStrengthModelLabel">LoRA strength (model)</label><input type="number" id="img-lora-strength-model" step="0.05" placeholder="default (1.0)" data-i18n-placeholder="images.loraStrengthModelPlaceholder"></div>
               <div class="img-comfy-only"><label data-i18n="images.loraStrengthClipLabel">LoRA strength (CLIP)</label><input type="number" id="img-lora-strength-clip" step="0.05" placeholder="default (0.5)" data-i18n-placeholder="images.loraStrengthClipPlaceholder"></div>
             </div>
@@ -537,6 +539,7 @@
             </label>
           </div>
           <pre id="img-log" class="job-log" style="display:none"></pre>
+          <div id="img-preview" class="job-preview" hidden></div>
           <div id="img-result"></div>
         </div>
         <div class="card">
@@ -657,6 +660,7 @@
             </label>
           </div>
           <pre id="video-log" class="job-log" style="display:none"></pre>
+          <div id="video-preview" class="job-preview" hidden></div>
           <div id="video-result"></div>
         </div>
         <div class="card">

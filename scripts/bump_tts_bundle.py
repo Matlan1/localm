@@ -15,7 +15,8 @@ phonemizer at exact versions (scripts disabled, transformers forced onto the
 pinned version for kokoro-js too) with esbuild at the version NOTICE.md records.
 esbuild bundles ENTRY with ESBUILD_ARGS, and one line is appended that exports
 the two internal eSpeak NG handles, located by content because the minifier
-renames them in every build. onnxruntime-web is whatever transformers.js pins.
+renames them in every build. The voice download is changed to request the commit
+tts-util.js pins (KOKORO_PINNED_REVISION), located by content the same way. onnxruntime-web is whatever transformers.js pins.
 The build is deterministic: the same four packages and esbuild version give the
 same bytes, which ``--verify`` proves against the tree.
 
@@ -364,6 +365,37 @@ def append_exports(upstream: bytes) -> bytes:
     return (text + f"\nexport{{{worker} as espeakWorker,{fs_name} as espeakFS}};\n").encode("utf-8")
 
 
+_VOICES_FETCH_RE = re.compile(
+    r"(let (?P<url>\w+)=`https://huggingface\.co/[^`]*?/resolve/main/voices/[^`]*`.{0,600}?\bawait fetch\()"
+    r"(?P=url)(\))", re.S)
+_PIN_RE = re.compile(r'^export const KOKORO_PINNED_REVISION = "([0-9a-f]{40})"', re.M)
+TTS_UTIL_REL = "localm/plugins/builtin/tts/static/tts-util.js"
+
+
+def pinned_kokoro_revision(root: Path = REPO) -> str:
+    """The commit of the Kokoro model repository the voices are fetched at (tts-util.js)."""
+    try:
+        found = _PIN_RE.findall((root / TTS_UTIL_REL).read_text(encoding="utf-8"))
+    except OSError as e:
+        raise Refused(f"cannot read {TTS_UTIL_REL}: {e}") from e
+    if len(found) != 1:
+        raise Refused(f"expected exactly one KOKORO_PINNED_REVISION in {TTS_UTIL_REL}, found {len(found)}")
+    return found[0]
+
+
+def pin_voices_fetch(upstream: bytes, revision: str) -> bytes:
+    """The bundle with its voice download requested at *revision* instead of the model
+    repository's default branch. The voices stay cached under the URL they always were."""
+    text = upstream.decode("utf-8")
+    found = list(_VOICES_FETCH_RE.finditer(text))
+    if len(found) != 1:
+        raise Refused(f"expected exactly one voices fetch in the bundle, found {len(found)}; this "
+                      f"release {NEEDS_CODE} to the voices pin")
+    m = found[0]
+    request = f'{m.group("url")}.replace("/resolve/main/","/resolve/{revision}/")'
+    return (text[:m.start()] + m.group(1) + request + m.group(3) + text[m.end():]).encode("utf-8")
+
+
 def smoke_check(node: str, bundle_path: Path) -> None:
     """Import the built bundle in Node and require exactly the expected export names, with
     ``espeakFS`` carrying ``createDataFile`` and ``espeakWorker`` being a Promise."""
@@ -406,7 +438,8 @@ def build_bundle(pins: Pins, workdir: Path) -> Built:
     esbuild_js = workdir / "node_modules" / "esbuild" / "bin" / "esbuild"
     proc = _run([node, str(esbuild_js), "entry.js", *ESBUILD_ARGS, "--outfile=out.js",
                  "--log-level=warning"], workdir, "esbuild")
-    bundle = append_exports((workdir / "out.js").read_bytes())
+    bundle = pin_voices_fetch(append_exports((workdir / "out.js").read_bytes()),
+                              pinned_kokoro_revision())
     final = workdir / "kokoro.min.js"
     final.write_bytes(bundle)
     smoke_check(node, final)

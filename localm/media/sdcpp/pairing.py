@@ -435,14 +435,31 @@ def is_media_model(c: Candidate, media: str) -> bool:
     return False
 
 
+def _slot_options(slot: str, cands: list, family: Optional[str],
+                  variant: Optional[str]) -> list[dict]:
+    """The options for component *slot*: every candidate of a fitting kind.
+    For a known *family* each carries ``fits`` and those that fit the family
+    come first, best first (``fitting``); the others keep registry order."""
+    kinds = [c for c in cands if c.info.kind in _SLOT_KINDS[slot]]
+    if not families.known_family(family):
+        return [_option(c) for c in kinds]
+    fit = fitting(slot, family, kinds, variant)
+    fit_names = {c.name for c in fit}
+    return ([dict(_option(c), fits=True) for c in fit]
+            + [dict(_option(c), fits=False) for c in kinds if c.name not in fit_names])
+
+
 def native_options(media: str, cands: Optional[list] = None,
-                   reg: Optional[dict] = None) -> dict:
+                   reg: Optional[dict] = None, *, family: Optional[str] = None,
+                   variant: Optional[str] = None) -> dict:
     """What a *media* (``"image"``/``"video"``) model picker offers:
     ``{"models", "slots", "loras"}``. ``models`` are the registered files that
     can be the main model; ``slots`` maps each component slot of that media to
-    the registered files of a fitting kind (any family); ``loras`` the
-    registered LoRAs. Each entry is ``{"name", "file", "kind", "family",
-    "family_label"}``."""
+    the registered files of a fitting kind; ``loras`` the registered LoRAs.
+    Each entry is ``{"name", "file", "kind", "family", "family_label"}``.
+    With the *family* (and wan2.2 *variant*) of the chosen model, each slot
+    entry also carries ``fits`` and the entries that fit come first
+    (``_slot_options``)."""
     if cands is None:
         cands = registry_candidates(reg)
     models = [_option(c) for c in cands if is_media_model(c, media)]
@@ -455,33 +472,43 @@ def native_options(media: str, cands: Optional[list] = None,
             raw = str(entry.get("path") or "")
             models.append({"name": name, "file": raw.replace("\\", "/").rsplit("/", 1)[-1],
                            "kind": "unknown", "family": None, "family_label": None})
-    slots = {slot: [_option(c) for c in cands if c.info.kind in _SLOT_KINDS[slot]]
+    slots = {slot: _slot_options(slot, cands, family, variant)
              for slot in MEDIA_SLOTS[media]}
     loras = [_option(c) for c in cands if c.info.kind == "lora"]
     return {"models": models, "slots": slots, "loras": loras}
 
 
 def preview(media: str, model_name: str, explicit: Optional[dict] = None,
-            cands: Optional[list] = None) -> dict:
+            cands: Optional[list] = None, recommended: Optional[dict] = None) -> dict:
     """What a job would load for registered model *model_name* with the
     *explicit* ``{slot: registered name}`` choices, without loading anything:
-    ``{"model", "family", "family_label", "kind", "needs", "components",
-    "missing", "notes", "error"}``. ``needs`` lists the slots the family
-    needs; ``error`` is a user-facing reason it cannot run, or None."""
+    ``{"model", "family", "family_label", "variant", "kind", "needs",
+    "components", "missing", "notes", "defaults", "error"}``. ``needs`` lists
+    the slots the family needs; ``defaults`` is ``{"steps", "cfg_scale",
+    "width", "height"}`` the family works with, or None; ``error`` is a
+    user-facing reason it cannot run, or None. *recommended* maps a curated
+    model's file name to its own ``defaults``, which replace the family's."""
     from .files import display_name, resolve_model_file
     cands = registry_candidates() if cands is None else cands
-    out = {"model": display_name(model_name), "family": None, "family_label": None, "kind": None,
-           "needs": [], "components": {}, "missing": [], "notes": [], "error": None}
+    out = {"model": display_name(model_name), "family": None, "family_label": None,
+           "variant": None, "kind": None, "needs": [], "components": {}, "missing": [],
+           "notes": [], "defaults": None, "error": None}
     try:
         main = resolve_model_file(model_name, f"{media} model")
         info = families.inspect_file(main)
-        out.update(kind=info.kind, family=info.family,
+        dflt = families.defaults_for(info)
+        out.update(kind=info.kind, family=info.family, variant=info.detail.get("variant"),
                    family_label=families.FAMILY_LABELS.get(info.family or "", info.family),
-                   needs=[r.slot for r in families.requirements(info)])
+                   needs=[r.slot for r in families.requirements(info)],
+                   defaults=None if dflt is None else {
+                       "steps": dflt.steps, "cfg_scale": dflt.cfg_scale,
+                       "width": dflt.width, "height": dflt.height})
         chosen = {}
         for slot, name in (explicit or {}).items():
             if name:
                 chosen[slot] = (display_name(name), resolve_model_file(name, f"{media} {slot}"))
+        if recommended and main.name in recommended:
+            out["defaults"] = dict(recommended[main.name])
         built = build_context(main, display_name(model_name), chosen, where=f"the {media} page",
                               media=media, cands=cands)
         out.update(components=built["components"], notes=built["notes"])

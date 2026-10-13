@@ -24,6 +24,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   checkpoint saved without its classification head is refused, and a classifier with several
   labels is not offered as a reranker.
 - **Import models from StabilityMatrix, and type them by content.** Import from ComfyUI also takes a StabilityMatrix install, data or models folder. Every model file found is filed as a diffusion model, text encoder, VAE or LoRA by what is inside it, not only by the folder it sits in, and ComfyUI's `diffusion_models` and `clip_vision` folders and StabilityMatrix's `StableDiffusion`, `DiffusionModels`, `TextEncoders`, `ClipVision`, `Lora` and `VAE` folders are recognised in any letter case.
+- **Live preview while a native image or video renders.** The Images and Video pages show a
+  small picture of the image taking shape under the job log, refreshed every few sampling
+  steps, so a slow render no longer runs blind and a bad composition can be stopped early.
+  The preview is held in memory only and never saved, including in privacy mode.
+- **Steps and clip skip on the Images page.** The Advanced fold takes both for the next native
+  image, with the model family's step count as the placeholder. ComfyUI jobs that send either
+  are refused with a reason, because ComfyUI takes them from its workflow.
+- **A negative prompt at CFG 1 says it has no effect.** FLUX and other models that default to
+  CFG 1 skip the negative-prompt pass entirely, so a negative prompt used to change nothing with no
+  message. The job log now says so and suggests raising CFG.
+- **Component pickers list what fits first.** Choosing a model on the Images or Video page
+  lists the text encoders and VAEs that fit its family first; files of another family are still
+  offered, marked "(other family)".
 - **Add models from Jan.** `localm add` on Jan's data folder (or its `llamacpp/models`
   folder) registers every downloaded model under its Jan id, with its vision projector
   attached, and follows a model that Jan only links to a file kept elsewhere. A download
@@ -47,6 +60,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a model dropdown plus the components and LoRAs that model uses, remembered per page and applied
   to the next generation only. In Settings, the native model fields are dropdowns of your
   registered models, with a custom path still possible.
+- **Parameters travel with a native image, and come back from any image.** A new Settings >
+  Images switch, **Embed generation parameters in the PNG** (off by default, never in privacy
+  mode), writes the prompt, seed and settings into each native image. **Import parameters from
+  image** on the Images page fills the prompt, seed, size, model and LoRAs from a localm image or
+  sidecar, an A1111/Forge image or a ComfyUI image, and names anything it could not apply.
+- **Enhance prompt.** The Images, Video and Music pages have a button that asks the loaded chat
+  model to expand your prompt for the model that will generate it (tags for Stable Diffusion 1.x,
+  2.x and SDXL, sentences for the newer image models, motion and camera wording for video, style
+  tags for music). The result stays editable and can be undone; with no chat model loaded the
+  button says so.
+- **Music checkpoints the native backend cannot run are listed.** An ACE-Step v1 file such as
+  `ace_step_v1_3.5b.safetensors` now shows in the Music page's model picker with the reason
+  (ComfyUI only) instead of being invisible.
 - **Register a single image model file.** `localm pull <file>.safetensors` now registers a lone diffusion model, text encoder, VAE or LoRA file, detecting its type,
   instead of asking for a HuggingFace folder.
 - **A reply that depends only on the request.** `cache_prompt: false` on
@@ -583,6 +609,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   loads as the encoder it is instead of as a language model.
 - **SmolVLM2 image chats no longer log a processor warning.** Each image turn logged
   "Kwargs passed to `processor.__call__` have to be in `processor_kwargs` dict" twice.
+- **Recovered runtime warnings no longer look like failures.** When a native image decode does
+  not fit in VRAM and is retried in tiles, the job log shows one plain line instead of the
+  runtime's memory and decode errors from before the retry. Warnings that are not followed by a
+  recovery are shown as before.
 - **A half-copied GGUF file is no longer registered by a folder import.** `localm add
   <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
   whose header declares more tensor data than the file holds, and one named `incomplete-...`
@@ -2071,6 +2101,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   of whatever its version name points at when you load. A transformers release that asks for a
   different kernel version loads no native kernel, so the FP8 weights are expanded to bf16 and
   the load says why.
+- **The Kokoro voice model is fetched at a fixed version.** The browser now downloads the
+  default Kokoro model and its voices from a pinned commit of their Hugging Face repository,
+  not from whatever the repository's default branch holds that day. A model already downloaded
+  and cached in the browser is still found. The weekly pin report flags the repository moving
+  past the pinned commit.
 - **Downloads from Hugging Face are checked more completely.** Every part of a split GGUF is
   checked against the digest the hub publishes, not only the first; a vision projector is
   checked and deleted when it does not match; a file already on disk is checked before it is

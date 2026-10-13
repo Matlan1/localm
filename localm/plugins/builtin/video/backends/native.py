@@ -21,6 +21,7 @@ from typing import Callable, Optional
 from localm.media.sdcpp import families, pairing
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
+from localm.media.sdcpp.logrelay import RecoveredWarnings
 from localm.media.sdcpp.files import ModelFileError as _ModelError
 from localm.media.sdcpp.files import display_name, registered_file, resolve_model_file
 from localm.media.sdcpp.runner import SdCancelled, SdWorkerError
@@ -403,23 +404,43 @@ def _load_init_image(path: Path, width: int, height: int) -> dict:
         return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
 
 
-def _event_relay(say):
-    state: dict = {"phase": None}
+class _EventRelay:
+    """The worker-event handler for one job: status lines to *say*, preview
+    frames to *on_preview*. ``flush`` shows any held warning lines and must be
+    called when the job ends."""
 
-    def on_event(event) -> None:
-        if event[0] == "log":
-            say(f"stable-diffusion.cpp: {event[2]}")
+    def __init__(self, say, on_preview=None):
+        self._say = say
+        self._on_preview = on_preview
+        self._phase = None
+        self._warnings = RecoveredWarnings(say)
+
+    def flush(self) -> None:
+        self._warnings.flush()
+
+    def __call__(self, event) -> None:
+        kind = event[0]
+        if kind == "log":
+            self._warnings.line(event[2])
+            return
+        if kind == "preview":
+            if self._on_preview is not None:
+                self._on_preview(event[1])
             return
         info = event[1]
         phase, step, steps = info.get("phase"), info.get("step", 0), info.get("steps", 0)
         if phase == "sampling":
+            self._warnings.sampling()
             secs = info.get("secs") or 0.0
             rate = f" ({secs:.1f} s/step)" if secs else ""
-            say(f"Step {step}/{steps}{rate}")
-        elif phase != state["phase"]:
-            say("Decoding frames..." if phase == "decoding" else "Loading weights...")
-        state["phase"] = phase
-    return on_event
+            self._say(f"Step {step}/{steps}{rate}")
+        elif phase != self._phase:
+            self._say("Decoding frames..." if phase == "decoding" else "Loading weights...")
+        self._phase = phase
+
+
+def _event_relay(say, on_preview=None) -> _EventRelay:
+    return _EventRelay(say, on_preview)
 
 
 def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:
@@ -453,6 +474,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
               placement: Optional[dict] = None,
               on_progress=None,
               loras: Optional[list] = None,
+              on_preview=None,
               **unsupported) -> tuple[bool, str]:
     """Generate one clip of *prompt* into *out_path* (MP4, H.264, with an AAC
     track when the model returns audio). Returns ``(ok, message)``. Writes only
@@ -463,7 +485,9 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     ``delete_outputs`` has nothing to act on (there is no second copy). *swap*
     asks this backend to unload the chat model itself, used when the caller's
     own unload did not succeed. *loras* (``[{"name", "strength"}]``) name
-    registered LoRAs (``pairing.resolve_loras``)."""
+    registered LoRAs (``pairing.resolve_loras``). *on_preview*, when given,
+    receives ``{"step", "steps", "width", "height", "png"}`` for each
+    in-progress frame the worker makes."""
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, placement=placement,
                       width=width, height=height, seconds=seconds, fps=fps,
@@ -505,7 +529,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         say("Freeing VRAM: unloading the chat model...")
         if _localm_unload(self_url, instance_token) is None:
             say("Could not unload the chat model - the video model may run low on VRAM.")
-    relay = _event_relay(say)
+    relay = _event_relay(say, on_preview)
     runner = shared.runner
     if seed is None or seed < 0:
         seed = secrets.randbelow(2 ** 31)
@@ -539,10 +563,12 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 "video_frames": frames, "fps": int(fps),
                 "steps": steps, "cfg_scale": cfg_scale, "flow_shift": flow_shift,
                 "sample_method": blk.get("sample_method") or None,
-                "init_image": init,
+                "init_image": init, "preview": on_preview is not None,
                 "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
                           for x in lora_files],
             }
+            if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
+                say("The negative prompt has no effect at CFG 1. Raise CFG to apply it.")
             say(f"Generating {frames} frames at {width}x{height}"
                 + (f", {steps} steps" if steps else "") + f", seed {seed}...")
             result = runner.generate_video(params, on_event=relay, cancel_check=cancel_check)
@@ -553,6 +579,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         except (OSError, ValueError) as e:
             return False, f"Native video generation failed: {e}"
         finally:
+            relay.flush()
             if runner.is_alive():
                 shared.arm_idle_timer()
     out_fps = int(result.get("fps") or fps)
