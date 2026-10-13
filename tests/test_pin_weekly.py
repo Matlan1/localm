@@ -95,6 +95,7 @@ def env(tmp_path, monkeypatch):
                  "FAKE_CONFIRM_WHY", "FAKE_CONFIRM_CRASH"):
         monkeypatch.delenv(name, raising=False)
 
+    monkeypatch.setattr(pw, "redirect_temp", lambda: None)
     spies = Spies()
     spies.resets = []
     monkeypatch.setattr(pp, "reset_pipeline_worktree", lambda wt: spies.resets.append(wt))
@@ -204,6 +205,31 @@ def test_current_pin_check_that_dies_without_a_receipt_reports_its_exit_code_and
     assert "exit code 2" in out.detail and "crashed: no network" in out.detail
 
 
+def test_a_custom_current_pin_check_that_exits_zero_without_a_receipt_is_not_a_pass(env):
+    script = "import sys; sys.exit(0)"
+    out = pw.verify_current(_adv(verify_current_cmd=lambda work, receipt: [sys.executable, "-c", script]))
+    assert out.verdict == pw.INCONCLUSIVE and "wrote no receipt" in out.detail
+
+
+def test_the_currency_table_is_read_after_the_main_checkout_is_brought_up_to_date(env, monkeypatch):
+    order = []
+    monkeypatch.setattr(pp, "sync_main_checkout", lambda: order.append("sync"))
+    monkeypatch.setattr(cp, "run_checks", lambda specs, now: order.append("rows") or [])
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    pw.run_weekly([], dry_run=True, verify=False)
+    assert order == ["sync", "rows"]
+
+
+def test_a_failed_sync_before_the_currency_table_is_reported_not_fatal(env, monkeypatch, capsys):
+    def boom():
+        raise pp.InfraError("fetch failed")
+    monkeypatch.setattr(pp, "sync_main_checkout", boom)
+    monkeypatch.setattr(cp, "run_checks", lambda specs, now: [])
+    monkeypatch.setattr(cp, "build_registry", lambda: [])
+    code, _ = pw.run_weekly([], dry_run=True, verify=False)
+    assert "could not be brought up to date" in capsys.readouterr().out and code == 0
+
+
 def test_a_custom_current_pin_check_that_dies_without_a_receipt_reports_its_exit_code_and_output(env):
     script = "import sys; print('crashed: no network'); sys.exit(2)"
     out = pw.verify_current(_adv(verify_current_cmd=lambda work, receipt: [sys.executable, "-c", script]))
@@ -247,10 +273,58 @@ def test_a_refused_bump_is_a_fail_and_nothing_is_pushed(env, monkeypatch):
     assert [c[0] for c in env.calls] == ["supersede", "branch"]
 
 
+def _failing_test(env):
+    (env.worktree / "tests").mkdir(exist_ok=True)
+    (env.worktree / "tests" / "test_fails.py").write_text("def test_it():\n    assert False\n", encoding="utf-8")
+    return ("tests/test_fails.py",)
+
+
 def test_failing_targeted_tests_stop_before_any_push(env):
-    out = pw.advance(_adv(tests=("tests/test_that_does_not_exist.py",)), dry_run=False)
+    out = pw.advance(_adv(tests=_failing_test(env)), dry_run=False)
     assert out.verdict == pw.FAIL and "targeted tests failed" in out.detail
+    assert pp.load_state(pin="fake")["verdict"] == "FAIL"
     assert "push" not in [c[0] for c in env.calls]
+
+
+def test_a_test_run_that_cannot_run_is_inconclusive_not_a_recorded_fail(env):
+    out = pw.advance(_adv(tests=("tests/test_that_does_not_exist.py",)), dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE and "targeted tests failed" in out.detail
+    assert pp.load_state(pin="fake")["verdict"] == "INCONCLUSIVE"
+    assert "push" not in [c[0] for c in env.calls]
+
+
+def test_a_timed_out_test_run_is_inconclusive_not_a_recorded_fail(env, monkeypatch):
+    real = pw.run_cmd
+    monkeypatch.setattr(pw, "run_cmd", lambda cmd, **k: (2, f"slow\n({pw.TIMED_OUT_MARK} 1s; process tree killed)")
+                        if "pytest" in cmd else real(cmd, **k))
+    out = pw.advance(_adv(tests=("tests/test_x.py",)), dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE
+    assert pp.load_state(pin="fake")["verdict"] == "INCONCLUSIVE"
+
+
+def test_a_real_test_failure_that_prints_the_timeout_words_is_still_a_fail(env, monkeypatch):
+    real = pw.run_cmd
+    monkeypatch.setattr(pw, "run_cmd", lambda cmd, **k: (1, f"FAILED test_x: {pw.TIMED_OUT_MARK} 5s waiting")
+                        if "pytest" in cmd else real(cmd, **k))
+    out = pw.advance(_adv(tests=("tests/test_x.py",)), dry_run=False)
+    assert out.verdict == pw.FAIL and pp.load_state(pin="fake")["verdict"] == "FAIL"
+
+
+def test_a_failing_npm_ci_is_inconclusive_but_a_failing_npm_test_is_a_fail(env, monkeypatch):
+    real = pw.run_cmd
+
+    def fake(cmd, **k):
+        if str(cmd[0]).lower().startswith("npm"):
+            return 1, "npm said no"
+        return real(cmd, **k)
+    monkeypatch.setattr(pw, "run_cmd", fake)
+    monkeypatch.setattr(pw, "_resolve_exe", lambda cmd: cmd)
+    out = pw.advance(_review_adv(post_bump_cmds=(("npm", "ci"), ("npm", "test")), auto_merge=lambda o, n: True),
+                     dry_run=False)
+    assert out.verdict == pw.INCONCLUSIVE
+    out = pw.advance(_review_adv(post_bump_cmds=(("npm", "test"),), candidate=lambda: ("v1", "v3"),
+                                 auto_merge=lambda o, n: True), dry_run=False)
+    assert out.verdict == pw.FAIL
 
 
 def test_a_candidate_that_needs_a_code_change_is_reported_once_not_as_a_build_fail(env, monkeypatch):
@@ -361,7 +435,7 @@ def test_a_tested_pin_that_crosses_a_major_boundary_still_waits_for_review(env):
 
 
 def test_a_failing_post_bump_command_stops_before_any_push(env):
-    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "raise SystemExit(3)"),),
+    out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "raise SystemExit(1)"),),
                                  auto_merge=lambda o, n: True), dry_run=False)
     assert out.verdict == pw.FAIL and "failed after the bump" in out.detail
     assert "push" not in [c[0] for c in env.calls]
@@ -533,7 +607,7 @@ def test_verify_current_uses_a_custom_command_when_given(env, tmp_path):
     def cmd(work, receipt):
         return [sys.executable, "-c",
                 f"import json; open({str(marker)!r}, 'w').write('x'); "
-                f"json.dump({{'checks': {{'a': {{'status': 'PASS'}}}}}}, open({str(receipt)!r}, 'w'))"]
+                f"json.dump({{'verdict': 'PASS', 'checks': {{'a': {{'status': 'PASS'}}}}}}, open({str(receipt)!r}, 'w'))"]
     out = pw.verify_current(_adv(verify_current_cmd=cmd))
     assert out.verdict == pw.PASS and marker.exists() and "a=PASS" in out.detail
 
@@ -770,6 +844,7 @@ def _stub_main(monkeypatch, *, fingerprint_after):
     monkeypatch.setattr(pp, "sync_main_checkout", lambda: calls.append("sync"))
     monkeypatch.setattr(pp, "clear_worktree_temp", lambda wt: calls.append("cleared"))
     monkeypatch.setattr(pw, "ensure_github_token", lambda: "env")
+    monkeypatch.setattr(pw, "redirect_temp", lambda: calls.append("temp"))
     monkeypatch.setattr(pw, "STARTUP_FINGERPRINT", "before")
     monkeypatch.setattr(pw, "script_fingerprint", lambda: fingerprint_after)
     monkeypatch.setattr(pw, "run_weekly", lambda advs, **k: calls.append("ran") or (0, Path("r.md")))
@@ -800,7 +875,50 @@ def test_reexec_on_windows_runs_a_child_and_returns_its_exit_code(monkeypatch):
     monkeypatch.setattr(pw.subprocess, "run", lambda cmd, **k: seen.append(cmd) or subprocess.CompletedProcess(cmd, 5))
     monkeypatch.setattr(pw.os, "execv", lambda *a: (_ for _ in ()).throw(AssertionError("execv on windows")))
     assert pw._reexec(["--only", "uv"], windows=True) == 5
-    assert seen[0][1].endswith("pin_weekly.py") and seen[0][-2:] == ["--only", "uv"]
+    assert seen[0][1:4] == ["-u", "-X", "utf8"] and seen[0][4].endswith("pin_weekly.py")
+    assert seen[0][-2:] == ["--only", "uv"]
+
+
+def test_a_weekly_run_keeps_every_child_process_temp_beside_the_checkout(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(pw, "REPO", repo)
+    for name in ("TMP", "TEMP", "TMPDIR"):
+        monkeypatch.setenv(name, "C:/elsewhere")
+    stale = pw.run_temp_dir()
+    stale.mkdir()
+    (stale / "left-over.bin").write_text("x", encoding="utf-8")
+    temp = pw.redirect_temp()
+    assert temp.parent == repo.parent and temp.is_dir() and not list(temp.iterdir())
+    assert {pw.os.environ[n] for n in ("TMP", "TEMP", "TMPDIR")} == {str(temp)}
+
+
+def test_main_redirects_temp_before_anything_else_runs(monkeypatch):
+    calls, _ = _stub_main(monkeypatch, fingerprint_after="before")
+    pw.main(["--only", "uv"])
+    assert calls[0] == "temp"
+
+
+def test_a_gpu_wrapped_confirm_holds_the_lease_for_longer_than_its_own_timeout(monkeypatch, tmp_path):
+    monkeypatch.setattr(pp, "gpu_lease_script", lambda: tmp_path / "gpu_lease.py")
+    cmd = pw._gpu_wrap(["python", "confirm.py"], "purpose")
+    ttl = int(cmd[cmd.index("--ttl") + 1])
+    assert ttl > pw.CONFIRM_TIMEOUT_SECONDS
+    assert cmd[cmd.index("--") + 1:] == ["python", "confirm.py"]
+
+
+@pytest.mark.parametrize("candidate", ["sha256:534baea6a22c0123", "nvidia-cuda-runtime==13.4.92,x", "2.11.0+rocm7.13.0",
+                                       "v1.123", "master-962-d763dae", "3.4.17", "b11541"])
+def test_every_kind_of_candidate_makes_a_branch_name_git_accepts(candidate, tmp_path):
+    branch = pp.bump_branch_name("some-pin", candidate)
+    ok = subprocess.run(["git", "check-ref-format", "--branch", branch], capture_output=True, text=True)
+    assert ok.returncode == 0, (branch, ok.stderr)
+    assert branch.startswith("claude/pin-pipeline-some-pin-")
+
+
+def test_distinct_candidates_get_distinct_branches():
+    names = {pp.bump_branch_name("p", c) for c in ("sha256:aaa", "sha256:bbb", "v1.1", "v1.2", "b1", "b2")}
+    assert len(names) == 6
 
 
 def test_reexec_on_posix_replaces_the_process(monkeypatch):
@@ -854,7 +972,7 @@ def test_a_failed_bump_leaves_the_shared_worktree_clean(env, monkeypatch):
 
 
 def test_failing_targeted_tests_leave_the_shared_worktree_clean(env):
-    pw.advance(_adv(tests=("tests/test_that_does_not_exist.py",)), dry_run=False)
+    pw.advance(_adv(tests=_failing_test(env)), dry_run=False)
     assert env.resets == [env.worktree]
 
 
