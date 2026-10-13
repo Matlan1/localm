@@ -308,3 +308,14 @@ test("the video page sends no sampler when ComfyUI generates", async () => {
   const body = JSON.parse(calls.find((c) => c.url === "/api/video").opts.body);
   assert.ok(!("sample_method" in body) && !("scheduler" in body));
 });
+
+test("a job that only reports its result (ComfyUI) still shows that image", async () => {
+  const { win, $ } = setup({ active: "comfy", jobEvents: [
+    { type: "line", text: "Submitting workflow" },
+    { type: "end", status: "done", result: "comfy.png" }] });
+  await settle(win, "await refreshImageBackend();");
+  $("img-prompt").value = "a fox";
+  $("img-generate").onclick();
+  for (let i = 0; i < 8; i++) await tick();
+  assert.equal($("img-result").querySelectorAll("img").length, 1);
+});
