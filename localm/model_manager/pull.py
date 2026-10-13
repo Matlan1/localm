@@ -908,9 +908,8 @@ def _hf_file_sha256(repo_id: str, filename: str,
     """
     try:
         from huggingface_hub import HfApi
-        extra = {"revision": revision} if revision else {}
         info = HfApi(endpoint=_HF_ENDPOINT).get_paths_info(
-            repo_id, [filename], token=token, **extra)
+            repo_id, [filename], token=token, **_at_commit(revision))
         if info:
             lfs = getattr(info[0], "lfs", None)
             digest = getattr(lfs, "sha256", None) if lfs else None
@@ -920,7 +919,13 @@ def _hf_file_sha256(repo_id: str, filename: str,
     return None
 
 
-_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_FULL_GIT_ID_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _at_commit(commit: Optional[str]) -> dict[str, Any]:
+    """The ``revision`` keyword for a hub call that reads at *commit*; nothing
+    when no commit is known, which leaves the call on the default branch."""
+    return {"revision": commit} if commit else {}
 
 
 def _hf_repo_commit(repo_id: str, token: Optional[str] = None) -> Optional[str]:
@@ -934,7 +939,7 @@ def _hf_repo_commit(repo_id: str, token: Optional[str] = None) -> Optional[str]:
     except Exception as e:
         logger.debug("could not read the current commit of %s: %s", repo_id, e)
         return None
-    return sha if isinstance(sha, str) and _COMMIT_RE.match(sha) else None
+    return sha if isinstance(sha, str) and _FULL_GIT_ID_RE.match(sha) else None
 
 
 def _published_sha256(repo_id: str, filename: str,
@@ -1143,7 +1148,7 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
     _ensure_hf_resumable_download()
     commit = _mm._hf_repo_commit(repo_id)
     expected = _published_sha256(repo_id, remote_name, commit)
-    extra = {"revision": commit} if commit else {}
+    extra = _at_commit(commit)
     plain = base_dir / remote_name
     if dest == plain:
         local = hf_hub_download(repo_id=repo_id, filename=remote_name,
@@ -1484,7 +1489,7 @@ def _pull_gguf_file(
     # Expected digest from HF metadata - free, no download needed. The metadata
     # and the bytes are both read at the commit the default branch points at now.
     commit = _mm._hf_repo_commit(repo_id)
-    at_commit = {"revision": commit} if commit else {}
+    at_commit = _at_commit(commit)
     expected = _published_sha256(repo_id, _remote(filename), commit)
     part_digests = {}
     for part in all_parts[1:]:
@@ -1979,7 +1984,7 @@ def _pull_hf_snapshot(
         repo_siblings = info.siblings
         total_size = sum(getattr(s, "size", None) or 0 for s in repo_siblings)
         info_sha = getattr(info, "sha", None)
-        commit = info_sha if isinstance(info_sha, str) and _COMMIT_RE.match(info_sha) else None
+        commit = info_sha if isinstance(info_sha, str) and _FULL_GIT_ID_RE.match(info_sha) else None
     except Exception as e:
         # Offline or API error: fall back to a config.json-only completeness
         # check below and an indeterminate (0) progress total.
@@ -2091,7 +2096,7 @@ def _pull_hf_snapshot(
                 repo_id=repo_id,
                 local_dir=str(dest),
                 endpoint=_HF_ENDPOINT,
-                **({"revision": commit} if commit else {}),
+                **_at_commit(commit),
             )
             _prog.ok()
     except Exception as e:
