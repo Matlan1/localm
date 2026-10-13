@@ -53,7 +53,9 @@ class TestPinnedDownload:
         dest = tmp_path / "model.gguf"
         got = embedder._download_known("m", "org/repo", "model.gguf", dest, True)
         assert got == str(dest) and dest.is_file()
+        assert dest.read_bytes() == b"the real bytes"
         assert seen["revision"] == "a" * 40
+        assert [p.name for p in tmp_path.iterdir()] == ["model.gguf"]
 
     def test_a_file_with_another_sha256_is_deleted_and_refused(self, tmp_path, monkeypatch, allow):
         self._pin(monkeypatch, b"the real bytes")
@@ -61,7 +63,7 @@ class TestPinnedDownload:
                             _fake_download(b"swapped bytes", {}))
         dest = tmp_path / "model.gguf"
         assert embedder._download_known("m", "org/repo", "model.gguf", dest, True) is None
-        assert not dest.exists()
+        assert list(tmp_path.iterdir()) == []
         assert "sha256" in (embedder.last_error() or "")
 
     def test_a_model_without_a_pin_downloads_as_before(self, tmp_path, monkeypatch, allow):
@@ -75,21 +77,32 @@ class TestPinnedDownload:
 
 
 class TestSetupEmbeddingsRegistration:
-    def test_the_registry_entry_carries_the_pinned_sha256(self, tmp_path, monkeypatch):
+    def _register_with_file(self, tmp_path, monkeypatch, content):
         from click.testing import CliRunner
 
         from localm.cli.maintenance import setup_embeddings
         from localm.config import load_registry
 
         repo_file = embedder.KNOWN_EMBEDDING_MODELS[embedder.DEFAULT_EMBEDDING_MODEL]
-        digest = embedder._EMBEDDING_PINS[repo_file][1]
+        pin = embedder._EMBEDDING_PINS[repo_file]
+        monkeypatch.setattr(embedder, "_EMBEDDING_PINS", {
+            repo_file: (pin[0], hashlib.sha256(b"the real bytes").hexdigest())})
         model_file = tmp_path / repo_file[1]
-        model_file.write_bytes(b"x")
+        model_file.write_bytes(content)
         monkeypatch.setattr(embedder, "_embeddings_dir", lambda: tmp_path)
         monkeypatch.setattr(embedder, "resolve_embedding_model_path",
                             lambda allow_download=True: str(model_file))
-
         result = CliRunner().invoke(setup_embeddings, [])
         assert result.exit_code == 0, result.output
-        entries = [e for n, e in load_registry().items() if n.startswith("embedding-")]
-        assert len(entries) == 1 and entries[0]["sha256"] == digest
+        return [e for n, e in load_registry().items() if n.startswith("embedding-")]
+
+    def test_a_file_that_matches_the_pin_is_registered_with_its_digest(
+            self, tmp_path, monkeypatch):
+        entries = self._register_with_file(tmp_path, monkeypatch, b"the real bytes")
+        assert len(entries) == 1
+        assert entries[0]["sha256"] == hashlib.sha256(b"the real bytes").hexdigest()
+
+    def test_a_file_that_does_not_match_is_registered_without_a_digest(
+            self, tmp_path, monkeypatch):
+        entries = self._register_with_file(tmp_path, monkeypatch, b"some other bytes")
+        assert len(entries) == 1 and "sha256" not in entries[0]

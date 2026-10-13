@@ -31,7 +31,7 @@ def info_output(monkeypatch):
 
 def _line(output: str, label: str) -> str:
     for line in output.splitlines():
-        if line.strip().startswith(label):
+        if line.strip().startswith(label + " "):
             return line
     raise AssertionError(f"no {label!r} line in: {output!r}")
 

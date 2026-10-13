@@ -489,24 +489,39 @@ def download_progress_line(label: str, done: int, total: Optional[int]) -> str:
     return f"Downloading {label}: {done // mb} MB..."
 
 
-def _require_sha256(path: Path, expected: str, what: str) -> None:
-    """Return when the sha256 of *path* is *expected*; otherwise delete *path* and
-    raise RuntimeError."""
+def file_sha256(path: Path) -> str:
+    """The hex sha256 of the file at *path*."""
     import hashlib
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
-    actual = digest.hexdigest()
-    if actual == expected.lower():
-        return
+    return digest.hexdigest()
+
+
+def _download_pinned(name: str, repo: str, filename: str, dest: Path,
+                     pin: tuple, extra: dict) -> Optional[str]:
+    """Download the pinned file into a scratch folder beside *dest*, check its
+    sha256 and only then move it to *dest*, so a file that fails the check or is
+    interrupted mid-check never sits at *dest*. Raises RuntimeError on a mismatch."""
+    import os
+    import shutil
+    import tempfile
+
+    from huggingface_hub import hf_hub_download
+    scratch = Path(tempfile.mkdtemp(prefix=".download-", dir=str(dest.parent)))
     try:
-        path.unlink()
-    except OSError as e:
-        logger.warning("could not delete the file that failed its sha256 check: %s", e)
-    raise RuntimeError(
-        f"the downloaded {what} has sha256 {actual}, not the pinned {expected}; "
-        "the file was deleted")
+        got = Path(hf_hub_download(repo, filename, local_dir=str(scratch),
+                                   endpoint=_HF_ENDPOINT, revision=pin[0], **extra))
+        actual = file_sha256(got)
+        if actual != pin[1].lower():
+            raise RuntimeError(
+                f"the downloaded embedding model {name!r} has sha256 {actual}, not the "
+                f"pinned {pin[1]}; it was not kept")
+        os.replace(got, dest)
+        return str(dest)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _download_known(name: str, repo: str, filename: str, dest: Path,
@@ -556,11 +571,9 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
                        if on_progress is not None else {})
         pin = _EMBEDDING_PINS.get((repo, filename))
         if pin is not None:
-            extra["revision"] = pin[0]
+            return _download_pinned(name, repo, filename, dest, pin, extra)
         got = hf_hub_download(repo, filename, local_dir=str(dest.parent),
                               endpoint=_HF_ENDPOINT, **extra)
-        if pin is not None:
-            _require_sha256(Path(got), pin[1], f"embedding model {name!r}")
         # hf may nest under the repo dir; normalise to dest.
         got_p = Path(got)
         if got_p.resolve() != dest.resolve() and got_p.is_file():
