@@ -137,3 +137,15 @@ test("load() leaves a model the admin chose on the bundle's own template", async
   assert.equal(seen.model, "someone/else-ONNX");
   assert.equal(seen.template, "{model}/resolve/{revision}/");
 });
+
+test("load() moves a model cached under the default branch to the pinned commit before building it", async () => {
+  const base = `https://huggingface.co/${KOKORO_DEFAULT_MODEL}/resolve/`;
+  const cache = new FakeCache({ [`${base}main/onnx/model.onnx`]: "weights" });
+  globalThis.caches = { open: async () => cache };
+  try {
+    await loadWith({});
+  } finally {
+    delete globalThis.caches;
+  }
+  assert.deepEqual([...cache.map.keys()], [`${base}${KOKORO_PINNED_REVISION}/onnx/model.onnx`]);
+});
