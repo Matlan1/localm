@@ -18,7 +18,8 @@ from typing import Optional
 
 from .base import (
     _MAX_OUTPUT, RESTRICTED_UNWRITABLE_MESSAGE, ToolResult, _confine, _truncate,
-    inside_unwritable_dir, unwritable_component,
+    has_other_hard_link, inside_unwritable_dir, unwritable_component,
+    unwritable_redirects,
 )
 # The indexer's skip and file-type tables, shared so grep and the project map
 # classify files the same way.
@@ -1218,8 +1219,9 @@ def tool_search_replace(
         When True, report what would change without modifying anything.
     _restricted:
         Set by the dispatcher for a restricted session. A matching file inside a
-        ``RESTRICTED_UNWRITABLE_DIRS`` directory is left unchanged and listed in
-        the output; when every match is in one, the call is an error.
+        ``RESTRICTED_UNWRITABLE_DIRS`` directory, in a folder such an entry
+        redirects to, or with another hard link is left unchanged and listed
+        in the output; when every match is such a file, the call is an error.
     """
     try:
         rx = _compile_model_pattern(pattern, _model_regex_flags())
@@ -1243,6 +1245,14 @@ def tool_search_replace(
     changes: list[tuple[Path, Path, str, int, bytes]] = []  # (abs, rel, new_text, count, old_bytes)
     unreadable: list[str] = []  # files we could not read; a replacement may be left partial
     locked: list[str] = []      # matching files a restricted session may not change
+    redirects: Optional[tuple[Path, ...]] = None
+    if _restricted:
+        try:
+            redirects = unwritable_redirects(cwd_resolved)
+        except OSError as e:
+            return ToolResult.error(
+                f"search_replace changed nothing: could not check the project for "
+                f".localcoder or .git links ({e}).")
 
     oversized: list[str] = []   # skipped by the size cap, reported not silenced
     for fp in candidates:
@@ -1285,7 +1295,8 @@ def tool_search_replace(
             rel = fp
         if _restricted and (
                 unwritable_component(rel.parts) is not None
-                or inside_unwritable_dir(cwd_resolved, fp.resolve())):
+                or inside_unwritable_dir(cwd_resolved, fp.resolve(), redirects)
+                or has_other_hard_link(fp.resolve())):
             locked.append(str(rel))
             continue
         changes.append((fp, rel, new_text, len(matches), old_bytes))

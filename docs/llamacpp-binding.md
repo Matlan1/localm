@@ -324,7 +324,7 @@ Covered functions (grouped):
 **Chat template**: `llama_model_chat_template`, `llama_chat_apply_template`  
 **Batch**: `llama_batch_get_one`, `llama_batch_init`, `llama_batch_free`  
 **Inference**: `llama_decode`, `llama_get_logits_ith`, `llama_get_logits`  
-**Embeddings** (export-probed via `has_embeddings_api()`): `llama_get_embeddings_seq`, `llama_get_embeddings_ith` - bound here but unused by `LlamaCpp`/`GgufBackend`; `llama_get_embeddings_seq` is called by the separate dedicated embedding-model loader (`localm.inference.embedder`, see Known Limitations), `llama_get_embeddings_ith` currently has no caller anywhere in the codebase  
+**Embeddings** (export-probed via `has_embeddings_api()`): `llama_get_embeddings_seq`, `llama_get_embeddings_ith` - bound here but unused by `LlamaCpp`/`GgufBackend`; `llama_get_embeddings_seq` is called by the separate dedicated embedding-model loader (`localm.inference.embedder`, see Known Limitations), `llama_get_embeddings_ith` is called by the Qwen3-TTS speech path (`mtmd_gen.py`) to read each step's hidden state  
 **Model metadata**: `has_model_meta_api()` / `llama_model_meta_val_str`  
 **Model introspection**: `has_kv_head_api()` / `llama_model_n_head` / `llama_model_n_head_kv`, `has_hybrid_api()` / `llama_model_is_recurrent` / `llama_model_is_hybrid`, `has_max_devices()` / `llama_max_devices`  
 **Sampler chain**: `llama_sampler_chain_default_params`, `llama_sampler_chain_init`, `llama_sampler_chain_add`, `llama_sampler_free`, `llama_sampler_sample`, `llama_sampler_accept`, `llama_sampler_init_greedy`, `llama_sampler_init_dist`, `llama_sampler_init_top_k`, `llama_sampler_init_top_p`, `llama_sampler_init_min_p`, `llama_sampler_init_temp`, `llama_sampler_init_grammar`, `llama_sampler_init_grammar_lazy_patterns` (export-probed via `has_lazy_grammar()`), `llama_sampler_init_penalties` (export-probed via `has_penalties_sampler()`)  
@@ -552,7 +552,10 @@ relatively expensive), on how often drafts are accepted (lower when sampling
 with a temperature) and on how busy the machine is. Each loaded model keeps a
 `_DraftPacer` that measures the time per emitted token of speculative steps and
 of plain one-token steps as the reply runs (one step in 24 runs plain to keep
-that figure current, one in 3 until there are 6 plain figures). Over the last 16 steps of each kind, speculation costs the
+that figure current, one in 3 until there are 6 plain figures; each plain
+figure that shows speculation costing at most 85% of the plain cost per token
+doubles that interval, up to one step in 96, and any other plain figure sets it
+back to one in 24). Over the last 16 steps of each kind, speculation costs the
 median time of a speculative step divided by the mean number of tokens one
 made available, and plain decoding the median time of a plain step. When
 speculation is the slower of the two it is paused for 32 steps, doubling on
@@ -785,8 +788,9 @@ persisted.
 
 ## Known Limitations
 
-- **Single sequence only**: `_create_batch` always calls `llama_batch_init(n, 0, 1)` -
-  the hardcoded final `1` is `n_seq_max`
+- **One sequence per batch call**: `_create_batch` always calls `llama_batch_init(n, 0, 1)` -
+  the hardcoded final `1` is `n_seq_max`. Concurrent replies are served by the
+  parallel slots (see above), not by a multi-sequence batch
 - **No embedding extraction via the chat class**: `LlamaCpp`/`GgufBackend` never
   call the embedding accessors, so `GgufBackend.embed` raises
   `NotImplementedError` and `GgufBackend.can_embed` is `False`. The low-level

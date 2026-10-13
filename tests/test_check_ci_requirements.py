@@ -39,6 +39,8 @@ def test_pins_reads_every_pinned_name_lowercased():
 def test_the_committed_sets_pin_what_the_readme_commands_name():
     assert mod.pins((mod.REQUIREMENTS / "torch-cpu.txt").read_text(encoding="utf-8"))["torch"]
     assert mod.pins((mod.REQUIREMENTS / "mutmut.txt").read_text(encoding="utf-8"))["mutmut"]
+    build = mod.pins((mod.REQUIREMENTS / "build.txt").read_text(encoding="utf-8"))
+    assert all(build[name] for name in mod._BUILD_ROOTS)
 
 
 def test_drift_ignores_only_the_header_lines_that_record_the_output_path():

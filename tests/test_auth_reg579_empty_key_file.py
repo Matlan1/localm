@@ -309,3 +309,17 @@ def test_empty_owner_key_still_locks_when_require_auth_is_on(auth, monkeypatch):
     assert ei.value.status_code == 401, (
         "require_auth is on and no key exists - the server must refuse, not "
         "serve open just because the empty auth.key reads as 'no key'")
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("\x00\x00\x00", None),
+    ("  \x00 \n", None),
+    ("", None),
+    ("\x00abc\x00", "abc"),
+    ("  \x00 key-value \x00\n", "key-value"),
+    ("a\x00b", "a\x00b"),
+    ("XabcX", "XabcX"),
+])
+def test_key_text_strips_nul_padding_around_the_key_only(text, expected):
+    from localm import auth
+    assert auth._key_text_or_none(text) == expected

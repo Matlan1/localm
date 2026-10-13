@@ -321,7 +321,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
 
     notes = {
         "vulkan": "universal GPU build (AMD/NVIDIA/Intel via the display driver)",
-        "amd-rocm": "self-contained AMD ROCm build (gfx103X / RX 6000)",
+        "amd-rocm": "self-contained AMD ROCm build (RX 6000 / 7000 / 9000)",
         "cuda": "NVIDIA CUDA build + self-contained runtime",
         "sycl": _sycl_backend_note(),
         "hip": "AMD ROCm build (needs the ROCm/HIP runtime present)",

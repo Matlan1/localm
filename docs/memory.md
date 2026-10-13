@@ -67,9 +67,8 @@ localm memory clear [-y]                             # erase everything, archive
 `memory add` produces the same kind of record `POST /api/memory/append` does:
 `--kind` is `semantic` (a standing fact, the default) or `episodic` (something
 that happened), and `--importance` (default 0.8) is the weight recall and
-prune use. Source is always `user` - there is no `--source` flag - and an
-unrecognised `--kind` is silently coerced to `semantic` by the record's own
-validation.
+prune use. Source is always `user` - there is no `--source` flag - and
+`--kind` accepts only those two values; anything else is a usage error.
 
 `forget` and `forgotten` are not two halves of one thing. `forget` deletes
 outright; the archive `forgotten` lists is filled only when localm drops a fact

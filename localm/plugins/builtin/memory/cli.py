@@ -154,8 +154,9 @@ def memory_list(show_all: bool, as_json: bool) -> None:
         click.echo(_json.dumps([r.to_dict() for r in records], indent=2))
         return
     if not records:
-        click.echo("Nothing remembered yet. localm saves facts as you chat "
-                   "(outside privacy mode), or add one with `localm memory add`.")
+        click.echo("Nothing remembered yet. Outside privacy mode localm saves "
+                   "facts as you chat, and you can add one with "
+                   "`localm memory add`. Privacy mode saves and adds nothing.")
         return
     click.echo(f"{len(records)} remembered fact(s):")
     for r in records:

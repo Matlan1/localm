@@ -1,8 +1,9 @@
 # MCP support
 
 > The MCP server is the `mcp` plugin. Install it with `localm plugin install
-> mcp`; it is not active by default. The `generate_image` tool below needs
-> ComfyUI running; it is exposed unless you pass `--no-images` and does not
+> mcp`; it is not active by default. The `generate_image` tool below uses the
+> image plugin's backend (the built-in native runtime, or ComfyUI when you have
+> one set up); it is exposed unless you pass `--no-images` and does not
 > require the `image` plugin.
 
 localm speaks the Model Context Protocol in both directions:

@@ -25,8 +25,8 @@ anything else CPU.
 Then pull a model and talk to it:
 
 ```bash
-localm pull unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M
-localm run Qwen3-4B-Instruct-2507
+localm pull unsloth/Qwen3-4B-Instruct-2507-GGUF:Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+localm run Qwen3-4B-Instruct-2507-Q4_K_M
 ```
 
 Or open the graphical interface:
