@@ -109,7 +109,8 @@ class NvidiaInfo:
     gpu_name: str = ""
     driver_version: str = ""
     cuda_capability: str = ""       # max CUDA the driver supports, e.g. "12.4"
-    compute_capability: str = ""    # the GPU's own sm/arch level, e.g. "12.0" (Blackwell/sm_120)
+    # The newest sm/arch level among the host's GPUs, e.g. "12.0" (Blackwell/sm_120).
+    compute_capability: str = ""
     # Every GPU nvidia-smi lists, in nvidia-smi's own order:
     # [{"index", "name", "total_mib", "free_mib"}, ...].
     gpus: list = field(default_factory=list)
@@ -153,6 +154,18 @@ def _nvidia_smi(*args: str) -> str:
         return ""
 
 
+def _newest_capability(lines: list) -> str:
+    """The highest compute capability among nvidia-smi's per-GPU *lines* (the
+    first line when none parses), so one Blackwell GPU in a mixed-generation
+    host selects the CUDA line that has kernels for it."""
+    values = [ln.strip() for ln in lines if ln.strip()]
+    known = [(v, _ver_tuple(v)) for v in values]
+    known = [(v, t) for v, t in known if t is not None]
+    if not known:
+        return values[0] if values else ""
+    return max(known, key=lambda pair: pair[1] + (0,) * (2 - len(pair[1])))[0]
+
+
 def nvidia_preflight() -> NvidiaInfo:
     """Detect the NVIDIA GPU + driver, the max CUDA version the DRIVER
     supports, and the GPU's own compute capability (its architecture - e.g.
@@ -194,7 +207,7 @@ def nvidia_preflight() -> NvidiaInfo:
         info.gpu_name = name[0].strip()
     cap = _sl._nvidia_smi("--query-gpu=compute_cap", "--format=csv,noheader").strip().splitlines()
     if cap:
-        info.compute_capability = cap[0].strip()
+        info.compute_capability = _newest_capability(cap)
     info.gpus = _parse_gpu_memory(_sl._nvidia_smi(
         "--query-gpu=index,name,memory.total,memory.free",
         "--format=csv,noheader,nounits"))

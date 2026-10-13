@@ -918,7 +918,7 @@ def _hf_file_sha256(repo_id: str, filename: str,
 
 
 
-def _pick_best_of_same_repo_mmprojs(cands: list[str]) -> str:
+def _pick_best_of_same_repo_mmprojs(cands: list[str], *, speech: bool = False) -> str:
     """Deterministic pick among several mmproj filenames found in the SAME
     repo, once stem-matching (``_pick_mmproj_candidate``) could not narrow them
     to one.
@@ -927,11 +927,21 @@ def _pick_best_of_same_repo_mmprojs(cands: list[str]) -> str:
     caller is pulling from, so they are quantised variants of the same
     projector rather than projectors for different models. Prefers the
     conventional highest-precision f16 build; falls back to a sorted-first pick
-    for determinism."""
+    for determinism. With *speech* (a text-to-speech model's generation
+    stages) the order is Q8_0, then bf16, then any other non-f16 build, then
+    f16. See test_a_speech_model_takes_the_q8_projector_over_f16."""
     # Matches f16 as a whole token, not a bf16 substring. See
     # test_bartowski_gemma3_triple_picks_f16_not_bf16.
-    f16 = [c for c in cands
-           if re.search(r"(?<![a-z0-9])f16(?![a-z0-9])", c.lower())]
+    def _has(c: str, token: str) -> bool:
+        return re.search(rf"(?<![a-z0-9]){token}(?![a-z0-9])", c.lower()) is not None
+
+    f16 = [c for c in cands if _has(c, "f16")]
+    if speech:
+        for group in ([c for c in cands if _has(c, "q8_0")],
+                      [c for c in cands if _has(c, "bf16")],
+                      [c for c in cands if c not in f16]):
+            if group:
+                return sorted(group)[0]
     return f16[0] if f16 else sorted(cands)[0]
 
 
@@ -951,7 +961,7 @@ def _hf_repo_files(repo_id: str) -> Optional[list[str]]:
 
 
 def _pick_mmproj_from_listing(
-    files: list[str], model_filename: str, base_dir: Path,
+    files: list[str], model_filename: str, base_dir: Path, *, speech: bool = False,
 ) -> Optional[str]:
     """The mmproj (vision projector) filename among *files* (a repo's file
     listing) that pairs with *model_filename*, or None when none qualify.
@@ -967,7 +977,8 @@ def _pick_mmproj_from_listing(
     The pick is ``_pick_mmproj_candidate``'s, the policy the folder scan
     (``find_sibling_mmproj``) uses, given the listing's other model files and no
     GGUF headers. When several candidates share the model's leading name token,
-    ``_pick_best_of_same_repo_mmprojs`` picks among them."""
+    ``_pick_best_of_same_repo_mmprojs`` picks among them (with *speech* for a
+    text-to-speech model)."""
     cands = [f for f in files
              if f != model_filename and "mmproj" in f.lower()
              and f.lower().endswith(".gguf")
@@ -986,12 +997,12 @@ def _pick_mmproj_from_listing(
     stem = Path(model_filename).stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
     stem_matches = [c for c in cands if stem and stem in c.lower()]
     if len(stem_matches) >= 2:
-        return _pick_best_of_same_repo_mmprojs(stem_matches)
+        return _pick_best_of_same_repo_mmprojs(stem_matches, speech=speech)
     return None
 
 
 def _hf_repo_mmproj_filename(
-    repo_id: str, model_filename: str, base_dir: Path,
+    repo_id: str, model_filename: str, base_dir: Path, *, speech: bool = False,
 ) -> Optional[str]:
     """The mmproj (vision projector) filename in *repo_id*'s OWN file listing
     that pairs with *model_filename*, or None when the repo ships none (or its
@@ -1000,7 +1011,7 @@ def _hf_repo_mmproj_filename(
     files = _hf_repo_files(repo_id)
     if files is None:
         return None
-    return _pick_mmproj_from_listing(files, model_filename, base_dir)
+    return _pick_mmproj_from_listing(files, model_filename, base_dir, speech=speech)
 
 
 # Highest -<n> suffix tried before giving up on a free local name for a
@@ -1100,7 +1111,8 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
         shutil.move(local, dest)
 
 
-def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Optional[Path]:
+def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
+                             speech: bool = False) -> Optional[Path]:
     """Auto-attach companion: look for a vision projector shipped in the SAME
     HF repo as *filename* and fetch it too.
 
@@ -1118,7 +1130,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
     files = _hf_repo_files(repo_id)
     if files is None:
         return None
-    candidate = _pick_mmproj_from_listing(files, filename, base_dir)
+    candidate = _pick_mmproj_from_listing(files, filename, base_dir, speech=speech)
     if candidate is None:
         if _mm._looks_like_vision_gguf_name(repo_id, filename):
             console.print(
@@ -1208,7 +1220,8 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
     repo_id = str(entry["source"])[len("hf:"):]
     if not repo_id:
         return None
-    return _maybe_fetch_repo_mmproj(repo_id, path.name, path.parent)
+    return _maybe_fetch_repo_mmproj(repo_id, path.name, path.parent,
+                                    speech=entry.get("type") == "tts")
 
 
 def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,
@@ -1315,7 +1328,7 @@ def _mmproj_for_registration(
         return None
     if mmproj_spec:
         return _fetch_explicit_mmproj(mmproj_spec, base_dir, model_filename=filename)
-    return _maybe_fetch_repo_mmproj(repo_id, filename, base_dir)
+    return _maybe_fetch_repo_mmproj(repo_id, filename, base_dir, speech=reg_type == "tts")
 
 
 def _pull_gguf_file(
@@ -1531,7 +1544,8 @@ def _pull_gguf_file(
             and "mmproj" not in filename.lower()):
         try:
             import requests as _req
-            mmproj_name = _mm._hf_repo_mmproj_filename(repo_id, filename, base_dir)
+            mmproj_name = _mm._hf_repo_mmproj_filename(
+                repo_id, filename, base_dir, speech=model_type == "tts")
             if mmproj_name:
                 mmproj_head = _req.head(
                     hf_hub_url(repo_id, mmproj_name, endpoint=_HF_ENDPOINT),

@@ -14,6 +14,7 @@ from localm.config import load_registry
 from localm.model_manager import add_local
 from localm.model_manager.gguf import (
     hub_repo_id,
+    is_hub_blob_link,
     hub_snapshot_repo_id,
     logical_model_path,
     scan_hub_cache,
@@ -309,6 +310,48 @@ class TestDirectPaths:
         (outside / "real.bin").write_bytes(b"x")
         os.symlink(outside / "real.bin", outside / "alias.gguf")
         assert logical_model_path(outside / "alias.gguf").name == "real.bin"
+
+
+class TestBlobsFolderThatIsALink:
+    def _linked_blobs_repo(self, tmp_path, layout):
+        if layout != "links":
+            pytest.skip("only the link layout has links")
+        root = tmp_path / "hub"
+        root.mkdir()
+        snap = _repo(root, layout, "org/m", _REV_A, {"m.Q4.gguf": _gguf_bytes("m")})
+        blobs = snap.parent.parent / "blobs"
+        elsewhere = tmp_path / "other-drive"
+        blobs.rename(elsewhere)
+        try:
+            os.symlink(elsewhere, blobs, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("directory symlinks are not available here")
+        return snap, elsewhere
+
+    def test_logical_path_keeps_the_snapshot_link(self, tmp_path, layout):
+        snap, _elsewhere = self._linked_blobs_repo(tmp_path, layout)
+        assert logical_model_path(snap / "m.Q4.gguf").name == "m.Q4.gguf"
+
+    def test_is_hub_blob_link_sees_through_the_linked_folder(self, tmp_path, layout):
+        snap, _elsewhere = self._linked_blobs_repo(tmp_path, layout)
+        assert is_hub_blob_link(snap / "m.Q4.gguf") is True
+
+    def test_adding_the_link_registers_the_snapshot_path(self, tmp_path, isolated_home, layout):
+        snap, elsewhere = self._linked_blobs_repo(tmp_path, layout)
+        assert add_local(str(snap / "m.Q4.gguf")) is True
+        path = Path(load_registry()["m.Q4"]["path"])
+        assert path.name == "m.Q4.gguf" and elsewhere.name not in path.parts
+
+    def test_a_link_to_an_ordinary_file_is_not_a_hub_link(self, tmp_path):
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (outside / "real.bin").write_bytes(b"x")
+        try:
+            os.symlink(outside / "real.bin", outside / "alias.gguf")
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available here")
+        assert is_hub_blob_link(outside / "alias.gguf") is False
+        assert is_hub_blob_link(outside / "real.bin") is False
 
 
 class TestStore:

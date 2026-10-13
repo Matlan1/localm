@@ -138,6 +138,52 @@ def test_a_statement_about_the_workspace_still_gets_the_first_nudge(text):
     assert implies_action(text) is True
 
 
+@pytest.mark.parametrize("text", [
+    "Build failed.",
+    "Test failed with a 500",
+    "Tests failed on CI",
+    "Build is red",
+    "Search fails with a timeout",
+    "Update broke login",
+    "Test didn't run",
+    "Install crashed again",
+    "Run completed.",
+    "Check passed",
+    "Build failed\nTest timed out",
+])
+def test_a_statement_that_opens_with_an_action_word_demands_nothing(text):
+    assert demands_action(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "Build failed. Fix it",
+    "Test failed with a 500. Run it again",
+    "Fix failed tests",
+    "Rerun failed tests in src",
+    "Show returned values",
+    "Fix broken imports",
+    "Check passed tests",
+    "Build the project",
+])
+def test_an_imperative_that_shares_a_statement_word_still_demands_action(text):
+    assert demands_action(text) is True
+
+
+def test_a_failure_report_gets_its_prose_answer_without_the_forced_rung(tmp_path):
+    agent = _make_agent(tmp_path, max_turns=8)
+    forced = []
+
+    def _reply(*a, **k):
+        forced.append(bool(getattr(agent, "_force_tool_grammar", False)))
+        return f"That usually means a missing dependency, variation {len(forced)}."
+
+    with patch.object(agent, "_call_llm", side_effect=_reply), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        result = agent.run_task("Build failed.")
+    assert True not in forced
+    assert "tool use not achieved" not in result
+
+
 def test_a_file_name_alone_implies_action_without_demanding_it():
     assert implies_action("what does main.py do?") is True
     assert demands_action("what does main.py do?") is False

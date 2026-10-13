@@ -1,60 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Guards the HAND-VENDORED marked at
-// localm/plugins/gui/static/vendor/marked.min.js.
+// Guards the hand-vendored marked at
+// localm/plugins/gui/static/vendor/marked.min.js, which is the release's
+// lib/marked.umd.js stored under the file name index.html loads.
 //
-// WHY THIS FILE EXISTS. Same reason as vendor-dompurify.test.mjs,
-// vendor-katex.test.mjs, vendor-jsqr.test.mjs and vendor-highlightjs.test.mjs:
-// this file has no entry in package.json, so no dependency tooling can ever see
-// it and a vulnerable version here produces no PR, no alert and no red check.
-// vendor/README.md named marked as the LAST library still without a guard
-// ("marked still has no guard. Until it does, check it by hand when you touch
-// this directory"); this closes it, so every vendored library is now pinned by
-// something that actually runs.
+// The file has no package.json entry, so no dependency tooling sees it. This
+// test pins the exact artefact (banner plus content hash), checks that it parses
+// real markdown, checks the option set app/helpers.js applies at load, and pins
+// the pipeline contract that marked does NOT sanitize: DOMPurify runs on its
+// output.
 //
-// ADVISORY STATUS AT THE TIME OF WRITING, established from the affected-VERSION
-// RANGES rather than by reading upstream code for a quoted vulnerable function.
-// An advisory documents a bug where it is easiest to explain, and upstream often
-// fixes it in the CALLER - so presence of the quoted code is not proof of
-// vulnerability, and its absence is not proof of a fix. Two independent sources,
-// each with a control query that returned a known-positive, so a zero could not
-// be a broken-query artefact:
-//   OSV (api.osv.dev)   marked@12.0.2 -> 0 vulns
-//                       control: marked@4.0.0 -> 2, dompurify@3.2.6 -> 19
-//   GitHub advisory DB  all 18 marked advisories fetched, every affected range
-//                       tested against 12.0.2 -> none matches
-//                       control: 4.0.0 matches both "< 4.0.10" ReDoS ranges
-// Every marked advisory except one is bounded above by 4.0.10 or lower; the one
-// later advisory (GHSA-6v9c-7cg6-27q7, OOM via infinite recursion) is
-// ">= 18.0.0, <= 18.0.1" and so sits ABOVE this build, not below it.
+// window.marked.version is undefined, so the pin is bytes rather than a runtime
+// version floor. A test below asserts the field stays absent, so a release that
+// adds one fails the guard and gets upgraded to a floor.
 //
-// THERE IS NO RUNTIME VERSION TO ASSERT, and that is measured rather than
-// assumed: window.marked.version is undefined on this build (the export carries
-// parse/Lexer/Parser/use/... and no version field). So unlike the DOMPurify and
-// highlight.js guards, this one CANNOT cross-check a banner against a runtime
-// value and cannot express a ">= floor" against the library itself. It pins the
-// EXACT artefact instead - banner plus content hash - which is the same
-// treatment vendor/README.md already documents for auto-render.min.js,
-// katex.min.css and jsQR.js. A test below asserts the version field is still
-// absent, so if a future marked starts exposing one this guard fails and gets
-// upgraded to a real floor rather than silently continuing to pin bytes.
+// Advisory status for 18.1.1: OSV reports 0 vulns (control queries:
+// marked@18.0.1 -> 1, marked@4.0.0 -> 2) and the repository's advisory list has
+// no range containing 18.1.1 (GHSA-6v9c-7cg6-27q7 covers 18.0.0 to 18.0.1, fixed
+// in 18.0.2).
 //
-// NO ReDoS TIMING TEST, deliberately, and that is a difference from the
-// highlight.js guard rather than an omission. That one anchors on a NAMED
-// upstream fix (issue #4362) with a concrete PoC, so its growth-shape threshold
-// was derived by measuring a known-bad build against a known-good one. marked
-// 12.0.2 has no such known defect to anchor on, so any threshold here would be
-// invented - and an invented threshold on a shared, loaded box is how a gate
-// starts flaking and then gets disabled, which is worse than no gate because
-// everyone assumes it is still running.
-//
-// THE HASH IS TAKEN OVER CRLF-NORMALISED BYTES, and that is load-bearing rather
-// than tidiness (see vendor-katex/jsqr/highlightjs for the same note). This repo
-// has core.autocrlf=true and no .gitattributes rule for vendor/, so the checked
-// out file differs in size from the git blob purely by line-ending conversion.
-// MEASURED for this file: 35485 bytes in a Windows working tree, 35479 after
-// normalising - exactly the 6 newlines in its banner comment. A raw-byte hash
-// would pass on one platform and fail on the other, and the failure would read
-// as a corrupted vendor drop rather than a line-ending artefact.
+// The hash is taken over CRLF-normalised bytes so a Windows checkout with
+// autocrlf and a Linux checkout agree.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -65,12 +30,10 @@ const VENDOR = new URL("../localm/plugins/gui/static/vendor/", import.meta.url);
 
 // Provenance pin. sha256, base64, over CRLF-normalised bytes. Recorded from the
 // npm registry artefact, tarball shasum-verified against the registry's own
-// published dist.shasum (b31578fe608b599944c69807b00f18edab84647e) before
-// extraction:  npm pack marked@12.0.2  ->  package/marked.min.js
-// NOTE the path: marked.min.js ships from the PACKAGE ROOT, not from a dist/
-// subdirectory, and it is NOT the same artefact as lib/marked.umd.js.
-const VENDORED_VERSION = "12.0.2";
-const PINNED_HASH = "Ffq85bZYmLMrA/XtJen4kacprUwNbYdxEKd0SqhHqJQ=";
+// published dist.shasum (dd6288f8217971f7b0beefcabc52c92a6519b3e3) before
+// extraction:  npm pack marked@18.1.1  ->  package/lib/marked.umd.js
+const VENDORED_VERSION = "18.1.1";
+const PINNED_HASH = "uCuTNEBti90WtiNsCN4ctlsqhZhzypUD2cwLKSyjwSo=";
 
 function readVendored(name) {
   return fs.readFileSync(new URL(name, VENDOR));
@@ -82,9 +45,7 @@ function normalisedHash(buf) {
 }
 
 /** Load the REAL vendored marked.min.js as a classic script in a jsdom window,
- *  the same load path index.html uses (<script src="/vendor/marked.min.js">).
- *  Evaluating the actual artefact is the point: an npm import would be
- *  structurally incapable of saying anything about the file that ships. */
+ *  the same load path index.html uses (<script src="/vendor/marked.min.js">). */
 function loadVendoredMarked() {
   const dom = new JSDOM("<!doctype html><html><head></head><body></body></html>",
     { runScripts: "dangerously" });
@@ -99,20 +60,14 @@ test("the vendored marked loads and exposes the entry points helpers.js calls", 
   try {
     assert.ok(win.marked, "the vendored file did not define window.marked");
     assert.equal(typeof win.marked.parse, "function",
-      "marked.parse is missing, and it is the only rendering entry point "
-      + "app/helpers.js calls (helpers.js:276 and :290)");
+      "marked.parse is missing; app/helpers.js renders every message with it");
     assert.equal(typeof win.marked.setOptions, "function",
-      "marked.setOptions is missing; helpers.js:187 calls it at load time, so "
+      "marked.setOptions is missing; app/helpers.js calls it at load time, so "
       + "the whole GUI would throw on startup");
   } finally { win.close(); }
 });
 
 test("marked still exposes NO runtime version, so the byte pin is the only signal", () => {
-  // Not a nicety. If this ever fails because upstream added a version field, the
-  // right response is to UPGRADE this guard to a real version floor (as
-  // vendor-dompurify and vendor-highlightjs do), not to delete the assertion.
-  // Pinning bytes is strictly weaker than pinning a floor, because it cannot say
-  // "this or anything newer is acceptable".
   const win = loadVendoredMarked();
   try {
     assert.equal(win.marked.version, undefined,
@@ -122,7 +77,7 @@ test("marked still exposes NO runtime version, so the byte pin is the only signa
   } finally { win.close(); }
 });
 
-test("the banner comment says 12.0.2", () => {
+test("the banner comment says 18.1.1", () => {
   const banner = readVendored("marked.min.js").toString("latin1").slice(0, 300);
   const m = banner.match(/marked v(\d+\.\d+\.\d+)/);
   assert.ok(m, "no version banner found in the first 300 bytes: "
@@ -156,36 +111,44 @@ test("the vendored marked actually parses real markdown", () => {
 });
 
 test("marked accepts the exact options helpers.js sets at load", () => {
-  // helpers.js:187 - marked.setOptions({ breaks: true, mangle: false, headerIds: false }).
-  // `breaks` is the one with a visible effect and it must survive a bump.
-  // mangle/headerIds were removed upstream in v7 and are inert here; harmless,
-  // but exactly the sort of thing that silently changes meaning across a bump.
   const win = loadVendoredMarked();
   try {
-    win.marked.setOptions({ breaks: true, mangle: false, headerIds: false });
+    win.marked.setOptions({ breaks: true });
     assert.match(win.marked.parse("a\nb"), /<br\s*\/?>/,
       "breaks:true no longer turns a single newline into a <br>, so helpers.js's "
       + "load-time options are not taking effect");
   } finally { win.close(); }
 });
 
+test("dropping the legacy mangle/headerIds options changes nothing", () => {
+  const win = loadVendoredMarked();
+  try {
+    win.marked.setOptions({ breaks: true });
+    const out = win.marked.parse("# Title\n\n<me@example.com>");
+    assert.doesNotMatch(out, /<h1[^>]* id=/, "headings now carry generated ids");
+    assert.match(out, /href="mailto:me@example\.com"/,
+      "autolinked email addresses are no longer emitted verbatim");
+    assert.doesNotMatch(out, /&#x?[0-9a-f]+;/i, "email addresses are entity-obfuscated");
+  } finally { win.close(); }
+});
+
+test("marked.parse returns a string synchronously", () => {
+  const win = loadVendoredMarked();
+  try {
+    win.marked.setOptions({ breaks: true });
+    assert.equal(typeof win.marked.parse("x"), "string",
+      "helpers.js assigns the result of marked.parse straight into DOMPurify.sanitize");
+    assert.equal(win.marked.parse(""), "");
+  } finally { win.close(); }
+});
+
 test("marked does NOT sanitize, which is why DOMPurify is load-bearing", () => {
-  // THE CONTRACT THIS FILE EXISTS TO PIN. marked's own `sanitize` option was
-  // REMOVED upstream in v7; it passes raw HTML through by design and its README
-  // tells the caller to sanitize the OUTPUT. So localm's safety at
-  // helpers.js:276/290 rests entirely on DOMPurify running AFTER marked, never
-  // on marked itself. If a future bump made marked start escaping raw HTML this
-  // test goes red - the correct outcome, because the pipeline's rationale would
-  // have changed and the next reader should re-derive it rather than inherit a
-  // stale comment.
   const win = loadVendoredMarked();
   try {
     const out = win.marked.parse('<img src=x onerror="alert(1)">\n\n[l](javascript:alert(1))');
     assert.match(out, /onerror/,
-      "marked now strips event handlers. It did not before, and localm relies on "
-      + "DOMPurify for this - re-read helpers.js's pipeline comment before "
-      + "changing this test.");
+      "marked now strips event handlers; localm relies on DOMPurify for that");
     assert.match(out, /javascript:/,
-      "marked now filters javascript: URLs. Same note as above.");
+      "marked now filters javascript: URLs; localm relies on DOMPurify for that");
   } finally { win.close(); }
 });

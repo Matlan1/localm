@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { $, authHeaders, confirmDanger, el, readSSE, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, readSSE, toast, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
@@ -84,7 +84,7 @@ export function _catalogRow(p) {
     const req = el("button", "btn-primary", t("plugins.installRequirements"));
     req.style.marginLeft = "6px";
     req.dataset.reqfor = p.name;
-    req.onclick = () => installRequirements(p.name, missing);
+    req.onclick = () => installRequirements(p.name, missing, req);
     actions.appendChild(req);
   }
   // One-click install of missing pip extras (host-side; a remote client is told
@@ -104,17 +104,21 @@ export async function renderCatalogPlugins() {
   const box = $("catalog-table");
   if (!box) return;
   const myToken = ++_catalogRenderToken;
-  box.replaceChildren();
+  const loading = el("div", "sub catalog-status", t("plugins.loading"));
+  box.replaceChildren(loading);
   let data;
   try {
     const r = await fetch("/api/plugins", { headers: authHeaders() });
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
+    if (myToken !== _catalogRenderToken) return;
+    loading.remove();
     box.appendChild(emptyState("warning", t("plugins.loadFailed"), e.message));
     return;
   }
   if (myToken !== _catalogRenderToken) return;   // superseded while fetching
+  loading.remove();
   _autoInstallDeps = data.auto_install_plugin_deps !== false;
   const plugins = (data.plugins || []).filter((p) => p.builtin);
 
@@ -162,27 +166,34 @@ export async function renderCatalogPlugins() {
 export function _catalogBtn(action, name, cls, label) {
   const b = el("button", cls, label);
   b.style.marginLeft = "6px";
-  b.onclick = () => pluginCatalogAction(action, name);
+  b.onclick = () => pluginCatalogAction(action, name, b);
   return b;
 }
 
 // Install every plugin a given plugin requires but that is not yet installed.
 // Sequential; each result is toasted, then the catalog re-renders.
-export async function installRequirements(name, missing) {
-  for (const dep of missing) {
-    try {
-      const r = await fetch(`/api/plugins/${encodeURIComponent(dep)}/install`,
-                            { method: "POST", headers: authHeaders() });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        toast(`install ${dep}: ${d.detail || "failed"}`, true);
-      } else {
-        toast(`${dep}: ${d.status || "installed"}`);
+export async function installRequirements(name, missing, btn = null) {
+  await whileBusy(btn, t("plugins.working.install"), async () => {
+    for (let i = 0; i < missing.length; i++) {
+      const dep = missing[i];
+      if (btn) {
+        btn.textContent = t("plugins.installingRequirement",
+          { name: dep, current: i + 1, total: missing.length });
       }
-    } catch (e) {
-      toast(`install ${dep} failed: ${e.message}`, true);
+      try {
+        const r = await fetch(`/api/plugins/${encodeURIComponent(dep)}/install`,
+                              { method: "POST", headers: authHeaders() });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          toast(`install ${dep}: ${d.detail || "failed"}`, true);
+        } else {
+          toast(`${dep}: ${d.status || "installed"}`);
+        }
+      } catch (e) {
+        toast(`install ${dep} failed: ${e.message}`, true);
+      }
     }
-  }
+  });
   renderCatalogPlugins();
   refreshPluginCommands();
 }
@@ -262,8 +273,8 @@ export async function _maybeAutoInstallDeps(name) {
   } catch { /* best-effort */ }
 }
 
-export function pluginCatalogAction(action, name) {
-  const run = async () => {
+export function pluginCatalogAction(action, name, btn = null) {
+  const run = () => whileBusy(btn, t("plugins.working." + action), async () => {
     try {
       const r = await fetch(`/api/plugins/${encodeURIComponent(name)}/${action}`,
                             { method: "POST", headers: authHeaders() });
@@ -288,7 +299,7 @@ export function pluginCatalogAction(action, name) {
     if (window.bumpPluginsRev) window.bumpPluginsRev();
     // Auto-install the plugin's pip extras when the setting is on (host-only).
     if (action === "install" || action === "enable") _maybeAutoInstallDeps(name);
-  };
+  });
   if (action === "uninstall") {
     confirmDanger(t("plugins.uninstallConfirm.title", { name }),
       t("plugins.uninstallConfirm.body"), t("plugins.uninstall"), run);
@@ -303,11 +314,13 @@ export function pluginCatalogAction(action, name) {
    the static catalog). */
 export async function refreshPluginsPage() {
   const box = $("plugins-table");
-  box.replaceChildren();
+  const loading = el("div", "sub", t("plugins.loading"));
+  box.replaceChildren(loading);
   try {
     const r = await fetch("/api/plugins", { headers: authHeaders() });
     if (!r.ok) throw new Error(r.statusText);
     const all = await r.json();
+    loading.remove();
     const builtins = new Set((all.plugins || []).filter((p) => p.builtin)
       .map((p) => p.name));
     const data = {
@@ -347,14 +360,14 @@ export async function refreshPluginsPage() {
         rm.onclick = () => {
           confirmDanger(t("plugins.removeConfirm.title", { name: p.name }),
             t("plugins.removeConfirm.body"),
-            t("plugins.remove"), async () => {
+            t("plugins.remove"), () => whileBusy(rm, t("plugins.working.remove"), async () => {
               const rr = await fetch(
                 `/api/plugins/${encodeURIComponent(p.name)}/uninstall`,
                 { method: "POST", headers: authHeaders() });
               const dd = await rr.json().catch(() => ({}));
               if (rr.ok) { toast(t("plugins.removed", { name: p.name })); refreshPluginsPage(); }
               else toast(dd.detail || t("plugins.removeFailed"), true);
-            });
+            }));
         };
         actions.appendChild(rm);
         tr.appendChild(actions);
@@ -367,6 +380,7 @@ export async function refreshPluginsPage() {
       box.appendChild(pluginErrorLine(name, err));
     }
   } catch (e) {
+    loading.remove();
     box.appendChild(emptyState("warning", t("plugins.loadFailed"), e.message));
   }
 }
@@ -374,18 +388,20 @@ export async function refreshPluginsPage() {
 $("plugin-install").onclick = async () => {
   const source = $("plugin-source").value.trim();
   if (!source) { toast(t("plugins.enterSourcePath"), true); return; }
-  const r = await fetch("/api/plugins/install-external", {
-    method: "POST", headers: authHeaders(),
-    body: JSON.stringify({ source }),
+  await whileBusy($("plugin-install"), t("plugins.working.install"), async () => {
+    const r = await fetch("/api/plugins/install-external", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ source }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) {
+      toast(t("plugins.installedRestartHint", { name: data.name, version: data.version }));
+      $("plugin-source").value = "";
+      refreshPluginsPage();
+    } else {
+      toast(data.detail || t("plugins.installFailed"), true);
+    }
   });
-  const data = await r.json().catch(() => ({}));
-  if (r.ok) {
-    toast(t("plugins.installedRestartHint", { name: data.name, version: data.version }));
-    $("plugin-source").value = "";
-    refreshPluginsPage();
-  } else {
-    toast(data.detail || t("plugins.installFailed"), true);
-  }
 };
 
 // The catalog and external tables are painted from fetched data, not marked

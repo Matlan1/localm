@@ -70,8 +70,28 @@ class TestDecideUseMmap:
         assert (d.use_mmap, d.reason) == (None, "host_unknown")
 
     def test_auto_partial_offload_keeps_the_runtime_default(self):
+        d = decide_use_mmap("auto", False, 1 * GIB, 64 * GIB, 32 * GIB)
+        assert d == MmapDecision(None, "partial_offload", 1 * GIB, 64 * GIB, 32 * GIB)
+
+    def test_a_partial_offload_whose_cpu_weights_exceed_ram_says_so(self):
         d = decide_use_mmap("auto", False, 100 * GIB, 8 * GIB, 1 * GIB)
+        assert d == MmapDecision(None, "cpu_exceeds_ram", 100 * GIB, 8 * GIB, 1 * GIB)
+
+    def test_the_partial_offload_headroom_boundary_is_inclusive(self):
+        avail = 10 * GIB
+        fits = decide_use_mmap("auto", False, avail - HOST_RAM_HEADROOM_BYTES, None, avail)
+        over = decide_use_mmap("auto", False, avail - HOST_RAM_HEADROOM_BYTES + 1, None, avail)
+        assert fits.reason == "partial_offload"
+        assert over.reason == "cpu_exceeds_ram"
+
+    @pytest.mark.parametrize("host, avail", [(None, 1), (100 * GIB, None)])
+    def test_a_partial_offload_with_an_unknown_reading_is_not_flagged(self, host, avail):
+        d = decide_use_mmap("auto", False, host, None, avail)
         assert (d.use_mmap, d.reason) == (None, "partial_offload")
+
+    def test_off_keeps_the_ram_reading_for_the_load_warning(self):
+        d = decide_use_mmap("off", False, 100 * GIB, 8 * GIB, 1 * GIB)
+        assert d == MmapDecision(False, "user_off", 100 * GIB, 8 * GIB, 1 * GIB)
 
     @pytest.mark.parametrize("setting", [None, True, False, "", "maybe", 1])
     def test_anything_but_on_or_off_reads_as_auto(self, setting):
@@ -103,6 +123,48 @@ def _ram(total, available):
     return patch("localm.sysstats.system_ram", MagicMock(return_value=(total, available)))
 
 
+class TestSplitAndAdapterBytes:
+    def _split(self, tmp_path):
+        from tests.test_gguf_moe_vram_sizing import _T_STRING, _gguf_with_tensors
+        kv = [("general.architecture", _T_STRING, "llama")]
+        first = _gguf_with_tensors(tmp_path / "m-00001-of-00002.gguf", kv,
+                                   [("blk.0.attn_q.weight", [4], 0, 4096)])
+        _gguf_with_tensors(tmp_path / "m-00002-of-00002.gguf", kv,
+                           [("token_embd.weight", [4], 0, 5000)])
+        return first
+
+    def test_an_input_tensor_in_a_later_split_part_is_host_resident(self, tmp_path):
+        first = self._split(tmp_path)
+        assert _backend(first)._host_resident_bytes() == 5000
+
+    def test_adapter_bytes_are_vram_weights_and_not_host_resident(self, tmp_path):
+        model = _dense_model(tmp_path)
+        adapter = tmp_path / "adapter.gguf"
+        adapter.write_bytes(b"\0" * 7000)
+        base = _backend(model)
+        tuned = GgufBackend(str(model), n_ctx=64, adapters=[(str(adapter), 1.0)])
+        assert tuned._vram_model_bytes(0) - base._vram_model_bytes(0) == 7000
+        assert (tuned._effective_model_bytes_for_vram()
+                - base._effective_model_bytes_for_vram()) == 7000
+        assert tuned._host_resident_bytes() == base._host_resident_bytes()
+
+    def test_a_missing_adapter_file_adds_nothing(self, tmp_path):
+        model = _dense_model(tmp_path)
+        base = _backend(model)
+        tuned = GgufBackend(str(model), n_ctx=64,
+                            adapters=[(str(tmp_path / "gone.gguf"), 1.0)])
+        assert tuned._vram_model_bytes(0) == base._vram_model_bytes(0)
+
+    def test_two_adapters_add_both(self, tmp_path):
+        model = _dense_model(tmp_path)
+        a, b = tmp_path / "a.gguf", tmp_path / "b.gguf"
+        a.write_bytes(b"\0" * 100)
+        b.write_bytes(b"\0" * 250)
+        base = _backend(model)
+        tuned = GgufBackend(str(model), n_ctx=64, adapters=[(str(a), 1.0), (str(b), 0.5)])
+        assert tuned._vram_model_bytes(0) - base._vram_model_bytes(0) == 350
+
+
 class TestHostResidentBytes:
     def test_a_dense_full_offload_keeps_only_the_input_layer_in_ram(self, tmp_path):
         host = _backend(_dense_model(tmp_path))._host_resident_bytes()
@@ -129,6 +191,89 @@ class TestHostResidentBytes:
         assert _backend(tmp_path / "gone.gguf")._host_resident_bytes() is None
 
 
+class TestCpuHeldWeightBytes:
+    """llama.cpp puts blocks from n_layer + 1 - n_gpu_layers up, and the
+    output layer, on the GPU; the rest stays in system RAM."""
+
+    def test_no_gpu_layers_hold_the_whole_file(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
+        assert b._cpu_held_weight_bytes(0) == b._model_bytes()
+
+    def test_each_gpu_layer_takes_the_next_block_off_the_cpu(self, tmp_path):
+        b = _backend(_moe_model(tmp_path))
+        blocks = b._block_bytes()
+        assert len({total for total, _ in blocks.values()}) == len(blocks)
+        assert b._cpu_held_weight_bytes(1) - b._cpu_held_weight_bytes(2) == blocks[3][0]
+        assert b._cpu_held_weight_bytes(2) - b._cpu_held_weight_bytes(3) == blocks[2][0]
+        assert b._cpu_held_weight_bytes(4) - b._cpu_held_weight_bytes(5) == blocks[0][0]
+
+    def test_every_block_on_the_gpu_leaves_the_input_layer(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
+        assert b._cpu_held_weight_bytes(5) == b._host_resident_bytes()
+        assert b._cpu_held_weight_bytes(98) == b._host_resident_bytes()
+
+    def test_pinned_experts_in_gpu_blocks_stay_in_ram(self, tmp_path):
+        path = _moe_model(tmp_path)
+        two = _backend(path, n_cpu_moe=2)._cpu_held_weight_bytes(3)
+        three = _backend(path, n_cpu_moe=3)._cpu_held_weight_bytes(3)
+        assert three - two == _backend(path)._block_bytes()[2][1]
+
+    def test_pinned_experts_in_cpu_blocks_are_not_counted_twice(self, tmp_path):
+        path = _moe_model(tmp_path)
+        assert (_backend(path, n_cpu_moe=2)._cpu_held_weight_bytes(2)
+                == _backend(path)._cpu_held_weight_bytes(2))
+
+    def test_an_unreadable_header_is_unknown(self, tmp_path):
+        bad = tmp_path / "bad.gguf"
+        bad.write_bytes(b"\0" * 4096)
+        assert _backend(bad)._cpu_held_weight_bytes(24) is None
+        assert _backend(bad)._cpu_held_weight_bytes(0) == 4096
+
+    def test_a_missing_file_is_unknown(self, tmp_path):
+        assert _backend(tmp_path / "gone.gguf")._cpu_held_weight_bytes(0) is None
+
+
+class TestCpuDraftWeightBytes:
+    def _draft_backend(self, tmp_path, on_gpu):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"\0" * 7_000)
+        b = _backend(_dense_model(tmp_path))
+        b.spec_source = "draft"
+        b.spec_draft_model = str(draft)
+        b.draft_model_on_gpu = on_gpu
+        return b
+
+    def test_a_cpu_draft_model_counts_its_file(self, tmp_path):
+        assert self._draft_backend(tmp_path, False)._cpu_draft_weight_bytes() == 7_000
+
+    def test_a_gpu_draft_model_counts_nothing(self, tmp_path):
+        assert self._draft_backend(tmp_path, True)._cpu_draft_weight_bytes() == 0
+
+    def test_a_missing_draft_file_counts_nothing(self, tmp_path):
+        b = self._draft_backend(tmp_path, False)
+        b.spec_draft_model = str(tmp_path / "gone.gguf")
+        assert b._cpu_draft_weight_bytes() == 0
+
+    def test_a_cpu_draft_joins_the_ram_check(self, tmp_path):
+        b = self._draft_backend(tmp_path, False)
+        base = b._host_resident_bytes()
+        with _ram(64 * GIB, base + 7_000 + HOST_RAM_HEADROOM_BYTES - 1):
+            d = b._resolve_use_mmap(99, GPU)
+        assert (d.reason, d.host_bytes) == ("cpu_exceeds_ram", base + 7_000)
+
+    def test_a_cpu_draft_that_fits_is_a_plain_full_offload(self, tmp_path):
+        b = self._draft_backend(tmp_path, False)
+        with _ram(64 * GIB, 32 * GIB):
+            d = b._resolve_use_mmap(99, GPU)
+        assert d.reason == "fits_ram"
+
+    def test_with_no_gpu_the_draft_counts_wherever_it_was_placed(self, tmp_path):
+        b = self._draft_backend(tmp_path, True)
+        with _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(99, [])
+        assert (d.reason, d.host_bytes) == ("no_gpu", b._model_bytes() + 7_000)
+
+
 class TestResolveUseMmap:
     def test_moe_experts_that_fit_ram_load_unmapped(self, tmp_path):
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
@@ -145,7 +290,7 @@ class TestResolveUseMmap:
         host = b._host_resident_bytes()
         with _ram(64 * GIB, host + HOST_RAM_HEADROOM_BYTES - 1):
             d = b._resolve_use_mmap(99, GPU)
-        assert (d.use_mmap, d.reason, d.host_bytes) == (None, "exceeds_ram", host)
+        assert (d.use_mmap, d.reason, d.host_bytes) == (None, "cpu_exceeds_ram", host)
 
     def test_an_unreadable_ram_reading_keeps_mmap(self, tmp_path):
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
@@ -165,23 +310,38 @@ class TestResolveUseMmap:
             d = b._resolve_use_mmap(99, GPU)
         assert (d.use_mmap, d.reason) == (None, "exceeds_ram")
 
-    @pytest.mark.parametrize("setting, want", [("on", True), ("off", False)])
-    def test_an_explicit_setting_wins_and_reads_no_ram(self, tmp_path, setting, want):
+    def test_on_wins_and_reads_no_ram(self, tmp_path):
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
-        b.use_mmap = setting
-        free = 1 if setting == "off" else 1024 * GIB
-        with _ram(64 * GIB, free) as probe:
+        b.use_mmap = "on"
+        with _ram(64 * GIB, 1024 * GIB) as probe:
             d = b._resolve_use_mmap(99, GPU)
-        assert d.use_mmap is want
+        assert d.use_mmap is True
         assert probe.call_count == 0
 
-    @pytest.mark.parametrize("layers", [0, 24, 98])
-    def test_a_partial_offload_keeps_the_default_and_reads_no_ram(self, tmp_path, layers):
-        b = _backend(_moe_model(tmp_path))
+    def test_off_wins_and_keeps_the_ram_reading(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
+        b.use_mmap = "off"
         with _ram(64 * GIB, 1) as probe:
+            d = b._resolve_use_mmap(99, GPU)
+        assert d == MmapDecision(False, "user_off", b._host_resident_bytes(), 64 * GIB, 1)
+        assert probe.call_count == 1
+
+    @pytest.mark.parametrize("layers", [0, 3, 98])
+    def test_a_partial_offload_keeps_the_default(self, tmp_path, layers):
+        b = _backend(_moe_model(tmp_path))
+        with _ram(64 * GIB, 64 * GIB) as probe:
             d = b._resolve_use_mmap(layers, GPU)
-        assert (d.use_mmap, d.reason) == (None, "partial_offload")
-        assert probe.call_count == 0
+        assert d == MmapDecision(None, "partial_offload", b._cpu_held_weight_bytes(layers),
+                                 64 * GIB, 64 * GIB)
+        assert probe.call_count == 1
+
+    @pytest.mark.parametrize("layers", [0, 3, 98])
+    def test_a_partial_offload_whose_cpu_weights_exceed_ram_says_so(self, tmp_path, layers):
+        b = _backend(_moe_model(tmp_path))
+        held = b._cpu_held_weight_bytes(layers)
+        with _ram(64 * GIB, held + HOST_RAM_HEADROOM_BYTES - 1):
+            d = b._resolve_use_mmap(layers, GPU)
+        assert (d.use_mmap, d.reason, d.host_bytes) == (None, "cpu_exceeds_ram", held)
 
     def test_a_failing_host_byte_count_never_raises(self, tmp_path):
         b = _backend(_moe_model(tmp_path))
@@ -197,12 +357,18 @@ class TestNoGpu:
     RAM, so the load keeps the runtime default however little the input layer
     and experts weigh."""
 
-    def test_no_gpu_reading_keeps_the_default_and_reads_no_ram(self, tmp_path):
+    def test_no_gpu_reading_keeps_the_default(self, tmp_path):
         b = _backend(_dense_model(tmp_path))
         with _ram(64 * GIB, 64 * GIB) as probe:
             d = b._resolve_use_mmap(99, [])
-        assert (d.use_mmap, d.reason) == (None, "no_gpu")
-        assert probe.call_count == 0
+        assert d == MmapDecision(None, "no_gpu", b._model_bytes(), 64 * GIB, 64 * GIB)
+        assert probe.call_count == 1
+
+    def test_no_gpu_with_a_model_larger_than_ram_says_so(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
+        with _ram(64 * GIB, b._model_bytes() + HOST_RAM_HEADROOM_BYTES - 1):
+            d = b._resolve_use_mmap(99, [])
+        assert (d.use_mmap, d.reason) == (None, "cpu_exceeds_ram")
 
     def test_a_cpu_only_runtime_keeps_the_default_despite_a_gpu_reading(self, tmp_path):
         b = _backend(_dense_model(tmp_path))
@@ -231,16 +397,29 @@ class TestNoGpu:
     def test_a_failing_gpu_check_never_raises(self, tmp_path):
         b = _backend(_dense_model(tmp_path))
         with patch("localm.discover.native_backend_has_gpu",
-                   side_effect=OSError("unreadable")), _ram(64 * GIB, 64 * GIB) as probe:
+                   side_effect=OSError("unreadable")), _ram(64 * GIB, 64 * GIB):
             d = b._resolve_use_mmap(99, GPU)
         assert (d.use_mmap, d.reason) == (None, "no_gpu")
-        assert probe.call_count == 0
+
+    @pytest.mark.parametrize("layers", [1, 3, 98])
+    def test_partial_layers_with_no_gpu_count_the_whole_file(self, tmp_path, layers):
+        b = _backend(_moe_model(tmp_path))
+        with _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(layers, [])
+        assert (d.use_mmap, d.reason, d.host_bytes) == (None, "no_gpu", b._model_bytes())
+
+    def test_partial_layers_with_no_gpu_and_a_model_larger_than_ram_say_so(self, tmp_path):
+        b = _backend(_moe_model(tmp_path))
+        with _ram(64 * GIB, b._model_bytes() + HOST_RAM_HEADROOM_BYTES - 1):
+            d = b._resolve_use_mmap(3, [])
+        assert d.reason == "cpu_exceeds_ram"
 
     def test_an_explicit_off_still_wins_without_a_gpu(self, tmp_path):
         b = _backend(_dense_model(tmp_path))
         b.use_mmap = "off"
-        d = b._resolve_use_mmap(99, [])
-        assert (d.use_mmap, d.reason) == (False, "user_off")
+        with _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(99, [])
+        assert (d.use_mmap, d.reason, d.host_bytes) == (False, "user_off", b._model_bytes())
 
 
 # --------------------------------------------------------------------------- #
@@ -322,6 +501,73 @@ class TestLoadNativeWiring:
             _load(b, True)
         assert b.effective_use_mmap is True
         assert b.mmap_forced_by_ram is False
+
+    def test_a_partial_load_whose_cpu_weights_exceed_ram_is_flagged(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), n_gpu_layers=2)
+        with _ram(64 * GIB, 1 * GIB):
+            params = _load(b, True)
+        assert params["n_gpu_layers"] == 2 and params["use_mmap"] is None
+        assert b.last_mmap_decision.reason == "cpu_exceeds_ram"
+        assert b.mmap_forced_by_ram is True
+        assert b.mmap_cpu_from_disk is True
+
+    def test_a_partial_load_that_fits_is_not_flagged(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), n_gpu_layers=2)
+        with _ram(64 * GIB, 32 * GIB):
+            _load(b, True)
+        assert b.mmap_forced_by_ram is False
+        assert b.mmap_cpu_from_disk is False
+
+    def test_a_dense_full_offload_exceeding_ram_is_not_a_cpu_layer_load(self, tmp_path):
+        b = _backend(_dense_model(tmp_path))
+        with _ram(64 * GIB, 1 * GIB):
+            _load(b, True)
+        assert b.mmap_forced_by_ram is True
+        assert b.mmap_cpu_from_disk is False
+
+    def test_a_full_offload_with_pinned_experts_exceeding_ram_reads_them_every_token(
+            self, tmp_path):
+        b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
+        with _ram(64 * GIB, 1 * GIB):
+            _load(b, True)
+        assert b.mmap_forced_by_ram is True
+        assert b.mmap_cpu_from_disk is True
+
+    def test_an_unmapped_load_larger_than_ram_warns_before_it_starts(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), use_mmap="off")
+        order = []
+        with _ram(64 * GIB, 1 * GIB), \
+             patch("localm.inference.backends.gguf.console.print",
+                   lambda *a, **k: order.append(str(a[0]) if a else "")), \
+             patch("localm.debuglog.logger.warning") as warned:
+            _load_ordered(b, order)
+        first = next(i for i, line in enumerate(order) if "use_mmap is off" in line)
+        assert first < order.index("spawn")
+        assert "may fail or swap" in order[first]
+        assert warned.call_count == 1
+        assert b.mmap_ram_short_note and "may fail or swap" in b.mmap_ram_short_note
+
+    def test_an_unmapped_load_that_fits_does_not_warn(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), use_mmap="off")
+        order = []
+        with _ram(64 * GIB, 32 * GIB), \
+             patch("localm.inference.backends.gguf.console.print",
+                   lambda *a, **k: order.append(str(a[0]) if a else "")):
+            _load_ordered(b, order)
+        assert not any("use_mmap is off" in line for line in order)
+        assert b.mmap_ram_short_note == ""
+
+
+def _load_ordered(backend, order):
+    def _spawn(params, **_kw):
+        order.append("spawn")
+        return {"n_layers": 4, "kv_bytes_per_token": 0, "supports_images": False,
+                "weight_placement": [], "moe_skip_reason": None, "mmap": False}
+
+    with patch("localm.discover.list_gpus", return_value=(list(GPU), "ok")), \
+         patch("localm.inference.backends.llamacpp._runner.ModelRunner."
+               "spawn_and_load", side_effect=_spawn):
+        backend._load_native()
 
 
 # --------------------------------------------------------------------------- #

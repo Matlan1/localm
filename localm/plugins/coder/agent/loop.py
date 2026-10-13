@@ -22,7 +22,7 @@ from ..tools import ToolResult
 from ..audit import SessionMode
 from .constants import (
     _ACTION_VERBS, _IMPERATIVE_LEADS, _IMPERATIVE_ONLY_VERBS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
-    _NON_FILE_SUFFIXES,
+    _NON_FILE_SUFFIXES, _STATEMENT_LINKS, _STATEMENT_PARTICIPLES, _STATEMENT_PREDICATES,
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
     _SKILL_STATE_TOOLS,
 )
@@ -88,13 +88,28 @@ def _is_action_verb(word: str) -> bool:
     return word in _ACTION_VERBS or word in _IMPERATIVE_ONLY_VERBS
 
 
+def _is_statement_subject(rest: list[str]) -> bool:
+    """True when *rest*, the words after a clause-initial action word, make that
+    word the subject of a statement: an auxiliary or a failure verb ("Build is
+    red", "Search fails"), or a participle that ends the clause or is followed
+    by a linking word ("Build failed.", "Test failed on CI")."""
+    if not rest:
+        return False
+    if rest[0] in _STATEMENT_PREDICATES:
+        return True
+    return rest[0] in _STATEMENT_PARTICIPLES and (
+        len(rest) == 1 or rest[1] in _STATEMENT_LINKS)
+
+
 def demands_action(text: str) -> bool:
     """True when *text* tells the agent to DO something.
 
     An action verb counts when it is used as an imperative: it starts a clause
     (clauses split on commas, sentence ends, colons and line breaks; a leading
     "now", "yes" or "quickly" is skipped), or it follows a request prefix such as
-    "please", "can you", "I'd like you to", "try to". A text that is a question
+    "please", "can you", "I'd like you to", "try to". A clause that opens with
+    an action word as the subject of a statement ("Build failed.", "Search
+    fails with a 500") is not an imperative. A text that is a question
     (ends with a question mark or opens with an interrogative) demands an action
     only through such a request prefix, so "search fails with a 500, why?" does
     not.
@@ -112,10 +127,11 @@ def demands_action(text: str) -> bool:
     if _is_question(text):
         return False
     for clause in _RE_CLAUSE_SPLIT.split(lowered):
-        for word in _RE_WORD.findall(clause):
+        words = _RE_WORD.findall(clause)
+        for i, word in enumerate(words):
             if word in _IMPERATIVE_LEADS:
                 continue
-            if _is_action_verb(word):
+            if _is_action_verb(word) and not _is_statement_subject(words[i + 1:]):
                 return True
             break
     return False

@@ -24,7 +24,7 @@ function loadRealPipeline({ withSanitizer = true } = {}) {
   }
   assert.equal(typeof win.marked.parse, "function", "real marked did not load");
   assert.equal(typeof win.DOMPurify.sanitize, "function", "real DOMPurify did not load");
-  win.marked.setOptions({ breaks: true, mangle: false, headerIds: false });
+  win.marked.setOptions({ breaks: true });
   if (!withSanitizer) win.DOMPurify = { sanitize: (s) => s };   // control arm only
   return win;
 }

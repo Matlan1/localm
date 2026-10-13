@@ -12,6 +12,27 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Your own image and video models in the native backend.** The built-in stable-diffusion.cpp
+  backend now runs a diffusion model you pick, not only the ones localm downloads for you: a
+  FLUX.1, Chroma, SD3, SDXL, Qwen-Image, Z-Image or Wan model file is recognised from its
+  contents and gets its text encoders and VAE from your registered models automatically (a CLIP-L
+  fine-tune, a T5 or UMT5 encoder, a matching VAE). A choice you make for a component always wins,
+  and a component that is missing is offered as a download before generating. Steps, CFG and size
+  follow the model family when you leave them blank.
+- **LoRAs in the native backend.** Images and Video take one or more registered LoRAs with a
+  strength each; a LoRA made for another model family is applied with a note saying so.
+- **Model pickers on the Images, Video and Music pages.** With the native backend, each page has
+  a model dropdown plus the components and LoRAs that model uses, remembered per page and applied
+  to the next generation only. In Settings, the native model fields are dropdowns of your
+  registered models, with a custom path still possible.
+- **Register a single image model file.** `localm pull <file>.safetensors` now registers a lone diffusion model, text encoder, VAE or LoRA file, detecting its type,
+  instead of asking for a HuggingFace folder.
+- **A reply that depends only on the request.** `cache_prompt: false` on
+  `/v1/chat/completions`, `/v1/completions`, `/v1/messages` and `/v1/responses` makes a GGUF
+  model empty its prompt cache, process the whole prompt and answer on its own, after the
+  replies already running. The same request then gets the same reply whatever was asked
+  before it, even where the prompt cache would have changed a temperature-0 reply (unless
+  speculative drafting is on, or the context window grew in between).
 - **Transcription without Whisper.** `POST /v1/audio/transcriptions` now answers with an
   installed GGUF model that hears audio (for example Qwen3-ASR) when faster-whisper is not
   installed, or when `model` names one. Whisper stays the default when it is installed. This
@@ -399,6 +420,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **The chat's Markdown renderer moved from marked 12 to marked 18.** Messages render the same; the visible differences are a half-typed list marker (`- `, `1. `) showing as an empty list while a reply streams in, and no stray blank line between consecutive HTML blocks.
 - **localm's managed ComfyUI now installs v0.39.0, up from v0.31.1.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **The bundled llama.cpp runtime moved from b11118 to b11541.** An existing install picks it up with `localm setup-llama --force`.
 - **Linux CUDA setup installs fixed NVIDIA runtime libraries.** `localm setup-llama` on Linux now fetches a pinned, checksum-verified version of the CUDA runtime and cuBLAS libraries instead of whichever version PyPI lists as newest.
@@ -509,6 +531,62 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `cache/glcache` inside it. A location you set yourself with `MESA_SHADER_CACHE_DIR` or
   `__GL_SHADER_DISK_CACHE_PATH` is used as you set it. Files already in the old location are
   left where they are.
+- **Zed lists localm's models even when one model's file is gone.** `/api/tags` and `/api/show` gave
+  such a model a `null` `modified_at`, and Zed rejects the whole model list on a `null` there; the
+  field is now always a date (1970-01-01 when the file's time cannot be read).
+- **`localm pull` of a Qwen3-TTS model fetches a projector that works.** In a repo that ships both a
+  Q8_0 and an f16 projector (such as `mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF`), the pull took the
+  f16 one, and speaking with it crashed the speech worker on the CPU and on AMD ROCm. A text-to-speech
+  pull now takes the Q8_0 projector, then bf16, and f16 only when nothing else is there.
+- **Brave Search failures named correctly.** When web search falls back to Brave and localm cannot read
+  the page Brave sends, the message now says so instead of calling it a bot check (Brave's normal
+  results page mentions captchas in its interface text).
+- **A failed image generation names the real reason.** `/v1/images/generations` answered a failed
+  generation with the chat model's reload note ("Reload deferred to the next message"), which comes
+  after it; the `502` now quotes what the image backend reported.
+- **`localm comfy setup` copies an AMD ROCm or StabilityMatrix ComfyUI.** Replicating a ComfyUI whose PyTorch came from
+  AMD's per-GPU ROCm packages (`amd-torch-device-gfx1030` and similar, as StabilityMatrix installs on
+  Windows) failed with "pip found no matching version"; those packages now install from AMD's own index.
+  The copy also finds the models your ComfyUI finds through its own `extra_model_paths.yaml` (such as
+  StabilityMatrix's shared models folder), not only those under its `models` folder.
+- **Document attachments without the Knowledge plugin.** Attaching a text document, PDF or code file in
+  Chat or the Coder no longer fails with "Method Not Allowed" when the Knowledge plugin is not
+  installed: attachments are now converted to text by the built-in chat plugin
+  (`POST /api/chat/extract`), still entirely in memory. An API key needs the `chat` scope for
+  this, where the old route needed `rag`.
+- **A model split between GPU and system RAM says when its RAM part does not fit.** A load that keeps
+  layers on the CPU (a partial offload, a machine with no GPU, or a draft model placed on the CPU) whose
+  weights in system RAM do not fit available RAM now says in the load output, the GUI load toast and the
+  load response (`mmap_cpu_from_disk`) that its CPU layers read from disk-backed memory and every token is
+  slower. With `use_mmap off`, such a load warns before it starts that it may fail or swap.
+- **One CPU backend, the best match for the CPU, on upstream llama.cpp builds.** With a Vulkan, CUDA or
+  CPU build from llama.cpp's releases, localm registered every CPU variant the processor supports and
+  ran CPU work on the first one by name; it now lets the build pick the single variant it scores best for
+  the processor.
+- **MTP leaves room for its draft cache at the automatic context ceiling.** With MTP or a draft model on
+  the GPU, the automatic context ceiling now counts the draft context's cache, which grows with the
+  context, so a reply that fills the window no longer moves the cache to system RAM and slows down.
+- **Draft-model drafting says when it is off, and loads more safely.** When the configured
+  draft model (`spec_draft_model`) cannot draft for the loaded model (not found, not a GGUF
+  file, a different vocabulary, recurrent layers, failed to load, or slower than decoding
+  without it), loading prints why. A draft model whose file already shows it cannot draft
+  is no longer loaded onto the GPU first, a compatible one is no longer left out of the VRAM
+  plan when its tokenizer flags are not written in the file, a draft model on the CPU keeps
+  its cache on the CPU when the context grows, and an unexpected error while setting it up
+  leaves the model loaded without drafting. A crash while loading the draft model now names
+  the draft model and `spec_source` instead of advising a smaller context, and replacing the
+  draft model file clears the retry back-off.
+- **gpt-oss replies reach their answer.** A gpt-oss reply stopped at the end of its
+  reasoning, so the answer came back empty; it now continues into the answer.
+- **Thinking off on gpt-oss.** Asking a model to answer without reasoning
+  (`chat_template_kwargs: {"enable_thinking": false}`, `reasoning_effort: "none"`, and the
+  summary written when a long conversation is compacted) now starts a gpt-oss reply in its
+  final channel, with no analysis before it. Before, only models that reason in `<think>`
+  blocks were affected.
+- **A llama runtime whose context-parameter layout cannot be told apart is refused.** When
+  a provided llama.cpp build's default context parameters fit both the layout with and the
+  one without the MoE expert cache field, loading stops with the ABI mismatch message
+  instead of assuming the older layout.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's
@@ -533,7 +611,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   part of a prompt its KV cache does not already hold from earlier requests, and that can
   change the reply, even at temperature 0. The coder's Seed tooltip, `localcoder --seed` and
   the docs said the same seed, model, prompt and settings always give the same output; they
-  now say a reply can also depend on what the model answered before.
+  now say a reply can also depend on what the model answered before, or on n-gram
+  speculative drafting when it is on.
 - **"Delete saved data" now also removes the voices folder.** The named reference voices
   for text-to-speech were left behind. A legacy data folder with no record of what was in it
   before LocaLM keeps a voices folder.
@@ -1735,6 +1814,40 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`localm coder --estimate` stops after printing the plan.** It used to print the
   plan and then run the task anyway, writing files and, with `--yes`, running shell
   commands; with `--output-format json` it also printed a second JSON document.
+- **Chat says when an answer had no web evidence.** With web access on, an answer that follows a
+  web lookup that failed, found nothing, or was refused now carries a visible "no web evidence
+  was available for this answer" line, so an answer written from the model's own knowledge is not
+  mistaken for one backed by a search.
+- **Web calls written as `[tool_call]...[/tool_call]` now run in chat.** A model that wraps its web
+  search or page read in bracket tags (also with a mismatched closing tag, or in capitals) gets the
+  lookup run, and the raw tag no longer shows in the reply.
+- **The Coder no longer forces tools on a status report.** A message like "Build failed." or "Search
+  fails with a timeout" is treated as a statement rather than an order, while "fix failed tests"
+  still counts as one.
+- **Plugins, Models and Settings show what they are waiting for.** The plugin catalog and external
+  list show "Loading plugins", install, enable, disable, refresh, uninstall and remove buttons show
+  their working state, "Check for updates" says it is checking, removing a model shows "Removing",
+  a model's info and relocate buttons show that they are working, the Models page and the
+  instances card show a loading line on first open, and Settings shows that its remaining
+  sections are still loading.
+- **Adding one Ollama model folder keeps its vision projector.** `localm add` on a single
+  Ollama manifest folder now attaches the model's vision projector, as adding the whole Ollama
+  store already did.
+- **A Hugging Face cache whose `blobs` folder is a link to another drive** now registers the
+  model from its snapshot path, not from the hash-named blob.
+- **Quantizations localm cannot load are named.** A Hugging Face folder quantized with a
+  method the loader has no support for (for example `squeezellm`) is registered with a note
+  naming the method and refused at load, instead of having its packed weights read as plain
+  ones. Old-format LoRA adapters and llama.cpp session files are now recognised and explained,
+  and a text file named `.plan`, `.task` or `.engine` is no longer described as a TensorRT or
+  MediaPipe file.
+- **Memory estimates for split GGUF models and LoRA adapters.** An embedding table stored in
+  a later part of a split GGUF now counts as host memory, and attached LoRA adapters now count
+  toward the VRAM estimate.
+- **Linux CUDA setup without the GitHub API.** When the release listing cannot be read
+  (offline, or the API rate limit is hit), setup installs the pinned CUDA build and checks it
+  against its pinned checksum. On a machine with GPUs of different generations, one Blackwell
+  GPU now selects the CUDA 13 build.
 
 ### Security
 - **A plain `coder` API key can no longer run commands through the project's coder

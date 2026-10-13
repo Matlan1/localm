@@ -123,7 +123,7 @@ def _tag_object(name: str, entry: dict, facts: tuple[int, Optional[float], str])
     return {
         "name": name,
         "model": name,
-        "modified_at": P.iso_from_timestamp(mtime) if mtime is not None else None,
+        "modified_at": P.iso_from_timestamp(mtime if mtime is not None else 0),
         "size": size,
         "digest": P.digest_of(entry),
         "details": _entry_details(entry, fmt),
@@ -239,8 +239,8 @@ def register(app: FastAPI, ctx) -> None:
                 "template": "",
                 "details": _entry_details(entry, facts[2]),
                 "model_info": info,
-                "modified_at": (P.iso_from_timestamp(facts[1])
-                                if facts[1] is not None else None),
+                "modified_at": P.iso_from_timestamp(
+                    facts[1] if facts[1] is not None else 0),
                 "capabilities": capabilities,
             }
 

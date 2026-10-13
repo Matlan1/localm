@@ -22,6 +22,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -316,7 +317,7 @@ def test_rewrite_moves_exactly_the_rocm_pin_regions_of_the_real_pins_file(cand):
 
 def test_rewrite_leaves_everything_outside_the_rocm_regions_byte_identical(cand):
     new = bump.rewrite_pins(REAL_PINS, cand)
-    start = REAL_PINS.index("# tag b11118 upstream assets")
+    start = REAL_PINS.index(re.search(r"# tag \S+ upstream assets \(_PINNED_TAG\)", REAL_PINS).group(0))
     end = REAL_PINS.index("    # tag " + REAL_VIEW.tag + " ROCm assets")
     assert REAL_PINS[start:end] in new, "the ggml-org block, which bump_llama_pin.py owns, is untouched"
     assert REAL_PINS[:REAL_PINS.index("DEFAULT_URL")] in new
