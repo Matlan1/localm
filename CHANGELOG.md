@@ -504,22 +504,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
-- **Chat says when an answer had no web evidence.** With web access on, an answer that follows a
-  web lookup that failed, found nothing, or was refused now carries a visible "no web evidence
-  was available for this answer" line, so an answer written from the model's own knowledge is not
-  mistaken for one backed by a search.
-- **Web calls written as `[tool_call]...[/tool_call]` now run in chat.** A model that wraps its web
-  search or page read in bracket tags (also with a mismatched closing tag, or in capitals) gets the
-  lookup run, and the raw tag no longer shows in the reply.
-- **The Coder no longer forces tools on a status report.** A message like "Build failed." or "Search
-  fails with a timeout" is treated as a statement rather than an order, while "fix failed tests"
-  still counts as one.
-- **Plugins, Models and Settings show what they are waiting for.** The plugin catalog and external
-  list show "Loading plugins", install, enable, disable, refresh, uninstall and remove buttons show
-  their working state, "Check for updates" says it is checking, removing a model shows "Removing",
-  a model's info and relocate buttons show that they are working, the Models page and the
-  instances card show a loading line on first open, and Settings shows that its remaining
-  sections are still loading.
+- **Document attachments without the Knowledge plugin.** Attaching a text document, PDF or code file in
+  Chat or the Coder no longer fails with "Method Not Allowed" when the Knowledge plugin is not
+  installed: attachments are now converted to text by the built-in chat plugin
+  (`POST /api/chat/extract`), still entirely in memory. An API key needs the `chat` scope for
+  this, where the old route needed `rag`.
 - **A model split between GPU and system RAM says when its RAM part does not fit.** A load that keeps
   layers on the CPU (a partial offload, a machine with no GPU, or a draft model placed on the CPU) whose
   weights in system RAM do not fit available RAM now says in the load output, the GUI load toast and the
@@ -1759,6 +1748,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`localm coder --estimate` stops after printing the plan.** It used to print the
   plan and then run the task anyway, writing files and, with `--yes`, running shell
   commands; with `--output-format json` it also printed a second JSON document.
+- **Chat says when an answer had no web evidence.** With web access on, an answer that follows a
+  web lookup that failed, found nothing, or was refused now carries a visible "no web evidence
+  was available for this answer" line, so an answer written from the model's own knowledge is not
+  mistaken for one backed by a search.
+- **Web calls written as `[tool_call]...[/tool_call]` now run in chat.** A model that wraps its web
+  search or page read in bracket tags (also with a mismatched closing tag, or in capitals) gets the
+  lookup run, and the raw tag no longer shows in the reply.
+- **The Coder no longer forces tools on a status report.** A message like "Build failed." or "Search
+  fails with a timeout" is treated as a statement rather than an order, while "fix failed tests"
+  still counts as one.
+- **Plugins, Models and Settings show what they are waiting for.** The plugin catalog and external
+  list show "Loading plugins", install, enable, disable, refresh, uninstall and remove buttons show
+  their working state, "Check for updates" says it is checking, removing a model shows "Removing",
+  a model's info and relocate buttons show that they are working, the Models page and the
+  instances card show a loading line on first open, and Settings shows that its remaining
+  sections are still loading.
 
 ### Security
 - **A plain `coder` API key can no longer run commands through the project's coder

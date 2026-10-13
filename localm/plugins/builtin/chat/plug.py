@@ -8,6 +8,7 @@ the ``chat`` capability):
 
   GET/PUT/DELETE /api/conversations[/{id}]   - server-side conversation store
   GET/PUT/DELETE /api/prompts[/{name}]       - prompt library / personas
+  POST           /api/chat/extract           - attachment -> text (in memory)
 
 Durable chat MEMORY (recall + consolidation + the /api/memory* routes) is a
 SEPARATE, opt-in plugin (localm/plugins/builtin/memory); chat does not depend on
@@ -30,6 +31,7 @@ the data dir and survive reloads and other devices on the LAN.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -54,6 +56,13 @@ class ConversationUpsert(BaseModel):
     pinned_model: str | None = Field(None, max_length=256)
     branches: list = []           # parked message-branch tails (fork points)
     messages: list = []
+
+
+class AttachmentExtractRequest(BaseModel):
+    filename: str
+    content_b64: str              # in-memory extraction - no disk writes
+    # None = the whole file. A number requests an excerpt of that many characters.
+    max_chars: int | None = None
 
 
 class PromptUpsert(BaseModel):
@@ -315,6 +324,25 @@ async def prompt_delete(name: str):
     del data[name]
     _save_prompts(data)
     return {"status": "deleted", "name": name}
+
+
+# ------------------------------------------------------------------ #
+#  Attachments                                                        #
+# ------------------------------------------------------------------ #
+
+@_router.post("/api/chat/extract")
+async def chat_extract(req: AttachmentExtractRequest):
+    """A chat or coder attachment -> plain text, entirely in memory, on the
+    plugin pool."""
+    from localm.executor import get_plugin_executor
+    from localm.rag.attachment import AttachmentError, extract_attachment
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(
+            get_plugin_executor(), extract_attachment,
+            req.filename, req.content_b64, req.max_chars)
+    except AttachmentError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
 
 
 # ------------------------------------------------------------------ #

@@ -61,7 +61,7 @@ with its own reason; scripts/bump_comfyui_pin.py reads that receipt.
 
 Usage:
     python scripts/confirm_comfyui_runtime.py --tag v0.32.0 --commit <40-hex> \\
-        --workdir D:/projects/localm-pin-pipeline-comfy-scratch --receipt r.json \\
+        --workdir <scratch> --receipt r.json \\
         --phase provision
     ... --phase smoke ...
     ... --phase teardown
