@@ -339,6 +339,7 @@ test("a failed or superseded options fetch leaves the filled dropdowns alone", a
   await tick(); await tick();
   const before = $("img-sampler").options.length;
   assert.ok(before > 1);
-  runScript(win, "imageGen.populate(null);");
+  runScript(win, "try { imageGen.populate(null); globalThis.__err = ''; } catch (e) { globalThis.__err = String(e); }");
+  assert.equal(win.__err, "", "populate(null) must not throw");
   assert.equal($("img-sampler").options.length, before);
 });
