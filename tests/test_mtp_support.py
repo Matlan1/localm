@@ -1143,7 +1143,8 @@ def test_mtp_draft_vram_charges_kv_plus_the_flat_overhead_when_eligible():
 
 
 def test_mtp_draft_vram_charges_the_draft_batch_of_logits_when_the_vocab_is_known():
-    from localm.inference.backends.llamacpp._sizing import MTP_DRAFT_COMPUTE_MARGIN_BYTES
+    from localm.inference.backends.llamacpp._sizing import (
+        MTP_DRAFT_BYTES_PER_VOCAB_ROW, MTP_DRAFT_COMPUTE_MARGIN_BYTES)
     n_vocab = 248_320
     b = _mtp_sizing_backend(n_ctx=4096)
     with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
@@ -1152,7 +1153,8 @@ def test_mtp_draft_vram_charges_the_draft_batch_of_logits_when_the_vocab_is_know
                return_value=(24, n_vocab)):
         charge = b._mtp_draft_context_vram_bytes()
     batch = LlamaCppModule._MTP_DRAFT_BATCH
-    assert charge == 4096 * 1000 + n_vocab * batch * 4 + MTP_DRAFT_COMPUTE_MARGIN_BYTES
+    assert charge == (4096 * 1000 + n_vocab * batch * MTP_DRAFT_BYTES_PER_VOCAB_ROW
+                      + MTP_DRAFT_COMPUTE_MARGIN_BYTES)
 
 
 def test_mtp_draft_vram_scales_with_the_main_context_past_2048_tokens():
@@ -1821,9 +1823,9 @@ def test_a_small_context_gets_a_batch_no_larger_than_itself():
     llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
     with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
         made = _context_factory(mock_api)
-        llm._create_mtp_context(256)
+        llm._create_mtp_context(32)
 
-    assert (made[0].n_ctx, made[0].n_batch, made[0].n_ubatch) == (256, 256, 256)
+    assert (made[0].n_ctx, made[0].n_batch, made[0].n_ubatch) == (32, 32, 32)
 
 
 def test_the_draft_batch_holds_every_draft_decode_outside_a_refill():

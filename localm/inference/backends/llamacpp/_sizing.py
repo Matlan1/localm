@@ -58,8 +58,12 @@ def embedder_ctx_reservation_bytes() -> int:
 # weights for them to be read into memory instead of memory-mapped.
 HOST_RAM_HEADROOM_BYTES = 2 * 1024 ** 3
 
-# VRAM the MTP draft context takes beyond its KV cache and logits buffer.
-MTP_DRAFT_COMPUTE_MARGIN_BYTES = 256 * 1024 * 1024
+# Bytes per vocabulary entry per batch row of the MTP draft context: its
+# logits (4) and the buffers of its backend draft sampler (8).
+MTP_DRAFT_BYTES_PER_VOCAB_ROW = 12
+
+# VRAM the MTP draft context takes beyond its KV cache and per-row buffers.
+MTP_DRAFT_COMPUTE_MARGIN_BYTES = 384 * 1024 * 1024
 
 
 class MmapDecision(NamedTuple):
@@ -748,10 +752,7 @@ class VramSizingMixin:
         Two charges: the draft context's own KV cache, sized to the main
         ``self.n_ctx`` (the draft context is created at the main context's size)
         and its own nextn/draft layer count rather than the whole stack; and its
-        compute buffers: the logits of ``llama._MTP_DRAFT_BATCH`` rows of the
-        vocabulary (``logits_buffer_bytes``) plus ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``,
-        or the flat ``_VRAM_OVERHEAD_BYTES`` when the header gives no vocabulary
-        size.
+        compute buffers (:meth:`_mtp_draft_compute_bytes`).
 
         Eligibility is the SAME two-part gate llama_model_mtp_support checks
         on an already-loaded model (declared nextn metadata AND an
@@ -787,18 +788,19 @@ class VramSizingMixin:
         return charge
 
     def _mtp_draft_compute_bytes(self, path: Path) -> int:
-        """Compute-buffer VRAM of the MTP draft context for the model at
-        *path*: the logits of ``llama._MTP_DRAFT_BATCH`` rows of its vocabulary
-        plus ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``, or ``_VRAM_OVERHEAD_BYTES``
-        when the GGUF header gives no vocabulary size."""
+        """VRAM of the MTP draft context beyond its KV cache, for the model at
+        *path*: ``MTP_DRAFT_BYTES_PER_VOCAB_ROW`` per vocabulary entry for each
+        of its ``min(n_ctx, llama._MTP_DRAFT_BATCH)`` batch rows, plus
+        ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``; ``_VRAM_OVERHEAD_BYTES`` when the
+        GGUF header gives no vocabulary size."""
         from localm.model_manager.gguf import _gguf_split_layout_meta
         from .llama import _MTP_DRAFT_BATCH
-        from ._split_fit import logits_buffer_bytes
         meta = _gguf_split_layout_meta(path)
         n_vocab = meta[1] if meta else 0
         if not n_vocab:
             return self._VRAM_OVERHEAD_BYTES
-        return (logits_buffer_bytes(n_vocab, self.n_ctx, max_batch=_MTP_DRAFT_BATCH)
+        rows = max(1, min(int(self.n_ctx), _MTP_DRAFT_BATCH))
+        return (rows * int(n_vocab) * MTP_DRAFT_BYTES_PER_VOCAB_ROW
                 + MTP_DRAFT_COMPUTE_MARGIN_BYTES)
 
     def _recurrent_state_vram_bytes(self) -> int:

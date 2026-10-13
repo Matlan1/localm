@@ -805,7 +805,7 @@ _PREFILL_CHUNK = 2048
 # n_batch and n_ubatch of the MTP draft context, and the chunk size the draft
 # cache is refilled in. Must stay above _MTP_QUEUED_ROWS_MAX + 1, the most rows
 # one draft decode carries outside a refill.
-_MTP_DRAFT_BATCH = 512
+_MTP_DRAFT_BATCH = 64
 
 # Coarse decode-progress heartbeat: every N generated tokens, never per token
 # (a per-token line would flood the shared debug log and the bug-report
