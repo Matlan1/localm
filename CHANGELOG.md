@@ -617,6 +617,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
   cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
   dropped. A model worker that does not exit when stopped is killed.
+- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
