@@ -503,9 +503,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
-- **`localm comfy setup` copies an AMD ROCm ComfyUI.** Replicating a ComfyUI whose PyTorch came from
+- **`localm comfy setup` copies an AMD ROCm or StabilityMatrix ComfyUI.** Replicating a ComfyUI whose PyTorch came from
   AMD's per-GPU ROCm packages (`amd-torch-device-gfx1030` and similar, as StabilityMatrix installs on
   Windows) failed with "pip found no matching version"; those packages now install from AMD's own index.
+  The copy also finds the models your ComfyUI finds through its own `extra_model_paths.yaml` (such as
+  StabilityMatrix's shared models folder), not only those under its `models` folder.
 - **Small message fixes.** `localm adapter detach` says the change applies the next time the base model
   loads. `localm pull` says "reranker" instead of "embedding model" for a reranker GGUF. A network bind
   without a key points at `localm key generate` instead of a PowerShell-only command. The coder's

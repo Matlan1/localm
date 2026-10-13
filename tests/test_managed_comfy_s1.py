@@ -209,6 +209,83 @@ def test_extra_model_paths_includes_both_dirs(home, tmp_path):
     assert str(user_comfy / "models") in base_paths            # user's models dir
 
 
+def _comfy_search_paths(yaml_text: str, yaml_dir: Path) -> dict:
+    """{folder type: [paths]} the way ComfyUI's utils/extra_config.py resolves
+    an extra_model_paths.yaml placed in *yaml_dir*."""
+    import os
+
+    import yaml
+    out: dict = {}
+    for conf in (yaml.safe_load(yaml_text) or {}).values():
+        if not conf:
+            continue
+        conf = dict(conf)
+        base = conf.pop("base_path", None)
+        if base and not os.path.isabs(base):
+            base = os.path.abspath(os.path.join(yaml_dir, base))
+        conf.pop("is_default", None)
+        for kind, value in conf.items():
+            for y in str(value).split("\n"):
+                if not y:
+                    continue
+                full = os.path.join(base, y) if base else (
+                    y if os.path.isabs(y) else os.path.abspath(os.path.join(yaml_dir, y)))
+                out.setdefault(kind, []).append(os.path.normpath(full))
+    return out
+
+
+def test_the_users_own_extra_model_paths_are_carried_over(home, tmp_path):
+    import os
+    user_comfy = tmp_path / "user-comfy"
+    (user_comfy / "models").mkdir(parents=True)
+    shared = tmp_path / "Data" / "Models"
+    (user_comfy / "extra_model_paths.yaml").write_text(
+        "stability_matrix:\n"
+        "  checkpoints: |-\n"
+        f"    {(shared / 'StableDiffusion').as_posix()}\n"
+        "  vae: |-\n"
+        f"    {(shared / 'VAE').as_posix()}\n"
+        "  loras: |-\n"
+        f"    {(shared / 'Lora').as_posix()}\n"
+        f"    {(shared / 'LyCORIS').as_posix()}\n"
+        "# a comment between sections\n"
+        "relative_one:\n"
+        "    base_path: ../more\n"
+        "    unet: unet\n"
+        "bare_relative:\n"
+        "  clip: extra/clip\n", encoding="utf-8")
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(user_comfy)})
+    paths = mc.managed_comfy_paths()
+    paths.root.mkdir(parents=True, exist_ok=True)
+    out = mc.write_extra_model_paths()
+
+    got = _comfy_search_paths(out.read_text(encoding="utf-8"), out.parent)
+    want = _comfy_search_paths(
+        (user_comfy / "extra_model_paths.yaml").read_text(encoding="utf-8"), user_comfy)
+    for kind, user_paths in want.items():
+        assert set(user_paths) <= set(got[kind]), kind
+    assert os.path.normpath(str(shared / "VAE")) in got["vae"]
+    assert os.path.normpath(str(tmp_path / "more" / "unet")) in got["unet"]
+    assert os.path.normpath(str(user_comfy / "extra" / "clip")) in got["clip"]
+    assert os.path.normpath(str(paths.models_dir / "vae")) in got["vae"]
+
+
+def test_an_unsupported_user_extra_model_paths_is_not_copied(home, tmp_path, caplog):
+    import yaml
+    user_comfy = tmp_path / "user-comfy"
+    (user_comfy / "models").mkdir(parents=True)
+    (user_comfy / "extra_model_paths.yaml").write_text(
+        "odd:\n  base_path: |-\n    /somewhere\n  vae: vae\n", encoding="utf-8")
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(user_comfy)})
+    paths = mc.managed_comfy_paths()
+    paths.root.mkdir(parents=True, exist_ok=True)
+    with caplog.at_level("WARNING"):
+        out = mc.write_extra_model_paths()
+    data = yaml.safe_load(out.read_text(encoding="utf-8"))
+    assert set(data) == {"localm_managed", "user_comfyui"}
+    assert "not shared" in caplog.text
+
+
 def test_extra_model_paths_managed_only_without_workdir(home):
     """No comfy_workdir -> only the managed models dir is referenced (fresh path)."""
     import yaml
