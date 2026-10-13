@@ -855,8 +855,16 @@ def _review_only_advancers() -> list[Advancer]:
                  post_bump_cmds=(("npm", "ci"), ("npm", "test")))
         for name in ("marked", "DOMPurify", "highlight.js", "KaTeX")
     ]
+    tts_bundle = [
+        Advancer(f"vendored-{name.lower().replace('.', '')}", f"vendored {name}", None,
+                 "scripts/bump_tts_bundle.py", candidate=_vendored_candidate(name),
+                 bump_args=("--lib", name), gpu=False, auto_merge=lambda old, new: False,
+                 post_bump_cmds=(("npm", "ci"), ("npm", "test")))
+        for name in ("kokoro-js", "transformers.js")
+    ]
     return [
         *vendored,
+        *tts_bundle,
         Advancer("cuda-runtime", "Linux CUDA runtime wheels", None,
                  "scripts/bump_cuda_runtime_pin.py", candidate=_cuda_runtime_candidate, gpu=False),
         Advancer("amd-wheels", "AMD ROCm torch and SDK wheels", None,
