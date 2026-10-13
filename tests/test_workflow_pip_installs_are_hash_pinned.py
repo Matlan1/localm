@@ -4,8 +4,9 @@
 ``_unpinned`` applies the rule OpenSSF Scorecard's Pinned-Dependencies check uses
 for pip: a command passes with ``--require-hashes``, or as an editable install of
 local source with ``--no-deps``; ``python -m pip install --upgrade pip`` and a
-bare package name do not. The CPU torch set (optional-stacks) and the mutmut set
-(mutation jobs) are committed, hash-locked files.
+bare package name do not. The CPU torch set (optional-stacks), the mutmut set
+(mutation jobs) and the build toolchain set (release builds) are committed,
+hash-locked files.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 TORCH_CPU = ROOT / ".github" / "requirements" / "torch-cpu.txt"
 MUTMUT = ROOT / ".github" / "requirements" / "mutmut.txt"
+BUILD = ROOT / ".github" / "requirements" / "build.txt"
 
 _FLAG = re.compile(r"^(\-\-?\w+)+$")
 _REMOTE = re.compile(r"^(git|svn|hg|bzr).+$")
@@ -101,9 +103,7 @@ def test_the_rule_classifies_known_commands(command, unpinned):
     assert bool(_unpinned_commands(command)) is unpinned
 
 
-# publish-pypi.yml waits for its own change: its workflow_dispatch publishes.
-@pytest.mark.parametrize("workflow", sorted(
-    p for p in WORKFLOWS.glob("*.yml") if p.name != "publish-pypi.yml"), ids=lambda p: p.name)
+@pytest.mark.parametrize("workflow", sorted(WORKFLOWS.glob("*.yml")), ids=lambda p: p.name)
 def test_every_pip_install_in_the_workflow_is_hash_pinned(workflow):
     assert _offenders(workflow) == []
 
@@ -129,7 +129,7 @@ def test_every_committed_requirement_set_is_fully_hash_locked(requirements):
 
 def test_the_requirement_sets_directory_holds_the_sets_the_currency_check_covers():
     names = {p.name for p in (ROOT / ".github" / "requirements").glob("*.txt")}
-    assert names == {"torch-cpu.txt", "mutmut.txt"}
+    assert names == {"torch-cpu.txt", "mutmut.txt", "build.txt"}
 
 
 def test_the_torch_cpu_set_is_hash_locked_and_pins_the_cpu_build():
@@ -151,3 +151,19 @@ def test_the_optional_stacks_job_installs_the_torch_cpu_set_with_hashes():
 @pytest.mark.parametrize("job", ["mutation-run", "mutation-test"])
 def test_the_mutation_jobs_install_the_mutmut_set_with_hashes(job):
     assert "pip install --require-hashes --no-deps -r .github/requirements/mutmut.txt" in _runs(job)
+
+
+def test_the_build_set_is_hash_locked_and_pins_the_whole_toolchain():
+    pins = _locked_pins(BUILD)
+    assert {"build", "hatchling", "twine"} <= set(pins)
+
+
+@pytest.mark.parametrize("workflow, job", [("publish-pypi.yml", "build"),
+                                           ("release-attest.yml", "build")])
+def test_the_release_builds_run_the_locked_toolchain_without_build_isolation(workflow, job):
+    doc = yaml.safe_load((WORKFLOWS / workflow).read_text(encoding="utf-8"))
+    runs = "\n".join(s.get("run", "") for s in doc["jobs"][job]["steps"])
+    assert "pip install --require-hashes --no-deps -r .github/requirements/build.txt" in runs
+    assert "python -m build --no-isolation" in runs
+    assert "uvx" not in runs
+    assert "pip install --upgrade" not in runs
