@@ -226,7 +226,7 @@ export async function refreshImageBackend() {
   for (const node of document.querySelectorAll("#view-images .img-comfy-only")) {
     node.hidden = native;
   }
-  for (const node of document.querySelectorAll("#view-images .img-native-only")) {
+  for (const node of document.querySelectorAll("#view-images .img-native-only, #view-images .img-native-gen")) {
     node.hidden = !native;
   }
 }

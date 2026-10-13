@@ -84,12 +84,12 @@ const imagineBody = (calls) => JSON.parse(calls.find((c) => c.url === "/api/imag
 test("the native controls show for the native backend and stay hidden for ComfyUI", async () => {
   const native = setup();
   await settle(native.win, "await refreshImageBackend();");
-  const nodes = [...native.win.document.querySelectorAll("#view-images .img-native-only")];
+  const nodes = [...native.win.document.querySelectorAll("#view-images .img-native-gen")];
   assert.ok(nodes.length >= 4);
   assert.ok(nodes.every((n) => n.hidden === false));
   const comfy = setup({ active: "comfy" });
   await settle(comfy.win, "await refreshImageBackend();");
-  assert.ok([...comfy.win.document.querySelectorAll("#view-images .img-native-only")]
+  assert.ok([...comfy.win.document.querySelectorAll("#view-images .img-native-gen")]
     .every((n) => n.hidden === true));
 });
 

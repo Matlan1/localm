@@ -141,7 +141,9 @@ scheduler also on the Video page); an empty field uses the model's own default.
   Files in a ComfyUI `upscale_models` folder and CivitAI upscalers register with that
   type.
 - **Reuse settings** on a gallery image restores the model and its components, LoRAs,
-  size, sampler, scheduler and hires settings.
+  size, sampler, scheduler and hires settings. **Import parameters from image** does the
+  same from a localm image or sidecar; a sampler or scheduler name from another tool is
+  applied only when it is one of the names above, and is reported otherwise.
 
 ## Parameters in the PNG
 
