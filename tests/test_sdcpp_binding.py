@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from localm.media.sdcpp import _binding as b
-from localm.media.sdcpp import pins
+from localm.media.sdcpp import pins, sampling
 
 
 def _fill_sample(sp):
@@ -118,6 +118,18 @@ class _FakeLib:
     def sd_commit(self):
         return self.commit
 
+    names = {"sample": list(sampling.SAMPLE_METHODS), "sched": list(sampling.SCHEDULERS),
+             "hires": ["None", *sampling.HIRES_UPSCALER_LIBRARY_NAMES.values()]}
+
+    def sd_sample_method_name(self, i):
+        return self.names["sample"][i].encode()
+
+    def sd_scheduler_name(self, i):
+        return self.names["sched"][i].encode()
+
+    def sd_hires_upscaler_name(self, i):
+        return self.names["hires"][i].encode()
+
 
 def test_matching_layout_and_commit_pass():
     lib = _FakeLib()
@@ -140,6 +152,14 @@ def test_a_shifted_field_is_reported(kind, struct_type, field, expect):
     assert bad, f"inserting an int before {field} went undetected"
     assert any(expect in item for item in bad), bad
     with pytest.raises(b.AbiMismatch, match="struct layout does not match"):
+        b.verify_abi(lib)
+
+
+def test_a_renamed_sampler_is_refused_with_the_abi_check():
+    lib = _FakeLib()
+    lib.names = dict(lib.names, sample=["renamed", *lib.names["sample"][1:]])
+    assert b.check_layouts(lib) == ["sample method names"]
+    with pytest.raises(b.AbiMismatch, match="sample method names"):
         b.verify_abi(lib)
 
 
