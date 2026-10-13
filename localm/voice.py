@@ -334,10 +334,10 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
         root.mkdir(parents=True, exist_ok=True)
         logger.info("downloading Whisper STT model %s (one-time)...", repo)
         pin = _stt_pin(name)
+        at_pin: dict[str, Any] = {"revision": pin[0]} if pin else {}
         snapshot_download(repo, cache_dir=str(root),
                           allow_patterns=list(_STT_ALLOW_PATTERNS),
-                          endpoint=_STT_HUB_ENDPOINT,
-                          **({"revision": pin[0]} if pin else {}))
+                          endpoint=_STT_HUB_ENDPOINT, **at_pin)
     except Exception as e:
         reason = f"Whisper model '{name}' download failed ({e})"
         logger.warning(reason)
