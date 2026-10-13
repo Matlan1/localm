@@ -231,7 +231,10 @@ def _read_safetensors(path: Path) -> Optional[dict]:
         (n,) = struct.unpack("<Q", raw)
         if n > _ST_MAX_HEADER or 8 + n > size:
             return None
-        header = json.loads(f.read(n))
+        try:
+            header = json.loads(f.read(n))
+        except RecursionError:
+            return None
     if not isinstance(header, dict):
         return None
     out = {}

@@ -472,6 +472,6 @@ def test_the_design_test_edges_are_legal_by_structure():
         assert index[gen] == index["image_gen"], "the generators are peers"
         assert index["media"] > index[gen]
 
-    assert edges["model_manager"]["media"] == "localm/model_manager/scan.py:9"
+    assert edges["model_manager"]["media"] .startswith("localm/model_manager/scan.py:")
     assert index["media"] > index["model_manager"], "media sits below model_manager"
     assert "model_manager" not in edges.get("media", {})
