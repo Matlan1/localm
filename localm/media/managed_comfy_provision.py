@@ -97,7 +97,13 @@ _TORCH_LABEL_RE = re.compile(
 # they pin are published there, not on download.pytorch.org.
 _AMD_MULTI_ARCH_INDEX = "https://repo.amd.com/rocm/whl-multi-arch/"
 _AMD_DEVICE_PACKAGE_RE = re.compile(
-    r"^(?:amd-torch(?:vision|audio)?-device|rocm-sdk-device)-[A-Za-z0-9]+==",
+    r"^(?:amd-torch(?:vision|audio)?-device|rocm-sdk-device)-[A-Za-z0-9-]+==",
+    re.IGNORECASE)
+# The packages a freeze with AMD device packages installs from AMD's index alone:
+# AMD's own rocm / rocm-* / amd-*-device-* names, and torch builds labelled +rocm.
+_AMD_ONLY_PACKAGE_RE = re.compile(
+    r"^(?:(?:amd-[A-Za-z0-9-]+-device-[A-Za-z0-9-]+|rocm|rocm-[A-Za-z0-9-]+)=="
+    r"|(?:torch|torchvision|torchaudio|triton)==[^+\s]+\+rocm)",
     re.IGNORECASE)
 
 
@@ -488,10 +494,29 @@ def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optiona
     """pip-install the user's exact package set into the managed venv. The freeze is
     written to a requirements file (kept as provenance) and installed with -r; the
     derived PyTorch index is added as an extra index so torch resolves to the same
-    wheel while everything else still comes from PyPI."""
+    wheel while everything else still comes from PyPI.
+
+    With AMD's multi-arch index, the AMD packages (``_AMD_ONLY_PACKAGE_RE``) are
+    installed first from that index alone, without dependencies, and the rest of
+    the freeze from PyPI alone, so no package can come from the other index."""
     req_file = managed_root / "localm-replicated-requirements.txt"
     req_file.write_text("\n".join(freeze_lines) + "\n", encoding="utf-8")
-    cmd = [str(managed_python), "-m", "pip", "install", "--disable-pip-version-check"]
+    pip = [str(managed_python), "-m", "pip", "install", "--disable-pip-version-check"]
+    if index_url == _AMD_MULTI_ARCH_INDEX:
+        amd = [ln for ln in freeze_lines if _AMD_ONLY_PACKAGE_RE.match(ln.strip())]
+        rest = [ln for ln in freeze_lines if not _AMD_ONLY_PACKAGE_RE.match(ln.strip())]
+        amd_file = managed_root / "localm-replicated-requirements-amd.txt"
+        rest_file = managed_root / "localm-replicated-requirements-pypi.txt"
+        amd_file.write_text("\n".join(amd) + "\n", encoding="utf-8")
+        rest_file.write_text("\n".join(rest) + "\n", encoding="utf-8")
+        ok, out = _run(pip + ["--index-url", index_url, "--no-deps", "-r", str(amd_file)],
+                       on_progress=on_progress, timeout=3600)
+        if not ok or not rest:
+            return ok, out
+        ok2, out2 = _run(pip + ["-r", str(rest_file)], on_progress=on_progress,
+                         timeout=3600)
+        return ok2, out + "\n" + out2
+    cmd = list(pip)
     if index_url:
         cmd += ["--extra-index-url", index_url]
     cmd += ["-r", str(req_file)]

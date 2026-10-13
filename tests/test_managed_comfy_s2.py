@@ -254,12 +254,45 @@ def test_torch_index_url_derived(line, expected):
     "amd-torch-device-gfx1030==2.12.0+rocm7.14.0",
     "rocm-sdk-device-gfx1100==7.14.0",
     "amd-torchvision-device-gfx1201==0.27.0+rocm7.14.0",
+    "amd-torch-device-gfx12-0==2.12.0+rocm7.14.0",
 ])
 def test_an_amd_device_package_selects_amd_multi_arch_index(device_line):
     from localm.media import managed_comfy_provision as prov
     freeze = ["numpy==2.4.4", "torch==2.12.0+rocm7.14.0", device_line]
     assert (prov.torch_index_url_from_freeze(freeze)
             == "https://repo.amd.com/rocm/whl-multi-arch/")
+
+
+def test_an_amd_device_package_without_a_torch_label_still_selects_amd():
+    from localm.media import managed_comfy_provision as prov
+    assert (prov.torch_index_url_from_freeze(
+        ["torch==2.5.1", "amd-torch-device-gfx1030==2.12.0+rocm7.14.0"])
+        == "https://repo.amd.com/rocm/whl-multi-arch/")
+
+
+def test_amd_packages_come_only_from_amd_and_the_rest_only_from_pypi(tmp_path, monkeypatch):
+    from localm.media import managed_comfy_provision as prov
+    freeze = ["numpy==2.4.4", "torch==2.12.0+rocm7.14.0", "torchvision==0.27.0+rocm7.14.0",
+              "amd-torch-device-gfx1030==2.12.0+rocm7.14.0", "rocm==7.14.0",
+              "rocm-sdk-core==7.14.0", "rocm-sdk-device-gfx1030==7.14.0",
+              "rocm-bootstrap==0.1.0", "pillow==12.2.0", "torchsde==0.2.6"]
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        req = Path(cmd[cmd.index("-r") + 1]).read_text(encoding="utf-8").split()
+        calls.append((cmd, req))
+        return True, ""
+
+    monkeypatch.setattr(prov, "_run", _fake_run)
+    index = prov.torch_index_url_from_freeze(freeze)
+    ok, _ = prov._install_freeze(tmp_path / "python.exe", freeze, index, tmp_path, None)
+    assert ok and len(calls) == 2
+    (amd_cmd, amd_req), (pypi_cmd, pypi_req) = calls
+    assert amd_cmd[amd_cmd.index("--index-url") + 1] == "https://repo.amd.com/rocm/whl-multi-arch/"
+    assert "--no-deps" in amd_cmd and "--extra-index-url" not in amd_cmd
+    assert set(amd_req) == set(freeze) - {"numpy==2.4.4", "pillow==12.2.0", "torchsde==0.2.6"}
+    assert "--index-url" not in pypi_cmd and "--extra-index-url" not in pypi_cmd
+    assert set(pypi_req) == {"numpy==2.4.4", "pillow==12.2.0", "torchsde==0.2.6"}
 
 
 def test_torch_index_url_none_for_plain_pypi():

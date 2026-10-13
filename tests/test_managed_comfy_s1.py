@@ -270,6 +270,74 @@ def test_the_users_own_extra_model_paths_are_carried_over(home, tmp_path):
     assert os.path.normpath(str(paths.models_dir / "vae")) in got["vae"]
 
 
+def _write_user_yaml(home, tmp_path, text, *, bom=False):
+    user_comfy = tmp_path / "user-comfy"
+    (user_comfy / "models").mkdir(parents=True)
+    (user_comfy / "extra_model_paths.yaml").write_text(
+        ("﻿" if bom else "") + text, encoding="utf-8")
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(user_comfy)})
+    paths = mc.managed_comfy_paths()
+    paths.root.mkdir(parents=True, exist_ok=True)
+    out = mc.write_extra_model_paths()
+    return user_comfy, out, _comfy_search_paths(out.read_text(encoding="utf-8"), out.parent)
+
+
+def test_a_user_section_named_comfyui_does_not_replace_the_models_folder(home, tmp_path):
+    import os
+    user_comfy, _out, got = _write_user_yaml(
+        home, tmp_path, "comfyui:\n  base_path: other\n  vae: vae\n")
+    assert os.path.normpath(str(user_comfy / "models" / "vae")) in got["vae"]
+    assert os.path.normpath(str(user_comfy / "other" / "vae")) in got["vae"]
+
+
+def test_copied_sections_never_carry_custom_nodes(home, tmp_path):
+    import os
+    user_comfy, out, got = _write_user_yaml(
+        home, tmp_path,
+        "mine:\n  base_path: shared\n  custom_nodes: |-\n    nodes_a\n    nodes_b\n"
+        "  vae: vae\n  custom_nodes_extra: keep\n")
+    assert "custom_nodes" not in got
+    assert os.path.normpath(str(user_comfy / "shared" / "vae")) in got["vae"]
+    assert os.path.normpath(str(user_comfy / "shared" / "keep")) in got["custom_nodes_extra"]
+
+
+@pytest.mark.parametrize("base", ["models~old", "100%models", "rel # a comment"])
+def test_a_relative_base_path_with_special_characters_stays_under_the_workdir(
+        home, tmp_path, base):
+    import os
+    user_comfy, _out, got = _write_user_yaml(
+        home, tmp_path, f"mine:\n  base_path: {base}\n  vae: vae\n")
+    want = base.split(" #")[0]
+    assert got["vae"][-1] == os.path.normpath(str(user_comfy / want / "vae"))
+
+
+def test_an_env_var_base_path_that_expands_to_a_relative_path_stays_under_the_workdir(
+        home, tmp_path, monkeypatch):
+    import os
+    monkeypatch.setenv("C15_REL_MODELS", "relmodels")
+    user_comfy, _out, got = _write_user_yaml(
+        home, tmp_path, "mine:\n  base_path: $C15_REL_MODELS/m\n  vae: vae\n")
+    assert got["vae"][-1] == os.path.normpath(str(user_comfy / "relmodels" / "m" / "vae"))
+
+
+def test_a_user_extra_model_paths_with_a_bom_is_copied(home, tmp_path):
+    import os
+    user_comfy, _out, got = _write_user_yaml(
+        home, tmp_path, "mine:\n  base_path: shared\n  vae: vae\n", bom=True)
+    assert os.path.normpath(str(user_comfy / "shared" / "vae")) in got["vae"]
+
+
+@pytest.mark.parametrize("text", [
+    "mine:\n  'base_path': sub\n  vae: vae\n",
+    "mine:\n  base_path: sub\n    more\n  vae: vae\n",
+])
+def test_a_base_path_the_copier_cannot_read_skips_the_file(home, tmp_path, text):
+    import yaml
+    _user, out, _got = _write_user_yaml(home, tmp_path, text)
+    assert set(yaml.safe_load(out.read_text(encoding="utf-8"))) == {
+        "localm_managed", "user_comfyui"}
+
+
 def test_an_unsupported_user_extra_model_paths_is_not_copied(home, tmp_path, caplog):
     import yaml
     user_comfy = tmp_path / "user-comfy"

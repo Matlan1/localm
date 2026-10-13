@@ -500,13 +500,15 @@ def build_extra_model_paths_config(cfg: Optional[dict] = None) -> dict:
 
 _USER_SECTION_RE = re.compile(r"^([A-Za-z0-9_.\-]+):\s*(?:#.*)?$")
 _USER_BASE_PATH_RE = re.compile(r"^(\s+)base_path:\s*(.*?)\s*$")
+_USER_CHILD_KEY_RE = re.compile(r"^(\s+)([A-Za-z0-9_.\-]+):")
+_USER_SECTION_PREFIX = "user_extra_"
 
 
 def _plain_yaml_scalar(raw: str) -> Optional[str]:
     """The value of a one-line YAML scalar (plain, single- or double-quoted
     without escapes), or None for anything else (a block scalar, a flow
     collection, an escape sequence)."""
-    raw = raw.split(" #", 1)[0].strip()
+    raw = re.split(r"\s#", raw, maxsplit=1)[0].strip()
     if not raw or raw[0] in "|>[{&*!":
         return None
     if raw[0] == "'" and raw.endswith("'") and len(raw) > 1:
@@ -525,13 +527,15 @@ def user_extra_model_paths_sections(workdir: Path) -> list[str]:
     lines for the managed ComfyUI's file, or ``[]`` when there is none or it
     cannot be copied faithfully (then a warning is logged).
 
-    Each top-level section is renamed ``user_<name>`` and carries an absolute
-    ``base_path``: a relative one is joined to *workdir*, and a section without
-    one gets *workdir*, which is where ComfyUI resolves that section's relative
-    paths from. Absolute paths stay as they are."""
+    Each top-level section is renamed ``user_extra_<name>`` and carries an
+    absolute ``base_path``: a relative one (after expanding ``~`` and environment
+    variables) is joined to *workdir*, and a section without one gets *workdir*,
+    which is where ComfyUI resolves that section's relative paths from. Absolute
+    paths stay as they are. ``custom_nodes`` entries are left out: custom nodes
+    reach the managed ComfyUI only through the setup's own copy step."""
     src = Path(workdir) / "extra_model_paths.yaml"
     try:
-        text = src.read_text(encoding="utf-8")
+        text = src.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return []
     except (OSError, UnicodeDecodeError) as e:
@@ -567,22 +571,33 @@ def user_extra_model_paths_sections(workdir: Path) -> list[str]:
                   if children else "  ")
         base = None
         kept: list[str] = []
-        for b in body:
+        dropping = False
+        for j, b in enumerate(body):
+            if b.startswith(indent) and b[len(indent):len(indent) + 1] in ("'", '"'):
+                return _skip("a quoted key")
+            ck = _USER_CHILD_KEY_RE.match(b)
+            if ck and ck.group(1) == indent:
+                dropping = ck.group(2) == "custom_nodes"
+            elif b.strip() and not b.startswith(indent + " ") and not b.lstrip().startswith("#"):
+                dropping = False
+            if dropping:
+                continue
             bm = _USER_BASE_PATH_RE.match(b)
             if bm and bm.group(1) == indent:
                 value = _plain_yaml_scalar(bm.group(2))
-                if value is None:
+                nxt = next((n for n in body[j + 1:]
+                            if n.strip() and not n.lstrip().startswith("#")), "")
+                if value is None or nxt.startswith(indent + " "):
                     return _skip("a base_path that is not a one-line value")
                 base = value
                 continue
             kept.append(b)
         if base is None:
             resolved = str(Path(workdir))
-        elif any(ch in base for ch in "$%~") or os.path.isabs(base):
-            resolved = base
         else:
-            resolved = str(Path(workdir) / base)
-        out.append(f"user_{m.group(1)}:")
+            expanded = os.path.expandvars(os.path.expanduser(base))
+            resolved = expanded if os.path.isabs(expanded) else str(Path(workdir) / expanded)
+        out.append(f"{_USER_SECTION_PREFIX}{m.group(1)}:")
         out.append(f"{indent}base_path: {_yaml_squote(resolved)}")
         out.extend(kept)
         out.append("")
@@ -604,7 +619,7 @@ def render_extra_model_paths(cfg: Optional[dict] = None) -> str:
         "# Tells this ComfyUI where to find models WITHOUT copying them:",
         "#   localm_managed = localm's own managed models dir",
         "#   user_comfyui   = your existing ComfyUI's models (when localm knows it)",
-        "#   user_<name>    = the model locations in your ComfyUI's own extra_model_paths.yaml",
+        "#   user_extra_<name> = the model locations in your ComfyUI's own extra_model_paths.yaml",
         "# Add your own sources by copying an entry below and editing base_path.",
         "",
     ]
