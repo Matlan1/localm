@@ -656,6 +656,7 @@ class BaseBackend(ABC):
         min_p: Optional[float] = None,
         presence_penalty: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
+        cache_prompt: bool = True,
     ) -> Iterator[str]:
         """
         Yield text tokens one at a time.
@@ -693,6 +694,11 @@ class BaseBackend(ABC):
             them.  ``presence_penalty`` subtracts a fixed amount from the logit
             of every token already generated, ``frequency_penalty`` that amount
             times how often it was generated.
+        cache_prompt:
+            ``False`` asks a backend that keeps a prompt cache to compute this
+            reply from a full prefill into an emptied cache, with no other
+            reply decoding beside it, so the reply depends only on the request.
+            A backend without a prompt cache ignores it.
 
         A backend whose :attr:`supports_logprobs` is True also takes
         ``logprobs`` (0 to 20 alternatives per token) and ``on_logprobs``, a

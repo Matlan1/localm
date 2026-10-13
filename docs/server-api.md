@@ -46,6 +46,7 @@ plus localm request extras:
 | `stop` | A string or a list of up to 16 strings (each up to 1024 characters). The reply is cut before the first match, the generation ends there, and `finish_reason` is `stop`. A stop sequence inside a model's `<think>` block is not applied. Also accepted by `POST /v1/completions`. |
 | `tools`, `tool_choice`, `parallel_tool_calls` | OpenAI function tools; see [Tool calling](#tool-calling). |
 | `grammar`, `grammar_lazy`, `grammar_triggers` | GBNF grammar constraining the output (local models); a lazy grammar stays unconstrained until a trigger pattern appears, and requires `grammar_triggers` |
+| `cache_prompt` | Default `true`. `false` computes the reply with nothing kept from earlier requests: a GGUF model empties its KV cache and processes the whole prompt, and the reply runs on its own, after the replies already running (it streams `waiting` until then). The same request then gets the same reply whatever came before it or runs beside it, unless speculative drafting is on or the model's context window had to grow (or move its cache to system RAM) in between. Only `true` or `false` is accepted (a string or a number is a 422; a 400 on `/v1/messages` and `/v1/responses`). Also accepted by `POST /v1/completions`, `POST /v1/messages` and `POST /v1/responses`. Other backends keep no prompt cache and accept it with no effect. |
 | `chat_template_kwargs` | `{"enable_thinking": false}` asks a reasoning model that uses `<think>` blocks or the harmony format (gpt-oss) to answer without reasoning. Only `enable_thinking` is applied and must be a boolean (otherwise 422); other keys are accepted and ignored. A model with none of these conventions is unaffected. |
 
 While a streaming reply is being prepared, localm reports what it is doing in
@@ -468,6 +469,7 @@ compaction, tool calling and the response headers work the same way.
 | `messages` | `user` and `assistant` turns; `content` is a string or blocks: `text`, `image` (`base64` or `url` source), `tool_use` (assistant), `tool_result` (user; text or image content, `is_error` marks a failed call). `thinking` blocks from earlier turns are dropped. Other block types (documents, server tool results) are a 400. |
 | `system` | A string or a list of text blocks. |
 | `stop_sequences`, `temperature`, `top_p`, `top_k` | Applied. |
+| `cache_prompt` | localm's field, applied as on `/v1/chat/completions`. |
 | `tools`, `tool_choice` | Custom tools (`name`, `description`, `input_schema`) work with any chat model, as in [Tool calling](#tool-calling). `tool_choice` `auto`, `any`, `tool` (by name) and `none`; `disable_parallel_tool_use` allows one call. Server tools (web search, code execution, ...) and `mcp_servers` are a 400. |
 | `thinking` | `{"type": "enabled"}` (or `adaptive`, `between_tools`) lets a reasoning model think and returns its reasoning as a `thinking` block; without it, or with `disabled`, the model answers without thinking. `budget_tokens` is not applied. |
 | `output_config` | `format: {"type": "json_schema", "schema": {...}}` constrains the reply to the schema, as a strict `response_format` does on chat (see [Structured output](#structured-output)). `effort` is accepted and not applied. |
@@ -512,7 +514,7 @@ tool calling, structured output and the response headers work the same way.
 | `include` | `reasoning.encrypted_content` and the built-in tool entries (`file_search_call.results`, `web_search_call.results`, `web_search_call.action.sources`, `message.input_image.image_url`, `computer_call_output.output.image_url`, `code_interpreter_call.outputs`) are accepted with no effect; a reasoning item carries no encrypted content. `message.output_text.logprobs` returns the log probabilities of the reply's text (see `top_logprobs` below). Any other value is a 400. |
 | `truncation` | `auto` or `disabled`; either way an over-long conversation is compacted as on chat. |
 | `metadata`, `user`, `prompt_cache_key`, `safety_identifier`, `service_tier`, `max_tool_calls` | Accepted; `metadata` is echoed, the rest have no effect. |
-| localm chat fields | `top_k`, `min_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, `stop`, `grammar` (with `grammar_lazy`, `grammar_triggers`), `required_capabilities`, `pin_model`, `min_context` and `chat_template_kwargs` (for example through an SDK's `extra_body`) are applied as on `/v1/chat/completions`. Other unknown fields have no effect and are named in the debug log. |
+| localm chat fields | `top_k`, `min_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, `stop`, `grammar` (with `grammar_lazy`, `grammar_triggers`), `required_capabilities`, `pin_model`, `min_context`, `chat_template_kwargs` and `cache_prompt` (for example through an SDK's `extra_body`) are applied as on `/v1/chat/completions`. Other unknown fields have no effect and are named in the debug log. |
 | `top_logprobs` | 0 to 20, anything else is a 400. With `include: ["message.output_text.logprobs"]`, each token of the reply's text comes with that many of the most likely alternatives in the `output_text` part's `logprobs` (and, streamed, in each `response.output_text.delta` event, holding the entries the chat stream sent with that piece of text, so a token split across two deltas comes with the first, and in the `response.output_text.done` event, which carries all of them), in the shape of [Log probabilities](#log-probabilities): `token`, `logprob`, `bytes`, `top_logprobs`. Without the `include` it has no effect and `logprobs` stays `[]`. The rules and limits are the chat route's: a GGUF model reports them, and a model that cannot (or a streamed request while a plugin rewrites the stream) is a 400 naming the model; a reply a chat plugin rewrote comes back with `logprobs: []`. |
 | `background`, `conversation`, `prompt`, `text.verbosity` other than `medium` | A 400 naming the field. |
 
@@ -1093,7 +1095,8 @@ for chunk in stream:
   on the CPU and a GPU present it can run a large step on the GPU and a small
   one on the CPU), so the same request can get a different reply depending on
   the requests before it, even at temperature 0 or with a fixed `seed`.
-  Greedy output changes where the two most likely tokens are close.
+  Greedy output changes where the two most likely tokens are close. Send
+  `cache_prompt: false` for a reply that depends only on the request.
 - **Speculative drafting**: with `spec_source` set to `ngram`, the same request at
   temperature 0 can get a different reply from one server run to the next, and two
   identical requests in a row can differ. With `spec_source` `off` that did not

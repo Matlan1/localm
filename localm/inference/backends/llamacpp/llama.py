@@ -2178,6 +2178,7 @@ class LlamaCpp:
         on_status: Optional[Callable[[str], None]] = None,
         sampling: Optional[dict] = None,
         logprobs: Optional[int] = None,
+        cache_prompt: bool = True,
     ) -> Iterator[int]:
         """
         Yield generated token ids one at a time. *sampling* holds extra
@@ -2192,16 +2193,29 @@ class LlamaCpp:
         a chat).  Otherwise the context is recreated from scratch - the
         behaviour of older builds without KV-management functions.
 
-        A model with parallel slots generates through ``_generate_slots``.
+        With ``cache_prompt=False`` nothing is kept: the KV cache is emptied
+        and the whole prompt is prefilled from position 0.
+
+        A model with parallel slots generates through ``_generate_slots``,
+        except with ``cache_prompt=False``: the reply then runs on sequence 0
+        inside the slot scheduler's exclusive section, so it starts once the
+        replies in flight have ended and shares no decode with another reply.
+        *on_status* receives the waiting status while it waits.
         """
         if self._slots is not None:
-            yield from self._generate_slots(
-                prompt_tokens, max_new_tokens, temperature, top_k, top_p,
-                repeat_penalty, grammar=grammar, grammar_lazy=grammar_lazy,
-                grammar_triggers=grammar_triggers, seed=seed, on_status=on_status,
-                sampling=sampling, logprobs=logprobs)
-            return
-        with self._inference_lock:
+            if cache_prompt:
+                yield from self._generate_slots(
+                    prompt_tokens, max_new_tokens, temperature, top_k, top_p,
+                    repeat_penalty, grammar=grammar, grammar_lazy=grammar_lazy,
+                    grammar_triggers=grammar_triggers, seed=seed, on_status=on_status,
+                    sampling=sampling, logprobs=logprobs)
+                return
+            from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
+            exclusive = self._slots.exclusive(
+                on_wait=(lambda: on_status(WAITING_FOR_MODEL_STATUS)) if on_status else None)
+        else:
+            exclusive = contextlib.nullcontext()
+        with exclusive, self._inference_lock:
             if not self._model_ptr:
                 raise RuntimeError("Model not loaded")
 
@@ -2261,12 +2275,12 @@ class LlamaCpp:
                     reuse = self._can_reuse_kv(needed)
                     with _ctx():
                         if reuse:
-                            self._prefill_with_reuse(prompt_tokens)
+                            self._prefill_with_reuse(prompt_tokens, keep_prefix=cache_prompt)
                         else:
                             self._prefill_fresh_context(prompt_tokens, needed)
 
                 logger.info("gguf generate: prefill complete in %.2fs (kv_reuse=%s)",
-                            time.monotonic() - _t0, reuse)
+                            time.monotonic() - _t0, reuse and cache_prompt)
 
                 # Build sampler
                 sampler = _build_sampler(
@@ -3028,13 +3042,15 @@ class LlamaCpp:
         grammar_lazy: bool = False,
         grammar_triggers: Optional[list[str]] = None,
         logprobs: Optional[int] = None,
+        cache_prompt: bool = True,
     ) -> Iterator[int]:
         """Yield generated token ids for a chat whose prompt includes image(s)
         or audio clip(s).
 
         The media+text prompt is evaluated into the KV cache by
         :meth:`_prefill_vision`, which keeps the part of the cache an earlier
-        image turn left that still matches; sampling then continues exactly like
+        image turn left that still matches (nothing with ``cache_prompt=False``:
+        the cache is emptied first); sampling then continues exactly like
         the text loop, with the same grammar handling. The text path's
         KV record (``_cached_tokens``) is left empty, so the next text turn
         prefills from scratch.
@@ -3129,6 +3145,8 @@ class LlamaCpp:
                             initial_budget = max_new_tokens if max_new_tokens > 0 else 512
                             needed = n_prompt + initial_budget + 64
                             from .mtmd import MtmdGpuEncodeFailed
+                            if not cache_prompt:
+                                self._vision_kv = None
                             try:
                                 pos, reused = self._prefill_vision(vprompt, needed, on_status)
                             except MtmdGpuEncodeFailed:
@@ -4374,15 +4392,17 @@ class LlamaCpp:
             return False
         return True
 
-    def _prefill_with_reuse(self, prompt_tokens: list[int]) -> None:
+    def _prefill_with_reuse(self, prompt_tokens: list[int], keep_prefix: bool = True) -> None:
         """
         Prefill keeping the common prefix with the previous call in the KV
         cache: remove diverging cached tokens, decode only the new suffix.
+        With *keep_prefix* False the cache is emptied and the whole prompt is
+        decoded from position 0.
         """
         self._vision_kv = None
         mem = api.llama_get_memory(self._ctx_ptr)
 
-        prefix = _common_prefix_len(self._cached_tokens, prompt_tokens)
+        prefix = _common_prefix_len(self._cached_tokens, prompt_tokens) if keep_prefix else 0
         # The model must decode at least the final prompt token so the
         # logits for sampling position -1 are fresh.
         if prefix == len(prompt_tokens):
@@ -4591,6 +4611,7 @@ class LlamaCpp:
         frequency_penalty: Optional[float] = None,
         logprobs: Optional[int] = None,
         logprob_sink: Optional[list] = None,
+        cache_prompt: bool = True,
         **_ignored,
     ):
         """
@@ -4620,6 +4641,11 @@ class LlamaCpp:
         appended to *logprob_sink* before that token's text is produced, with
         *logprobs* alternatives per token. Pass both or neither. A diffusion
         language model refuses *logprobs* with :class:`UnsupportedInputError`.
+
+        ``cache_prompt=False`` keeps no prefix of an earlier prompt in the KV
+        cache: the reply is computed from a full prefill into an emptied cache,
+        alone (see :meth:`_generate`). Encoder-decoder and diffusion models never
+        keep one.
         """
         if (logprobs is None) != (logprob_sink is None):
             raise ValueError("logprobs and logprob_sink must be passed together")
@@ -4724,6 +4750,7 @@ class LlamaCpp:
                 grammar_lazy=grammar_lazy,
                 grammar_triggers=grammar_triggers,
                 logprobs=logprobs,
+                cache_prompt=cache_prompt,
             )
         else:
             gen = self._generate(
@@ -4740,6 +4767,7 @@ class LlamaCpp:
                 on_status=on_status,
                 sampling=sampling,
                 logprobs=logprobs,
+                cache_prompt=cache_prompt,
             )
 
         return self._completion_result(gen, stream, logprob_sink)
