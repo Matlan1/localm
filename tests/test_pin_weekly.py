@@ -2,7 +2,7 @@
 """Tests for scripts/pin_weekly.py.
 
 The confirm and bump scripts it drives are REAL subprocesses here: tiny stand-ins
-written into a temp repo that follow dev-notes/pin-automation/CONTRACT.md (exit
+written into a temp repo that follow the contract in scripts/pin_weekly.py (exit
 0/1/2, a receipt file, a bump that edits a file). Only the git and gh effects
 (worktree, branch, commit, PR, CI wait, merge) are replaced, by recording spies,
 because there is no remote to push to.
@@ -1153,6 +1153,15 @@ def test_shipped_advancers_cover_every_runtime_with_a_pipeline_or_a_named_gap():
             assert t.startswith("tests/test_")
 
 
+def _declared_options(path):
+    """Every option string the script passes to an add_argument call."""
+    import ast
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {a.value for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"
+            for a in n.args if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+
+
 def test_every_advancer_script_that_exists_follows_the_contract_cli():
     for a in pw.build_advancers():
         scripts = [a.bump_script] if a.confirm_script is None else [a.confirm_script, a.bump_script]
@@ -1160,9 +1169,9 @@ def test_every_advancer_script_that_exists_follows_the_contract_cli():
             path = Path(_PATH).parent.parent / rel
             if not path.is_file():
                 continue
-            text = path.read_text(encoding="utf-8")
-            assert '"--tag"' in text or a.delegate, rel
+            options = _declared_options(path)
+            assert "--tag" in options or a.delegate, rel
             if a.confirm_script is not None:
-                assert '"--receipt"' in text, rel
+                assert "--receipt" in options, rel
             if rel == a.confirm_script and not a.verify_current_cmd:
-                assert '"--current"' in text, rel
+                assert "--current" in options, rel

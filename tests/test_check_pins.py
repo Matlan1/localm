@@ -441,10 +441,26 @@ def test_legacy_rows_extract_pinned_and_newest_and_a_readable_detail(monkeypatch
     assert row.detail.startswith("BEHIND: 423 builds") and "pinned release date" not in row.detail
 
 
+def _declared_options(path):
+    """Every option string the script passes to an add_argument call."""
+    import ast
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {a.value for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument"
+            for a in n.args if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+
+
 def test_every_legacy_script_exists_and_accepts_gate():
     for _name, _group, script, _adv, _p, _l in cp._LEGACY:
-        text = (cp.REPO / script).read_text(encoding="utf-8")
-        assert '"--gate"' in text, script
+        assert "--gate" in _declared_options(cp.REPO / script), script
+
+
+def test_the_option_scanner_ignores_a_mention_that_is_not_a_declared_option(tmp_path):
+    f = tmp_path / "s.py"
+    f.write_text('"""takes --gate"""\n# "--gate"\nx = "--gate"\n'
+                 'import argparse\np = argparse.ArgumentParser()\np.add_argument("--other")\n',
+                 encoding="utf-8")
+    assert _declared_options(f) == {"--other"}
 
 
 # --------------------------------------------------------------------------- #
@@ -630,6 +646,129 @@ def test_an_unchecked_source_whose_file_moved_is_inconsistent_not_silently_dropp
     monkeypatch.setattr(cp, "REPO", tmp_path)
     rows = cp.run_checks([s for s in cp.build_registry() if s.group == "unchecked"], NOW)
     assert all(r.status == cp.INCONSISTENT and "is missing" in r.detail for r in rows)
+
+
+def _real_table():
+    text = cp._read_text("localm/setup_llama/pins.py")
+    block = cp._ASSET_TABLE_RE.search(text).group(1)
+    return dict(cp._ASSET_ENTRY_RE.findall(block))
+
+
+def _asset_router(monkeypatch, *, change=None, drop=None):
+    """A GitHub that publishes exactly the digests the repo pins (optionally one changed
+    or one dropped)."""
+    table = _real_table()
+    tag = cp._read_const("localm/setup_llama/pins.py", r'^_PINNED_TAG = "([^"]+)"')
+    rocm = cp._read_const("localm/setup_llama/pins.py", r'^_ROCM_TAG = "([^"]+)"')
+    cpu = cp._read_const("localm/setup_llama/pins.py", r'^_ROCM_CPU_TAG = "([^"]+)"')
+
+    def published(names):
+        return {"assets": [{"name": n, "digest": "sha256:" + ("0" * 64 if n == change else table[n])}
+                           for n in names if n != drop]}
+    rocm_names = [n for n in table if n.startswith(f"llama-{rocm}-")]
+    cpu_names = [n for n in table if n.startswith(f"llama-{cpu}-")]
+    upstream_names = [n for n in table if n not in rocm_names and n not in cpu_names]
+    routes = {
+        f"ggml-org/llama.cpp/releases/tags/{cpu}": published(cpu_names),
+        f"llamacpp-rocm/releases/tags/{rocm}": published(rocm_names),
+        f"ggml-org/llama.cpp/releases/tags/{tag}": published(upstream_names),
+    }
+    _router(monkeypatch, routes)
+    return table, tag
+
+
+def _checksum_row():
+    return next(s for s in cp.build_registry() if s.name == "llama.cpp asset checksums").check(NOW)
+
+
+def test_llama_asset_checksums_match_what_github_publishes(monkeypatch):
+    table, _ = _asset_router(monkeypatch)
+    row = _checksum_row()
+    assert row.status == cp.CURRENT and f"{len(table)} pinned checksum(s)" in row.detail
+
+
+def test_a_changed_published_digest_is_stale(monkeypatch):
+    table, tag = _asset_router(monkeypatch, change=sorted(n for n in _real_table() if "-bin-win-cpu-x64" in n)[0])
+    row = _checksum_row()
+    assert row.status == cp.STALE and "differ from the published digest" in row.detail
+
+
+def test_a_pinned_asset_missing_from_its_release_is_inconsistent(monkeypatch):
+    victim = next(n for n in _real_table() if n.endswith("-bin-win-vulkan-x64.zip"))
+    _asset_router(monkeypatch, drop=victim)
+    row = _checksum_row()
+    assert row.status == cp.INCONSISTENT and victim in row.detail
+
+
+def test_an_unreadable_release_listing_is_unknown_for_the_checksums(monkeypatch):
+    _router(monkeypatch, {"releases/tags/": cp.FetchError("rate limited", status=403)})
+    assert _checksum_row().status == cp.UNKNOWN
+
+
+def test_an_empty_or_missing_checksum_table_is_inconsistent_not_current(monkeypatch, tmp_path):
+    (tmp_path / "localm" / "setup_llama").mkdir(parents=True)
+    head = "\n".join(['_PINNED_TAG = "b1"', '_ROCM_TAG = "b2"', '_ROCM_CPU_TAG = "b3"',
+                      '_UPSTREAM_REPO = "o/r"', ''])
+    monkeypatch.setattr(cp, "REPO", tmp_path)
+    for body in ("_PINNED_FALLBACK_SHA256 = {\n}\n", "# no table here\n"):
+        (tmp_path / "localm" / "setup_llama" / "pins.py").write_text(head + body, encoding="utf-8")
+        row = _checksum_row()
+        assert row.status == cp.INCONSISTENT and "table" in row.detail
+
+
+def test_the_real_checksum_table_is_parseable_and_every_entry_is_64_hex():
+    table = _real_table()
+    assert len(table) > 40 and all(len(v) == 64 for v in table.values())
+
+
+def _pin_constant_files():
+    """Every tracked source file that assigns a pin-like constant."""
+    import subprocess
+    out = subprocess.run(["git", "ls-files", "localm/*.py"], cwd=cp.REPO, capture_output=True, text=True).stdout
+    pattern = cp.re.compile(r"^_?[A-Z0-9_]*(?:PINNED|_PIN)[A-Z0-9_]*\s*(?::[^=]*)?=\s*[\"'(\{]|^(?:TAG|COMMIT)\s*=\s*\"",
+                            cp.re.MULTILINE)
+    return {f for f in out.split() if pattern.search((cp.REPO / f).read_text(encoding="utf-8", errors="replace"))}
+
+
+# Files that assign something pin-shaped that is not a version to keep current, each with the reason.
+_NOT_A_VERSION_PIN = {
+    "localm/config.py": "a marker name and a cache-pin tuple for GPU caches, not an upstream version",
+}
+
+
+def _files_the_registry_reads(monkeypatch):
+    read = set()
+    real = cp._read_const
+
+    def spy(rel, pattern):
+        read.add(rel)
+        return real(rel, pattern)
+    monkeypatch.setattr(cp, "_read_const", spy)
+    real_text = cp._read_text
+
+    def spy_text(rel):
+        read.add(rel)
+        return real_text(rel)
+    monkeypatch.setattr(cp, "_read_text", spy_text)
+    monkeypatch.setattr(cp, "_get_json", lambda url: (_ for _ in ()).throw(cp.FetchError("offline")))
+    monkeypatch.setattr(cp, "_pypi_latest", lambda p: (_ for _ in ()).throw(cp.FetchError("offline")))
+    monkeypatch.setattr(cp, "_registry_digest", lambda r, t: (_ for _ in ()).throw(cp.FetchError("offline")))
+    monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 2, "", ""))
+    cp.run_checks([s for s in cp.build_registry() if not s.legacy], NOW)
+    return read
+
+
+def test_every_file_that_pins_a_version_is_read_by_the_registry_or_explained(monkeypatch):
+    pinned_files = _pin_constant_files()
+    assert "localm/setup_llama/pins.py" in pinned_files and "localm/media/sdcpp/pins.py" in pinned_files
+    read = _files_the_registry_reads(monkeypatch)
+    unaccounted = sorted(f for f in pinned_files if f not in read and f not in _NOT_A_VERSION_PIN)
+    assert unaccounted == [], f"pins nothing watches: {unaccounted}"
+
+
+def test_the_not_a_version_list_has_no_stale_entries():
+    pinned_files = _pin_constant_files()
+    assert sorted(f for f in _NOT_A_VERSION_PIN if f not in pinned_files) == []
 
 
 def test_registry_covers_every_inventory_group():

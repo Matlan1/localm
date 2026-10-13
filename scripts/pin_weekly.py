@@ -22,6 +22,15 @@ one FAIL (a candidate that does not work, a current pin that no longer works, a
 refused bump); 2 nothing failed but at least one result is INCONCLUSIVE, NOT BUILT or
 a PR opened for review.
 
+Script contract:
+  confirm_<x>_runtime.py  ``--tag X`` or ``--current``, plus ``--workdir`` and
+      ``--receipt``. Exit 0 PASS, 1 FAIL, 2 INCONCLUSIVE. Writes a schema-1 receipt
+      whose checks each carry a status and a required flag. A refusal that says the
+      build "needs a code update" is reported as NEEDS-CODE-UPDATE.
+  bump_<x>_pin.py  ``--tag X``, ``--receipt`` and ``--write``. Forward-only; every
+      region it rewrites must be found exactly once. A review-only bump has no
+      receipt and takes ``--tag`` (and ``--lib`` for a vendored library).
+
 Usage (from the main checkout):
     python scripts/pin_weekly.py --dry-run     # confirm only, never bump, commit or merge
     python scripts/pin_weekly.py
@@ -290,7 +299,7 @@ def _receipt_summary(receipt: Path) -> str:
 
 def advance(adv: Advancer, *, dry_run: bool) -> Outcome:
     """The state machine run_comfyui_pipeline implements, for any advancer with a
-    confirm script and a bump script that follow dev-notes/pin-automation/CONTRACT.md."""
+    confirm script and a bump script that follow the contract in the module docstring."""
     out = Outcome(adv.key, adv.title, "advance", NONE_NEWER)
     for rel in (adv.confirm_script, adv.bump_script):
         if rel is not None and not (REPO / rel).is_file():
@@ -467,18 +476,11 @@ def _bump_and_merge(adv: Advancer, out: Outcome, old: str, new: str, receipt: Pa
             raise pp.PipelineError(f"targeted tests failed after the bump:\n{test_out[-2000:]}")
 
     title = f"Advance the bundled {adv.title} to {new}"
-    if adv.confirm_script:
-        tested = "The new build was installed and exercised on real hardware before the pin changed."
-    elif adv.post_bump_cmds and adv.auto_merge(old, new):
-        tested = "The GUI test suite was run against the new files before this pull request was opened."
-    else:
-        tested = "This build could not be exercised on this machine; review before merging."
-    body = (f"Moves the bundled {adv.title} from {old} to {new}. {tested}\n\n"
+    review_note = "" if adv.auto_merge(old, new) else " This update needs a review before it is merged."
+    body = (f"Moves the bundled {adv.title} from {old} to {new}.{review_note}\n\n"
             "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
-    how = (f"confirmed with {adv.confirm_script}" if adv.confirm_script
-           else "mechanical bump, opened for review")
     message = (f"chore({adv.key}): advance the pinned build to {new}\n\n"
-               f"Automated: {how} before advancing from {old}.\n\n"
+               f"Moves the bundled {adv.title} from {old} to {new}.\n\n"
                "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\n")
     pp.commit_and_push(worktree, branch, new, old, message=message)
     pr = pp.open_pr(worktree, branch, new, old, title=title, body=body)

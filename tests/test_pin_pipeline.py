@@ -285,6 +285,19 @@ def test_append_fail_issue_kind_changes_the_title_and_the_dedup_key(tmp_path):
         "both entries must actually be present, not one silently skipped as a dupe")
 
 
+def test_a_failed_issue_write_leaves_the_original_file_and_no_temp_file(monkeypatch, tmp_path):
+    path = tmp_path / "issues.txt"
+    path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+
+    def refuse(src, dst):
+        raise OSError("disk full")
+    monkeypatch.setattr(pipeline.os, "replace", refuse)
+    with pytest.raises(OSError, match="disk full"):
+        pipeline.append_fail_issue("b10999", "reason", None, issues_path=path)
+    assert path.read_text(encoding="utf-8") == _ISSUES_FIXTURE
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["issues.txt"]
+
+
 def test_append_fail_issue_still_dedupes_within_the_same_kind(tmp_path):
     path = tmp_path / "issues.txt"
     path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
@@ -671,6 +684,79 @@ def test_merge_pr_pins_the_head_commit_it_waited_on(monkeypatch, tmp_path):
     pipeline.merge_pr(7, tmp_path, "b", "c", "o", title="t", body="b")
     merge = next(c for c in seen if c[:3] == ["gh", "pr", "merge"])
     assert merge[merge.index("--match-head-commit") + 1] == "cafe123"
+
+
+def test_worktree_processes_get_temp_and_cache_dirs_beside_the_worktree(tmp_path):
+    worktree = tmp_path / "wt"
+    env = pipeline._worktree_env(worktree)
+    temp = pipeline.worktree_temp_dir(worktree)
+    assert temp.is_dir() and temp.parent == worktree.parent and not str(temp).startswith(str(worktree) + os.sep)
+    assert {env["TMP"], env["TEMP"], env["TMPDIR"]} == {str(temp)}
+    assert env["npm_config_cache"].startswith(str(temp)) and env["PYTHONPATH"] == str(worktree)
+
+
+def test_too_little_free_disk_is_an_infra_error_naming_the_drive(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.shutil, "disk_usage", lambda p: type("U", (), {"free": 100 * 1024 ** 2})())
+    with pytest.raises(pipeline.InfraError, match="MiB free"):
+        pipeline.check_free_space(tmp_path / "not" / "created" / "yet")
+    monkeypatch.setattr(pipeline.shutil, "disk_usage", lambda p: type("U", (), {"free": 9 * 1024 ** 3})())
+    pipeline.check_free_space(tmp_path)
+
+
+def test_ensure_pipeline_worktree_refuses_before_touching_git_when_the_disk_is_full(monkeypatch, tmp_path):
+    def full(path, minimum=pipeline.MIN_FREE_BYTES):
+        raise pipeline.InfraError("only 1 MiB free")
+    monkeypatch.setattr(pipeline, "check_free_space", full)
+    calls = []
+    monkeypatch.setattr(pipeline, "_verify_main_checkout", lambda repo: calls.append("verified"))
+    monkeypatch.setattr(pipeline, "_run_git", lambda *a, **k: calls.append("git"))
+    with pytest.raises(pipeline.InfraError, match="MiB free"):
+        pipeline.ensure_pipeline_worktree(tmp_path)
+    assert calls == ["verified"]
+
+
+def test_reset_empties_the_worktree_temp_dir(monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    temp = pipeline.worktree_temp_dir(worktree)
+    (temp / "pytest-of-x").mkdir(parents=True)
+    (temp / "pytest-of-x" / "leftover").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout=""))
+    pipeline.reset_pipeline_worktree(worktree)
+    assert not temp.exists()
+
+
+_INTERNAL_WORDS = ("real hardware", "this machine", "confirm_", "bump_", "receipt", "Automated:", "GUI test suite")
+
+
+def test_default_public_text_names_the_change_and_no_internal_process(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout="cafe123\n"))
+    monkeypatch.setattr(pipeline.subprocess, "run",
+                        lambda cmd, **k: seen.append(cmd) or _FakeCompleted(stdout="https://x/pull/7"))
+    pipeline.open_pr(tmp_path, "b", "b999", "b998")
+    pipeline.merge_pr(7, tmp_path, "b", "b999", "b998")
+    texts = []
+    for cmd in seen:
+        if cmd[:3] == ["gh", "pr", "create"]:
+            texts += [cmd[cmd.index("--title") + 1], cmd[cmd.index("--body") + 1]]
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            texts += [cmd[cmd.index("-t") + 1], cmd[cmd.index("-b") + 1]]
+    assert len(texts) == 4 and all("b999" in t for t in texts)
+    assert [(w, t) for t in texts for w in _INTERNAL_WORDS if w in t] == []
+
+
+def test_the_default_commit_message_names_the_change_and_no_internal_process(tmp_path):
+    repo = _init_bare_origin_and_clone(tmp_path)
+    worktree = pipeline.ensure_pipeline_worktree(repo)
+    branch = "claude/pin-pipeline-llama-b999"
+    subprocess.run(["git", "checkout", "-q", "-b", branch], cwd=worktree, check=True)
+    (worktree / "README.md").write_text("scratch\nchange\n", encoding="utf-8")
+    pipeline.commit_and_push(worktree, branch, "b999", "b998")
+    message = subprocess.run(["git", "log", "-1", "--format=%B"], cwd=worktree,
+                             capture_output=True, text=True).stdout
+    assert "b999" in message and "b998" in message
+    assert [w for w in _INTERNAL_WORDS if w in message] == []
 
 
 def test_a_git_command_that_hangs_is_stopped_and_reported_as_a_failure(monkeypatch, tmp_path):
