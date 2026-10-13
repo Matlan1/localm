@@ -41,6 +41,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   fine-tune, a T5 or UMT5 encoder, a matching VAE). A choice you make for a component always wins,
   and a component that is missing is offered as a download before generating. Steps, CFG and size
   follow the model family when you leave them blank.
+- **Batch, hires fix, sampler and upscaling in the native image backend.** The Images page can
+  make several images in one job (each with the next seed, saved as it finishes), add a hires-fix
+  pass (latent, Lanczos, or an ESRGAN upscaler model you registered), and pick a sampler and
+  scheduler by name (the Video page gets the same two dropdowns). A gallery image has an Upscale
+  action that makes a larger copy with a registered upscaler model, and Reuse settings now restores
+  the model, LoRAs, size, sampler, scheduler and hires settings. Upscaler files have their own
+  model type, `upscaler`.
 - **LoRAs in the native backend.** Images and Video take one or more registered LoRAs with a
   strength each; a LoRA made for another model family is applied with a note saying so.
 - **Model pickers on the Images, Video and Music pages.** With the native backend, each page has

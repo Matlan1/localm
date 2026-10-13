@@ -10,7 +10,7 @@ import { chat, renderAttachChips } from "../app/chat.js";
 import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
-import { createNativeModelPicker } from "../app/native-models.js";
+import { createNativeGenControls, createNativeModelPicker } from "../app/native-models.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -40,26 +40,7 @@ const imageGallery = createGallery({
     body.appendChild(img);
   },
 
-  reuse: (item) => {
-    const m = item.meta || {};
-    $("img-prompt").value = m.prompt || "";
-    $("img-negative").value = m.negative_prompt || "";
-    $("img-seed").value = m.seed ?? "";
-    $("img-guidance").value = m.guidance ?? "";
-    $("img-denoise").value = m.denoise ?? "";
-    $("img-cfg").value = m.cfg ?? "";
-    $("img-input").value = m.input_image || "";
-    $("img-lora").value = m.lora_name || "";
-    $("img-lora-strength-model").value = m.lora_strength_model ?? "";
-    $("img-lora-strength-clip").value = m.lora_strength_clip ?? "";
-    if (m.backend === "native") {
-      imageModelPicker.setModels({ model: m.model, ...(m.components || {}) });
-      imageModelPicker.setLoras(m.loras || []);
-    }
-    // Most of those ids live behind this page's Advanced fold; open it when
-    // they are filled.
-    revealFilledAdvanced($("view-images"));
-  },
+  reuse: (item) => reuseImageSettings(item),
 
   // Still-image-only actions.
   extraActions: (item, ctx) => {
@@ -110,7 +91,9 @@ const imageGallery = createGallery({
       }
     };
 
-    return [useInput, toChat, copyImg];
+    const actions = [useInput, toChat, copyImg];
+    if (imageBackend.active === "native") actions.push(buildUpscaleAction(item, ctx));
+    return actions;
   },
 
   beforeRefresh: () => {
@@ -118,6 +101,30 @@ const imageGallery = createGallery({
     refreshReloadToggle("image", "img-reload-llm");
   },
 });
+
+/* "Reuse settings" on a gallery item: writes its sidecar settings back into the form. */
+function reuseImageSettings(item) {
+  const m = item.meta || {};
+  $("img-prompt").value = m.prompt || "";
+  $("img-negative").value = m.negative_prompt || "";
+  $("img-seed").value = m.seed ?? "";
+  $("img-guidance").value = m.guidance ?? "";
+  $("img-denoise").value = m.denoise ?? "";
+  $("img-cfg").value = m.cfg ?? "";
+  $("img-input").value = m.input_image || "";
+  $("img-lora").value = m.lora_name || "";
+  $("img-lora-strength-model").value = m.lora_strength_model ?? "";
+  $("img-lora-strength-clip").value = m.lora_strength_clip ?? "";
+  if (m.backend === "native") {
+    $("img-size").value = m.size || "";
+    imageModelPicker.setModels({ model: m.model, ...(m.components || {}) });
+    imageModelPicker.setLoras(m.loras || []);
+    imageGen.set(m);
+  }
+  // Most of those ids live behind this page's Advanced fold; open it when
+  // they are filled.
+  revealFilledAdvanced($("view-images"));
+}
 
 export const refreshImageHistory = imageGallery.refresh;
 
@@ -134,6 +141,40 @@ export const imageBackend = { active: null, choice: null };
 
 export const imageModelPicker = createNativeModelPicker(
   { media: "image", prefix: "imagine", mountId: "img-native-models" });
+
+const imageGen = createNativeGenControls({ prefix: "img" });
+
+/* The detail-view "Upscale" control: a registered upscaler model and a button
+   that starts the upscale job (a new gallery image). */
+function buildUpscaleAction(item, ctx) {
+  const row = el("div", "native-lora-row");
+  const sel = document.createElement("select");
+  sel.title = t("images.upscaleModel");
+  const btn = el("button", "btn-secondary", t("images.upscale"));
+  btn.type = "button";
+  btn.title = t("images.upscaleTitle");
+  btn.disabled = true;
+  row.append(sel, btn);
+  (async () => {
+    let list = [];
+    try {
+      const r = await fetch("/api/imagine/native-models", { headers: authHeaders() });
+      if (r.ok) list = (await r.json()).upscalers || [];
+    } catch { /* offline: the button stays disabled */ }
+    for (const u of list) {
+      const o = document.createElement("option");
+      o.value = u.name;
+      o.textContent = u.file && u.file !== u.name ? `${u.name} (${u.file})` : u.name;
+      sel.appendChild(o);
+    }
+    if (list.length) { btn.disabled = false; } else {
+      sel.hidden = true;
+      btn.title = t("images.upscaleNone");
+    }
+  })();
+  btn.onclick = () => { ctx.closeModal(); runImageUpscale(item.name, sel.value); };
+  return row;
+}
 
 export async function refreshImageBackend() {
   let data;
@@ -166,10 +207,13 @@ export async function refreshImageBackend() {
   const picker = $("img-native-models");
   if (picker) {
     picker.hidden = !native;
-    if (native) imageModelPicker.refresh();
+    if (native) imageModelPicker.refresh().then(() => imageGen.populate(imageModelPicker.data));
   }
   for (const node of document.querySelectorAll("#view-images .img-comfy-only")) {
     node.hidden = native;
+  }
+  for (const node of document.querySelectorAll("#view-images .img-native-only")) {
+    node.hidden = !native;
   }
 }
 
@@ -220,6 +264,57 @@ export function hideStop(btnId) {
 /*  Generation                                                       */
 /* ================================================================ */
 
+function addResultImage(name, shown) {
+  if (shown.has(name)) return;
+  shown.add(name);
+  const img = document.createElement("img");
+  $("img-result").appendChild(img);
+  fetchImageURL(`/api/imagine/file/${encodeURIComponent(name)}`)
+    .then((url) => { img.src = url; })
+    .catch((e) => toast(t("images.generationFailed", { message: e.message }), true));
+}
+
+/* Follow image job *jobId*: log lines into *log*, each saved image into the
+   result area as it arrives, then the end status. */
+async function followImageJob(jobId, log) {
+  showStop("img-stop", jobId);
+  const shown = new Set();
+  const end = await streamJob(jobId, (line) => {
+    log.textContent += line + "\n";
+    log.scrollTop = log.scrollHeight;
+  }, undefined, (ev) => {
+    if (ev.type === "image" && ev.name) addResultImage(ev.name, shown);
+  });
+  if (end.status === "done" && end.result) addResultImage(end.result, shown);
+  refreshImageHistory();
+  return end;
+}
+
+async function runImageUpscale(name, upscaler) {
+  if (!upscaler) { toast(t("images.upscaleNone"), true); return; }
+  $("img-generate").disabled = true;
+  const log = $("img-log");
+  log.style.display = "block";
+  log.textContent = "";
+  $("img-result").replaceChildren();
+  log.scrollIntoView?.({ block: "nearest" });
+  try {
+    const r = await fetch(`/api/imagine/file/${encodeURIComponent(name)}/upscale`, {
+      method: "POST", headers: authHeaders(), body: JSON.stringify({ upscaler }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const end = await followImageJob(data.job_id, log);
+    if (end.status === "done") toast(t("images.upscaledToast"));
+    else toast(t("images.upscaleStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
+  } catch (e) {
+    toast(t("images.upscaleFailed", { message: e.message }), true);
+  } finally {
+    $("img-generate").disabled = false;
+    hideStop("img-stop");
+  }
+}
+
 $("img-generate").onclick = async () => {
   const promptText = $("img-prompt").value.trim();
   if (!promptText) { toast(t("images.enterPrompt"), true); return; }
@@ -249,6 +344,7 @@ $("img-generate").onclick = async () => {
   }
   const nativeChoice = native ? imageModelPicker.choice() : {};
   Object.assign(body, nativeChoice);
+  if (native) Object.assign(body, imageGen.body());
   $("img-generate").disabled = true;
   const log = $("img-log");
   log.style.display = "block";
@@ -264,21 +360,9 @@ $("img-generate").onclick = async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    showStop("img-stop", data.job_id);
-    const end = await streamJob(data.job_id, (line) => {
-      log.textContent += line + "\n";
-      log.scrollTop = log.scrollHeight;
-    });
-    if (end.status === "done" && end.result) {
-      const img = document.createElement("img");
-      img.src = await fetchImageURL(
-        `/api/imagine/file/${encodeURIComponent(end.result)}`);
-      $("img-result").appendChild(img);
-      toast(t("images.generatedToast"));
-      refreshImageHistory();
-    } else {
-      toast(t("images.generationStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
-    }
+    const end = await followImageJob(data.job_id, log);
+    if (end.status === "done" && end.result) toast(t("images.generatedToast"));
+    else toast(t("images.generationStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
   } catch (e) {
     toast(t("images.generationFailed", { message: e.message }), true);
   } finally {

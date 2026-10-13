@@ -246,7 +246,110 @@ export function createNativeModelPicker({ media, prefix, mountId }) {
     return refresh();
   }
 
-  return { refresh, choice, setLoras, setModels, get state() { return state; } };
+  return { refresh, choice, setLoras, setModels, get state() { return state; },
+           get data() { return data; } };
+}
+
+/* Fill a <select> with *values* after its first (default, value "") option.
+   The current value is kept when still offered; a *current* the list lacks
+   is added so a restored setting is never dropped. */
+function ngcFillSelect(sel, values, firstText, current) {
+  if (!sel) return;
+  const keep = current !== undefined ? current : sel.value;
+  sel.replaceChildren(nmOption("", firstText));
+  for (const v of values) sel.appendChild(nmOption(v.value, v.label));
+  if (keep && ![...sel.options].some((o) => o.value === keep)) sel.appendChild(nmOption(keep, keep));
+  sel.value = keep || "";
+}
+
+/* Select *value* in *sel*, adding it as an option when the list lacks it. */
+function ngcSetSelect(sel, value) {
+  if (!sel) return;
+  if (value && ![...sel.options].some((o) => o.value === value)) {
+    sel.appendChild(nmOption(value, value));
+  }
+  sel.value = value || "";
+}
+
+/** The sampler / scheduler / batch / hires controls of a native media page,
+ * wired to the ids `<prefix>-sampler`, `-scheduler`, `-batch`, `-hires`,
+ * `-hires-upscaler`, `-hires-model`, `-hires-scale`, `-hires-steps` and
+ * `-hires-denoise` (only those present are used). Every field's empty value
+ * means "the model's / backend's own default" and sends nothing.
+ * `populate(data)` fills the dropdowns from a `/native-models` response,
+ * `body()` returns the request fields, `set(meta)` restores a gallery item's
+ * sidecar settings. */
+export function createNativeGenControls({ prefix }) {
+  const node = (name) => document.getElementById(`${prefix}-${name}`);
+  const number = (name) => {
+    const el = node(name);
+    if (!el) return null;
+    const raw = String(el.value).trim();
+    if (raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  function syncHires() {
+    const row = node("hires-model-row");
+    const up = node("hires-upscaler");
+    if (row && up) row.hidden = up.value !== "model";
+  }
+
+  function populate(data) {
+    const s = (data && data.sampling) || {};
+    const asItems = (names) => names.map((n) => ({ value: n, label: n }));
+    ngcFillSelect(node("sampler"), asItems(s.sample_methods || []), t("nativeModels.samplerDefault"));
+    ngcFillSelect(node("scheduler"), asItems(s.schedulers || []), t("nativeModels.schedulerDefault"));
+    const ups = (s.hires_upscalers || []).filter((u) => u.id !== "latent");
+    ngcFillSelect(node("hires-upscaler"),
+      ups.map((u) => ({ value: u.id, label: u.label })), t("nativeModels.hiresLatent"));
+    const models = ((data && data.upscalers) || []).map((u) => ({
+      value: u.name, label: u.file && u.file !== u.name ? `${u.name} (${u.file})` : u.name }));
+    ngcFillSelect(node("hires-model"), models, t("nativeModels.hiresModelPick"));
+    syncHires();
+  }
+
+  function body() {
+    const out = {};
+    const batch = number("batch");
+    if (batch !== null && batch > 1) out.batch = Math.floor(batch);
+    const sampler = node("sampler");
+    if (sampler && sampler.value) out.sample_method = sampler.value;
+    const scheduler = node("scheduler");
+    if (scheduler && scheduler.value) out.scheduler = scheduler.value;
+    const hires = node("hires");
+    if (hires && hires.checked) {
+      const upscaler = node("hires-upscaler").value || "latent";
+      const h = { upscaler, scale: number("hires-scale") ?? 2,
+                  steps: Math.floor(number("hires-steps") ?? 0),
+                  denoise: number("hires-denoise") ?? 0.7 };
+      if (upscaler === "model") h.model = node("hires-model").value || null;
+      out.hires = h;
+    }
+    return out;
+  }
+
+  function set(meta) {
+    const m = meta || {};
+    ngcSetSelect(node("sampler"), m.sample_method || "");
+    ngcSetSelect(node("scheduler"), m.scheduler || "");
+    const hires = node("hires");
+    if (!hires) return;
+    const h = m.hires || null;
+    hires.checked = !!h;
+    ngcSetSelect(node("hires-upscaler"), h && h.upscaler !== "latent" ? h.upscaler : "");
+    ngcSetSelect(node("hires-model"), (h && h.model) || "");
+    const put = (name, value) => { const el = node(name); if (el) el.value = value ?? ""; };
+    put("hires-scale", h ? h.scale : "");
+    put("hires-steps", h && h.steps ? h.steps : "");
+    put("hires-denoise", h ? h.denoise : "");
+    syncHires();
+  }
+
+  const upscaler = node("hires-upscaler");
+  if (upscaler) upscaler.addEventListener("change", syncHires);
+  return { populate, body, set, syncHires };
 }
 
 /** The music picker: one select per ACE-Step component. */

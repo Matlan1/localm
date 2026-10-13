@@ -8,10 +8,13 @@ command at a time:
     ("load", {"runtime_dir", "extra_dirs", "ctx": {<sd_ctx_params_t path fields>, ...}})
     ("generate_image", {"prompt", "negative_prompt", "width", "height", "steps",
                         "cfg_scale", "guidance", "seed", "strength", "sample_method",
-                        "scheduler", "clip_skip", "init_image"})
+                        "scheduler", "clip_skip", "init_image", "loras",
+                        "hires": {"upscaler", "model_path", "scale", "steps",
+                                  "denoising_strength", "tile_size"}})
     ("generate_video", {"prompt", "negative_prompt", "width", "height", "video_frames",
                         "fps", "steps", "cfg_scale", "flow_shift", "seed",
-                        "sample_method", "init_image"})
+                        "sample_method", "scheduler", "init_image", "loras"})
+    ("upscale_image", {"runtime_dir", "extra_dirs", "model_path", "image", "tile_size"})
     ("shutdown", None)
 
 ``resp_q``: zero or more events, then exactly one final reply per command:
@@ -48,6 +51,7 @@ class _State:
     crash_fh: Optional[TextIO] = None
     generating = False
     sample_steps = 0
+    hires_steps = 0
     decoding = False
     redact: tuple = ()
     paths: tuple = ()
@@ -151,7 +155,7 @@ def _make_callbacks(resp_q):
         if step not in (1, steps) and now - _State.last_progress < _PROGRESS_MIN_INTERVAL:
             return
         _State.last_progress = now
-        if _State.sample_steps and steps == _State.sample_steps and not _State.decoding:
+        if steps and steps in (_State.sample_steps, _State.hires_steps) and not _State.decoding:
             phase = "sampling"
         elif _State.decoding:
             phase = "decoding"
@@ -251,12 +255,14 @@ def _do_load(payload):
     _State.ctx = ctx
     version = (lib.sd_get_model_version_name(ctx) or b"").decode("utf-8", "replace")
     method = lib.sd_get_default_sample_method(ctx)
+    scheduler = lib.sd_get_default_scheduler(ctx, method)
     return {
         "version": version,
         "desc": _State.model_desc,
         "image": bool(lib.sd_ctx_supports_image_generation(ctx)),
         "video": bool(lib.sd_ctx_supports_video_generation(ctx)),
         "default_sample_method": (lib.sd_sample_method_name(method) or b"").decode(),
+        "default_scheduler": (lib.sd_scheduler_name(scheduler) or b"").decode(),
         "devices": b.list_devices(lib),
     }
 
@@ -272,6 +278,37 @@ def _enum_from_name(lib, kind: str, name):
     if value < 0 or value >= count:
         raise ValueError(f"unknown {kind.replace('_', ' ')} {name!r}")
     return value
+
+
+def _set_hires(lib, b, p, payload):
+    """Enable the hires pass of image params *p* from ``payload["hires"]``.
+    Returns the bytes objects that must stay alive until generation returns
+    (None without a hires request)."""
+    hires = payload.get("hires")
+    if not hires:
+        return None
+    upscaler = lib.str_to_sd_hires_upscaler(str(hires["upscaler"]).encode())
+    if upscaler < 1 or upscaler >= b._SD_HIRES_UPSCALER_COUNT:
+        raise ValueError(f"unknown hires upscaler {hires['upscaler']!r}")
+    h = p.hires
+    h.enabled = True
+    h.upscaler = upscaler
+    keep = []
+    if hires.get("model_path"):
+        enc = str(hires["model_path"]).encode("utf-8")
+        keep.append(enc)
+        h.model_path = enc
+        if str(hires["model_path"]) not in _State.paths:
+            _State.paths = _State.paths + (str(hires["model_path"]),)
+    if hires.get("scale") is not None:
+        h.scale = float(hires["scale"])
+    if hires.get("steps") is not None:
+        h.steps = int(hires["steps"])
+    if hires.get("denoising_strength") is not None:
+        h.denoising_strength = float(hires["denoising_strength"])
+    if hires.get("tile_size"):
+        h.upscale_tile_size = int(hires["tile_size"])
+    return keep
 
 
 def _set_loras(b, p, payload):
@@ -327,6 +364,7 @@ def _do_generate_image(payload, cancel_event):
     sched = _enum_from_name(lib, "scheduler", payload.get("scheduler"))
     if sched is not None:
         p.sample_params.scheduler = sched
+    hires_refs = _set_hires(lib, b, p, payload)
     keep = None
     init = payload.get("init_image")
     if init:
@@ -343,6 +381,7 @@ def _do_generate_image(payload, cancel_event):
     lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
     _State.last_errors = []
     _State.sample_steps = int(p.sample_params.sample_steps)
+    _State.hires_steps = (int(p.hires.steps) or _State.sample_steps) if p.hires.enabled else 0
     _State.decoding = False
     _State.generating = True
     try:
@@ -350,7 +389,7 @@ def _do_generate_image(payload, cancel_event):
     finally:
         _State.generating = False
         _State.redact = ()
-        del keep, lora_refs
+        del keep, lora_refs, hires_refs
     cancelled = cancel_event.is_set()
     try:
         if not ok or count.value < 1 or not out:
@@ -372,6 +411,51 @@ def _do_generate_image(payload, cancel_event):
     if cancelled:
         return "cancelled", "Generation cancelled."
     return "ok", result
+
+
+def _do_upscale_image(payload):
+    """Upscale ``payload["image"]`` with the ESRGAN model ``payload["model_path"]``.
+    Loads the library when no job has yet; needs no diffusion model. Returns the
+    image as ``{"width", "height", "channel", "data", "scale"}``."""
+    from . import _binding as b
+    lib = _State.lib or _load_lib(payload)
+    _State.lib = lib
+    path = str(payload["model_path"])
+    scale = int(lib.get_upscaler_model_scale(path.encode("utf-8")))
+    if scale < 1:
+        raise ValueError(f"{Path(path).name} is not an RGB ESRGAN upscaler model")
+    img = payload["image"]
+    w, h, c, data = int(img["width"]), int(img["height"]), int(img["channel"]), img["data"]
+    if len(data) != w * h * c:
+        raise ValueError("input image buffer does not match its size")
+    _State.last_errors = []
+    _State.paths = (path,)
+    keep = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+    src = b.sd_image_t(w, h, c, ctypes.cast(keep, ctypes.POINTER(ctypes.c_uint8)))
+    uctx = lib.new_upscaler_ctx(path.encode("utf-8"), False, 0,
+                                int(payload.get("tile_size") or 128), None, None)
+    if not uctx:
+        raise RuntimeError(_error_with_native("stable-diffusion.cpp could not load the upscaler"))
+    out = ctypes.POINTER(b.sd_image_t)()
+    count = ctypes.c_int(0)
+    _State.generating = True
+    try:
+        ok = lib.upscale(uctx, src, scale, ctypes.byref(out), ctypes.byref(count))
+    finally:
+        _State.generating = False
+        lib.free_upscaler_ctx(uctx)
+        del keep
+    try:
+        if not ok or count.value < 1 or not out or not out[0].data:
+            raise RuntimeError(_error_with_native("stable-diffusion.cpp upscaling failed"))
+        res = out[0]
+        size = int(res.width) * int(res.height) * int(res.channel)
+        return {"width": int(res.width), "height": int(res.height),
+                "channel": int(res.channel), "data": ctypes.string_at(res.data, size),
+                "scale": scale}
+    finally:
+        if out:
+            lib.free_sd_images(out, count.value)
 
 
 def _do_generate_video(payload, cancel_event):
@@ -401,6 +485,9 @@ def _do_generate_video(payload, cancel_event):
     method = _enum_from_name(lib, "sample_method", payload.get("sample_method"))
     if method is not None:
         p.sample_params.sample_method = method
+    sched = _enum_from_name(lib, "scheduler", payload.get("scheduler"))
+    if sched is not None:
+        p.sample_params.scheduler = sched
     keep = None
     init = payload.get("init_image")
     if init:
@@ -416,6 +503,7 @@ def _do_generate_video(payload, cancel_event):
     lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
     _State.last_errors = []
     _State.sample_steps = int(p.sample_params.sample_steps)
+    _State.hires_steps = 0
     _State.decoding = False
     _State.generating = True
     try:
@@ -493,7 +581,7 @@ def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
                 _State.ctx = None
             return
         try:
-            if name in ("probe", "load") and not callbacks_set:
+            if name in ("probe", "load", "upscale_image") and not callbacks_set:
                 lib = _State.lib or _load_lib(payload)
                 _State.lib = lib
                 lib.sd_set_log_callback(log_cb, None)
@@ -503,6 +591,8 @@ def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
                 resp_q.put(("ok", _do_probe(payload)))
             elif name == "load":
                 resp_q.put(("ok", _do_load(payload)))
+            elif name == "upscale_image":
+                resp_q.put(("ok", _do_upscale_image(payload)))
             elif name == "generate_image":
                 kind, value = _do_generate_image(payload, cancel_event)
                 resp_q.put((kind, value))

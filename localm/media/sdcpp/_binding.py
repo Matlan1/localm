@@ -22,7 +22,7 @@ from ctypes import (POINTER, Structure, c_bool, c_char_p, c_float, c_int,
 from pathlib import Path
 from typing import Optional
 
-from . import pins
+from . import pins, sampling
 
 _enum = c_int
 
@@ -43,6 +43,7 @@ _SAMPLE_METHOD_COUNT = 21
 _SCHEDULER_COUNT = 17
 _SD_VAE_FORMAT_AUTO = -1
 _SD_HIRES_UPSCALER_LATENT = 1
+_SD_HIRES_UPSCALER_COUNT = 10
 
 
 class sd_tiling_params_t(Structure):
@@ -369,6 +370,13 @@ def _declare(lib: ctypes.CDLL) -> None:
     fn("str_to_scheduler", _enum, c_char_p)
     fn("sd_sample_method_name", c_char_p, _enum)
     fn("sd_scheduler_name", c_char_p, _enum)
+    fn("sd_hires_upscaler_name", c_char_p, _enum)
+    fn("str_to_sd_hires_upscaler", _enum, c_char_p)
+    fn("new_upscaler_ctx", c_void_p, c_char_p, c_bool, c_int, c_int, c_char_p, c_char_p)
+    fn("free_upscaler_ctx", None, c_void_p)
+    fn("upscale", c_bool, c_void_p, sd_image_t, c_uint32,
+       POINTER(POINTER(sd_image_t)), POINTER(c_int))
+    fn("get_upscaler_model_scale", c_int, c_char_p)
     fn("generate_image", c_bool, c_void_p, POINTER(sd_img_gen_params_t),
        POINTER(POINTER(sd_image_t)), POINTER(c_int))
     fn("generate_video", c_bool, c_void_p, POINTER(sd_vid_gen_params_t),
@@ -523,6 +531,24 @@ def _hires_defaults_ok(h: sd_hires_params_t, prefix: str) -> list[str]:
     return bad
 
 
+def check_names(lib) -> list[str]:
+    """Every sampler, scheduler and hires upscaler whose name in the library
+    differs from ``sampling``'s tables."""
+    bad: list[str] = []
+
+    def names(count, name_fn):
+        return [(name_fn(i) or b"").decode("utf-8", "replace") for i in range(count)]
+
+    if tuple(names(_SAMPLE_METHOD_COUNT, lib.sd_sample_method_name)) != sampling.SAMPLE_METHODS:
+        bad.append("sample method names")
+    if tuple(names(_SCHEDULER_COUNT, lib.sd_scheduler_name)) != sampling.SCHEDULERS:
+        bad.append("scheduler names")
+    library = names(_SD_HIRES_UPSCALER_COUNT, lib.sd_hires_upscaler_name)
+    if library[1:] != list(sampling.HIRES_UPSCALER_LIBRARY_NAMES.values()):
+        bad.append("hires upscaler names")
+    return bad
+
+
 def check_layouts(lib) -> list[str]:
     """Every field whose value, read through this module's structs after the
     library's own ``*_init``, differs from the default that init writes at the
@@ -586,6 +612,7 @@ def check_layouts(lib) -> list[str]:
     bad += _hires_defaults_ok(vp.hires, "vid.hires")
     if not _close(vp.vae_tiling_params.target_overlap, 0.5):
         bad.append("vid.vae_tiling_params.target_overlap")
+    bad += check_names(lib)
     return bad
 
 

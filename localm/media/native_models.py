@@ -10,14 +10,18 @@ value clears the setting, so the slot is picked automatically.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from localm.media.sdcpp import sampling
 from localm.media.sdcpp.pairing import MEDIA_SLOTS
 
 MAX_LORAS = 8
+MAX_BATCH = 16
+UPSCALER_TYPE = "upscaler"
 
 MUSIC_KEYS = ("dit", "text_encoder", "vae", "lm")
 
@@ -32,6 +36,94 @@ def media_keys(media: str) -> tuple:
 class LoraChoice(BaseModel):
     name: str
     strength: float = Field(default=1.0, ge=-4.0, le=4.0, allow_inf_nan=False)
+
+
+class HiresChoice(BaseModel):
+    """The hires-fix pass of a native image job: the first pass is upscaled by
+    *scale* with *upscaler* (a ``sampling.HIRES_UPSCALER_LIBRARY_NAMES`` id; the
+    ``model`` id needs *model*, a registered upscaler) and sampled again for
+    *steps* steps (0 keeps the job's steps) at *denoise* strength."""
+    upscaler: str = "latent"
+    model: Optional[str] = None
+    scale: float = Field(default=2.0, ge=sampling.MIN_HIRES_SCALE, le=sampling.MAX_HIRES_SCALE,
+                         allow_inf_nan=False)
+    steps: int = Field(default=0, ge=0, le=sampling.MAX_HIRES_STEPS)
+    denoise: float = Field(default=0.7, ge=sampling.MIN_HIRES_DENOISE, le=1.0,
+                           allow_inf_nan=False)
+
+
+def upscaler_options(reg: Optional[dict] = None) -> list:
+    """``[{"name", "file"}]``: the registered upscaler models whose file exists."""
+    from localm.model_manager.registry import _entry_path
+    if reg is None:
+        from localm.config import load_registry
+        reg = load_registry()
+    out = []
+    for name, entry in sorted(reg.items()):
+        if not isinstance(entry, dict) or entry.get("model_type") != UPSCALER_TYPE:
+            continue
+        raw = _entry_path(entry)
+        if not raw:
+            continue
+        try:
+            if not Path(raw).is_file():
+                continue
+        except OSError:
+            continue
+        out.append({"name": str(name), "file": raw.replace("\\", "/").rsplit("/", 1)[-1]})
+    return out
+
+
+def validate_upscaler(name: Optional[str], reg: Optional[dict] = None) -> str:
+    """*name* when it is a registered upscaler model. Raises ``ValueError``."""
+    name = (name or "").strip()
+    if reg is None:
+        from localm.config import load_registry
+        reg = load_registry()
+    entry = reg.get(name) if name else None
+    if not isinstance(entry, dict) or entry.get("model_type") != UPSCALER_TYPE:
+        raise ValueError(f"'{name}' is not a registered upscaler model." if name
+                         else "Pick an upscaler model.")
+    return name
+
+
+def validate_hires(hires: Optional[HiresChoice], reg: Optional[dict] = None) -> Optional[dict]:
+    """*hires* as ``{"upscaler", "model", "scale", "steps", "denoise"}``, or None
+    without one. Raises ``ValueError`` with a user-facing reason."""
+    if hires is None:
+        return None
+    upscaler = hires.upscaler.strip()
+    if upscaler not in sampling.HIRES_UPSCALER_LIBRARY_NAMES:
+        raise ValueError(f"Unknown hires upscaler '{upscaler}'. Allowed: "
+                         + ", ".join(sampling.HIRES_UPSCALER_LIBRARY_NAMES) + ".")
+    model = None
+    if upscaler == sampling.HIRES_MODEL_UPSCALER:
+        model = validate_upscaler(hires.model, reg)
+    return {"upscaler": upscaler, "model": model, "scale": float(hires.scale),
+            "steps": int(hires.steps), "denoise": float(hires.denoise)}
+
+
+def check_generation_extras(sample_method: Optional[str], scheduler: Optional[str],
+                            hires: Optional[HiresChoice], batch: int = 1) -> dict:
+    """A request's sampler, scheduler, hires pass and batch count checked:
+    ``{"sample_method", "scheduler", "hires", "batch"}`` with None for an unset
+    one. A bad value is a 400."""
+    try:
+        if not 1 <= int(batch) <= MAX_BATCH:
+            raise ValueError(f"Batch count must be between 1 and {MAX_BATCH}.")
+        return {"sample_method": sampling.check_sample_method(sample_method),
+                "scheduler": sampling.check_scheduler(scheduler),
+                "hires": validate_hires(hires), "batch": int(batch)}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+def sampling_options() -> dict:
+    """The sampler, scheduler and hires upscaler choices the media pages offer."""
+    return {"sample_methods": list(sampling.SAMPLE_METHODS),
+            "schedulers": list(sampling.SCHEDULERS),
+            "hires_upscalers": [{"id": k, "label": v}
+                                for k, v in sampling.HIRES_UPSCALER_LIBRARY_NAMES.items()]}
 
 
 def validate_choice(native_models: Optional[dict], media: str,
@@ -178,6 +270,9 @@ def make_router(media: str, prefix: str, plugin_backend) -> APIRouter:
             configured = {k: str(blk.get(k) or "").strip() for k in keys}
             cands = pairing.registry_candidates()
             out = pairing.native_options(media, cands)
+            out["sampling"] = sampling_options()
+            if media == "image":
+                out["upscalers"] = upscaler_options()
             out["current"] = {k: display_name(v) if v else "" for k, v in configured.items()}
             other_model = "model" in query and query["model"] != configured["model"]
             picked = {k: query.get(k, "" if other_model and k != "model" else configured[k])
