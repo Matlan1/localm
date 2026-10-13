@@ -597,8 +597,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **A UNet-only SDXL model loads in the native image backend.** Choosing an SDXL file that holds
-  only the UNet (ComfyUI layout, or diffusers layout) used to fail with "get sd version from file
-  failed"; it now loads with its CLIP-L, CLIP-G and VAE from your registered models.
+  only the UNet (a safetensors file in ComfyUI or diffusers layout) used to fail with "get sd
+  version from file failed"; it now loads with its CLIP-L, CLIP-G and VAE from your registered
+  models.
 - **An external SDXL VAE no longer gives an all-white image.** A VAE picked next to an SDXL
   checkpoint, or paired with a UNet-only SDXL model, produced a blank white picture that was still
   reported as a success. The native backend now scales that VAE the way stable-diffusion.cpp does

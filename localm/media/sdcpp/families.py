@@ -324,9 +324,10 @@ def _diffusion_view(tensors: dict) -> dict:
     return out
 
 
-def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
+def _diffusion_family(t: dict, gguf: bool = False) -> Optional[tuple[str, dict]]:
     """``(family, detail)`` of the diffusion model in *t* (names already under
-    ``model.diffusion_model.``), or None."""
+    ``model.diffusion_model.``), or None. A diffusers-layout SDXL UNet is
+    recognised only from a safetensors file (*gguf* False)."""
     p = DIFFUSION_PREFIX
     names = t.keys()
     if _has(names, p + "joint_blocks."):
@@ -362,7 +363,7 @@ def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
         if in_ch == 36 and not i2v:
             return "wan2.2", {"variant": "i2v-a14b"}
         return "wan2.1", {"i2v": i2v}
-    if _has(names, p + "down_blocks.") and _has(names, p + "add_embedding."):
+    if not gguf and _has(names, p + "down_blocks.") and _has(names, p + "add_embedding."):
         return "sdxl", {}
     if _has(names, p + "input_blocks."):
         if _has(names, p + "label_emb."):
@@ -516,7 +517,7 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
     vae = _vae_info(tensors)
     if vae is not None:
         return vae
-    found = _diffusion_family(_diffusion_view(tensors))
+    found = _diffusion_family(_diffusion_view(tensors), gguf=arch is not None)
     if found is not None:
         return FileInfo("diffusion", found[0], found[1])
     if arch in _GGUF_DIFFUSION_ARCH:
