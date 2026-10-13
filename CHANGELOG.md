@@ -608,6 +608,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **The coder's diff edits leave every line they were not asked to touch exactly as it was.**
+  A form feed or Unicode line separator elsewhere in the file no longer turns into a newline, a
+  file with mixed line endings keeps each line's own ending, and trailing blank lines survive.
+- **Phone share and file upload reject malformed or oversized multipart bodies up front.** Both
+  read the form with the same bounded reader as the audio routes, so a body that is not valid
+  multipart answers 400 or 415 and a share over its size limit is refused before it is parsed.
 - **Settings labels and help translate for every field.** Forty-six settings had no German text and
   showed English in the German interface: the reranker, diffusion, parallel-request and metrics
   settings, every image, music and video generation setting, and the text-to-speech settings.
