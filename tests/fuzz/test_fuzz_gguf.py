@@ -15,11 +15,12 @@ import pytest
 
 pytest.importorskip("hypothesis")
 
-from hypothesis import example, given, strategies as st  # noqa: E402
+from hypothesis import example, given, settings, strategies as st  # noqa: E402
 
 from localm.model_manager import gguf  # noqa: E402
 from tests.fuzz import _bounds  # noqa: E402
-from tests.fuzz._gguf_strategies import gguf_bytes, lstr, raw_gguf_like  # noqa: E402
+from tests.fuzz._gguf_strategies import (  # noqa: E402
+    big_gguf_bytes, gguf_bytes, lstr, raw_gguf_like)
 
 _counter = itertools.count()
 
@@ -134,3 +135,44 @@ def test_write_with_string_kv_raises_only_value_or_os_error(data, tmp_path):
     finally:
         src.unlink(missing_ok=True)
         dst.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("name", sorted({**NEVER_RAISE, **UNDOCUMENTED}))
+@settings(max_examples=8)
+@given(data=big_gguf_bytes())
+def test_reader_never_raises_and_returns_promptly_on_a_large_file(name, data, tmp_path):
+    fn = {**NEVER_RAISE, **UNDOCUMENTED}[name]
+    path = _write(tmp_path, data)
+    try:
+        _bounds.returns_within(fn, path)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("name", [
+    "gguf_kv_bytes_per_token", "gguf_expert_counts", "gguf_block_bytes",
+    "gguf_input_layer_bytes", "gguf_moe_expert_bytes_by_layer", "_gguf_metadata_probe",
+    "gguf_n_embd", "gguf_recurrent_state_bytes", "gguf_split_layout",
+])
+@settings(max_examples=8)
+@given(data=big_gguf_bytes())
+def test_reader_allocation_stays_bounded_on_a_large_file(name, data, tmp_path):
+    fn = {**NEVER_RAISE, **UNDOCUMENTED}[name]
+    path = _write(tmp_path, data)
+    try:
+        _, peak = _bounds.peak_allocation(fn, path)
+    finally:
+        path.unlink(missing_ok=True)
+    assert peak < _bounds.DEFAULT_PEAK_BYTES, (
+        f"{name} allocated {peak} bytes for a {len(data)}-byte file")
+
+
+def test_the_large_file_strategy_reaches_sizes_the_kilobyte_strategy_cannot():
+    from hypothesis import find
+    from hypothesis.errors import NoSuchExample
+
+    find(big_gguf_bytes(), lambda b: len(b) > 1_000_000,
+         settings=settings(max_examples=500, database=None))
+    with pytest.raises(NoSuchExample):
+        find(gguf_bytes(), lambda b: len(b) > 100_000,
+             settings=settings(max_examples=500, database=None))
