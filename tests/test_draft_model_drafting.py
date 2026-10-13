@@ -1833,3 +1833,99 @@ def test_replacing_the_draft_file_changes_the_load_fingerprint(tmp_path):
         draft.write_bytes(b"GGUF22")
         after = routing_latch.load_fingerprint("m")
     assert before != after
+
+
+def test_an_existing_unregistered_draft_path_resolves_to_itself(tmp_path):
+    from localm.inference import engine
+    upper = tmp_path / "draft.GGUF"
+    upper.write_bytes(b"GGUF")
+    with patch("localm.model_manager.registry.get_operator_model_info", return_value=None):
+        assert engine.resolve_spec_draft_model({"spec_draft_model": str(upper)}) == str(upper)
+        assert engine.resolve_spec_draft_model(
+            {"spec_draft_model": str(tmp_path / "gone.gguf")}) is None
+
+
+@pytest.mark.parametrize("status,printed", [
+    ("ok-cpu", True), ("ok", False), ("draft-vocab-mismatch", False)])
+def test_bench_spec_says_the_draft_runs_on_the_cpu_only_when_it_does(status, printed):
+    from localm.cli import models as models_mod
+    from localm.inference import engine as engine_mod
+    eng = MagicMock()
+    eng.chat_stream.return_value = iter(())
+    eng.speculation_usage.return_value = {"state": "unavailable", "reason": status}
+    eng.draft_model_on_gpu.return_value = False
+    eng.draft_model_status.return_value = status
+    eng.draft_step_costs.return_value = None
+    with patch.object(engine_mod, "Engine", return_value=eng), \
+         patch.object(models_mod, "console") as console:
+        models_mod._spec_probe_arm("m.gguf", "m", "draft", 8, 512, 99, draft_model="d.gguf")
+    said_cpu = any("runs on the CPU" in str(c.args[0]) for c in console.print.call_args_list)
+    assert said_cpu is printed
+
+
+def test_the_engine_reports_the_draft_status():
+    from localm.inference import engine as engine_mod
+    eng = object.__new__(engine_mod.Engine)
+    eng._backend = SimpleNamespace(draft_status="ok-cpu")
+    assert eng.draft_model_status() == "ok-cpu"
+    eng._backend = SimpleNamespace()
+    assert eng.draft_model_status() == ""
+
+
+def test_a_cancelled_draft_load_is_freed_outside_the_draft_frame(tmp_path):
+    import threading
+
+    from localm.inference.backends.base import ModelLoadCancelled
+    llm, path, llama_mod = _loading_llama(tmp_path)
+    llm._cancel_event = threading.Event()
+    llm._cancel_event.set()
+    seen = []
+    llm._free_native = lambda: seen.append("free")
+    with patch.object(llama_mod, "api") as api, \
+         patch.object(llama_mod, "set_use_mmap"):
+        api.llama_load_model_from_file.return_value = None
+        with pytest.raises(ModelLoadCancelled):
+            llm._load_draft_model(path, None, True)
+    assert seen == ["free"]
+    import inspect
+    assert "_free_native" not in inspect.getsource(llama_mod.LlamaCpp._attach_draft_model)
+
+
+def test_a_failed_target_free_after_a_cancel_is_not_reported_as_a_draft_error(tmp_path):
+    import threading
+
+    llm, path, llama_mod = _loading_llama(tmp_path)
+    llm._cancel_event = threading.Event()
+    llm._cancel_event.set()
+
+    def fail():
+        raise RuntimeError("free failed")
+    llm._free_native = fail
+    with patch.object(llama_mod, "api") as api, \
+         patch.object(llama_mod, "set_use_mmap"):
+        api.llama_load_model_from_file.return_value = None
+        with pytest.raises(RuntimeError, match="free failed"):
+            llm._load_draft_model(path, None, True)
+
+
+def test_metadata_without_a_tokenizer_model_or_with_text_after_nul_is_not_refused():
+    assert draft_vocab_mismatch(_view(vocab_type=None), _view(vocab_type=2)) is None
+    nul = VocabView(2, 300, None, None, 1, 2,
+                    lambda i: (b"t%d" % i) if i != 7 else b"t7")
+    view = gguf_vocab_view({"model": "gpt2", "tokens": ["t%d" % i if i != 7 else "t7\x00x"
+                                                        for i in range(300)]})
+    assert view.text(7) == b"t7"
+    assert draft_vocab_mismatch(nul, view) is None
+
+
+def test_a_hand_edited_draft_source_still_fingerprints_the_draft_file(tmp_path):
+    from localm.inference import routing_latch
+    draft = tmp_path / "d.gguf"
+    draft.write_bytes(b"GGUF1")
+    cfg = {"spec_source": " Draft ", "spec_draft_model": str(draft)}
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch("localm.model_manager.registry.get_operator_model_info",
+               side_effect=lambda n: (draft, None)):
+        before = routing_latch.load_fingerprint("m")
+        draft.write_bytes(b"GGUF22")
+        assert routing_latch.load_fingerprint("m") != before

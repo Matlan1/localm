@@ -3973,9 +3973,13 @@ class LlamaCpp:
         if not is_gguf_file(path):
             source.disable("draft-not-gguf")
             return
+        from ._draftmodel import native_vocab_view
         try:
-            self._attach_draft_model(source, path, verbose, on_gpu)
+            target_vocab = native_vocab_view(api, self._model_ptr)
+            self._attach_draft_model(source, path, verbose, on_gpu, target_vocab)
         except ModelLoadCancelled:
+            with quiet():
+                self._free_native()
             raise
         except Exception as exc:
             logger.warning("draft model %s could not be set up (%s: %s)",
@@ -3984,9 +3988,13 @@ class LlamaCpp:
                 source.close()
             source.disable("draft-error:%s" % type(exc).__name__)
 
-    def _attach_draft_model(self, source, path: str, verbose: bool, on_gpu: bool) -> None:
+    def _attach_draft_model(self, source, path: str, verbose: bool, on_gpu: bool,
+                            target_vocab) -> None:
         """Load the draft GGUF at *path* into *source* and create its context,
-        or disable *source* with the status ``_load_draft_model`` names."""
+        or disable *source* with the status ``_load_draft_model`` names.
+        *target_vocab* is the loaded model's ``native_vocab_view``. Makes no
+        native call on the loaded model. Raises ModelLoadCancelled, freeing
+        nothing, when the cancel event stopped the draft load."""
         from localm.debuglog import logger
         quiet = _quiet_stderr if not verbose else contextlib.nullcontext
 
@@ -4022,16 +4030,13 @@ class LlamaCpp:
                 detail = captured.tail()
         if not model:
             if self._cancel_event is not None and self._cancel_event.is_set():
-                with quiet():
-                    self._free_native()
                 from localm.inference.backends.base import ModelLoadCancelled
                 raise ModelLoadCancelled(f"Model load aborted (superseded): {path}")
             logger.warning("draft model failed to load: %s %s", os.path.basename(path), detail)
             source.disable("draft-load-failed")
             return
         source._model = model
-        mismatch = draft_vocab_mismatch(native_vocab_view(api, self._model_ptr),
-                                        native_vocab_view(api, model))
+        mismatch = draft_vocab_mismatch(target_vocab, native_vocab_view(api, model))
         if mismatch:
             logger.warning("draft model %s does not share this model's vocabulary (%s)",
                            os.path.basename(path), mismatch)

@@ -107,7 +107,8 @@ def load_fingerprint(name: str) -> str:
     except Exception as exc:
         logger.debug("routing latch: model files unreadable for %s: %s", name, exc)
         parts["model"] = parts["mmproj"] = "unreadable"
-    if isinstance(parts["config"], dict) and parts["config"].get("spec_source") == "draft":
+    if (isinstance(parts["config"], dict)
+            and str(parts["config"].get("spec_source") or "").strip().lower() == "draft"):
         try:
             from localm.inference.engine import resolve_spec_draft_model
             parts["draft"] = _file_identity(resolve_spec_draft_model(cfg))

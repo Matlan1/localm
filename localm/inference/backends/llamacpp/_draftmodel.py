@@ -87,9 +87,10 @@ def draft_vocab_mismatch(target: VocabView, draft: VocabView) -> Optional[str]:
     The two must have the same vocabulary type; the same add-BOS and add-EOS
     flags, and the same BOS / EOS id where it is added; sizes at most
     DRAFT_VOCAB_SIZE_MAX_DIFFERENCE apart; and the same token text for every id
-    from DRAFT_VOCAB_CHECK_START_ID up to the smaller size. A flag that is None
-    on either side skips that flag's comparison and its id's."""
-    if target.vocab_type != draft.vocab_type:
+    from DRAFT_VOCAB_CHECK_START_ID up to the smaller size. A ``vocab_type``
+    or flag that is None on either side skips that comparison (for a flag,
+    its id's too)."""
+    if None not in (target.vocab_type, draft.vocab_type) and target.vocab_type != draft.vocab_type:
         return "vocab-type %s != %s" % (draft.vocab_type, target.vocab_type)
     if None not in (target.add_bos, draft.add_bos) and (
             target.add_bos != draft.add_bos or (target.add_bos and target.bos != draft.bos)):
@@ -167,7 +168,8 @@ def draft_metadata_refusal(target_path, draft_path) -> Optional[tuple[str, str]]
 def gguf_vocab_view(signature: dict) -> VocabView:
     """The VocabView of a GGUF's ``gguf_vocab_signature``. ``add_bos`` and
     ``add_eos`` are None, as the GGUF metadata alone does not determine
-    them. An id the file does not carry reads as -1."""
+    them. An id the file does not carry reads as -1, and token text is cut at
+    its first NUL, as the native view reads it."""
     tokens = signature["tokens"]
     return VocabView(
         vocab_type=signature.get("model"),
@@ -176,7 +178,7 @@ def gguf_vocab_view(signature: dict) -> VocabView:
         add_eos=None,
         bos=-1 if signature.get("bos") is None else int(signature["bos"]),
         eos=-1 if signature.get("eos") is None else int(signature["eos"]),
-        text=lambda i: tokens[i].encode("utf-8"))
+        text=lambda i: tokens[i].encode("utf-8").split(b"\0", 1)[0])
 
 
 def native_vocab_view(api, model_ptr) -> VocabView:
