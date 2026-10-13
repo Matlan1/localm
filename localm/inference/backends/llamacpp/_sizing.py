@@ -58,6 +58,9 @@ def embedder_ctx_reservation_bytes() -> int:
 # weights for them to be read into memory instead of memory-mapped.
 HOST_RAM_HEADROOM_BYTES = 2 * 1024 ** 3
 
+# VRAM the MTP draft context takes beyond its KV cache and logits buffer.
+MTP_DRAFT_COMPUTE_MARGIN_BYTES = 256 * 1024 * 1024
+
 
 class MmapDecision(NamedTuple):
     """How a load memory-maps the model file (:func:`decide_use_mmap`).
@@ -744,12 +747,11 @@ class VramSizingMixin:
 
         Two charges: the draft context's own KV cache, sized to the main
         ``self.n_ctx`` (the draft context is created at the main context's size)
-        and its own nextn/draft layer count rather than the whole stack; and a flat
-        compute-buffer charge of ``_VRAM_OVERHEAD_BYTES``, the same constant
-        the main context's own KV-cache-plus-compute-buffer overhead already
-        uses - the draft context's n_batch/n_ubatch are set to its own n_ctx
-        regardless of layer count, so its buffers are not assumed to shrink
-        proportionally with it.
+        and its own nextn/draft layer count rather than the whole stack; and its
+        compute buffers: the logits of ``llama._MTP_DRAFT_BATCH`` rows of the
+        vocabulary (``logits_buffer_bytes``) plus ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``,
+        or the flat ``_VRAM_OVERHEAD_BYTES`` when the header gives no vocabulary
+        size.
 
         Eligibility is the SAME two-part gate llama_model_mtp_support checks
         on an already-loaded model (declared nextn metadata AND an
@@ -775,7 +777,7 @@ class VramSizingMixin:
                 kv_per_token = gguf_mtp_draft_kv_bytes_per_token(
                     path, nextn_layers)
                 self._mtp_draft_kv_per_token_cached = int(kv_per_token)
-                charge = self.n_ctx * kv_per_token + self._VRAM_OVERHEAD_BYTES
+                charge = self.n_ctx * kv_per_token + self._mtp_draft_compute_bytes(path)
         except Exception as exc:
             from localm.debuglog import logger as _dbg
             _dbg.debug("mtp draft-context VRAM probe failed (%s); charging "
@@ -783,6 +785,21 @@ class VramSizingMixin:
             charge = 0
         self._mtp_draft_vram_bytes_cached = charge
         return charge
+
+    def _mtp_draft_compute_bytes(self, path: Path) -> int:
+        """Compute-buffer VRAM of the MTP draft context for the model at
+        *path*: the logits of ``llama._MTP_DRAFT_BATCH`` rows of its vocabulary
+        plus ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``, or ``_VRAM_OVERHEAD_BYTES``
+        when the GGUF header gives no vocabulary size."""
+        from localm.model_manager.gguf import _gguf_split_layout_meta
+        from .llama import _MTP_DRAFT_BATCH
+        from ._split_fit import logits_buffer_bytes
+        meta = _gguf_split_layout_meta(path)
+        n_vocab = meta[1] if meta else 0
+        if not n_vocab:
+            return self._VRAM_OVERHEAD_BYTES
+        return (logits_buffer_bytes(n_vocab, self.n_ctx, max_batch=_MTP_DRAFT_BATCH)
+                + MTP_DRAFT_COMPUTE_MARGIN_BYTES)
 
     def _recurrent_state_vram_bytes(self) -> int:
         """VRAM the main context's recurrent state takes for THIS load - 0 for a

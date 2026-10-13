@@ -802,6 +802,11 @@ from localm.textnorm import scrub_stream as _scrub_stream  # noqa: E402
 # Suffix tokens are prefilled in chunks of this size (matches n_batch ceiling)
 _PREFILL_CHUNK = 2048
 
+# n_batch and n_ubatch of the MTP draft context, and the chunk size the draft
+# cache is refilled in. Must stay above _MTP_QUEUED_ROWS_MAX + 1, the most rows
+# one draft decode carries outside a refill.
+_MTP_DRAFT_BATCH = 512
+
 # Coarse decode-progress heartbeat: every N generated tokens, never per token
 # (a per-token line would flood the shared debug log and the bug-report
 # digest's benign-record budget - see debuglog.py's ring-buffer docstring).
@@ -4224,7 +4229,7 @@ class LlamaCpp:
         from ._structs import LLAMA_CONTEXT_TYPE_MTP
         cp_mtp.ctx_type = LLAMA_CONTEXT_TYPE_MTP
         cp_mtp.n_ctx = n_ctx
-        cp_mtp.n_batch = min(n_ctx, _PREFILL_CHUNK)
+        cp_mtp.n_batch = min(n_ctx, _MTP_DRAFT_BATCH)
         cp_mtp.n_ubatch = cp_mtp.n_batch
         cp_mtp.offload_kqv = offload_kqv
         if n_threads is not None:
@@ -4355,11 +4360,11 @@ class LlamaCpp:
             return
         if h_rows is None:
             h_rows = [self._pending_h_addr(base_pos)] + [None] * (len(tokens) - 1)
-        for i in range(0, len(tokens), _PREFILL_CHUNK):
-            piece = tokens[i:i + _PREFILL_CHUNK]
+        for i in range(0, len(tokens), _MTP_DRAFT_BATCH):
+            piece = tokens[i:i + _MTP_DRAFT_BATCH]
             try:
                 ret = self._decode_draft(piece, base_pos + i,
-                                         h_rows[i:i + _PREFILL_CHUNK], output_last=False)
+                                         h_rows[i:i + _MTP_DRAFT_BATCH], output_last=False)
             except Exception as exc:
                 if mid_reply:
                     self._stop_drafting_this_call("draft-catchup-error:%s" % type(exc).__name__)

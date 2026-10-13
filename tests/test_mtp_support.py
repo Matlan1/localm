@@ -1142,6 +1142,19 @@ def test_mtp_draft_vram_charges_kv_plus_the_flat_overhead_when_eligible():
     assert charge == 1024 * 1000 + GgufBackend._VRAM_OVERHEAD_BYTES
 
 
+def test_mtp_draft_vram_charges_the_draft_batch_of_logits_when_the_vocab_is_known():
+    from localm.inference.backends.llamacpp._sizing import MTP_DRAFT_COMPUTE_MARGIN_BYTES
+    n_vocab = 248_320
+    b = _mtp_sizing_backend(n_ctx=4096)
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)),          patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+               return_value=1000),          patch("localm.model_manager.gguf._gguf_split_layout_meta",
+               return_value=(24, n_vocab)):
+        charge = b._mtp_draft_context_vram_bytes()
+    batch = LlamaCppModule._MTP_DRAFT_BATCH
+    assert charge == 4096 * 1000 + n_vocab * batch * 4 + MTP_DRAFT_COMPUTE_MARGIN_BYTES
+
+
 def test_mtp_draft_vram_scales_with_the_main_context_past_2048_tokens():
     # The draft context is created at the main context's size, so its KV charge
     # is not capped.
@@ -1524,7 +1537,8 @@ def _context_factory(mock_api, refuse_draft=False):
         is_draft = cp.ctx_type == LLAMA_CONTEXT_TYPE_MTP
         ptr = None if (is_draft and refuse_draft) else ctypes.c_void_p(100 + len(made))
         made.append(SimpleNamespace(draft=is_draft, n_ctx=cp.n_ctx, n_batch=cp.n_batch,
-                                    offload_kqv=cp.offload_kqv, ptr=ptr))
+                                    n_ubatch=cp.n_ubatch, offload_kqv=cp.offload_kqv,
+                                    ptr=ptr))
         return ptr
 
     mock_api.llama_context_default_params.side_effect = _context_params
@@ -1565,13 +1579,15 @@ def test_a_grown_main_context_gets_a_draft_context_of_the_same_size():
     main, draft = made
     assert (main.draft, main.n_ctx) == (False, 8192)
     assert (draft.draft, draft.n_ctx) == (True, 8192), made
-    assert draft.n_batch == 2048
+    batch = LlamaCppModule._MTP_DRAFT_BATCH
+    assert draft.n_batch == batch
     assert llm._mtp_ctx_capacity == 8192
     assert llm._mtp_ctx_ptr is draft.ptr
-    # The 2335-token prompt was mirrored into the draft cache in two chunks.
+    # The 2335-token prompt was prefilled in chunks of 2048 and 287 and mirrored
+    # into the draft cache in chunks of at most the draft batch.
     draft_decodes = [c for c in mock_api.llama_decode.call_args_list
                      if c.args[0] is draft.ptr]
-    assert len(draft_decodes) == 2
+    assert len(draft_decodes) == -(-2048 // batch) + -(-287 // batch)
     assert (llm.supports_mtp, llm._mtp_usable, llm.mtp_status) == (True, True, "ok:qwen35")
 
 
@@ -1796,7 +1812,8 @@ def test_the_draft_context_is_created_at_the_size_it_is_asked_for():
         made = _context_factory(mock_api)
         assert llm._create_mtp_context(16384) == ""
 
-    assert [(m.draft, m.n_ctx, m.n_batch) for m in made] == [(True, 16384, 2048)]
+    assert [(m.draft, m.n_ctx, m.n_batch, m.n_ubatch) for m in made] == [
+        (True, 16384, LlamaCppModule._MTP_DRAFT_BATCH, LlamaCppModule._MTP_DRAFT_BATCH)]
     assert llm._mtp_ctx_capacity == 16384
 
 
@@ -1804,9 +1821,13 @@ def test_a_small_context_gets_a_batch_no_larger_than_itself():
     llm = make_bare_llama(_model_ptr=ctypes.c_void_p(1), _ctx_ptr=ctypes.c_void_p(2))
     with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
         made = _context_factory(mock_api)
-        llm._create_mtp_context(1024)
+        llm._create_mtp_context(256)
 
-    assert (made[0].n_ctx, made[0].n_batch) == (1024, 1024)
+    assert (made[0].n_ctx, made[0].n_batch, made[0].n_ubatch) == (256, 256, 256)
+
+
+def test_the_draft_batch_holds_every_draft_decode_outside_a_refill():
+    assert LlamaCppModule._MTP_DRAFT_BATCH > LlamaCppModule._MTP_QUEUED_ROWS_MAX + 1
 
 
 def test_a_context_growth_charges_the_draft_contexts_kv_too():
