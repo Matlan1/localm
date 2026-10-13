@@ -533,7 +533,8 @@ def test_the_model_table_is_complete_and_matches_localms_defaults(cf):
     assert music["repo"] == models.DEFAULT_REPO
     for comp in models.COMPONENTS:
         size, sha = music["files"][models.DEFAULT_FILES[comp]]
-        assert size == models.DEFAULT_SIZES[comp] and len(sha) == 64
+        assert size == models.DEFAULT_SIZES[comp] and sha == models.DEFAULT_SHA256[comp]
+    assert music["revision"] == models.DEFAULT_REVISION
     assert set(music["files"]) == set(models.DEFAULT_FILES.values())
     chat = cf.MODELS["chat"]
     assert len(chat["revision"]) == 40 and chat["architecture"] == "llama"

@@ -705,10 +705,21 @@ export function shouldShowInstallGate() {
     // would skip its own onboarding because a DIFFERENT install dismissed it here.
     if (instanceCacheTrusted() && localStorage.getItem("localm.onboarded") === "1") return false;
   } catch { /* storage blocked - treat as not onboarded */ }
-  // Phones/tablets only: a touch device with a coarse pointer. A desktop
-  // `localm gui` (fine pointer) opens straight into the app.
-  return (navigator.maxTouchPoints || 0) > 0
-    || !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  return isPhoneOrTablet();
+}
+
+// A phone or tablet: the browser says it is mobile (`userAgentData.mobile`), its
+// user agent names a phone/tablet OS, it is iPadOS posing as a Mac, or its
+// PRIMARY pointer is coarse. A desktop with touch input and a mouse is not one.
+// See install-gate.test.mjs "a Windows PC with touch input and a mouse".
+export function isPhoneOrTablet() {
+  const nav = window.navigator || {};
+  if (nav.userAgentData && nav.userAgentData.mobile === true) return true;
+  if (/Android|iPhone|iPad|iPod|Mobile/.test(nav.userAgent || "")) return true;
+  if (isIOSSafari()) return true;
+  try {
+    return !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  } catch { return false; }
 }
 
 // Render the gate's install affordance - mirror of applyInstallUI for the gate's

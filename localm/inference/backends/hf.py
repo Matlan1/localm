@@ -140,6 +140,10 @@ def _load_notes(notes) -> list[str]:
     return [one_line(n) for n in notes if isinstance(n, str) and n.strip()]
 
 
+# Pairs sent to the worker in one rerank call, so each call stays inside its timeout.
+_RERANK_PAIRS_PER_CALL = 16
+
+
 class HFBackend(BaseBackend):
     """
     Parent-side handle to a HuggingFace-format model loaded in an isolated
@@ -156,9 +160,15 @@ class HFBackend(BaseBackend):
     # actually see images is only known after load().
     can_be_multimodal = True
 
-    def __init__(self, model_path: str, device: Optional[str] = None) -> None:
+    def __init__(self, model_path: str, device: Optional[str] = None,
+                 task: str = "chat") -> None:
         self.model_path = str(Path(model_path).resolve())
         self._device = device      # None = auto-detect
+        # "chat" for every ordinary model; "rerank" loads the checkpoint's
+        # sequence-classification head so rerank() can score pairs.
+        self._task = task
+        # Head output names when the reranker's head has several; set by load().
+        self.rerank_labels: list[str] = []
         # The isolated worker process holding the real model. None until load()
         # succeeds.
         self._runner: Optional[HFRunner] = None
@@ -312,7 +322,10 @@ class HFBackend(BaseBackend):
 
         self._runner = HFRunner()
         params = {"model_path": self.model_path, "device": self._device}
+        if self._task != "chat":
+            params["task"] = self._task
         meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
+        self.rerank_labels = [str(n) for n in (meta.get("rerank_labels") or [])]
         self._supports_images = bool(meta.get("supports_images"))
         self._supports_audio = bool(meta.get("supports_audio"))
         self._processor_error = meta.get("processor_error")
@@ -486,6 +499,20 @@ class HFBackend(BaseBackend):
                 f"across {len(texts)} texts (max {max_chars}). Split the "
                 f"batch across multiple requests.")
         return self._runner.embed(texts, timeout=self._embed_timeout_seconds())
+
+    def rerank(self, pairs: list) -> list[dict]:
+        """Score ``(query, document)`` pairs via the isolated worker. Each result
+        is ``{"scores": [...], "tokens": N, "truncated": bool}`` (see
+        ``HFWorker.rerank``). Requires a backend built with ``task="rerank"``."""
+        if self._task != "rerank":
+            raise RuntimeError("this backend was not loaded for reranking")
+        if self._runner is None or not self.loaded:
+            raise RuntimeError("Model not loaded - call load() first")
+        out: list[dict] = []
+        for start in range(0, len(pairs), _RERANK_PAIRS_PER_CALL):
+            chunk = list(pairs[start:start + _RERANK_PAIRS_PER_CALL])
+            out.extend(self._runner.rerank(chunk, timeout=self._embed_timeout_seconds()))
+        return out
 
     # ------------------------------------------------------------------ #
     #  Inference                                                           #

@@ -762,6 +762,7 @@ def _files_the_registry_reads(monkeypatch):
     monkeypatch.setattr(cp, "_get_json", lambda url: (_ for _ in ()).throw(cp.FetchError("offline")))
     monkeypatch.setattr(cp, "_pypi_latest", lambda p: (_ for _ in ()).throw(cp.FetchError("offline")))
     monkeypatch.setattr(cp, "_registry_digest", lambda r, t: (_ for _ in ()).throw(cp.FetchError("offline")))
+    monkeypatch.setattr(cp, "_hf_linked_sha256", lambda *a, **k: (_ for _ in ()).throw(cp.FetchError("offline")))
     monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 2, "", ""))
     cp.run_checks([s for s in cp.build_registry() if not s.legacy], NOW)
     return read
@@ -791,3 +792,110 @@ def test_registry_covers_every_inventory_group():
                      "vendored KaTeX", "vendored kokoro-js", "vendored transformers.js",
                      "vendored onnxruntime-web", "vendored jsQR", "vendored Inter font"):
         assert required in names, required
+
+
+# ---- pinned Hugging Face file digests ---------------------------------------
+
+
+def _hf_row(monkeypatch, served):
+    """Run the digest row with a hub that answers *served* (a callable
+    ``(repo, path, revision) -> sha256 | None`` that may raise FetchError)."""
+    monkeypatch.setattr(cp, "_hf_linked_sha256", served)
+    spec = next(s for s in cp.build_registry() if s.name == cp._HF_PINS_NAME)
+    return cp.run_checks([spec], NOW)[0]
+
+
+def _hub_serving_the_pins():
+    pins = {(repo, path): sha for _label, repo, path, _rev, sha in cp.hf_file_pins()}
+    return lambda repo, path, revision="main": pins[(repo, path)]
+
+
+def test_the_pinned_hf_files_cover_music_and_comfyui_and_every_digest_is_64_hex():
+    pins = cp.hf_file_pins()
+    labels = [p[0] for p in pins]
+    assert sum(label.startswith("music ") for label in labels) == 4
+    assert sum(label.startswith("ComfyUI ") for label in labels) == 8
+    assert all(cp._HEX64_RE.match(p[4]) for p in pins)
+    assert len({(p[1], p[2]) for p in pins}) == len(pins)
+
+
+def test_a_hub_serving_the_pinned_digests_reads_current(monkeypatch):
+    row = _hf_row(monkeypatch, _hub_serving_the_pins())
+    assert row.status == cp.CURRENT and "12 pinned digest(s)" in row.detail
+
+
+def test_a_reuploaded_file_reads_stale_and_names_it(monkeypatch):
+    serving = _hub_serving_the_pins()
+    victim = next(p for p in cp.hf_file_pins() if p[0].startswith("ComfyUI clip_l"))
+
+    def served(repo, path, revision="main"):
+        return "0" * 64 if (repo, path) == (victim[1], victim[2]) else serving(repo, path, revision)
+
+    row = _hf_row(monkeypatch, served)
+    assert row.status == cp.STALE and "ComfyUI clip_l.safetensors" in row.detail
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_a_pinned_source_the_hub_refuses_reads_inconsistent(monkeypatch, status):
+    serving = _hub_serving_the_pins()
+    victim = next(p for p in cp.hf_file_pins() if p[0].startswith("ComfyUI ae"))
+
+    def served(repo, path, revision="main"):
+        if (repo, path) == (victim[1], victim[2]):
+            raise cp.FetchError("refused", status=status)
+        return serving(repo, path, revision)
+
+    row = _hf_row(monkeypatch, served)
+    assert row.status == cp.INCONSISTENT and f"HTTP {status}" in row.detail
+
+
+def test_a_hub_that_cannot_be_reached_reads_unknown_never_current(monkeypatch):
+    def served(repo, path, revision="main"):
+        raise cp.FetchError("timed out")
+
+    assert _hf_row(monkeypatch, served).status == cp.UNKNOWN
+
+
+def test_a_pinned_file_the_hub_does_not_store_as_lfs_reads_stale(monkeypatch):
+    assert _hf_row(monkeypatch, lambda repo, path, revision="main": None).status == cp.STALE
+
+
+def test_a_renamed_pin_table_is_inconsistent_not_current(monkeypatch, tmp_path):
+    serving = _hub_serving_the_pins()
+    monkeypatch.setattr(cp, "REPO", tmp_path)
+    row = _hf_row(monkeypatch, serving)
+    assert row.status == cp.INCONSISTENT
+
+
+def test_the_unredirected_response_is_what_carries_the_digest(monkeypatch):
+    import email.message
+    import urllib.error
+    sha = "ab" * 32
+    headers = email.message.Message()
+    headers["X-Linked-ETag"] = f'"{sha}"'
+    seen = []
+
+    class Opener:
+        def open(self, req, timeout=None):
+            seen.append((req.get_method(), req.full_url))
+            raise urllib.error.HTTPError(req.full_url, 302, "Found", headers, None)
+
+    monkeypatch.setattr(cp.urllib.request, "build_opener", lambda *handlers: Opener())
+    assert cp._hf_linked_sha256("o/r", "dir/a b.gguf", "abc") == sha
+    assert seen == [("HEAD", "https://huggingface.co/o/r/resolve/abc/dir/a%20b.gguf")]
+    headers.replace_header("X-Linked-ETag", '"not-a-sha"')
+    assert cp._hf_linked_sha256("o/r", "f", "main") is None
+
+
+def test_a_missing_file_raises_with_the_status(monkeypatch):
+    import email.message
+    import urllib.error
+
+    class Opener:
+        def open(self, req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", email.message.Message(), None)
+
+    monkeypatch.setattr(cp.urllib.request, "build_opener", lambda *handlers: Opener())
+    with pytest.raises(cp.FetchError) as caught:
+        cp._hf_linked_sha256("o/r", "f")
+    assert caught.value.status == 404

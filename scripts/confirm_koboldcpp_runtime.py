@@ -104,6 +104,8 @@ NOT_MEASURED = [
 _TAG_RE = re.compile(r"^v(\d+(?:\.\d+)+)$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
+from localm.media.koboldcpp import models as _kmodels  # noqa: E402
+
 # Files fetched once into the persistent cache. Identity is (repo, revision,
 # file, size, sha256); a cached file that does not match is discarded.
 MODELS = {
@@ -116,21 +118,11 @@ MODELS = {
         "architecture": "llama",
     },
     "music": {
-        "repo": "Serveurperso/ACE-Step-1.5-GGUF",
-        "revision": "666ac70204440867d8c01ba4b119cc79c95b370a",
+        "repo": _kmodels.DEFAULT_REPO,
+        "revision": _kmodels.DEFAULT_REVISION,
         "files": {
-            "acestep-5Hz-lm-0.6B-Q8_0.gguf": (
-                709846656,
-                "bdaf9e292d4470f31c19cafeaca1b74936a114667e3a85e5d33b65247e9908ec"),
-            "Qwen3-Embedding-0.6B-Q8_0.gguf": (
-                784144960,
-                "972f23255e46adfe744a0eb9a0039f3c63988f65753b0968d776e8b27168c321"),
-            "acestep-v15-turbo-Q4_K_M.gguf": (
-                1445710272,
-                "55b4d8514850f3d0f82536f37e99673aaf48df802b5ae5b153eea32a2e2daa5e"),
-            "vae-BF16.gguf": (
-                337420928,
-                "0599862ac5d15cd308e1d2e368373aea6c02e25ebd1737ad4a4562a0901b0ef8"),
+            _kmodels.DEFAULT_FILES[c]: (_kmodels.DEFAULT_SIZES[c], _kmodels.DEFAULT_SHA256[c])
+            for c in _kmodels.COMPONENTS
         },
     },
 }

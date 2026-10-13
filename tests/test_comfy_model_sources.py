@@ -21,6 +21,8 @@ class TestResolveComfyModelSource:
             assert repo.count("/") == 1
             assert path.rsplit("/", 1)[-1] == filename
             assert source.size_bytes > 0
+            assert source.sha256 and len(source.sha256) == 64
+            assert source.sha256 == source.sha256.lower() and int(source.sha256, 16) >= 0
             assert source.model_type
             assert source.comfy_subfolder
 
@@ -49,10 +51,9 @@ class TestResolveComfyModelSource:
         assert clip_l.comfy_subfolder == t5xxl.comfy_subfolder == "clip"
 
     def test_flux_vae_sourced_from_ungated_repo(self):
-        # ae.safetensors is byte-identical in the gated FLUX.1-dev repo and the
-        # ungated FLUX.1-schnell repo, and is sourced from the ungated one.
         source = resolve_comfy_model_source("ae.safetensors")
-        assert source.spec == "black-forest-labs/FLUX.1-schnell:ae.safetensors"
-        assert "FLUX.1-dev" not in source.spec
+        assert source.spec == "Comfy-Org/z_image_turbo:split_files/vae/ae.safetensors"
+        assert source.sha256 == "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"
+        assert "FLUX.1" not in source.spec
         assert source.model_type == "vae"
         assert source.comfy_subfolder == "vae"

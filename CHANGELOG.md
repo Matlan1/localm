@@ -12,6 +12,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Sentence-transformers folders embed the way their model defines.** A Hugging Face folder
+  with a `modules.json` is registered as an embedding model, and its Pooling (mean, CLS, max,
+  last token and the other modes), Dense and Normalize modules are applied, so a CLS-pooled
+  model such as bge no longer gets mean-pooled vectors. A folder that lists any other module,
+  or keeps its Dense weights in a pickle file, is refused with the module named.
+- **Cross-encoder rerankers in Hugging Face format.** A folder whose model is a
+  `*ForSequenceClassification` with a single output (for example bge-reranker-v2-m3) is
+  registered as a reranker and scores `POST /v1/rerank`, `localm rerank` and Knowledge
+  reranking with the head's raw logit, on the CPU or the GPU like the GGUF rerankers. A
+  checkpoint saved without its classification head is refused, and a classifier with several
+  labels is not offered as a reranker.
+- **Import models from StabilityMatrix, and type them by content.** Import from ComfyUI also takes a StabilityMatrix install, data or models folder. Every model file found is filed as a diffusion model, text encoder, VAE or LoRA by what is inside it, not only by the folder it sits in, and ComfyUI's `diffusion_models` and `clip_vision` folders and StabilityMatrix's `StableDiffusion`, `DiffusionModels`, `TextEncoders`, `ClipVision`, `Lora` and `VAE` folders are recognised in any letter case.
 - **Add models from Jan.** `localm add` on Jan's data folder (or its `llamacpp/models`
   folder) registers every downloaded model under its Jan id, with its vision projector
   attached, and follows a model that Jan only links to a file kept elsewhere. A download
@@ -440,6 +452,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 - **A native image, video or music job frees the other native runtime when the card is short.** The music runtime and the image/video worker each stay loaded for ten minutes after a job, so a job of the other kind started with that memory still taken. When the job needs more than the free VRAM, the idle runtime is now stopped first and the job log says so in one line. When another localm instance holds VRAM on the same GPU, the log names it (its port, chat model and loaded media runtimes).
+- **`localm info` says whether the install is portable.** It prints a `mode` line (`portable`
+  or `standard`) and a `temp dir` line naming where temporary files go.
 - **Knowledge chat injects less off-topic text without embeddings.** Where the check can only compare
   words (no embedding model, or a passage without a vector), an excerpt now needs at least two of the
   message's words, unless the message is a single word, so a greeting that shares one word with the
@@ -549,6 +563,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **The FLUX VAE offered for a missing ComfyUI workflow file downloads again.** `ae.safetensors`
+  came from a Hugging Face repository that now requires a licence click-through and answers
+  401 to an anonymous download. It now comes from an open repository that holds the same file.
+- **OpenGL shader caches stay in the data folder.** Mesa and the NVIDIA Linux driver wrote
+  compiled shaders to `~/.cache/mesa_shader_cache` and `~/.cache/nvidia`, outside the data
+  folder, so "delete saved data" never removed them. They now go to `cache/mesa` and
+  `cache/glcache` inside it. A location you set yourself with `MESA_SHADER_CACHE_DIR` or
+  `__GL_SHADER_DISK_CACHE_PATH` is used as you set it. Files already in the old location are
+  left where they are.
+- **Hugging Face encoder models load.** Loading a plain encoder such as bge or MiniLM
+  failed with `'_DocstringLeakFilter' object has no attribute 'isatty'` whenever transformers
+  printed a weight-loading report. They load now, and a sentence-transformers folder
+  loads as the encoder it is instead of as a language model.
+- **SmolVLM2 image chats no longer log a processor warning.** Each image turn logged
+  "Kwargs passed to `processor.__call__` have to be in `processor_kwargs` dict" twice.
 - **A half-copied GGUF file is no longer registered by a folder import.** `localm add
   <folder>` skipped a GGUF only when its version was unsupported. It now also skips one
   whose header declares more tensor data than the file holds, and one named `incomplete-...`
@@ -1882,8 +1911,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instead of 10, so a slower GPU can finish it, and a cancelled coder run now stops the image its
   `generate_image` tool is rendering instead of letting it run on. Ctrl-C in `localm image`, `music` or `video` still
   stops everything ComfyUI is doing, as it says.
+- **A PC with touch input opens straight into the app.** A Windows PC that reports touch points (a
+  touchscreen, a pen, or a remote-desktop session from a phone) got the phone onboarding screen, and every
+  desktop showed the camera button. Both now follow the browser's own mobile flag, a phone or tablet
+  user agent, or a coarse primary pointer.
 
 ### Security
+- **The default embedding models are downloaded from a fixed version and checked.** The
+  first use of semantic search, `localm setup-embeddings` and the Knowledge page fetch
+  bge-small (or nomic-embed) from a pinned commit, delete the file and report the failure
+  when its sha256 is not the expected one, and register it with that digest. The commands
+  printed for the recommended image and video models now include `--sha256`.
 - **A plain `coder` API key can no longer run commands through the project's coder
   configuration.** A restricted coder session (a shared, non-owner key) started any
   MCP server listed in the project's `.localcoder/config.toml` when it opened, and
@@ -2014,6 +2052,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Querying or deleting a RAG collection that does not exist, with an API key confined to
   specific folders, now returns 404 like it does for every other caller**, instead of a 403
   that implied the collection exists but is off-limits.
+- **The default music models and the curated ComfyUI models are checked against a fixed
+  sha256.** Downloading the four ACE-Step 1.5 files (Music page, `localm setup-music`) or one
+  of the eight models offered when a ComfyUI workflow is missing a file now fails and deletes
+  the file when its bytes are not the expected ones. The weekly pin report lists these digests
+  and flags one the hub no longer serves.
 
 ## [0.2.0] - 2026-09-04
 

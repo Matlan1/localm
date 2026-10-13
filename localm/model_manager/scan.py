@@ -5,30 +5,56 @@ from pathlib import Path
 from typing import Optional, NamedTuple
 
 from localm.config import load_config, load_registry
-from localm.model_manager.registry import _register_with_dedup, _entry_path
+from localm.model_manager.registry import (
+    _register_with_dedup, _entry_path, _MEDIA_KIND_TYPES,
+)
 from localm.media.comfy_client import (
     comfy_object_info, model_type_for_node, _MODEL_FILE_EXTS, _looks_like_model_files,
 )
 from localm.debuglog import logger
 
-# Table mapping ComfyUI model subdirectories to localm model_types. Narrower
-# than ComfyUI's OWN folder set (see media/managed_comfy.py's
-# _MODEL_FOLDER_TYPES): controlnet/upscale_models/embeddings/clip_vision/
-# style_models fall through to "unknown"/Other here. Those files are still
-# registered and stay usable by ComfyUI, which resolves them itself from the
-# workflow JSON via extra_model_paths.yaml.
+# Folder name (lower case) -> localm model_type, for ComfyUI's models/ tree and
+# StabilityMatrix's Data/Models tree. Folders with no registry type map to
+# "unknown"; they are still recognised as model folders. A file's own header
+# (see _type_for_file) overrides its folder; the folder types a file the header
+# cannot classify.
 SUBFOLDER_MAPPING = {
     "unet": "diffusion-unet",
     "unet_gguf": "diffusion-unet",
+    "diffusion_models": "diffusion-unet",
+    "diffusionmodels": "diffusion-unet",
+    "stablediffusion": "diffusion-unet",
+    "checkpoints": "diffusion-unet",
     "clip": "text-encoder",
     "clip_gguf": "text-encoder",
     "text_encoders": "text-encoder",
+    "textencoders": "text-encoder",
+    "clip_vision": "text-encoder",
+    "clipvision": "text-encoder",
     "vae": "vae",
     "vae_approx": "vae",
+    "approxvae": "vae",
     "loras": "lora",
     "lora": "lora",
-    "checkpoints": "diffusion-unet",
+    "lycoris": "lora",
+    "controlnet": "unknown",
+    "t2iadapter": "unknown",
+    "ipadapter": "unknown",
+    "ipadapters15": "unknown",
+    "ipadaptersxl": "unknown",
+    "embeddings": "unknown",
+    "upscale_models": "unknown",
+    "esrgan": "unknown",
+    "realesrgan": "unknown",
+    "style_models": "unknown",
+    "stylemodels": "unknown",
+    "hypernetwork": "unknown",
+    "hypernetworks": "unknown",
+    "diffusers": "unknown",
 }
+
+_HEADER_TYPED_EXTS = frozenset({".safetensors", ".sft", ".gguf"})
+_COMPONENT_DIR_MARKERS = ("config.json", "model_index.json", "adapter_config.json")
 
 class ScanResult(NamedTuple):
     added: int
@@ -74,7 +100,46 @@ def _resolve_explicit_workdir_models_path(workdir: str) -> Path:
     paths = managed_comfy_paths()
     if Path(workdir).resolve() == paths.root.resolve():
         return paths.models_dir
-    return Path(workdir) / "models"
+    return _models_dir_under(Path(workdir))
+
+
+def _child_dir(parent: Path, name: str) -> Optional[Path]:
+    """The subdirectory of *parent* named *name*, matched case-insensitively
+    (StabilityMatrix writes ``Data/Models``, ComfyUI ``models``)."""
+    try:
+        for child in parent.iterdir():
+            if child.name.lower() == name and child.is_dir():
+                return child
+    except OSError:
+        return None
+    return None
+
+
+def _looks_like_models_dir(path: Path) -> bool:
+    try:
+        return any(c.is_dir() and c.name.lower() in SUBFOLDER_MAPPING
+                   for c in path.iterdir())
+    except OSError:
+        return False
+
+
+def _models_dir_under(root: Path) -> Path:
+    """The models directory for a scan source *root*: a ComfyUI checkout
+    (``root/models``), a StabilityMatrix data directory (``root/Models``) or
+    install folder (``root/Data/Models``), or *root* itself when it already
+    holds model folders. When none exists, ``root/models`` is returned so the
+    caller reports it as not found."""
+    direct = _child_dir(root, "models")
+    if direct is not None:
+        return direct
+    data = _child_dir(root, "data")
+    if data is not None:
+        nested = _child_dir(data, "models")
+        if nested is not None:
+            return nested
+    if _looks_like_models_dir(root):
+        return root
+    return root / "models"
 
 
 def _resolve_scan_models_path(workdir: Optional[str]) -> Optional[Path]:
@@ -93,7 +158,7 @@ def _resolve_scan_models_path(workdir: Optional[str]) -> Optional[Path]:
     if managed_comfy_active():
         return managed_comfy_paths().models_dir
     wd = get_comfy_workdir()
-    return Path(wd) / "models" if wd else None
+    return _models_dir_under(Path(wd)) if wd else None
 
 
 def get_comfy_api_url() -> str:
@@ -129,6 +194,33 @@ def _existing_registered_paths(reg: dict) -> set:
     return existing
 
 
+def _in_component_dir(path: Path, cache: dict) -> bool:
+    """True when *path* sits in a HuggingFace/diffusers component directory
+    (one that carries a config.json or model_index.json), whose files are parts
+    of one model rather than standalone model files."""
+    parent = path.parent
+    hit = cache.get(parent)
+    if hit is None:
+        hit = any((parent / m).is_file() for m in _COMPONENT_DIR_MARKERS)
+        cache[parent] = hit
+    return hit
+
+
+def _type_for_file(path: Path, folder_type: str, component_dirs: dict) -> str:
+    """The model_type for one scanned file: what its header says (a diffusion
+    model, text encoder, VAE or LoRA, per localm.media.sdcpp.families), else the
+    type its folder names. Files in a component directory, and LoRAs of
+    language models, take the folder type."""
+    if path.suffix.lower() in _HEADER_TYPED_EXTS and not _in_component_dir(path, component_dirs):
+        from localm.media.sdcpp.families import inspect_file
+        info = inspect_file(path)
+        if not (info.kind == "lora" and info.family == "llm"):
+            header_type = _MEDIA_KIND_TYPES.get(info.kind)
+            if header_type is not None:
+                return header_type
+    return folder_type
+
+
 def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
     """Walk *models_path* (pass 1) and, if ComfyUI answers /object_info,
     reconcile types against its loader specs (pass 2). Shared by scan_comfy_models
@@ -145,25 +237,21 @@ def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
 
     # Pass 1: Walk the local folders
     found_files: dict[Path, str] = {}
-    for sub, mtype in SUBFOLDER_MAPPING.items():
-        sub_dir = models_path / sub
-        if not sub_dir.is_dir():
+    component_dirs: dict[Path, bool] = {}
+    try:
+        folders = sorted(models_path.iterdir())
+    except OSError:
+        folders = []
+    for folder in folders:
+        if not folder.is_dir():
             continue
-        # Walk recursively to find all files with model extensions
-        for path in sub_dir.rglob("*"):
+        folder_type = SUBFOLDER_MAPPING.get(folder.name.lower(), "unknown")
+        for path in folder.rglob("*"):
             if not path.is_file():
                 continue
             if path.suffix.lower() not in _MODEL_FILE_EXTS:
                 continue
-            found_files[path] = mtype
-
-    # Also check the rest of the folders for unknown files
-    for child in models_path.iterdir():
-        if child.is_dir() and child.name not in SUBFOLDER_MAPPING:
-            for path in child.rglob("*"):
-                if path.is_file() and path.suffix.lower() in _MODEL_FILE_EXTS:
-                    if path not in found_files:
-                        found_files[path] = "unknown"
+            found_files[path] = _type_for_file(path, folder_type, component_dirs)
 
     # Pass 2: Reconcile with /object_info if ComfyUI is online
     api_url = comfy_url or get_comfy_api_url()

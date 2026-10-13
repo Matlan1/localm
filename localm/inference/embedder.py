@@ -62,6 +62,18 @@ KNOWN_EMBEDDING_MODELS = {
 }
 DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 
+# (repo, filename) -> (commit, sha256) of the file a known embedding model is
+# downloaded as: the download is made from that commit and the file is deleted and
+# refused when its sha256 differs.
+_EMBEDDING_PINS = {
+    ("CompendiumLabs/bge-small-en-v1.5-gguf", "bge-small-en-v1.5-q4_k_m.gguf"): (
+        "d32f8c040ea3b516330eeb75b72bcc2d3a780ab7",
+        "363a0a4855dff6c653e06efe3209157debcf7f74e52d0d7c71e2747cd523043e"),
+    ("nomic-ai/nomic-embed-text-v1.5-GGUF", "nomic-embed-text-v1.5.Q4_K_M.gguf"): (
+        "0188c9bf409793f810680a5a431e7b899c46104c",
+        "d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac"),
+}
+
 # HF endpoint for embedding-model downloads. The ambient HF_ENDPOINT /
 # HF_HUB_ENDPOINT env vars are not read.
 _HF_ENDPOINT = "https://huggingface.co"
@@ -477,6 +489,41 @@ def download_progress_line(label: str, done: int, total: Optional[int]) -> str:
     return f"Downloading {label}: {done // mb} MB..."
 
 
+def file_sha256(path: Path) -> str:
+    """The hex sha256 of the file at *path*."""
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download_pinned(name: str, repo: str, filename: str, dest: Path,
+                     pin: tuple, extra: dict) -> Optional[str]:
+    """Download the pinned file into a scratch folder beside *dest*, check its
+    sha256 and only then move it to *dest*, so a file that fails the check or is
+    interrupted mid-check never sits at *dest*. Raises RuntimeError on a mismatch."""
+    import os
+    import shutil
+    import tempfile
+
+    from huggingface_hub import hf_hub_download
+    scratch = Path(tempfile.mkdtemp(prefix=".download-", dir=str(dest.parent)))
+    try:
+        got = Path(hf_hub_download(repo, filename, local_dir=str(scratch),
+                                   endpoint=_HF_ENDPOINT, revision=pin[0], **extra))
+        actual = file_sha256(got)
+        if actual != pin[1].lower():
+            raise RuntimeError(
+                f"the downloaded embedding model {name!r} has sha256 {actual}, not the "
+                f"pinned {pin[1]}; it was not kept")
+        os.replace(got, dest)
+        return str(dest)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def _download_known(name: str, repo: str, filename: str, dest: Path,
                     allow_download: Optional[bool], *,
                     on_progress=None) -> Optional[str]:
@@ -519,9 +566,12 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         from huggingface_hub import hf_hub_download
         dest.parent.mkdir(parents=True, exist_ok=True)
         logger.info("downloading embedding model %s/%s (one-time)...", repo, filename)
-        extra = ({"tqdm_class": _download_progress_class(
-                     f"the embedding model {name}", on_progress)}
-                 if on_progress is not None else {})
+        extra: dict = ({"tqdm_class": _download_progress_class(
+                           f"the embedding model {name}", on_progress)}
+                       if on_progress is not None else {})
+        pin = _EMBEDDING_PINS.get((repo, filename))
+        if pin is not None:
+            return _download_pinned(name, repo, filename, dest, pin, extra)
         got = hf_hub_download(repo, filename, local_dir=str(dest.parent),
                               endpoint=_HF_ENDPOINT, **extra)
         # hf may nest under the repo dir; normalise to dest.

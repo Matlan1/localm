@@ -330,12 +330,16 @@ def test_pull_comfy_source_route_offloads_settings_dns_lookup(
         scoped_app, tmp_path, monkeypatch):
     _set_hostname_comfy_config(tmp_path)
     calls = _sink_probe(monkeypatch)
+    started = []
+    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli",
+                        lambda self, kind, cli_args, **kw: started.append(cli_args)
+                        or type("Job", (), {"id": "job-test"})())
 
     with TestClient(scoped_app) as c:
         r = c.post("/api/models/pull-comfy-source",
                    json={"filename": "ae.safetensors"})
     assert r.status_code == 200, r.text
-    assert "job_id" in r.json()
+    assert "job_id" in r.json() and len(started) == 1
 
     assert calls, (
         "pull-comfy-source never reached sanitize_comfy_url at all - this "
