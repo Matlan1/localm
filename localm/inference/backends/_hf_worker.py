@@ -31,7 +31,7 @@ import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 from localm.debuglog import logger
 
@@ -224,12 +224,13 @@ def _set_fp8_kernel_request(pinned: bool) -> Optional[str]:
     request was set, else why it was not (transformers requests something else)."""
     try:
         from transformers.integrations.hub_kernels import _HUB_KERNEL_MAPPING
-        entry = _HUB_KERNEL_MAPPING["finegrained-fp8"]
+        requests: dict[str, Any] = _HUB_KERNEL_MAPPING  # type: ignore[assignment]
+        entry = requests["finegrained-fp8"]
         if (entry.get("repo_id") != FP8_KERNEL_REPO
                 or entry.get("version", FP8_KERNEL_VERSION) != FP8_KERNEL_VERSION):
             return (f"transformers requests {entry!r}, not version {FP8_KERNEL_VERSION} of "
                     f"{FP8_KERNEL_REPO}, which is the one localm pins")
-        _HUB_KERNEL_MAPPING["finegrained-fp8"] = (
+        requests["finegrained-fp8"] = (
             {"repo_id": FP8_KERNEL_REPO, "revision": FP8_KERNEL_REVISION} if pinned
             else {"repo_id": FP8_KERNEL_REPO, "version": FP8_KERNEL_VERSION})
     except Exception as e:
