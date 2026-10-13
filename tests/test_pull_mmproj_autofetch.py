@@ -7,6 +7,7 @@ on the registry entry - no CLI flag required. An explicit --mmproj (mmproj_spec)
 still wins when given.
 """
 
+import hashlib
 import struct
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -795,14 +796,16 @@ class TestCrossRepoFilenameCollision:
         when the (weaker) embedding-width fallback would have let it through."""
         store, models_dir = fake_registry
         wrong_bytes = _real_mmproj_gguf(
-            tmp_path / "_scratch_wrong.gguf", 3584).read_bytes()   # same width
+            tmp_path / "_scratch_wrong.gguf", 3584).read_bytes() + b"stale"   # same width
         (models_dir / "mmproj-main-f16.gguf").write_bytes(wrong_bytes)
         model_bytes = _real_text_model_gguf(
             tmp_path / "_scratch_model.gguf", "qwen2", 3584).read_bytes()
         right_bytes = _real_mmproj_gguf(
             tmp_path / "_scratch_right.gguf", 3584).read_bytes()
-        monkeypatch.setattr(mm, "_hf_file_sha256",
-                            lambda repo, fn: "f" * 64 if fn == "mmproj-main-f16.gguf" else None)
+        right_digest = hashlib.sha256(right_bytes).hexdigest()
+        monkeypatch.setattr(
+            mm, "_hf_file_sha256",
+            lambda repo, fn: right_digest if fn == "mmproj-main-f16.gguf" else None)
         _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
         _wire_download(monkeypatch, {
             "main.gguf": model_bytes,

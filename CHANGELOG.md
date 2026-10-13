@@ -451,6 +451,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **A native image, video or music job frees the other native runtime when the card is short.** The music runtime and the image/video worker each stay loaded for ten minutes after a job, so a job of the other kind started with that memory still taken. When the job needs more than the free VRAM, the idle runtime is now stopped first and the job log says so in one line. When another localm instance holds VRAM on the same GPU, the log names it (its port, chat model and loaded media runtimes).
 - **`localm info` says whether the install is portable.** It prints a `mode` line (`portable`
   or `standard`) and a `temp dir` line naming where temporary files go.
 - **Knowledge chat injects less off-topic text without embeddings.** Where the check can only compare
@@ -2065,6 +2066,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   small and medium models are downloaded from a pinned commit of their repository, and the
   downloaded `model.bin` is deleted and refused when its sha256 is not the expected one. A
   model already downloaded keeps loading offline as before.
+- **Downloads from Hugging Face are checked more completely.** Every part of a split GGUF is
+  checked against the digest the hub publishes, not only the first; a vision projector is
+  checked and deleted when it does not match; a file already on disk is checked before it is
+  registered under the hub's digest, and refused when it does not match; each weight file of a
+  whole-repository download is checked. The file metadata and the bytes are read from one
+  commit, so a repository that changes during a pull no longer fails the check. When no digest
+  can be read, the pull now says so instead of finishing silently.
 
 ## [0.2.0] - 2026-09-04
 

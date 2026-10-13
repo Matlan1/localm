@@ -141,7 +141,8 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
         if not ok:
             return False
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
-                                 unload_chat_for_media)
+                                 note_other_vram_holders,
+                                 release_other_native_media, unload_chat_for_media)
         placement = None
         if s.get("backend") == "comfy":
             from localm.media.comfy_client import resolve_media_placement
@@ -155,6 +156,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             job.push({"type": "line", "text":
                       "Per-component GPU placement applies to ComfyUI only; the native "
                       "backend loads each model on one GPU."})
+        release_other_native_media(job, s, "image")
         swap = decide_media_swap(s)
         # The gate above reads COMBINED free VRAM across a configured GPU split,
         # but each media model component loads WHOLE onto ONE card (localm ORDERS the
@@ -180,6 +182,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             job.push({"type": "line", "text":
                       "Both models fit in VRAM - keeping the chat model loaded "
                       "(no swap)."})
+        note_other_vram_holders(job, s, "image")
         if s.get("backend") == "comfy":
             job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
         is_privacy = effective_mode("server") == SessionMode.PRIVACY

@@ -2,9 +2,14 @@ version = 1
 revision = 3
 requires-python = "==3.12.*"
 resolution-markers = [
-    "sys_platform == 'darwin' or sys_platform == 'win32'",
+    "sys_platform == 'win32'",
     "sys_platform == 'linux'",
-    "sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32'",
+    "sys_platform == 'darwin'",
+]
+supported-markers = [
+    "sys_platform == 'win32'",
+    "sys_platform == 'linux'",
+    "sys_platform == 'darwin'",
 ]
 
 [options]
@@ -31,8 +36,8 @@ dependencies = [
     { name = "psutil" },
     { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "torch", version = "2.11.0+rocm7.13.0", source = { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'darwin' or sys_platform == 'win32'" },
-    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
+    { name = "torch", version = "2.11.0+rocm7.13.0", source = { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f5/b5/1d3ed029ac71d3f2961346829a268da923698e9fd63f218f78841f216bfd/accelerate-1.15.0.tar.gz", hash = "sha256:5654f8c5eaa0d4fa68b33e287a97765da6849bf6d51dcac874e73fbbddfb6134", size = 422615, upload-time = "2026-09-09T13:04:49.078Z" }
 wheels = [
@@ -235,8 +240,8 @@ dependencies = [
     { name = "loguru" },
     { name = "psutil" },
     { name = "pydantic" },
-    { name = "torch", version = "2.11.0+rocm7.13.0", source = { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'darwin' or sys_platform == 'win32'" },
-    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
+    { name = "torch", version = "2.11.0+rocm7.13.0", source = { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
     { name = "transformers" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a5/9d/7ac32c1754d64b9cedeb962b65a2e4282839736f42984df42a737bc1e7f0/compressed_tensors-0.19.0.tar.gz", hash = "sha256:c66f72f121df8970722f708bc2ca719dc1c869004d4fbf6294403b2de1049749", size = 336283, upload-time = "2026-09-21T16:46:33.592Z" }
@@ -767,7 +772,7 @@ coder = [
     { name = "requests" },
 ]
 desktop = [
-    { name = "pywebview", marker = "sys_platform == 'darwin' or sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "pywebview" },
     { name = "pywebview", extra = ["qt"], marker = "sys_platform == 'linux'" },
 ]
 dev = [
@@ -2146,7 +2151,7 @@ name = "torch"
 version = "2.11.0+rocm7.13.0"
 source = { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }
 resolution-markers = [
-    "sys_platform == 'darwin' or sys_platform == 'win32'",
+    "sys_platform == 'win32'",
 ]
 dependencies = [
     { name = "filelock" },
@@ -2184,7 +2189,7 @@ version = "2.13.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "sys_platform == 'linux'",
-    "sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32'",
+    "sys_platform == 'darwin'",
 ]
 dependencies = [
     { name = "cuda-bindings", marker = "sys_platform == 'linux'" },
@@ -2203,6 +2208,7 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
+    { url = "https://files.pythonhosted.org/packages/c4/3a/ed0f4d4d1dcde03bced7aac9a28e800abcdc0cbd06b6775044c9fbd877b7/torch-2.13.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:2fe228aba290d14b9f31b049be550dbd469c3fd3013d7a19705b30454da97027", size = 111213045, upload-time = "2026-07-08T16:05:22.997Z" },
     { url = "https://files.pythonhosted.org/packages/df/a9/f6a2a4d763ff1df02e9a64c477029db614295bc9367f4131223791ccc243/torch-2.13.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:572df8be8ffb4599c88cbd6a0726f1f854f4da65d2e3c09f0e2c2283333cd6d4", size = 427210998, upload-time = "2026-07-08T16:04:37.708Z" },
     { url = "https://files.pythonhosted.org/packages/f3/82/fea946351658e6534db52d2cc12bc53087cbf87f9440c5f180f367c1950b/torch-2.13.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:796633c4cdf0fe2cdced72d8f88f22e73dbcfce83132763162f6d4bff13b820b", size = 526605292, upload-time = "2026-07-08T16:04:22.81Z" },
 ]
@@ -2394,8 +2400,8 @@ dependencies = [
     { name = "apache-tvm-ffi" },
     { name = "numpy" },
     { name = "pydantic" },
-    { name = "torch", version = "2.11.0+rocm7.13.0", source = { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'darwin' or sys_platform == 'win32'" },
-    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin' and sys_platform != 'win32'" },
+    { name = "torch", version = "2.11.0+rocm7.13.0", source = { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl" }, marker = "sys_platform == 'win32'" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
     { name = "transformers" },
     { name = "triton", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "typing-extensions" },
