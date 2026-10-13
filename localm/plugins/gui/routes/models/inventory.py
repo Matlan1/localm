@@ -467,8 +467,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.model_meta import cached_n_layers
         from localm.model_manager import _entry_path
         from localm.model_manager.gguf import (
-            gguf_architecture, gguf_input_layer_bytes, gguf_is_diffusion_architecture,
-            gguf_kv_bytes_per_token, gguf_moe_pinned_expert_bytes)
+            gguf_architecture, gguf_file_bytes, gguf_input_layer_bytes,
+            gguf_is_diffusion_architecture, gguf_kv_bytes_per_token,
+            gguf_moe_pinned_expert_bytes)
         from localm.sysstats import estimate_vram
         name = model or active_model()
         model_bytes = 0
@@ -535,7 +536,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                     "file (today's behavior)",
                                     type(exc).__name__, ep)
                         kv = not gguf_is_diffusion_architecture(gguf_architecture(p))
-                        return (p.stat().st_size, cached_n_layers(str(p)), kv_bpt,
+                        return (gguf_file_bytes(p) or p.stat().st_size,
+                                cached_n_layers(str(p)), kv_bpt,
                                 moe_pinned, input_bytes, kv)
                 except (OSError, ValueError):
                     pass
