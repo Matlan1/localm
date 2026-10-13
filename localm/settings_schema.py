@@ -652,8 +652,8 @@ CORE_FIELDS: list = [
     # CONTENT TO DISK, so only an owner may turn privacy off and start
     # persisting transcripts and an audit trail. Gating the READ costs the GUI
     # nothing: it reads the injected cfg["effective_mode"] /
-    # cfg["effective_coder_mode"], which routes/config.py adds AFTER the
-    # admin_only strip, never cfg["mode"].
+    # cfg["effective_chat_mode"] / cfg["effective_coder_mode"], which
+    # routes/config.py adds AFTER the admin_only strip, never cfg["mode"].
     SettingField("mode", Widget.SELECT, "Session persistence",
                  "What localm saves: privacy = nothing written automatically; "
                  "log = a JSONL audit trail; full = log plus a chat transcript.",

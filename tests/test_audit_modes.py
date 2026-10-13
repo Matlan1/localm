@@ -254,6 +254,9 @@ class _Config:
     def set_mode(self, mode):
         self.cfg = {**self.cfg, "mode": mode}
 
+    def set(self, **kw):
+        self.cfg = {**self.cfg, **kw}
+
     def load(self):
         return dict(self.cfg)
 
@@ -480,6 +483,154 @@ class TestSessionRecorder:
             assert len(closed) == 1
         assert path.read_text(encoding="utf-8").count("session ended") == 1
         assert list(tmp_path.glob("*.jsonl")) == [path]
+
+
+class TestSurfaceOverridesOnServerTraffic:
+    """A request to the server's chat routes from the GUI chat (X-Client-Id:
+    chat) or the coder (X-Client-Id: coder, plus its session mode in
+    X-Localm-Session-Mode) is recorded no less privately than that surface's
+    persistence override, and never less privately than the server's mode."""
+
+    @pytest.fixture(autouse=True)
+    def _no_env(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_MODE", raising=False)
+
+    @staticmethod
+    def _post(client, text, headers=None, stream=False, route="chat"):
+        if route == "chat":
+            url, body = "/v1/chat/completions", {
+                "model": "test-model", "messages": [{"role": "user", "content": text}]}
+        else:
+            url, body = "/v1/completions", {"model": "test-model", "prompt": text}
+        if stream:
+            with client.stream("POST", url, json={**body, "stream": True},
+                               headers=headers or {}) as r:
+                assert r.status_code == 200
+                for _ in r.iter_lines():
+                    pass
+        else:
+            r = client.post(url, json=body, headers=headers or {})
+            assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("route,stream", [
+        ("chat", False), ("chat", True), ("completions", False), ("completions", True)])
+    def test_chat_privacy_override_keeps_gui_chat_out_of_a_full_server(
+            self, tmp_path, route, stream):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="privacy")
+            self._post(client, "gui chat secret", {"X-Client-Id": "chat"},
+                       stream=stream, route=route)
+            self._post(client, "plain api call", stream=stream, route=route)
+        assert "plain api call" in _session_text(tmp_path, "*_server.jsonl")
+        assert "plain api call" in _session_text(tmp_path, "*_server.md")
+        assert "gui chat secret" not in _session_text(tmp_path, "*_server.*")
+
+    def test_chat_log_override_drops_the_transcript_only(self, tmp_path):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="log")
+            self._post(client, "gui chat line", {"X-Client-Id": "chat"})
+        assert "gui chat line" in _session_text(tmp_path, "*_server.jsonl")
+        assert "gui chat line" not in _session_text(tmp_path, "*_server.md")
+
+    def test_chat_full_override_never_records_above_a_privacy_server(self, tmp_path):
+        with _server(tmp_path, "privacy") as (client, config):
+            config.set(chat_mode="full")
+            self._post(client, "gui chat line", {"X-Client-Id": "chat"})
+            data = client.get("/v1/config").json()
+        assert (data["effective_mode"], data["effective_chat_mode"]) == (
+            "privacy", "full")
+        assert "gui chat line" not in _session_text(tmp_path, "*_server.*")
+
+    def test_config_reports_the_chat_mode_for_the_gui(self, tmp_path):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="privacy")
+            data = client.get("/v1/config").json()
+            assert (data["effective_mode"], data["effective_chat_mode"]) == (
+                "full", "privacy")
+            config.set(chat_mode=None)
+            assert client.get("/v1/config").json()["effective_chat_mode"] == "full"
+
+    def test_a_chat_mode_change_mid_stream_keeps_that_reply_out(self, tmp_path):
+        engine = _engine()
+        holder = {}
+
+        def _tokens(messages, **kw):
+            yield "Hi"
+            holder["config"].set(chat_mode="privacy")
+            yield " there"
+
+        engine.chat_stream.side_effect = _tokens
+        with _server(tmp_path, "full", engine=engine) as (client, config):
+            holder["config"] = config
+            self._post(client, "streamed gui secret", {"X-Client-Id": "chat"},
+                       stream=True)
+        assert "streamed gui secret" not in _session_text(tmp_path, "*_server.*")
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_coder_privacy_override_keeps_coder_calls_out_of_a_full_server(
+            self, tmp_path, stream):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(coder_mode="privacy")
+            self._post(client, "contents of secret.py", {"X-Client-Id": "coder"},
+                       stream=stream)
+        assert "contents of secret.py" not in _session_text(tmp_path, "*_server.*")
+
+    @pytest.mark.parametrize("asserted,in_log,in_md", [
+        ("privacy", False, False),
+        ("log", True, False),
+        ("full", True, True),
+        ("PRIVACY ", False, False),
+        ("not-a-mode", False, False),
+        ("", True, True),
+    ])
+    def test_the_coder_session_mode_header_caps_recording(
+            self, tmp_path, asserted, in_log, in_md):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(coder_mode="full")
+            self._post(client, "coder prompt", {
+                "X-Client-Id": "coder", "X-Localm-Session-Mode": asserted})
+        assert ("coder prompt" in _session_text(tmp_path, "*_server.jsonl")) is in_log
+        assert ("coder prompt" in _session_text(tmp_path, "*_server.md")) is in_md
+
+    def test_a_caller_mode_header_never_records_above_the_server(self, tmp_path):
+        with _server(tmp_path, "log") as (client, config):
+            config.set(coder_mode="full")
+            self._post(client, "asks for full", {
+                "X-Client-Id": "coder", "X-Localm-Session-Mode": "full"})
+            self._post(client, "untagged asks for full",
+                       {"X-Localm-Session-Mode": "full"})
+        log = _session_text(tmp_path, "*_server.jsonl")
+        assert "asks for full" in log and "untagged asks for full" in log
+        assert not list(tmp_path.glob("*_server.md"))
+
+    def test_an_unknown_client_id_stays_on_the_server_mode(self, tmp_path):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="privacy", coder_mode="privacy")
+            self._post(client, "other client", {"X-Client-Id": "my-script"})
+        assert "other client" in _session_text(tmp_path, "*_server.md")
+
+    def test_the_coder_backend_headers_carry_the_session_mode(self, tmp_path):
+        """The headers HTTPBackend sends to a localm server, replayed through
+        the real route: a project-pinned privacy session records nothing."""
+        from localm.plugins.coder.backends.http import HTTPBackend
+        backend = HTTPBackend("http://127.0.0.1:1/v1", "test-model",
+                              localm_server=True)
+        backend.session_mode = SessionMode.PRIVACY
+        headers = backend._headers()
+        assert headers["X-Localm-Session-Mode"] == "privacy"
+        with _server(tmp_path, "full") as (client, config):
+            config.set(coder_mode="full")
+            headers["Authorization"] = client.headers["Authorization"]
+            self._post(client, "pinned project file", headers)
+        assert "pinned project file" not in _session_text(tmp_path, "*_server.*")
+
+    def test_the_coder_backend_sends_no_session_mode_off_localm(self):
+        from localm.plugins.coder.backends.http import HTTPBackend
+        backend = HTTPBackend("http://127.0.0.1:1/v1", "m")
+        backend.session_mode = "privacy"
+        assert "X-Localm-Session-Mode" not in backend._headers()
+        local = HTTPBackend("http://127.0.0.1:1/v1", "m", localm_server=True)
+        assert "X-Localm-Session-Mode" not in local._headers()
 
 
 # ------------------------------------------------------------------ #

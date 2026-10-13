@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, applyChatBackground, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -149,7 +149,7 @@ export const chat = {
   // by refreshCtxLimit's 30s poll) - a config refresh must not resurrect a
   // grammar THIS backend has already demonstrated it cannot honour.
   toolGrammarUnsupported: false,
-  privacy: false,    // server in privacy mode: conversations not persisted
+  privacy: false,    // chat in privacy mode: conversations not persisted
   // True once /v1/config has answered and `privacy` reflects the server's real
   // mode. The two localStorage write funnels (lsSetScoped, saveConversations)
   // queue their writes while this is false - the boot default above is not an
@@ -332,7 +332,7 @@ export async function compactConversation(conv, signal = null) {
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders(CHAT_SURFACE_HEADERS),
       body: JSON.stringify({
         model: pinnedModel || modelSelect.value || modelCache.active,
         pin_model: !!pinnedModel,
@@ -557,7 +557,7 @@ export async function refreshCtxLimit() {
       // show the hint. The server applies a Settings change of the mode at
       // once, so this also handles a switch while the page is open.
       const wasPrivacy = chat.modeKnown && chat.privacy;
-      chat.privacy = cfg.effective_mode === "privacy";
+      chat.privacy = (cfg.effective_chat_mode ?? cfg.effective_mode) === "privacy";
       chat.modeKnown = true;
       settlePendingScopedWrites();
       if (chat.privacy) {

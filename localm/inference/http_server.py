@@ -5115,11 +5115,12 @@ def _audit_exchange(audit, transcript, messages: list, reply: str,
     ``[finish_reason: ...]`` line in the transcript, so a failed or cut-off
     generation never reads as a short normal reply.
 
-    *audit* may be a :class:`localm.audit.SessionRecorder`: the exchange then
-    goes to the audit log and transcript of the session mode in force when it
-    is recorded, and *transcript* is ignored."""
-    from localm.audit import SessionRecorder
-    if isinstance(audit, SessionRecorder):
+    *audit* may be a :class:`localm.audit.SessionRecorder` or
+    :class:`localm.audit.CallerRecorder`: the exchange then goes to the audit
+    log and transcript of the session mode in force when it is recorded, and
+    *transcript* is ignored."""
+    from localm.audit import CallerRecorder, SessionRecorder
+    if isinstance(audit, (SessionRecorder, CallerRecorder)):
         audit, transcript, _mode = audit.current()
     if audit is None:
         return

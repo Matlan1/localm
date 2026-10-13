@@ -774,6 +774,10 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # tool-call convention and does not send the OpenAI tools fields. Nothing
     # errors either way; saying nothing is what would make an ignored option
     # indistinguishable from an applied one.
+    # A localm server records this session's requests no less privately than
+    # the session's own mode.
+    if hasattr(backend, "session_mode"):
+        backend.session_mode = session_mode
     if req.native_tools and not backend.supports_native_tools:
         notes.append(
             "native_tools was not applied: this session talks to localm's own "

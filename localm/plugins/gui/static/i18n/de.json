@@ -90,7 +90,7 @@
   "chat.pinModel": "Diesen Chat festlegen auf",
   "chat.pinModel.title": "Diesen Chat immer mit diesem Modell beantworten, auch wenn eine Anfrage etwas braucht, das ihm fehlt (Bilder lesen, Tool-Aufrufe, ein längeres Gespräch). Ohne Festlegung kann ein installiertes Modell, das es kann, eine solche Anfrage beantworten (siehe Automatischer Modellwechsel in den Einstellungen).",
   "chat.privacyHint": "Privatmodus - nur diese Sitzung",
-  "chat.privacyHint.title": "Der Server läuft im Privatmodus: Unterhaltungen werden nicht gespeichert (weder hier noch auf der Festplatte) und verschwinden beim Neuladen. Der Export funktioniert weiterhin.",
+  "chat.privacyHint.title": "Der Chat läuft im Privatmodus: Unterhaltungen werden nicht gespeichert (weder hier noch auf der Festplatte) und verschwinden beim Neuladen. Der Export funktioniert weiterhin.",
   "chat.random": "zufällig",
   "chat.repeatPenalty": "Wiederholungsstrafe",
   "chat.routed.cap.context_length": "ein längeres Gespräch",

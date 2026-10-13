@@ -30,6 +30,11 @@ Mode resolution (``effective_mode(surface)``)
     chat:    --mode flag > config "chat_mode" > config "mode" > privacy
     server:  --mode flag > config "mode" > privacy
 
+The server records a request to its chat routes under the most private of the
+server mode, the chat or coder mode when the request's ``X-Client-Id`` is
+``chat`` or ``coder``, and the mode in its ``X-Localm-Session-Mode`` header
+(see :class:`CallerRecorder`).
+
 CLI ``--mode`` flags set the ``LOCALM_MODE`` env var so child processes
 inherit the override.  A chat REPL or coder session keeps the mode it started
 with (its JSONL file is opened at startup).  The server follows a change to
@@ -87,6 +92,11 @@ _MODE_RANK = {SessionMode.PRIVACY: 0, SessionMode.LOG: 1, SessionMode.FULL: 2}
 def mode_at_least_as_private(candidate: SessionMode, floor: SessionMode) -> bool:
     """True if *candidate* writes no more than *floor* would."""
     return _MODE_RANK[candidate] <= _MODE_RANK[floor]
+
+
+def most_private(*modes: SessionMode) -> SessionMode:
+    """The mode among *modes* that writes the least. Needs at least one."""
+    return min(modes, key=_MODE_RANK.__getitem__)
 
 
 # ---------------------------------------------------------------------------
@@ -565,3 +575,62 @@ class SessionRecorder:
             old = self._audit
             self._audit, self._transcript = NullAuditLog(), None
         old.close()
+
+    def for_caller(self, client_id: Optional[str] = None,
+                   caller_mode: Optional[str] = None) -> CallerRecorder:
+        """This recorder as seen by one request; see :class:`CallerRecorder`."""
+        return CallerRecorder(self, client_id, caller_mode)
+
+
+# Request headers a caller of the server's chat routes uses to name its surface
+# and its own resolved session mode.
+CLIENT_ID_HEADER = "X-Client-Id"
+SESSION_MODE_HEADER = "X-Localm-Session-Mode"
+
+# X-Client-Id values that name a surface with its own persistence override.
+_CALLER_SURFACES = ("chat", "coder")
+
+
+class CallerRecorder:
+    """A :class:`SessionRecorder` capped for one caller's traffic.
+
+    :meth:`current` returns the recorder's files, limited to the most private of
+    the server's mode, the caller's surface mode (``effective_mode("chat")`` or
+    ``effective_mode("coder")`` when *client_id* is ``"chat"`` or ``"coder"``)
+    and *caller_mode*, the session mode the caller resolved for itself. All are
+    resolved on every call. A cap of ``log`` drops the transcript; ``privacy``
+    drops both. An empty or absent *caller_mode* adds no cap; an unknown one caps
+    at ``privacy``. The result is never less private than the server's mode.
+    """
+
+    def __init__(self, recorder: SessionRecorder, client_id: Optional[str] = None,
+                 caller_mode: Optional[str] = None) -> None:
+        self._recorder = recorder
+        cid = (client_id or "").strip().lower()
+        self._surface = cid if cid in _CALLER_SURFACES else None
+        self._caller_mode = (caller_mode or "").strip()
+
+    def cap(self) -> Optional[SessionMode]:
+        """The caller's own limit (surface and asserted mode), or None for none."""
+        caps = []
+        if self._surface is not None:
+            caps.append(effective_mode(self._surface))
+        if self._caller_mode:
+            try:
+                caps.append(parse_mode(self._caller_mode))
+            except ValueError:
+                caps.append(SessionMode.PRIVACY)
+        return most_private(*caps) if caps else None
+
+    def current(self) -> tuple[AuditLogT, Optional[MarkdownTranscript], SessionMode]:
+        """``(audit, transcript, mode)`` this caller's exchange is recorded with."""
+        audit, transcript, mode = self._recorder.current()
+        cap = self.cap()
+        if cap is None:
+            return audit, transcript, mode
+        mode = most_private(mode, cap)
+        if mode == SessionMode.PRIVACY:
+            return NullAuditLog(), None, mode
+        if mode == SessionMode.LOG:
+            return audit, None, mode
+        return audit, transcript, mode

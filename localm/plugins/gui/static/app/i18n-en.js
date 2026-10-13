@@ -199,7 +199,7 @@ export const I18N_EN = {
   "chat.pinModel.title": "Always answer this chat with this model, even when a request needs something it lacks (reading an image, tool calls, a longer conversation). Unpinned, such a request can be answered by an installed model that has it (see Model autoswitch in Settings).",
   "chat.privacyHint": "privacy mode - this session only",
   "chat.privacyHint.title":
-    "The server runs in privacy mode: conversations are not saved (here or on disk) and vanish on reload. Export still works.",
+    "Chat runs in privacy mode: conversations are not saved (here or on disk) and vanish on reload. Export still works.",
   "chat.random": "random",
   "chat.repeatPenalty": "Repeat penalty",
   "chat.routed.cap.context_length": "a longer conversation",

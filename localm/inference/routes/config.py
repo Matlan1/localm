@@ -88,11 +88,11 @@ def register(app: FastAPI, ctx) -> None:
             # engine_managed, which gates the WRITE only and is never popped above,
             # so those nested values are scrubbed here as well.
             _scrub_media_admin_only(cfg)
-        # Read-only extras for the frontend (skipped by the settings form).
-        # The server mode is the one the configured mode resolves to now (the
-        # recorder switches its files on a change); the coder default is
-        # resolved per new session.
+        # Read-only extras for the frontend (skipped by the settings form): the
+        # server's session mode now, the mode the GUI chat runs under, and the
+        # coder default a new session starts with.
         cfg["effective_mode"] = ctx.mode.value
+        cfg["effective_chat_mode"] = effective_mode("chat").value
         cfg["effective_coder_mode"] = effective_mode("coder").value
         # Resolved context ceiling (VRAM-derived when ctx_auto) - the GUI
         # bases its compaction threshold on this, not the static config.
@@ -146,8 +146,9 @@ def register(app: FastAPI, ctx) -> None:
         from localm.config import ConfigUnreadable, update_config
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
-        readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
-                    "effective_ctx_model", "instance_id", "instance_port"}
+        readonly = {"effective_mode", "effective_chat_mode", "effective_coder_mode",
+                    "effective_ctx_max", "effective_ctx_model", "instance_id",
+                    "instance_port"}
         # `confirm` is this route's own protocol flag, not a config key: stripped
         # here alongside the read-only extras so validate_update never sees it.
         confirm = bool(body.get("confirm"))

@@ -141,6 +141,10 @@ export function readCookie(name) {
   catch { return m[1]; }
 }
 
+// Extra headers naming the chat surface on a request to the chat routes; the
+// server then records the exchange under the chat persistence override too.
+export const CHAT_SURFACE_HEADERS = Object.freeze({ "X-Client-Id": "chat" });
+
 export function authHeaders(extra = {}) {
   const h = { "Content-Type": "application/json", ...extra };
   const csrf = window.__LOCALM_CSRF__ || "";

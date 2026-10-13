@@ -277,6 +277,10 @@ class HTTPBackend(BaseLLMBackend):
         # called with each new note.
         self.routing_note: Optional[str] = None
         self.on_routing_note: Optional[Callable[[str], None]] = None
+        # The coder session's resolved session mode ("privacy" | "log" |
+        # "full"), or None. When set, requests to a localm server carry it in
+        # X-Localm-Session-Mode, and the server records them no less privately.
+        self.session_mode: Optional[str] = None
 
     @property
     def supports_native_tools(self) -> bool:
@@ -509,11 +513,16 @@ class HTTPBackend(BaseLLMBackend):
                 "anthropic-version": self._ANTHROPIC_VERSION,
                 "Content-Type": "application/json",
             }
-        return {
+        headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
             "X-Client-Id": "coder",
         }
+        if self._is_local_server and self.session_mode:
+            from localm.audit import SESSION_MODE_HEADER
+            headers[SESSION_MODE_HEADER] = str(
+                getattr(self.session_mode, "value", self.session_mode))
+        return headers
 
     def _chat_url(self) -> str:
         """The completion endpoint for this backend's protocol."""
