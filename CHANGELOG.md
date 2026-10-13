@@ -605,6 +605,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Rotating the owner key with a malformed request no longer replaces it with a random key.** `POST
+  /api/auth/key/rotate` with a body that is not empty and not a JSON object (for example a form-encoded
+  `key=...`) now answers 400 and leaves the key unchanged, instead of generating a new key the caller
+  never learns.
+- **Creating a key says when plugin readiness could not be checked.** If checking whether the plugins
+  behind the granted scopes are installed fails, the reply now carries a warning saying so instead of
+  reading as "all ready".
 - **The coder's browser_close stops a browser that is still starting.** Closing the browser
   while it was still starting used to report that no browser was open and leave it to finish
   starting; it now cancels the start, the browser is closed as soon as it is up, and the calls
