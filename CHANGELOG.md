@@ -605,6 +605,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   working untouched until you do.
 
 ### Fixed
+- **Pulling a file whose name another repository's model already uses no longer calls it
+  damaged.** The pull is still refused, since the models folder keeps one file per name, but the
+  message now says the name is in use, names the registered model that holds it and how to
+  proceed, and leaves that file alone.
 - **The coder no longer crashes on a project config whose `mcp` key is not a table.** A
   `.localcoder/config.toml` with, for example, `mcp = "x"` stopped MCP setup with an error; it now
   means no MCP servers are configured.

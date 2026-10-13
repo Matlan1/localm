@@ -1559,6 +1559,22 @@ def _pull_gguf_file(
             on_disk = _verify_digest(base_dir / part,
                                      purpose="to check the file already here")
             if on_disk.lower() != published.lower():
+                taken = _hf_file_name_taken_by(base_dir / part, repo_id)
+                if taken:
+                    console.print(
+                        f"[red]File name already in use:[/red] {escape(part)} in "
+                        f"the models folder is a different file "
+                        f"({escape(on_disk[:16])}…) from the one {escape(repo_id)} "
+                        f"publishes ({escape(published[:16])}…). It is registered "
+                        f"as {_civitai_registered_as(taken)} and was left as it is.\n"
+                        "A file name holds one file, and --name only sets the "
+                        "registry name. To keep both, pull a file of this "
+                        "repository that has another name. To use this one "
+                        "instead, remove the other first, which deletes its file "
+                        f"({' and '.join('localm rm ' + escape(n) for n, _ in taken)}), "
+                        "then pull again."
+                    )
+                    return False
                 console.print(
                     f"[red]SHA256 mismatch![/red] The file already at "
                     f"{escape(part)} ({escape(on_disk[:16])}…) does not match the "
@@ -3211,6 +3227,12 @@ def _civitai_owners(dest: Path) -> "list[tuple[str, str]]":
     reg = _mm.load_registry()
     return [(n, str(reg[n].get("source") or ""))
             for n in find_aliases_by_path(dest, reg)]
+
+
+def _hf_file_name_taken_by(dest: Path, repo_id: str) -> "list[tuple[str, str]]":
+    """``(name, source)`` of every registry entry whose path is *dest* and whose
+    source is not ``hf:<repo_id>``."""
+    return [(n, s) for n, s in _civitai_owners(dest) if s != f"hf:{repo_id}"]
 
 
 def _civitai_registry_unreadable() -> bool:
