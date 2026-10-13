@@ -608,6 +608,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
+  its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
+  localm is reported as such instead of with advice to repair the llama.cpp runtime.
+- **A transformers model whose grammar constraint fails mid-reply is no longer reported as constrained.**
+  The failure is logged and shown, and later grammar requests to that model are refused, as for GGUF
+  models.
+- **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
+  cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
+  dropped. A model worker that does not exit when stopped is killed.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
