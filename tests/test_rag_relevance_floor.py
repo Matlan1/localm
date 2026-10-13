@@ -209,7 +209,7 @@ class TestConversationReference:
         "why did my last message not get through", "can you say that again",
         "what time is it", "the thing you said about the cache", "go back to what you mentioned",
         "I did not follow the part you wrote about ports", "as I said, how long does it take",
-        "can you expand the example above", "you just said the opposite", "explain the previous one",
+        "you just said the opposite", "explain the previous one",
         "what was the point you made earlier",
     ])
     def test_detected(self, text):
@@ -224,6 +224,10 @@ class TestConversationReference:
         "what is the default part size for uploads", "how many steps does a release take",
         "list the steps to set up the server", "the example config file in the docs",
         "you can set the port in the config", "which one of the two reranker files is used",
+        "What happens in the step before upload?", "Which part before the build fails?",
+        "the previous step of the install", "how do I run the code earlier in the pipeline",
+        "what is the list before sorting", "how does the prior point release work",
+        "what does the above example do", "which one before 3.12?",
         "",
     ])
     def test_not_detected(self, text):

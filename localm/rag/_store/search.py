@@ -52,9 +52,7 @@ _CONVERSATION_REF_RE = re.compile(
     r"|\b(?:thing|part|point|bit|step|example|list)\s+(?:you|we|i)\s+"
     r"(?:just\s+)?(?:made|gave|meant|listed)\b"
     r"|\b(?:as|like)\s+i\s+(?:said|mentioned|asked)\b"
-    r"|\b(?:thing|part|point|one|item|step|example|code|list|answer)\s+"
-    r"(?:above|before|earlier)\b"
-    r"|\b(?:above|earlier|previous|prior)\s+(?:one|point|part|item|step|example|code|list)\b",
+    r"|\b(?:above|earlier|previous|prior)\s+one\b",
     re.IGNORECASE)
 
 

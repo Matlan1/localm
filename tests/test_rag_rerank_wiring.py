@@ -476,3 +476,40 @@ class TestMinScoreSetting:
             gated = _query(c, relevant_only=True)
         assert _sources(gated) == ["third.md"]
         assert gated["reranked"] is True
+
+
+class TestConcurrentQueries:
+    def test_simultaneous_reranked_queries_all_succeed(self, rag_app, fake_reranker,
+                                                       monkeypatch):
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+        from fastapi.testclient import TestClient
+        module = sys.modules["localm.inference.reranker"]
+        inner = module.rerank
+        gauge = SimpleNamespace(active=0, peak=0)
+        lock = threading.Lock()
+
+        def slow(path, query, documents):
+            with lock:
+                gauge.active += 1
+                gauge.peak = max(gauge.peak, gauge.active)
+            try:
+                time.sleep(0.03)
+                return inner(path, query, documents)
+            finally:
+                with lock:
+                    gauge.active -= 1
+
+        monkeypatch.setattr(module, "rerank", slow)
+        with TestClient(rag_app) as c:
+            _index(c)
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                bodies = list(pool.map(lambda _: _query(c, relevant_only=True),
+                                       range(24)))
+        assert len(bodies) == 24
+        assert all(b["reranked"] is True and b["rerank_note"] is None for b in bodies)
+        assert all(_sources(b)[0] == "third.md" for b in bodies)
+        assert len(fake_reranker.calls) == 24
+        assert gauge.active == 0
+        assert gauge.peak >= 2, 'the queries never overlapped'

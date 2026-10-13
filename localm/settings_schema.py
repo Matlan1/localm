@@ -1006,12 +1006,9 @@ CORE_FIELDS: list = [
                  "answers ranked lower, and takes proportionally longer per question.",
                  group="Knowledge", owner="rag", min=5, max=100, step=5),
     SettingField("rag_rerank_min_score", Widget.NUMBER, "Reranker minimum score",
-                 "The reranker score a Knowledge excerpt needs to be added to a chat, "
-                 "in the reranker's own scale (Qwen3-Reranker: 0 to 1, higher is "
-                 "stricter; bge-reranker: a logit, usually between -10 and 10). "
-                 "Blank uses the measured value for the Qwen3-Reranker-0.6B and "
-                 "bge-reranker-v2-m3 Q8_0 files, and the relevance floor for any "
-                 "other reranker.",
+                 "The reranker score an excerpt needs to reach a chat, in that "
+                 "reranker's own scale (Qwen3: 0 to 1; bge: a logit). Blank uses "
+                 "the measured value, or the relevance floor for other rerankers.",
                  group="Knowledge", owner="rag", step=0.05),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     # These three are the CORE twins of the admin_only MediaFields (see
