@@ -542,6 +542,14 @@ class BaseBackend(ABC):
         return False
 
     @property
+    def can_embed(self) -> bool:
+        """True when :meth:`embed` returns embeddings of this backend's own
+        loaded model. Default False, so ``Engine.embed`` serves a backend that
+        does not declare it through the dedicated on-device embedder instead of
+        calling an :meth:`embed` that raises."""
+        return False
+
+    @property
     def supports_grammar(self) -> bool:
         """True when this backend, in its current state, can actually constrain
         generation to a GBNF grammar.

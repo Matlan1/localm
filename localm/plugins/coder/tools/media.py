@@ -55,12 +55,12 @@ def tool_generate_image(
             rel = out_p.relative_to(cwd) if out_p.is_relative_to(cwd) else out_p
             return ToolResult.success(message, summary=f"generated {rel}")
         return ToolResult.error(message)
-    # default_api_url() checks FLUX_API_URL first, then localm-managed-instance
-    # routing, then the configured comfy_api_url, falling back to the loopback
-    # default last. A bare os.environ.get(...) here would bypass all of that, so
-    # the coder agent's image tool would never route to a managed ComfyUI
-    # instance.
-    api_url = default_api_url()
+    # The image plugin's own resolution: the managed instance when it is
+    # selected, else the per-plugin comfy.api_url, else the global comfy_api_url,
+    # else default_api_url() (FLUX_API_URL, then the loopback default). The same
+    # target the GUI, REPL and MCP image paths use.
+    from localm.config import load_config
+    api_url = image_backend.settings(load_config()).get("api_url") or default_api_url()
     ok, message = generate_image(
         prompt, out_p,
         api_url=api_url,
