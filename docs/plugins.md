@@ -3,9 +3,9 @@
 localm is plugin-first. The core is a model loader plus the plugin engine; the
 only always-present feature is **chat**, which itself ships as the protected,
 preinstalled plugin #0. Everything else - the coder agent, image/music/video
-generation, RAG (Knowledge), web access, durable memory, voice (Whisper STT),
-text-to-speech (Kokoro), scheduled jobs, and the MCP server - is a plugin you
-install.
+generation, RAG (Knowledge), web access, the automated browser, durable memory,
+voice (Whisper STT), text-to-speech (Kokoro), scheduled jobs, and the MCP
+server - is a plugin you install.
 
 This guide covers the plugin lifecycle, the `plugin.toml` manifest, the
 `register(host)` contract, the Host API, and how to ship server routes, a GUI
@@ -53,7 +53,8 @@ stale plugin code (including missing fixes). Staleness is detected by a content
 hash of the store source, not the plugin version (a bugfix often does not bump
 it).
 
-Builtins are refreshed automatically on server launch (and on `enable`); you can
+Builtins are refreshed automatically on server launch (and when enabled through
+the GUI or `POST /api/plugins/{name}/enable`); you can
 also force it with `localm plugin refresh` (all installed builtins) or
 `localm plugin refresh <name>` (one), or the **Refresh** button on the GUI
 Plugins page. The refresh re-copies only the plugin directory, so your per-plugin
@@ -81,14 +82,14 @@ my-plugin/
   static/            # optional client-side assets (served at /plugins/<name>/)
 ```
 
-The bundled `web` plugin (routes only) and `tts` plugin (client-side assets)
-are the two smallest worked examples in `localm/plugins/builtin/`.
+The bundled `web` plugin (routes only) and `tts` plugin (client-side assets plus
+a few routes) are two small worked examples in `localm/plugins/builtin/`.
 
 ## `plugin.toml` reference
 
 ```toml
 [plugin]
-name = "myplugin"            # required; CLI name, must be a valid identifier
+name = "myplugin"            # required; CLI name, must be a valid identifier (hyphens allowed)
 version = "1.0.0"
 api_version = 1              # contract version the engine must support (default 1)
 description = "What it does"
@@ -114,6 +115,11 @@ client_entry = "myplugin.js" # ES module under assets_dir the SPA import()s on b
 settings_group = "My Plugin" # label for this plugin's settings section
 group = "studio"             # nav group; tabs sharing a group collapse together
 ```
+
+An unknown or misspelled key in `[plugin]` or `[surface]` is ignored with a
+warning; the plugin still loads. The nav rail knows two groups, `studio`
+(Images, Music, Video) and `coder` (Coder, Browser); a tab with any other
+`group` value is shown as a flat tab.
 
 The dataclasses backing this are `Surface` and `PluginSpec` in
 [contract.py](https://github.com/Matlan1/localm/blob/master/localm/plugins/contract.py); the parser is `parse_spec` in
@@ -145,10 +151,12 @@ not just a debug file). An `on_uninstall` failure is logged at WARNING too and
 uninstall proceeds; when the user asked for the plugin's data to be deleted, the
 uninstall then reports that the data may not be fully gone.
 
-`on_install` fires only from the HTTP/GUI install routes (`PluginManager.install`
-/ `install_external`). The CLI's `localm plugin install <name>` (and `install
-/path/to/plugin`) install headless, without loading the plugin, and never call
-it - nor does it fire retroactively the first time the server loads the plugin.
+`on_install` fires only from the HTTP/GUI first-party install route
+(`POST /api/plugins/{name}/install`, i.e. `PluginManager.install`). The CLI's
+`localm plugin install <name>` (and `install /path/to/plugin`), the GUI's
+install-from-directory route and the MCP plugin-admin tool install headless,
+without loading the plugin, and never call it - nor does it fire retroactively
+the first time the server loads the plugin.
 A plugin whose `on_install` does real work (the bundled `voice` plugin prefetches
 its Whisper model there) must not assume it ran; use `on_first_use` for anything
 that has to happen regardless of install path.
@@ -166,10 +174,11 @@ that has to happen regardless of install path.
 | `engine()` | Handle to the inference engine. |
 | `driving_engine(engine=None)` | Context manager: wrap around a real generation call to pin the engine busy and reset its idle-unload clock for the duration. Never wrap a bare `.loaded`/name check with it. Raises FastAPI's `HTTPException` (503) without running the block when the engine is being unloaded; retry later. |
 | `on_startup(callback)` | Queue work to run once the server's event loop is up (register() runs before uvicorn creates it on a normal start). |
-| `audit(event, data)` | Log a plugin event. |
+| `audit(event, data)` | Log a plugin event (debug level). |
 | `browse_dirs(path)` | Server-side folder picker helper. |
 | `register_chat_hook(phase, fn, *, priority=0)` | Register an inlet/stream/outlet transform that runs on every chat turn (see [Chat pipeline hooks](#chat-pipeline-hooks)). |
 | `register_model_role(descriptor)` | Declare a model slot the plugin needs, by registry `model_type` (see [Model roles](#model-roles)). |
+| `has_scope(scope)`, `require_scope(scope)` | Not implemented: both raise `NotImplementedError`. Scopes are enforced per request on the routes mounted via `mount_router`. |
 
 A routes-only plugin (`voice`) is:
 
@@ -192,8 +201,11 @@ def unregister():
 
 Every plugin declares a `scope` (default: its name). `mount_router` gates all of
 the plugin's routes behind that scope, enforced per-request when an API key is
-configured (the server is fail-open with no key). Scopes keep a plugin's reach
-explicit and let a key be issued for a subset of capabilities.
+configured (the server is fail-open with no key, unless `LOCALM_REQUIRE_AUTH`
+or the `require_auth` setting forces fail-closed). Scopes keep a plugin's reach explicit and let a key be
+issued for a subset of capabilities. A third-party plugin cannot claim a scope
+localm reserves (a kernel scope, a first-party plugin scope or `coder:full`) or
+one another installed plugin already uses.
 
 ## Settings fields
 
@@ -226,14 +238,17 @@ saves one plugin's block through `POST /v1/plugins/<name>/settings`, gated on
 own capability scope, so a key that may merely USE a plugin cannot reconfigure
 it. `admin_only` fields (a secret, a script URL, anything that widens a trust
 boundary) additionally require an owner (admin) key to see or set, mirroring
-the media backends' `launch_cmd`/`api_url` gate. A blank/`null` save clears an
+the media backends' `launch_cmd`/`api_url` gate. A `Widget.SECRET` field's value
+and default are never returned by either route. A blank/`null` save clears an
 override back to the field's own `default`.
 
 `localm plugin config <name>` reaches the same fields from the terminal, over
 those same two routes. It needs a running localm to do it: your field list is
 declared when the plugin loads, so a process that has not loaded it (as the CLI
 deliberately never does) has nothing to list. With no server up the command says
-that, rather than reporting your plugin as having no settings.
+that, rather than reporting your plugin as having no settings. The exceptions
+are `image`, `music`, `video` and `tts`, whose fixed schemas the command reads
+and writes offline.
 
 Because the field list is supplied at `register()` time rather than declared
 statically, it only exists while the plugin is loaded: there is no way to
@@ -277,8 +292,8 @@ A plugin that declares `register` and no `entry` is treated as engine-owned and
 skipped by that scan entirely, so **a `[tools] exports` block on an
 engine-contract plugin is parsed, shown in the GUI's External plugins card, and
 never registered as a coder tool.** That split is a real limitation of the
-current loader, not a convention: a plugin that wants both surfaces has to ship
-the legacy form.
+current loader, not a convention: a plugin that wants both surfaces has to
+declare `entry` as well as `register`.
 
 Each name in `exports` is looked up on the imported module. The callable takes
 the working directory as its first positional argument and everything else by
@@ -327,8 +342,12 @@ plugin's hooks automatically when it is disabled or uninstalled.
 
 `ctx` (`ChatHookContext`) carries `model_id`, `stream`, `request_id`, and a
 mutable `state` dict shared across the inlet/stream/outlet of one request (so an
-inlet can stash data its outlet reads). `principal` / `scopes` are reserved for
-future per-user gating and are unset in open mode.
+inlet can stash data its outlet reads). `outcome` is how the turn ended
+(`success`, `length`, `error` or `abort`); an inlet or stream hook always reads
+`success`, and the outlet is skipped when generation failed. `on_status` is a
+callable an inlet hook can use to report progress to a waiting client (event
+loop thread only; `None` when no client is told). `principal` (an opaque per-key
+id) and `scopes` (the calling key's scopes) are empty in open mode.
 
 ```python
 def _inlet(messages, ctx):
@@ -348,9 +367,11 @@ def unregister():
 
 Scope and limits:
 
-- The chain runs for **every** `/v1/chat/completions` client (the GUI, raw API
-  callers, and the coder agent pointed at localm). It does **not** run for the
-  in-process `localm run` REPL, which calls the engine directly.
+- The chain runs for **every** `/v1/chat/completions` and `/v1/completions`
+  client (the GUI, raw API callers, and the coder agent pointed at localm); a
+  `/v1/completions` prompt reaches the hooks as a single user message. It does
+  **not** run for the in-process `localm run` REPL, which calls the engine
+  directly.
 - Hooks see scrubbed content text, not model-internal control markers (the
   pipeline sits downstream of the engine's marker scrubbing).
 - This is a server-side seam. It is independent of localm's existing
@@ -421,7 +442,9 @@ imperfect is still choosable.
   **Install dependencies** button). Plugins with no Python dependency
   (like `tts`, which runs in the browser) declare no extra.
 - **`requires`** - other plugins that must be installed first. `missing_requires`
-  surfaces these at install time.
+  surfaces these at install time, and enabling a plugin whose required plugins
+  are not installed is refused. Uninstalling a plugin disables and unloads every
+  plugin that requires it.
 
 ## Per-plugin config and privacy
 

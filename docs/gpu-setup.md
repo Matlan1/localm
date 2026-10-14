@@ -10,6 +10,9 @@ localm setup-llama                      # auto-detect
 localm setup-llama --backend vulkan     # any GPU
 localm setup-llama --backend cuda       # NVIDIA
 localm setup-llama --backend amd-rocm   # AMD, self-contained (Windows only)
+localm setup-llama --backend hip        # AMD, needs a system ROCm/HIP toolkit
+localm setup-llama --backend sycl       # Intel
+localm setup-llama --backend metal      # Apple Silicon (macOS only)
 localm setup-llama --backend cpu        # no GPU
 localm setup-llama --from <build dir>   # your own llama.cpp build
 ```
@@ -23,14 +26,18 @@ See the table below for what each backend needs and when to pick it.
 | `amd-rocm` | AMD RX 6000/7000/9000 (gfx103X/110X/120X), Windows only | self-contained ROCm build matched to your card's family (bundles its runtime, no toolkit needed); auto-picked for RX 6000 (gfx103X), the best-tested family - request it explicitly (`--backend amd-rocm`) on RX 7000/9000 too, since auto-detect still defaults those to `hip`/`vulkan`; on Linux use `hip` or `--from` instead |
 | `hip` | AMD (any gfx) | upstream ROCm build; auto-picked when a system ROCm/HIP toolkit is detected present, else `vulkan` |
 | `sycl` | Intel GPU (Arc/Battlemage, or an 11th-gen+ Core integrated GPU) | self-contained on Windows (bundles the oneAPI runtime) and auto-picked there; needs a system oneAPI install on Linux, so it stays opt-in there |
-| `metal` | Apple Silicon | auto-picked on macOS; experimental, Metal inference unverified - see the note below |
+| `metal` | Apple Silicon | auto-picked on Apple Silicon (Intel Macs get `cpu`); experimental, Metal inference unverified - see the note below |
 | `cpu` | no GPU | always works |
 
 Binaries come from official [llama.cpp](https://github.com/ggml-org/llama.cpp)
 releases (AMD uses a self-contained build); the loader auto-detects the GPU at
-runtime. **macOS/Metal is experimental and its inference is unverified - treat it as best-effort.
-If inference fails or hangs on macOS, fall back to CPU:
-`localm setup-llama --backend cpu --force`.**
+runtime. **macOS/Metal is experimental and its inference is unverified - treat it as best-effort.**
+CI on an Apple Silicon runner checks the install, the Metal auto-pick, `localm
+doctor`, a server with no model, and a tiny model loading and generating on the
+CPU (0 GPU layers); it does not run Metal inference. If inference fails or hangs
+on macOS, run on the CPU with `localm config n_gpu_layers 0` (or `-g 0` on
+`localm run` / `localm serve`). `--backend cpu` does not do this on Apple
+Silicon: it installs the same arm64 build as `metal`.
 
 Before anything is kept installed, setup **load-tests** the library - and that
 load includes localm's own ABI check: does this exact build's struct layout and
@@ -81,7 +88,7 @@ without touching a terminal.
 
 ## AMD (ROCm / HIP)
 
-localm uses the native `llama.dll` HIP build for AMD GPUs. No Python GPU packages are needed for GGUF inference: only the prebuilt DLLs.
+localm uses the native llama.cpp HIP (ROCm) build for AMD GPUs (`llama.dll` on Windows, `libllama.so` on Linux). No Python GPU packages are needed for GGUF inference: only the prebuilt native libraries.
 
 `--backend amd-rocm` detects your card's family from its name and fetches the
 matching self-contained build automatically: gfx103X for RX 6000, gfx110X for RX
@@ -136,8 +143,10 @@ Output: `build\bin\Release\llama.dll` and sibling `ggml*.dll` files.
 
 > `-DAMDGPU_TARGETS=gfx1030` targets RX 6000 (RDNA2). For another AMD GPU set it to
 > your card's gfx arch (e.g. `gfx1100` for RX 7000 / RDNA3). On Linux,
-> `localm setup-llama --backend hip` builds against the installed ROCm/HIP runtime
-> instead of bundling one.
+> `localm setup-llama --backend hip` downloads upstream's prebuilt ROCm build,
+> which loads against the ROCm/HIP runtime installed on the system (it does not
+> bundle one); to use a build you compiled, run `localm setup-llama --from
+> <build dir>`.
 
 ### Verify GPU is being used
 
@@ -164,7 +173,8 @@ normal driver, no CUDA toolkit) if you would rather skip the runtime download.
 On **Windows** this is a guided, self-contained path: setup checks your
 driver, then fetches BOTH the CUDA `llama` build and the matching `cudart`
 runtime bundle from the same llama.cpp release, so **you do not need to
-install the CUDA Toolkit** (needs CUDA >= 12.4 for most GPUs). Setup also
+install the CUDA Toolkit** (the driver must support CUDA >= 12.4 for most GPUs;
+`nvidia-smi` prints the version it supports). Setup also
 detects your GPU's own architecture and picks the CUDA asset line it actually
 needs: NVIDIA Blackwell (RTX 50-series and datacenter B100/B200) automatically
 gets the newer 13.x line - which needs a newer driver in turn (CUDA >= 13.4) -
@@ -211,7 +221,8 @@ have, so it is opt-in there (`--backend sycl`) rather than automatic.
 
 ## CPU-only
 
-Drop the HIP/CUDA DLL. The DLL load order becomes:
+Provision the CPU build with `localm setup-llama --backend cpu`. On Windows the
+HIP/CUDA DLL is then absent and the DLL load order becomes:
 
 ```
 ggml-base.dll → ggml-cpu.dll → ggml.dll → llama.dll
@@ -350,7 +361,9 @@ plain dependency the vendor index does not carry. If you installed with `pip
 install localm` there is no `.venv` to point at - drop `-p .venv` and run the
 same `uv pip install torch torchvision --torch-backend=...` in whatever
 environment `localm` is already installed into (`uv` itself is a separate,
-optional tool - `pip install uv` first if you do not already have it).
+optional tool - `pip install uv` first if you do not already have it). If setup
+put uv inside the clone (the Portable choice), run it as `./.uv/uv` (Windows:
+`.uv\uv.exe`) unless it is on your PATH.
 
 `.venv/bin/python -m localm.hwdetect torch-args cuda` (Windows:
 `.venv\Scripts\python -m localm.hwdetect torch-args cuda`) prints the exact

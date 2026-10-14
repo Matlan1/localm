@@ -134,11 +134,11 @@ trigger.
 
 `.github/workflows/macos-smoke.yml` installs localm on an Apple Silicon runner
 with `setup.sh --yes`, then checks `localm doctor`, that the backend
-auto-pick is Metal, that `localm serve --no-model` answers `/v1/models`, and a
-small test selection. It runs nightly, on a dispatch, and on pull requests that
-touch `localm/hwdetect*`, `localm/setup_llama/`, `localm/inference/backends/`
-or `setup.sh`. It is not in `merge-policy`'s `needs`; it is added there once
-it has been green on ten consecutive scheduled runs on master.
+auto-pick is Metal, that `localm serve --no-model` answers `/v1/models`, that a
+tiny GGUF model loads and generates on the CPU, and a small test selection. It
+runs nightly, on a dispatch, and on pull requests that touch `localm/hwdetect*`,
+`localm/setup_llama/`, `localm/inference/backends/`, `setup.sh` or the workflow
+file. It is not a required check: it is not in `merge-policy`'s `needs`.
 
 `mutation-test` is the mutation-testing gate for the trust boundary: the
 eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`). On the
@@ -292,15 +292,17 @@ their original precision.
 `inference/http_server.py` builds the FastAPI app (`create_app(engine)`) and
 holds the shared inference state; the route handlers themselves live in
 `inference/routes/` modules (chat, models, config, keys, session, admin,
-system, gpu, plus the `ollama`, `anthropic` and `responses` compatibility
-surfaces). The plugin management API is mounted separately, by
+system, gpu, peer_routing, plus the `ollama`, `anthropic` and `responses`
+compatibility surfaces). The plugin management API is mounted separately, by
 `localm/plugins/engine.py`. `create_app()` reads as the boot order: it
 resets the engine registry and opens the session audit (module globals that
 `http_server` owns, as does the lifespan that starts the background services),
 then calls the stateless steps in `inference/app_assembly/`: exception
 handlers, `app.state`, the kernel diagnostics routes, the security middleware
 (CORS, the origin and shell-token gate, the CSP headers, the docs guard), the
-transport middleware, the route groups and, last, the plugin engine. The
+transport middleware, the metrics middleware and `/metrics` route (only when
+`metrics_enabled` or `LOCALM_METRICS` is on), the route groups and, last, the
+plugin engine. The
 middleware order is load-bearing and pinned by
 `tests/test_create_app_characterization.py` and `tests/test_app_assembly.py`.
 The synchronous `engine.chat_stream()` runs in a thread; tokens cross into
@@ -362,12 +364,15 @@ By default only chat is active. See [plugins.md](plugins.md) for the full model.
 **Chat is plugin #0.** CHAT is protected and preinstalled; it cannot be
 disabled or uninstalled.
 
-**Contract.** `localm/plugins/contract.py` defines the protocols a plugin
-sees: `Surface` and `PluginSpec` (manifest shape) and `Host` (the API the
-engine hands to `register`). The host exposes `mount_router`, `mount_static`,
-`add_settings`, `register_tab`, `plugin_config`, `save_plugin_config`,
-`engine`, `audit`, and `browse_dirs`. `catalog.py` holds the static
-first-party catalog.
+**Contract.** `localm/plugins/contract.py` defines the contract a plugin
+sees: the dataclasses `Surface` and `PluginSpec` (manifest shape),
+`ModelRoleDescriptor` and `PluginSettingField`, and the `Host` protocol (the
+API the engine hands to `register`). The host exposes `mount_router`,
+`mount_static`, `add_settings`, `register_tab`, `plugin_config`,
+`save_plugin_config`, `engine`, `audit`, `browse_dirs`, `register_model_role`
+and `register_chat_hook`; `has_scope` and `require_scope` are declared but raise
+`NotImplementedError`, and the concrete `PluginHost` adds `driving_engine` and
+`on_startup`. `catalog.py` holds the static first-party catalog.
 
 **Lifecycle.** `PluginManager` discovers installed plugins, then
 `load_enabled` mounts each active plugin at runtime through `PluginHost`

@@ -45,12 +45,11 @@ Without it, recall still works but is lexical only (exact-word BM25). See
 
 ## From the terminal
 
-`localm memory` manages the same store the app does - it was GUI-only until now,
-which mattered because `localm job add --memory` can schedule the consolidation
-that produces corrections you then had no way to review. The command reads and
-writes the on-disk store directly, so it works even when the memory plugin is
-not installed or enabled - installing the plugin only turns on the automatic
-chat-turn recall and consolidation hooks described below.
+`localm memory` manages the same store the app does, including the corrections
+that a scheduled consolidation (`localm job add --memory`) produces. The command
+reads and writes the on-disk store directly, so it works even when the memory
+plugin is not installed or enabled - installing the plugin only turns on the
+automatic chat-turn recall and consolidation hooks described below.
 
 ```bash
 localm memory list [--all] [--json]                  # what localm has remembered about you
@@ -68,7 +67,14 @@ localm memory clear [-y]                             # erase everything, archive
 `--kind` is `semantic` (a standing fact, the default) or `episodic` (something
 that happened), and `--importance` (default 0.8) is the weight recall and
 prune use. Source is always `user` - there is no `--source` flag - and
-`--kind` accepts only those two values; anything else is a usage error.
+`--kind` accepts only those two values; anything else is a usage error. `add`
+refuses an empty fact and refuses once the store holds 256 records.
+
+In privacy mode `add`, `restore`, `accept` and `reject` refuse, and `corrections`
+lists nothing (listing prunes the proposal file, which is a write); `list`,
+`show`, `forgotten`, `forget` and `clear` still work. A command that finds
+another localm process mid-write on the store waits briefly, then reports who
+holds it and changes nothing.
 
 `forget` and `forgotten` are not two halves of one thing. `forget` deletes
 outright; the archive `forgotten` lists is filled only when localm drops a fact
@@ -93,7 +99,7 @@ A record also carries a source that governs how much it is trusted:
 
 - **user** - you typed it (via `/remember` or the memory editor). Trusted; can
   reach full importance.
-- **synth** - the model distilled it from a session. Importance-capped, and a
+- **synth** - the model distilled it from a session. Importance-capped (at 0.85), and a
   synth fact may never overwrite or delete a user-typed one without your
   approval (see [How memory grows](#how-memory-grows-consolidation) below).
 - **import** - migrated from the legacy flat `chat-memory.md` file (imported
@@ -112,7 +118,7 @@ In the GUI:
   Save replaces the list), click **Synthesize now** to distil facts from your
   recent chats immediately, and review any **suggested corrections** (see
   below) - nothing about them changes until you accept or reject each one.
-- The 🧠 toggle in the parameters drawer turns recall on and off (the
+- The **Memory** checkbox in the parameters drawer turns recall on and off (the
   `memory_enabled` setting).
 
 Over the HTTP API (the routes the memory plugin mounts; see
@@ -133,10 +139,14 @@ Over the HTTP API (the routes the memory plugin mounts; see
 
 Writes are refused with `403` in privacy mode, and with `409` when another
 localm process is mid-write on the same store (nothing is changed - let it
-finish and retry; the terminal commands report the same thing in words). There is no memory search,
-export, or import yet, and the per-item `PATCH`/`DELETE` routes have no GUI or
-CLI surface: bulk editing goes through the `/memory` textarea, and moving a
-store between machines means copying the data directory.
+finish and retry; the terminal commands report the same thing in words). They
+are refused with `413` when an append would pass the 256-record cap, or a bulk
+edit carries more than 256 lines or over 64,000 characters. There is no memory
+search or import (`localm memory list --json` dumps the records), and the
+per-item `PATCH` route has no GUI or CLI surface; the `DELETE`, forgotten and
+restore routes have no GUI surface either (the terminal has `forget`,
+`forgotten` and `restore`). Bulk editing goes through the `/memory` textarea, and
+moving a store between machines means copying the data directory.
 
 ## How memory grows (consolidation)
 
@@ -150,7 +160,7 @@ model. There are three ways it fires:
    `LOCALM_MEMORY_AUTO_INTERVAL` environment variable, in seconds). Controlled by
    the `memory_auto_consolidate` setting - and, since this pass fires from the
    same chat-turn hook as recall, it also stays off while `memory_enabled` (the
-   🧠 toggle) is off, even with `memory_auto_consolidate` left on. This is what
+   **Memory** checkbox) is off, even with `memory_auto_consolidate` left on. This is what
    makes memory grow with no manual step: chat normally, and durable facts
    accumulate on their own.
 2. **The "Synthesize now" button** in the `/memory` manager, or
@@ -169,9 +179,12 @@ recovered). It is guarded against the failure modes a small local model brings:
 session text is treated as DATA, never as instructions to follow; a synth
 candidate can never *silently* rewrite or delete a user-typed or imported fact;
 an unsure UPDATE keeps both facts rather than risk losing a true one;
-near-duplicates collapse without a model call. Episodic capture is watermarked,
-so a session is summarised exactly once and re-running consolidation adds
-nothing new.
+near-duplicates collapse without a model call. A pass reads about 8,000
+characters of the newest session logs and considers at most 12 candidate facts.
+Episodic capture is watermarked, so a session is summarised exactly once and
+re-running consolidation adds nothing new; only a session untouched for 15
+minutes is summarised, at most 5 sessions per pass, and a session with fewer than
+3 distinct content words in your messages gets no summary.
 
 When a high-confidence candidate would update or delete a user-typed/imported
 fact, consolidation does not apply it - it stores a **pending correction**
@@ -200,16 +213,22 @@ block marked as data, not instructions, so a memory that reads like a command
 is treated as context.
 
 - Ranking blends **relevance** (0.5), **recency** (0.3), and **importance**
-  (0.2). Up to 6 facts are injected, within a bounded block.
+  (0.2). Recency decays with a 30-day time constant for synthesized memories;
+  user-typed and imported facts do not decay. Up to 6 facts are injected, within
+  a 1,200-character block. The coder agent's requests get no recall.
 - Recall is **relevance-gated**: a fact is injected only when it actually relates
-  to the query (it shares a content word, or, with embeddings, its similarity
-  clears an absolute floor). An off-topic turn injects nothing rather than
-  padding the prompt with the top few facts regardless.
+  to the query (it shares a content word, or, with embeddings, its cosine
+  similarity is at least 0.55; once some fact shares a word, a fact matching only
+  by similarity needs 0.75). An off-topic turn injects nothing rather than
+  padding the prompt with the top few facts regardless. When the semantic signal
+  is unavailable and nothing matched, a first-person question ("what is my
+  name?") brings in at most 2 user-typed or imported facts.
 - **Semantic vs lexical.** With `localm setup-embeddings` installed, recall uses
   meaning-based cosine similarity (a paraphrase still matches); without it,
   recall falls back to exact-word BM25. Facts stored before you installed the
-  embedding model are re-embedded in the background, so semantic recall turns on
-  retroactively.
+  embedding model are re-embedded in the background (a sweep at most once an
+  hour, `LOCALM_MEMORY_BACKFILL_INTERVAL` in seconds, plus up to 64 records per
+  consolidation pass), so semantic recall turns on retroactively.
 
 ### Seeing what recall did
 
@@ -246,7 +265,7 @@ none are recalled, so nothing from a past session reaches the model.
 | Mode | Recall | Growth |
 |---|---|---|
 | **privacy** (default) | Off, unless you opt into read-only recall | Off (no writes) |
-| **log** / **full** | On (while `memory_enabled` and the 🧠 toggle are on) | On (while `memory_auto_consolidate` is on; the automatic pass also needs `memory_enabled` - manual **Synthesize now** and a scheduled memory job are unaffected by it) |
+| **log** / **full** | On (while `memory_enabled` and the **Memory** checkbox are on) | On (while `memory_auto_consolidate` is on; the automatic pass also needs `memory_enabled` - manual **Synthesize now** and a scheduled memory job are unaffected by it) |
 
 You can opt into recalling your existing memories during privacy-mode chats
 without ever writing new ones: turn on **Allow memory recall in privacy mode**
