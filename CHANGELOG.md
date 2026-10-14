@@ -608,6 +608,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A chat answered by another localm instance keeps this instance's session persistence.** With a
+  route to another instance's loaded model, a scheduled chat job on a routed model, or
+  `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a
+  privacy-mode chat could land in another instance's session log. Unless the chat is recorded in
+  full mode here, the other instance must now confirm it records it no more than this mode allows.
+  If it does not, nothing is sent and the message names that instance and its mode.
 - **A scheduled coder job honours its project's privacy setting.** A `mode` set in the project's
   `.localcoder/config.toml` now applies to scheduled runs as it does to interactive coder sessions, so
   a project pinned to privacy mode no longer gets a transcript or audit log from a job. A project
