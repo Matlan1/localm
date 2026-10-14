@@ -985,3 +985,30 @@ def test_an_exclusive_section_starts_after_the_scheduler_left_its_stderr_scope(m
     holder.join(10)
     assert not holder.is_alive()
     assert ctx.events.index("scope-exit") < ctx.events.index("exclusive"), ctx.events
+
+
+class _CountingFitContext(_SimContext):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.fit_calls = 0
+
+    def vram_fit(self, target):
+        self.fit_calls += 1
+        return super().vram_fit(target)
+
+
+def test_a_reply_paused_for_vram_does_not_probe_on_every_step(made):
+    ctx = _CountingFitContext(capacity=2048, n_ctx_max=4096, base=2048, vram_fits=False)
+    sched = made(ctx, 2)
+    with ctx.lock():
+        budgeted = sched.submit(PROMPTS[1], 900, _Sampler())
+        unlimited = sched.submit(PROMPTS[0], 0, _Sampler())
+    results = {}
+    _run_threads([lambda: results.__setitem__("b", _drain(budgeted)),
+                  lambda: results.__setitem__("u", _drain(unlimited))], timeout=60)
+    assert results["b"] == _reference(PROMPTS[1], 900)
+    out, reason = results["u"]
+    assert reason == "length"
+    assert out == _reference(PROMPTS[0], len(out))[0]
+    assert len(PROMPTS[0]) + len(out) >= 4096 - 1
+    assert ctx.fit_calls <= 10, f"{ctx.fit_calls} VRAM checks while one reply waited"

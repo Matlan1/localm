@@ -182,6 +182,7 @@ class _Slot:
         self.first = False                # the next sample is the reply's first
         self.extend = False               # needs more reserved cells before its next decode
         self.room_wait = False            # paused until another reply frees cells
+        self.room_seen: Optional[tuple[int, int]] = None  # (others' cells, capacity) at the last try
         self.order = 0                    # admission order
         self.last_used = 0.0
 
@@ -627,6 +628,7 @@ class SlotScheduler:
         slot.first = True
         slot.extend = False
         slot.room_wait = False
+        slot.room_seen = None
         slot.reserve = stream.reserve
         slot.order = next(self._admissions)
         logger.info("gguf slots: slot %d prefill starting, %d prompt token(s), %d reused",
@@ -718,12 +720,17 @@ class SlotScheduler:
     def _extend_pending(self) -> None:
         """Reserve more cells for the replies whose next decode needs them. A
         reply whose cells other replies hold pauses while any running reply is
-        not paused itself; otherwise it ends with "length". Runs before a batch
-        is composed, never while one is being sampled: a growth recreates the
-        context the batch's rows are read from."""
+        not paused itself; otherwise it ends with "length". A paused reply tries
+        again only once the cells the other replies hold or the context size
+        have changed. Runs before a batch is composed, never while one is being
+        sampled: a growth recreates the context the batch's rows are read from."""
         from localm.debuglog import logger
         for slot in self._active():
-            if not slot.extend or slot.stream is None:
+            stream = slot.stream
+            if not slot.extend or stream is None:
+                continue
+            if slot.room_wait and slot.room_seen == self._room_key(slot):
+                self._heartbeat_waiting(stream)
                 continue
             got = self._extend(slot)
             stream = slot.stream
@@ -732,21 +739,30 @@ class SlotScheduler:
             if got is True:
                 slot.extend = False
                 slot.room_wait = False
+                slot.room_seen = None
                 continue
             if got is _WAIT and any(o is not slot and o.stream is not None
                                     and not o.room_wait for o in self._slots):
-                now = self._clock()
+                slot.room_seen = self._room_key(slot)
                 if not slot.room_wait:
                     slot.room_wait = True
-                    stream.waiting_heard_at = now
+                    stream.waiting_heard_at = self._clock()
                     logger.info("gguf slots: slot %d waits for cells other replies hold",
                                 slot.seq)
-                elif (stream.waiting_heard_at is None
-                      or now - stream.waiting_heard_at >= WAIT_HEARTBEAT_S):
-                    stream.waiting_heard_at = now
-                    stream._put(_HEARTBEAT)
+                else:
+                    self._heartbeat_waiting(stream)
                 continue
             self._end(slot, "length")
+
+    def _room_key(self, slot: _Slot) -> tuple[int, int]:
+        """(cells the other running replies hold, context size)."""
+        return self._committed() - slot.reserve, self._ops.capacity()
+
+    def _heartbeat_waiting(self, stream: SlotStream) -> None:
+        now = self._clock()
+        if stream.waiting_heard_at is None or now - stream.waiting_heard_at >= WAIT_HEARTBEAT_S:
+            stream.waiting_heard_at = now
+            stream._put(_HEARTBEAT)
 
     def _extend(self, slot: _Slot) -> Any:
         """Reserve ``UNLIMITED_STEP`` more cells for a reply with no budget.
@@ -829,6 +845,7 @@ class SlotScheduler:
         slot.first = False
         slot.extend = False
         slot.room_wait = False
+        slot.room_seen = None
         slot.reserve = 0
         slot.last_used = self._clock()
         with self._cond:
