@@ -7,7 +7,8 @@ localm's auto-updater already relies on: its Ed25519 signature envelope against
 the update signing keys in `localm/updater.py`, and/or a plain SHA256 digest.
 
 THIS VERIFIES THE GITHUB RELEASE **ASSET** (`localm-<version>.zip` plus its
-`localm-<version>.zip.sig`, both listed under a release's "Assets" section),
+signature envelope, `localm-<version>.zip.envelope` for 0.3.0 and
+`localm-<version>.zip.sig` otherwise, listed under a release's "Assets" section),
 NOT GitHub's own auto-generated "Source code (zip)" link. The asset is built
 from `release-manifest.toml`'s file list and carries a baked version file;
 the auto-zipball is the raw tracked tree with neither, so its bytes differ
@@ -23,8 +24,10 @@ Usage:
   python scripts/verify_release.py <path-to-zip> [--sig PATH] [--sha256 HEX_OR_PATH]
 
 Signature check: runs when --sig is given, or, when neither --sig nor
---sha256 is given at all, when a file named "<path-to-zip>.sig" sits next to
-the zip (the default name scripts/sign_release.py itself writes). Verifies
+--sha256 is given at all, when a file named "<path-to-zip>.envelope" or
+"<path-to-zip>.sig" sits next to the zip, the ".envelope" file first (the
+0.3.0 release ships its signature envelope as ".envelope"; ".sig" is the name
+scripts/sign_release.py itself writes). Verifies
 against the same signing keys the auto-updater trusts (the key set pinned in
 localm/updater.py, or a newer one this install has accepted, plus any key set
 the envelope carries) via localm.updater.verify_signature - never
@@ -141,7 +144,7 @@ def main(argv=None) -> int:
     p.add_argument("zip_path", type=Path, metavar="PATH",
                    help="the downloaded release zip to verify")
     p.add_argument("--sig", type=Path, default=None,
-                   help="path to the .sig file (default: <PATH>.sig if it exists)")
+                   help="path to the signature file (default: <PATH>.envelope, else <PATH>.sig, if it exists)")
     p.add_argument("--sha256", default=None,
                    help="expected SHA256: a 64-char hex digest, or a file holding one")
     args = p.parse_args(argv)
@@ -159,14 +162,17 @@ def main(argv=None) -> int:
 
     sig_source = args.sig
     if sig_source is None and args.sha256 is None:
-        candidate = Path(str(zip_path) + ".sig")
-        if candidate.is_file():
-            sig_source = candidate
+        for suffix in (".envelope", ".sig"):
+            candidate = Path(str(zip_path) + suffix)
+            if candidate.is_file():
+                sig_source = candidate
+                break
 
     if sig_source is not None:
         if not sig_source.is_file():
             could_not.append(("signature", f"--sig file not found: {sig_source}"))
         else:
+            print(f"signature file: {sig_source}")
             sig_text = sig_source.read_text(encoding="utf-8", errors="replace").strip()
             try:
                 ok, msg = verify_ed25519(zip_path.read_bytes(), sig_text)
@@ -195,7 +201,7 @@ def main(argv=None) -> int:
 
     if not checks_run and not could_not:
         print("error: nothing to verify against - pass --sig, --sha256, or "
-              "place a <PATH>.sig file next to PATH", file=sys.stderr)
+              "place a <PATH>.envelope or <PATH>.sig file next to PATH", file=sys.stderr)
         p.print_usage(sys.stderr)
         return 2
     if any(not ok for _, ok, _ in checks_run):

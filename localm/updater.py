@@ -216,14 +216,14 @@ def _load_trusted() -> dict:
     pinned = _parse_keyset(_PINNED_KEYSET, signed=False)
     path = _trust_path()
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except FileNotFoundError:
         return pinned
     except OSError as e:
         raise LocalmError("the saved update signing keys could not be read",
                           reason=f"{path}: {e}") from None
     try:
-        saved = _parse_keyset(_strict_json(text), signed=True)
+        saved = _parse_keyset(_strict_json(raw.decode("utf-8")), signed=True)
     except (ValueError, RecursionError) as e:
         raise LocalmError(
             "the saved update signing keys are corrupt",

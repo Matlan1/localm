@@ -2369,8 +2369,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Security
 - **Updates are signed under a new key scheme.** A release key signs every build, and three
   offline recovery keys can replace any key through a signed update, with no action from
-  you. 0.2.0 cannot verify 0.3.0, so an install of 0.2.0 does not update itself to 0.3.0:
-  install 0.3.0 fresh, once. Updates after that apply as before.
+  you. 0.2.0 updates to 0.3.0 as before.
 - **Update and key-listing replies no longer hand a scoped key your file paths.** The backup
   path from `GET /api/update/rollback` and `POST /api/update/apply`, the text of a failed apply,
   and the owner-key-file notice on `GET /v1/keys` named the full location under your data
@@ -2553,9 +2552,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   fetched) reached the parent as if the parent had written it. The diff in that report is now
   defanged and marked so the model backend reads it as plain text only. The `/diff` and
   `/changes` footer still shows each child's diff byte for byte.
-- Rotated the release signing key. The previous key stays pinned alongside the new one for this
-  release so existing installations can still verify and apply the update; it is removed in the
-  release after.
 - **A downloaded model can no longer make localm read a file from outside its own folder.** A
   model split across several files lists those files in an index, and that list was trusted as
   written. A hostile or tampered model could name a file anywhere on the machine, and loading it

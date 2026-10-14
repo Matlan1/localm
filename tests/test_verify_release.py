@@ -143,6 +143,23 @@ def test_main_adjacent_sig_file_auto_discovered(tmp_path, monkeypatch):
     assert rc == 0
 
 
+def test_main_adjacent_envelope_is_preferred_over_a_bare_sig(tmp_path, monkeypatch, capsys):
+    import base64
+    priv = _pin(monkeypatch)
+    old = _stranger()
+    data = b"a 0.3.0 release zip"
+    zpath = _write(tmp_path, "localm-0.3.0.zip", data)
+    _write(tmp_path, "localm-0.3.0.zip.sig", base64.b64encode(old.sign(data)))
+    _write(tmp_path, "localm-0.3.0.zip.envelope", _sig(priv, data).encode())
+    assert vr.main([str(zpath)]) == 0
+    out = capsys.readouterr().out
+    assert "signature: OK" in out
+    assert f"signature file: {tmp_path / 'localm-0.3.0.zip.envelope'}" in out
+    (tmp_path / "localm-0.3.0.zip.envelope").unlink()
+    assert vr.main([str(zpath)]) == 1
+    assert f"signature file: {tmp_path / 'localm-0.3.0.zip.sig'}" in capsys.readouterr().out
+
+
 def test_main_tampered_zip_exit_1(tmp_path, monkeypatch, capsys):
     priv = _pin(monkeypatch)
     good = b"the real bytes"
