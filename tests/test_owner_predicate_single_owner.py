@@ -146,23 +146,55 @@ def _scope_tested_names(boolop: ast.BoolOp) -> set:
     return names
 
 
+def _called_names(fn: ast.AST) -> set:
+    names = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            names.add(getattr(node.func, "attr", getattr(node.func, "id", "")))
+    return names
+
+
+def _tests_privileged_scope(fn: ast.AST) -> bool:
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Compare) and len(node.ops) == 1
+                and isinstance(node.ops[0], (ast.In, ast.NotIn))):
+            left = node.left
+            leaf = left.attr if isinstance(left, ast.Attribute) else getattr(left, "id", "")
+            if leaf in {"ADMIN", "CODER_FULL"}:
+                return True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "grants"):
+            return True
+    return False
+
+
 def inline_owner_derivations(tree: ast.AST) -> list:
-    """(lineno, enclosing function) of each ``X is [not] None`` combined, in one
-    boolean expression, with an ADMIN/CODER_FULL membership test or a
-    ``grants(X, ...)`` call on the same name X."""
+    """(lineno, enclosing function) of each inline owner derivation:
+
+    * ``X is [not] None`` combined, in one boolean expression, with an
+      ADMIN/CODER_FULL membership test or a ``grants(X, ...)`` call on the same
+      name X; or
+    * a function that calls ``caller_scopes`` and also tests ADMIN/CODER_FULL
+      membership or calls ``grants`` (however the None case is spelled)."""
     parents = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+
+    def enclosing(node) -> str:
+        cur = node
+        while cur in parents:
+            cur = parents[cur]
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cur.name
+        return "<module>"
+
     hits = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.BoolOp):
-            continue
-        if _none_checked_names(node) & _scope_tested_names(node):
-            fn, cur = "<module>", node
-            while cur in parents:
-                cur = parents[cur]
-                if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    fn = cur.name
-                    break
-            hits.append((node.lineno, fn))
+        if (isinstance(node, ast.BoolOp)
+                and _none_checked_names(node) & _scope_tested_names(node)):
+            hits.append((node.lineno, enclosing(node)))
+        elif (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and {"caller_scopes", "_caller_scopes"} & _called_names(node)
+                and _tests_privileged_scope(node)):
+            hits.append((node.lineno, node.name))
     return hits
 
 
@@ -173,6 +205,8 @@ def test_sentinel_flags_the_inline_shapes():
         "ok = held is not None and scopes.ADMIN in held",
         "ok = held is None or scopes.grants(held, scopes.CONFIG_WRITE)",
         "ok = held is not None and (S.ADMIN in held or S.CODER_FULL in held)",
+        "def f(r):\n    held = caller_scopes(r)\n    if not held:\n        return False\n    return S.ADMIN in held",
+        "def f(r):\n    held = _hs.caller_scopes(r) or set()\n    return scopes.grants(held, 'x')",
     ):
         assert inline_owner_derivations(ast.parse(src)), src
     for src in (
