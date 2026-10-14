@@ -10,6 +10,10 @@ before writing; reads/recall of memories from earlier non-privacy sessions stay
 allowed ("no new traces", not amnesia). A blocked write must surface a skip, never
 report success.
 
+The ``localm memory forget`` and ``clear`` commands remove stored data without
+consulting this gate, so they work in privacy mode; ``DELETE /api/memory/{id}``
+does consult it.
+
 Kept in its own leaf module so ``store.py`` stays free of the audit import and is
 trivially unit-testable, and so callers (the chat inlet/routes, the coder) share
 one gate.

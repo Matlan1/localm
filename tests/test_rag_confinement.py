@@ -1089,6 +1089,124 @@ class TestExpandAndAddPathsSecretFilter:
         assert res["added"] == 1
 
 
+class TestCliCredentialFloor:
+    """The CLI passes no policy (no mode confinement) but the credential-folder
+    hard floor still applies to add, folder walks and re-sync."""
+
+    def test_add_paths_refuses_credential_dir(self, home_env, tmp_path):
+        home, _ = home_env
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        (ssh / "config").write_text("Host secret-host", encoding="utf-8")
+        c = Collection("cred1", base=tmp_path / "rag").create()
+        with pytest.raises(ConfinementError) as ei:
+            c.add_paths([ssh])
+        assert ei.value.reason == "credential"
+        assert c.docs() == []
+
+    def test_add_paths_refuses_file_inside_credential_dir(self, home_env, tmp_path):
+        home, _ = home_env
+        aws = home / ".aws"
+        aws.mkdir()
+        f = aws / "notes.txt"
+        f.write_text("access key notes", encoding="utf-8")
+        c = Collection("cred2", base=tmp_path / "rag").create()
+        with pytest.raises(ConfinementError) as ei:
+            c.add_paths([f])
+        assert ei.value.reason == "credential"
+        assert c.docs() == []
+
+    def test_folder_walk_skips_nested_credential_dir(self, home_env, tmp_path):
+        home, _ = home_env
+        proj = home / "proj"
+        (proj / ".ssh").mkdir(parents=True)
+        (proj / ".ssh" / "config").write_text("Host secret-host", encoding="utf-8")
+        (proj / "good.txt").write_text("ordinary document", encoding="utf-8")
+        c = Collection("cred3", base=tmp_path / "rag").create()
+        res = c.add_paths([proj])
+        assert res["added"] == 1
+        sources = " ".join(d["path"] for d in c.docs())
+        assert "good.txt" in sources
+        assert ".ssh" not in sources
+
+    def test_resync_blocks_credential_root_and_file(self, home_env, tmp_path):
+        home, _ = home_env
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        cfgfile = ssh / "config"
+        cfgfile.write_text("Host secret-host", encoding="utf-8")
+        c = Collection("cred4", base=tmp_path / "rag").create()
+        c._meta["roots"] = {str(ssh): {"added": 0}}
+        c._meta["docs"] = {str(cfgfile): {}}
+        notes = []
+        available, _unavail, blocked = c._partition_roots(None, notes.append)
+        assert available == []
+        assert [b["root"] for b in blocked] == [str(ssh)]
+        assert c._resyncable_files([], None, notes.append) == []
+
+    def test_cli_add_reports_a_credential_folder_as_a_plain_refusal(self, home_env):
+        from click.testing import CliRunner
+
+        from localm.cli import rag as ragcli
+        home, _ = home_env
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        (ssh / "config").write_text("Host secret-host", encoding="utf-8")
+        res = CliRunner().invoke(ragcli.rag_group, ["add", "cli1", str(ssh)])
+        assert isinstance(res.exception, SystemExit), res.exception
+        assert res.exit_code == 1
+        assert "credential directory" in res.output
+        assert Collection("cli1").docs() == []
+
+
+    @staticmethod
+    def _collection_with_refused_doc(home, tmp_path, name):
+        good = home / "docs" / "good.txt"
+        good.write_text("ordinary document about turbines", encoding="utf-8")
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        bad = ssh / "config"
+        bad.write_text("Host secret-host", encoding="utf-8")
+        c = Collection(name).create()
+        c.add_paths([good])
+        c._meta["docs"][str(bad.resolve())] = dict(c._meta["docs"][str(good.resolve())])
+        c._save_meta()
+        return c, good, bad
+
+    def test_resync_skips_a_refused_doc_instead_of_aborting(self, home_env, tmp_path):
+        home, _ = home_env
+        c, good, bad = self._collection_with_refused_doc(home, tmp_path, "cred5")
+        good.write_text("ordinary document about turbines, edited", encoding="utf-8")
+        res = Collection("cred5").resync(policy=None)
+        assert res["updated"] == 1
+
+    def test_resync_skips_a_network_drive_doc_when_the_toggle_is_off(
+            self, home_env, tmp_path, monkeypatch):
+        import localm.rag._store.confine as confine_mod
+        home, _ = home_env
+        c, good, bad = self._collection_with_refused_doc(home, tmp_path, "cred6")
+        import localm.rag._store.resync as resync_mod
+        monkeypatch.setattr(resync_mod, "_network_drives_allowed_fresh",
+                            lambda: False)
+        monkeypatch.setattr(confine_mod, "is_mapped_network_drive",
+                            lambda path: Path(path).name == "good.txt")
+        notes = []
+        assert c._resyncable_files([], None, notes.append) == []
+        assert any("network drive" in n for n in notes)
+
+    def test_cli_repair_skips_a_refused_doc_and_repairs_the_rest(
+            self, home_env, tmp_path):
+        from click.testing import CliRunner
+
+        from localm.cli import rag as ragcli
+        home, _ = home_env
+        c, good, bad = self._collection_with_refused_doc(home, tmp_path, "cred7")
+        res = CliRunner().invoke(ragcli.rag_group, ["repair", "cred7", "--yes"])
+        assert res.exit_code == 0, res.output
+        assert "credential directory" in res.output
+        assert "repaired: 1 re-indexed" in res.output
+
+
 class TestRagAddRouteSecretFile:
     def test_owner_explicit_secret_file_hard_blocked(self, rag_route_app):
         app, home = rag_route_app

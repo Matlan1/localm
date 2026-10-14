@@ -49,7 +49,7 @@ def fake_registry(tmp_path, monkeypatch):
         return dict(store)
 
     monkeypatch.setattr(mm, "update_registry", _update)
-    monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(
+    monkeypatch.setattr("localm.model_manager.pull._policy_head", lambda *a, **k: MagicMock(
         headers={"content-length": "16"}))
     return store, models_dir
 

@@ -12,7 +12,17 @@
 | `_api.py` | Low-level C API bindings (one Python function per C function) |
 | `_symbols.py` | Resolves a C++-linkage export (MTP draft-head API) by reading the binary's own export table when a plain `getattr` lookup fails |
 | `llama.py` | `LlamaCpp` public class + helpers |
-| `mtmd.py` | Multimodal (vision) support: binds the bundled `mtmd.dll` for GGUF mmproj |
+| `_chat_formats.py` | Chat prompt renderers for template families that `llama_chat_apply_template` does not recognise (Gemma 4) |
+| `_logprobs.py` | `LogprobScorer`: log probabilities of sampled tokens, read from the context's logits |
+| `_slots.py` | `SlotScheduler`: continuous batching of several text replies over one context (parallel slots) |
+| `_drafting.py` | `DraftSource` interface and the shared draft-length logic for speculative decoding |
+| `_ngram.py` | N-gram (prompt-lookup) draft source |
+| `_draftmodel.py` | Draft-model draft source and the vocabulary-compatibility rule |
+| `_stepcosts.py` | Measured step costs of speculative decoding and the draft length they pick |
+| `_diffusion.py` | Text generation for diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) |
+| `_split_fit.py` | Per-device fit of llama.cpp's implicit multi-GPU layer split |
+| `mtmd.py` | Multimodal (vision and audio input) support: binds the bundled `mtmd.dll` for GGUF mmproj |
+| `mtmd_gen.py` | Speech synthesis with a text-to-speech GGUF through `libmtmd`; runs inside the isolated speech worker |
 | `_runner.py` | Subprocess isolation for the whole GGUF model lifecycle (load, generate, tokenize, grammar-check, unload), so a native abort in the child kills only that child |
 | `_worker.py` | `GgufWorker`: owns the real native model; runs only inside the isolated child process spawned by `_runner.py` |
 | `_sizing.py` | VRAM measurement and load-sizing logic shared by `GgufBackend` (preflight checks before spawning) and `GgufWorker` (mid-generation context-grow checks) |
@@ -123,7 +133,7 @@ call sites need no layout awareness at all):
 | 0 | 0 | 0 | u32 | `n_ctx` | 512 |
 | 4 | 4 | 4 | u32 | `n_batch` | 2048 |
 | - | 24 | 24 | u32 | `n_outputs_max_per_seq` | 1 |
-| 24 | 28 | 28 | i32 | `n_threads` | -1 (auto) |
+| 24 | 28 | 28 | i32 | `n_threads` | 4 |
 | 36 | 40 | 40 | i32 | `rope_scaling_type` | -1 (unspecified) |
 | 48 | 52 | 52 | i32 | `flash_attn_type` | -1 (unspecified) |
 | 80 | 84 | 84 | f32 | `defrag_thold` | -1.0 |
@@ -242,9 +252,11 @@ localm class, not assumed to move in lockstep. The no-arg default run fails
 loudly if either axis's pinned refs stop straddling that axis's reorder.
 
 A mid-struct reorder/insert exits non-zero; a purely trailing addition is a note
-(it is absorbed by the reserved pad). A weekly CI job (`abi-check`) runs
-`--ref latest` and also provisions the real cpu prebuilt to run `verify_abi`
-against the actual binary.
+(it is absorbed by the reserved pad). The `abi-check` CI job (weekly, on a push that touches the native binding or
+`localm/setup_llama/`, and on a dispatch that opts in) runs `--ref latest`,
+provisions the real cpu prebuilt to run `verify_abi` against the actual binary,
+and checks with `scripts/confirm_llama_runtime.py` that the pinned build
+generates.
 
 ### Enum domains
 
@@ -329,8 +341,14 @@ Covered functions (grouped):
 **Model introspection**: `has_kv_head_api()` / `llama_model_n_head` / `llama_model_n_head_kv`, `has_hybrid_api()` / `llama_model_is_recurrent` / `llama_model_is_hybrid`, `has_max_devices()` / `llama_max_devices`  
 **Sampler chain**: `llama_sampler_chain_default_params`, `llama_sampler_chain_init`, `llama_sampler_chain_add`, `llama_sampler_free`, `llama_sampler_sample`, `llama_sampler_accept`, `llama_sampler_init_greedy`, `llama_sampler_init_dist`, `llama_sampler_init_top_k`, `llama_sampler_init_top_p`, `llama_sampler_init_min_p`, `llama_sampler_init_temp`, `llama_sampler_init_grammar`, `llama_sampler_init_grammar_lazy_patterns` (export-probed via `has_lazy_grammar()`), `llama_sampler_init_penalties` (export-probed via `has_penalties_sampler()`)  
 **Memory (KV cache)**: `llama_get_memory`, `llama_memory_clear`, `llama_memory_seq_rm` (all probed at runtime via `has_memory_api()`), `llama_kv_cache_seq_rm` (a combined wrapper that prefers the memory API and falls back to the legacy call on an older DLL)  
-**Multi-Token Prediction (MTP)**: `llama_model_mtp_support` / `llama_model_has_mtp` (plain export; whether an MTP draft context on this model would run a real draft head), `llama_set_embeddings_nextn`, `llama_get_embeddings_nextn` (declared without `extern "C"` in an internal header, resolved via `_symbols.py` rather than a plain `getattr`, and probed as a group via `mtp_hidden_state_available()`), `llama_get_embeddings_nextn_ith`, `llama_set_nextn_layer_offset` (same C++-linkage resolution, but each probed individually rather than as part of the group check) - see below  
-**Diagnostics**: `llama_print_system_info`
+**Multi-Token Prediction (MTP)**: `llama_model_mtp_support` / `llama_model_has_mtp` (plain export; whether an MTP draft context on this model would run a real draft head), `llama_set_embeddings_nextn`, `llama_get_embeddings_nextn` (declared without `extern "C"` in an internal header, resolved via `_symbols.py` rather than a plain `getattr`, and probed as a group via `mtp_hidden_state_available()`), `llama_get_embeddings_nextn_ith` (surfaced as `llama_get_embeddings_nextn_rows` for a run of rows), `llama_set_nextn_layer_offset` (same C++-linkage resolution, but each probed individually rather than as part of the group check) - see below  
+**Diagnostics**: `llama_print_system_info`  
+**LoRA adapters** (`has_lora_api()`): `llama_adapter_lora_init`, `llama_adapter_lora_free`, `llama_set_adapters_lora`  
+**Encoder-decoder** (`has_encoder_api()`): `llama_encode`, `llama_model_has_encoder`, `llama_model_has_decoder`, `llama_model_decoder_start_token`  
+**Diffusion** (`has_diffusion_api()`): `llama_model_is_diffusion`, `llama_vocab_mask`, `llama_set_causal_attn`, `llama_sampler_apply`, `llama_n_ubatch`, `llama_encode`  
+**Reranking** (`has_rerank_api()`): `llama_vocab_bos`, `llama_vocab_eos`, `llama_vocab_sep`, `llama_vocab_get_add_bos`, `llama_vocab_get_add_eos`, `llama_vocab_get_add_sep`, `llama_model_n_cls_out`, `llama_model_cls_label`  
+**Backend sampling** (`has_backend_sampling()`): `llama_set_sampler`, `llama_get_sampled_token_ith`  
+**Other accessors**: `llama_vocab_type`, `llama_vocab_get_text`, `llama_model_n_embd_inp`, `llama_max_devices`; `penalties_needs_n_vocab()` reports whether the runtime's `llama_sampler_init_penalties` takes an `n_vocab` argument
 
 ## LlamaCpp Class (`llama.py`)
 
@@ -343,7 +361,7 @@ llm = LlamaCpp(
     n_gpu_layers=99,    # layers to offload (99 = all)
     verbose=False,
     seed=0xFFFFFFFF,    # LLAMA_DEFAULT_SEED
-    n_threads=None,     # None = auto
+    n_threads=None,     # None = keep llama.cpp's own default (4 on the bundled build)
 )
 ```
 
@@ -361,10 +379,11 @@ The constructor:
 `create_chat_completion` formats messages via `_apply_model_template(model_ptr, messages)`:
 
 1. Calls `llama_model_chat_template(model_ptr)`: returns the Jinja template embedded in the GGUF
-2. Builds a `LlamaChatMessage` ctypes array from the messages list
-3. Calls `llama_chat_apply_template(tmpl, array, n, add_assistant=True, buf, buflen)`
-4. If the template includes a BOS marker (`<bos>`, `<s>`, or a leading BOM character) at the start, skips `add_special` in tokenize to avoid doubling
-5. Falls back to hardcoded ChatML if the model has no embedded template
+2. If the template is of a family listed in `_chat_formats.py` (Gemma 4), renders it there and stops; any other template continues
+3. Builds a `LlamaChatMessage` ctypes array from the messages list
+4. Calls `llama_chat_apply_template(tmpl, array, n, add_assistant=True, buf, buflen)`
+5. If the template includes a BOS marker (`<bos>`, `<s>`, or a leading BOM character) at the start, skips `add_special` in tokenize to avoid doubling
+6. Falls back to hardcoded ChatML if the model has no embedded template or the template call fails
 
 ### Generation loop (`_generate`)
 
@@ -401,8 +420,9 @@ loop:
 ```
 
 (`llama_batch_get_one` is also bound in `_api.py`, but only the separate
-embedding-model loader uses it - see Known Limitations below; the chat
-generation loop always builds its one-token batch via `llama_batch_init`.)
+embedding-model loader and the encoder pass of an encoder-decoder model use it
+(see Known Limitations below); the chat generation loop always builds its
+one-token batch via `llama_batch_init`.)
 
 Do NOT call `llama_sampler_accept` after `llama_sampler_sample`: sample()
 already accepts the token into every stateful sampler in the chain. A second
@@ -477,12 +497,13 @@ on the GPU). `localm bench-mtp` measures it per model. `mtp_draft_tokens`
   hand-derived allowlist pinned to the shipped runtime's build tag
   (`MTP_ARCH_SOURCE_TAG`) and kept honest by `scripts/check_mtp_arch_allowlist.py`,
   which fails when the pin moves without a re-derivation. Carrying the
-  metadata does not imply this: GLM-4.5/4.5-Air/4.6 ship
-  `nextn_predict_layers` and the NextN tensors, but the runtime's
-  `build_arch_graph` ignores the MTP graph type for `glm4moe` and returns an
-  ordinary decoder, so an MTP context there would be a second full decoder
-  with its own VRAM-pinned KV cache rather than a draft head -
-  `llama_model_mtp_support` refuses it instead of allocating one.
+  metadata does not imply this: on a runtime that does not export
+  `llama_model_has_mtp`, an architecture outside the allowlist (status
+  `no-mtp-graph:<arch>`) is
+  refused by `llama_model_mtp_support` instead
+  of getting an MTP context, because on a model whose runtime class returns an
+  ordinary decoder for the MTP graph type that context would be a second full
+  decoder with its own VRAM-pinned KV cache rather than a draft head.
 
 When both hold, `LlamaCpp` opens a second context, sized like the main one and
 recreated whenever the main one grows, as the draft head's own KV cache. Two
@@ -506,8 +527,9 @@ more things gate whether it actually activates:
   recurrent state (the Qwen3.5/3.6 MTP family, Nemotron, DeepSeek V4) cannot
   be truncated at all unless it was asked to keep per-token snapshots, and
   rolling back r positions needs r snapshots. The context requests
-  `max(2, mtp_draft_tokens)` of them (`n_rs_seq`, on builds whose context
-  params struct has the field) whenever MTP is enabled, a no-op on a model
+  the largest of the runtime's own default, 2 and `mtp_draft_tokens` of them
+  (`n_rs_seq`, on builds whose context params struct has the field) whenever
+  MTP is enabled, a no-op on a model
   with no recurrent layers. Each snapshot is one more copy of the recurrent
   state.
 
@@ -723,11 +745,13 @@ per-device plan with it keeps the target's split and fits every device);
 otherwise it runs on the CPU, so it never costs the target layers or devices,
 and the reply's usage reports `draft-on-cpu`. A draft model that is missing, is
 not a causal chat model by its metadata (a draft head, a diffusion,
-encoder-decoder, embedding, audio or image model; nothing is loaded), fails to
-load, does not share the vocabulary, has recurrent layers, or whose context is
-refused leaves the model working without drafting, with the status naming why
-(`draft-model-missing`, `draft-unsupported-role`, `draft-load-failed`,
-`draft-vocab-mismatch`, `draft-rewind-unsupported`, `draft-context-refused`).
+encoder-decoder, embedding, audio or image model; nothing is loaded), is not a
+GGUF file, fails to load, does not share the vocabulary, has recurrent layers,
+or whose context is refused leaves the model working without drafting, with the
+status naming why (`draft-model-missing`, `draft-not-gguf`,
+`draft-unsupported-role`, `draft-load-failed`, `draft-vocab-mismatch`,
+`draft-rewind-unsupported`, `draft-context-refused`, or `draft-error:<exception
+type>` for any other setup error).
 `localm spec-drafts MODEL` lists the downloaded causal chat models whose
 metadata passes the vocabulary rule.
 
@@ -749,12 +773,12 @@ Many models signal end-of-turn with multi-token sequences (e.g. `<|im_end|>` →
 
 `_filtered_stream(pieces)` wraps the raw text piece stream:
 
-- Buffers the last `max(len(s) for s in STOP_STRINGS) - 1` characters
+- Buffers the last `max(len(s) for s in _STOP_STRINGS) - 1` characters
 - Yields the safe prefix immediately
 - When a complete stop string appears anywhere in the buffer, yields the text before it and returns
 - Flushes the remaining buffer at end-of-stream
 
-Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `</s>`, `<|endoftext|>`, `[/INST]`, `<|end|>`.
+Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `</s>`, `<|endoftext|>`, `[/INST]`, `<|end|>`. For a harmony (gpt-oss) vocabulary, where `<|return|>` and `<|call|>` each tokenize to a single end-of-generation token, `<|end|>` is dropped from the set (`model_stop_strings`): there it ends one message of a reply, not the reply.
 
 ### Sampler chain
 
@@ -772,8 +796,13 @@ Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `<
   rather than silently generating unconstrained text - answering with a
   normal 200 the caller had every reason to believe was grammar-conformant
   would be worse than a clean refusal.
-- The repetition-penalty stage is added when `repeat_penalty != 1.0` and
-  the DLL exports `llama_sampler_init_penalties`.
+- The penalties stage (over the last 64 sampled tokens) is added when
+  `repeat_penalty != 1.0` or a non-zero frequency or presence penalty is
+  requested, and `has_penalties_sampler()` holds (the DLL exports
+  `llama_sampler_init_penalties` and which of its two argument lists it takes,
+  with or without a leading `n_vocab`, could be determined). Without that, a
+  repeat penalty alone is skipped and a frequency or presence penalty is
+  refused with `UnsupportedInputError`.
 - For `temperature <= 0` the stochastic stages are replaced by `greedy`
   (grammar and penalties still apply).
 

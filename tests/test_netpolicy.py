@@ -276,6 +276,11 @@ class _FakeSession:
     def post(self, url, **kw):
         return self._responder("POST", url, **kw)
 
+    def request(self, method, url, **kw):
+        if method.upper() == "GET":
+            return self.get(url, **kw)
+        return self.post(url, **kw)
+
     def close(self):
         pass
 
@@ -284,6 +289,17 @@ class _FakeSession:
 
     def __exit__(self, *exc):
         return False
+
+
+class _ReadBody:
+    """A search response double whose ``text``/``json`` carry the answer and
+    whose streamed body is empty."""
+
+    def iter_content(self, chunk_size=65536):
+        return iter(())
+
+    def close(self):
+        pass
 
 
 def _patch_session(monkeypatch, *, get=None, post=None):
@@ -621,7 +637,7 @@ class TestWebSearch:
             "socket.getaddrinfo",
             lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
 
-        class _R:
+        class _R(_ReadBody):
             text = _DDG_HTML
             def raise_for_status(self):
                 pass
@@ -641,7 +657,7 @@ class TestWebSearch:
         })
         seen = {}
 
-        class _R:
+        class _R(_ReadBody):
             def raise_for_status(self):
                 pass
             def json(self):
@@ -668,7 +684,7 @@ class TestWebSearch:
             "socket.getaddrinfo",
             lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
 
-        class _R:
+        class _R(_ReadBody):
             status_code = 200
             def raise_for_status(self):
                 pass
@@ -691,6 +707,7 @@ class TestWebSearch:
         message = str(info.value)
         for service in ("DuckDuckGo:", "DuckDuckGo lite:", "Brave Search:"):
             assert service in message
+        assert message.count("could not read results from") == 3
         assert "no results" not in message
 
     def test_mode_off_blocks_search(self, monkeypatch):

@@ -17,6 +17,23 @@ def test_builtin_plugin_scopes_documented():
         assert s in scopes.BUILTIN_PLUGIN_SCOPES
 
 
+def test_every_builtin_plugin_scope_is_reserved():
+    import tomllib
+    from pathlib import Path
+
+    import localm.plugins.builtin as builtin
+    root = Path(next(iter(builtin.__path__)))
+    manifests = sorted(root.glob("*/plugin.toml"))
+    assert manifests, "no built-in plugin manifests found"
+    for toml_path in manifests:
+        data = tomllib.loads(toml_path.read_text(encoding="utf-8"))["plugin"]
+        name = data["name"]
+        scope = data.get("scope", name)
+        assert scope == name, f"{name}: scope {scope!r} differs from its name"
+        assert scope in scopes.BUILTIN_PLUGIN_SCOPES, (
+            f"{name}: scope {scope!r} is not reserved in BUILTIN_PLUGIN_SCOPES")
+
+
 def test_all_scope_strings_unique():
     vals = list(scopes.KERNEL_SCOPES) + list(scopes.BUILTIN_PLUGIN_SCOPES)
     assert len(vals) == len(set(vals))

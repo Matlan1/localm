@@ -52,8 +52,8 @@ path - `rag repair`/`rag resync` cannot re-read an uploaded document from disk,
 so only `rag rm-doc` can remove it.
 
 From the coder: two built-in tools let the agent search your Knowledge
-collections mid-task - one lists what is available, the other searches a
-named collection for matching excerpts. Search asks for confirmation by
+collections mid-task - `rag_list_collections` lists what is available,
+`rag_search` searches a named collection for matching excerpts. Search asks for confirmation by
 default (collection content is not scoped to the project the way file reads
 are), and retrieved text goes through the same sanitiser used for any other
 untrusted content before it reaches the model. Search is lexical only for
@@ -73,7 +73,10 @@ Indexing through the GUI or the HTTP API is confined by a folder policy
 working directory, and any folders you add to it; **blacklist** mode allows
 everywhere except the folders you deny. In both modes well-known credential
 folders (`.ssh`, `.aws`, `.gnupg`, ...) are always refused, wherever they
-appear in the path. A Windows drive mapped to a network share (`net use Z:
+appear in the path, and UNC and device paths are always refused. Through the
+GUI and the API, key and credential files (private keys, certificates,
+keystores, `.env` files, `.netrc` and the like) are refused too. A Windows
+drive mapped to a network share (`net use Z:
 \\host\share`) is treated as an ordinary local folder unless you turn off
 **Settings > Security > "Allow network drives as filesystem locations"**.
 The localm data directory (it holds your API key and
@@ -82,8 +85,11 @@ an allowed folder, its contents are indexable like any other file, since the
 owner already has direct filesystem access to their own data; this is a
 deliberate choice for a local, single-user tool, not an oversight. Picking a
 folder outside the whitelist offers an "add this folder and continue" prompt
-rather than a dead end. The local CLI (`localm rag add`) is unconfined: the
-person running it can already read their own files.
+rather than a dead end. The local CLI (`localm rag add`) is not bound by the
+folder policy: the person running it can already read their own files. It still
+refuses the well-known credential folders (and skips any file under one when it
+walks a folder), UNC and device paths, and mapped network drives when **Allow
+network drives as filesystem locations** is off.
 
 ### Per-key folder scoping
 
@@ -123,7 +129,7 @@ host path to confine. Only the owner key may set `rag_roots` on another key
 
 - Plain text & code (stdlib): `.txt .md .rst .csv .json .yaml .toml .py .js
   .ts .java .c .cpp .go .rs .sh .sql …`
-- `.html` (tags stripped), `.docx` (stdlib zip+xml), `.ipynb` (cells)
+- `.html` / `.htm` (tags stripped), `.docx` (stdlib zip+xml), `.ipynb` (cells)
 - `.pdf` - needs the one optional package: `pip install "localm[rag]"`
 - **Archives** `.zip` / `.tar` (and `.gz .bz2 .xz .tgz .tbz .txz`) are unpacked in
   memory and each text member is indexed.
@@ -295,8 +301,9 @@ policy as an interactive add. Full details in
   rest.
 - A recently queried collection stays in memory, so the next query skips
   re-reading its files and rebuilding its index. That cache holds at most
-  256 MiB across all collections (the least recently used one is dropped
-  first), and a collection is read again whenever its files change. Scoring
+  256 MiB across all collections and at most 8 collections (the least
+  recently used one is dropped first), and a collection is read again whenever
+  its files change. Scoring
   still visits every chunk, so retrieval is brute force by design: fast at home
   scale (thousands of chunks), but query latency grows with collection size and
   it is not built for millions of chunks.
@@ -317,6 +324,10 @@ policy as an interactive add. Full details in
   folder is safe: the holder keeps reporting in, and only a holder that stops
   reporting (a crash, a killed process) has its lock reclaimed. Collections are
   independent, so work on a different one never waits.
+- Extraction is capped per document: 8,000,000 characters of text, and for a PDF
+  5,000 pages or 30 seconds, whichever comes first (a PDF or archive cut short
+  keeps the text read so far plus a truncation note). An archive is read for at
+  most 5,000 members and 500 MB of decompressed data.
 - `POST .../add` accepts up to 50 paths per request (a path may itself be a
   folder); `POST .../upload` accepts up to 50 files per request, 30 MB each
   and 100 MB total. Split a larger batch across multiple calls.

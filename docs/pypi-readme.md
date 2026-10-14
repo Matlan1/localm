@@ -4,7 +4,7 @@ Run large language models on your own machine. Offline, private, and yours.
 
 LocaLM downloads and runs LLMs locally: GGUF models through llama.cpp and
 HuggingFace models through transformers, on AMD, NVIDIA, Intel, Apple Silicon
-or CPU. It ships a chat GUI, an OpenAI-compatible API, a coding agent, RAG
+(experimental) or CPU. It ships a chat GUI, an OpenAI-compatible API, a coding agent, RAG
 over your own documents, and an MCP server, with every online feature off by
 default. The only thing it does online without being asked is a periodic
 update check (see Network below), which you can turn off too.
@@ -16,11 +16,13 @@ pip install localm
 localm setup-llama
 ```
 
-`setup-llama` detects your GPU and provisions the matching llama.cpp runtime.
-It needs no vendor toolkit: NVIDIA gets a self-contained CUDA build, AMD on
-Windows a bundled ROCm build, Intel on Windows a self-contained SYCL build,
-Intel on Linux and toolkit-less AMD a Vulkan build, Apple Silicon Metal, and
-anything else CPU.
+`setup-llama` detects your GPU and provisions the matching llama.cpp runtime:
+NVIDIA gets a self-contained CUDA build (no CUDA Toolkit needed), AMD RX 6000
+on Windows a bundled ROCm build, other AMD GPUs the ROCm/HIP build when a
+system ROCm/HIP toolkit is installed (Vulkan otherwise), Intel on Windows a
+self-contained SYCL build, Intel on Linux a Vulkan build, Apple Silicon Metal
+(experimental), and no GPU the CPU build. `localm setup-llama --backend
+<name>` picks one yourself.
 
 Then pull a model and talk to it:
 
@@ -35,8 +37,8 @@ Or open the graphical interface:
 localm gui
 ```
 
-Python 3.12 is required. `localm doctor` reports what is installed and what is
-missing at any point.
+Python 3.12 is required (the package supports 3.12.x only, not 3.13 or newer).
+`localm doctor` reports what is installed and what is missing at any point.
 
 ## Where data lives
 

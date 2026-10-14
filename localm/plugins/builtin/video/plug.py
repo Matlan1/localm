@@ -40,6 +40,7 @@ from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
+from localm.vram import media_handover_job
 from . import backend as _backend
 
 _router = APIRouter()
@@ -127,6 +128,7 @@ async def video(req: VideoRequest, request: Request):
     out_path = video_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.mp4"
     owner = principal_id(request)
 
+    @media_handover_job
     def _generate(job):
         from localm.audit import SessionMode, effective_mode
         from localm.config import load_config

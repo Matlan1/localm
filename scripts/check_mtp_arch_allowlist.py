@@ -3,19 +3,18 @@
 
 A GGUF carrying ``<arch>.nextn_predict_layers`` is DECLARING multi-token
 prediction heads. It is not promising that the runtime can BUILD an MTP draft
-graph for that architecture, and those two diverge: glm4moe (GLM-4.5 / 4.5-Air /
-4.6) ships the key and the NextN tensors while upstream's ``build_arch_graph``
-ignores the MTP graph type and returns the ordinary decoder. Asking for an MTP
-context there yields a SECOND FULL DECODER with its own VRAM-pinned KV cache,
-created after the caller's memory preflight and charged to nobody.
+graph for that architecture, and those two diverge: an architecture can ship the
+key and the NextN tensors while upstream's ``build_arch_graph`` ignores the MTP
+graph type and returns the ordinary decoder. Asking for an MTP context there
+yields a SECOND FULL DECODER with its own VRAM-pinned KV cache, created after
+the caller's memory preflight and charged to nobody.
 
 Detection therefore consults ``MTP_GRAPH_ARCHITECTURES`` in
 ``localm/inference/backends/llamacpp/_api.py``: the architectures whose
 llama.cpp model class declares a nested ``struct graph_mtp`` AND dispatches to
 it from ``build_arch_graph`` on ``LLM_GRAPH_TYPE_DECODER_MTP``. That set is a
 property of ONE upstream release, so it goes stale the moment the runtime pin
-moves - at b10375 twelve of one hundred and forty-one model classes qualify and
-glm4moe is not one of them, while on upstream's later default branch it is.
+moves.
 
 WHAT THIS GATE CHECKS, all offline
 ----------------------------------

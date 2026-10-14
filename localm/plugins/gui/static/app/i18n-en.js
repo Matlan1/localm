@@ -1597,7 +1597,7 @@ export const I18N_EN = {
   "settings.field.coderReview.label": "Review changes before finishing",
   "settings.field.coderReview.help": "Before the coder declares a task done, a reviewer model reads the diff and feeds blocking issues back for one more fix pass. Adds a model round-trip per task that changed files. Off by default.",
   "settings.field.coderReviewer.label": "Reviewer model target",
-  "settings.field.coderReviewer.help": "Sends your diff off-machine unless left blank or set to 'local'. Values: blank = the agent's own model; local = a small CPU model; openai; anthropic; or an http(s) URL.",
+  "settings.field.coderReviewer.help": "Sends your diff off-machine (network policy applies) unless blank or 'local'. Values: blank = the agent's own model; local = a small CPU model; openai; anthropic; or an http(s) URL.",
   "settings.field.coderReviewerModel.label": "Reviewer model name",
   "settings.field.coderReviewerModel.help": "Model name for a cloud/URL reviewer. Blank uses a sensible provider default or the agent's own model name.",
 
@@ -1653,7 +1653,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Knowledge
   "settings.field.ragIndexingMode.label": "Indexing folder rule",
-  "settings.field.ragIndexingMode.help": "Which folders document indexing may read. whitelist = home, the working directory and Allowed folders only. blacklist = anything except Denied folders. Data and credential folders are always refused.",
+  "settings.field.ragIndexingMode.help": "Which folders document indexing may read. whitelist = home, the working directory and Allowed folders only. blacklist = anything except Denied folders. Credential folders are always refused.",
   "settings.field.ragAllowedRoots.label": "Allowed folders",
   "settings.field.ragAllowedRoots.help": "Folders that may be indexed in whitelist mode, in addition to your home folder and the working directory. When you pick a folder outside this list, localm offers to add it here and continue.",
   "settings.field.ragDeniedRoots.label": "Denied folders",

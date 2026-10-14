@@ -612,16 +612,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **`localm rag add` no longer indexes credential folders.** Adding a folder such as `~/.ssh` or
+  `~/.aws` from the terminal, or a folder that contains one, used to index its files even though
+  the API refuses them. The command now refuses a credential folder, UNC or device path, and (when
+  network drives are turned off in Settings) a mapped network drive, skips any file under a
+  credential folder while walking a folder, and a re-sync or repair skips a refused source
+  instead of failing.
+- **A config lock that cannot be read on release is reported.** The lock file left behind is named in a warning instead of lingering silently until it is reclaimed.
 - **A malformed key store or credentials file is no longer overwritten.** Creating or revoking an API key, or saving a Hugging Face or CivitAI credential, now refuses and leaves the file untouched when `auth.json` is not a list or `model_source_credentials.json` is not an object, instead of replacing it with just the new entry.
 - **Self-calls to a look-alike loopback URL keep certificate verification.** An HTTPS URL containing a backslash or control character is no longer treated as loopback, so the coder agent does not disable verification for it when the local CA file is missing.
 - **Ollama-compatible routes.** A non-streamed `/api/chat` or `/api/generate` reply now carries the
   `X-Localm-*` response headers, as the streamed one does. `POST /api/embed` with an empty `input`
   refuses `dimensions` and answers 404 for an unknown model instead of returning an empty result.
   The `keep_alive: 0` unload idiom no longer unloads a local copy of a model that another instance serves.
-- **Revoking an admin-scoped key says when its browser sessions could not be dropped.** If
-  removing the revoked key's sessions failed with an error, the server log said nothing at the
-  default level although an admin session cookie for that key could stay usable. It now logs a
-  warning naming the key.
+- **Two image, video or music jobs no longer load their models on top of the chat model coming back.** A second job that started while the first job's chat model was reloading loaded its own model beside it, which made the second job several times slower on a full card. A job now waits for a running chat reload, and the chat model reloads once, after the last job.
 - **A chat answered by another localm instance keeps this instance's session persistence.** With a
   route to another instance's loaded model, a scheduled chat job on a routed model, or
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a
@@ -2153,12 +2157,29 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A damaged native image runtime says so instead of failing obscurely.** A runtime folder that
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
+- **Revoking an admin-scoped key says when its browser sessions could not be dropped.** If
+  removing the revoked key's sessions failed with an error, the server log said nothing at the
+  default level although an admin session cookie for that key could stay usable. It now logs a
+  warning naming the key.
 ### Security
 - **Update and key-listing replies no longer hand a scoped key your file paths.** The backup
   path from `GET /api/update/rollback` and `POST /api/update/apply`, the text of a failed apply,
   and the owner-key-file notice on `GET /v1/keys` named the full location under your data
   directory. A caller other than the owner now gets the scrubbed form (data directory as
   `<data>`, file name kept); the owner and open mode still see the full path.
+- **The coder's network reviewer obeys the network policy.** A cloud reviewer (`openai` /
+  `anthropic`) or an off-machine reviewer URL sent the cumulative diff even with `net_mode` off or
+  the host on `net_deny`. It is now checked like the GUI coder's own model server: when the policy
+  refuses it (including a LAN address while `net_allow_private` is off), the review runs on the
+  local model with a warning naming the refusal. A reviewer URL on this machine is not affected.
+- **Hugging Face pulls are checked against the network policy.** `net_deny`, `net_allow` and the
+  private-address guard now apply to the Hugging Face endpoint before any pull, and the size check
+  before a single-file download checks every redirect hop and pins its address.
+- **Internationalised host names match the domain lists in either spelling.** A `net_deny` or
+  `net_allow` entry written in Unicode or in its `xn--` form now matches both spellings of the host.
+- **The private-address guard refuses the IPv6 site-local range `fec0::/10`.**
+- **Web search reads at most 4 MB of a search service's answer.** A larger answer is refused instead
+  of being read whole into memory.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model

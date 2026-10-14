@@ -77,6 +77,8 @@ localm config net_deny  "doubleclick.net"                        # never these
 - `net_allow` empty (default) = any domain. Non-empty = only listed domains.
 - `net_deny` always wins over `net_allow`.
 - `example.com` matches `example.com` and every subdomain (`api.example.com`).
+- An internationalised name is compared in its IDNA (`xn--`) form, so an entry
+  written either way matches both spellings of the host.
 
 ## SSRF guard
 
@@ -222,7 +224,14 @@ coding agent's shell access, so you can grant one without the other.
   (OpenAI/Anthropic opt-ins) - explicit user actions. Note that model
   downloads DO go through this same policy's domain lists and SSRF guard
   (`check_url`); `off` is bypassed only via the separate
-  `net_allow_model_downloads` setting.
+  `net_allow_model_downloads` setting. A Hugging Face pull checks the hub
+  endpoint before any request, and the size check before a single-file
+  download checks and pins every redirect hop; the metadata requests and the
+  transfer itself are made by the `huggingface_hub` library, which follows the
+  hub's redirect to its download host on its own, without the per-hop check or
+  the DNS-rebinding pin. The
+  coder's network reviewer (a cloud model or an off-machine URL) is checked
+  the same way, and falls back to the local model when refused.
 - **Bug-report upload.** A deliberate, one-off action you trigger yourself
   (see [privacy.md](privacy.md)); it does not call `check_url` and is not
   subject to the domain lists.

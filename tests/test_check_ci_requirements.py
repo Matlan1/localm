@@ -37,10 +37,26 @@ def test_pins_reads_every_pinned_name_lowercased():
 
 
 def test_the_committed_sets_pin_what_the_readme_commands_name():
-    assert mod.pins((mod.REQUIREMENTS / "torch-cpu.txt").read_text(encoding="utf-8"))["torch"]
+    torch = mod.pins((mod.REQUIREMENTS / "torch-cpu.txt").read_text(encoding="utf-8"))
+    assert all(torch[name] for name in mod._TORCH_ROOTS)
     assert mod.pins((mod.REQUIREMENTS / "mutmut.txt").read_text(encoding="utf-8"))["mutmut"]
     build = mod.pins((mod.REQUIREMENTS / "build.txt").read_text(encoding="utf-8"))
     assert all(build[name] for name in mod._BUILD_ROOTS)
+
+
+def test_regenerate_feeds_the_torch_compile_both_committed_torch_pins(monkeypatch, tmp_path):
+    compiles = []
+
+    def fake_run(cmd, *, cwd, stdin=None):
+        if cmd[1:3] == ["pip", "compile"] and "--emit-index-url" in cmd:
+            compiles.append(stdin)
+        for name in mod.SETS:
+            (tmp_path / name).write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    mod.regenerate(tmp_path)
+    committed = mod.pins((mod.REQUIREMENTS / "torch-cpu.txt").read_text(encoding="utf-8"))
+    assert compiles == [f"torch=={committed['torch']}\ntorchvision=={committed['torchvision']}\n"]
 
 
 def test_drift_ignores_only_the_header_lines_that_record_the_output_path():

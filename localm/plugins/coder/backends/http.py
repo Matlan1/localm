@@ -905,9 +905,13 @@ def make_localm_backend(model: str, port: int = 8642, *, host: str = "",
                        localm_server=True, **kw)
 
 
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+
+
 def make_openai_backend(model: str = "gpt-4o", **kw) -> HTTPBackend:
     key = os.environ.get("OPENAI_API_KEY", "")
-    return HTTPBackend("https://api.openai.com/v1", model, api_key=key, native_tools=True, **kw)
+    return HTTPBackend(OPENAI_BASE_URL, model, api_key=key, native_tools=True, **kw)
 
 
 def make_anthropic_backend(model: str = "claude-opus-4-5", **kw) -> HTTPBackend:
@@ -921,7 +925,7 @@ def make_anthropic_backend(model: str = "claude-opus-4-5", **kw) -> HTTPBackend:
     """
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     return HTTPBackend(
-        "https://api.anthropic.com/v1",
+        ANTHROPIC_BASE_URL,
         model,
         api_key=key,
         anthropic=True,

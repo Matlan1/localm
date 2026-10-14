@@ -52,6 +52,11 @@ class _FakeSession:
     def post(self, url, **kw):
         return self._resolve(self._post, url, **kw)
 
+    def request(self, method, url, **kw):
+        if method.upper() == "GET":
+            return self.get(url, **kw)
+        return self.post(url, **kw)
+
     def close(self):
         pass
 
@@ -198,6 +203,12 @@ class _FakeResp:
 
     def json(self):
         return self._json
+
+    def iter_content(self, chunk_size=65536):
+        return iter(())
+
+    def close(self):
+        pass
 
 
 class TestN3SearchRedirects:

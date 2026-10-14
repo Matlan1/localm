@@ -82,7 +82,7 @@ class TestAgainstTheHub:
         import huggingface_hub
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
         monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn, **kw: state.published)
-        monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(
+        monkeypatch.setattr("localm.model_manager.pull._policy_head", lambda *a, **k: MagicMock(
             headers={"content-length": "1"}))
         return state
 

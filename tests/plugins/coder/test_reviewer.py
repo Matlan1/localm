@@ -16,6 +16,7 @@ from localm.plugins.coder.reviewer import (
     parse_review,
     reviewer_for_agent,
 )
+from tests._net_config import set_config
 from tests.conftest import final_answer as _final_answer
 
 
@@ -239,9 +240,13 @@ def test_partial_warning_silent_when_the_review_itself_failed():
 # --------------------------------------------------------------------------- #
 
 def _cfg(monkeypatch, **over):
-    base = {"coder_review": True, "coder_reviewer": "", "coder_reviewer_model": ""}
+    base = {"coder_review": True, "coder_reviewer": "", "coder_reviewer_model": "",
+            "net_mode": "ask"}
     base.update(over)
-    monkeypatch.setattr("localm.config.load_config", lambda: base)
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+    set_config(monkeypatch, base)
+    monkeypatch.setattr("socket.getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
 
 
 def test_factory_off_by_default(monkeypatch):
@@ -347,6 +352,87 @@ def test_factory_127_0_0_2_is_loopback_under_the_new_classifier(monkeypatch):
         rv = reviewer_for_agent(_backend_returning(""), SessionMode.PRIVACY, False)
     mk.assert_called_once()
     assert rv.heterogeneous is True and rv.backend is fake
+
+
+# --------------------------------------------------------------------------- #
+#  reviewer_for_agent: network policy gate                                     #
+# --------------------------------------------------------------------------- #
+
+def _http_backends(monkeypatch):
+    """Record every HTTPBackend the factory builds, as (base_url, kwargs)."""
+    import localm.plugins.coder.backends.http as http_mod
+    built = []
+    real = http_mod.HTTPBackend
+
+    def spy(base_url, *a, **kw):
+        built.append((base_url, kw))
+        return real(base_url, *a, **kw)
+    monkeypatch.setattr(http_mod, "HTTPBackend", spy)
+    return built
+
+
+class TestReviewerNetworkPolicy:
+    def _build(self, monkeypatch, **cfg):
+        _cfg(monkeypatch, **cfg)
+        built = _http_backends(monkeypatch)
+        backend = _backend_returning("")
+        with patch("localm.plugins.coder.display.print_warning") as warn:
+            rv = reviewer_for_agent(backend, SessionMode.FULL, False)
+        return rv, backend, built, warn
+
+    def test_cloud_reviewer_refused_when_net_mode_off(self, monkeypatch):
+        for target in ("openai", "anthropic"):
+            rv, backend, built, warn = self._build(
+                monkeypatch, coder_reviewer=target, net_mode="off")
+            assert built == []
+            assert rv.backend is backend and rv.heterogeneous is False
+            assert "network policy refused" in warn.call_args[0][0]
+            assert "net_mode=off" in warn.call_args[0][0]
+
+    def test_cloud_reviewer_refused_by_deny_list(self, monkeypatch):
+        rv, backend, built, warn = self._build(
+            monkeypatch, coder_reviewer="openai", net_deny=["openai.com"])
+        assert built == [] and rv.backend is backend
+        assert "deny list" in warn.call_args[0][0]
+
+    def test_offmachine_url_refused_when_net_mode_off(self, monkeypatch):
+        rv, backend, built, warn = self._build(
+            monkeypatch, coder_reviewer="https://reviewer.example.net/v1",
+            net_mode="off")
+        assert built == [] and rv.backend is backend
+        assert "network policy refused the reviewer URL" in warn.call_args[0][0]
+
+    def test_offmachine_url_refused_by_deny_list(self, monkeypatch):
+        rv, backend, built, warn = self._build(
+            monkeypatch, coder_reviewer="https://reviewer.example.net/v1",
+            net_deny=["example.net"])
+        assert built == [] and rv.backend is backend
+
+    def test_offmachine_url_to_a_lan_address_refused(self, monkeypatch):
+        rv, backend, built, warn = self._build(
+            monkeypatch, coder_reviewer="http://192.168.1.20:8000/v1")
+        assert built == [] and rv.backend is backend
+        assert "non-public" in warn.call_args[0][0]
+
+    def test_allowed_offmachine_url_is_pinned(self, monkeypatch):
+        rv, backend, built, warn = self._build(
+            monkeypatch, coder_reviewer="https://reviewer.example.net/v1")
+        assert [(u, kw.get("pinned")) for u, kw in built] == [
+            ("https://reviewer.example.net/v1", True)]
+        assert rv.heterogeneous is True and not warn.called
+
+    def test_allowed_cloud_reviewer_is_pinned(self, monkeypatch):
+        rv, backend, built, warn = self._build(monkeypatch, coder_reviewer="openai")
+        assert [(u, kw.get("pinned")) for u, kw in built] == [
+            ("https://api.openai.com/v1", True)]
+        assert rv.heterogeneous is True
+
+    def test_loopback_url_is_not_policy_checked(self, monkeypatch):
+        rv, backend, built, warn = self._build(
+            monkeypatch, coder_reviewer="http://127.0.0.1:8643/v1", net_mode="off")
+        assert [(u, kw.get("pinned")) for u, kw in built] == [
+            ("http://127.0.0.1:8643/v1", False)]
+        assert rv.heterogeneous is True
 
 
 # --------------------------------------------------------------------------- #

@@ -17,8 +17,9 @@ Scope and layering:
     content text, not model-internal control markers. A stream hook therefore
     receives a scrubbed text piece (possibly several characters), not a raw
     model token.
-  - It is independent of localm's client-side context injection (RAG, memory
-    and web are assembled in the SPA before the request is sent).
+  - It is independent of localm's client-side context injection (RAG and web
+    are assembled in the SPA before the request is sent). Memory recall is not
+    client-side: the memory plugin registers it as an inlet hook on this chain.
 
 Phases (a hook is any callable):
   - ``inlet(messages, ctx) -> messages``    pre-inference; transform the message

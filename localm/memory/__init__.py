@@ -13,7 +13,8 @@ agent recall across sessions with no cloud dependency. A small, auditable store
   - poisoning defence: every recalled memory is neutralised (``localm.textguard``)
     and injected inside a fenced, labelled data-not-instructions block.
 
-Consumers: the chat plugin (server-side inlet injection + /api/memory routes).
+Consumers: the memory plugin (server-side recall inlet, consolidation outlet and
+/api/memory routes) and the ``localm memory`` CLI.
 """
 
 from __future__ import annotations

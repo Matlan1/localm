@@ -196,7 +196,9 @@ localm process's own permissions rather than a sandbox:
   folder, its contents are indexable like any other file, on the reasoning that
   the owner already has direct filesystem access to their own data; this is a
   deliberate choice for a local, single-user tool, not an oversight.
-  The `localm rag` CLI is unconfined (a local user can already read their own files).
+  The `localm rag` CLI is not bound by that folder policy (a local user can already read
+  their own files) but it refuses the same credential folders, UNC and device paths,
+  and mapped network drives when that setting is off.
   A `rag`-scoped key can still read documents under the allowed roots back through a
   query, so issue one only to clients you trust. A key can also be confined to a
   specific folder allowlist at mint time (`rag_roots`) instead of that default
@@ -278,7 +280,11 @@ domain lists and the mode semantics, is in [docs/network.md](docs/network.md);
 this section states the security properties and, more importantly, their edges.
 
 - **What it covers.** The coder's and chat's web access, HuggingFace model
-  discovery, and model pulls all go through the policy. It is not only a
+  discovery, model pulls and the coder's network reviewer all go through the
+  policy. A HuggingFace pull checks the hub endpoint, and a single-file pull
+  every redirect hop of its size check; the metadata requests and the transfer
+  itself run inside the `huggingface_hub` library, which follows the hub's
+  redirect without a per-hop check or the DNS-rebinding pin. It is not only a
   model-facing guard.
 - **What it does not cover.** Several outbound paths deliberately do not use
   it, including bug-report upload and requests to your ComfyUI instance.

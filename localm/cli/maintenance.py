@@ -308,7 +308,7 @@ def make_launcher_cmd(force: bool, quiet: bool) -> None:
               help="Do not attach this run's debug log tail even if one exists. "
                    "Attached by default when present (debug mode only - a normal "
                    "run has none to attach - and always scrubbed, never chat "
-                   "content, #961).")
+                   "content).")
 @click.option("-s", "--send", is_flag=True,
               help="Send it to the maintainer immediately via the hosted proxy - "
                    "no GitHub account needed. Works from any shell, interactive or "
@@ -388,7 +388,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
 
     Most updates apply with just a restart (the install is editable); localm tells you
     what an update entails before applying. Requires the update channel to be
-    configured (the bug-report proxy with an update token); see tools/bugreport-proxy/."""
+    configured (the bug-report proxy with an update token)."""
     from localm import updater
     from localm.bugreport import LocalmError
     from rich.markup import escape

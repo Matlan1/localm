@@ -39,6 +39,7 @@ from localm.media.native_models import apply_choice, check_request
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.selfclient import resolve_self_url
+from localm.vram import media_handover_job
 from . import backend as _backend
 
 _router = APIRouter()
@@ -117,6 +118,7 @@ async def music(req: MusicRequest, request: Request):
     out_path = music_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.flac"
     owner = principal_id(request)
 
+    @media_handover_job
     def _generate(job):
         from localm.audit import SessionMode, effective_mode
         from localm.config import load_config

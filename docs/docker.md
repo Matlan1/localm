@@ -16,7 +16,8 @@ a checkout (see [Build it yourself](#build-it-yourself)).
 | `<version>-cuda`, `cuda` | llama.cpp CUDA runtime, CUDA 12 line: every NVIDIA architecture before Blackwell |
 | `<version>-cuda13`, `cuda13` | llama.cpp CUDA runtime, CUDA 13 line: Blackwell (RTX 50-series and later) |
 
-`latest`, `cpu`, `vulkan`, `cuda` and `cuda13` move with each release that is not a pre-release.
+`latest`, `cpu`, `vulkan`, `cuda` and `cuda13` move only when the release is the
+repository's latest release (never a pre-release). `latest` is the CPU image.
 Images are `linux/amd64` only (on an arm64 host, build with `--platform linux/amd64`).
 
 ## First run
@@ -87,7 +88,7 @@ volumes:
 | Path | Contents |
 |---|---|
 | `/data` (volume, `LOCALM_HOME`) | models, settings, the API key (`auth.key`), TLS certificates (`tls/`), logs |
-| `/opt/localm`, `/opt/venv` | localm and its Python 3.12, installed the same way `setup.sh` installs them; part of the image |
+| `/opt/localm`, `/opt/venv` | localm (extras `coder`, `monitor`, `rag`) and its uv-managed Python 3.12; part of the image |
 
 The server runs as user `localm` (uid 10001). A named volume is owned by that user
 automatically. For a bind mount, make the directory writable by uid 10001
@@ -120,7 +121,8 @@ that hop on a private network.
 
 Arguments after the image name go to `localm serve`, and the server is always
 started with `-H 0.0.0.0`. Any other first argument runs as a `localm` command
-(`key`, `pull`, `doctor`, `list`, ...). `sh` and `bash` open a shell.
+(`key`, `pull`, `doctor`, `list`, ...). `sh` and `bash` run that shell (add `-it` to
+use it interactively).
 
 - Another port inside the container: `-e LOCALM_CONTAINER_PORT=9000`, and publish
   that port.
@@ -186,7 +188,7 @@ start check are in each image and that the container refuses to serve without a 
 
 ## Build it yourself
 
-From the repository root:
+From the repository root (without `--build-arg BACKEND`, the image is the CPU one):
 
 ```bash
 docker build --platform linux/amd64 -f docker/Dockerfile --build-arg BACKEND=cpu -t localm:cpu .
