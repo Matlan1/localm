@@ -107,6 +107,7 @@ def enable_detection(monkeypatch, *ports: int) -> None:
     """Turn peer detection on for this test, scanning only *ports*."""
     monkeypatch.setenv("LOCALM_PEER_DETECTION", "on")
     monkeypatch.setattr("localm.config.PORT_RANGE", (min(ports), max(ports)))
+    monkeypatch.setattr("localm.gpu_registry.EXTRA_PEER_PORTS", ())
 
 
 def localm_whoami(instance_id: str, **extra) -> dict:

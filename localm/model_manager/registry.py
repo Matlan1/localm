@@ -4205,10 +4205,14 @@ def _register_ollama_blob(
     projector: Optional[Path] = None,
     architecture: Optional[str] = None,
     expert_count: Optional[int] = None,
+    stored_projectors: Optional[dict] = None,
 ) -> bool:
     """Register one Ollama model blob (and its *projector* blob, when given) under
     *model_name*, first copying or moving them into the models folder when *store*
-    is set. Returns False when nothing was registered; see ``add_local``."""
+    is set. *stored_projectors* maps a projector's source path to its path in the
+    models folder: a projector already stored for an earlier model is reused, and
+    a newly stored one is added. Returns False when nothing was registered; see
+    ``add_local``."""
     from rich.markup import escape
 
     blob_unusable = gguf_unusable_reason(blob_path)
@@ -4231,12 +4235,28 @@ def _register_ollama_blob(
                     "pick another name with -n."
                 )
                 return False
+        stored_blob = False
         try:
             blob_path = _mm._store_into_models_dir(blob_path, store)
+            stored_blob = True
             if projector is not None and _mm.is_external_path(projector):
-                projector = _mm._store_into_models_dir(projector, store)
+                source = projector
+                if stored_projectors is not None and source in stored_projectors:
+                    projector = stored_projectors[source]
+                else:
+                    projector = _mm._store_into_models_dir(source, store)
+                    if stored_projectors is not None:
+                        stored_projectors[source] = projector
         except RuntimeError as e:
             console.print(f"[red]{escape(str(e))}[/red]")
+            if stored_blob:
+                verb = "moved" if store == "move" else "copied"
+                console.print(
+                    f"[yellow]{escape(str(blob_path))} was {verb} into the models "
+                    f"folder but not registered as '{escape(model_name)}'.[/yellow] "
+                    "It will be picked up under an automatic name the next time "
+                    "models are scanned (`localm list`, or the next server start)."
+                )
             return False
     digest = blob_path.name.removeprefix("sha256-") \
         if blob_path.name.startswith("sha256-") else None
@@ -4411,6 +4431,7 @@ def _add_local_ollama_root(
     models.sort(key=lambda m: m.projector is None)
     registered_any = False
     first_name_for_blob: dict = {}
+    stored_projectors: dict = {}
     for model in models:
         wanted = _sanitize_name(name) if (name and len(models) == 1) else model.name
         model_name = _unique_registry_name(_mm.load_registry(), wanted)
@@ -4427,6 +4448,7 @@ def _add_local_ollama_root(
             projector=model.projector if effective == "llm" else None,
             architecture=meta.get("architecture"),
             expert_count=meta.get("expert_count"),
+            stored_projectors=stored_projectors,
         )
         if ok:
             first_name_for_blob[model.blob] = model_name
@@ -4533,6 +4555,7 @@ def _add_local_hub_cache(
             ) or registered_any
             continue
         first_parts, _hf = _find_model_units(unit.snapshot, max_depth=_import_max_depth())
+        first_parts = _skip_unusable_ggufs(first_parts)
         if not first_parts:
             why = explain_unsupported_model(unit.snapshot)
             if why is None:

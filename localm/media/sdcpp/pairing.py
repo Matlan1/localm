@@ -502,11 +502,15 @@ def native_options(media: str, cands: Optional[list] = None,
     (``_slot_options``)."""
     if cands is None:
         cands = registry_candidates(reg)
-    models = [_option(c) for c in cands if is_media_model(c, media)]
     from localm.model_manager import load_registry
+    from localm.model_manager.gguf import gguf_is_music_architecture
     reg = load_registry() if reg is None else reg
+    music = {name for name, entry in reg.items() if isinstance(entry, dict)
+             and gguf_is_music_architecture(entry.get("architecture"))}
+    models = [_option(c) for c in cands if is_media_model(c, media) and c.name not in music]
     for name, entry in sorted(reg.items()):
         if (isinstance(entry, dict) and entry.get("model_type") == "diffusion-unet"
+                and name not in music
                 and not any(m["name"] == name for m in models)
                 and not any(c.name == name for c in cands)):
             raw = str(entry.get("path") or "")

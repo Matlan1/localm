@@ -239,10 +239,10 @@ CORE_FIELDS: list = [
                  "still loads instead of being refused. An explicit value is kept.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("mtp_enabled", Widget.TOGGLE, "Multi-Token Prediction (MTP)",
-                 "Speculative drafting on MTP/next-n-head models. Off by "
-                 "default: speeds some models up, slows others, depending on "
-                 "model and machine. Run `localm bench-mtp <model>` to check "
-                 "yours.",
+                 "Speculative drafting on MTP/next-n-head models. Applies only "
+                 "while Speculative drafting is Inherit. Off by default: speeds "
+                 "some models up, slows others. Run `localm bench-mtp <model>` "
+                 "to check yours.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("mtp_draft_tokens", Widget.NUMBER, "MTP draft tokens",
                  "Tokens MTP proposes per step when it is on. More pays off "

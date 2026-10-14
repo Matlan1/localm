@@ -624,6 +624,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Adding an Ollama store with copy or move handles models that share a vision projector.**
+  Two tags of one vision model (for example two quantizations) now both register; the second
+  used to fail with "already exists" and leave its model file in the models folder unregistered.
+  A failure while bringing in the projector now names the model file it left behind.
+- **Importing the Hugging Face cache skips files that are not models.** An importance matrix or
+  a GGUF of an unsupported version is reported and skipped, as with any other folder, instead of
+  being registered as a model.
+- **Benchmark advice for Multi-Token Prediction names an overriding setting.** When Speculative
+  drafting is set to a source other than mtp, `localm bench-mtp` says that setting takes
+  precedence over the MTP toggle, and the toggle's help says it applies only while Speculative
+  drafting is Inherit.
+- **The ACE-Step music model is no longer offered as an image or video model.**
 - **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
   several seconds, and while it did, every other request and stream waited. The close now runs
   in the background pool like the browser's other actions.
@@ -635,6 +647,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Text-to-speech in Safari older than 26 without WebGPU loads the runtime build transformers.js
   selects for it.** localm shipped only the asyncify onnxruntime build, which every browser got,
   including that one. The plain build is now bundled too and used there.
+- **Server errors show up as 500 in `/metrics`.** A request whose handler crashed was counted as a
+  499 (client left), so an alert on 5xx never fired; it is now counted as the 500 the client received.
+- **Unloading a model that another localm instance serves says so.** An Ollama client sending
+  `keep_alive: 0` for such a model now gets a 409 naming the other instance instead of an "unload"
+  reply while nothing was unloaded.
+- **An instance served on Ollama's port 11434 is found by the others.** Instances on `--port 11434`
+  were invisible to peer detection, so siblings could not ask them to release VRAM and the Instances
+  list left them out.
+- **Bug reports keep the end of a long error.** A long traceback in the recent-activity log was cut
+  from the end, dropping the exception line; the exception type and message are now kept.
 - **Changing the embedding model no longer freezes the server while it checks your collections.** The preview of which collections the switch would affect now reads them off the main thread, so chat and the page keep responding while a large collection is read.
 - **Clear now removes a plugin's saved secret setting.** Clicking Clear on a plugin's API key field and saving previously said "Nothing changed" and kept the key; it now removes it.
 - **The chat model comes back after a failed image, video or music job.** When a generation
