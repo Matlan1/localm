@@ -664,6 +664,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model registry) could not be read and localm worked from its `.bak` copy, the next save moved the
   damaged file over that backup, leaving the newer settings only in a file nothing could read. The
   damaged file is now kept as `config.json.unreadable-<time>` and the backup stays as it was.
+- **`localm unload` no longer reports a model it could not unload as unloaded.** When the
+  server keeps a model because a request is still using it, the command now says so and exits
+  with an error instead of printing it as unloaded.
 - **A request body that is not JSON gets a clear error, not a server error.** Sending a file or
   other binary data where an API route expects JSON now returns the usual 422 explaining the
   problem, instead of a 500 "Internal server error".

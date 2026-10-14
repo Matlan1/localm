@@ -1824,6 +1824,11 @@ def unload_cmd(model):
         console.print(f"[dim]'{escape(str(data.get('model', model)))}' was not "
                       "loaded - nothing to do.[/dim]")
         return
+    if data.get("status") == "in_use":
+        console.print(f"[yellow]'{escape(str(data.get('model', model)))}' is in use by a "
+                      "running request and was not unloaded.[/yellow] Try again when it "
+                      "finishes.")
+        sys.exit(1)
     unloaded = data.get("unloaded_models")
     if unloaded is None:
         unloaded = [data["model"]] if data.get("model") not in (None, "none") else []
