@@ -624,6 +624,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **The coder knows a model's context size before its first reply.** A coder session whose
+  model is an unpinned scheduled job or a Hugging Face reference now budgets its first prompt
+  against the server's real context ceiling instead of the 4096 default.
+- **Commands the coder runs see your own caches and Hugging Face login.** `run_shell`,
+  background shells, tests and git no longer inherit the cache folders localm pins for itself,
+  so a Hugging Face script run through the coder finds the models you already downloaded
+  instead of downloading them again into localm's data folder.
+- **Knowledge relevance works for a known embedding model registered under another name.**
+  The measured relevance thresholds are matched by the model file, so bge-small or nomic
+  registered under your own name no longer loses its semantic matches in Knowledge chat.
+- **Repairing a Knowledge collection from the GUI skips a source that may no longer be
+  indexed.** One document under a credential folder, or on a network drive you have since
+  disallowed, no longer makes the whole repair fail; the others are rebuilt, as `localm rag
+  repair` already did.
+- **A Knowledge collection with a damaged chunk file opens.** A byte that is not valid UTF-8
+  in `chunks.jsonl` costs the chunk it sits in, flags the collection as corrupt and offers
+  repair, instead of failing every request that opens it.
+- **A restricted coder edit of many files checks the project once.** A scoped-key coder
+  session no longer scans the whole project tree again for every file of a multi-file edit.
 - **A refused chat message no longer deletes attachments that were not the problem.** An audio clip from an earlier turn is now kept when a later message fails for another reason (a conversation that is too long, an image the model cannot read, a rejected grammar), and images are kept when the refusal was not about an image. The server now says which attachment a refusal was about; the chat strips clips or images only for a refusal of that kind.
 - **A photo localm cannot read (an SVG, an iPhone HEIC, a cut-off upload) is refused with its own message.** The reply says the attached image could not be read instead of making the chat delete every earlier image and claim the model cannot see. Remove the message that holds the unreadable image to keep chatting.
 - **PDF attachments work on a default install.** `pypdf` is now installed with localm, so a PDF attached in Chat or the Coder is read even when the Knowledge plugin was never enabled.

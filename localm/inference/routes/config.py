@@ -104,6 +104,8 @@ def register(app: FastAPI, ctx) -> None:
         # The model that ceiling belongs to.
         ctx_model = getattr(_hs._engine, "display_name", None) if _hs._engine else None
         cfg["effective_ctx_model"] = ctx_model if isinstance(ctx_model, str) else None
+        ctx_key = _hs._active_model_name if _hs._engine else None
+        cfg["effective_ctx_model_key"] = ctx_key if isinstance(ctx_key, str) else None
         # A stable per-data-directory id, so the GUI can tell a restart of this
         # install apart from a different install that shares the browser origin
         # (localStorage is scoped by origin only, not by data directory).
@@ -149,7 +151,8 @@ def register(app: FastAPI, ctx) -> None:
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
         readonly = {"effective_mode", "effective_chat_mode", "effective_coder_mode",
-                    "effective_ctx_max", "effective_ctx_model", "instance_id",
+                    "effective_ctx_max", "effective_ctx_model",
+                    "effective_ctx_model_key", "instance_id",
                     "instance_port"}
         # `confirm` is this route's own protocol flag, not a config key: stripped
         # here alongside the read-only extras so validate_update never sees it.

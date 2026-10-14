@@ -23,6 +23,7 @@ from .vectors import _cosine, _maxnorm, _vectors_finite
 DEFAULT_RERANK_CANDIDATES = 20
 
 _WARNED_RERANK_DEGRADES: set = set()
+_WARNED_UNCALIBRATED: set = set()
 
 
 #: Absolute relevance floors applied by ``Collection.query(relevant_only=True)``
@@ -34,6 +35,23 @@ RELEVANCE_FLOORS: dict[str, tuple[float, float, float]] = {
     "bge-small-en-v1.5": (0.67, 0.60, 0.65),
     "nomic-embed-text-v1.5": (0.72, 0.56, 0.55),
 }
+
+
+def calibrated_floors(model: str) -> Optional[tuple[float, float, float]]:
+    """The ``RELEVANCE_FLOORS`` entry for the embedding model recorded as
+    *model*: by that name, else by the sha256 of the file it is registered as,
+    so a known model registered under another name keeps its floors. None for a
+    model that has no measured floors."""
+    floors = RELEVANCE_FLOORS.get(model)
+    if floors is not None or not model:
+        return floors
+    from localm.config import load_registry
+    from localm.inference.embedder import known_embedding_model_for_sha256
+    entry = load_registry().get(model)
+    if not isinstance(entry, dict):
+        return None
+    known = known_embedding_model_for_sha256(str(entry.get("sha256") or ""))
+    return RELEVANCE_FLOORS.get(known) if known else None
 
 
 #: Phrasings that point back at the conversation rather than at a topic
@@ -80,6 +98,7 @@ class _CollectionSearch:
     _chunks: list[dict]
     _vectors: Optional[list]
     _note_vector_degrade: Callable[..., None]
+    embedding_model: Callable[[], Optional[str]]
 
     def query(self, text: str, k: int = 4,
               embed_fn: Optional[EmbedFn] = None, *,
@@ -213,7 +232,14 @@ class _CollectionSearch:
             return []
         floors = None
         if cosines is not None and not self.embedding_model_mixed():
-            floors = RELEVANCE_FLOORS.get(self.embedding_model() or "")
+            floors = calibrated_floors(self.embedding_model() or "")
+            if floors is None:
+                key = (str(self.dir), self.embedding_model())
+                if key not in _WARNED_UNCALIBRATED:
+                    _WARNED_UNCALIBRATED.add(key)
+                    _log.info("RAG collection %r: no measured relevance floors for "
+                              "embedding model %r; relevance-only queries match on "
+                              "keywords", self.name, self.embedding_model())
         vectors = self._vectors or []
         coverage = index.coverage(text, order)
         matched = index.matched_terms(text, order)
