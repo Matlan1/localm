@@ -6,6 +6,7 @@ scheduler's exclusive section, never in a decode beside another reply."""
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -419,3 +420,61 @@ def test_the_other_wire_formats_refuse_a_wrong_type(home, path, body):  # noqa: 
     assert r.status_code == 400, r.text
     assert "cache_prompt" in r.text
     assert not served.calls
+
+
+class _OrderSlots:
+    def __init__(self, order):
+        self.order = order
+
+    @contextlib.contextmanager
+    def exclusive(self, on_wait=None, stop_requested=None):
+        self.order.append("exclusive")
+        yield
+
+
+def test_the_media_is_decoded_before_the_exclusive_section(monkeypatch):
+    from localm.inference.backends.base import stream_stop_check
+    order = []
+    seen = {}
+    llm = _llm()
+    llm._slots = _OrderSlots(order)
+    llm._mtmd = MagicMock()
+    llm._mtmd.encode_count = 0
+
+    def fake_markers(messages, marker, audio_rate=0, should_stop=None):
+        order.append("decode")
+        seen["stop"] = should_stop
+        return messages, []
+
+    def fake_prefill(vprompt, needed, on_status=None):
+        raise RuntimeError("stop here")
+    monkeypatch.setattr(llm, "_messages_with_markers", fake_markers)
+    monkeypatch.setattr(llm, "_prefill_vision", fake_prefill)
+    monkeypatch.setattr(L, "_apply_model_template", lambda model, messages: ("p", None))
+    monkeypatch.setattr(L.pretokenizer_guard, "check_text", lambda *a: None)
+    msgs = [{"role": "user", "content": "hi"}]
+    with patch.object(L, "api"), pytest.raises(RuntimeError, match="stop here"):
+        list(llm._generate_image(msgs, 3, 0.0, 40, 0.9, 1.0))
+    assert order == ["decode", "exclusive"]
+    with stream_stop_check(lambda: True):
+        assert seen["stop"]() is True
+    with stream_stop_check(lambda: False):
+        assert seen["stop"]() is False
+
+
+def test_a_stop_during_the_media_decode_ends_without_taking_the_model(monkeypatch):
+    from localm.inference.media import AudioDecodeCancelled
+    order = []
+    llm = _llm()
+    llm._slots = _OrderSlots(order)
+    llm._mtmd = MagicMock()
+    llm.last_finish_reason = "length"
+
+    def cancelled(*a, **kw):
+        raise AudioDecodeCancelled()
+    monkeypatch.setattr(llm, "_messages_with_markers", cancelled)
+    msgs = [{"role": "user", "content": "hi"}]
+    with patch.object(L, "api"):
+        assert list(llm._generate_image(msgs, 3, 0.0, 40, 0.9, 1.0)) == []
+    assert order == []
+    assert llm.last_finish_reason == "stop"

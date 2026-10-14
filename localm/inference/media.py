@@ -6,7 +6,7 @@ from __future__ import annotations
 import base64
 import io
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     # numpy is referenced ONLY by decode_audio's return annotation, and this
@@ -172,6 +172,9 @@ AUDIO_MAX_SECONDS = 600.0
 # Shortest audio clip accepted, in seconds.
 AUDIO_MIN_SECONDS = 0.1
 
+# Samples a decode or resample step handles between two stop checks.
+_DECODE_CHUNK = 1 << 20
+
 _WAVE_FORMAT_PCM = 0x0001
 _WAVE_FORMAT_IEEE_FLOAT = 0x0003
 _WAVE_FORMAT_EXTENSIBLE = 0xFFFE
@@ -180,6 +183,15 @@ _WAVE_FORMAT_EXTENSIBLE = 0xFFFE
 def _audio_error(message: str):
     from localm.inference.backends.base import AudioInputError
     return AudioInputError(message)
+
+
+class AudioDecodeCancelled(Exception):
+    """An audio decode stopped because its stop check returned True."""
+
+
+def _check_stop(should_stop: Optional[Callable[[], bool]]) -> None:
+    if should_stop is not None and should_stop():
+        raise AudioDecodeCancelled()
 
 
 def _wav_fmt(raw: bytes, off: int, size: int) -> tuple[int, int, int, int]:
@@ -209,10 +221,12 @@ def _wav_fmt(raw: bytes, off: int, size: int) -> tuple[int, int, int, int]:
     return tag, channels, rate, bits
 
 
-def _wav_frames(raw: bytes):
+def _wav_frames(raw: bytes, should_stop: Optional[Callable[[], bool]] = None):
     """``(mono_samples, sample_rate)`` from the RIFF/WAVE bytes *raw*: every
     channel averaged into one, scaled to [-1, 1], as an ``array('f')``. Raises
-    ``AudioInputError`` on a malformed or unsupported file."""
+    ``AudioInputError`` on a malformed or unsupported file, and
+    ``AudioDecodeCancelled`` once *should_stop* returns True (polled every
+    ``_DECODE_CHUNK`` samples)."""
     import struct
     import sys
     from array import array
@@ -265,17 +279,25 @@ def _wav_frames(raw: bytes):
     if sys.byteorder != "little" and values.itemsize > 1:
         values.byteswap()
     offset = 128 if bits == 8 else 0
-    if tag == _WAVE_FORMAT_IEEE_FLOAT and not all(-1e30 < v < 1e30 for v in values):
-        raise _audio_error(
-            "The attached WAV file contains non-finite or out-of-range samples.")
-    if channels == 1:
-        mono = array("f", ((v - offset) * scale for v in values))
-    else:
-        lanes = [values[c::channels] for c in range(channels)]
-        mix = scale / channels
-        bias = offset * channels
-        mono = array("f", ((sum(group) - bias) * mix
-                           for group in zip(*lanes, strict=True)))
+    step = max(1, _DECODE_CHUNK // channels) * channels
+    if tag == _WAVE_FORMAT_IEEE_FLOAT:
+        for i in range(0, len(values), step):
+            _check_stop(should_stop)
+            if not all(-1e30 < v < 1e30 for v in values[i:i + step]):
+                raise _audio_error(
+                    "The attached WAV file contains non-finite or out-of-range samples.")
+    mono = array("f")
+    mix = scale / channels
+    bias = offset * channels
+    for i in range(0, len(values), step):
+        _check_stop(should_stop)
+        chunk = values[i:i + step]
+        if channels == 1:
+            mono.extend((v - offset) * scale for v in chunk)
+        else:
+            lanes = [chunk[c::channels] for c in range(channels)]
+            mono.extend((sum(group) - bias) * mix
+                        for group in zip(*lanes, strict=True))
     return mono, rate
 
 
@@ -298,11 +320,15 @@ def _resample_with_av(samples, rate: int, target: int):
     return out
 
 
-def _resample(samples, rate: int, target: int):
+def _resample(samples, rate: int, target: int,
+              should_stop: Optional[Callable[[], bool]] = None):
     """The ``array('f')`` *samples* at *rate* Hz resampled to *target* Hz, as an
     ``array('f')``: with FFmpeg's resampler when PyAV is installed; otherwise
     box-filtered averaging over each output sample's span when lowering the
-    rate, linear interpolation when raising it."""
+    rate, linear interpolation when raising it. Without PyAV, raises
+    ``AudioDecodeCancelled`` once *should_stop* returns True (polled every
+    ``_DECODE_CHUNK`` samples) and holds the running sums of at most
+    ``_DECODE_CHUNK`` input samples at a time."""
     from array import array
     if rate == target or not samples:
         return samples
@@ -312,6 +338,7 @@ def _resample(samples, rate: int, target: int):
     n = len(samples)
     m = n * target // rate
     step = rate / target
+    out = array("f")
     if rate < target:
         last = n - 1
 
@@ -322,24 +349,43 @@ def _resample(samples, rate: int, target: int):
                 return samples[last]
             return samples[k] + (samples[k + 1] - samples[k]) * (t - k)
 
-        return array("f", (lerp(i) for i in range(m)))
+        for i0 in range(0, m, _DECODE_CHUNK):
+            _check_stop(should_stop)
+            out.extend(lerp(i) for i in range(i0, min(m, i0 + _DECODE_CHUNK)))
+        return out
     from itertools import accumulate
-    prefix = array("d", accumulate(samples, initial=0.0))
+    i = 0
+    prev = 0.0
+    total = 0.0
+    for base in range(0, n, _DECODE_CHUNK):
+        _check_stop(should_stop)
+        chunk = samples[base:base + _DECODE_CHUNK]
+        prefix = array("d", accumulate(chunk, initial=total))
+        end = base + len(chunk)
+        while i < m:
+            t = (i + 1) * step
+            k = int(t)
+            if k >= end:
+                break
+            here = prefix[k - base] + (t - k) * chunk[k - base]
+            out.append((here - prev) / step)
+            prev = here
+            i += 1
+        total = prefix[-1]
+    while i < m:
+        out.append((total - prev) / step)
+        prev = total
+        i += 1
+    return out
 
-    def area(t: float) -> float:
-        k = int(t)
-        if k >= n:
-            return prefix[n]
-        return prefix[k] + (t - k) * samples[k]
 
-    return array("f", ((area((i + 1) * step) - area(i * step)) / step
-                       for i in range(m)))
-
-
-def _decode_with_av(raw: bytes, target: int, max_seconds: float):
+def _decode_with_av(raw: bytes, target: int, max_seconds: float,
+                    should_stop: Optional[Callable[[], bool]] = None):
     """Mono float samples at *target* Hz, as an ``array('f')``, decoded from
     *raw* with PyAV, which reads any container and codec FFmpeg knows. Raises
-    ``AudioInputError`` when PyAV is not installed or cannot decode *raw*."""
+    ``AudioInputError`` when PyAV is not installed or cannot decode *raw*, and
+    ``AudioDecodeCancelled`` once *should_stop* returns True (polled once per
+    decoded frame)."""
     try:
         import av
     except ImportError as e:
@@ -371,6 +417,7 @@ def _decode_with_av(raw: bytes, target: int, max_seconds: float):
                         "seconds, the most localm accepts in one clip.")
 
             for frame in container.decode(stream):
+                _check_stop(should_stop)
                 take(resampler.resample(frame))
             take(resampler.resample(None))
     except AudioInputError:
@@ -381,7 +428,8 @@ def _decode_with_av(raw: bytes, target: int, max_seconds: float):
     return out
 
 
-def decode_audio_clip(b64: str, fmt: str, target_rate: int):
+def decode_audio_clip(b64: str, fmt: str, target_rate: int,
+                      should_stop: Optional[Callable[[], bool]] = None):
     """Decode the base64 audio *b64* to mono 32-bit float samples at
     *target_rate* Hz, as an ``array('f')``.
 
@@ -394,7 +442,9 @@ def decode_audio_clip(b64: str, fmt: str, target_rate: int):
     Raises ``AudioInputError`` (an ``UnsupportedInputError``) when the payload
     is not valid base64, larger than :data:`AUDIO_MAX_BYTES`, undecodable,
     shorter than :data:`AUDIO_MIN_SECONDS` or longer than
-    :data:`AUDIO_MAX_SECONDS`. No message includes the payload's bytes."""
+    :data:`AUDIO_MAX_SECONDS`. No message includes the payload's bytes.
+    Raises ``AudioDecodeCancelled`` once *should_stop* returns True; it is
+    polled while the samples are decoded and resampled."""
     import binascii
 
     if not isinstance(b64, str) or not b64:
@@ -419,7 +469,7 @@ def decode_audio_clip(b64: str, fmt: str, target_rate: int):
 
         from localm.inference.backends.base import AudioInputError
         try:
-            samples, rate = _wav_frames(raw)
+            samples, rate = _wav_frames(raw, should_stop=should_stop)
         except AudioInputError:
             raise
         except (struct.error, ValueError, IndexError) as e:
@@ -428,7 +478,9 @@ def decode_audio_clip(b64: str, fmt: str, target_rate: int):
         except MemoryError as e:
             raise _audio_error("The attached audio is too large to decode.") from e
         try:
-            samples = _resample(samples, rate, target_rate)
+            samples = _resample(samples, rate, target_rate, should_stop)
+        except AudioDecodeCancelled:
+            raise
         except MemoryError as e:
             raise _audio_error("The attached audio is too large to resample.") from e
         except Exception as e:  # noqa: BLE001 - any resampler failure is this request's
@@ -436,7 +488,8 @@ def decode_audio_clip(b64: str, fmt: str, target_rate: int):
                 f"The attached audio could not be resampled from {rate} Hz to "
                 f"{target_rate} Hz ({type(e).__name__}).") from e
     else:
-        samples = _decode_with_av(raw, target_rate, AUDIO_MAX_SECONDS)
+        samples = _decode_with_av(raw, target_rate, AUDIO_MAX_SECONDS,
+                                  should_stop=should_stop)
     if len(samples) < AUDIO_MIN_SECONDS * target_rate:
         raise _audio_error(
             f"The attached audio is shorter than {AUDIO_MIN_SECONDS:g} seconds, "

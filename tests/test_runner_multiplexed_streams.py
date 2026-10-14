@@ -513,3 +513,102 @@ def test_token_counts_at_the_same_time_both_get_the_real_answer():
     assert out == {0: 11, 1: 11}
     child.stop()
     r.shutdown(grace=0)
+
+
+def _cancel_a_beside_b(r, child):
+    """Start streams a and b, give a one token, close a on another thread.
+    Returns (closer thread, sid_a, sid_b, b's thread, b's result dict)."""
+    gen_a = r.chat_stream(messages=[])
+    first = {}
+    t = _start(lambda: first.__setitem__("tok", next(gen_a)))
+    sid_a = child.next_sid()
+    out = {}
+    b = _start(lambda: _consume(r, out, "b"))
+    sid_b = child.next_sid()
+    child.send(sid_a, ("chunk", "a0"))
+    t.join(5)
+    assert first["tok"] == "a0"
+    closer = _start(gen_a.close)
+    assert r._ctrl_q.get(timeout=5) == ("cancel_stream", sid_a)
+    return closer, sid_a, sid_b, b, out
+
+
+def test_a_cancel_whose_stream_keeps_reporting_progress_does_not_kill_the_worker(monkeypatch):
+    monkeypatch.setattr(ModelRunner._cancel_mux_stream_and_drain, "__defaults__", (0.3,))
+    r = _mux_runner()
+    proc = r._proc
+    child = _Child(r)
+    closer, sid_a, sid_b, b, out = _cancel_a_beside_b(r, child)
+    for _ in range(6):
+        child.send(sid_a, ("status", "Generating response..."))
+        time.sleep(0.15)
+    child.send(sid_a, ("done", {"finish_reason": "stop"}))
+    closer.join(5)
+    assert not closer.is_alive()
+    assert r._proc is proc and proc.alive, "the worker was killed during a slow cancel"
+    child.send(sid_b, ("chunk", "b0"))
+    child.send(sid_b, ("done", {"finish_reason": "length"}))
+    b.join(5)
+    assert out["b"] == {"tokens": ["b0"], "done": {"finish_reason": "length"}}
+    child.stop()
+    r.shutdown(grace=0)
+
+
+def test_an_unconfirmed_cancel_leaves_the_worker_to_the_other_streams(monkeypatch):
+    monkeypatch.setattr(ModelRunner._cancel_mux_stream_and_drain, "__defaults__", (0.3,))
+    monkeypatch.setattr(runner_mod, "_STREAM_CHUNK_TIMEOUT", 0.6)
+    r = _mux_runner()
+    proc = r._proc
+    child = _Child(r)
+    closer, sid_a, sid_b, b, out = _cancel_a_beside_b(r, child)
+    closer.join(5)
+    assert not closer.is_alive()
+    assert r._proc is proc and proc.alive, "the worker was killed with another stream open"
+    child.send(sid_a, ("done", {"finish_reason": "stop"}))
+    child.send(sid_b, ("chunk", "b0"))
+    child.send(sid_b, ("done", {"finish_reason": "stop"}))
+    b.join(5)
+    assert out["b"] == {"tokens": ["b0"], "done": {"finish_reason": "stop"}}
+    child.stop()
+    r.shutdown(grace=0)
+
+
+def test_an_unconfirmed_cancel_of_the_only_stream_kills_the_worker(monkeypatch):
+    monkeypatch.setattr(ModelRunner._cancel_mux_stream_and_drain, "__defaults__", (0.3,))
+    monkeypatch.setattr(runner_mod, "_STREAM_CHUNK_TIMEOUT", 0.6)
+    r = _mux_runner()
+    proc = r._proc
+    child = _Child(r)
+    gen = r.chat_stream(messages=[])
+    t = _start(lambda: next(gen))
+    sid = child.next_sid()
+    child.send(sid, ("chunk", "x"))
+    t.join(5)
+    closer = _start(gen.close)
+    assert r._ctrl_q.get(timeout=5) == ("cancel_stream", sid)
+    closer.join(5)
+    assert not closer.is_alive()
+    assert r._proc is None and not proc.alive
+    child.stop()
+
+
+def test_progress_during_a_cancel_cannot_hold_it_past_the_cap(monkeypatch):
+    monkeypatch.setattr(ModelRunner._cancel_mux_stream_and_drain, "__defaults__", (0.3,))
+    monkeypatch.setattr(runner_mod, "_STREAM_CHUNK_TIMEOUT", 0.8)
+    r = _mux_runner()
+    child = _Child(r)
+    gen = r.chat_stream(messages=[])
+    t = _start(lambda: next(gen))
+    sid = child.next_sid()
+    child.send(sid, ("chunk", "x"))
+    t.join(5)
+    closer = _start(gen.close)
+    assert r._ctrl_q.get(timeout=5) == ("cancel_stream", sid)
+    t0 = time.monotonic()
+    while closer.is_alive() and time.monotonic() - t0 < 5:
+        child.send(sid, ("status", "Generating response..."))
+        time.sleep(0.1)
+    assert not closer.is_alive()
+    assert time.monotonic() - t0 < 2.0
+    assert r._proc is None
+    child.stop()

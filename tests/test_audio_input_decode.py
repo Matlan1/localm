@@ -216,7 +216,7 @@ class TestRefusals:
             decode_audio_clip(_b64(_wav(_pcm16([1] * 16000))), "wav", 16000)
 
     def test_an_unexpected_parse_error_stays_a_per_request_error(self, monkeypatch):
-        def boom(raw):
+        def boom(raw, *_args, **_kwargs):
             raise struct.error("unpack requires a buffer of 4 bytes")
         monkeypatch.setattr(media, "_wav_frames", boom)
         with pytest.raises(AudioInputError, match="malformed"):
@@ -254,3 +254,59 @@ class TestRefusals:
                 decode_audio_clip(payload, fmt, 16000)
             text = str(info.value)
             assert "SECRET" not in text and payload[:24] not in text, text
+
+
+class TestStopCheck:
+    def test_a_stop_check_ends_a_wav_decode_between_chunks(self, monkeypatch):
+        monkeypatch.setattr(media, "_DECODE_CHUNK", 1000)
+        calls = []
+
+        def stop():
+            calls.append(1)
+            return len(calls) > 2
+
+        with pytest.raises(media.AudioDecodeCancelled):
+            decode_audio_clip(_b64(_wav(_pcm16([5] * 20000))), "wav", 16000,
+                              should_stop=stop)
+        assert len(calls) == 3
+
+    @pytest.mark.parametrize("rate", [8000, 32000])
+    def test_a_stop_check_ends_the_builtin_resampler(self, monkeypatch, rate):
+        monkeypatch.setattr(media, "_resample_with_av", lambda *a: None)
+        samples = array("f", [0.25] * 5000)
+        with pytest.raises(media.AudioDecodeCancelled):
+            media._resample(samples, rate, 16000, should_stop=lambda: True)
+
+    def test_a_stop_check_ends_a_pyav_decode(self):
+        pytest.importorskip("av")
+        sf = pytest.importorskip("soundfile")
+        import io
+        buf = io.BytesIO()
+        sf.write(buf, _tone(16000, 16000), 16000, format="FLAC", subtype="PCM_16")
+        with pytest.raises(media.AudioDecodeCancelled):
+            decode_audio_clip(_b64(buf.getvalue()), "flac", 16000, should_stop=lambda: True)
+
+    def test_without_a_stop_check_a_decode_is_unchanged(self):
+        values = [0, 1000, -1000] * 700
+        out = decode_audio_clip(_b64(_wav(_pcm16(values))), "wav", 16000,
+                                should_stop=lambda: False)
+        assert list(out) == [v / 32768.0 for v in values]
+
+
+class TestChunkedDecode:
+    @pytest.mark.parametrize("rate", [8000, 22050, 44100])
+    @pytest.mark.parametrize("channels,bits,tag", [(1, 16, 1), (2, 24, 1), (3, 8, 1),
+                                                   (2, 32, 3)])
+    def test_small_chunks_give_the_same_samples_as_one_chunk(
+            self, monkeypatch, rate, channels, bits, tag):
+        monkeypatch.setattr(media, "_resample_with_av", lambda *a: None)
+        n = 6001 * channels
+        if tag == 3:
+            raw = struct.pack("<%df" % n, *[math.sin(i / 7) * 0.9 for i in range(n)])
+        else:
+            raw = bytes((i * 37 + i // 5) & 0xFF for i in range(n * bits // 8))
+        payload = _b64(_wav(raw, rate=rate, channels=channels, bits=bits, tag=tag))
+        whole = decode_audio_clip(payload, "wav", 16000)
+        monkeypatch.setattr(media, "_DECODE_CHUNK", 7)
+        chunked = decode_audio_clip(payload, "wav", 16000)
+        assert chunked.tobytes() == whole.tobytes()

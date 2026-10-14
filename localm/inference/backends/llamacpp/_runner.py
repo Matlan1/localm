@@ -1515,10 +1515,17 @@ class ModelRunner:
                 self._streams.pop(sid, None)
 
     def _cancel_mux_stream_and_drain(self, sid: int, stream_q: _queue.Queue,
-                                     timeout: float = _CANCEL_DRAIN_TIMEOUT) -> None:
+                                     timeout: Optional[float] = None) -> None:
         """Ask the child to stop stream *sid* and consume its envelopes until its
-        "done" or "error", for at most *timeout* seconds; past that the child is
-        killed, ending every stream on it."""
+        "done" or "error". Every other envelope for the stream restarts the
+        *timeout* wait, up to ``max(timeout, _STREAM_CHUNK_TIMEOUT)`` seconds in
+        all. When the stream has not ended by then, the child is killed (ending
+        every stream on it) only when no other stream is open on this runner;
+        otherwise the stream is left to end in the child, and the other streams
+        keep their own stall detection. *timeout* defaults to
+        ``_CANCEL_DRAIN_TIMEOUT``."""
+        if timeout is None:
+            timeout = _CANCEL_DRAIN_TIMEOUT
         ctrl_q = self._ctrl_q
         if not self.is_alive() or ctrl_q is None:
             return
@@ -1527,10 +1534,15 @@ class ModelRunner:
         except Exception:
             self.shutdown(grace=0)
             return
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        start = time.monotonic()
+        cap = start + max(timeout, _STREAM_CHUNK_TIMEOUT)
+        deadline = start + timeout
+        while True:
+            now = time.monotonic()
+            if now >= min(deadline, cap):
+                break
             try:
-                result = stream_q.get(timeout=0.5)
+                result = stream_q.get(timeout=min(0.5, min(deadline, cap) - now))
             except _queue.Empty:
                 if not self.is_alive():
                     return
@@ -1541,9 +1553,18 @@ class ModelRunner:
                 return
             if result[0] == "error":
                 return
+            deadline = time.monotonic() + timeout
         from localm.debuglog import logger as _dbg
+        with self._streams_lock:
+            others = sum(1 for other in self._streams if other != sid)
+        waited = time.monotonic() - start
+        if others:
+            _dbg.warning("gguf runner: cancel of stream %d did not confirm within %.0fs; "
+                         "leaving it to end in the worker, which %d other stream(s) "
+                         "still use", sid, waited, others)
+            return
         _dbg.warning("gguf runner: cancel of stream %d did not confirm within %.0fs; "
-                     "killing the worker process", sid, timeout)
+                     "killing the worker process", sid, waited)
         self.shutdown(grace=0)
 
     def _simple_request(self, name: str, payload, timeout: float = _SIMPLE_CMD_TIMEOUT,

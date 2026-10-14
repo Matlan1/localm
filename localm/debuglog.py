@@ -878,6 +878,48 @@ class _GrammarTraceFolder:
 _READER_JOIN_TIMEOUT = 30.0
 
 
+class _DedupScope:
+    """The descriptors of one open :func:`dedup_native_stderr` scope that refer
+    to what fd 2 was when it opened: *saved_fd*, and *console_fd* when its
+    console copy was taken from fd 2."""
+
+    __slots__ = ("saved_fd", "console_fd")
+
+    def __init__(self, saved_fd: int, console_fd: Optional[int]) -> None:
+        self.saved_fd = saved_fd
+        self.console_fd = console_fd
+
+
+# Open dedup scopes, outermost first.
+_dedup_scopes: list[_DedupScope] = []
+_dedup_scopes_lock = threading.Lock()
+
+
+def _stderr_fileno() -> Optional[int]:
+    try:
+        return sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _close_dedup_scope(scope: _DedupScope) -> None:
+    """Restore fd 2 for *scope* on exit. The innermost scope points fd 2 back at
+    its saved descriptor. A scope that exits while a later one is still open
+    instead points that later scope's saved and console descriptors at its
+    own saved descriptor, so fd 2 stays on the later scope's pipe and its own
+    pipe loses every writer."""
+    with _dedup_scopes_lock:
+        idx = _dedup_scopes.index(scope)
+        above = _dedup_scopes[idx + 1] if idx + 1 < len(_dedup_scopes) else None
+        del _dedup_scopes[idx]
+    if above is None:
+        os.dup2(scope.saved_fd, 2)
+        return
+    os.dup2(scope.saved_fd, above.saved_fd)
+    if above.console_fd is not None:
+        os.dup2(scope.saved_fd, above.console_fd)
+
+
 @contextlib.contextmanager
 def dedup_native_stderr(swap_lock=None):
     """
@@ -919,7 +961,9 @@ def dedup_native_stderr(swap_lock=None):
     overhead break.
 
     *swap_lock*, when given, is held while fd 2 is redirected on entry and
-    while it is restored on exit, and is not held in between.
+    while it is restored on exit, and is not held in between. Scopes may exit
+    in any order: once every open scope has exited, fd 2 is what it was before
+    the first one opened, and each scope's reader ends when its scope exits.
     """
     # _stable_console_stream() MUST run before fd 2 is redirected below: it
     # duplicates sys.stderr.fileno() (= fd 2) to get a handle that survives
@@ -931,11 +975,16 @@ def dedup_native_stderr(swap_lock=None):
     guard = swap_lock if swap_lock is not None else contextlib.nullcontext()
     with guard:
         console = _stable_console_stream()
+        console_fd = (console.fileno()
+                      if console is not None and _stderr_fileno() == 2 else None)
 
         saved_fd = os.dup(2)
         read_fd, write_fd = os.pipe()
         os.dup2(write_fd, 2)
         os.close(write_fd)
+        scope = _DedupScope(saved_fd, console_fd)
+        with _dedup_scopes_lock:
+            _dedup_scopes.append(scope)
 
     debug_fd = native_stderr_target()
 
@@ -1021,7 +1070,7 @@ def dedup_native_stderr(swap_lock=None):
         yield
     finally:
         with guard:
-            os.dup2(saved_fd, 2)
+            _close_dedup_scope(scope)
         thread.join(timeout=_READER_JOIN_TIMEOUT)
         os.close(saved_fd)
         if thread.is_alive():

@@ -43,7 +43,7 @@ LOAD_CONFIG_KEYS = (
     "mtp_draft_tokens", "spec_source", "spec_draft_tokens", "spec_draft_model",
     "vram_overhead_mb", "gpu_split_ratios", "gpu_split_indices",
     "main_gpu_index", "gguf_load_timeout_s", "hf_load_timeout_s",
-    "hf_trust_remote_code", "binary_dir", "llama_runtime_pin",
+    "hf_trust_remote_code", "binary_dir", "llama_runtime_pin", "parallel_slots",
 )
 
 

@@ -190,6 +190,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   requests). The requests share the model's context window: one that does not fit beside
   the running ones waits for them and shows a waiting status. A reply generated beside
   others can differ slightly from the same request run alone, even at temperature 0.
+  Stopping one reply, or a long prompt being read beside a running reply, no longer
+  restarts the model or fails the other replies, and a reply with no token limit waits for the room
+  the others hold instead of stopping early. An audio clip is decoded before the model is
+  taken, so the other replies keep running meanwhile, and stopping the request stops the
+  decode. Changing Parallel requests lets automatic model routing try again a model that
+  failed to load with the old value.
 - **`localm setup-music` installs native music generation.** It downloads the KoboldCpp
   build that runs ACE-Step 1.5 on this machine (CUDA, Vulkan, CPU or Metal) from a pinned
   release through the network policy, checks its size and checksum before running it, pulls
