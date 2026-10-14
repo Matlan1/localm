@@ -448,7 +448,8 @@ no more than this instance's mode allows (it reports this in the
 key). Otherwise accepting is a 409 and nothing is stored, and a forwarded
 request is a 409 saying why (naming that instance, and its mode when it
 reports one); nothing is sent and the route stays. An instance that does not
-answer this check, or refuses the key, drops the route with a 502 as above. A
+answer this check, or refuses the key, makes accepting a 403 and drops an
+existing route with a 502 as above. A
 forwarded request carries `X-Localm-Session-Mode`. With a key that is not that
 instance's owner key, it records at its own mode, which is checked before
 each request; a change it makes to its mode while a request is running is not
