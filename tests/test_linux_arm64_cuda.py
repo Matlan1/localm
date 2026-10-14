@@ -169,12 +169,17 @@ def test_arm64_provision_of_the_12_line_downloads_nothing(provision):
     assert provision.log == {"build": [], "cudart": [], "pypi": []}
 
 
-def test_arm64_provision_without_a_runtime_bundle_raises_after_the_build(
-        provision, machine):
+def test_arm64_provision_without_a_runtime_bundle_downloads_nothing(provision, machine):
     machine("arm64", _listing([n for n in REAL_NAMES if n != CUDART]))
     with pytest.raises(click.ClickException, match="no Linux cuda-13 CUDA runtime bundle"):
         provision()
-    assert provision.log["cudart"] == [] and provision.log["pypi"] == []
+    assert provision.log == {"build": [], "cudart": [], "pypi": []}
+
+
+def test_arm64_provision_with_an_empty_runtime_bundle_is_an_error(provision, monkeypatch):
+    monkeypatch.setattr(sl, "_fetch_and_place", lambda url, target, sha=None: 0)
+    with pytest.raises(sl.ArtifactError, match="contained no libraries"):
+        provision()
 
 
 def test_arm64_sha256_pin_covers_the_build_only(provision):

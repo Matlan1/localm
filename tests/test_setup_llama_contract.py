@@ -920,7 +920,7 @@ def test_linux_arm64_cuda_uses_the_upstream_build_and_runtime_bundle(world):
               f"Downloading {urls[cudart]}",
               "OK - cuda runtime loads on this machine.")
     listing = f"{API}/{UPSTREAM}/releases/tags/{PIN}"
-    assert world.requests == [listing, urls[build], listing, urls[cudart]]
+    assert world.requests == [listing, listing, urls[build], urls[cudart]]
     assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libcublas.so.13",
                              "libcublasLt.so.13", "libcudart.so.13", "libggml-cuda.so",
                              "libggml.so", "libllama.so"]
@@ -954,6 +954,28 @@ def test_linux_arm64_cuda_without_its_runtime_bundle_installs_no_cuda(world):
               "Trying vulkan...", "OK - vulkan runtime loads.")
     assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libllama.so"]
     assert world.marker() == f"vulkan {PIN}\n"
+
+
+def test_staging_the_12_line_on_arm64_is_refused_before_the_runtime_is_cleared(world):
+    build, cudart, urls = _linux_arm64_cuda_release(world)
+    world.seed_target("libllama.so", marker="vulkan b1")
+    before = world.files()
+    r = world.invoke("--backend", "cuda", "--cuda-line", "cuda-12")
+    assert r.exit_code == 2, r.output
+    assert "--cuda-line cuda-12 has no ARM64 build (only cuda-13 does)." in r.text
+    assert world.files() == before
+    assert world.marker() == "vulkan b1\n"
+    assert world.requests == []
+
+
+def test_staging_the_13_line_on_arm64_fetches_the_build_and_runtime_bundle(world):
+    build, cudart, urls = _linux_arm64_cuda_release(world)
+    r = world.invoke("--backend", "cuda", "--cuda-line", "cuda-13")
+    assert r.exit_code == 0, r.output
+    listing = f"{API}/{UPSTREAM}/releases/tags/{PIN}"
+    assert world.requests == [listing, listing, urls[build], urls[cudart]]
+    assert {"libllama.so", "libcudart.so.13", "libcublas.so.13"} <= set(world.files())
+    assert world.marker() == f"cuda {PIN}\n"
 
 
 @pytest.mark.parametrize("sha_matches", [True, False])
