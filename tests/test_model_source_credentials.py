@@ -844,3 +844,39 @@ def test_cli_config_setting_on_an_unreadable_config_is_a_usage_error(isolated_ho
     assert isinstance(exc, click.ClickException), (
         f"an unreadable config.json must be a ClickException, not a crash; got {exc!r}")
     assert "config.json" in exc.message
+
+
+@pytest.mark.parametrize("wrong_shape", ['["hf_token"]', '"hf_x"', "42", "null"])
+def test_set_credentials_refuses_rather_than_overwrites_a_wrong_shape_store(
+        isolated_home, wrong_shape):
+    """A credentials file that parses as JSON but is not an object is left
+    byte-for-byte alone by a write, which raises ConfigUnreadable."""
+    from localm.config import ConfigUnreadable
+    from localm.model_source_credentials import (check_credentials_readable,
+                                                  credentials_path, get_credential_source,
+                                                  set_credentials)
+    path = credentials_path()
+    path.write_text(wrong_shape, encoding="utf-8")
+    before = path.read_bytes()
+
+    exc = None
+    try:
+        set_credentials({"hf_token": "hf_new"})
+    except Exception as e:  # noqa: BLE001 - captured for an isinstance check below
+        exc = e
+
+    assert path.read_bytes() == before, "the wrong-shape store was overwritten"
+    assert isinstance(exc, ConfigUnreadable), f"expected ConfigUnreadable, got {exc!r}"
+    with pytest.raises(ConfigUnreadable):
+        check_credentials_readable()
+    assert get_credential_source("hf_token") == "unreadable"
+
+
+def test_set_credentials_still_updates_a_valid_object_store(isolated_home):
+    from localm.model_source_credentials import (credentials_path, get_hf_token,
+                                                  set_credentials)
+    credentials_path().write_text('{"civitai_api_key": "civ_1"}', encoding="utf-8")
+    set_credentials({"hf_token": "hf_new"})
+    assert get_hf_token() == "hf_new"
+    assert json.loads(credentials_path().read_text(encoding="utf-8")) == {
+        "civitai_api_key": "civ_1", "hf_token": "hf_new"}
