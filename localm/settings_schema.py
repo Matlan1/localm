@@ -972,8 +972,8 @@ CORE_FIELDS: list = [
     SettingField("rag_indexing_mode", Widget.SELECT, "Indexing folder rule",
                  "Which folders document indexing may read. whitelist = home, "
                  "the working directory and Allowed folders only. blacklist = "
-                 "anything except Denied folders. Credential folders (.ssh, "
-                 ".aws, ...) are always refused.",
+                 "anything except Denied folders. Credential folders are "
+                 "always refused.",
                  group="Knowledge", owner="rag", admin_only=True,
                  options=["whitelist", "blacklist"]),
     SettingField("rag_allowed_roots", Widget.PATHLIST, "Allowed folders",

@@ -10,7 +10,7 @@ from typing import Optional
 
 from localm.rag import store as _st
 
-from .confine import _path_within
+from .confine import _path_within, is_credential_path
 from .types import ProgressFn
 
 
@@ -172,7 +172,7 @@ class _CollectionResync:
                 except ValueError as e:
                     say(f"skipping {key}: {e}")
                     continue
-            elif _st.is_credential_path(p):
+            elif is_credential_path(p):
                 say(f"skipping {key}: under a credential folder")
                 continue
             out.append(p)

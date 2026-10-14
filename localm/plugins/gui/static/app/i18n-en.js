@@ -1653,7 +1653,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Knowledge
   "settings.field.ragIndexingMode.label": "Indexing folder rule",
-  "settings.field.ragIndexingMode.help": "Which folders document indexing may read. whitelist = home, the working directory and Allowed folders only. blacklist = anything except Denied folders. Credential folders (.ssh, .aws, ...) are always refused.",
+  "settings.field.ragIndexingMode.help": "Which folders document indexing may read. whitelist = home, the working directory and Allowed folders only. blacklist = anything except Denied folders. Credential folders are always refused.",
   "settings.field.ragAllowedRoots.label": "Allowed folders",
   "settings.field.ragAllowedRoots.help": "Folders that may be indexed in whitelist mode, in addition to your home folder and the working directory. When you pick a folder outside this list, localm offers to add it here and continue.",
   "settings.field.ragDeniedRoots.label": "Denied folders",

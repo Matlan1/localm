@@ -18,6 +18,7 @@ from ..chunk import chunk_text
 from ..extract import (BLACKLISTED_SUFFIXES, UNINDEXABLE_SUFFIXES,
                        ExtractError, classify_format, extract_text,
                        is_secret_index_name)
+from .confine import is_credential_path
 from .types import ClassifyFn, DescribeImageFn, EmbedFn, ProgressFn
 from .vectors import _first_dim, _vectors_finite
 
@@ -123,7 +124,7 @@ class _CollectionIndexing:
         seen: set = set()
         deduped = [p for p in out if not (p in seen or seen.add(p))]
         if policy is None:
-            return [p for p in deduped if not _st.is_credential_path(p)]
+            return [p for p in deduped if not is_credential_path(p)]
         kept: list[Path] = []
         for p in deduped:
             try:
