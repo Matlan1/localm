@@ -5,8 +5,11 @@ when APPDATA and HISTFILE point at real-looking ones."""
 
 from __future__ import annotations
 
+import importlib
+import sys
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 
@@ -62,5 +65,32 @@ def test_a_privacy_mode_cli_exit_leaves_history_files_alone(tmp_path, monkeypatc
 
     assert result.exception is None, result.output
     assert calls == [1], "the privacy-mode exit did not run the history scrub"
+    for f in files:
+        assert "localm coder" in f.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def _privacy_module_reimported_after_the_cli_import():
+    from localm.plugins.coder.cli import _main
+    name = "localm.plugins.coder.privacy"
+    package = sys.modules["localm.plugins.coder"]
+    original = sys.modules[name]
+    del sys.modules[name]
+    try:
+        fresh = importlib.import_module(name)
+        yield _main, fresh
+    finally:
+        sys.modules[name] = original
+        package.privacy = original
+
+
+def test_the_guard_covers_a_scrub_bound_before_the_privacy_module_was_reimported(
+        tmp_path, monkeypatch, _privacy_module_reimported_after_the_cli_import):
+    _main, fresh = _privacy_module_reimported_after_the_cli_import
+    assert _main.clear_shell_history_traces.__globals__ is not fresh.__dict__
+    files = _history_files(tmp_path, monkeypatch)
+
+    assert _main.clear_shell_history_traces() == 0
+
     for f in files:
         assert "localm coder" in f.read_text(encoding="utf-8")

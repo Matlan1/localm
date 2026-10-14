@@ -393,8 +393,10 @@ class TestRunShellPrivacy:
         assert captured_env.get("HISTFILE") == expected_null
         assert captured_env.get("HISTSIZE") == "0"
 
-    def test_no_privacy_flag_passes_none_env(self, tmp_path):
-        """Without _privacy, env should be None (inherit parent)."""
+    def test_no_privacy_flag_passes_the_parent_env(self, tmp_path):
+        """Without _privacy, the command gets the parent environment (minus
+        the cache locations localm pinned), not the zeroed privacy one."""
+        from localm.config import user_command_env
         from localm.plugins.coder.tools import tool_run_shell
 
         captured_kwargs = {}
@@ -410,7 +412,7 @@ class TestRunShellPrivacy:
         with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
             tool_run_shell(tmp_path, "echo hi", _privacy=False)
 
-        assert captured_kwargs.get("env") is None
+        assert captured_kwargs.get("env") == user_command_env()
 
 
 # ---------------------------------------------------------------------------
