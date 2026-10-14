@@ -130,13 +130,43 @@ def downloads_allowed_when_off() -> bool:
         return False
 
 
+def _canonical_host(host: str) -> str:
+    """*host* lowercased, without a trailing dot, and with a non-ASCII name
+    converted to its IDNA A-label form (UTS #46 mapping, the same encoding
+    ``requests`` applies to the host it connects to). An ASCII host is
+    returned unchanged apart from case and the trailing dot. Raises
+    NetworkPolicyError when a non-ASCII name has no valid A-label form."""
+    host = host.lower().rstrip(".")
+    if host.isascii():
+        return host
+    import idna
+    try:
+        return idna.encode(host, uts46=True).decode("ascii").lower()
+    except (idna.IDNAError, UnicodeError) as exc:
+        raise NetworkPolicyError(
+            f"'{host}' is not a valid internationalised host name; "
+            "refusing it.") from exc
+
+
+def _canonical_entry(entry: str) -> str:
+    """A net_deny / net_allow entry in the form ``_canonical_host`` gives a
+    URL's host; an entry with no valid A-label form is kept lowercased."""
+    try:
+        return _canonical_host(entry)
+    except NetworkPolicyError:
+        return entry.lower()
+
+
 def _domain_list(value) -> list[str]:
-    """Accept a list or a comma-separated string (CLI sets strings)."""
+    """Accept a list or a comma-separated string (CLI sets strings). Entries
+    are lowercased and a non-ASCII entry is converted to its IDNA A-label
+    form, so it matches the host ``check_url_shape`` returns."""
     if not value:
         return []
     if isinstance(value, str):
         value = value.split(",")
-    return [str(d).strip().lower().lstrip("*.") for d in value if str(d).strip()]
+    return [_canonical_entry(str(d).strip().lower().lstrip("*."))
+            for d in value if str(d).strip()]
 
 
 def _host_matches(host: str, pattern: str) -> bool:
@@ -165,11 +195,13 @@ def _config() -> dict:
 
 
 def check_url_shape(url: str) -> str:
-    """Validate a URL's SHAPE and return its lowercased host.
+    """Validate a URL's SHAPE and return its host in canonical form
+    (``_canonical_host``: lowercased, IDNA A-labels for a non-ASCII name).
 
     The part of the policy that is about the URL STRING rather than about where
     it points: the parser-differential guard, the http/https scheme restriction,
-    and the host-is-present check. Raises NetworkPolicyError on any of them.
+    the host-is-present check and the host's IDNA validity. Raises
+    NetworkPolicyError on any of them.
 
     ``check_url`` calls this, so there is exactly one implementation. A caller
     that wants THESE checks without the destination ones calls it directly: an
@@ -204,7 +236,7 @@ def check_url_shape(url: str) -> str:
     host = (parsed.hostname or "").lower().rstrip(".")
     if not host:
         raise NetworkPolicyError(f"URL has no host: {url}")
-    return host
+    return _canonical_host(host)
 
 
 def check_url(url: str, *, allow_when_off: bool = False) -> None:
@@ -277,10 +309,12 @@ def check_url(url: str, *, allow_when_off: bool = False) -> None:
 # Special-use ranges that the stdlib marks is_global=True (so neither
 # ``not is_global`` nor any is_* flag catches them) yet are not ordinary public
 # hosts. The deprecated 6to4 relay anycast prefix (RFC 7526) sends packets to
-# whatever 6to4 relay the local network advertises.
+# whatever 6to4 relay the local network advertises; the deprecated IPv6
+# site-local prefix (RFC 3879) addresses hosts inside the local site.
 _EXTRA_BLOCKED_NETS = (
     ipaddress.ip_network("192.88.99.0/24"),   # 6to4 relay anycast (deprecated)
     ipaddress.ip_network("2002::/16"),         # 6to4
+    ipaddress.ip_network("fec0::/10"),         # IPv6 site-local (deprecated)
 )
 
 
@@ -298,7 +332,7 @@ def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
     few deprecated IPv6 forms (IPv4-compatible ``::127.0.0.1``, NAT64-embedded
     ``64:ff9b::7f00:1``) is_global=True even though they still route to
     internal IPv4, and is_reserved catches those. _EXTRA_BLOCKED_NETS covers
-    the residual special-use ranges (6to4 anycast). A genuine public address
+    the residual special-use ranges (6to4, IPv6 site-local). A genuine public address
     (is_global True with no special-use flag, outside the extra nets) is the
     only thing that passes."""
     return bool(not ip.is_global
@@ -484,10 +518,10 @@ def _resolve_pinned(host: str) -> Optional[str]:
 
 
 def _host_header(parsed) -> str:
-    """The Host header value for a pinned request: the original hostname (so
-    virtual-host routing survives the IP pin), with the port only when it is
-    non-default for the scheme."""
-    host = parsed.hostname or ""
+    """The Host header value for a pinned request: the original hostname in
+    ``_canonical_host`` form (so virtual-host routing survives the IP pin),
+    with the port only when it is non-default for the scheme."""
+    host = _canonical_host(parsed.hostname or "")
     port = parsed.port
     if port and not ((parsed.scheme == "http" and port == 80)
                      or (parsed.scheme == "https" and port == 443)):
@@ -511,7 +545,7 @@ def _session_for(url: str):
     reach an internal service unvalidated."""
     from localm import netpin
     parsed = urllib.parse.urlparse(url)
-    ips = _resolve_pinned_all(parsed.hostname or "")
+    ips = _resolve_pinned_all(_canonical_host(parsed.hostname or ""))
     if not ips:
         raise NetworkPolicyError(
             f"Could not resolve '{parsed.hostname}' to an address; refusing the "
@@ -519,7 +553,12 @@ def _session_for(url: str):
     return netpin.pinned_session(ips)
 
 
-def pinned_request(method: str, url: str, **kwargs):
+class ResponseTooLarge(Exception):
+    """A response body was longer than the caller's byte cap."""
+
+
+def pinned_request(method: str, url: str, *, max_bytes: Optional[int] = None,
+                   **kwargs):
     """A single policy-pinned HTTP request for callers that manage their own
     response (streamed downloads, HEAD probes) instead of going through
     safe_fetch_bytes. ``check_url`` MUST already have passed on *url*.
@@ -529,12 +568,40 @@ def pinned_request(method: str, url: str, **kwargs):
     (``resp._localm_pin_session``) so a streamed body stays usable until the caller
     is done with the response; it is released when the response is GC'd, matching
     how requests' own streamed responses are managed. Raises NetworkPolicyError
-    when the host cannot be resolved to a validated address (fail-closed)."""
+    when the host cannot be resolved to a validated address (fail-closed).
+
+    With *max_bytes*, the body is read here, one network read at a time and
+    decoded at most *max_bytes* + 1 bytes per decompression step, before the
+    response is returned: ``.content``, ``.text`` and ``.json()`` then read the
+    loaded body, and the connection and session are closed. The request
+    advertises only ``PER_READ_ACCEPT_ENCODING``. Raises ``ResponseTooLarge``
+    when the decoded body is longer than *max_bytes*."""
     session = _session_for(url)
     headers = {**(kwargs.pop("headers", None) or {}),
                "Host": _host_header(urllib.parse.urlparse(url))}
-    resp = session.request(method, url, headers=headers, **kwargs)
-    resp._localm_pin_session = session   # tie the session lifetime to the response
+    if max_bytes is None:
+        resp = session.request(method, url, headers=headers, **kwargs)
+        resp._localm_pin_session = session   # tie the session lifetime to the response
+        return resp
+    headers["Accept-Encoding"] = PER_READ_ACCEPT_ENCODING
+    kwargs["stream"] = True
+    try:
+        resp = session.request(method, url, headers=headers, **kwargs)
+        try:
+            chunks, size = [], 0
+            for chunk in _body_chunks(resp, True, max_bytes + 1):
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ResponseTooLarge(
+                        f"The response from {urllib.parse.urlparse(url).hostname} "
+                        f"is larger than {max_bytes} bytes; refusing to read it.")
+                chunks.append(chunk)
+            resp._content = b"".join(chunks)
+            resp._content_consumed = True
+        finally:
+            resp.close()
+    finally:
+        session.close()
     return resp
 
 

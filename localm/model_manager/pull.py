@@ -770,6 +770,16 @@ def pull_model(
             expected_sha256=expected_sha256, redownload=redownload,
             register=register, model_type=model_type)
 
+    # A Hugging Face spec: the hub endpoint must pass the network policy
+    # (domain lists, private-address guard) before any metadata or download call.
+    if not (spec.startswith("http://") or spec.startswith("https://")):
+        refusal = _hf_endpoint_refusal()
+        if refusal:
+            console.print(
+                f"[red]Network policy refused the Hugging Face pull:[/red] "
+                f"{escape(refusal)}")
+            return False
+
     # Remote spec: resolve the model type (a network probe against HF for a bare
     # owner/repo). Only reached for confirmed-remote specs, after the local-path
     # and net_mode gates above.
@@ -1289,11 +1299,13 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
     ``downloads_allowed_when_off()``), the same bar ``pull_model``'s net_mode
     gate uses for this identical HF-listing-plus-download operation, not the
     stricter ``== "allow"`` bar ``embedder.py`` applies to its background
-    fetch."""
+    fetch, and on ``_hf_endpoint_refusal()`` being None."""
     if not mmproj_backfill_candidate(entry, path):
         return None
     from localm.netpolicy import downloads_allowed_when_off, network_mode
     if network_mode() == "off" and not downloads_allowed_when_off():
+        return None
+    if _hf_endpoint_refusal():
         return None
     repo_id = str(entry["source"])[len("hf:"):]
     if not repo_id:
@@ -1658,19 +1670,23 @@ def _pull_gguf_file(
 
     # Disk space pre-flight - HEAD each missing part's CDN URL for its
     # Content-Length and the etag huggingface_hub will name its temp file by.
+    from localm.netpolicy import NetworkPolicyError
     part_sizes: dict[str, int] = {}
     etags: dict[str, str | None] = {}
     try:
-        import requests as _req
         total_size = 0
         for part in missing:
             cdn_url = hf_hub_url(repo_id, _remote(part), endpoint=_HF_ENDPOINT,
                                  **_at_commit(published.get(part)))
-            head    = _req.head(cdn_url, allow_redirects=True, timeout=10)
+            head    = _policy_head(cdn_url)
             size = int(head.headers.get("content-length", 0))
             part_sizes[part] = size
             etags[part] = _etag_from_head(head)
             total_size += size
+    except NetworkPolicyError as e:
+        console.print(f"[red]Network policy refused the download:[/red] "
+                      f"{escape(str(e))}")
+        return False
     except Exception:
         total_size = 0
 
@@ -1681,14 +1697,16 @@ def _pull_gguf_file(
             and model_type not in ("mmproj", "embedding")
             and "mmproj" not in filename.lower()):
         try:
-            import requests as _req
             mmproj_name = _mm._hf_repo_mmproj_filename(
                 repo_id, filename, base_dir, speech=model_type == "tts")
             if mmproj_name:
-                mmproj_head = _req.head(
-                    hf_hub_url(repo_id, mmproj_name, endpoint=_HF_ENDPOINT),
-                    allow_redirects=True, timeout=10)
+                mmproj_head = _policy_head(
+                    hf_hub_url(repo_id, mmproj_name, endpoint=_HF_ENDPOINT))
                 total_size += int(mmproj_head.headers.get("content-length", 0))
+        except NetworkPolicyError as e:
+            console.print(f"[red]Network policy refused the download:[/red] "
+                          f"{escape(str(e))}")
+            return False
         except Exception:
             pass
 
@@ -2237,6 +2255,47 @@ def _ssrf_resolve_final_url(url: str) -> str:
         break
     netpolicy.check_url(current, allow_when_off=allow_off)   # final target, revalidated
     return current
+
+
+def _hf_endpoint_refusal() -> Optional[str]:
+    """None when the network policy allows a request to the Hugging Face
+    endpoint (``check_url`` on ``_HF_ENDPOINT``, with
+    net_allow_model_downloads applied to the net_mode=off floor), else the
+    refusal's message."""
+    from localm import netpolicy
+    try:
+        netpolicy.check_url(
+            _HF_ENDPOINT, allow_when_off=netpolicy.downloads_allowed_when_off())
+    except netpolicy.NetworkPolicyError as e:
+        return str(e)
+    return None
+
+
+def _policy_head(url: str):
+    """HEAD *url*, following at most 5 redirects. Every hop passes
+    ``check_url`` (net_allow_model_downloads applied to the net_mode=off
+    floor) and is sent over the pinned transport. Returns the last response
+    with ``history`` set to the earlier hops' responses, first hop first.
+    Raises NetworkPolicyError when a hop is refused; transport errors
+    propagate."""
+    import urllib.parse
+
+    from localm import netpolicy
+    allow_off = netpolicy.downloads_allowed_when_off()
+    history: list = []
+    current = url
+    for _ in range(6):
+        netpolicy.check_url(current, allow_when_off=allow_off)
+        resp = netpolicy.pinned_request(
+            "HEAD", current, allow_redirects=False, timeout=10)
+        location = (resp.headers.get("Location")
+                    if resp.status_code in (301, 302, 303, 307, 308) else None)
+        if not location:
+            break
+        history.append(resp)
+        current = urllib.parse.urljoin(current, location)
+    resp.history = history
+    return resp
 
 
 class PullInFlight(Exception):

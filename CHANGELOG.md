@@ -2156,6 +2156,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and the owner-key-file notice on `GET /v1/keys` named the full location under your data
   directory. A caller other than the owner now gets the scrubbed form (data directory as
   `<data>`, file name kept); the owner and open mode still see the full path.
+- **The coder's network reviewer obeys the network policy.** A cloud reviewer (`openai` /
+  `anthropic`) or an off-machine reviewer URL sent the cumulative diff even with `net_mode` off or
+  the host on `net_deny`. It is now checked like the GUI coder's own model server: when the policy
+  refuses it, the review runs on the local model with a warning naming the refusal.
+- **Hugging Face pulls are checked against the network policy.** `net_deny`, `net_allow` and the
+  private-address guard now apply to the Hugging Face endpoint before any pull, and the size check
+  before a download checks every redirect hop and pins its address.
+- **Internationalised host names match the domain lists in either spelling.** A `net_deny` or
+  `net_allow` entry written in Unicode or in its `xn--` form now matches both spellings of the host.
+- **The private-address guard refuses the IPv6 site-local range `fec0::/10`.**
+- **Web search reads at most 4 MB of a search service's answer.** A larger answer is refused instead
+  of being read whole into memory.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model

@@ -276,6 +276,11 @@ class _FakeSession:
     def post(self, url, **kw):
         return self._responder("POST", url, **kw)
 
+    def request(self, method, url, **kw):
+        if method.upper() == "GET":
+            return self.get(url, **kw)
+        return self.post(url, **kw)
+
     def close(self):
         pass
 

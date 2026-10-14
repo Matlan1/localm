@@ -278,7 +278,10 @@ domain lists and the mode semantics, is in [docs/network.md](docs/network.md);
 this section states the security properties and, more importantly, their edges.
 
 - **What it covers.** The coder's and chat's web access, HuggingFace model
-  discovery, and model pulls all go through the policy. It is not only a
+  discovery, model pulls and the coder's network reviewer all go through the
+  policy. A HuggingFace pull checks the hub endpoint and every redirect hop of
+  its size check; the transfer itself follows the hub's redirect inside the
+  `huggingface_hub` library, without a per-hop check or the DNS-rebinding pin. It is not only a
   model-facing guard.
 - **What it does not cover.** Several outbound paths deliberately do not use
   it, including bug-report upload and requests to your ComfyUI instance.
