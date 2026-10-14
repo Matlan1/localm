@@ -1888,9 +1888,11 @@ def _reclaim_stale_lock(lockpath: Path, judged: bytes, judged_mtime: float) -> b
 
 
 @contextlib.contextmanager
-def _cross_process_lock(target: Path):
+def _cross_process_lock(target: Path, *, timeout: Optional[float] = None):
     """Hold an exclusive, cross-process lock on *target* (a sibling ``<name>.lock``
     marker file) for the duration of the ``with`` block.
+
+    *timeout* is the wait budget in seconds; None means _CROSS_LOCK_TIMEOUT.
 
     Bounded retry with an escalating backoff, matching _replace_atomic's
     established pattern, but on a wall-clock budget (_CROSS_LOCK_TIMEOUT) rather
@@ -1926,7 +1928,8 @@ def _cross_process_lock(target: Path):
     is logged."""
     lockpath = target.with_name(target.name + ".lock")
     token = f"{os.getpid()}:{uuid.uuid4().hex}".encode("ascii")
-    deadline = time.time() + _CROSS_LOCK_TIMEOUT
+    budget = _CROSS_LOCK_TIMEOUT if timeout is None else timeout
+    deadline = time.time() + budget
     attempt = 0
     while True:
         try:
@@ -1959,7 +1962,7 @@ def _cross_process_lock(target: Path):
                 continue
             if time.time() >= deadline:
                 raise TimeoutError(
-                    f"timed out after {_CROSS_LOCK_TIMEOUT:.0f}s waiting for "
+                    f"timed out after {budget:g}s waiting for "
                     f"{lockpath.name}, held by another localm process") from None
             _cross_lock_backoff(attempt)
             attempt += 1

@@ -807,7 +807,9 @@ def attach_gui(
             q = {k: v for k, v in request.query_params.items() if k != "localm_token"}
             clean = request.url.path + (("?" + urlencode(q)) if q else "")
             resp = RedirectResponse(url=clean, status_code=303, headers=headers)
-            _set_session_cookies(resp, key, secure=request.url.scheme == "https")
+            from fastapi.concurrency import run_in_threadpool
+            await run_in_threadpool(_set_session_cookies, resp, key,
+                                    secure=request.url.scheme == "https")
             return resp
         # There is no keyed auto-seed branch: a credential-free GET / on a keyed
         # instance is served without a session, and the page shows its key gate.

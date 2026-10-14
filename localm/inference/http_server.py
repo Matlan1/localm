@@ -107,12 +107,9 @@ _active_model_name: str | None = None
 # stale name from an unrelated, long-past eviction.
 _last_active_model_name: str | None = None
 
-# The server's audit log, published by create_app() (see the `global _audit`
-# there). Must default to None here so _do_restart's `global _audit` guard
-# always resolves to a real (possibly None) value even if it runs in a
-# process/interpreter where create_app() was never called first - reading an
-# unassigned global raises NameError, not a clean "None" check.
-_audit = None
+# The server's SessionRecorder (audit log + transcript), published by
+# create_app(). None until create_app() runs.
+_session_recorder = None
 
 # Per-model admission, display name -> InferenceGate: generations share it up
 # to the model's parallel slots, loads and unloads hold it alone.
@@ -715,6 +712,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if interrupted is not None:
             return interrupted
 
+        if healing is not None:
+            healing.unloading = False
         _switch_commit(name, new_engine, sem, activate=activate or was_active,
                        on_active=on_active)
         _log_switch_placement(name, new_engine, evictions)
@@ -1478,8 +1477,11 @@ async def _switch_free_for_reload(loop, name: str, engine,
     semaphore kept) so switch_engine can load it again at a better placement.
     Logs why at INFO, frees it like an eviction victim (``_switch_free_victim``
     against *probe*, the VRAM reading taken before the detach, for a load that
-    needs *needed* bytes) and clears its ``unloading`` flag and
-    ``placement_heal``. Returns the ``VictimRelease``."""
+    needs *needed* bytes) and clears its ``placement_heal``. Its ``unloading``
+    flag stays set until switch_engine commits it as resident again, so a
+    heal that never reaches the commit leaves an engine outside ``_engines``
+    that no ``try_pin_engine`` accepts. Returns the ``VictimRelease``.
+    See test_a_heal_that_never_recommits_leaves_the_engine_unpinnable."""
     from localm.debuglog import logger as _dbg
     heal = getattr(engine, "placement_heal", None)
     placement = getattr(engine, "gpu_placement", None) or {}
@@ -1492,7 +1494,6 @@ async def _switch_free_for_reload(loop, name: str, engine,
     try:
         return await _switch_free_victim(loop, name, engine, probe, needed=needed)
     finally:
-        engine.unloading = False
         engine.placement_heal = None
 
 
@@ -4314,9 +4315,8 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
                      "misreport this intentional restart as a crash", level="warning")
 
     try:
-        global _audit
-        if _audit is not None and hasattr(_audit, "close"):
-            _audit.close()
+        if _session_recorder is not None:
+            _session_recorder.close()
     except Exception:
         _dbg_swallow("audit log close during restart failed (non-fatal)")
 
@@ -4451,25 +4451,16 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
 
 
 def _init_session_audit():
-    """Open the server's audit log and transcript for the "server" session mode,
-    publish the audit log as the module global _audit, and return all three as
-    the AppContext create_app() hands to the route groups."""
-    global _audit
-
-    # Session-persistence mode for this server (privacy -> no traces). One audit
-    # log / transcript covers the server lifetime; GUI + API chat traffic flows
-    # through /v1/chat/completions and lands here. _audit is published as a
-    # module global (unlike _mode/_transcript, which reach the route groups
-    # only on the AppContext returned below) because _do_restart is a
-    # separate top-level function with no other way to reach it - without
-    # `global _audit` here, its cleanup could never reach the real object.
-    # The lifespan's shutdown closes it through the same global.
-    from localm.audit import effective_mode, make_audit_log, make_transcript
-    _mode = effective_mode("server")
-    _audit = make_audit_log(_mode, label="server")
-    _transcript = make_transcript(_mode, label="server")
+    """Open the server's SessionRecorder for the "server" session mode (its
+    audit log and transcript follow later changes to the configured mode),
+    publish it as the module global _session_recorder for _do_restart and the
+    lifespan's shutdown to close, and return the AppContext create_app() hands
+    to the route groups."""
+    global _session_recorder
+    from localm.audit import SessionRecorder
+    _session_recorder = SessionRecorder("server", label="server")
     from localm.inference.app_assembly.context import AppContext
-    return AppContext(audit=_audit, transcript=_transcript, mode=_mode)
+    return AppContext(recorder=_session_recorder)
 
 
 def _make_lifespan():
@@ -4480,7 +4471,7 @@ def _make_lifespan():
     saturation watch, the hang alarm, the cross-install GPU registry and the
     mmproj backfill. Most of those stay off under pytest; each guard says which.
     Shutdown stops them, leaves the GPU registry, clears _server_loop and closes
-    the module global _audit.
+    the module global _session_recorder.
 
     It lives here, not in app_assembly, because every process-lifetime global
     it writes belongs to this module (ADR-0023)."""
@@ -4761,7 +4752,8 @@ def _make_lifespan():
             # falls back to the safe "no loop" path instead of a dead loop reference
             # (_server_loop is already declared global at the top of lifespan).
             _server_loop = None
-            _audit.close()
+            if _session_recorder is not None:
+                _session_recorder.close()
 
     return lifespan
 
@@ -5128,7 +5120,14 @@ def _audit_exchange(audit, transcript, messages: list, reply: str,
     """Record one chat exchange (log/full modes; no-op log in privacy). A
     non-"success" *outcome* is recorded as an audit notice and as a trailing
     ``[finish_reason: ...]`` line in the transcript, so a failed or cut-off
-    generation never reads as a short normal reply."""
+    generation never reads as a short normal reply.
+
+    *audit* may be a :class:`localm.audit.SessionRecorder`: the exchange then
+    goes to the audit log and transcript of the session mode in force when it
+    is recorded, and *transcript* is ignored."""
+    from localm.audit import SessionRecorder
+    if isinstance(audit, SessionRecorder):
+        audit, transcript, _mode = audit.current()
     if audit is None:
         return
     try:
@@ -5261,10 +5260,20 @@ def driving_engine(engine):
     nothing re-touches it between rounds unless every round does so itself.
     Touching the clock again on exit resets the idle countdown to "now" the
     moment the task genuinely finishes, so the model is not instantly eligible
-    for eviction the second a long task ends."""
+    for eviction the second a long task ends.
+
+    The pin is taken with ``residency.try_pin_engine``: an engine flagged
+    ``unloading`` (being freed, or evicted out of ``_engines``) is refused with
+    HTTPException 503 asking the caller to retry, and nothing is pinned or
+    touched. An engine evicted out of ``_engines`` keeps that flag, so it is
+    never loaded again here behind the server's back.
+    See test_driving_engine_refuses_an_evicted_engine."""
     name = getattr(engine, "display_name", None)
+    if not residency.try_pin_engine(engine):
+        raise HTTPException(
+            503, f"The model '{name}' is being unloaded and cannot run this "
+            "task now; retry once it has finished unloading.")
     _touch_activity(name)
-    _pin(engine)
     try:
         yield engine
     finally:

@@ -31,8 +31,10 @@ Mode resolution (``effective_mode(surface)``)
     server:  --mode flag > config "mode" > privacy
 
 CLI ``--mode`` flags set the ``LOCALM_MODE`` env var so child processes
-inherit the override.  Switching mid-session is not supported (the JSONL
-file is opened at startup).
+inherit the override.  A chat REPL or coder session keeps the mode it started
+with (its JSONL file is opened at startup).  The server follows a change to
+the config at once through :class:`SessionRecorder`: the next recorded
+exchange goes to files opened for the new mode, or to none in privacy mode.
 """
 
 from __future__ import annotations
@@ -477,3 +479,89 @@ def make_transcript(mode: SessionMode, label: str = "chat") -> Optional[Markdown
     if mode == SessionMode.FULL:
         return MarkdownTranscript(label=label)
     return None
+
+
+class SessionRecorder:
+    """The audit log and transcript of a long-running surface (the server),
+    kept in step with the session mode the config names now.
+
+    :meth:`current` resolves ``effective_mode(surface)`` on every call and,
+    when it differs from the mode in force, switches: to privacy, the audit log
+    is closed and nothing is recorded; from privacy, a new audit log is opened;
+    between log and full, the same audit log stays open and only the transcript
+    is added (full) or dropped (log). Nothing is recorded under a mode the user
+    has left.
+
+    If a new audit log cannot be opened (privacy to log or full), privacy stays
+    in force and is reported, the failure is logged once per target mode at
+    WARNING, and the next call tries again.
+
+    After :meth:`close`, :meth:`current` returns a NullAuditLog, no transcript
+    and privacy mode, and logs one WARNING if the config then names log or full.
+    Thread-safe.
+    """
+
+    def __init__(self, surface: str = "server", label: str = "server") -> None:
+        self._surface = surface
+        self._label = label
+        self._lock = threading.Lock()
+        self._closed = False
+        self._warned_closed = False
+        self._failed_mode: Optional[SessionMode] = None
+        self._mode = effective_mode(surface)
+        self._audit: AuditLogT = make_audit_log(self._mode, label=label)
+        self._transcript = make_transcript(self._mode, label=label)
+
+    def current(self) -> tuple[AuditLogT, Optional[MarkdownTranscript], SessionMode]:
+        """``(audit, transcript, mode)`` for the mode in force now. Never raises
+        for a mode switch that fails to open its files (see the class doc)."""
+        old: Optional[AuditLogT] = None
+        with self._lock:
+            wanted = effective_mode(self._surface)
+            if self._closed:
+                if wanted != SessionMode.PRIVACY and not self._warned_closed:
+                    self._warned_closed = True
+                    logger.warning("session recording is closed; the configured "
+                                   "%s mode records nothing in this process",
+                                   wanted.value)
+                return self._audit, None, SessionMode.PRIVACY
+            if wanted == self._mode:
+                return self._audit, self._transcript, self._mode
+            try:
+                if wanted == SessionMode.PRIVACY:
+                    audit: AuditLogT = NullAuditLog()
+                elif self._mode == SessionMode.PRIVACY:
+                    audit = make_audit_log(wanted, label=self._label)
+                else:
+                    audit = self._audit
+                transcript = make_transcript(wanted, label=self._label)
+            except OSError as e:
+                if self._failed_mode != wanted:
+                    self._failed_mode = wanted
+                    logger.warning("session mode %s could not take effect, still "
+                                   "recording as %s: %s", wanted.value,
+                                   self._mode.value, e)
+                return self._audit, self._transcript, self._mode
+            if audit is not self._audit:
+                old = self._audit
+            self._audit, self._transcript, self._mode = audit, transcript, wanted
+            self._failed_mode = None
+            result = (audit, transcript, wanted)
+        if old is not None:
+            old.close()
+        return result
+
+    @property
+    def mode(self) -> SessionMode:
+        """The session mode in force now (see :meth:`current`)."""
+        return self.current()[2]
+
+    def close(self) -> None:
+        """Close the open audit log; later :meth:`current` calls record nothing."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            old = self._audit
+            self._audit, self._transcript = NullAuditLog(), None
+        old.close()

@@ -14,21 +14,35 @@ from fastapi import FastAPI
 from localm.inference.chat_pipeline import ChatPipeline
 
 if TYPE_CHECKING:
-    from localm.audit import AuditLogT, MarkdownTranscript, SessionMode
+    from localm.audit import AuditLogT, MarkdownTranscript, SessionMode, SessionRecorder
 
 
 @dataclass(frozen=True)
 class AppContext:
     """The session-scoped objects every route group receives as ``ctx`` in
-    ``register(app, ctx)`` (localm/inference/routes/*.py): the server's audit
-    log, its transcript (only in ``full`` mode, else None) and the session mode
-    both were opened for. The engine and the inference semaphores are not
-    here: they are http_server module globals the route groups read live, so a
-    model swap that rebinds them is seen there."""
+    ``register(app, ctx)`` (localm/inference/routes/*.py): the server's
+    SessionRecorder, which holds its audit log, its transcript (only in
+    ``full`` mode, else None) and the session mode both were opened for, and
+    switches them when the configured mode changes. The engine and the
+    inference semaphores are not here: they are http_server module globals the
+    route groups read live, so a model swap that rebinds them is seen there."""
 
-    audit: AuditLogT
-    transcript: Optional[MarkdownTranscript]
-    mode: SessionMode
+    recorder: SessionRecorder
+
+    @property
+    def audit(self) -> AuditLogT:
+        """The audit log for the session mode in force now."""
+        return self.recorder.current()[0]
+
+    @property
+    def transcript(self) -> Optional[MarkdownTranscript]:
+        """The transcript for the session mode in force now (None unless full)."""
+        return self.recorder.current()[1]
+
+    @property
+    def mode(self) -> SessionMode:
+        """The session mode in force now."""
+        return self.recorder.current()[2]
 
 
 def init_app_state(app: FastAPI) -> None:

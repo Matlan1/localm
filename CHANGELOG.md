@@ -632,6 +632,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Settings labels and help translate for every field.** Forty-six settings had no German text and
   showed English in the German interface: the reranker, diffusion, parallel-request and metrics
   settings, every image, music and video generation setting, and the text-to-speech settings.
+- **Signing out every device and disabling a job stick while the server is running.** `localm key
+  recover`, `localm key clear` and `localm job disable` could be undone by the running server saving
+  a browser session or a job result at the same moment, so revoked sessions kept working or a disabled
+  job ran again. Writes to the session and job stores now wait for each other across processes.
+- **Disabling the coder plugin ends its open sessions.** A coder session kept running after the plugin
+  was disabled, with its stop button gone. Disabling or uninstalling the plugin now stops and closes
+  every live coder session, and so does refreshing the plugin to a new version.
+- **A background task no longer reloads a model that is being unloaded.** A scheduled job or a memory
+  consolidation that started on a model just as it was unloaded or evicted could load it again where
+  the Models page and idle unload could not see it. It now fails with a message to retry.
 - **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
   its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
   localm is reported as such instead of with advice to repair the llama.cpp runtime.
@@ -682,6 +692,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   showed the same process twice and `localm stop <old id>` stopped the running server. The
   entry is now removed on stop and restart, and `localm stop` on an entry a restart left behind
   only removes the entry.
+- **Changing Session persistence in Settings takes effect at once.** The server kept the mode it
+  started with until a restart, so switching to full or log saved the setting but recorded
+  nothing and the chat page still said privacy mode, and switching to privacy kept writing the
+  chat transcript. The next exchange now follows the saved mode, and the chat page updates its
+  hint and starts or stops saving conversations straight away. Switching to privacy also clears
+  the conversation list on the chat page, as a restart into privacy mode does; conversations
+  already saved come back when you leave privacy mode.
 - **Pulling a file whose name another repository's model already uses no longer calls it
   damaged.** The pull is still refused, since the models folder keeps one file per name, but the
   message now says the name is in use, names the registered model that holds it and how to
@@ -803,6 +820,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   summary written when a long conversation is compacted) now starts a gpt-oss reply in its
   final channel, with no analysis before it. Before, only models that reason in `<think>`
   blocks were affected.
+- **gpt-oss tool calls come back as tool calls.** A gpt-oss GGUF model writes a function call
+  as a harmony message addressed to `functions.NAME`; that call used to end up in the
+  reasoning text with no `tool_calls` in the reply. It is now returned as a `tool_calls` entry
+  on the OpenAI, Responses, Anthropic and Ollama routes, streamed or not, and the coder agent
+  runs it, while the analysis before it stays reasoning.
 - **A llama runtime whose context-parameter layout cannot be told apart is refused.** When
   a provided llama.cpp build's default context parameters fit both the layout with and the
   one without the MoE expert cache field, loading stops with the ABI mismatch message

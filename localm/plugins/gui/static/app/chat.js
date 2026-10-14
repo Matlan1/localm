@@ -554,11 +554,15 @@ export async function refreshCtxLimit() {
 
       // Privacy mode: conversations live in memory only - wipe anything a
       // previous non-privacy session left behind (in-memory AND on disk) and
-      // show the hint.
+      // show the hint. The server applies a Settings change of the mode at
+      // once, so this also handles a switch while the page is open.
+      const wasPrivacy = chat.modeKnown && chat.privacy;
       chat.privacy = cfg.effective_mode === "privacy";
       chat.modeKnown = true;
       settlePendingScopedWrites();
       if (chat.privacy) {
+        chat.persist = false;
+        document.getElementById("persist-hint")?.remove();
         for (const key of INSTANCE_SCOPED_KEYS) localStorage.removeItem(key);
         // GUI-LIVE-WIPE: the destructive in-memory reset below must run only
         // the FIRST time privacy mode is confirmed for this page load, not on
@@ -611,6 +615,13 @@ export async function refreshCtxLimit() {
         // privacy mode would suppress that wipe and leave them on screen for the
         // rest of the tab's life.
         chat.privacyWiped = false;
+        document.getElementById("privacy-hint")?.remove();
+        // Left privacy mode while this page was open: save what is on screen
+        // now and connect to the server's conversation store.
+        if (wasPrivacy) {
+          saveConversations();
+          initServerConversations();
+        }
       }
       hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
@@ -771,6 +782,7 @@ export function pushConversation(conv) {
   clearTimeout(_convPushTimers.get(conv.id));
   _convPushTimers.set(conv.id, setTimeout(async () => {
     _convPushTimers.delete(conv.id);
+    if (!chat.persist) return;   // the mode switched to privacy while this waited
     try {
       const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
         method: "PUT",
