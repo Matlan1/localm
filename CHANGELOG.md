@@ -652,6 +652,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A request body that is not JSON gets a clear error, not a server error.** Sending a file or
+  other binary data where an API route expects JSON now returns the usual 422 explaining the
+  problem, instead of a 500 "Internal server error".
 - **A Knowledge collection with a damaged chunk file opens.** A byte that is not valid UTF-8
   in `chunks.jsonl` costs the chunk it sits in, flags the collection as corrupt and offers
   repair, instead of failing every request that opens it.
