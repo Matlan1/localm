@@ -656,6 +656,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Settings or with `localm config embedding_gpu_layers` was stored as a decimal number that the
   embedder did not recognise, so it placed the embedding model automatically (usually on the GPU)
   instead of following the setting.
+- **`--debug` starts even when the log folder cannot be written.** `localm run`, `localm serve` and
+  `localm gui` with `--debug` stopped at startup with "Permission denied" when the data folder's
+  `logs` folder could not be created or written. They now start, say the log file could not be
+  created, and show the debug output in the console.
 - **A request body that is not JSON gets a clear error, not a server error.** Sending a file or
   other binary data where an API route expects JSON now returns the usual 422 explaining the
   problem, instead of a 500 "Internal server error".

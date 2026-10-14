@@ -39,6 +39,9 @@ _ENV_VAR = "LOCALM_DEBUG"
 logger = logging.getLogger("localm")
 
 
+_debug_console_only = False
+
+
 def debug_enabled() -> bool:
     return bool(os.environ.get(_ENV_VAR))
 
@@ -488,29 +491,48 @@ def child_crash_trace_path(tag: str) -> Path:
     return d / f"crash_{tag}_{os.getpid()}_{next(_crash_trace_counter)}.txt"
 
 
-def enable_debug() -> Path:
+def enable_debug() -> Optional[Path]:
     """
     Turn on debug mode for this process and its children.
 
-    Idempotent: a second call returns the existing log file.
+    Idempotent: a second call returns the existing log file. Returns None when
+    the log file cannot be created (its folder is not writable): debug output
+    then goes to the console only, with one WARNING naming the path and the
+    error. Never raises OSError for that.
     """
+    global _debug_console_only
     existing = log_file_path()
     if existing is not None:
         return existing
+    if _debug_console_only:
+        return None
 
-    logs_dir().mkdir(parents=True, exist_ok=True)
     path = logs_dir() / f"localm_{time.strftime('%Y-%m-%d_%H%M%S')}_{os.getpid()}.log"
+    try:
+        logs_dir().mkdir(parents=True, exist_ok=True)
+        # buffering=1 = line-buffered: each log record is flushed to disk
+        # immediately so no lines are lost if the process is killed or os.execv'd.
+        stream = open(path, "a", buffering=1, encoding="utf-8",
+                      errors="backslashreplace")
+    except OSError as exc:
+        _debug_console_only = True
+        os.environ[_ENV_VAR] = "1"
+        logger.setLevel(logging.DEBUG)
+        _add_console_handler()
+        install_ring_buffer()
+        _install_thread_hook()
+        logger.warning("debug log %s could not be created (%s); logging to the "
+                       "console only", path, exc)
+        _flush_deferred()
+        return None
     os.environ[_ENV_VAR] = str(path)
 
-    # buffering=1 = line-buffered: each log record is flushed to disk immediately
-    # so no lines are lost if the process is killed or os.execv'd.
     # delay=True prevents FileHandler from opening the file internally; we then
-    # set stream to a manually opened line-buffered handle so baseFilename is
+    # set stream to the line-buffered handle opened above so baseFilename is
     # preserved (used by attach_child_logging to deduplicate) while the fd is
     # opened exactly once with the correct buffer mode.
     handler = logging.FileHandler(path, mode="a", encoding="utf-8", delay=True)
-    handler.stream = open(path, "a", buffering=1, encoding="utf-8",
-                         errors="backslashreplace")
+    handler.stream = stream
     handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
