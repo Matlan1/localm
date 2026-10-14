@@ -668,10 +668,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A share inbox that cannot be listed says so.** If the folder holding items shared from a
   phone cannot be read, the 15-minute clean-up now logs that it could not run instead of
   leaving expired items on disk unreported.
-- **Switching models no longer freezes the server while the model folder is measured.** Reading
-  the model registry, measuring a model's size on disk and building its engine ran on the
-  server's main loop, so a load of a large model folder on a slow or network disk stalled every
-  other request, including the status poll, until the disk answered.
 - **Model control markers hidden inside other markers no longer reach the reply.** A model
   that wrote a header or turn marker with another control marker inside it (for example a
   Llama 3 role header split by `<|message|>`, or `<start_of_turn>` followed by a marker and

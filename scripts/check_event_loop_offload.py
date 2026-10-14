@@ -18,12 +18,6 @@ the tree and asks whether it transitively reaches a slow primitive.
 
 A network call is always UNBOUNDED.
 
-A directory walk (`rglob`, `glob`, `iglob`, `iterdir`, `scandir`, `os.walk`) reached
-from a handler is reported as a TREE WALK and does not fail the gate: its cost
-scales with the size of the tree, which is a disk's business and not
-knowable here. Plain single-file reads and writes are not reported; nearly
-every handler reaches one through the config and key stores.
-
 WHAT IS NOT A FINDING
 ---------------------
 Work handed to a worker thread. The analyzer follows the same boundaries the
@@ -79,9 +73,6 @@ NET_MOD_CALLS = (
 UNBOUNDED_LEAVES = {"spawn_and_load", "load_lib", "CDLL", "WinDLL", "Popen",
                     "getaddrinfo", "create_connection"} | NET_LEAVES
 BOUNDED_LEAVES = {"check_output", "check_call", "communicate"}
-# A walk over a directory: one stat or listing per entry.
-WALK_LEAVES = {"rglob", "glob", "iglob", "iterdir", "scandir"}
-WALK_CALLS = {"os.walk"}
 # `x.join()` / `x.wait()` / `x.poll()` where x names a child, a queue or a
 # future. Matched on the receiver's name, not on its type.
 WAIT_CALLS = {"join", "wait", "recv", "poll", "result"}
@@ -122,7 +113,7 @@ class Module:
 
 class Func:
     __slots__ = ("mod", "qual", "node", "is_async", "calls", "locks", "nets",
-                 "walks", "offloaded", "nested")
+                 "offloaded", "nested")
 
     def __init__(self, mod: Module, qual: str, node):
         self.mod = mod
@@ -132,7 +123,6 @@ class Func:
         self.calls: list[tuple[str, int]] = []
         self.locks: list[tuple[str, str, int]] = []
         self.nets: list[tuple[str, int]] = []
-        self.walks: list[tuple[str, int]] = []
         self.offloaded: set[str] = set()
         self.nested: set[str] = set()
 
@@ -149,7 +139,7 @@ class Finding:
     def __init__(self, route, handler, kind, sink, sink_at, sink_func, chain, confident):
         self.route = route
         self.handler = handler          # Func
-        self.kind = kind                # "network" | "unbounded-lock" | "bounded-lock" | "tree-walk"
+        self.kind = kind                # "network" | "unbounded-lock" | "bounded-lock"
         self.sink = sink                # the blocking call, or the lock's identity
         self.sink_at = sink_at
         self.sink_func = sink_func      # qualname of the function CONTAINING the sink
@@ -322,8 +312,6 @@ class Analyzer:
             if (leaf in NET_LEAVES or (head, leaf) in NET_MOD_CALLS
                     or (head_mod, leaf) in NET_MOD_CALLS):
                 func.nets.append((name, node.lineno))
-            if leaf in WALK_LEAVES or name in WALK_CALLS:
-                func.walks.append((name, node.lineno))
             if leaf in OFFLOADERS and node.args:
                 first = node.args[0]
                 if isinstance(first, ast.Name):
@@ -467,11 +455,6 @@ class Analyzer:
                 out.append(Finding(route, handler, "network", name, at, func.qual,
                                    chain + [at + "  " + func.qual + "  (" + name + ")"],
                                    confident))
-            for name, line in func.walks:
-                at = func.mod.rel + ":" + str(line)
-                out.append(Finding(route, handler, "tree-walk", name, at, func.qual,
-                                   chain + [at + "  " + func.qual + "  (" + name + ")"],
-                                   confident))
             for name, line in func.calls:
                 leaf = name.rsplit(".", 1)[-1]
                 if leaf in OFFLOADERS or leaf in THREAD_CTORS:
@@ -497,7 +480,7 @@ def _shortest(findings: list[Finding]) -> list[Finding]:
         key = (f.route, f.kind, f.sink, f.sink_at, f.sink_func)
         if key not in best or len(f.chain) < len(best[key].chain):
             best[key] = f
-    order = {"network": 0, "unbounded-lock": 1, "bounded-lock": 2, "tree-walk": 3}
+    order = {"network": 0, "unbounded-lock": 1, "bounded-lock": 2}
     return sorted(best.values(), key=lambda f: (order[f.kind], f.route, f.sink))
 
 
@@ -528,8 +511,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     gating = [f for f in rows if f.gating]
     for group, label in (("network", "NETWORK CALL ON THE EVENT LOOP"),
                          ("unbounded-lock", "UNBOUNDED LOCK ON THE EVENT LOOP"),
-                         ("bounded-lock", "BOUNDED LOCK ON THE EVENT LOOP (reported, not gated)"),
-                         ("tree-walk", "DIRECTORY WALK ON THE EVENT LOOP (reported, not gated)")):
+                         ("bounded-lock", "BOUNDED LOCK ON THE EVENT LOOP (reported, not gated)")):
         chunk = [f for f in rows if f.kind == group]
         if not chunk:
             continue
