@@ -15,7 +15,8 @@ from fastapi import Depends, FastAPI, Request
 
 import localm.plugins.gui.web as _web
 from localm import scopes
-from localm.inference.http_server import (_require_auth, caller_scopes,
+from localm.inference.http_server import (_require_auth, caller_grants,
+                                          caller_scopes,
                                           effective_fs_access, preview_allowed,
                                           require_scope)
 from localm.executor import get_plugin_executor
@@ -123,7 +124,7 @@ def register(app: FastAPI, ctx) -> None:
         turn."""
         held = caller                      # None => open mode / full access
         def granted(required: str) -> bool:
-            return held is None or scopes.grants(held, required)
+            return caller_grants(request, required)
         core = {
             "chat":     True,
             "models":   granted(scopes.MODELS_READ),

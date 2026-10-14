@@ -675,7 +675,9 @@ class TestSurfaceOverridesOnServerTraffic:
         request = Request({"type": "http", "method": "POST", "path": "/",
                            "headers": [(k.lower().encode(), v.encode())
                                        for k, v in headers.items()]})
-        with patch("localm.config.load_config", side_effect=config.load),              patch("localm.inference.http_server.caller_scopes", return_value=held):
+        with patch("localm.config.load_config", side_effect=config.load), \
+             patch("localm.inference.http_server.caller_scopes", return_value=held), \
+             patch("localm.auth.any_key_configured", return_value=held is not None):
             assert request_session_mode(request) == expected
 
     def test_localm_run_attached_to_the_server_records_by_the_chat_mode(self, tmp_path):

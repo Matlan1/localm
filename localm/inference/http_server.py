@@ -3491,9 +3491,10 @@ def require_scope(scope: str):
 
 def caller_scopes(request: Request) -> Optional[set]:
     """The scope set the presented key grants (the owner key -> {ADMIN}), or
-    None in open mode / when no valid key is presented. Routes use this to make
-    authorisation decisions that depend on *who* the caller is (e.g. only an
-    owner/ADMIN principal may mint keys carrying privileged scopes)."""
+    None in open mode / when no valid key is presented. None therefore conflates
+    "open mode" with "no valid credential": never read it as "is the owner".
+    Use ``caller_auth_state`` to tell the two apart and ``caller_is_operator`` /
+    ``caller_is_admin_key`` / ``caller_grants`` for authorisation decisions."""
     from localm.auth import any_key_configured
     if not any_key_configured():
         return None
@@ -3502,13 +3503,43 @@ def caller_scopes(request: Request) -> Optional[set]:
     return prin[0] if prin else None
 
 
+CALLER_OPEN = "open"
+CALLER_ANONYMOUS = "anonymous"
+CALLER_KEYED = "keyed"
+
+
+def caller_auth_state(request: Request) -> str:
+    """``CALLER_OPEN`` when no key is configured anywhere (the local operator),
+    ``CALLER_KEYED`` when a key is configured and the request presents a valid
+    one, ``CALLER_ANONYMOUS`` when a key is configured and the request presents
+    no valid credential."""
+    from localm.auth import any_key_configured
+    if not any_key_configured():
+        return CALLER_OPEN
+    return CALLER_ANONYMOUS if caller_scopes(request) is None else CALLER_KEYED
+
+
+def caller_grants(request: Request, scope: str) -> bool:
+    """True in open mode, or when the presented valid key grants *scope* (the
+    ADMIN/owner key grants every scope). False for a request presenting no valid
+    key while a key is configured."""
+    from localm.auth import any_key_configured
+    if not any_key_configured():
+        return True
+    held = caller_scopes(request)
+    return held is not None and scopes.grants(held, scope)
+
+
 def caller_is_operator(request: Request) -> bool:
     """True for the local operator: open mode (no key configured anywhere) or
     a caller holding an ADMIN/owner key. False for any other caller, including
     a scoped key and a request presenting no valid key."""
-    from localm.auth import any_key_configured
-    if not any_key_configured():
-        return True
+    return caller_grants(request, scopes.ADMIN)
+
+
+def caller_is_admin_key(request: Request) -> bool:
+    """True only for a request presenting a valid ADMIN/owner key. False in open
+    mode, for a scoped key, and for a request presenting no valid key."""
     held = caller_scopes(request)
     return held is not None and scopes.ADMIN in held
 
@@ -3556,13 +3587,8 @@ def _owner_caller_headers(request: Request) -> tuple:
     the owner (open mode, or an ADMIN key or session), else ``(None, None)``.
     A caller presenting no valid key while a key is configured is not the
     owner."""
-    from localm import scopes
     from localm.audit import CLIENT_ID_HEADER, SESSION_MODE_HEADER
-    from localm.auth import any_key_configured
-    held = caller_scopes(request)
-    if held is None and any_key_configured():
-        return None, None
-    if held is not None and scopes.ADMIN not in held:
+    if not caller_is_operator(request):
         return None, None
     return (request.headers.get(CLIENT_ID_HEADER),
             request.headers.get(SESSION_MODE_HEADER))
@@ -3599,9 +3625,7 @@ def memory_principal(request: Request) -> Optional[str]:
     background job stays bound to the key that created it. Only the memory
     principal collapses ADMIN/owner to "owner"; a non-owner scoped key keeps its
     own hash namespace here too."""
-    from localm import scopes
-    held = caller_scopes(request)
-    if held is not None and scopes.ADMIN in held:
+    if caller_is_admin_key(request):
         return None
     return principal_id(request)
 
@@ -3613,8 +3637,7 @@ def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
     creator's. Pairs with principal_id() stamped at job creation."""
     if job_owner is None:
         return True
-    held = caller_scopes(request)
-    if held is not None and scopes.ADMIN in held:
+    if caller_is_admin_key(request):
         return True
     return principal_id(request) == job_owner
 

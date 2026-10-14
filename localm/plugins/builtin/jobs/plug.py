@@ -157,16 +157,8 @@ def _caller_can_allow_shell(request: Request) -> bool:
     unrestricted-shell job: it gets the safe restricted coder. Mirrors the
     coder route's ``restricted = not (is_owner or coder:full)`` policy."""
     from localm import scopes as S
-    from localm.auth import any_key_configured
-    from localm.inference.http_server import caller_scopes
-    if not any_key_configured():
-        return True                              # open mode = loopback owner
-    # caller_scopes resolves both a bearer key AND a cookie session (an opaque
-    # session id) to its scope snapshot; a raw verify() would fail on a session id.
-    held = caller_scopes(request)
-    if not held:
-        return False
-    return S.ADMIN in held or S.CODER_FULL in held
+    from localm.inference.http_server import caller_grants
+    return caller_grants(request, S.CODER_FULL)
 
 
 def _caller_is_owner_key(request: Request) -> bool:

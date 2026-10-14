@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
@@ -15,16 +14,15 @@ from localm.bindhost import is_loopback_host as _is_loopback
 
 def register(app: FastAPI, ctx) -> None:
     require_scope = _hs.require_scope
-    caller_scopes = _hs.caller_scopes
 
     @app.get("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
-    async def list_keys_ep(request: Request, caller: Optional[set] = Depends(caller_scopes)):
+    async def list_keys_ep(request: Request):
         from localm.auth import list_keys, owner_key_downgrade_warning
         from localm.config import load_config
         # is_owner lets the GUI hide owner-only (privileged) scope choices from a
         # mere keys:admin device; presets ride along so a keys:admin key WITHOUT
         # config:read can still see the quick-select bundles.
-        is_owner = caller is not None and scopes.ADMIN in caller
+        is_owner = _hs.caller_is_admin_key(request)
         presets = load_config().get("key_presets", [])
         # Not owner-gated. In open mode caller is None and an is_owner gate
         # would hide this in exactly the case it matters. In protected mode via
@@ -38,8 +36,7 @@ def register(app: FastAPI, ctx) -> None:
                 "owner_key_warning": warning}
 
     @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
-    async def create_key_ep(request: Request, response: Response, body: dict,
-                            caller: Optional[set] = Depends(caller_scopes)):
+    async def create_key_ep(request: Request, response: Response, body: dict):
         from localm import auth
         from localm.auth import create_key
         from localm.config import ConfigUnreadable
@@ -65,8 +62,8 @@ def register(app: FastAPI, ctx) -> None:
             except (TypeError, ValueError) as exc:
                 raise HTTPException(400, "'expires' must be an epoch number or null") from exc
         # Only an owner/ADMIN caller may grant privileged scopes. In open mode
-        # (caller is None) privileged grants are refused.
-        is_owner = caller is not None and scopes.ADMIN in caller
+        # privileged grants are refused.
+        is_owner = _hs.caller_is_admin_key(request)
         # The same owner-only gate covers host-filesystem reach, refused rather
         # than silently downgraded to "none".
         fs_access = auth.norm_fs_access(body.get("fs_access"))

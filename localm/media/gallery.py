@@ -148,15 +148,9 @@ def _privileged(request: Request) -> bool:
     """True for a caller that may still reach media when ownership CANNOT be
     determined: the open-mode loopback owner (no key configured anywhere) or an
     ADMIN/owner key. A scoped non-owner key is NOT privileged and is denied -
-    fail closed. Mirrors job_owner_ok's admin bypass, plus the open mode where
-    caller_scopes() is None yet the loopback owner is fully trusted."""
-    from localm.auth import any_key_configured
-    if not any_key_configured():
-        return True                          # open/dev mode = loopback owner
-    from localm import scopes
-    from localm.inference.http_server import caller_scopes
-    held = caller_scopes(request)
-    return held is not None and scopes.ADMIN in held
+    fail closed."""
+    from localm.inference.http_server import caller_is_operator
+    return caller_is_operator(request)
 
 
 def require_owner(media_kind: str):
