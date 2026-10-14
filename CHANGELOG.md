@@ -623,6 +623,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Adding an Ollama store with copy or move handles models that share a vision projector.**
+  Two tags of one vision model (for example two quantizations) now both register; the second
+  used to fail with "already exists" and leave its model file in the models folder unregistered.
+  A failure while bringing in the projector now names the model file it left behind.
+- **Importing the Hugging Face cache skips files that are not models.** An importance matrix or
+  a GGUF of an unsupported version is reported and skipped, as with any other folder, instead of
+  being registered as a model.
+- **Benchmark advice for Multi-Token Prediction names an overriding setting.** When Speculative
+  drafting is set to a source other than mtp, `localm bench-mtp` says that setting takes
+  precedence over the MTP toggle, and the toggle's help says it applies only while Speculative
+  drafting is Inherit.
+- **The ACE-Step music model is no longer offered as an image or video model.**
 - **The chat model comes back after a failed image, video or music job.** When a generation
   crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
   until your next message. It now reloads on every way a job can end, and a job that finishes

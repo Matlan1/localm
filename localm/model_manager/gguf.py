@@ -765,6 +765,12 @@ def gguf_non_chat_model_type(architecture: Optional[str]) -> Optional[str]:
     return "unknown" if architecture in _GGUF_NON_CHAT_ARCHITECTURES else None
 
 
+def gguf_is_music_architecture(architecture: Optional[str]) -> bool:
+    """True when *architecture* is a ``general.architecture`` of an ACE-Step
+    music generation component."""
+    return isinstance(architecture, str) and architecture in _GGUF_MUSIC_ARCHITECTURES
+
+
 def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
     """The reason a GGUF with this ``general.architecture`` cannot be chatted
     with, or None when it can (including an unknown or missing architecture,
