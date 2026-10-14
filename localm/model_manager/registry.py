@@ -218,13 +218,28 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
     return p
 
 
+def _hf_folder_has_chat_template(folder: Path) -> bool:
+    """Whether the Hugging Face model folder *folder* carries a chat template: a
+    ``chat_template.jinja`` or ``chat_template.json`` file, or a non-empty
+    ``chat_template`` in ``tokenizer_config.json``."""
+    if (folder / "chat_template.jinja").is_file() or (folder / "chat_template.json").is_file():
+        return True
+    try:
+        tok_cfg = json.loads((folder / "tokenizer_config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    return isinstance(tok_cfg, dict) and bool(tok_cfg.get("chat_template"))
+
+
 def hf_reranker_state(folder: Path) -> Optional[bool]:
     """Whether the Hugging Face model folder *folder* is a cross-encoder reranker:
     its config.json declares a ``*ForSequenceClassification`` architecture with a
-    single output label. None when config.json cannot be read.
+    single output label and its tokenizer carries no chat template. None when
+    config.json cannot be read.
 
     A head with several labels is a classifier (sentiment, NLI), not a reranker,
-    and answers False."""
+    and answers False. A single-label head whose tokenizer carries a chat
+    template scores a conversation (a reward model) and answers False."""
     try:
         config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
@@ -237,9 +252,8 @@ def hf_reranker_state(folder: Path) -> Optional[bool]:
         return False
     id2label = config.get("id2label")
     num_labels = config.get("num_labels")
-    if isinstance(id2label, dict):
-        return len(id2label) == 1
-    return num_labels == 1
+    single = len(id2label) == 1 if isinstance(id2label, dict) else num_labels == 1
+    return single and not _hf_folder_has_chat_template(folder)
 
 
 def _is_sentence_transformers_folder(path: Path) -> bool:
