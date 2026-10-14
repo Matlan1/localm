@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import urllib.request
 from typing import Optional
 
 import click
 
+from localm import hwdetect
 from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.pins import (_AMD_ROCM_ASSET_TAG, _ASSET_MATCH, _CUDA_LINUX_PINNED_SHA256,
@@ -80,26 +82,29 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
     cuda_line = cuda_line or _CUDA_LINE
     if backend == "amd-rocm":
         return _resolve_amd_rocm_asset()
-    if backend == "cuda" and _sl._platform_key() == "linux":
+    plat = _sl._platform_key()
+    arch = _sl._machine_arch()
+    _require_prebuilt(backend, plat, arch)
+    if backend == "cuda" and plat == "linux":
         return _resolve_linux_cuda_asset(backend, cuda_line, tag)
 
-    plat = _sl._platform_key()
     entry = _ASSET_MATCH.get(plat, {}).get(backend)
     # The 'cuda' entry on win32 is keyed by cuda_line (a dict), not a flat
     # list, since the right asset depends on the GPU's architecture, not just
     # the platform - see _ASSET_MATCH's comment.
     matchers = entry.get(cuda_line) if isinstance(entry, dict) else entry
     if not matchers:
-        avail = ", ".join(sorted(_ASSET_MATCH.get(plat, {})))
         raise click.ClickException(
             f"backend {backend!r} is not available on this platform "
-            f"({plat}). Available: {avail or 'none'}.")
+            f"({plat}). Available: {_available_here(plat, arch) or 'none'}.")
+    matchers = [m.format(arch=arch) for m in matchers]
 
     tag = tag or _tag_for(backend)
     assets = _sl._release_assets(tag)
     for a in assets:
         name = str(a.get("name", "")).lower()
         if (any(m in name for m in matchers) and "cudart" not in name
+                and _asset_arch_ok(name, arch)
                 and a.get("browser_download_url")):
             url = a["browser_download_url"]
             digest = a.get("digest")
@@ -126,14 +131,18 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
     # express (it assumes tar.gz off win32). Both produced a confident 404 offline.
     # Reading the name from the table fixes every such rename at once, and keeps
     # fixing them: bump the pin and its digests, and this follows.
+    if assets:
+        raise _no_build_in_release(tag, backend, plat, arch)
     fname = ""
     for m in matchers:
         hits = sorted(n for n in _PINNED_FALLBACK_SHA256
                       if n.startswith(f"llama-{tag}-") and m in n.lower()
-                      and "cudart" not in n)
+                      and "cudart" not in n and _asset_arch_ok(n.lower(), arch))
         if hits:
             fname = hits[0]
             break
+    if not fname and any(n.startswith(f"llama-{tag}-") for n in _PINNED_FALLBACK_SHA256):
+        raise _no_build_in_release(tag, backend, plat, arch)
     if not fname:
         # An unpinned tag (--tag <something>), so there is nothing to read and a
         # constructed name is the only option left. Still worth attempting: it is
@@ -151,11 +160,12 @@ def _resolve_amd_rocm_asset() -> tuple[str, Optional[str], None]:
     """The (url, sha256, None) triple for the self-contained amd-rocm build of
     this machine's AMD GPU family, from lemonade-sdk's release listing, else the
     pinned URL and checksum for that family. Raises ``click.ClickException``
-    off Windows."""
+    off Windows, and on a CPU architecture the build is not published for."""
     if sys.platform != "win32":
         raise click.ClickException(
             "the self-contained 'amd-rocm' build is Windows-only; on Linux "
             "use --backend hip (needs ROCm) or build with --from.")
+    _require_prebuilt("amd-rocm", "win32", _sl._machine_arch())
     # Try to resolve dynamically first
     tag = _ROCM_TAG
     try:
@@ -283,16 +293,62 @@ def _release_assets(tag: str, repo: str = _UPSTREAM_REPO) -> list:
         return []
 
 
-def _pick_asset(assets: list, *needles: str, exclude: tuple = ()) -> Optional[dict]:
+def _pick_asset(assets: list, *needles: str, exclude: tuple = (),
+                arch: Optional[str] = None) -> Optional[dict]:
     """First asset whose (lowercased) name contains ALL *needles* and NONE of
-    *exclude*."""
+    *exclude*, and, when *arch* is given, names no CPU architecture other than
+    *arch* (see ``_asset_arch_ok``)."""
     for a in assets:
         name = str(a.get("name", "")).lower()
         if (all(n in name for n in needles)
                 and not any(x in name for x in exclude)
+                and (arch is None or _asset_arch_ok(name, arch))
                 and a.get("browser_download_url")):
             return a
     return None
+
+
+# A CPU-architecture token in a release asset name, delimited so "x64" never
+# matches inside a longer word.
+_ASSET_ARCH_RE = re.compile(r"(?<![a-z0-9])(x86_64|amd64|x64|aarch64|arm64|s390x)(?![a-z0-9])")
+_ASSET_ARCH_ALIASES = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}
+
+
+def _asset_arch_ok(name: str, arch: str) -> bool:
+    """False when the lowercased asset *name* names a CPU architecture and none
+    of the ones it names is *arch*; True for a name that names none."""
+    found = {_ASSET_ARCH_ALIASES.get(t, t) for t in _ASSET_ARCH_RE.findall(name)}
+    return not found or arch in found
+
+
+def _require_prebuilt(backend: str, plat: str, arch: str) -> None:
+    """Raise ``click.ClickException`` naming what IS available when *backend*
+    has no prebuilt build for *plat* on *arch* (``hwdetect.PREBUILT_ARCHES``).
+    A backend the table does not list for *plat* passes, so the caller's own
+    "not available on this platform" message still applies to it."""
+    if backend not in hwdetect.PREBUILT_ARCHES.get(plat, {}):
+        return
+    if hwdetect.has_prebuilt(backend, plat, arch):
+        return
+    raise click.ClickException(
+        f"backend {backend!r} has no prebuilt build for {plat} on {arch}. "
+        f"Available here: {_available_here(plat, arch) or 'none'}. Or build "
+        "llama.cpp yourself and pass --from <build dir>.")
+
+
+def _available_here(plat: str, arch: str) -> str:
+    """The upstream backends with a prebuilt build for *plat* on *arch*, sorted
+    and comma-separated ("" when there are none)."""
+    return ", ".join(sorted(b for b in _ASSET_MATCH.get(plat, {})
+                            if hwdetect.has_prebuilt(b, plat, arch)))
+
+
+def _no_build_in_release(tag: str, backend: str, plat: str, arch: str) -> click.ClickException:
+    """The error for a release whose asset list has no *backend* build for
+    *plat* on *arch*."""
+    return click.ClickException(
+        f"llama.cpp release {tag} has no {backend} build for {plat} on {arch}. "
+        "Pick another backend, or build llama.cpp yourself and pass --from <build dir>.")
 
 
 def _resolve_cuda_pair(tag: str, line: str = _CUDA_LINE) -> tuple:
@@ -307,6 +363,7 @@ def _resolve_cuda_pair(tag: str, line: str = _CUDA_LINE) -> tuple:
     llama.dll) and provisioning aborts with "the archive did not contain
     llama.dll"."""
     assets = _sl._release_assets(tag)
-    build = _pick_asset(assets, "bin-win-" + line, exclude=("cudart",))
-    cudart = _pick_asset(assets, "cudart", "win-" + line)
+    arch = _sl._machine_arch()
+    build = _pick_asset(assets, "bin-win-" + line, exclude=("cudart",), arch=arch)
+    cudart = _pick_asset(assets, "cudart", "win-" + line, arch=arch)
     return build, cudart

@@ -314,19 +314,26 @@ def test_probe_failed_fallback_metal_case_precedes_generic_vulkan_fallback_in_so
 
 
 def _backend_menu_block() -> str:
+    """From the offered-backends probe through the unlisted-pick check. Run where
+    no .venv exists, the probe does not answer and the fallback list applies."""
     src = SETUP_SH.read_text(encoding="utf-8")
-    start = src.index('_same="   (same as [1])"')
-    end = src.index("esac\n", src.index('case "$bpick" in')) + len("esac\n")
+    start = src.index("# The backends setup-llama has a build of")
+    tail = src.index("# A number the menu did not list", start)
+    end = src.index("\nesac\n", tail) + len("\nesac\n")
     return src[start:end]
 
 
-def _run_backend_menu(tmp_path: Path, *, rec: str, is_apple_silicon: bool, bpick: str) -> dict:
+def _run_backend_menu(tmp_path: Path, *, rec: str, is_apple_silicon: bool, bpick: str,
+                      is_macos: bool | None = None) -> dict:
+    macos = is_apple_silicon if is_macos is None else is_macos
     script = (
+        'set -euo pipefail\n'
         'say() { :; }\n'
         f'ask() {{ echo "{bpick}"; }}\n'
         f'REC="{rec}"\n'
         f'GPU=irrelevant\n'
         f'IS_APPLE_SILICON={1 if is_apple_silicon else 0}\n'
+        f'IS_MACOS={1 if macos else 0}\n'
         + _backend_menu_block()
         + '\nprintf "BACKEND=%s\\n" "$BACKEND"\n'
     )
@@ -370,13 +377,13 @@ def test_menu_pick_range_extends_to_8_only_on_apple_silicon(tmp_path):
     script_apple = (
         'say() { :; }\n'
         'ask() { printf "%s" "$1" >&2; echo 1; }\n'
-        'REC="metal"\nGPU=irrelevant\nIS_APPLE_SILICON=1\n'
+        'REC="metal"\nGPU=irrelevant\nIS_APPLE_SILICON=1\nIS_MACOS=1\n'
         + _backend_menu_block()
     )
     result = subprocess.run([_bash(), "-c", script_apple], capture_output=True,
                             text=True, cwd=tmp_path, timeout=15)
     assert result.returncode == 0, result.stderr
-    assert "Pick 1-8" in result.stderr
+    assert "Pick 1, 6, 7 or 8" in result.stderr
 
 
 def test_menu_pick_range_is_1_to_7_without_apple_silicon(tmp_path):
@@ -420,18 +427,129 @@ def test_menu_bpick_5_selects_sycl(tmp_path):
     assert out["BACKEND"] == "sycl"
 
 
-def test_menu_always_shows_sycl_line_regardless_of_platform(tmp_path):
-    for is_apple in (False, True):
-        script = (
-            'say() { printf "%s\\n" "$*"; }\n'
-            'ask() { echo 1; }\n'
-            f'REC="vulkan"\nGPU=irrelevant\nIS_APPLE_SILICON={1 if is_apple else 0}\n'
-            + _backend_menu_block()
-        )
-        result = subprocess.run([_bash(), "-c", script], capture_output=True,
-                                text=True, cwd=tmp_path, timeout=15)
-        assert result.returncode == 0, result.stderr
-        assert "[5] sycl" in result.stdout
+def _menu_text(tmp_path: Path, *, is_macos: bool, is_apple_silicon: bool,
+               rec: str = "cpu") -> tuple[str, str]:
+    """(menu stdout, pick prompt) for one platform."""
+    script = (
+        'set -euo pipefail\n'
+        'say() { printf "%s\\n" "$*"; }\n'
+        'ask() { printf "%s" "$1" >&2; echo 1; }\n'
+        f'REC="{rec}"\nGPU=irrelevant\n'
+        f'IS_APPLE_SILICON={1 if is_apple_silicon else 0}\nIS_MACOS={1 if is_macos else 0}\n'
+        + _backend_menu_block()
+    )
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
+    return result.stdout, result.stderr
+
+
+def test_menu_shows_the_vendor_backends_off_macos(tmp_path):
+    out, prompt = _menu_text(tmp_path, is_macos=False, is_apple_silicon=False)
+    for line in ("[2] vulkan", "[3] cuda", "[4] hip", "[5] sycl", "[6] cpu", "[7] I will"):
+        assert line in out
+    assert "Pick 1-7" in prompt
+
+
+@pytest.mark.parametrize("apple, entries, pick", [
+    (True, ("[6] cpu", "[7] I will", "[8] metal"), "Pick 1, 6, 7 or 8"),
+    (False, ("[6] cpu", "[7] I will"), "Pick 1, 6 or 7"),
+])
+def test_macos_menu_lists_only_backends_with_a_macos_build(tmp_path, apple, entries, pick):
+    out, prompt = _menu_text(tmp_path, is_macos=True, is_apple_silicon=apple)
+    for line in entries:
+        assert line in out
+    for line in ("[2] vulkan", "[3] cuda", "[4] hip", "[5] sycl"):
+        assert line not in out
+    assert ("[8] metal" in out) is apple
+    assert pick in prompt
+
+
+@pytest.mark.parametrize("bpick", ["2", "3", "4", "5"])
+@pytest.mark.parametrize("apple, rec", [(True, "metal"), (False, "cpu")])
+def test_an_unlisted_number_on_macos_uses_the_recommendation(tmp_path, bpick, apple, rec):
+    out = _run_backend_menu(tmp_path, rec=rec, is_apple_silicon=apple, is_macos=True,
+                            bpick=bpick)
+    assert out["BACKEND"] == rec
+
+
+def test_metal_is_not_pickable_without_apple_silicon(tmp_path):
+    out = _run_backend_menu(tmp_path, rec="vulkan", is_apple_silicon=False, bpick="8")
+    assert out["BACKEND"] == "vulkan"
+    out = _run_backend_menu(tmp_path, rec="cpu", is_apple_silicon=False, is_macos=True,
+                            bpick="8")
+    assert out["BACKEND"] == "cpu"
+
+
+def test_an_unlisted_pick_says_what_it_used_instead(tmp_path):
+    script = (
+        'say() { printf "%s\\n" "$*"; }\n'
+        'ask() { echo 3; }\n'
+        'REC="cpu"\nGPU=irrelevant\nIS_APPLE_SILICON=0\nIS_MACOS=1\n'
+        + _backend_menu_block()
+    )
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert "[3] is not offered on this machine; using cpu." in result.stdout
+
+
+def _menu_with_probe(tmp_path: Path, avail: str, bpick: str, rec: str) -> tuple[str, str]:
+    """(stdout, stderr) of the menu when `python -m localm.hwdetect backends`
+    answers *avail*."""
+    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    stub = bin_dir / "python"
+    stub.write_text(f'#!/bin/sh\n[ "$3" = backends ] && echo "{avail}"\n', encoding="utf-8")
+    _mark_executable(stub)
+    script = (
+        'set -euo pipefail\n'
+        'say() { printf "%s\\n" "$*"; }\n'
+        f'ask() {{ printf "%s" "$1" >&2; echo {bpick}; }}\n'
+        f'REC="{rec}"\nGPU=irrelevant\nIS_APPLE_SILICON=0\nIS_MACOS=0\n'
+        + _backend_menu_block()
+        + '\nprintf "BACKEND=%s\\n" "$BACKEND"\n'
+    )
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
+    return result.stdout, result.stderr
+
+
+def test_menu_lists_what_the_probe_offers_on_arm64_linux(tmp_path):
+    out, prompt = _menu_with_probe(tmp_path, "cpu vulkan", "1", "vulkan")
+    assert "[2] vulkan" in out and "[6] cpu" in out and "[7] I will" in out
+    for line in ("[3] cuda", "[4] hip", "[5] sycl", "[8] metal"):
+        assert line not in out
+    assert "Pick 1, 2, 6 or 7" in prompt
+
+
+def test_a_pick_the_probe_does_not_offer_uses_the_recommendation(tmp_path):
+    out, _prompt = _menu_with_probe(tmp_path, "cpu vulkan", "3", "vulkan")
+    assert "[3] is not offered on this machine; using vulkan." in out
+    assert out.strip().endswith("BACKEND=vulkan")
+
+
+def test_the_probe_answer_wins_over_the_fallback_list(tmp_path):
+    out, prompt = _menu_with_probe(tmp_path, "cpu metal", "8", "metal")
+    assert "[8] metal" in out and "[2] vulkan" not in out
+    assert "Pick 1, 6, 7 or 8" in prompt
+    assert out.strip().endswith("BACKEND=metal")
+
+
+def test_menu_cuda_line_says_the_runtime_is_fetched():
+    block = _backend_menu_block()
+    assert "[3] cuda     - NVIDIA, peak performance (fetches the CUDA runtime for you)" in block
+    assert "needs the CUDA runtime" not in block
+
+
+def test_probe_failed_fallback_on_macos_is_cpu_not_vulkan(tmp_path):
+    script = ('IS_MACOS=1\nREC=""\nGPU="rocm"\n' + _rec_fallback_case()
+              + '\nprintf "REC=%s\\n" "$REC"\n')
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "REC=cpu"
 
 
 def test_rec_sycl_marks_bpick_5_as_the_recommended_twin(tmp_path):

@@ -80,16 +80,13 @@ _BACKEND_CHOICES = [
 
 
 def backend_choices() -> list[tuple]:
-    """The runtime menu for this platform. metal exists only on macOS and
-    amd-rocm only on Windows, matching the console installer's menu."""
-    out = []
-    for key, desc in _BACKEND_CHOICES:
-        if key == "metal" and sys.platform != "darwin":
-            continue
-        if key == "amd-rocm" and not IS_WINDOWS:
-            continue
-        out.append((key, desc))
-    return out
+    """The runtime menu for this machine: every backend setup-llama has a
+    prebuilt build of for this platform and CPU architecture
+    (``hwdetect.has_prebuilt``), then "own"."""
+    sys.path.insert(0, str(ROOT))
+    from localm import hwdetect
+    return [(key, desc) for key, desc in _BACKEND_CHOICES
+            if key == "own" or hwdetect.has_prebuilt(key)]
 
 
 # The plugins the console installer preselects.
@@ -485,12 +482,15 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
         steps.append(Step(f"Provisioning the {plan.backend} inference runtime", provision,
                           key="native-runtime"))
 
-    def launcher(emit):
-        _run([str(venv_python(ROOT)), "-m", "localm", "make-launcher",
-              "--force", "--quiet"], emit, plan, allow_fail=True)
-    steps.append(Step("Building the launcher", launcher, fatal=False, key="launcher"))
+    # macOS has no launcher or shortcut; see test_macos_gets_no_launcher_or_shortcut.
+    on_macos = sys.platform == "darwin"
+    if not on_macos:
+        def launcher(emit):
+            _run([str(venv_python(ROOT)), "-m", "localm", "make-launcher",
+                  "--force", "--quiet"], emit, plan, allow_fail=True)
+        steps.append(Step("Building the launcher", launcher, fatal=False, key="launcher"))
 
-    if plan.shortcut != "none":
+    if plan.shortcut != "none" and not on_macos:
         def shortcut(emit):
             intended = intended_shortcut_path()
             if intended:
@@ -1068,6 +1068,11 @@ class Wizard:
                         variable=self.appwin_var).pack(anchor="w")
         ttk.Checkbutton(page, text="Make 'localm' runnable from any terminal",
                         variable=self.path_cmd_var).pack(anchor="w")
+        if sys.platform == "darwin":
+            ttk.Label(page, text="macOS gets no shortcut: start LocaLM with "
+                                 "./localm-launcher.sh or ./localm.sh gui.",
+                      wraplength=520).pack(anchor="w", pady=(14, 0))
+            return
         ttk.Label(page, text="Desktop shortcut:" if IS_WINDOWS else "Shortcut:",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(14, 0))
         for key, text in (("launcher", "Launcher menu (GUI / chat / server / coder)"),

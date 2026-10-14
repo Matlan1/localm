@@ -13,6 +13,12 @@ from localm import hwdetect
 from localm.hwdetect import Detection
 
 
+@pytest.fixture(autouse=True)
+def _x64_process(monkeypatch):
+    """Every test here runs as an x64 process unless it says otherwise."""
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
+
+
 # --------------------------- _run (never raises) ---------------------------
 
 def test_run_returns_empty_on_missing_tool(monkeypatch):
@@ -303,13 +309,14 @@ def test_detect_never_raises_even_with_dead_probes(monkeypatch):
 
 # ------------------- recommended_install_backend (policy) -------------------
 
-@pytest.mark.parametrize("vendors,expected", [
-    (["apple"], "metal"),
-    ([], "cpu"),
+@pytest.mark.parametrize("vendors,plat,arch,expected", [
+    (["apple"], "darwin", "arm64", "metal"),
+    ([], "linux", "x64", "cpu"),
+    ([], "win32", "x64", "cpu"),
 ])
-def test_install_backend_early_return_branches(vendors, expected):
-    # apple/no-gpu are platform-independent; nvidia is platform-scoped (cuda on
-    # Windows, vulkan elsewhere) and covered by its own tests below.
+def test_install_backend_early_return_branches(monkeypatch, vendors, plat, arch, expected):
+    monkeypatch.setattr(hwdetect.sys, "platform", plat)
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: arch)
     assert hwdetect.recommended_install_backend(Detection(vendors=vendors)) == expected
 
 

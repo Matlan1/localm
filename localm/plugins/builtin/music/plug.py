@@ -237,7 +237,8 @@ async def music(req: MusicRequest, request: Request):
             job.push({"type": "line", "text": message})
             if ok:
                 job.result = track_path.name
-                gallery.stamp_owner("music", track_path.name, owner)
+                gallery.push_stamp_warning(
+                    job, gallery.stamp_owner("music", track_path.name, owner))
             # Recorded before the chat model reload that runs on leaving the block.
             job.mark_outcome("done" if ok else "failed")
         return ok
@@ -341,8 +342,9 @@ async def music_rename(name: str, req: RenameFileRequest):
     sidecar = path.with_suffix(path.suffix + ".json")
     if sidecar.is_file():
         sidecar.rename(target.with_suffix(target.suffix + ".json"))
-    gallery.rename_owner("music", name, target.name)
-    return {"status": "renamed", "name": target.name}
+    warning = gallery.rename_owner("music", name, target.name)
+    return {"status": "renamed", "name": target.name,
+            **({"warning": warning} if warning else {})}
 
 
 @_router.get("/api/music/history")

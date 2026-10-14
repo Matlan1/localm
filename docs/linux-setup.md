@@ -5,8 +5,10 @@ native llama.cpp library and a few setup scripts differ from Windows.
 
 > **macOS is experimental.** On Apple Silicon `setup.sh` defaults to the Metal
 > llama.cpp build (the interactive picker also lists it, as choice 8, on Apple
-> Silicon only); Intel Macs default to the `cpu` backend, since no Metal build
-> targets them. A CI job on an Apple Silicon runner (daily, and on changes to
+> Silicon only); Intel Macs default to the `cpu` backend and get the macOS x64
+> build, since no Metal build targets them. On macOS the picker lists only the
+> backends with a macOS build: `cpu`, `metal` on Apple Silicon, and your own
+> build. A CI job on an Apple Silicon runner (daily, and on changes to
 > detection or provisioning code) installs with `setup.sh --yes`, checks that
 > the backend pick is Metal, runs `localm doctor`, starts a server with no
 > model, and loads a tiny model and generates with it on the CPU (0 GPU
@@ -26,14 +28,14 @@ Needs `git` and `curl`. This clones localm (shallow) to `~/localm` - an
 existing clone there is updated with `git pull --ff-only` instead - and runs
 `bash setup.sh --yes`, which takes the default at every question: the Portable
 choice (uv, its Python and its download cache stay inside the clone), a private
-`.venv`, data in `./home`, the GUI in a browser tab, an application-menu entry
-(a `.desktop` file in `~/.local/share/applications`), and no global `localm`
-command. It auto-detects your GPU and provisions the
+`.venv`, data in `./home`, the GUI in a browser tab, on Linux an
+application-menu entry (a `.desktop` file in `~/.local/share/applications`),
+and no global `localm` command. It auto-detects your GPU and provisions the
 matching llama.cpp backend (CUDA for NVIDIA, HIP for AMD when a system ROCm/HIP
 toolkit is present, Metal on Apple Silicon, Vulkan as the universal fallback
 otherwise, CPU with no GPU - see [gpu-setup.md](gpu-setup.md) for the full
-policy). Piped from `curl`, it skips the plugin picker; run `localm plugin
-setup` afterwards to choose features. `localm` is not on your PATH afterwards:
+policy). `--yes` skips the plugin picker (its default is to install none); run
+`localm plugin setup` afterwards to choose features. `localm` is not on your PATH afterwards:
 run `~/localm/localm.sh <args>`, or run `bash setup.sh` yourself and answer `y`
 to the global-command question.
 
@@ -60,11 +62,13 @@ asks where data should live (`./home`, or a custom path recorded in
 `localm-home.cfg`); asks whether the GUI opens in a browser tab or an app window
 (the app window adds the `desktop` extra); installs localm (extras `coder`,
 `voice`, `monitor`); lets you pick a llama.cpp backend (or copy in your own
-build); installs PyTorch to match; builds the launcher; offers an
-application-menu entry and an optional global `localm` command (a symlink in
-`~/.local/bin`); and runs `localm plugin setup`. Pass `--yes` to take the
-default at each question (the plugin picker still asks when run from a
-terminal). `bash setup.sh --uninstall` removes what setup installed.
+build); installs PyTorch to match; on Linux builds the launcher and offers an
+application-menu entry (macOS gets neither: start LocaLM with
+`./localm-launcher.sh` or `./localm.sh gui`); offers an optional global `localm`
+command (a symlink in `~/.local/bin`); and runs `localm plugin setup`. Pass
+`--yes` to take the default at each question without prompting, including the
+plugin picker, whose default is to install none. `bash setup.sh --uninstall`
+removes what setup installed.
 
 The PyTorch stack is only needed to run HuggingFace (non-GGUF) Transformers
 models; GGUF chat through the llama.cpp backend needs none of it. There is no

@@ -243,7 +243,8 @@ async def video(req: VideoRequest, request: Request):
             job.push({"type": "line", "text": message})
             if ok:
                 job.result = out_path.name
-                gallery.stamp_owner("video", out_path.name, owner)
+                gallery.push_stamp_warning(
+                    job, gallery.stamp_owner("video", out_path.name, owner))
             # Recorded before the chat model reload that runs on leaving the block.
             job.mark_outcome("done" if ok else "failed")
         return ok
@@ -350,8 +351,9 @@ async def video_rename(name: str, req: RenameFileRequest):
     sidecar = path.with_suffix(path.suffix + ".json")
     if sidecar.is_file():
         sidecar.rename(target.with_suffix(target.suffix + ".json"))
-    gallery.rename_owner("video", name, target.name)
-    return {"status": "renamed", "name": target.name}
+    warning = gallery.rename_owner("video", name, target.name)
+    return {"status": "renamed", "name": target.name,
+            **({"warning": warning} if warning else {})}
 
 
 @_router.get("/api/video/history")

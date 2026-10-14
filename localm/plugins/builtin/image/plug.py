@@ -250,7 +250,8 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             def _on_saved(path):
                 saved_names.append(path.name)
                 if in_gallery:
-                    gallery.stamp_owner("image", path.name, owner)
+                    gallery.push_stamp_warning(
+                        job, gallery.stamp_owner("image", path.name, owner))
                 if len(saved_names) == 1:
                     job.result = path.name
                 job.push({"type": "image", "name": path.name})
@@ -291,7 +292,8 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             if ok and not saved_names:
                 job.result = out_path.name
                 if in_gallery:
-                    gallery.stamp_owner("image", out_path.name, owner)
+                    gallery.push_stamp_warning(
+                        job, gallery.stamp_owner("image", out_path.name, owner))
             # Recorded before the chat model reload that runs on leaving the block.
             job.mark_outcome("done" if ok else "failed")
         return ok
@@ -550,7 +552,8 @@ async def create_image(req: ImageGenerationRequest, request: Request):
     ``b64_json`` when none is, where ``url`` is a 400. In privacy mode nothing
     is kept: the image is generated into a private directory, returned as
     ``b64_json`` (the default there; ``url`` is a 400) and the directory is
-    deleted before the response is sent."""
+    deleted before the response is sent. When a gallery image's owner could only
+    be held in memory, the response also carries ``warnings``."""
     prompt = req.prompt.strip()
     if not prompt:
         raise HTTPException(400, "Empty prompt")
@@ -597,6 +600,7 @@ async def create_image(req: ImageGenerationRequest, request: Request):
     private_dir = None
     started_jobs = []
     items = []
+    warnings = []
     try:
         if private:
             from localm.config import temp_dir
@@ -622,6 +626,10 @@ async def create_image(req: ImageGenerationRequest, request: Request):
             if status != "done" or not out_path.is_file():
                 raise HTTPException(
                     502, f"Image generation failed: {last_line or 'no reason was reported'}")
+            if not private:
+                held = gallery.held_stamp_warning("image", out_path.name)
+                if held:
+                    warnings.append(held)
             if fmt == "b64_json":
                 loop = asyncio.get_running_loop()
                 data = await loop.run_in_executor(None, out_path.read_bytes)
@@ -631,7 +639,8 @@ async def create_image(req: ImageGenerationRequest, request: Request):
     finally:
         if private_dir is not None:
             _remove_tree_when_idle(private_dir, started_jobs)
-    return {"created": int(time.time()), "data": items}
+    return {"created": int(time.time()), "data": items,
+            **({"warnings": warnings} if warnings else {})}
 
 
 @_router.get("/api/imagine/file/{name}",
@@ -696,8 +705,9 @@ async def imagine_rename(name: str, req: RenameFileRequest):
     sidecar = path.with_suffix(path.suffix + ".json")
     if sidecar.is_file():
         sidecar.rename(target.with_suffix(target.suffix + ".json"))
-    gallery.rename_owner("image", name, target.name)
-    return {"status": "renamed", "name": target.name}
+    warning = gallery.rename_owner("image", name, target.name)
+    return {"status": "renamed", "name": target.name,
+            **({"warning": warning} if warning else {})}
 
 
 _UPSCALE_DROPPED_META = ("upscaled", "batch", "elapsed_seconds", "created")
@@ -745,7 +755,8 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
                 s, source, upscaler, out_path, extra_meta=extra_meta,
                 write_sidecar=not is_privacy, cancel_check=lambda: job.cancel_requested,
                 on_progress=say,
-                on_saved=lambda p: gallery.stamp_owner("image", p.name, owner),
+                on_saved=lambda p: gallery.push_stamp_warning(
+                    job, gallery.stamp_owner("image", p.name, owner)),
                 on_queue_state=lambda state: job.progress(phase=state))
             job.push({"type": "line", "outcome": True, "text": message})
             if ok:

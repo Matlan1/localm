@@ -25,6 +25,7 @@ gets it.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -191,3 +192,182 @@ def test_a_failed_write_does_not_corrupt_the_existing_index(home, monkeypatch):
     # monkeypatch.undo() (which would also revert the home fixture's config
     # patches and send this read at the real data dir).
     assert gallery._read_index("image") == {"a.png": "owner1"}
+
+
+
+# --------------------------------------------------------------------------- #
+#  The READ half of the same calls: a lock on the index read                   #
+# --------------------------------------------------------------------------- #
+
+_REAL_READ_TEXT = Path.read_text
+
+
+def _flaky_index_read(monkeypatch, index_path: Path, fail_times: int):
+    """Make ``Path.read_text`` raise PermissionError for *index_path* only, the
+    first *fail_times* calls. Counts the index reads."""
+    calls = {"n": 0}
+    real_read_text = Path.read_text
+    target = Path(index_path)
+
+    def _read_text(self, *a, **kw):
+        if Path(self) == target:
+            calls["n"] += 1
+            if calls["n"] <= fail_times:
+                raise PermissionError(32, "The process cannot access the file because "
+                                          "it is being used by another process")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+    return calls
+
+
+def test_stamp_owner_survives_a_transient_read_lock(home, monkeypatch):
+    from localm.media import gallery
+    gallery.stamp_owner("image", "old.png", "ownerA")
+    calls = _flaky_index_read(monkeypatch, gallery._index_path("image"), fail_times=2)
+
+    assert gallery.stamp_owner("image", "new.png", "ownerX") is None
+
+    assert calls["n"] >= 3, "the index read was not retried past the transient lock"
+    assert json.loads(gallery._index_path("image").read_text(encoding="utf-8")) == {
+        "old.png": "ownerA", "new.png": "ownerX"}
+
+
+def test_owner_of_survives_a_transient_read_lock(home, monkeypatch):
+    from localm.media import gallery
+    gallery.stamp_owner("image", "a.png", "ownerA")
+    _flaky_index_read(monkeypatch, gallery._index_path("image"), fail_times=2)
+
+    assert gallery.owner_of("image", "a.png") == "ownerA"
+
+
+def test_a_stamp_that_cannot_read_the_index_is_held_reported_and_written_later(
+        home, monkeypatch):
+    from localm.media import gallery
+    idx_path = gallery._index_path("image")
+    gallery.stamp_owner("image", "old.png", "ownerA")
+    _flaky_index_read(monkeypatch, idx_path, fail_times=10_000)
+
+    warning = gallery.stamp_owner("image", "new.png", "ownerX")
+
+    assert warning and "new.png" in warning and "owner" in warning
+    monkeypatch.setattr(Path, "read_text", _REAL_READ_TEXT)
+    assert gallery.owner_of("image", "new.png") == "ownerX", (
+        "the failed stamp left the artifact unowned, which owner_of treats as open")
+    assert "new.png" not in json.loads(idx_path.read_text(encoding="utf-8"))
+
+    assert gallery.stamp_owner("image", "next.png", "ownerY") is None
+    assert json.loads(idx_path.read_text(encoding="utf-8")) == {
+        "old.png": "ownerA", "new.png": "ownerX", "next.png": "ownerY"}
+
+
+def test_a_stamp_against_a_corrupt_index_is_held_and_survives_the_repair(
+        home, monkeypatch):
+    from localm.media import gallery
+    idx_path = gallery._index_path("image")
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    idx_path.write_text("{ not valid json", encoding="utf-8")
+
+    warning = gallery.stamp_owner("image", "new.png", "ownerX")
+
+    assert warning and "new.png" in warning
+    assert idx_path.read_text(encoding="utf-8") == "{ not valid json"
+    with pytest.raises(gallery.GalleryIndexUnreadable):
+        gallery.owner_of("image", "new.png")
+    idx_path.write_text("{}", encoding="utf-8")
+    assert gallery.owner_of("image", "new.png") == "ownerX"
+
+
+def test_a_stamp_whose_write_never_lands_is_held_and_reported(home, monkeypatch):
+    from localm.media import gallery
+    _flaky_replace(monkeypatch, fail_times=10_000)
+
+    warning = gallery.stamp_owner("image", "new.png", "ownerX")
+
+    assert warning and "new.png" in warning
+    assert gallery.owner_of("image", "new.png") == "ownerX"
+    assert _temps(gallery._index_path("image")) == []
+
+
+def test_a_held_stamp_follows_rename_and_forget(home, monkeypatch):
+    from localm.media import gallery
+    idx_path = gallery._index_path("image")
+    gallery.stamp_owner("image", "seed.png", "ownerA")
+    _flaky_index_read(monkeypatch, idx_path, fail_times=10_000)
+    assert gallery.stamp_owner("image", "a.png", "ownerX")
+    assert gallery.stamp_owner("image", "gone.png", "ownerX")
+    monkeypatch.setattr(Path, "read_text", _REAL_READ_TEXT)
+
+    gallery.rename_owner("image", "a.png", "b.png")
+    gallery.forget_owner("image", "gone.png")
+
+    assert json.loads(idx_path.read_text(encoding="utf-8")) == {
+        "seed.png": "ownerA", "b.png": "ownerX"}
+    assert gallery.owner_of("image", "a.png") is None
+    assert gallery.owner_of("image", "gone.png") is None
+
+
+def test_held_stamps_do_not_leak_into_another_home(home, monkeypatch, tmp_path):
+    from localm.media import gallery
+    _flaky_replace(monkeypatch, fail_times=10_000)
+    assert gallery.stamp_owner("image", "new.png", "ownerX")
+    other = tmp_path / "other-home"
+    other.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(other))
+
+    assert gallery.owner_of("image", "new.png") is None
+
+
+
+def test_a_rename_whose_write_never_lands_keeps_the_owner(home, monkeypatch):
+    from localm.media import gallery
+    gallery.stamp_owner("image", "a.png", "ownerX")
+    _flaky_replace(monkeypatch, fail_times=10_000)
+
+    warning = gallery.rename_owner("image", "a.png", "b.png")
+
+    assert warning and "b.png" in warning
+    assert gallery.owner_of("image", "b.png") == "ownerX"
+    assert gallery.owner_of("image", "a.png") is None
+
+
+def test_a_rename_against_an_unreadable_index_survives_the_repair(home, monkeypatch):
+    from localm.media import gallery
+    idx_path = gallery._index_path("image")
+    gallery.stamp_owner("image", "a.png", "ownerX")
+    good = idx_path.read_text(encoding="utf-8")
+    idx_path.write_text("{ not valid json", encoding="utf-8")
+
+    warning = gallery.rename_owner("image", "a.png", "b.png")
+
+    assert warning and "b.png" in warning
+    assert idx_path.read_text(encoding="utf-8") == "{ not valid json"
+    idx_path.write_text(good, encoding="utf-8")
+    assert gallery.owner_of("image", "b.png") == "ownerX"
+    assert gallery.owner_of("image", "a.png") is None
+    assert gallery.stamp_owner("image", "c.png", "ownerY") is None
+    assert json.loads(idx_path.read_text(encoding="utf-8")) == {
+        "b.png": "ownerX", "c.png": "ownerY"}
+
+
+def test_a_forget_whose_write_never_lands_does_not_raise_and_is_held(home, monkeypatch):
+    from localm.media import gallery
+    idx_path = gallery._index_path("image")
+    gallery.stamp_owner("image", "a.png", "ownerX")
+    _flaky_replace(monkeypatch, fail_times=10_000)
+
+    gallery.forget_owner("image", "a.png")
+
+    assert gallery.owner_of("image", "a.png") is None
+    assert json.loads(idx_path.read_text(encoding="utf-8")) == {"a.png": "ownerX"}
+
+
+def test_the_stamp_warning_names_no_server_path(home, monkeypatch):
+    from localm.media import gallery
+    _flaky_replace(monkeypatch, fail_times=10_000)
+
+    warning = gallery.stamp_owner("image", "new.png", "ownerX")
+
+    assert warning and str(home) not in warning and "gallery_index" not in warning
+    assert gallery.held_stamp_warning("image", "new.png") == warning
+    assert gallery.held_stamp_warning("image", "other.png") is None
