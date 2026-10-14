@@ -85,7 +85,7 @@ def test_config_read_failure_resolves_required(auth, monkeypatch, caplog):
     # rather than downgrading an explicit require_auth: true to "not required".
     def boom():
         raise OSError("config unreadable")
-    monkeypatch.setattr("localm.config.load_config_checked", boom)
+    monkeypatch.setattr("localm.config.load_config", boom)
     with caplog.at_level(logging.WARNING, logger="localm"):
         assert auth.require_auth_enabled() is True
     assert any("require_auth" in r.message and "required" in r.message.lower()
@@ -98,7 +98,7 @@ def test_config_read_failure_env_var_short_circuits(auth, monkeypatch):
     # returns True even with an unreadable config file.
     def boom():
         raise OSError("config unreadable")
-    monkeypatch.setattr("localm.config.load_config_checked", boom)
+    monkeypatch.setattr("localm.config.load_config", boom)
     monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
     assert auth.require_auth_enabled() is True
 

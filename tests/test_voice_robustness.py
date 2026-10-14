@@ -28,7 +28,6 @@ import pytest
 
 from localm import voice
 from tests._voice_stack import voice_stack  # noqa: F401
-from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)
@@ -90,7 +89,8 @@ def test_stt_model_cached_resolves_hub_path_without_import(monkeypatch, tmp_path
     # snapshot file the resolver expects inside localm's OWN cache dir; it must
     # report cached=True without importing huggingface_hub, and False when absent.
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
-    set_config(monkeypatch, lambda: {"voice_stt_model": "base"})
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "load_config", lambda: {"voice_stt_model": "base"})
 
     cached, name = voice.stt_model_cached()
     assert (cached, name) == (False, "base")     # empty cache -> not cached
@@ -273,7 +273,7 @@ def test_real_transcription_runs_in_worker(monkeypatch):
     # net_mode=allow rather than whatever the box's config says.
     base["net_mode"] = "allow"
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    set_config(monkeypatch, lambda: base)
+    monkeypatch.setattr(_cfg, "load_config", lambda: base)
     try:
         text = voice.transcribe_bytes(_make_wav())
         assert isinstance(text, str)

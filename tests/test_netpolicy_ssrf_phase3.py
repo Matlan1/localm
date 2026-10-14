@@ -25,7 +25,6 @@ from localm.netpolicy import NetworkPolicyError, check_url
 
 def _with_config(monkeypatch, cfg: dict):
     monkeypatch.setattr("localm.config.load_config", lambda: cfg)
-    monkeypatch.setattr("localm.config.load_config_checked", lambda: (cfg, True))
 
 
 def _no_dns(monkeypatch):

@@ -89,28 +89,19 @@ class NetworkPolicyError(Exception):
 def network_mode() -> str:
     """Resolve the active mode: LOCALM_NET_MODE env > config > "ask".
 
-    A config-read failure resolves to "off", not "ask", and logs a warning.
-    That covers both a load that raises and a config.json (with its .bak) that
-    is present but cannot be read, which load_config_checked reports as
-    read_ok False. An unset or unrecognised config value resolves to "ask"."""
+    A config-read failure resolves to "off", not "ask", and logs a warning. An
+    unset or unrecognised config value resolves to "ask"."""
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     if env in NET_MODES:
         return env
     try:
-        from localm.config import load_config_checked
-        cfg, read_ok = load_config_checked()
+        from localm.config import load_config
+        mode = str(load_config().get("net_mode", "ask")).strip().lower()
     except Exception as exc:
         logger.warning("netpolicy: could not load config (%s); resolving "
                        "net_mode to 'off' (fail-safe) so an unreadable config "
                        "cannot silently re-enable network access", exc)
         return "off"
-    if not read_ok:
-        logger.warning("netpolicy: config.json is present but unreadable; "
-                       "resolving net_mode to 'off' (fail-safe) so an "
-                       "unreadable config cannot silently re-enable network "
-                       "access")
-        return "off"
-    mode = str(cfg.get("net_mode", "ask")).strip().lower()
     return mode if mode in NET_MODES else "ask"
 
 
@@ -216,10 +207,9 @@ def check_url(url: str, *, allow_when_off: bool = False) -> None:
     resolved-IP class.
 
     Reads the config exactly ONCE, up front: net_mode, net_allow_model_downloads
-    and the net_deny/net_allow lists come from the same snapshot. A load that
-    raises, or a config.json (with its .bak) that is present but unreadable
-    (read_ok False), has exactly one outcome - refuse - no matter what
-    LOCALM_NET_MODE says.
+    and the net_deny/net_allow lists come from the same snapshot, so a read
+    failure has exactly one outcome - refuse - no matter what LOCALM_NET_MODE
+    says.
 
     *allow_when_off*, default False: pass True only from an explicit-download
     caller (a model pull's SSRF/redirect validation, HuggingFace search) so
@@ -228,24 +218,17 @@ def check_url(url: str, *, allow_when_off: bool = False) -> None:
     toggle, the jobs webtool) - those stay governed by net_mode alone.
     """
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
-    unreadable = NetworkPolicyError(
-        "Network policy configuration could not be read; refusing this "
-        "request as a precaution. Retry once the config is readable.")
     try:
-        from localm.config import load_config_checked
-        cfg, read_ok = load_config_checked()
+        from localm.config import load_config
+        cfg = load_config()
     except Exception as exc:
         logger.warning(
             "netpolicy: could not load config (%s); refusing this request "
             "(fail-safe) rather than resolving net_mode and net_deny/"
             "net_allow from different reads", exc)
-        raise unreadable from exc
-    if not read_ok:
-        logger.warning(
-            "netpolicy: config.json is present but unreadable; refusing this "
-            "request (fail-safe) rather than enforcing net_mode, net_deny and "
-            "net_allow from defaults")
-        raise unreadable
+        raise NetworkPolicyError(
+            "Network policy configuration could not be read; refusing this "
+            "request as a precaution. Retry once the config is readable.") from exc
 
     mode = env if env in NET_MODES else str(cfg.get("net_mode", "ask")).strip().lower()
     if mode not in NET_MODES:

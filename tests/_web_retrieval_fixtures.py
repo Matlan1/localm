@@ -15,7 +15,6 @@ import urllib.parse
 from typing import Callable, Optional
 
 import requests
-from tests._net_config import set_config
 
 DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"
@@ -38,7 +37,7 @@ def allow_public(monkeypatch, **extra_cfg) -> dict:
     dict."""
     cfg = {"net_mode": "allow", **extra_cfg}
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    set_config(monkeypatch, lambda: cfg)
+    monkeypatch.setattr("localm.config.load_config", lambda: cfg)
     monkeypatch.setattr("socket.getaddrinfo", public_dns)
     no_sleep(monkeypatch)
     return cfg

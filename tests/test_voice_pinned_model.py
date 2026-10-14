@@ -14,7 +14,6 @@ import huggingface_hub
 import pytest
 
 from localm import voice
-from tests._net_config import set_config
 
 BODY = b"whisper-model-bytes" * 100
 REPO = "Systran/faster-whisper-base"
@@ -26,7 +25,9 @@ OLD_COMMIT = "1" * 40
 def _home(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    set_config(monkeypatch, lambda: {"voice_stt_model": "base", "net_mode": "allow"})
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "load_config",
+                        lambda: {"voice_stt_model": "base", "net_mode": "allow"})
 
 
 @pytest.fixture()
@@ -104,7 +105,9 @@ class TestPrefetch:
         assert voice.stt_model_cached() == (False, "base")
 
     def test_an_unpinned_model_is_fetched_without_a_revision(self, hub, monkeypatch):
-        set_config(monkeypatch, lambda: {"voice_stt_model": "Systran/faster-whisper-large-v3",
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "load_config",
+                            lambda: {"voice_stt_model": "Systran/faster-whisper-large-v3",
                                      "net_mode": "allow"})
 
         def snapshot_download(repo_id, **kw):

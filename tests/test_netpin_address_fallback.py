@@ -17,13 +17,12 @@ import urllib3.connection
 
 from localm import netpin, netpolicy
 from localm.netpolicy import NetworkPolicyError
-from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)
 def _allow(monkeypatch):
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
-    set_config(monkeypatch, lambda: {})
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
 
 
 def _infos(*ips):
@@ -83,7 +82,8 @@ class TestResolvePinnedAll:
             netpolicy._resolve_pinned_all("internal.example")
 
     def test_private_kept_when_configured(self, monkeypatch):
-        set_config(monkeypatch, lambda: {"net_allow_private": True})
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"net_allow_private": True})
         monkeypatch.setattr("socket.getaddrinfo",
                             _infos("127.0.0.1", "93.184.216.34"))
         assert netpolicy._resolve_pinned_all("lan.example") == [
@@ -215,7 +215,8 @@ def test_full_fetch_falls_back_across_resolved_addresses(echo_server, dial_log,
     """End to end through safe_fetch_bytes: the host resolves to an
     unreachable address first and a reachable one second; the fetch succeeds
     on the second."""
-    set_config(monkeypatch, lambda: {"net_allow_private": True})
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"net_allow_private": True})
     monkeypatch.setattr("socket.getaddrinfo",
                         _infos("192.0.2.10", "127.0.0.1"))
     dial_log["refuse"] = {"192.0.2.10"}

@@ -27,7 +27,6 @@ from tests._web_retrieval_fixtures import (
     ddg_no_results,
     searx_json,
 )
-from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)
@@ -118,7 +117,8 @@ class TestDuckDuckGoHTMLProvider:
                                    "could not read results from.")
 
     def test_policy_off_refuses_before_any_request(self, monkeypatch):
-        set_config(monkeypatch, lambda: {"net_mode": "off"})
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"net_mode": "off"})
         t = Transport().install(monkeypatch)
         with pytest.raises(netpolicy.NetworkPolicyError):
             DuckDuckGoHTMLProvider().search("q", 5)
@@ -195,7 +195,8 @@ class TestProviderFromConfig:
         assert p.base_url == "http://127.0.0.1:8080"
 
     def test_live_config_read_when_none_given(self, monkeypatch):
-        set_config(monkeypatch, lambda: {"net_search_url": "https://s.example"})
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"net_search_url": "https://s.example"})
         assert isinstance(provider_from_config(), SearXNGProvider)
 
     def test_unreadable_config_selects_duckduckgo_and_warns(self, monkeypatch,

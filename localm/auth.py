@@ -355,24 +355,23 @@ def require_auth_enabled() -> bool:
     ``"require_auth": true``. Default false keeps loopback installs keyless.
 
     On a config-read failure this resolves to True: a security kill-switch
-    resolves toward MORE restriction when config is unreadable, never less.
-    That covers a load that raises and a config.json (with its .bak) that is
-    present but cannot be read (read_ok False)."""
+    resolves toward MORE restriction when config is unreadable, never less."""
     if os.environ.get(REQUIRE_ENV_VAR, "").strip().lower() in _TRUTHY:
         return True
     try:
-        from localm.config import load_config_checked
-        cfg, read_ok = load_config_checked()
-        if not read_ok:
-            logger.warning(
-                "config.json is present but unreadable; cannot confirm "
-                "require_auth - treating as required (fail closed) until it "
-                "can be read")
-            return True
-        return bool(cfg.get("require_auth", False))
+        from localm.config import load_config
+        return bool(load_config().get("require_auth", False))
     except Exception:
-        # The load itself raised (e.g. ensure_dirs() on an inaccessible home
-        # dir): fail closed, same as an unreadable config.json above.
+        # Fail CLOSED, not open: an admin who explicitly set require_auth: true
+        # must never silently drop to open mode because of a read glitch.
+        # load_config() itself only raises here for something severe (e.g.
+        # ensure_dirs() hitting an inaccessible home dir) - ordinary
+        # corrupt/locked config.json is already absorbed by its own .bak/retry
+        # fallback in config._read_json and never reaches this except - so an
+        # install that never touched require_auth hitting this rare path gets a
+        # temporary lockout instead of a silently-open server. A
+        # config-independent fail-closed switch is LOCALM_REQUIRE_AUTH, checked
+        # earlier, ahead of this try.
         logger.warning(
             "config unreadable; cannot confirm require_auth - treating as "
             "required (fail closed) until it can be read")

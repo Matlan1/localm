@@ -22,7 +22,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from localm.inference import embedder as emb
-from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +35,7 @@ def _cfg(monkeypatch, **overrides):
     base = {"embedding_model": "bge-small-en-v1.5", "n_gpu_layers": 99,
             "net_mode": "off"}
     base.update(overrides)
-    set_config(monkeypatch, lambda: dict(base))
+    monkeypatch.setattr("localm.config.load_config", lambda: dict(base))
 
 
 # --------------------------------------------------------------------------- #
@@ -637,7 +636,8 @@ def test_embed_texts_none_when_no_model(monkeypatch):
     is attempted AT MOST once - a batch of embed calls must not re-download per
     chunk. (The filesystem is still re-checked each call; only the download probe
     is latched.)"""
-    set_config(monkeypatch, lambda: {"embedding_model": "bge-small-en-v1.5",
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "ask"})
     downloads = {"n": 0}
 
@@ -657,7 +657,8 @@ def test_get_embedder_picks_up_model_installed_mid_session(monkeypatch):
     """A model installed into a RUNNING server (``localm setup-embeddings``) is
     picked up on the NEXT call, without a restart: the 'no model' result is not
     latched for the process lifetime."""
-    set_config(monkeypatch, lambda: {"embedding_model": "bge-small-en-v1.5",
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "ask"})
     state = {"path": None}
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
@@ -685,7 +686,8 @@ def test_get_embedder_picks_up_model_installed_mid_session(monkeypatch):
 def test_get_embedder_on_progress_announces_stages_on_success(monkeypatch):
     """on_progress receives coarse stage announcements around the load steps.
     Only the PARENT-side IsolatedEmbedder construction is faked here."""
-    set_config(monkeypatch, lambda: {"embedding_model": "bge-small-en-v1.5",
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "off"})
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
                         lambda *, allow_download=None, on_progress=None: "/models/bge-small.gguf")
@@ -767,7 +769,8 @@ def test_get_embedder_progress_states_the_real_load_bound(monkeypatch):
 
 
 def test_get_embedder_on_progress_reports_no_model_available(monkeypatch):
-    set_config(monkeypatch, lambda: {"embedding_model": "bge-small-en-v1.5",
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "off"})
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
                         lambda *, allow_download=None, on_progress=None: None)
@@ -778,7 +781,8 @@ def test_get_embedder_on_progress_reports_no_model_available(monkeypatch):
 
 
 def test_get_embedder_on_progress_reports_load_failure(monkeypatch):
-    set_config(monkeypatch, lambda: {"embedding_model": "x", "n_gpu_layers": 99,
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "x", "n_gpu_layers": 99,
                                  "net_mode": "off"})
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
                         lambda *, allow_download=None: "/models/not-an-embedder.gguf")
@@ -801,7 +805,7 @@ def test_get_embedder_recovers_after_the_config_changes_to_a_good_spec(monkeypat
     attempt."""
     cfg = {"embedding_model": "broken-model.gguf", "n_gpu_layers": 99,
            "net_mode": "off"}
-    set_config(monkeypatch, lambda: dict(cfg))
+    monkeypatch.setattr("localm.config.load_config", lambda: dict(cfg))
     paths = {"broken-model.gguf": "/models/broken-model.gguf",
              "good-model.gguf": "/models/good-model.gguf"}
     monkeypatch.setattr(
@@ -840,7 +844,8 @@ def test_get_embedder_does_not_retry_the_load_for_the_same_still_broken_spec(
         monkeypatch):
     """A genuinely UNCHANGED spec that already failed to load is attempted
     once, not on every call."""
-    set_config(monkeypatch, lambda: {"embedding_model": "broken-model.gguf",
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "broken-model.gguf",
                                  "n_gpu_layers": 99, "net_mode": "off"})
     monkeypatch.setattr(
         emb, "resolve_embedding_model_path",
@@ -865,7 +870,8 @@ def test_get_embedder_does_not_retry_the_load_for_the_same_still_broken_spec(
 def test_get_embedder_on_progress_raising_sink_does_not_abort_load(monkeypatch):
     """A broken progress sink must not turn a successful load into a
     failure."""
-    set_config(monkeypatch, lambda: {"embedding_model": "bge-small-en-v1.5",
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
                                  "n_gpu_layers": 99, "net_mode": "off"})
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
                         lambda *, allow_download=None, on_progress=None: "/models/bge-small.gguf")
@@ -891,7 +897,8 @@ def test_get_embedder_on_progress_raising_sink_does_not_abort_load(monkeypatch):
 def test_loaded_dim_and_last_error_track_state(monkeypatch):
     """A load FAILURE records the reason in last_error() and reports no dim; a
     success clears the error and reports the dimension."""
-    set_config(monkeypatch, lambda: {"embedding_model": "x", "n_gpu_layers": 99,
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "x", "n_gpu_layers": 99,
                                  "net_mode": "off"})
     monkeypatch.setattr(emb, "resolve_embedding_model_path",
                         lambda *, allow_download=None: "/models/not-an-embedder.gguf")
@@ -1017,7 +1024,7 @@ def _isolated_embedder(monkeypatch, *, split_devices=0, check_vram=None, n_gpu_l
     monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
     # The embedder gates on applied_split_device_count, not split_device_count.
     monkeypatch.setattr("localm.discover.applied_split_device_count", lambda cfg: split_devices)
-    set_config(monkeypatch, lambda: {})
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
     monkeypatch.setattr(emb.IsolatedEmbedder, "_check_vram",
                         check_vram if check_vram is not None else (lambda self: None))
     return emb.IsolatedEmbedder("model.gguf", n_gpu_layers=n_gpu_layers)
@@ -1064,7 +1071,7 @@ def test_isolated_embedder_multi_gpu_uses_split_shortfall_not_check_vram(monkeyp
     monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
     monkeypatch.setattr("localm.discover.applied_split_device_count", lambda cfg: 2)
     monkeypatch.setattr("localm.discover.gpu_split_shortfall", _shortfall)
-    set_config(monkeypatch, lambda: {})
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
 
     e = emb.IsolatedEmbedder(str(f), n_gpu_layers=99)
     assert calls["shortfall"] == 1
@@ -1096,7 +1103,7 @@ def test_isolated_embedder_vulkan_split_skips_per_device_and_still_loads(
     monkeypatch.setattr("localm.inference._embedder_runner.EmbedderRunner", _StubRunner)
     monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: True)
     monkeypatch.setattr("localm.discover.list_gpus", lambda *a, **k: list(blind))
-    set_config(monkeypatch, lambda: {"gpu_split_indices": [0, 1]})
+    monkeypatch.setattr("localm.config.load_config", lambda: {"gpu_split_indices": [0, 1]})
 
     with caplog.at_level(logging.INFO, logger="localm"):
         e = emb.IsolatedEmbedder(str(f), n_gpu_layers=99)   # must NOT raise
@@ -1130,7 +1137,9 @@ def test_isolated_embedder_split_preflight_admits_on_stale_probe(monkeypatch, tm
     monkeypatch.setattr("localm.discover.applied_split_device_count", lambda cfg: 2)
     monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque", lambda: False)
     monkeypatch.setattr("localm.discover.list_gpus", _list_gpus)
-    set_config(monkeypatch, lambda: {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]})
+    monkeypatch.setattr(
+        "localm.config.load_config",
+        lambda: {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]})
 
     e = emb.IsolatedEmbedder(str(f), n_gpu_layers=99)   # must NOT raise
     assert e.dim == 5
@@ -1265,7 +1274,8 @@ def test_real_gguf_embeddings_via_isolated_embedder(monkeypatch):
     """The isolation-wrapped path (IsolatedEmbedder / get_embedder(), running
     the real native load in a CHILD process) produces the same real,
     semantically-correct embeddings as the raw GGUFEmbedder class above."""
-    set_config(monkeypatch, lambda: {"embedding_model": _EMBED_MODEL, "n_gpu_layers": 99,
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": _EMBED_MODEL, "n_gpu_layers": 99,
                                  "net_mode": "off"})
     e = emb.get_embedder()
     assert e is not None and e.dim > 0

@@ -9,7 +9,6 @@ import logging
 import pytest
 
 from localm.inference import embedder
-from tests._net_config import set_config
 
 MB = 1024 * 1024
 
@@ -144,7 +143,8 @@ class TestGetEmbedderForwardsProgress:
         monkeypatch.setattr(embedder, "_EMBEDDER", None)
         monkeypatch.setattr(embedder, "_TRIED_DOWNLOAD", False)
         monkeypatch.setattr(embedder, "_LOAD_FAILED_SPEC", None)
-        set_config(monkeypatch, lambda: {"embedding_model": "bge-small-en-v1.5",
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"embedding_model": "bge-small-en-v1.5",
                                      "net_mode": "allow"})
 
         def _resolve(*, allow_download=None, on_progress=None):

@@ -29,7 +29,6 @@ def _clean_env(monkeypatch):
 
 def _with_config(monkeypatch, cfg: dict):
     monkeypatch.setattr("localm.config.load_config", lambda: cfg)
-    monkeypatch.setattr("localm.config.load_config_checked", lambda: (cfg, True))
 
 
 # ------------------------------------------------------------------ #
@@ -56,12 +55,12 @@ class TestNetworkMode:
         _with_config(monkeypatch, {})
         assert network_mode() == "ask"
 
-    def test_config_load_raising_resolves_off(self, monkeypatch, caplog):
+    def test_config_read_failure_resolves_off(self, monkeypatch, caplog):
         # An unreadable config must NOT downgrade an explicit net_mode="off"
         # kill switch to "ask". It resolves to "off" and surfaces a warning.
         def boom():
             raise OSError("config unreadable")
-        monkeypatch.setattr("localm.config.load_config_checked", boom)
+        monkeypatch.setattr("localm.config.load_config", boom)
         with caplog.at_level(logging.WARNING, logger="localm"):
             assert network_mode() == "off"
         assert any("net_mode" in r.message and "off" in r.message.lower()
@@ -75,7 +74,7 @@ class TestNetworkMode:
 
         def boom():
             raise OSError("config unreadable")
-        monkeypatch.setattr("localm.config.load_config_checked", boom)
+        monkeypatch.setattr("localm.config.load_config", boom)
         assert network_mode() == "allow"
 
 
@@ -214,7 +213,7 @@ class TestCheckUrl:
 
         def boom():
             raise OSError("config unreadable")
-        monkeypatch.setattr("localm.config.load_config_checked", boom)
+        monkeypatch.setattr("localm.config.load_config", boom)
         with pytest.raises(NetworkPolicyError):
             check_url("https://denied.example/")
 

@@ -18,7 +18,6 @@ from unittest.mock import patch
 
 from localm.audit import SessionMode
 from localm.plugins.coder.agent.constants import _BROWSER_TOOLS
-from tests._net_config import set_config
 
 
 class _Stub:
@@ -156,15 +155,18 @@ class TestTheRouteDecidesFromScopeAndSetting:
 
     def test_owner_still_needs_the_setting_on(self, monkeypatch):
         fn = self._helper()
-        set_config(monkeypatch, lambda: {"browser_enabled": False})
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"browser_enabled": False})
         assert fn(True, set()) is False
-        set_config(monkeypatch, lambda: {"browser_enabled": True})
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"browser_enabled": True})
         assert fn(True, set()) is True
 
     def test_a_key_without_the_capability_never_browses(self, monkeypatch):
         from localm import scopes as S
         fn = self._helper()
-        set_config(monkeypatch, lambda: {"browser_enabled": True})
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"browser_enabled": True})
         assert fn(False, {S.CODER}) is False
         assert fn(False, {S.CODER_FULL}) is False, \
             "shell access must not imply browser access"
