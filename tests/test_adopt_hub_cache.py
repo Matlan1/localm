@@ -5,6 +5,7 @@ from the snapshot folder, never from ``blobs/``, in both the symlink layout
 
 import hashlib
 import os
+import struct
 import time
 from pathlib import Path
 
@@ -171,6 +172,48 @@ class TestHubCacheRoot:
         assert add_local(str(root), on_duplicate="skip") is True
         assert add_local(str(root), on_duplicate="skip") is True
         assert set(load_registry()) == {"org-alpha-GGUF", "org-beta"}
+
+
+def _typed_gguf_bytes(general_type: str) -> bytes:
+    """A version 3 GGUF header declaring ``general.type``, padded past the size floor."""
+    key, val = b"general.type", general_type.encode()
+    body = (struct.pack("<Q", len(key)) + key + struct.pack("<I", 8)
+            + struct.pack("<Q", len(val)) + val)
+    return b"GGUF" + struct.pack("<I", 3) + struct.pack("<QQ", 0, 1) + body + b"\0" * 4096
+
+
+def _age(snap: Path) -> None:
+    old = time.time() - 3600
+    for f in snap.rglob("*"):
+        if f.is_file():
+            os.utime(f, (old, old))
+
+
+class TestUnusableGgufsAreSkipped:
+    def test_an_importance_matrix_beside_the_model_is_not_registered(
+            self, tmp_path, isolated_home, layout, capsys):
+        root = tmp_path / "hub"
+        root.mkdir()
+        snap = _repo(root, layout, "org/alpha-GGUF", _REV_A, {
+            "alpha.Q4_K_M.gguf": _gguf_bytes("alpha"),
+            "imatrix.gguf": _typed_gguf_bytes("imatrix"),
+        })
+        _age(snap)
+        assert add_local(str(root)) is True
+        reg = load_registry()
+        assert set(reg) == {"org-alpha-GGUF"}
+        assert Path(reg["org-alpha-GGUF"]["path"]).name == "alpha.Q4_K_M.gguf"
+        assert "imatrix.gguf" in capsys.readouterr().out
+
+    def test_a_repo_holding_only_an_importance_matrix_registers_nothing(
+            self, tmp_path, isolated_home, layout):
+        root = tmp_path / "hub"
+        root.mkdir()
+        snap = _repo(root, layout, "org/imat", _REV_A,
+                     {"imatrix.gguf": _typed_gguf_bytes("imatrix")})
+        _age(snap)
+        assert add_local(str(root)) is False
+        assert load_registry() == {}
 
 
 class TestRevisions:
