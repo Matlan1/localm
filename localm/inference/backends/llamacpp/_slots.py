@@ -20,7 +20,15 @@ first takes the cells idle slots keep for prefix reuse (least recently used
 first), then a bigger context, and otherwise waits, FIFO, while the other
 replies run. Growing the context with replies in flight re-decodes their
 cached tokens into the new context, and only happens when the VRAM check says
-the bigger cache fits on the GPU.
+the bigger cache fits on the GPU. A reply with no budget that needs more cells
+while other replies hold them pauses until one of those ends; it ends with
+"length" only when every other running reply is paused the same way.
+
+While one native decode runs for ``STEP_BEAT_S`` or longer, a second thread
+repeats the last status to every cancelled reply and, for a decode that carries
+prompt tokens or rebuilds the cache, to every reply that already produced a
+token, for at most ``HEAVY_BEAT_LIMIT_S`` (``LIGHT_BEAT_LIMIT_S`` for any other
+decode) per native call.
 
 Lock order: the model's ``LlamaCpp._gen_lock`` (``ops.lock()``) is taken
 before ``SlotScheduler._cond``, never after. See
@@ -40,6 +48,7 @@ from typing import Any, Callable, Iterator, Optional
 from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
 
 GENERATING_STATUS = "Generating response..."
+PROCESSING_STATUS = "Processing prompt..."
 UNLOADED_MESSAGE = "Model was unloaded during generation - request aborted."
 
 RESERVE_PAD = 64          # cells reserved past prompt + budget
@@ -47,6 +56,9 @@ UNLIMITED_STEP = 512      # cells a reply with no budget reserves at a time
 WAIT_HEARTBEAT_S = 5.0    # a waiting request receives its status this often
 POLL_S = 0.25             # how often a reader blocked on its stream polls stop
 BATCH_CAP = 2048          # most tokens one decode carries
+STEP_BEAT_S = 1.0         # a native decode this long starts sending progress
+HEAVY_BEAT_LIMIT_S = 900.0  # progress stops once a prompt-carrying decode runs this long
+LIGHT_BEAT_LIMIT_S = 120.0  # same, for a decode of generated tokens only
 
 # (token, position, sequence id, wants logits)
 Entry = tuple[int, int, int, bool]
@@ -87,7 +99,9 @@ class SlotStream:
     iteration ends. Iteration raises the exception that ended the reply when
     one did. Status texts reach *on_status* on the iterating thread; the
     waiting status repeats every ``WAIT_HEARTBEAT_S`` while the request waits,
-    and the last status repeats while the scheduler rebuilds the cache.
+    and the last status (``PROCESSING_STATUS`` before any) repeats while the
+    scheduler rebuilds the cache, while the reply waits for cells, and while a
+    long native decode runs (see the module docstring).
 
     :meth:`close` cancels the reply; it is idempotent and safe from any
     thread. While blocked waiting for an item, the iterator polls
@@ -139,8 +153,8 @@ class SlotStream:
                     self._on_status(item.text)
                 continue
             if isinstance(item, _Heartbeat):
-                if self._on_status is not None and self._last_status is not None:
-                    self._on_status(self._last_status)
+                if self._on_status is not None:
+                    self._on_status(self._last_status or PROCESSING_STATUS)
                 continue
             self._finished = True
             self.finish_reason = item.reason
@@ -167,6 +181,7 @@ class _Slot:
         self.reserve = 0
         self.first = False                # the next sample is the reply's first
         self.extend = False               # needs more reserved cells before its next decode
+        self.room_wait = False            # paused until another reply frees cells
         self.order = 0                    # admission order
         self.last_used = 0.0
 
@@ -204,6 +219,9 @@ class SlotScheduler:
         self._touched = False   # a slot decoded since the last exclusive section
         self._clock = clock
         self._admissions = itertools.count()
+        self._in_scope = False  # the scheduler thread is inside its stderr scope
+        self._native: tuple[Optional[float], bool] = (None, False)
+        self._beat_stop = threading.Event()
 
     @property
     def n_slots(self) -> int:
@@ -240,6 +258,8 @@ class SlotScheduler:
                 self._thread = threading.Thread(
                     target=self._run, name="localm-gguf-slots", daemon=True)
                 self._thread.start()
+                threading.Thread(target=self._beat, name="localm-gguf-slots-beat",
+                                 daemon=True).start()
             self._cond.notify_all()
         return stream
 
@@ -257,7 +277,8 @@ class SlotScheduler:
     def exclusive(self, on_wait: Optional[Callable[[], None]] = None,
                   stop_requested: Optional[Callable[[], bool]] = None) -> Iterator[None]:
         """Hold the model alone: admits nothing new, waits until every active
-        reply has ended, empties the KV cache when a slot used it since the last
+        reply has ended and the scheduler thread has left its stderr scope,
+        empties the KV cache when a slot used it since the last
         exclusive section, and on exit marks the cache as holding tokens no slot
         records. While it waits, *on_wait* is called at once and then every
         ``WAIT_HEARTBEAT_S`` seconds. *stop_requested*, when given, is polled
@@ -279,7 +300,7 @@ class SlotScheduler:
                     if self._closed:
                         self._cond.notify_all()
                         raise RuntimeError(UNLOADED_MESSAGE)
-                    if not (self._exclusive_held or self._busy()):
+                    if not (self._exclusive_held or self._busy() or self._in_scope):
                         self._exclusive_held = True
                         break
                 now = time.monotonic()
@@ -288,7 +309,7 @@ class SlotScheduler:
                     on_wait()
                     last_beat = now
                 with self._cond:
-                    if self._exclusive_held or self._busy():
+                    if self._exclusive_held or self._busy() or self._in_scope:
                         self._cond.wait(WAIT_HEARTBEAT_S if stop_requested is None else POLL_S)
         finally:
             with self._cond:
@@ -316,6 +337,7 @@ class SlotScheduler:
             self._closed = True
             self._cond.notify_all()
             thread = self._thread
+        self._beat_stop.set()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
         if thread is None or not thread.is_alive():
@@ -346,14 +368,20 @@ class SlotScheduler:
                         self._cond.wait(WAIT_HEARTBEAT_S if self._queue else None)
                     if self._closed:
                         break
-                with self._ops.stderr_scope():
-                    while True:
-                        with self._cond:
-                            if self._closed or not self._has_work():
+                    self._in_scope = True
+                try:
+                    with self._ops.stderr_scope():
+                        while True:
+                            with self._cond:
+                                if self._closed or not self._has_work():
+                                    break
+                            if not self._step():
+                                running = False
                                 break
-                        if not self._step():
-                            running = False
-                            break
+                finally:
+                    with self._cond:
+                        self._in_scope = False
+                        self._cond.notify_all()
         except BaseException as exc:
             logger.exception("gguf slots: scheduler failed")
             self._abort(exc)
@@ -369,6 +397,7 @@ class SlotScheduler:
             self._queue.clear()
             active = [s for s in self._slots if s.stream is not None]
             self._cond.notify_all()
+        self._beat_stop.set()
         for slot in active:
             self._end(slot, "error", error, drop=False)
         for stream in queued:
@@ -382,7 +411,8 @@ class SlotScheduler:
             self._reap()
             self._extend_pending()
             with self._cond:
-                admitting = self._admitting()
+                admitting = self._admitting() and not any(
+                    s.room_wait for s in self._slots if s.stream is not None)
                 if not admitting:
                     self._heartbeat_queued()
             if admitting:
@@ -392,7 +422,7 @@ class SlotScheduler:
                 return True
             self._touched = True
             entries = [e for part in plan.values() for e in part[0]]
-            rc = self._ops.decode(entries)
+            rc = self._decode(entries, len(entries) > len(plan))
             if rc == 0:
                 offset = 0
                 rows = {}
@@ -405,6 +435,35 @@ class SlotScheduler:
             else:
                 self._isolate(plan, rc)
         return True
+
+    def _decode(self, entries: list[Entry], heavy: bool) -> int:
+        """``ops.decode(entries)``, recorded for :meth:`_beat`. *heavy* marks a
+        decode that carries prompt or cached tokens."""
+        self._native = (time.monotonic(), heavy)
+        try:
+            return self._ops.decode(entries)
+        finally:
+            self._native = (None, False)
+
+    def _beat(self) -> None:
+        """Beat thread: every ``STEP_BEAT_S`` while one native decode has run
+        that long and less than its limit, repeat the last status to the
+        replies that are cancelled and, during a heavy decode, to the replies
+        that already produced a token. Returns once the scheduler closes."""
+        while not self._beat_stop.wait(STEP_BEAT_S):
+            since, heavy = self._native
+            if since is None:
+                continue
+            elapsed = time.monotonic() - since
+            limit = HEAVY_BEAT_LIMIT_S if heavy else LIGHT_BEAT_LIMIT_S
+            if elapsed < STEP_BEAT_S or elapsed >= limit:
+                continue
+            with self._cond:
+                targets = [s.stream for s in self._slots if s.stream is not None
+                           and (s.stream.cancelled.is_set() or (heavy and not s.first))]
+                targets.extend(q for q in self._queue if q.cancelled.is_set())
+            for stream in targets:
+                stream._put(_HEARTBEAT)
 
     # -- admission ------------------------------------------------------- #
 
@@ -538,7 +597,7 @@ class SlotScheduler:
                 chunk = tokens[i:i + step]
                 entries = [(tok, i + j, slot.seq, j == len(chunk) - 1)
                            for j, tok in enumerate(chunk)]
-                rc = self._ops.decode(entries)
+                rc = self._decode(entries, True)
                 if rc != 0:
                     self._end(slot, "error", RuntimeError(
                         f"llama_decode failed while rebuilding the cache (code {rc})"))
@@ -567,6 +626,7 @@ class SlotScheduler:
         slot.generated = 0
         slot.first = True
         slot.extend = False
+        slot.room_wait = False
         slot.reserve = stream.reserve
         slot.order = next(self._admissions)
         logger.info("gguf slots: slot %d prefill starting, %d prompt token(s), %d reused",
@@ -597,7 +657,7 @@ class SlotScheduler:
                     "the reply had nothing left to decode"))
                 active.remove(slot)
         for slot in active:
-            if slot.pending is not None:
+            if slot.pending is not None and not slot.room_wait:
                 plan[slot.seq] = ([(slot.pending, len(slot.kv), slot.seq, True)], 0)
         room = min(self._ops.n_batch(), BATCH_CAP) - len(plan)
         for slot in active:
@@ -656,19 +716,42 @@ class SlotScheduler:
                 slot.extend = True
 
     def _extend_pending(self) -> None:
-        """Reserve more cells for the replies whose next decode needs them, or
-        end them with "length". Runs before a batch is composed, never while one
-        is being sampled: a growth recreates the context the batch's rows are
-        read from."""
+        """Reserve more cells for the replies whose next decode needs them. A
+        reply whose cells other replies hold pauses while any running reply is
+        not paused itself; otherwise it ends with "length". Runs before a batch
+        is composed, never while one is being sampled: a growth recreates the
+        context the batch's rows are read from."""
+        from localm.debuglog import logger
         for slot in self._active():
-            if slot.extend:
+            if not slot.extend or slot.stream is None:
+                continue
+            got = self._extend(slot)
+            stream = slot.stream
+            if stream is None:
+                continue
+            if got is True:
                 slot.extend = False
-                if not self._extend(slot) and slot.stream is not None:
-                    self._end(slot, "length")
+                slot.room_wait = False
+                continue
+            if got is _WAIT and any(o is not slot and o.stream is not None
+                                    and not o.room_wait for o in self._slots):
+                now = self._clock()
+                if not slot.room_wait:
+                    slot.room_wait = True
+                    stream.waiting_heard_at = now
+                    logger.info("gguf slots: slot %d waits for cells other replies hold",
+                                slot.seq)
+                elif (stream.waiting_heard_at is None
+                      or now - stream.waiting_heard_at >= WAIT_HEARTBEAT_S):
+                    stream.waiting_heard_at = now
+                    stream._put(_HEARTBEAT)
+                continue
+            self._end(slot, "length")
 
-    def _extend(self, slot: _Slot) -> bool:
+    def _extend(self, slot: _Slot) -> Any:
         """Reserve ``UNLIMITED_STEP`` more cells for a reply with no budget.
-        False when neither the context nor its ceiling has room."""
+        True once reserved, ``_WAIT`` when other running replies hold the cells
+        it needs, False when neither the context nor its ceiling has room."""
         if slot.stream is None or slot.stream.budget > 0:
             return False
         ceiling = self._ops.max_capacity()
@@ -686,12 +769,12 @@ class SlotScheduler:
                 self._drop_cache(other)
             total = committed + extra
             target = self._ops.target_ctx(total)
-            if target < total:
-                return False
             others = sum(1 for s in self._slots if s.stream is not None) > 1
+            if target < total:
+                return _WAIT if others else False
             decision = self._ops.vram_fit(target)
             if others and decision is False:
-                return False
+                return _WAIT
             try:
                 self._grow(target, decision is not False)
             except Exception:
@@ -716,7 +799,7 @@ class SlotScheduler:
             slot = self._slots[seq]
             if slot.stream is None:
                 continue
-            code = self._ops.decode(part)
+            code = self._decode(part, len(part) > 1)
             if code == 0:
                 self._commit({seq: (part, row)})
                 if row is not None:
@@ -745,6 +828,7 @@ class SlotScheduler:
         slot.todo = []
         slot.first = False
         slot.extend = False
+        slot.room_wait = False
         slot.reserve = 0
         slot.last_used = self._clock()
         with self._cond:

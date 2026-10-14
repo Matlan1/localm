@@ -186,7 +186,7 @@ class TestLoadFingerprint:
         ("n_ctx", 8192), ("n_gpu_layers", 20), ("n_cpu_moe", 4),
         ("mtp_enabled", True), ("gpu_split_ratios", [1, 2]),
         ("main_gpu_index", 1), ("binary_dir", "x"), ("llama_runtime_pin", "b1"),
-        ("vram_overhead_mb", 3000), ("ctx_auto", False),
+        ("vram_overhead_mb", 3000), ("ctx_auto", False), ("parallel_slots", 1),
     ])
     def test_a_load_setting_changes_it(self, world, key, value):
         before = rl.load_fingerprint("m")

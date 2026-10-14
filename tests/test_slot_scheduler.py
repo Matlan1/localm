@@ -809,3 +809,179 @@ def test_the_wait_status_repeats_only_once_per_heartbeat_while_polling_the_stop_
     _drain(running)
     assert len(polls) > 4
     assert len(beats) == 1
+
+
+def test_a_reply_with_no_budget_waits_for_cells_a_budgeted_reply_holds(made):
+    ceiling = 2048
+    ctx = _SimContext(capacity=ceiling, n_ctx_max=ceiling)
+    sched = made(ctx, 2)
+    with ctx.lock():
+        budgeted = sched.submit(PROMPTS[1], 900, _Sampler())
+        unlimited = sched.submit(PROMPTS[0], 0, _Sampler())
+    results = {}
+    _run_threads([lambda: results.__setitem__("b", _drain(budgeted)),
+                  lambda: results.__setitem__("u", _drain(unlimited))], timeout=60)
+    assert results["b"] == _reference(PROMPTS[1], 900)
+    out, reason = results["u"]
+    assert reason == "length"
+    assert out == _reference(PROMPTS[0], len(out))[0]
+    assert len(PROMPTS[0]) + len(out) >= ceiling - 1, \
+        f"the reply stopped at {len(out)} tokens while the other reply held cells"
+
+
+def test_no_new_reply_is_admitted_while_a_reply_waits_for_cells(made):
+    ceiling = 2048
+    ctx = _SimContext(capacity=ceiling, n_ctx_max=ceiling)
+    sched = made(ctx, 3)
+    with ctx.lock():
+        budgeted = sched.submit(PROMPTS[1], 900, _Sampler())
+        unlimited = sched.submit(PROMPTS[0], 0, _Sampler())
+    results = {}
+    threads = [threading.Thread(target=lambda: results.__setitem__("b", _drain(budgeted)),
+                                daemon=True),
+               threading.Thread(target=lambda: results.__setitem__("u", _drain(unlimited)),
+                                daemon=True)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + 30
+    while not any(s.room_wait for s in sched._slots) and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert any(s.room_wait for s in sched._slots), "the reply never waited for cells"
+    late = _collect(sched, PROMPTS[2], 5)
+    for t in threads:
+        t.join(30)
+    assert late["out"] == _reference(PROMPTS[2], 5)[0]
+    assert results["b"][1] == "length"
+    b_last = max(i for i, call in enumerate(ctx.calls) if any(e[2] == 0 for e in call))
+    late_first = min(i for i, call in enumerate(ctx.calls) if any(e[2] == 2 for e in call))
+    assert late_first > b_last, "a new reply was admitted while a reply waited for cells"
+
+
+def test_two_replies_with_no_budget_at_a_fixed_ceiling_both_end(made):
+    ceiling = 2048
+    ctx = _SimContext(capacity=ceiling, n_ctx_max=ceiling)
+    sched = made(ctx, 2)
+    with ctx.lock():
+        streams = [sched.submit(PROMPTS[0], 0, _Sampler()),
+                   sched.submit(PROMPTS[2], 0, _Sampler())]
+    results = {}
+    _run_threads([lambda i=i: results.__setitem__(i, _drain(streams[i])) for i in range(2)],
+                 timeout=60)
+    for i, prompt in enumerate((PROMPTS[0], PROMPTS[2])):
+        out, reason = results[i]
+        assert reason == "length"
+        assert out == _reference(prompt, len(out))[0]
+    assert max(len(p) + len(results[i][0])
+               for i, p in enumerate((PROMPTS[0], PROMPTS[2]))) >= ceiling - 1
+
+
+class _SlowPromptContext(_SimContext):
+    """A decode carrying more than *threshold* entries takes *slow* seconds."""
+
+    def __init__(self, slow, threshold, **kw):
+        super().__init__(**kw)
+        self.slow = slow
+        self.threshold = threshold
+        self.slow_started = threading.Event()
+
+    def decode(self, entries):
+        if len(entries) > self.threshold:
+            self.slow_started.set()
+            time.sleep(self.slow)
+        return super().decode(entries)
+
+
+def test_a_long_prompt_step_keeps_the_running_reply_hearing_progress(made, monkeypatch):
+    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05)
+    ctx = _SlowPromptContext(slow=0.8, threshold=50)
+    ctx.step_delay = 0.005
+    sched = made(ctx, 2)
+    statuses = []
+    running = sched.submit(PROMPTS[0], 400, _Sampler(), on_status=statuses.append)
+    first = next(running)
+    results = {}
+    t = threading.Thread(target=lambda: results.__setitem__("r", _drain(running)),
+                         daemon=True)
+    t.start()
+    long_prompt = [1 + (i * 7) % (VOCAB - 1) for i in range(90)]
+    rec = _collect(sched, long_prompt, 3)
+    t.join(10)
+    assert rec["out"] == _reference(long_prompt, 3)[0]
+    assert ctx.slow_started.is_set()
+    assert [first] + results["r"][0] == _reference(PROMPTS[0], 400)[0]
+    assert statuses.count(_slots.GENERATING_STATUS) >= 3, statuses
+
+
+def test_a_reply_cancelled_during_a_long_step_hears_progress_until_it_ends(made, monkeypatch):
+    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05)
+    ctx = _SlowPromptContext(slow=0.8, threshold=50)
+    sched = made(ctx, 2)
+    statuses = []
+    long_prompt = [1 + (i * 5) % (VOCAB - 1) for i in range(90)]
+    stream = sched.submit(long_prompt, 5, _Sampler(), on_status=statuses.append)
+    assert ctx.slow_started.wait(5)
+    stream.close()
+    out, reason = _drain(stream)
+    assert reason == "stop"
+    assert _slots.PROCESSING_STATUS in statuses, statuses
+
+
+def test_a_short_step_sends_no_progress(made, monkeypatch):
+    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05)
+    ctx = _SimContext()
+    ctx.step_delay = 0.15
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 6)
+    assert rec["statuses"] == [_slots.GENERATING_STATUS]
+
+
+def test_progress_stops_once_a_decode_runs_past_its_limit(made, monkeypatch):
+    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05)
+    monkeypatch.setattr(_slots, "HEAVY_BEAT_LIMIT_S", 0.3)
+    ctx = _SlowPromptContext(slow=1.2, threshold=50)
+    sched = made(ctx, 2)
+    statuses = []
+    stamps = []
+    long_prompt = [1 + (i * 3) % (VOCAB - 1) for i in range(90)]
+    stream = sched.submit(long_prompt, 5, _Sampler(),
+                          on_status=lambda s: (statuses.append(s), stamps.append(time.monotonic())))
+    assert ctx.slow_started.wait(5)
+    t0 = time.monotonic()
+    stream.close()
+    _drain(stream)
+    beats = [ts - t0 for s, ts in zip(statuses, stamps) if s == _slots.PROCESSING_STATUS]
+    assert beats, "no progress was sent"
+    assert max(beats) < 0.3 + 0.2, beats
+
+
+class _ScopeContext(_SimContext):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.events = []
+
+    @contextlib.contextmanager
+    def stderr_scope(self):
+        self.events.append("scope-enter")
+        try:
+            yield
+        finally:
+            time.sleep(0.2)
+            self.events.append("scope-exit")
+
+
+def test_an_exclusive_section_starts_after_the_scheduler_left_its_stderr_scope(made):
+    ctx = _ScopeContext()
+    sched = made(ctx, 1)
+    running = sched.submit(PROMPTS[0], 5, _Sampler())
+    next(running)
+
+    def hold():
+        with sched.exclusive():
+            ctx.events.append("exclusive")
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    _drain(running)
+    holder.join(10)
+    assert not holder.is_alive()
+    assert ctx.events.index("scope-exit") < ctx.events.index("exclusive"), ctx.events
