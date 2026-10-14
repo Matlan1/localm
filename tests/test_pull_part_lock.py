@@ -397,14 +397,17 @@ def _space_under_host_name(monkeypatch, name: str) -> str:
 
 
 @pytest.mark.parametrize("case", ["local", "not-local", "other-host",
-                                  "no-host"])
+                                  "no-host", "writer-not-local",
+                                  "no-local-field", "local-not-a-bool"])
 def test_a_dead_holder_recorded_under_an_earlier_host_name(home, monkeypatch,
                                                            case):
     """A record written before the host was renamed carries another pid space
     id. Its dead holder's lock is reclaimed when the record's host id is this
-    machine's and the lock folder is on a local disk; it is kept when the
-    folder is not local, the host id is another machine's, or the record has
-    none."""
+    machine's, the record says its writer saw the lock folder on a local disk,
+    and the folder is on a local disk here; it is kept when the folder is not
+    local here, the writer recorded it as not local, the record has no
+    ``local`` field or one that is not True, the host id is another
+    machine's, or the record has none."""
     from localm import instances
     host = instances.host_id()
     if host is None:
@@ -414,6 +417,9 @@ def test_a_dead_holder_recorded_under_an_earlier_host_name(home, monkeypatch,
     fields = {"space": old_space, "started": 0.0}
     if case != "no-host":
         fields["host"] = host if case != "other-host" else "0123456789abcdef"
+    if case != "no-local-field":
+        fields["local"] = {"writer-not-local": False,
+                           "local-not-a-bool": "true"}.get(case, True)
     if case == "not-local":
         monkeypatch.setattr(instances, "path_is_local", lambda p: False)
     elif not instances.path_is_local(_part_lock_dir("m.gguf").parent.parent):
@@ -433,9 +439,83 @@ def test_a_dead_holder_recorded_under_an_earlier_host_name(home, monkeypatch,
         assert refused is None, f"the stale lock was kept: {refused}"
         assert rec["pid"] == os.getpid()
         assert rec["host"] == host
+        assert rec["local"] is True
     else:
         assert refused is not None and str(pid) in str(refused)
         assert _record(d) == before
+
+
+@pytest.mark.parametrize("writer_local", [False, True])
+def test_a_live_holder_on_a_cloned_machine_that_reaches_the_folder_remotely(
+        home, monkeypatch, writer_local):
+    """A cloned machine shares this machine's host id but has another host
+    name, so its records carry another pid space id. When it records that the
+    lock folder was not on its own disk (it reaches this machine's local disk
+    over a network share), its live holder's lock is kept even though the pid
+    here names another process. A record whose writer saw the folder as local
+    is this machine's own from before a rename, and its pid now naming a
+    different process frees the lock."""
+    from localm import instances
+    host = instances.host_id()
+    if host is None:
+        pytest.skip("no machine identifier is readable here")
+    d = _part_lock_dir("m.gguf")
+    if not instances.path_is_local(d.parent.parent):
+        pytest.skip("the test folder is not on a local disk here")
+    clone_space = _space_under_host_name(monkeypatch, "cloned-vm-other-name")
+    assert clone_space != this_pid_space(), "the injected name took no effect"
+    other = _idle_child()
+    try:
+        recorded = started_an_hour_earlier(start_identity_of(other.pid))
+        assert instances.start_identity_differs(
+            recorded, instances.process_start_identity(other.pid))
+        _write_owner(d, other.pid, space=clone_space, host=host,
+                     local=writer_local, start=recorded, started=time.time())
+        before = _record(d)
+
+        refused = None
+        try:
+            with _part_lock("m.gguf"):
+                rec = json.loads(_record(d))
+        except PullInFlight as e:
+            refused = e
+        assert other.poll() is None, "the holder died during the test"
+        if writer_local:
+            assert refused is None, f"the stale lock was kept: {refused}"
+            assert rec["pid"] == os.getpid()
+        else:
+            assert refused is not None and str(other.pid) in str(refused)
+            assert _record(d) == before, (
+                "a cloned machine's live lock was reclaimed")
+    finally:
+        _release(other)
+
+
+def test_the_sweep_keeps_a_cloned_machines_staging_record(home, monkeypatch):
+    """A staging directory whose record was written by a cloned machine that
+    reached the lock folder remotely is not removed by the sweep, even with a
+    dead pid; the same record from a writer that saw the folder as local is."""
+    from localm import instances
+    from localm.model_manager import pull
+    host = instances.host_id()
+    if host is None:
+        pytest.skip("no machine identifier is readable here")
+    locks = _part_lock_dir("m.gguf").parent
+    locks.mkdir(parents=True, exist_ok=True)
+    if not instances.path_is_local(locks):
+        pytest.skip("the test folder is not on a local disk here")
+    clone_space = _space_under_host_name(monkeypatch, "cloned-vm-other-name")
+    pid = _dead_pid()
+    staged = {}
+    for writer_local in (False, True):
+        p = locks / f"{pull._LOCK_STAGING_PREFIX}{int(writer_local)}"
+        _write_owner(p, pid, space=clone_space, host=host, local=writer_local)
+        staged[writer_local] = p
+
+    pull._sweep_lock_leftovers(locks)
+
+    assert staged[False].exists(), "a cloned machine's staging dir was swept"
+    assert not staged[True].exists()
 
 
 def _foreign(ident):
@@ -697,6 +777,8 @@ def test_the_lock_records_its_holders_pid_space_and_start_identity(home):
     assert rec["pid"] == os.getpid()
     assert rec["space"] == _pid_space_id()
     assert rec["start"] == process_start_identity(os.getpid())
+    from localm.instances import path_is_local
+    assert rec["local"] is path_is_local(_part_lock_dir("m.gguf").parent)
 
 
 @pytest.mark.parametrize("body", [
