@@ -187,3 +187,48 @@ def test_a_scope_gated_route_also_verifies_off_the_event_loop(keyed_app):
     assert calls and not any(calls), f"on_loop flags: {calls}"
     assert waited < BLOCK_S * 0.5
     assert resp.status_code == 200
+
+
+def _slow_recorder(result):
+    """A stand-in taking BLOCK_S that records whether it ran on the event loop."""
+    calls = []
+
+    def fake(*args, **kwargs):
+        on_loop = True
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop = False
+        calls.append(on_loop)
+        time.sleep(BLOCK_S)
+        return result
+
+    return fake, calls
+
+
+def test_session_login_derives_the_key_identity_off_the_event_loop(keyed_app):
+    fake_hash, calls = _slow_recorder("a" * 64)
+    with patch.object(auth, "verify", lambda presented: {scopes.ADMIN}), \
+            patch.object(auth, "_hash_key", fake_hash):
+        waited, resp = asyncio.run(_request_with_a_concurrent_coroutine(
+            keyed_app, "POST", "/api/session", json={"key": SECRET}))
+    assert calls == [False], (
+        "auth._hash_key was not called, or was called on the event loop, from "
+        f"POST /api/session (on_loop flags: {calls})")
+    assert waited < BLOCK_S * 0.5
+    assert resp.status_code == 200
+
+
+def test_session_state_resolves_the_caller_off_the_event_loop(keyed_app):
+    import localm.inference.http_server as hs
+    fake, calls = _slow_recorder(({scopes.ADMIN}, "a" * 64, "host", []))
+    with patch.object(hs, "_principal_from_token", fake):
+        waited, resp = asyncio.run(_request_with_a_concurrent_coroutine(
+            keyed_app, "GET", "/api/session",
+            headers={"Authorization": f"Bearer {SECRET}"}))
+    assert calls == [False], (
+        "_principal_from_token was not called, or was called on the event loop, "
+        f"from GET /api/session (on_loop flags: {calls})")
+    assert waited < BLOCK_S * 0.5
+    assert resp.status_code == 200
+    assert resp.json()["authed"] is True

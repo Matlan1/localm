@@ -695,10 +695,39 @@ def _owner_digest(key: str) -> str:
 
 
 def _owner_digest_locked(key: str) -> str:
+    """:func:`_owner_digest`'s body. The read-derive-write runs under the
+    cross-process lock on the KDF file, so a second localm process cannot mint
+    a different salt for the same key or lose a record; the legacy-identity
+    migration runs after that lock is released. When the lock cannot be taken
+    (its directory cannot be written, or another process holds it past the
+    wait budget) a WARNING is logged and the record is read and written without
+    it."""
+    import contextlib
+
+    from localm.config import _cross_process_lock
+    path = owner_kdf_file()
+    with contextlib.ExitStack() as stack:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stack.enter_context(_cross_process_lock(path))
+        except (OSError, TimeoutError) as e:
+            logger.warning("could not lock the owner key derivation record %s (%s); "
+                           "reading and writing it without the cross-process lock",
+                           path, e)
+        digest, minted = _owner_digest_record(key)
+    if minted:
+        _migrate_legacy_owner_identity(_legacy_owner_identity(key), digest)
+    return digest
+
+
+def _owner_digest_record(key: str) -> tuple:
+    """``(digest, minted)``: the digest of the persisted record matching *key*
+    with minted False, or a freshly minted and saved record's digest with minted
+    True. Caller holds the locks :func:`_owner_digest_locked` takes."""
     records = _load_owner_kdf()
     existing = _owner_kdf_record_for(key, records)
     if existing is not None:
-        return str(existing["digest"])
+        return str(existing["digest"]), False
     salt = secrets.token_bytes(16)
     rec = {
         "alg": _ALG_KDF, "salt": salt.hex(), "n": _SCRYPT_N, "r": _SCRYPT_R,
@@ -717,8 +746,7 @@ def _owner_digest_locked(key: str) -> str:
         logger.warning("could not persist the owner key derivation record %s "
                        "(%s); sessions and jobs stamped in this process may not "
                        "be recognised after a restart", owner_kdf_file(), e)
-    _migrate_legacy_owner_identity(_legacy_owner_identity(key), rec["digest"])
-    return str(rec["digest"])
+    return str(rec["digest"]), True
 
 
 def _migrate_legacy_owner_identity(legacy: str, current: str) -> None:
