@@ -40,10 +40,10 @@ function setup(streams, { web = false } = {}) {
 const status = (text, code) => ({ choices: [{ delta: { status: text, status_code: code } }] });
 const content = (text) => ({ choices: [{ delta: { content: text } }] });
 const stop = { choices: [{ delta: {}, finish_reason: "stop" }] };
-const refusal = (code, detail) => [
-  { ...content(detail), localm_error: { status: code, detail } },
+const refusal = (code, detail, kind) => [
+  { ...content(detail), localm_error: { status: code, detail, ...(kind ? { refusal: kind } : {}) } },
   { choices: [{ delta: {}, finish_reason: "error" }],
-    localm_error: { status: code, detail } },
+    localm_error: { status: code, detail, ...(kind ? { refusal: kind } : {}) } },
 ];
 function activateConv(window, conv) {
   window.__testConv = conv;
@@ -92,7 +92,7 @@ test("an in-stream refusal is shown once, as an error, and not saved as a reply"
 });
 
 test("an in-stream image refusal drops the image like the HTTP 400 does", async () => {
-  const { window } = setup([refusal(400, "This model cannot read images.")]);
+  const { window } = setup([refusal(400, "This model cannot read images.", "image")]);
   const conv = { id: "c1", title: "t", messages: [{ role: "user", content: [
     { type: "text", text: "what is this?" },
     { type: "image_url", image_url: { url: IMG } },

@@ -338,7 +338,7 @@ test("model-unload: an in_use reply from a resident embedder is not reported as 
   const models = [
     { name: "embed-a", active: false, loaded: true, model_type: "llm", size_bytes: 1000 },
   ];
-  const fetchImpl = async (url, opts = {}) => {
+  const fetchImpl = async (url) => {
     const u = String(url);
     if (u.startsWith("/api/models/unload")) {
       return { ok: true, status: 200, text: async () => "",

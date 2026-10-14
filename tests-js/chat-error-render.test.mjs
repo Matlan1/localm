@@ -80,6 +80,7 @@ test("a zero-content chat failure does not touch vision-reject recovery", async 
   const impl = async (url) => {
     if (String(url) === "/v1/chat/completions") {
       return { ok: false, status: 400, json: async () => ({}),
+        headers: { get: (k) => (k === "X-Localm-Refusal" ? "image" : null) },
         text: async () => "This model has no vision support; remove the image." };
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
