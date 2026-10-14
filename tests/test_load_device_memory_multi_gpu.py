@@ -52,7 +52,8 @@ def windows_two_gpus(monkeypatch):
 
     def _list_gpus(*, return_status=False, deadline=None, wait_for_inflight=False):
         probes.append(wait_for_inflight)
-        return [dict(g) for g in READINGS], discover.GPU_PROBE_OK
+        gpus = [dict(g) for g in READINGS]
+        return (gpus, discover.GPU_PROBE_OK) if return_status else gpus
 
     monkeypatch.setattr(discover, "list_gpus", _list_gpus)
     return probes
