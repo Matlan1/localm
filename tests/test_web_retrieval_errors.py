@@ -30,6 +30,7 @@ from localm.web_retrieval.providers import SearXNGProvider
 from localm.web_retrieval.retrieve import retrieve
 
 from tests._web_retrieval_fixtures import no_sleep
+from tests._net_config import set_config
 
 
 class RawServer:
@@ -124,7 +125,7 @@ def local_net(monkeypatch):
     127.0.0.1 with the requested port; provider sleeps recorded, not slept."""
     cfg: dict = {"net_mode": "allow", "net_allow_private": True}
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    monkeypatch.setattr("localm.config.load_config", lambda: cfg)
+    set_config(monkeypatch, lambda: cfg)
 
     def loopback(host, port=None, *a, **k):
         port = port if isinstance(port, int) else 0

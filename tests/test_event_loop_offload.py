@@ -200,6 +200,66 @@ def register(app):
         "routes at once is one people switch off")
 
 
+def test_a_directory_walk_is_reported_but_does_not_gate(tmp_path):
+    """A walk over a model directory costs a stat per entry, so a handler that
+    reaches one inline stalls the loop for as long as the disk takes. Reported
+    so it is visible; not gated, because the cost is a property of the tree."""
+    mod = _load()
+    root = _tree(tmp_path, {
+        "helpers.py": '''
+import os
+from pathlib import Path
+
+
+def footprint(path):
+    return sum(p.stat().st_size for p in Path(path).rglob("*"))
+
+
+def listing(path):
+    return [name for _root, _dirs, names in os.walk(path) for name in names]
+''',
+        "routes.py": '''
+from localm.helpers import footprint, listing
+
+def register(app):
+    @app.post("/api/size")
+    async def size(path: str):
+        return footprint(path)
+
+    @app.post("/api/list")
+    async def lst(path: str):
+        return listing(path)
+''',
+    })
+    found = _routes(mod, root)
+    for route in ("POST /api/size", "POST /api/list"):
+        assert {f.kind for f in found[route]} == {"tree-walk"}, route
+        assert not any(f.gating for f in found[route]), route
+
+
+def test_a_directory_walk_handed_to_a_worker_thread_is_not_reported(tmp_path):
+    mod = _load()
+    root = _tree(tmp_path, {
+        "helpers.py": '''
+from pathlib import Path
+
+
+def footprint(path):
+    return sum(p.stat().st_size for p in Path(path).rglob("*"))
+''',
+        "routes.py": '''
+from localm.helpers import footprint
+
+def register(app):
+    @app.post("/api/size")
+    async def size(path: str):
+        loop = None
+        return await loop.run_in_executor(None, footprint, path)
+''',
+    })
+    assert "POST /api/size" not in _routes(mod, root)
+
+
 # --------------------------------------------------------------------------- #
 #  2. IT DOES NOT FIRE on the legal shapes                                     #
 # --------------------------------------------------------------------------- #

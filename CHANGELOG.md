@@ -614,6 +614,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   privacy-mode chat could land in another instance's session log. Unless the chat is recorded in
   full mode here, the other instance must now confirm it records it no more than this mode allows.
   If it does not, nothing is sent and the message names that instance and its mode.
+- **Switching models no longer freezes the server while the model folder is measured.** Reading
+  the model registry, measuring a model's size on disk and building its engine ran on the
+  server's main loop, so a load of a large model folder on a slow or network disk stalled every
+  other request, including the status poll, until the disk answered.
 - **A scheduled coder job honours its project's privacy setting.** A `mode` set in the project's
   `.localcoder/config.toml` now applies to scheduled runs as it does to interactive coder sessions, so
   a project pinned to privacy mode no longer gets a transcript or audit log from a job. A project
@@ -2152,6 +2156,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   skipped the cross-origin refusal and the open-mode shell-token check without anyone listing it.
   Each now matches only its own path. A trailing-slash spelling of one of those paths is no longer
   exempt.
+- **An unreadable `config.json` no longer switches the network policy or the sign-in requirement
+  off.** When `config.json` (and its backup) exists but cannot be read, localm used to fall back
+  to the defaults for everything: `net_mode = off` read as `ask`, the `net_deny` list was empty,
+  and an empty `net_allow` list lifted a strict allow-list entirely. Scheduled jobs then got the
+  web tool back. Now an unreadable config is treated as `net_mode = off`: every policy-routed
+  request is refused and scheduled jobs get no web tool, with a warning in the log. A configured
+  `require_auth` is kept in force the same way, and the server asks for a key until the file is
+  readable again.
 - **A bug report is sent only after you have seen it.** In Settings > Report a bug, "Send to
   maintainer" used to file the report as a public GitHub issue in one click, without showing it.
   It now saves the report and shows its whole text, and nothing is sent until you press "Send this

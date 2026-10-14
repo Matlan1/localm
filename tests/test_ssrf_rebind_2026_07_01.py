@@ -17,12 +17,13 @@ import requests
 
 from localm import netpolicy
 from localm.netpolicy import NetworkPolicyError
+from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)
 def _allow(monkeypatch):
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
-    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    set_config(monkeypatch, lambda: {})
 
 
 def _dns(ip, port=0):
@@ -60,8 +61,7 @@ class TestResolvePinned:
             netpolicy._resolve_pinned("sneaky.example")
 
     def test_private_allowed_when_configured(self, monkeypatch):
-        monkeypatch.setattr("localm.config.load_config",
-                            lambda: {"net_allow_private": True})
+        set_config(monkeypatch, lambda: {"net_allow_private": True})
         monkeypatch.setattr("socket.getaddrinfo", _dns("127.0.0.1"))
         assert netpolicy._resolve_pinned("localhost") == "127.0.0.1"
 
@@ -150,8 +150,7 @@ def test_full_fetch_pins_socket_and_preserves_host(monkeypatch):
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        monkeypatch.setattr("localm.config.load_config",
-                            lambda: {"net_allow_private": True})
+        set_config(monkeypatch, lambda: {"net_allow_private": True})
         # The made-up vhost "resolves" to loopback; the pin must dial 127.0.0.1
         # and still send Host: vhost.test:<port>.
         monkeypatch.setattr("socket.getaddrinfo", _dns("127.0.0.1", port))
