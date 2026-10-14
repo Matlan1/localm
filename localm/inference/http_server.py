@@ -3553,10 +3553,15 @@ def principal_id(request: Request) -> Optional[str]:
 
 def _owner_caller_headers(request: Request) -> tuple:
     """``(X-Client-Id, X-Localm-Session-Mode)`` of *request* when its caller is
-    the owner (open mode, or an ADMIN key or session), else ``(None, None)``."""
+    the owner (open mode, or an ADMIN key or session), else ``(None, None)``.
+    A caller presenting no valid key while a key is configured is not the
+    owner."""
     from localm import scopes
     from localm.audit import CLIENT_ID_HEADER, SESSION_MODE_HEADER
+    from localm.auth import any_key_configured
     held = caller_scopes(request)
+    if held is None and any_key_configured():
+        return None, None
     if held is not None and scopes.ADMIN not in held:
         return None, None
     return (request.headers.get(CLIENT_ID_HEADER),

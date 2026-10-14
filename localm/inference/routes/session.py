@@ -316,7 +316,10 @@ def register(app: FastAPI, ctx) -> None:
         cookie/header; *required* is True when a key is configured. For a cookie
         session it also returns the ``csrf`` token derived from that session, so the
         client always has a token in lockstep with its session (it can never desync)
-        and can refresh it after a server restart rotated the secret."""
+        and can refresh it after a server restart rotated the secret.
+        *session_mode* is the mode a chat from this caller, sent with these same
+        headers, is recorded under (another localm instance reads it before
+        forwarding a chat here)."""
         from localm.auth import any_key_configured, require_auth_enabled
         configured = any_key_configured()
         token, source = _request_token(request)
@@ -328,4 +331,5 @@ def register(app: FastAPI, ctx) -> None:
         return {"authed": held is not None,
                 "scopes": sorted(held) if held else [],
                 "required": configured or require_auth_enabled(),
-                "csrf": csrf}
+                "csrf": csrf,
+                "session_mode": _hs.request_session_mode(request).value}

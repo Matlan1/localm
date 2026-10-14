@@ -97,9 +97,6 @@ def register(app: FastAPI, ctx) -> None:
         cfg["effective_chat_mode"] = (effective_mode("chat").value if owner
                                       else cfg["effective_mode"])
         cfg["effective_coder_mode"] = effective_mode("coder").value
-        # The mode an exchange from this caller, sent with these same headers,
-        # is recorded under (a forwarding instance reads it before a forward).
-        cfg["request_session_mode"] = _hs.request_session_mode(request).value
         # Resolved context ceiling (VRAM-derived when ctx_auto) - the GUI
         # bases its compaction threshold on this, not the static config.
         eff_ctx = getattr(_hs._engine, "effective_ctx_max", None) if _hs._engine else None
@@ -153,7 +150,7 @@ def register(app: FastAPI, ctx) -> None:
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
         readonly = {"effective_mode", "effective_chat_mode", "effective_coder_mode",
-                    "request_session_mode", "effective_ctx_max", "effective_ctx_model", "instance_id",
+                    "effective_ctx_max", "effective_ctx_model", "instance_id",
                     "instance_port"}
         # `confirm` is this route's own protocol flag, not a config key: stripped
         # here alongside the read-only extras so validate_update never sees it.
