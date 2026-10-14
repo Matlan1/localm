@@ -693,8 +693,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The ACE-Step music model is no longer offered as an image or video model.**
 - **GGUF sizing measures free VRAM again on Windows with two or more GPUs.** With torch
   installed, a box whose llama.cpp runtime sees two GPUs (two cards, or a card beside integrated
-  graphics) skipped the VRAM fit check and sized context and layers blind. The load now reads the
-  free VRAM of the GPU it loads on.
+  graphics) skipped the VRAM fit check and sized context and layers blind. A load that runs on
+  one GPU (a one-GPU split, or one card beside integrated graphics) now reads that GPU's free
+  VRAM. A load spread over two or more cards with no combined reading loads as before instead
+  of being sized, or refused, against one of the cards.
 - **Free VRAM on Windows AMD counts other programs while a GPU check runs.** A model load that
   started while the GUI was refreshing its GPU readings used a figure that missed VRAM held by
   other programs, and the GUI could show such a figure as exact.

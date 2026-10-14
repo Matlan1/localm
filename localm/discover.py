@@ -2867,7 +2867,15 @@ def load_device_memory_isolated(config: Optional[dict] = None) -> Optional[tuple
     from (:func:`resolve_load_gpu_index`), as the active native runtime's own
     registry reports it through the crash-isolated probe daemon
     (:func:`_runtime_device_registry`), or ``None`` when that device cannot be
-    named in the registry.
+    named in the registry or the load does not run on one device.
+
+    The load runs on one device when ``gpu_split_indices`` is a 1-entry list
+    naming a detected GPU (:func:`single_gpu_index`), or when none is
+    configured and the registry read this call lists exactly one GPU-type
+    device. A split of 2+ entries, a 1-entry split that names no detected GPU,
+    and 2+ GPU-type devices with no split configured (llama.cpp's default
+    layer split spreads the load over all of them) answer ``None``. The free
+    and total figures are always the registry's own, read this call.
 
     The device's registry position comes from :func:`_torch_llama_numbering`
     of the last completed :func:`list_gpus` reading (:func:`last_gpu_reading`);
@@ -2877,6 +2885,12 @@ def load_device_memory_isolated(config: Optional[dict] = None) -> Optional[tuple
     ``None``. Never raises."""
     from localm.inference.backends.llamacpp import _loader
     try:
+        from localm.config import load_config
+        cfg = config if config is not None else load_config()
+        configured = cfg.get("gpu_split_indices")
+        if configured and not (isinstance(configured, (list, tuple))
+                               and len(configured) == 1):
+            return None
         readings = last_gpu_reading()
         if not readings:
             if _loader.native_lib_loaded():
@@ -2885,8 +2899,9 @@ def load_device_memory_isolated(config: Optional[dict] = None) -> Optional[tuple
         readings = [g for g in (readings or []) if isinstance(g, dict)]
         if not readings or _native_gpu_index_space_is_opaque():
             return None
-        from localm.config import load_config
-        cfg = config if config is not None else load_config()
+        if configured and single_gpu_index(configured, gpus=readings,
+                                           quiet=True) is None:
+            return None
         idx = resolve_load_gpu_index(cfg, gpus=readings, quiet=True)
         slot_of, reason = _torch_llama_numbering(readings)
         if slot_of is None or idx not in slot_of:
@@ -2896,6 +2911,11 @@ def load_device_memory_isolated(config: Optional[dict] = None) -> Optional[tuple
             return None
         registry = _runtime_device_registry()
         native = _registry_gpus(registry) if registry is not None else []
+        if not configured and len(native) != 1:
+            logger.debug("load device memory: no gpu_split_indices and the "
+                         "llama.cpp runtime lists %d GPUs, so the load is not "
+                         "on one device", len(native))
+            return None
         slot = slot_of[idx]
         if slot >= len(native):
             return None
