@@ -92,10 +92,19 @@ set nor read them, and the Images page and job log show only a model's file name
   log. It is a quick projection of the model's latent, so it looks rough and washed out
   before the final decode. The preview lives in memory only: it is never saved, never
   written to the job history, and exists in privacy mode too.
+- **VRAM shared with other programs.** On Windows the ROCm and Vulkan runtimes cannot see
+  the VRAM other programs hold (the desktop, a browser, a game, a loaded chat model). Before
+  each model load localm measures the VRAM free on the whole card, shows it in the job log
+  ("Free VRAM: 13.9 of 16.0 GB.") and gives the runtime that budget, so a model that does
+  not fit next to the other programs keeps part of its weights in RAM and streams them in,
+  instead of Windows paging it to system memory, which made each step many times slower on
+  ROCm and made Vulkan fail. Close other GPU programs for the fastest runs.
+- **Flash attention on ROCm.** Images on the ROCm runtime use the runtime's flash attention,
+  which is faster and needs less VRAM there; on Vulkan it is much slower, so it stays off.
 - **Warnings that were recovered from.** A decode that does not fit in VRAM is retried in
-  tiles and succeeds; the job log then shows one line ("Not enough VRAM to decode in one
-  piece; decoding in tiles.") instead of the runtime's failure messages from before the
-  retry. Warnings that are not followed by a recovery are shown unchanged, and every raw
+  tiles (half the image size, then half again) and succeeds; the job log then shows one line
+  ("Not enough VRAM to decode in one piece; decoding in tiles.") instead of the runtime's
+  failure messages from before the retry. Warnings that are not followed by a recovery are shown unchanged, and every raw
   line is in the debug log.
 - **Steps and clip skip per image.** The Images Advanced fold takes Steps and Clip skip
   for the next image; the placeholder shows the step count the picked model's family
