@@ -667,6 +667,20 @@ def _name_identity(name: str) -> str:
     return ""
 
 
+def _model_key(name: str) -> str:
+    """The GGUF file name *name* reduced to what names its model: lower-cased,
+    without ``mmproj``, its ``.gguf`` suffix, its split-part suffix, its
+    quantisation and precision tags (``_QUANT_TAG_RE``) and its separators:
+    ``"qwen3asr06b"`` for both ``mmproj-Qwen3-ASR-0.6B-Q8_0.gguf`` and
+    ``Qwen3-ASR-0.6B-Q8_0.gguf``, ``"gemma4e4bit"`` for
+    ``gemma-4-E4B-it-Q4_K_M.gguf``."""
+    text = name.lower()
+    if text.endswith(".gguf"):
+        text = text[:-5]
+    text = _SPLIT_SUFFIX_RE.sub("", text.replace("mmproj", " "))
+    return _squashed(_QUANT_TAG_RE.sub(" ", text))
+
+
 def _squashed(name: str) -> str:
     """*name* lower-cased, keeping only the characters a-z and 0-9."""
     return re.sub(r"[^a-z0-9]", "", name.lower())
@@ -757,7 +771,14 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
         return None
     matches = [n for n in names if token in n.lower()]
     if matches:
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) != 1:
+            return None
+        key = _model_key(matches[0])
+        # A projector named exactly for another model in the folder is that model's.
+        if key and key != _model_key(model_name) and any(
+                _model_key(other) == key for other in others):
+            return None
+        return matches[0]
     if len(names) != 1:
         return None
     lone = names[0]
