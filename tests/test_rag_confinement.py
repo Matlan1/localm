@@ -1159,6 +1159,53 @@ class TestCliCredentialFloor:
         assert Collection("cli1").docs() == []
 
 
+    @staticmethod
+    def _collection_with_refused_doc(home, tmp_path, name):
+        good = home / "docs" / "good.txt"
+        good.write_text("ordinary document about turbines", encoding="utf-8")
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        bad = ssh / "config"
+        bad.write_text("Host secret-host", encoding="utf-8")
+        c = Collection(name).create()
+        c.add_paths([good])
+        c._meta["docs"][str(bad.resolve())] = dict(c._meta["docs"][str(good.resolve())])
+        c._save_meta()
+        return c, good, bad
+
+    def test_resync_skips_a_refused_doc_instead_of_aborting(self, home_env, tmp_path):
+        home, _ = home_env
+        c, good, bad = self._collection_with_refused_doc(home, tmp_path, "cred5")
+        good.write_text("ordinary document about turbines, edited", encoding="utf-8")
+        res = Collection("cred5").resync(policy=None)
+        assert res["updated"] == 1
+
+    def test_resync_skips_a_network_drive_doc_when_the_toggle_is_off(
+            self, home_env, tmp_path, monkeypatch):
+        import localm.rag._store.confine as confine_mod
+        home, _ = home_env
+        c, good, bad = self._collection_with_refused_doc(home, tmp_path, "cred6")
+        monkeypatch.setattr(confine_mod, "_network_drives_allowed_fresh",
+                            lambda: False)
+        monkeypatch.setattr(confine_mod, "is_mapped_network_drive",
+                            lambda path: Path(path).name == "good.txt")
+        notes = []
+        assert c._resyncable_files([], None, notes.append) == []
+        assert any("network drive" in n for n in notes)
+
+    def test_cli_repair_skips_a_refused_doc_and_repairs_the_rest(
+            self, home_env, tmp_path):
+        from click.testing import CliRunner
+
+        from localm.cli import rag as ragcli
+        home, _ = home_env
+        c, good, bad = self._collection_with_refused_doc(home, tmp_path, "cred7")
+        res = CliRunner().invoke(ragcli.rag_group, ["repair", "cred7", "--yes"])
+        assert res.exit_code == 0, res.output
+        assert "credential directory" in res.output
+        assert "repaired: 1 re-indexed" in res.output
+
+
 class TestRagAddRouteSecretFile:
     def test_owner_explicit_secret_file_hard_blocked(self, rag_route_app):
         app, home = rag_route_app

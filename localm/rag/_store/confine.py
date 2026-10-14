@@ -152,6 +152,49 @@ def _network_drives_allowed_fresh() -> bool:
     return bool(cfg.get("allow_network_drives", True))
 
 
+def hard_floor(p, allow_net: Optional[bool] = None) -> Path:
+    """Resolve *p* and apply the checks no caller can switch off: a UNC or
+    device path, a credential folder anywhere in the resolved path, and a mapped
+    network drive when *allow_net* is False. Returns the resolved path, else
+    raises ``ConfinementError``. *allow_net* None reads the
+    ``allow_network_drives`` setting fresh."""
+    try:
+        rp = Path(p).expanduser()
+    except (OSError, ValueError) as e:
+        raise ConfinementError(f"Invalid path: {p}",
+                               path=Path(str(p)), reason="invalid") from e
+    # Refuse UNC/device syntax unconditionally, BEFORE the .resolve() below ever
+    # runs, and on the EXPANDED string. Raised OUTSIDE the try/except above.
+    if is_unc_or_device_path(str(rp)):
+        raise ConfinementError(f"Refusing to index a UNC or device path: {p}",
+                               path=Path(str(p)), reason="unc_or_device")
+    try:
+        rp = rp.resolve()
+    except (OSError, ValueError) as e:
+        raise ConfinementError(f"Invalid path: {p}",
+                               path=Path(str(p)), reason="invalid") from e
+
+    if is_credential_path(rp):
+        raise ConfinementError(f"Refusing to index a credential directory: {p}",
+                               path=rp, reason="credential")
+
+    if allow_net is None:
+        allow_net = _network_drives_allowed_fresh()
+    if not allow_net and is_mapped_network_drive(str(rp)):
+        raise ConfinementError(f"Refusing to index a network drive: {p}",
+                               path=rp, reason="network_drive_denied")
+    return rp
+
+
+def floor_refusal(p, allow_net: Optional[bool] = None) -> Optional[str]:
+    """The ``hard_floor`` refusal message for *p*, or None when it passes."""
+    try:
+        hard_floor(p, allow_net)
+    except ValueError as e:
+        return str(e)
+    return None
+
+
 def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     """Resolve *p* and verify it may be indexed, raising ``ConfinementError`` (a
     ``ValueError``) otherwise.
@@ -182,39 +225,11 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
 
     ``policy=None`` means hard-floor only; the caller is otherwise unconfined.
     """
-    try:
-        rp = Path(p).expanduser()
-    except (OSError, ValueError) as e:
-        raise ConfinementError(f"Invalid path: {p}",
-                               path=Path(str(p)), reason="invalid") from e
-    # Refuse UNC/device syntax unconditionally, BEFORE the .resolve() below ever
-    # runs, and on the EXPANDED string. Raised OUTSIDE the try/except above.
-    if is_unc_or_device_path(str(rp)):
-        raise ConfinementError(f"Refusing to index a UNC or device path: {p}",
-                               path=Path(str(p)), reason="unc_or_device")
-    try:
-        rp = rp.resolve()
-    except (OSError, ValueError) as e:
-        raise ConfinementError(f"Invalid path: {p}",
-                               path=Path(str(p)), reason="invalid") from e
-
-    # Credential folders are denied wherever they appear in the resolved path,
-    # not only at the home root. rp is already resolved, so a symlink pointing
-    # into a credential dir is caught too.
-    if is_credential_path(rp):
-        raise ConfinementError(f"Refusing to index a credential directory: {p}",
-                               path=rp, reason="credential")
-
-    # Checked unconditionally, BEFORE the policy=None return below. Read off
-    # *policy* when one is given, else read fresh here; .get(), not [], so a
+    # Read off *policy* when one is given, else read fresh; .get(), not [], so a
     # hand-built policy dict without the key defaults to True.
-    if policy is not None:
-        allow_net = bool(policy.get("allow_network_drives", True))
-    else:
-        allow_net = _network_drives_allowed_fresh()
-    if not allow_net and is_mapped_network_drive(str(rp)):
-        raise ConfinementError(f"Refusing to index a network drive: {p}",
-                               path=rp, reason="network_drive_denied")
+    allow_net = (bool(policy.get("allow_network_drives", True))
+                 if policy is not None else None)
+    rp = hard_floor(p, allow_net)
 
     if policy is None:
         return rp
@@ -224,7 +239,7 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     # applied to explicit picks whenever a policy is present, and BEFORE the mode
     # branches. Guarded on "not a directory" rather than is_file(): a directory
     # merely NAMED like a secret stays walkable, and a path that does not exist
-    # is refused here too. The CLI (policy=None, returned above) stays unconfined.
+    # is refused here too. The CLI (policy=None, returned above) does not apply it.
     if not rp.is_dir() and (rp.suffix.lower() in SECRET_SUFFIXES
                             or is_secret_index_name(rp.name)):
         raise ConfinementError(

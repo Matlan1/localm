@@ -10,7 +10,7 @@ from typing import Optional
 
 from localm.rag import store as _st
 
-from .confine import _path_within, is_credential_path
+from .confine import _network_drives_allowed_fresh, _path_within, floor_refusal
 from .types import ProgressFn
 
 
@@ -153,8 +153,10 @@ class _CollectionResync:
         Uploads have no source file (``upload:`` keys) and are skipped. So is
         anything under a skipped root, and anything the current policy refuses;
         the last of those is filtered HERE rather than handed to
-        ``_add_paths_locked``, whose top-level confinement check raises."""
+        ``_add_paths_locked``, whose top-level confinement check raises. With no
+        policy the hard floor alone applies."""
         out: list = []
+        allow_net = _network_drives_allowed_fresh() if policy is None else None
         for key in sorted(self._meta.get("docs", {})):
             if str(key).startswith("upload:"):
                 continue
@@ -172,9 +174,11 @@ class _CollectionResync:
                 except ValueError as e:
                     say(f"skipping {key}: {e}")
                     continue
-            elif is_credential_path(p):
-                say(f"skipping {key}: under a credential folder")
-                continue
+            else:
+                reason = floor_refusal(p, allow_net)
+                if reason:
+                    say(f"skipping {key}: {reason}")
+                    continue
             out.append(p)
         return out
 
