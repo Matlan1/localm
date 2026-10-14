@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
+import socket
 import sys
 import urllib.error
 import urllib.parse
@@ -192,6 +194,54 @@ def _email_replacement(m: re.Match) -> str:
         return token
     return lead + "<redacted-email>" + trail
 
+
+# Machine names. Byte-identical to _UNC_HOST_RE and _LAN_HOST_RE in
+# localm/bugreport/scrub.py, where the rules are described.
+_UNC_HOST_RE = re.compile(
+    r"(?<![^\s\x22\x27(\[{=,;|])"
+    r"(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)"
+    r"(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))"
+    r"[A-Za-z0-9][A-Za-z0-9._$-]*",
+    re.IGNORECASE)
+_LAN_HOST_RE = re.compile(
+    r"(?<![A-Za-z0-9._-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
+    r"\.(local|lan|home\.arpa|internal|localdomain)"
+    r"(?![A-Za-z0-9-]|\.[A-Za-z0-9])",
+    re.IGNORECASE)
+
+
+def _own_host_names() -> list:
+    """This machine's names, longest first. Mirrors localm/bugreport/scrub.py."""
+    raw = []
+    try:
+        raw.append(socket.gethostname())
+    except OSError:
+        pass
+    raw.append(os.environ.get("COMPUTERNAME", ""))
+    names = set()
+    for name in raw:
+        name = (name or "").strip().rstrip(".")
+        if name:
+            names.add(name)
+            names.add(name.split(".")[0])
+    return sorted((n for n in names if len(n) >= 3 and n.lower() != "localhost"),
+                  key=lambda n: (-len(n), n))
+
+
+def _scrub_hosts(text: str) -> str:
+    """UNC machine names, local-network host names and this machine's own
+    names replaced with ``<host>``. Mirrors localm/bugreport/scrub.py."""
+    text = _UNC_HOST_RE.sub(r"\1<host>", text)
+    text = _LAN_HOST_RE.sub(r"<host>.\1", text)
+    names = _own_host_names()
+    if names:
+        own = re.compile(r"(?<![A-Za-z0-9_-])(?:"
+                         + "|".join(re.escape(n) for n in names)
+                         + r")(?![A-Za-z0-9_-])", re.IGNORECASE)
+        text = own.sub("<host>", text)
+    return text
+
+
 def stdin_is_interactive() -> bool:
     """True when stdin is a terminal a person can answer at: ``isatty()`` is
     True and, on Windows, stdin is also a console (``GetConsoleMode``
@@ -247,6 +297,8 @@ def scrub(text: str) -> str:
     text = _APIKEY_RE.sub("<redacted>", text)
     # Email addresses, except the maintainer's.
     text = _EMAIL_RE.sub(_email_replacement, text)
+    # Machine names.
+    text = _scrub_hosts(text)
     return text
 
 

@@ -35,6 +35,7 @@ _spec.loader.exec_module(ri)
 # Path.home() replacement fires and all three go through the same rules.
 USER = "zqalice"
 SECRET = "PARITYCANARY7Q4M"
+HOST = "zqfilesrv"
 
 _CORPUS = [
     # Doubled-backslash home paths: repr() / json.dumps() of a Windows path.
@@ -69,6 +70,14 @@ _CORPUS = [
     # Everything at once, in one line.
     repr("C:\\Users\\" + USER + "\\a") + ' {"token": "' + SECRET
     + '"} https://u:p@h.example.org/?sig=' + SECRET + " bob@example.com",
+    # Machine names: UNC (plain, doubled, device form), local-network suffixes.
+    "open \\\\" + HOST + "\\share\\x.gguf failed",
+    repr("\\\\" + HOST + "\\share"),
+    '{"path": "\\\\\\\\' + HOST + '\\\\share"}',
+    "\\\\?\\UNC\\" + HOST + "\\share",
+    "\\\\wsl$\\Ubuntu\\home and \\\\localhost\\c$",
+    "comfy at http://" + HOST + ".local:8188 and " + HOST + ".lan, " + HOST + ".home.arpa",
+    "config.local.json and github.com stay",
 ]
 
 _IDS = [f"case{i}" for i in range(len(_CORPUS))]
@@ -80,6 +89,7 @@ def test_in_app_scrub_removes_every_name_and_secret(text):
     assert USER not in out.lower()
     assert SECRET not in out
     assert "bob.builder" not in out
+    assert HOST not in out.lower()
 
 
 @pytest.mark.parametrize("text", _CORPUS, ids=_IDS)
@@ -101,7 +111,8 @@ def test_doubled_backslash_path_keeps_its_structure():
 def test_python_standalone_patterns_are_byte_identical_to_in_app():
     assert ri._USER_ROOT_PATTERN == pathscrub._USER_ROOT_PATTERN
     for name in ("_QUERY_SECRET_RE", "_HEADER_SECRET_RE", "_JSON_SECRET_RE",
-                 "_BEARER_RE", "_APIKEY_RE", "_EMAIL_RE"):
+                 "_BEARER_RE", "_APIKEY_RE", "_EMAIL_RE",
+                 "_UNC_HOST_RE", "_LAN_HOST_RE"):
         assert getattr(ri, name).pattern == getattr(br_scrub, name).pattern, name
 
 

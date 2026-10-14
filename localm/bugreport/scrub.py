@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Redaction applied to the free-form text a report carries: home paths and user
 names, URL credentials, credential-named query parameters, header lines and JSON
-keys, bearer tokens and API keys.
+keys, bearer tokens and API keys, email addresses, and machine names.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import socket
 
 from localm import pathscrub
 from localm.bugreport._common import MAINTAINER_EMAIL
@@ -214,10 +216,75 @@ def _scrub_emails(text: str) -> str:
     return _EMAIL_RE.sub(_email_replacement, text)
 
 
+# The machine name of a UNC path: ``\\NAME\share``, its doubled form
+# ``\\\\NAME\\share`` (repr() / JSON) and the ``\\?\UNC\NAME\share`` device form.
+# The run of backslashes must start the text or follow whitespace, a quote or
+# one of ``( [ { = , ; |``, so a doubled separator inside a path
+# (``C:\\Users\\x``) is not read as one. ``wsl$``, ``wsl.localhost`` and
+# ``localhost`` are kept. Same
+# pattern as scripts/report_issue.py, scripts/report_issue.ps1 and
+# report-issue.sh. See test_host_patterns_do_not_grow_superlinearly.
+_UNC_HOST_RE = re.compile(
+    r"(?<![^\s\x22\x27(\[{=,;|])"
+    r"(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)"
+    r"(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))"
+    r"[A-Za-z0-9][A-Za-z0-9._$-]*",
+    re.IGNORECASE)
+
+# A host name under a local-network suffix (``nas.local``, ``pc.lan``,
+# ``printer.home.arpa``, ``db.internal``, ``box.localdomain``). The suffix is
+# kept: ``nas.local`` becomes ``<host>.local``. A name continuing past the
+# suffix (``config.local.json``) is not one.
+_LAN_HOST_RE = re.compile(
+    r"(?<![A-Za-z0-9._-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
+    r"\.(local|lan|home\.arpa|internal|localdomain)"
+    r"(?![A-Za-z0-9-]|\.[A-Za-z0-9])",
+    re.IGNORECASE)
+
+
+def _own_host_names() -> list:
+    """This machine's names (``socket.gethostname()``, its first label, and
+    ``COMPUTERNAME``), longest first. Names shorter than three characters and
+    ``localhost`` are left out. Empty when none can be read."""
+    raw = []
+    try:
+        raw.append(socket.gethostname())
+    except OSError:
+        pass
+    raw.append(os.environ.get("COMPUTERNAME", ""))
+    names = set()
+    for name in raw:
+        name = (name or "").strip().rstrip(".")
+        if name:
+            names.add(name)
+            names.add(name.split(".")[0])
+    return sorted((n for n in names if len(n) >= 3 and n.lower() != "localhost"),
+                  key=lambda n: (-len(n), n))
+
+
+def _scrub_hosts(text: str) -> str:
+    """Replace machine names with ``<host>``: a UNC path's machine name
+    (``_UNC_HOST_RE``), a host name under a local-network suffix
+    (``_LAN_HOST_RE``, suffix kept), and this machine's own names wherever they
+    stand as a whole word (case-insensitive). Idempotent."""
+    if not text:
+        return text
+    text = _UNC_HOST_RE.sub(r"\1<host>", text)
+    text = _LAN_HOST_RE.sub(r"<host>.\1", text)
+    names = _own_host_names()
+    if names:
+        own = re.compile(r"(?<![A-Za-z0-9_-])(?:"
+                         + "|".join(re.escape(n) for n in names)
+                         + r")(?![A-Za-z0-9_-])", re.IGNORECASE)
+        text = own.sub("<host>", text)
+    return text
+
+
 def _scrub_secrets(text: str) -> str:
     """Run every scrubber over untrusted text: home paths (username), URL
     ``user:pass@`` credentials, credential-named query params / header lines,
-    bearer / API-key tokens, and email addresses other than the maintainer's.
+    bearer / API-key tokens, email addresses other than the maintainer's, and
+    machine names (``_scrub_hosts``).
     Used for client-supplied fields and the bundled log tails / activity ring
     a share-intended report carries - each of which is untrusted, free-form
     text that could contain a secret the plain home-scrub alone would leave
@@ -230,4 +297,5 @@ def _scrub_secrets(text: str) -> str:
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)
     text = _scrub_emails(text)
+    text = _scrub_hosts(text)
     return text

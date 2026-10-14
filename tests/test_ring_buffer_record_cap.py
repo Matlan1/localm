@@ -64,3 +64,36 @@ def test_native_line_is_truncated_too(fresh_ring):
     entry = debuglog.recent_activity()[-1]
     assert len(entry) <= debuglog._RING_MAX_RECORD_CHARS + len(_suffix(100_000 + 60))
     assert "(truncated," in entry
+
+
+def test_bug_report_activity_section_is_bounded_and_scrubbed_before_it_is_cut(
+        fresh_ring, monkeypatch):
+    from localm import bugreport
+    from localm.bugreport import assembly
+    monkeypatch.setattr(assembly, "collect_diagnostics", lambda context=None: {})
+
+    key = "sk-" + "A" * 20 + "TAILCANARY0123456789"
+    log = logging.getLogger("localm.web")
+    for i in range(4):
+        log.info("filler %d %s", i, "f" * 1500)
+    log.info("request used %s", key)
+
+    def joined() -> str:
+        return "\n".join(debuglog.recent_activity()[-80:])
+
+    start = joined().index(key)
+    log.info("%s", "t" * 1500)
+    entry_overhead = len(debuglog.recent_activity()[-1]) - 1500
+    want_total = start + 23 + 4000
+    remaining = want_total - len(joined()) - 1 - entry_overhead
+    assert 0 < remaining < debuglog._RING_MAX_RECORD_CHARS - entry_overhead
+    log.info("%s", "u" * remaining)
+    text = joined()
+    assert len(text) - 4000 == start + 23
+    assert text[start + 23:].startswith("AAAA") and "TAILCANARY" in text[start + 23:]
+
+    report = bugreport.build_report("activity bound check")
+    assert joined() == text
+    section = report.split("## Recent activity (in-memory log)", 1)[1].split("```")[1]
+    assert len(section.strip("\n")) <= 4000
+    assert "TAILCANARY" not in report

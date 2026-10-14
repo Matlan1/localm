@@ -219,6 +219,12 @@ nothing when `perl`, which it needs to remove personal details, is missing.
   `name%40domain`), anywhere in the report including the configuration
   section and the subject of an emailed report, replaced with `<redacted-email>`, except the maintainer's contact
   address the report is addressed to.
+- Machine names, replaced with `<host>`: the server in a network path
+  (`\\FILESERVER01\share`, also in its doubled-backslash and `\\?\UNC\` forms),
+  a host name ending in a local-network suffix (`nas.local`, `pc.lan`,
+  `printer.home.arpa`, `.internal`, `.localdomain`; the suffix is kept), and this
+  computer's own name wherever it appears as a whole word. `\\wsl$`,
+  `\\wsl.localhost` and `localhost` are kept, and so are public domain names.
 - Config values are sent only from a small allowlist of operational keys
   (port, context size, GPU layer count, mode, ...); the API key itself is
   never stored in config and never included.
