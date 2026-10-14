@@ -630,7 +630,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Enhance prompt works with reasoning models.** The request now asks the chat model not to think, and a reply cut off while it was still reasoning is reported with a clear message instead of an empty reply or reasoning text pasted into the prompt.
 - **The routed-model tooltip names the audio need.** Sending an audio clip to a model that cannot hear it no longer shows a raw `chat.routed.cap.audio_input` in the tooltip.
 - **Unload no longer says "Unloaded" for a model that is still in use.** Unloading an embedding, reranker or speech model that is serving a request now shows that it stays loaded.
-- **The activity list shows a waiting image or video job as queued, and a finished job no longer reports a stale phase.**
+- **The activity list shows a waiting image or video job as queued.** The pill, the list and `localm activity` now show the phase the job reported.
 - **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
   several seconds, and while it did, every other request and stream waited. The close now runs
   in the background pool like the browser's other actions.
