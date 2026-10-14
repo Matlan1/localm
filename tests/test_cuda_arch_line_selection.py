@@ -196,7 +196,8 @@ def test_asset_match_cuda_entry_is_keyed_by_line():
     assert any("13" in m for m in entry["cuda-13"])
     # Every other backend/platform is untouched by this restructuring.
     assert isinstance(sl._ASSET_MATCH["win32"]["vulkan"], list)
-    assert isinstance(sl._ASSET_MATCH["linux"]["cuda"], list)
+    linux = sl._ASSET_MATCH["linux"]["cuda"]
+    assert isinstance(linux, dict) and set(linux) == {"cuda-12", "cuda-13"}
 
 
 # --------------------------------------------------------------------------- #

@@ -66,7 +66,7 @@ PREBUILT_ARCHES: dict[str, dict[str, tuple[str, ...]]] = {
     "linux": {
         "cpu": ("x64", "arm64", "s390x"),
         "vulkan": ("x64", "arm64"),
-        "cuda": ("x64",),
+        "cuda": ("x64", "arm64"),
         "sycl": ("x64",),
         "hip": ("x64",),
     },
@@ -365,8 +365,8 @@ def recommended_install_backend(det: Detection | None = None) -> str:
     is both-OS, so only the AMD gfx103X case is narrowed to Windows.
 
     A pick with no prebuilt build for this machine's CPU architecture (see
-    ``has_prebuilt``) becomes vulkan when that has one, else cpu: an ARM64 Linux
-    NVIDIA box gets vulkan, an Intel Mac stays on cpu. On an architecture with
+    ``has_prebuilt``) becomes vulkan when that has one, else cpu: an Intel Mac
+    stays on cpu, and an s390x box with an NVIDIA card gets cpu. On an architecture with
     no build at all (riscv64, a 32-bit interpreter) the answer is cpu, which
     setup-llama then refuses, naming ``--from``."""
     d = det or detect()

@@ -17,6 +17,12 @@ from click.testing import CliRunner
 from localm import setup_llama as sl
 
 
+@pytest.fixture(autouse=True)
+def _x64_process(monkeypatch):
+    from localm import hwdetect
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
+
+
 def _gpu(name="NVIDIA GeForce RTX 4090", compute="8.9", cuda="12.9", driver="575.51"):
     return sl.NvidiaInfo(present=True, gpu_name=name, driver_version=driver,
                          cuda_capability=cuda, compute_capability=compute)

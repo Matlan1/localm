@@ -123,7 +123,7 @@ from localm.setup_llama.versions import (
 )
 from localm.setup_llama.assets import (
     _auto_backend, _resolve_backend_asset, _resolve_backend_url, _release_assets,
-    _pick_asset, _resolve_cuda_pair,
+    _pick_asset, _resolve_cuda_pair, _resolve_linux_cudart_asset,
 )
 from localm.setup_llama.cuda import (
     _CUDA_LINE, _BLACKWELL_MIN_CAP, _MIN_DRIVER_CUDA, _ver_tuple, _ver_at_least,
@@ -193,7 +193,7 @@ __all__ = [
     "_read_marker", "_recent_tags", "_record_provisioned_backend",
     "_record_runtime_history", "_refresh_install_record", "_release_assets",
     "_RELEASE_TAG_RE", "_repo_runtime_lib", "_resolve_backend_asset",
-    "_resolve_backend_url", "_resolve_cuda_pair", "rocm_build", "_ROCM_BUILD",
+    "_resolve_backend_url", "_resolve_cuda_pair", "_resolve_linux_cudart_asset", "rocm_build", "_ROCM_BUILD",
     "_ROCM_CPU_ASSET", "_ROCM_CPU_TAG", "rocm_cpu_overlay_url", "_ROCM_TAG", "runtime_history",
     "_RUNTIME_HISTORY_MAX", "_runtime_pkg_dir", "RuntimeInUseError",
     "_safe_extractall_tar", "_safe_is_file", "set_pinned_tag", "_sha256_file",

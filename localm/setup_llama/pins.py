@@ -142,13 +142,9 @@ _TRACK_LATEST = "latest"
 _TRACK_DEFAULT = "default"
 
 
-# Third-party Linux CUDA prebuilt: upstream publishes no bare Linux CUDA binary
-# itself, so this fetches from an actively-maintained third party instead - the
-# same shape as the amd-rocm backend's own dependency on
-# lemonade-sdk/llamacpp-rocm, just below. hybridgroup/llama-cpp-builder tracks
-# upstream's bNNNNN tag numbering 1:1 and publishes the same asset-name
-# convention upstream itself uses for every other Linux backend. NOT a
-# localm-built or localm-hosted binary.
+# Linux x64 CUDA builds come from this third-party repo, which uses upstream's
+# bNNNNN tags and asset-name convention. Linux ARM64 CUDA builds come from
+# upstream's own release.
 _CUDA_LINUX_REPO = "hybridgroup/llama-cpp-builder"
 
 # Offline checksums for the Linux CUDA assets of _PINNED_TAG on _CUDA_LINUX_REPO.
@@ -268,7 +264,10 @@ _ASSET_MATCH = {
     "linux": {
         "cpu":    ["bin-ubuntu-{arch}"],
         "vulkan": ["bin-ubuntu-vulkan-{arch}"],
-        "cuda":   ["bin-ubuntu-cuda"],
+        "cuda": {
+            "cuda-12": ["bin-ubuntu-cuda-12.8-{arch}", "bin-ubuntu-cuda-12"],
+            "cuda-13": ["bin-ubuntu-cuda-13.4-{arch}", "bin-ubuntu-cuda-13"],
+        },
         "sycl":   ["bin-ubuntu-sycl-fp16-x64", "bin-ubuntu-sycl-fp16", "bin-ubuntu-sycl"],
         # Same versioned-name drift as the Windows entry above: 7.2 at the old
         # fallback tag, 7.14 at the pinned one. Newest first, generic last.

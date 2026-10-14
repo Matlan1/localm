@@ -20,7 +20,7 @@ from localm.setup_llama.pins import (_AMD_ROCM_ASSET_TAG, _ASSET_MATCH, _CUDA_LI
                                      _CUDA_LINUX_REPO, _PINNED_FALLBACK_SHA256, _ROCM_TAG,
                                      _UPSTREAM_REPO, DEFAULT_URL, DEFAULT_URL_SHA256)
 from localm.setup_llama.versions import _tag_for
-from localm.setup_llama.cuda import _CUDA_LINE
+from localm.setup_llama.cuda import _ARM64_CUDA_LINES, _CUDA_LINE
 import localm.setup_llama as _sl
 
 # --------------------------------------------------------------------------- #
@@ -85,7 +85,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
     plat = _sl._platform_key()
     arch = _sl._machine_arch()
     _require_prebuilt(backend, plat, arch)
-    if backend == "cuda" and plat == "linux":
+    if backend == "cuda" and plat == "linux" and arch == "x64":
         return _resolve_linux_cuda_asset(backend, cuda_line, tag)
 
     entry = _ASSET_MATCH.get(plat, {}).get(backend)
@@ -100,6 +100,8 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
     matchers = [m.format(arch=arch) for m in matchers]
 
     tag = tag or _tag_for(backend)
+    if backend == "cuda" and arch == "arm64" and cuda_line not in _ARM64_CUDA_LINES:
+        raise _no_build_in_release(tag, backend, plat, arch)
     assets = _sl._release_assets(tag)
     for a in assets:
         name = str(a.get("name", "")).lower()
@@ -208,18 +210,13 @@ def _resolve_amd_rocm_asset() -> tuple[str, Optional[str], None]:
 
 def _resolve_linux_cuda_asset(backend: str, cuda_line: str,
                               tag: Optional[str]) -> tuple[str, Optional[str], str]:
-    """The (url, sha256, tag) triple for the Linux CUDA build of *cuda_line*
+    """The (url, sha256, tag) triple for the Linux x64 CUDA build of *cuda_line*
     from hybridgroup/llama-cpp-builder's release listing. When the listing is
     unavailable (offline, rate-limited) and *tag* is the pinned build, the pinned
     download URL and checksum are returned instead. Raises
     ``click.ClickException`` when neither resolves."""
-    # Upstream (ggml-org/llama.cpp) publishes no bare Linux CUDA binary at
-    # all, so the generic _ASSET_MATCH path in _resolve_backend_asset would only
-    # ever construct a guessed URL that 404s. Resolve against
-    # hybridgroup/llama-cpp-builder instead, the same shape as the amd-rocm ->
-    # lemonade-sdk resolution in _resolve_amd_rocm_asset: they track upstream's
-    # own tag numbering 1:1 and publish upstream's own asset-name convention, so
-    # the same tag every other Linux backend uses applies here too.
+    # Linux x64 CUDA builds resolve against hybridgroup/llama-cpp-builder, which
+    # uses upstream's tag numbering; Linux ARM64 resolves against upstream.
     #
     # cuda_line-aware, like the win32 cuda matchers in _ASSET_MATCH: hybridgroup
     # publishes both a cuda-12 asset ("...-cuda-x64.tar.gz") and a
@@ -367,3 +364,28 @@ def _resolve_cuda_pair(tag: str, line: str = _CUDA_LINE) -> tuple:
     build = _pick_asset(assets, "bin-win-" + line, exclude=("cudart",), arch=arch)
     cudart = _pick_asset(assets, "cudart", "win-" + line, arch=arch)
     return build, cudart
+
+
+def _resolve_linux_cudart_asset(tag: str, line: str = _CUDA_LINE) -> tuple[str, Optional[str]]:
+    """The (url, sha256) of upstream's Linux CUDA runtime bundle for *line* on
+    this machine's CPU architecture at release *tag*, from the release listing,
+    else from the offline asset table when *tag* is a pinned release. The
+    sha256 is None when neither carries a digest. Raises
+    ``click.ClickException`` when no bundle resolves: a CUDA build without its
+    runtime does not load."""
+    arch = _sl._machine_arch()
+    assets = _sl._release_assets(tag)
+    if not assets:
+        assets = [{"name": n,
+                   "browser_download_url": f"https://github.com/{_UPSTREAM_REPO}/releases/download/{tag}/{n}",
+                   "digest": "sha256:" + sha}
+                  for n, sha in sorted(_PINNED_FALLBACK_SHA256.items())
+                  if n.startswith(f"cudart-llama-{tag}-")]
+    asset = _pick_asset(assets, "cudart", "ubuntu-" + line, arch=arch)
+    if asset is None:
+        raise click.ClickException(
+            f"llama.cpp release {tag} has no Linux {line} CUDA runtime bundle for "
+            f"{arch} - falling back to vulkan.")
+    digest = asset.get("digest")
+    sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
+    return asset["browser_download_url"], sha or _PINNED_FALLBACK_SHA256.get(asset["name"])

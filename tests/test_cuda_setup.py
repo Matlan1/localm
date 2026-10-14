@@ -20,6 +20,12 @@ import sys
 import pytest
 
 from localm import setup_llama as sl
+
+
+@pytest.fixture(autouse=True)
+def _x64_process(monkeypatch):
+    from localm import hwdetect
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
 from tests._fake_https import patch_https_transport
 
 

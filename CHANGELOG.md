@@ -12,6 +12,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **CUDA on ARM64 Linux.** An ARM64 Linux machine with a Blackwell-class NVIDIA GPU now gets
+  the CUDA build and its runtime instead of Vulkan. Older NVIDIA GPUs on ARM64 Linux still get
+  Vulkan, because upstream builds ARM64 CUDA for the 13.x line only.
 - **Plugins can tell who is calling a route.** The plugin host offers `caller_is_owner(request)`,
   `caller_principal(request)` and `caller_owns(request, owner)`, so a third-party plugin can
   keep a resource to the key that created it, or an action to the owner, without reaching

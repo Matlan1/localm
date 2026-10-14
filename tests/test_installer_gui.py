@@ -714,7 +714,7 @@ class TestBackendMenu:
         monkeypatch.setattr(hwdetect, "machine_arch", lambda: "arm64")
         monkeypatch.setattr(gui.sys, "platform", "linux")
         monkeypatch.setattr(gui, "IS_WINDOWS", False)
-        assert [k for k, _ in gui.backend_choices()] == ["vulkan", "cpu", "own"]
+        assert [k for k, _ in gui.backend_choices()] == ["vulkan", "cuda", "cpu", "own"]
 
     def test_x64_menus_are_unchanged(self, gui, monkeypatch):
         from localm import hwdetect

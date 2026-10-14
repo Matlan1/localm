@@ -884,7 +884,7 @@ if [ -z "$AVAIL" ]; then
   else
     case "$(uname -m 2>/dev/null || true)" in
       x86_64|amd64)  AVAIL="vulkan cuda hip sycl cpu" ;;
-      aarch64|arm64) AVAIL="vulkan cpu" ;;
+      aarch64|arm64) AVAIL="vulkan cuda cpu" ;;
       s390x)         AVAIL="cpu" ;;
       *)             AVAIL="none" ;;
     esac

@@ -20,7 +20,7 @@ from localm.setup_llama.runtime_dir import (_exit_provisioning_busy, _exit_runti
                                             ProvisioningBusyError, RuntimeInUseError)
 from localm.setup_llama.versions import (_apply_version_request, _pin_note_for_backend,
                                          _record_runtime_history)
-from localm.setup_llama.cuda import _CUDA_LINE
+from localm.setup_llama.cuda import _ARM64_CUDA_LINES, _CUDA_LINE
 from localm.setup_llama.provision import _provision_with_fallback
 import localm.setup_llama as _sl
 
@@ -70,7 +70,8 @@ BACKENDS: tuple[str, ...] = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
               help="With --backend cuda on Linux: fetch the CUDA build and runtime "
                    "libraries of this line without an NVIDIA GPU present, for building "
                    "container images. cuda-12 covers every architecture before "
-                   "Blackwell, cuda-13 is for Blackwell. The driver check and the load "
+                   "Blackwell, cuda-13 is for Blackwell and is the only line with an "
+                   "ARM64 build. The driver check and the load "
                    "test are skipped, the runtime is recorded as not load-tested, and "
                    "the container's start check tests it on the GPU host.")
 @click.option("--yes", "-y", "assume_yes", is_flag=True,
@@ -158,7 +159,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
 def _require_staging_context(backend: str, cuda_line: str, from_dir: Optional[str],
                              url: Optional[str], rollback: bool) -> None:
     """Exit non-zero unless --cuda-line is used with --backend cuda on Linux and
-    without --from, --url or --rollback."""
+    without --from, --url or --rollback, and names a line this CPU architecture
+    has a build for. Nothing on disk has been touched when it exits."""
     problem = None
     if backend.lower() != "cuda":
         problem = "--cuda-line needs --backend cuda"
@@ -166,6 +168,8 @@ def _require_staging_context(backend: str, cuda_line: str, from_dir: Optional[st
         problem = "--cuda-line is only available on Linux"
     elif from_dir or url or rollback:
         problem = "--cuda-line cannot be combined with --from, --url or --rollback"
+    elif _sl._machine_arch() == "arm64" and cuda_line not in _ARM64_CUDA_LINES:
+        problem = f"--cuda-line {cuda_line} has no ARM64 build (only cuda-13 does)"
     if problem:
         console.print(f"[red]{problem}.[/red]")
         sys.exit(2)

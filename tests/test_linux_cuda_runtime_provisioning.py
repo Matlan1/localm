@@ -26,6 +26,12 @@ import pytest
 from localm import setup_llama as sl
 
 
+@pytest.fixture(autouse=True)
+def _x64_process(monkeypatch):
+    from localm import hwdetect
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
+
+
 def _make_wheel_zip(path: Path, so_names: tuple, extra_names: tuple = ()) -> None:
     """A real, valid zip shaped like an nvidia-* wheel: some .so* files under a
     package dir, plus non-.so metadata files that must NOT be copied out.

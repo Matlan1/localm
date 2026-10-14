@@ -35,10 +35,10 @@ runtime.
 
 setup fetches the build for the CPU architecture of localm's own Python:
 an Intel Mac gets the macOS x64 build and Apple Silicon the arm64 one. On ARM64
-Linux only `cpu` and `vulkan` have a build, so an NVIDIA GPU there is set up
-with `vulkan`; on ARM64 Windows `cpu` and `vulkan` do, and `cuda` for
-Blackwell-class and newer GPUs only (upstream builds ARM64 CUDA on the 13.x line
-only). A backend with no build for the machine's architecture is
+Linux and ARM64 Windows, `cpu`, `vulkan` and `cuda` have a build, and `cuda` is
+for Blackwell-class and newer GPUs only (upstream builds ARM64 CUDA on the 13.x
+line only), so an older NVIDIA GPU there is set up with `vulkan`. On ARM64 Linux
+the CUDA build and its runtime bundle both come from upstream's release. A backend with no build for the machine's architecture is
 refused with the list of backends that have one. Any other architecture (s390x
 has `cpu` only) needs your own build: `localm setup-llama --from <build dir>`. **macOS/Metal is experimental and its inference is unverified - treat it as best-effort.**
 CI on an Apple Silicon runner checks the install, the Metal auto-pick, `localm

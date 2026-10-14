@@ -417,9 +417,10 @@ Options:
   --cuda-line [cuda-12|cuda-13]   With --backend cuda on Linux: fetch the CUDA build and runtime
                                   libraries of this line without an NVIDIA GPU present, for building
                                   container images. cuda-12 covers every architecture before
-                                  Blackwell, cuda-13 is for Blackwell. The driver check and the load
-                                  test are skipped, the runtime is recorded as not load-tested, and
-                                  the container's start check tests it on the GPU host.
+                                  Blackwell, cuda-13 is for Blackwell and is the only line with an
+                                  ARM64 build. The driver check and the load test are skipped, the
+                                  runtime is recorded as not load-tested, and the container's start
+                                  check tests it on the GPU host.
   -y, --yes                       Non-interactive: accept the recommended action at every prompt
                                   (e.g. fetch the self-contained CUDA runtime). Used by the one-
                                   click installer and for scripted setups.
@@ -601,8 +602,8 @@ def test_intel_mac_cpu_provision_fetches_the_x64_build(world):
 
 @pytest.mark.parametrize("plat, arch, backend, available", [
     ("darwin", "x64", "metal", "cpu"),
-    ("linux", "arm64", "cuda", "cpu, vulkan"),
-    ("linux", "arm64", "hip", "cpu, vulkan"),
+    ("linux", "arm64", "hip", "cpu, cuda, vulkan"),
+    ("linux", "arm64", "sycl", "cpu, cuda, vulkan"),
     ("linux", "riscv64", "cpu", "none"),
 ])
 def test_a_backend_with_no_build_for_this_architecture_is_refused_before_anything_changes(
@@ -882,6 +883,98 @@ def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world, mo
     assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libcublas.so.12",
                              "libcublasLt.so.12", "libcudart.so.12", "libggml-cuda.so",
                              "libllama.so"]
+    assert world.marker() == f"cuda {PIN}\n"
+
+
+LINUX_ARM64_CUDA = {"b/libllama.so": b"libllama@cuda", "b/libggml.so": b"ggml",
+                    "b/libggml-cuda.so": b"ggml-cuda"}
+LINUX_ARM64_CUDART = {"c/libcudart.so.13": b"cudart", "c/libcublas.so.13": b"cublas",
+                      "c/libcublasLt.so.13": b"cublasLt"}
+
+
+def _linux_arm64_cuda_release(world):
+    world.platform("linux")
+    world.arch = "arm64"
+    world.vendors = ["nvidia"]
+    build = f"llama-{PIN}-bin-ubuntu-cuda-13.4-arm64.tar.gz"
+    cudart = f"cudart-llama-{PIN}-bin-ubuntu-cuda-13.4-arm64.tar.gz"
+    urls = world.release(UPSTREAM, PIN, [
+        (cudart, _targz(LINUX_ARM64_CUDART, 6), "ok"),
+        (build, _targz(LINUX_ARM64_CUDA, 5), "ok"),
+        (f"llama-{PIN}-bin-ubuntu-cuda-13.4-x64.tar.gz", _targz({"x/libllama.so": b"x64"}, 7), "ok"),
+        (f"llama-{PIN}-bin-ubuntu-vulkan-arm64.tar.gz",
+         _targz({"v/libllama.so": b"libllama@vulkan"}, 8), "ok"),
+    ])
+    return build, cudart, urls
+
+
+def test_linux_arm64_cuda_uses_the_upstream_build_and_runtime_bundle(world):
+    build, cudart, urls = _linux_arm64_cuda_release(world)
+    world.nvidia = ("580.95", "13.4", "NVIDIA GB10", "12.1")
+    r = world.invoke("--backend", "cuda", "--yes")
+    assert r.exit_code == 0, r.output
+    _in_order(r.text, "Compute capability 12.1 (Blackwell) -> cuda-13 line",
+              "Backend: cuda (NVIDIA CUDA build + self-contained runtime)",
+              f"Downloading {urls[build]}",
+              f"CUDA runtime: {cudart} - no Toolkit install needed",
+              f"Downloading {urls[cudart]}",
+              "OK - cuda runtime loads on this machine.")
+    listing = f"{API}/{UPSTREAM}/releases/tags/{PIN}"
+    assert world.requests == [listing, listing, urls[build], urls[cudart]]
+    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libcublas.so.13",
+                             "libcublasLt.so.13", "libcudart.so.13", "libggml-cuda.so",
+                             "libggml.so", "libllama.so"]
+    assert world.marker() == f"cuda {PIN}\n"
+
+
+def test_linux_arm64_cuda_12_line_gpu_gets_vulkan_without_downloading_cuda(world):
+    build, cudart, urls = _linux_arm64_cuda_release(world)
+    world.nvidia = ("580.95", "13.4", "NVIDIA GH200", "9.0")
+    r = world.invoke("--backend", "cuda", "--yes")
+    assert r.exit_code == 0, r.output
+    _in_order(r.text, "Compute capability 9.0 -> cuda-12 line",
+              "This GPU needs the cuda-12 line, which has no ARM64 build",
+              "Using Vulkan now", "Backend: vulkan", "OK - vulkan runtime loads on this machine.")
+    assert urls[build] not in world.requests and urls[cudart] not in world.requests
+    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libllama.so"]
+    assert world.marker() == f"vulkan {PIN}\n"
+
+
+def test_linux_arm64_cuda_without_its_runtime_bundle_installs_no_cuda(world):
+    build, cudart, urls = _linux_arm64_cuda_release(world)
+    world.nvidia = ("580.95", "13.4", "NVIDIA GB10", "12.1")
+    world.release(UPSTREAM, PIN, [
+        (build, _targz(LINUX_ARM64_CUDA, 5), "ok"),
+        (f"llama-{PIN}-bin-ubuntu-vulkan-arm64.tar.gz",
+         _targz({"v/libllama.so": b"libllama@vulkan"}, 8), "ok"),
+    ])
+    r = world.invoke("--backend", "cuda", "--yes")
+    assert r.exit_code == 0, r.output
+    _in_order(r.text, f"llama.cpp release {PIN} has no Linux cuda-13 CUDA runtime bundle for arm64",
+              "Trying vulkan...", "OK - vulkan runtime loads.")
+    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libllama.so"]
+    assert world.marker() == f"vulkan {PIN}\n"
+
+
+def test_staging_the_12_line_on_arm64_is_refused_before_the_runtime_is_cleared(world):
+    build, cudart, urls = _linux_arm64_cuda_release(world)
+    world.seed_target("libllama.so", marker="vulkan b1")
+    before = world.files()
+    r = world.invoke("--backend", "cuda", "--cuda-line", "cuda-12")
+    assert r.exit_code == 2, r.output
+    assert "--cuda-line cuda-12 has no ARM64 build (only cuda-13 does)." in r.text
+    assert world.files() == before
+    assert world.marker() == "vulkan b1\n"
+    assert world.requests == []
+
+
+def test_staging_the_13_line_on_arm64_fetches_the_build_and_runtime_bundle(world):
+    build, cudart, urls = _linux_arm64_cuda_release(world)
+    r = world.invoke("--backend", "cuda", "--cuda-line", "cuda-13")
+    assert r.exit_code == 0, r.output
+    listing = f"{API}/{UPSTREAM}/releases/tags/{PIN}"
+    assert world.requests == [listing, listing, urls[build], urls[cudart]]
+    assert {"libllama.so", "libcudart.so.13", "libcublas.so.13"} <= set(world.files())
     assert world.marker() == f"cuda {PIN}\n"
 
 
