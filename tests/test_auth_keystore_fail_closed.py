@@ -120,3 +120,34 @@ def test_revoke_key_refuses_rather_than_wipes_on_unreadable_keystore(auth, monke
 
     assert auth.revoke_key(alpha["id"]) is True
     assert {r["name"] for r in auth.list_keys()} == {"beta"}
+
+
+@pytest.mark.parametrize("wrong_shape", ['{"keys": []}', '"alpha"', "42", "null"])
+def test_create_and_revoke_refuse_rather_than_overwrite_a_wrong_shape_keystore(
+        auth, wrong_shape):
+    """An auth.json that parses as JSON but is not a list is left byte-for-byte
+    alone by create_key and revoke_key, which raise ConfigUnreadable; plain
+    reads still see no keys."""
+    import localm.config as cfg
+    path = Path(auth.keystore_file())
+    path.write_text(wrong_shape, encoding="utf-8")
+    before = path.read_bytes()
+
+    excs = []
+    for call in (lambda: auth.create_key("gamma", []),
+                 lambda: auth.revoke_key("any-id")):
+        try:
+            call()
+        except Exception as e:  # noqa: BLE001 - captured for isinstance checks below
+            excs.append(e)
+
+    assert path.read_bytes() == before, "the wrong-shape keystore was overwritten"
+    assert len(excs) == 2 and all(isinstance(e, cfg.ConfigUnreadable) for e in excs), excs
+    assert auth.list_keys() == []
+
+
+def test_create_key_still_works_on_a_valid_list_keystore(auth):
+    path = Path(auth.keystore_file())
+    path.write_text("[]", encoding="utf-8")
+    auth.create_key("alpha", [])
+    assert {r["name"] for r in auth.list_keys()} == {"alpha"}
