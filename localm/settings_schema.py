@@ -949,10 +949,9 @@ CORE_FIELDS: list = [
     # local model instead.
     SettingField("coder_reviewer", Widget.TEXT,
                  "Reviewer model target",
-                 "Sends your diff off-machine unless left blank or set to "
-                 "'local'. Values: blank = the agent's own model; local = a "
-                 "small CPU model; openai; anthropic; or an http(s) URL. "
-                 "Off-machine targets follow the network policy.",
+                 "Sends your diff off-machine (network policy applies) unless "
+                 "blank or 'local'. Values: blank = the agent's own model; "
+                 "local = a small CPU model; openai; anthropic; or an http(s) URL.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
                  admin_only=True),
     # Gated together with coder_reviewer: gating the SELECTOR while leaving its
