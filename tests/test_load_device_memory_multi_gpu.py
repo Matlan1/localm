@@ -130,3 +130,89 @@ def test_a_single_gpu_runtime_still_uses_the_isolated_probe(windows_two_gpus, mo
     monkeypatch.setattr(discover, "load_device_memory_isolated",
                         lambda config=None: pytest.fail("read the registry needlessly"))
     assert VramSizingMixin._free_vram_bytes() == 5 * GIB
+
+
+TWO_DISCRETE = [
+    {"index": 0, "name": "AMD Radeon RX 7800 XT", "total": 16 * GIB, "free": 15 * GIB,
+     "integrated": False},
+    {"index": 1, "name": "AMD Radeon RX 7800 XT", "total": 16 * GIB, "free": 15 * GIB,
+     "integrated": False},
+]
+TWO_DISCRETE_REGISTRY = [
+    {"index": 0, "name": "ROCm0", "type": _loader.GGML_DEV_TYPE_GPU,
+     "total": 16 * GIB, "free": 14 * GIB},
+    {"index": 1, "name": "ROCm1", "type": _loader.GGML_DEV_TYPE_GPU,
+     "total": 16 * GIB, "free": 12 * GIB},
+]
+
+
+@pytest.fixture
+def windows_two_discrete(windows_two_gpus, monkeypatch):
+    """Two discrete 16 GB GPUs in both the torch reading and the runtime
+    registry, no gpu_split_indices configured."""
+    monkeypatch.setattr(discover, "last_gpu_reading",
+                        lambda: [dict(g) for g in TWO_DISCRETE])
+    monkeypatch.setattr(discover, "_runtime_device_registry",
+                        lambda: [dict(d) for d in TWO_DISCRETE_REGISTRY])
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    return windows_two_gpus
+
+
+def test_an_implicit_split_over_two_gpus_is_not_read_as_one(windows_two_discrete):
+    assert discover.load_device_memory_isolated() is None
+    assert VramSizingMixin._free_vram_bytes() is None
+    assert VramSizingMixin._total_vram_bytes() is None
+
+
+def test_a_configured_two_gpu_split_is_not_read_as_one(windows_two_discrete, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"gpu_split_indices": [0, 1], "main_gpu_index": 0})
+    assert discover.load_device_memory_isolated() is None
+    assert VramSizingMixin._total_vram_bytes() is None
+
+
+def test_a_one_entry_split_reads_its_device_beside_another_discrete_gpu(
+        windows_two_discrete, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"gpu_split_indices": [1]})
+    assert discover.load_device_memory_isolated() == (12 * GIB, 16 * GIB)
+
+
+def test_a_one_entry_split_naming_no_detected_gpu_is_not_read(
+        windows_two_discrete, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"gpu_split_indices": [5]})
+    assert discover.load_device_memory_isolated() is None
+
+
+def test_a_runtime_keeping_the_integrated_gpu_is_not_read_as_one(
+        windows_two_gpus, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    monkeypatch.setattr(discover, "_runtime_device_registry", lambda: [
+        dict(REGISTRY[0], type=_loader.GGML_DEV_TYPE_GPU), dict(REGISTRY[1])])
+    assert discover.load_device_memory_isolated() is None
+
+
+def test_a_lone_discrete_gpu_beside_an_integrated_one_is_read_with_no_split(
+        windows_two_gpus, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    assert discover.load_device_memory_isolated() == (13 * GIB, 24 * GIB)
+
+
+def test_the_figures_come_from_the_registry_not_the_last_reading(
+        windows_two_discrete, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"gpu_split_indices": [0]})
+    stale = [dict(g, free=1 * GIB) for g in TWO_DISCRETE]
+    monkeypatch.setattr(discover, "last_gpu_reading", lambda: stale)
+    assert discover.load_device_memory_isolated() == (14 * GIB, 16 * GIB)
+
+
+def test_check_vram_does_not_refuse_a_model_that_fits_across_two_gpus(
+        windows_two_discrete, monkeypatch, tmp_path):
+    from localm.inference.backends.gguf import GgufBackend
+    f = tmp_path / "model.gguf"
+    f.write_bytes(b"\0" * 4096)
+    b = GgufBackend(str(f), n_gpu_layers=99, n_gpu_layers_auto=False, n_ctx=4096)
+    b._model_bytes = lambda: 20 * GIB
+    b.effective_gpu_layers = 99
+    monkeypatch.setattr(GgufBackend, "_split_free_total_bytes",
+                        classmethod(lambda cls: (None, None, 0)))
+    b._check_vram()

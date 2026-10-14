@@ -333,7 +333,8 @@ class VramSizingMixin:
         _free_total_vram_bytes. Falls back to loader.gpu_memory_isolated() when
         torch cannot answer, which includes "did not answer in time", and on a
         runtime with 2+ GPU devices, where that probe declines, to
-        discover.load_device_memory_isolated() for the load's device. Never
+        discover.load_device_memory_isolated() for the load's device when the
+        load runs on that one device (None otherwise). Never
         calls loader.gpu_memory() directly in this process: that call's
         ggml_backend_dev_memory -> hipMemGetInfo path can abort the whole
         process from C on a transient driver condition, which no Python
@@ -486,10 +487,7 @@ class VramSizingMixin:
           GgufWorker or an isolated child, where ``_check_context_fit`` runs
           mid-generation): no probe is attempted at all, because
           ``discover.list_gpus``'s probe does ``import torch``, the
-          DLL-identity conflict ``_free_total_vram_bytes`` guards against. The
-          single-device fallback stays honest there: the isolated native probe
-          declines to answer on a 2+-GPU-device box
-          (``_loader._resolve_gpu_memory``).
+          DLL-identity conflict ``_free_total_vram_bytes`` guards against.
         - Fewer than 2 GPU devices are detected, whether or not a split is
           configured. With no ``gpu_split_indices`` this is answered by
           ``discover.implicit_split_capacity``, which short-circuits from
@@ -504,6 +502,16 @@ class VramSizingMixin:
           ``combined_only`` contract returns ``{}``).
         - A test double patched ``vram_capacity`` without the opt-in kwargs
           (TypeError) or with a plain dict lacking the ``"devices"`` key.
+
+        The single-device readings the caller falls back to answer only for a
+        load that runs on one device: the isolated native probe declines on a
+        runtime with 2+ GPU devices (``_loader._resolve_gpu_memory``), and
+        ``discover.load_device_memory_isolated`` then answers only for a
+        1-entry ``gpu_split_indices``, or for no split on a runtime that lists
+        exactly one GPU-type device. A 2+-GPU load with no combined reading is
+        therefore unmeasurable rather than sized against one of its devices
+        (the torch path, which reads ``resolve_load_gpu_index`` alone, is the
+        exception).
 
         Never raises: a failure to fetch a combined reading is surfaced at
         debug and answered as "no combined reading"."""
