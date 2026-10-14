@@ -220,23 +220,37 @@ def test_shell_standalone_reporter_replaces_its_home(tmp_path):
     assert got == ["~/localm/x.gguf", "at ~"]
 
 
-def test_shell_reporter_sends_nothing_without_a_terminal(tmp_path):
-    bash = _bash_with_perl()
+def _run_curl_fallback(tmp_path, bash, *, drop_terminal_check):
     text = _SH_PATH.read_text(encoding="utf-8")
-    fallback = tmp_path / "fallback.sh"
-    fallback.write_text(text[text.index("# --- No Python at all"):],
-                        encoding="utf-8", newline="\n")
-    sink = tmp_path / "curl_called"
-    fake = tmp_path / "bin"
-    fake.mkdir()
+    fallback_text = text[text.index("# --- No Python at all"):]
+    if drop_terminal_check:
+        assert fallback_text.count("if [ ! -t 0 ]; then") == 1
+        fallback_text = fallback_text.replace("if [ ! -t 0 ]; then", "if false; then")
+    work = tmp_path / ("ungated" if drop_terminal_check else "gated")
+    fake = work / "bin"
+    fake.mkdir(parents=True)
+    (work / "fallback.sh").write_text(fallback_text, encoding="utf-8", newline="\n")
+    sink = work / "curl_called"
     (fake / "curl").write_text('#!/bin/sh\ntouch "' + sink.as_posix() + '"\necho 201\n',
                                encoding="utf-8", newline="\n")
     (fake / "curl").chmod(0o755)
-    env = dict(os.environ, LOCALM_BUGREPORT_URL="https://proxy.example/report")
+    env = dict(os.environ, LOCALM_BUGREPORT_URL="http://127.0.0.1:9/report")
     proc = subprocess.run(
-        [bash, "-c", 'PATH="$1:$PATH"; cd "$2" && bash fallback.sh',
-         "_", fake.as_posix(), tmp_path.as_posix()],
+        [bash, "-c",
+         'p="$(cygpath -u "$1" 2>/dev/null || printf %s "$1")"; '
+         'PATH="$p:$PATH"; cd "$2" && bash fallback.sh',
+         "_", fake.as_posix(), work.as_posix()],
         input="it broke\ny\n", capture_output=True, text=True, timeout=120, env=env)
+    return proc, sink
+
+
+def test_shell_reporter_sends_nothing_without_a_terminal(tmp_path):
+    bash = _bash_with_perl()
+    control, control_sink = _run_curl_fallback(tmp_path, bash, drop_terminal_check=True)
+    assert control_sink.exists(), (
+        "control: without the terminal check the fake curl must be reached\n"
+        + control.stdout + control.stderr)
+    proc, sink = _run_curl_fallback(tmp_path, bash, drop_terminal_check=False)
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
     assert "nothing was sent" in out, out
