@@ -2880,7 +2880,9 @@
         "localm.tls.x__make_ca__mutmut_11": "killed",
         "localm.tls.x__make_ca__mutmut_12": "killed",
         "localm.tls.x__make_ca__mutmut_13": "killed",
-        "localm.tls.x__make_ca__mutmut_14": "killed",
+        "localm.tls.x__make_ca__mutmut_14": {
+          "unstable": "the CN literal is asserted by no test; recorded killed by CI run 38593795303 but survived in CI run 38616906275 on identical tls source and tests, and in all 7 local seeds, so no test reliably catches it and the earlier kill is not reproducible"
+        },
         "localm.tls.x__make_ca__mutmut_15": "survived",
         "localm.tls.x__make_ca__mutmut_16": "survived",
         "localm.tls.x__make_ca__mutmut_17": "killed",
@@ -3007,7 +3009,9 @@
         "localm.tls.x__make_leaf__mutmut_126": "survived",
         "localm.tls.x__make_leaf__mutmut_127": "survived",
         "localm.tls.x__make_leaf__mutmut_128": "killed",
-        "localm.tls.x__make_leaf__mutmut_129": "survived",
+        "localm.tls.x__make_leaf__mutmut_129": {
+          "unstable": "an equivalent codec-name spelling (utf-8 vs UTF-8) that no test can distinguish; recorded survived by CI run 38593795303 but killed in CI run 38616906275 on identical source and tests, while it survived in all 7 local seeds, so the CI kill is not reproducible"
+        },
         "localm.tls.x__make_leaf__mutmut_13": "killed",
         "localm.tls.x__make_leaf__mutmut_14": "killed",
         "localm.tls.x__make_leaf__mutmut_15": "killed",
@@ -3106,7 +3110,9 @@
         "localm.tls.x__meta_path__mutmut_1": "killed",
         "localm.tls.x__meta_path__mutmut_2": "killed",
         "localm.tls.x__meta_path__mutmut_3": "survived",
-        "localm.tls.x__meta_path__mutmut_4": "survived",
+        "localm.tls.x__meta_path__mutmut_4": {
+          "unstable": "the sidecar name meta.json becomes META.JSON consistently for reads and writes and no test names the file; recorded survived by CI run 38593795303 but killed in CI run 38616906275 on identical source and tests, while it survived in all 7 local seeds, so the CI kill is not reproducible"
+        },
         "localm.tls.x__norm_ip__mutmut_1": "killed",
         "localm.tls.x__norm_ip__mutmut_2": "killed",
         "localm.tls.x__now__mutmut_1": "killed",
