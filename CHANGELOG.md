@@ -639,6 +639,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   refuses `dimensions` and answers 404 for an unknown model instead of returning an empty result.
   The `keep_alive: 0` unload idiom no longer unloads a local copy of a model that another instance serves.
 - **Two image, video or music jobs no longer load their models on top of the chat model coming back.** A second job that started while the first job's chat model was reloading loaded its own model beside it, which made the second job several times slower on a full card. A job now waits for a running chat reload, and the chat model reloads once, after the last job.
+- **A fractional number for a whole-number setting is refused over the API too.**
+  `PATCH /v1/config {"max_tokens": 1.5}` used to store 1 while `localm config max_tokens 1.5`
+  was refused; both now refuse it with "expected an integer". A whole number written as
+  `2048.0` is still accepted.
+- **Applying an update no longer says "already up to date" when it cannot compare versions.**
+  If the latest release's version is not a recognisable version number, `POST /api/update/apply`
+  now says it could not tell whether that release is newer, as the update check already did.
 - **A chat answered by another localm instance keeps this instance's session persistence.** With a
   route to another instance's loaded model, a scheduled chat job on a routed model, or
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a
