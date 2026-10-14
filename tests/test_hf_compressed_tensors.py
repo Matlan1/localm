@@ -283,6 +283,73 @@ class TestExpandedSize:
             worker.unload()
 
 
+def _build_nvfp4(folder):
+    """A 1-layer llama whose Linear layers are saved in the compressed-tensors
+    nvfp4-pack-quantized format; saves the same model unquantized beside it and
+    returns that folder."""
+    import torch
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    _define_missing_distributed_work(torch)
+    from compressed_tensors.compressors import ModelCompressor
+    from compressed_tensors.quantization import QuantizationConfig, apply_quantization_config
+
+    torch.manual_seed(0)
+    cfg = LlamaConfig(vocab_size=64, hidden_size=64, intermediate_size=128,
+                      num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=4,
+                      max_position_embeddings=64)
+    model = LlamaForCausalLM(cfg).eval()
+    plain = folder.parent / (folder.name + "-plain")
+    model.save_pretrained(plain)
+    qcfg = QuantizationConfig.model_validate({
+        "config_groups": {"g": {"targets": ["Linear"], "weights": {
+            "num_bits": 4, "type": "float", "symmetric": True,
+            "strategy": "tensor_group", "group_size": 16, "dynamic": False,
+            "scale_dtype": "float8_e4m3fn"}}},
+        "ignore": ["lm_head"], "quant_method": "compressed-tensors",
+        "format": "nvfp4-pack-quantized"})
+    apply_quantization_config(model, qcfg)
+    for module in model.modules():
+        scheme = getattr(module, "quantization_scheme", None)
+        if scheme is None or scheme.weights is None:
+            continue
+        weight = module.weight.data
+        global_scale = torch.tensor([448.0 * 6.0 / weight.abs().max().item()])
+        module.weight_global_scale = torch.nn.Parameter(global_scale, requires_grad=False)
+        group = weight.reshape(weight.shape[0], -1, 16).abs().amax(-1) / 6.0
+        scale = (group * global_scale).clamp_min(1e-4).to(torch.float8_e4m3fn)
+        module.weight_scale = torch.nn.Parameter(scale.to(torch.float32), requires_grad=False)
+    compressor = ModelCompressor.from_pretrained_model(
+        model, quantization_format="nvfp4-pack-quantized")
+    compressor.compress_model(model)
+    folder.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(folder)
+    compressor.update_config(str(folder))
+    _write_tokenizer(folder)
+    return plain
+
+
+@needs_stack
+def test_an_nvfp4_checkpoint_runs_at_the_cpu_load_dtype(tmp_path):
+    import torch
+    from localm.inference.backends import _hf_fp8
+    from localm.inference.backends._hf_worker import HFWorker
+    folder = tmp_path / "q"
+    plain = _build_nvfp4(folder)
+    worker = HFWorker(str(folder), device="cpu")
+    worker.load()
+    try:
+        proj = worker._model.model.layers[0].self_attn.q_proj
+        assert proj.weight.dtype == torch.float32
+        with torch.no_grad():
+            logits = worker._model(torch.tensor([[1, 2, 3]])).logits
+        assert logits.shape == (1, 3, 64)
+    finally:
+        worker.unload()
+    assert (_hf_fp8.compressed_expanded_bytes(str(folder), 4)
+            == _hf_fp8.expanded_bf16_bytes(str(plain)) * 2)
+
+
 def _write_tokenizer(folder):
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import PreTrainedTokenizerFast
@@ -323,6 +390,7 @@ class TestExpandedSizeParsing:
             "norm.weight": ("BF16", [8], b"\0" * 16)},
             groups={"g": {"weights": {"num_bits": 4}}})
         assert compressed_expanded_bytes(path, 2) == (8 * 8 + 8) * 2
+        assert compressed_expanded_bytes(path, 4) == (8 * 8 + 8) * 4
 
     def test_the_shape_tensor_wins_over_the_packed_size(self, tmp_path):
         import struct

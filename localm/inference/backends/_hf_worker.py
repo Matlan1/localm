@@ -350,6 +350,13 @@ def _define_missing_distributed_work(torch) -> None:
     dist.Work = type("Work", (), {})
 
 
+def _cast_floating_weights(model, dtype) -> None:
+    """Cast *model* to *dtype* when any floating-point parameter has another
+    dtype. See test_an_nvfp4_checkpoint_runs_at_the_cpu_load_dtype."""
+    if any(p.is_floating_point() and p.dtype != dtype for p in model.parameters()):
+        model.to(dtype)
+
+
 def _hub_kernel_blocked_message(model_path: str, blocked: tuple) -> str:
     from localm.inference.backends._hf_fp8 import one_line
     method, refusal = blocked
@@ -1561,6 +1568,7 @@ class HFWorker:
             if note:
                 self.load_notes.append(note)
             if _is_compressed_tensors(self.model_path):
+                _cast_floating_weights(self._model, dtype)
                 self.load_notes.append(
                     f"compressed-tensors weights expanded to {_param_dtype_label(self._model)}")
 
