@@ -90,6 +90,14 @@ def test_shortcut_and_path_steps_are_opt_in(gui):
     assert any("PATH" in l for l in labels)
 
 
+@pytest.mark.parametrize("plat, expected", [("darwin", False), ("linux", True)])
+def test_macos_gets_no_launcher_or_shortcut(gui, monkeypatch, plat, expected):
+    monkeypatch.setattr(gui.sys, "platform", plat)
+    labels = [s.label for s in gui.build_steps(gui.Plan(shortcut="gui"))]
+    assert ("Building the launcher" in labels) is expected
+    assert any("shortcut" in l for l in labels) is expected
+
+
 def test_optional_steps_cannot_fail_the_install(gui):
     """A machine with no working torch wheel still gets a usable GGUF install,
     so those steps are marked non-fatal; the ones that define the install are
