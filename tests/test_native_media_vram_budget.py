@@ -319,6 +319,43 @@ def test_a_release_that_never_shows_logs_and_still_loads(image_env, tmp_path, mo
     assert any("did not rise" in w for w in warned)
 
 
+@pytest.mark.parametrize("when", ["before the stop", "after the stop"])
+def test_a_cancel_during_a_switch_loads_nothing(image_env, tmp_path, monkeypatch, when):
+    runner, s, _order = _switch_env(image_env, monkeypatch, release_after=10 ** 6)
+    monkeypatch.setattr(sd_budget, "RELEASE_TIMEOUT_S", 30.0)
+
+    def cancel_check():
+        return True if when == "before the stop" else not runner.alive
+    ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
+                                    width=64, height=64, cancel_check=cancel_check)
+    assert (ok, msg) == (False, "Cancelled.")
+    assert runner.loads == []
+
+
+def test_a_failed_final_reading_falls_back_to_the_last_good_one(image_env, tmp_path,
+                                                                monkeypatch):
+    runner, s, _backend, _probes = image_env
+    runner.alive, runner.loaded_key = True, ("something else", "rocm")
+    reads = []
+
+    def probe(**kw):
+        reads.append(runner.alive)
+        stopped = sum(1 for alive in reads if not alive)
+        if runner.alive or stopped == 1:
+            return [_gpu(free=3 * GIB)], discover.GPU_PROBE_OK
+        return [], discover.GPU_PROBE_TIMEOUT
+    monkeypatch.setattr(discover, "list_gpus", probe)
+    monkeypatch.setattr(sd_budget, "RELEASE_TIMEOUT_S", 0.05)
+    said = []
+    ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
+                                    width=64, height=64, on_progress=said.append)
+    assert ok, msg
+    (_key, ctx), = runner.loads
+    assert ctx["max_vram"] == "2.50"
+    assert sum(1 for alive in reads if not alive) >= 2
+    assert not any("could not be measured" in line for line in said)
+
+
 def test_a_first_load_does_not_wait_for_a_release(image_env, tmp_path, monkeypatch):
     runner, s, _backend, probes = image_env
     waited = []

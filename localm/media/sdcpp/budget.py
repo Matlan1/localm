@@ -120,25 +120,41 @@ def with_budget(ctx: dict, backend: str, say: Callable[[str], None],
     return dict(ctx, max_vram=b.setting)
 
 
-def reload_ctx(runner, ctx: dict, backend: str, say: Callable[[str], None]) -> dict:
+def reload_ctx(runner, ctx: dict, backend: str, say: Callable[[str], None],
+               cancel_check: Optional[Callable[[], bool]] = None) -> dict:
     """Stop *runner*'s worker and return *ctx* for the next load, with its
     budget (:func:`with_budget`). When the stopped worker held a model and the
     budget applies, the free VRAM is read before the stop, and the budget is
     the first reading after it that has risen (``vram.wait_for_vram_release``,
-    at most ``RELEASE_TIMEOUT_S``; the last reading when it has not)."""
+    polling for ``RELEASE_TIMEOUT_S``); when none rises, the last successful
+    reading after the stop. Raises ``SdCancelled`` when *cancel_check* returns
+    True before a reading or after the stop."""
+    from .runner import SdCancelled
+
+    def check_cancel() -> None:
+        if cancel_check is not None and cancel_check():
+            raise SdCancelled("Generation cancelled.")
+
     before = None
     if applies(backend) and runner.is_alive() and runner.loaded_key is not None:
+        check_cancel()
         b = vram_budget(backend)
         before = b.free if b is not None and b.setting is not None else None
     runner.shutdown()
+    check_cancel()
     if before is None:
         return with_budget(ctx, backend, say)
     last: list = [None]
+    good: list = [None]
 
     def read_free() -> Optional[int]:
-        last[0] = vram_budget(backend)
-        b = last[0]
-        return b.free if b is not None and b.setting is not None else None
+        check_cancel()
+        b = vram_budget(backend)
+        last[0] = b
+        if b is None or b.setting is None:
+            return None
+        good[0] = b
+        return b.free
 
     from localm.vram import wait_for_vram_release
     released, _final = wait_for_vram_release(read_free, before_bytes=before,
@@ -147,4 +163,4 @@ def reload_ctx(runner, ctx: dict, backend: str, say: Callable[[str], None]) -> d
         from localm.debuglog import logger
         logger.warning("native media VRAM budget: free VRAM did not rise within %.0f s "
                        "of stopping the previous model", RELEASE_TIMEOUT_S)
-    return with_budget(ctx, backend, say, last[0])
+    return with_budget(ctx, backend, say, good[0] or last[0])
