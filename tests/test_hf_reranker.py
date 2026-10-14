@@ -279,6 +279,42 @@ class TestRealCrossEncoder:
         assert resident._runner._proc.pid != old.pid
         assert after.scored == before.scored
 
+    def test_a_dead_worker_waits_for_a_model_load_in_progress_before_restarting(
+            self, cross_encoder):
+        import threading
+
+        from localm.inference.engine import _LOAD_LOCK
+        reranker.rerank(str(cross_encoder), _QUERY, ["w3"])
+        resident = reranker._RERANKER
+        old = resident._runner._proc
+        old.kill()
+        old.join(10)
+        held, release = threading.Event(), threading.Event()
+
+        def _model_load():
+            with _LOAD_LOCK:
+                held.set()
+                release.wait(60)
+
+        loader = threading.Thread(target=_model_load, daemon=True)
+        loader.start()
+        assert held.wait(10)
+        result: list = []
+        call = threading.Thread(
+            target=lambda: result.append(reranker.rerank(str(cross_encoder), _QUERY, ["w3"])),
+            daemon=True)
+        try:
+            call.start()
+            call.join(3)
+            assert call.is_alive(), "the reranker restarted while a model load held the lock"
+            assert resident._runner is None or resident._runner._proc is old
+        finally:
+            release.set()
+            loader.join(10)
+        call.join(120)
+        assert not call.is_alive() and len(result) == 1
+        assert resident._runner._proc.pid != old.pid
+
     def test_more_than_one_chunk_of_documents_keeps_the_request_order(self, cross_encoder):
         docs = [f"w{i} w{i + 1}" for i in range(1, 41)]
         outcome = reranker.rerank(str(cross_encoder), _QUERY, docs)
@@ -299,6 +335,65 @@ class TestRealCrossEncoder:
 
 
 @needs_stack
+class _FailingBackend:
+    loaded = False
+    _runner = None
+
+    def __init__(self):
+        self.loads = 0
+        self.lock_held_at_load: list = []
+
+    def unload(self):
+        pass
+
+    def load(self):
+        from localm.inference.engine import _LOAD_LOCK
+        self.loads += 1
+        self.lock_held_at_load.append(_LOAD_LOCK._is_owned())
+        raise RuntimeError("worker exited during load")
+
+    def rerank(self, pairs):
+        raise AssertionError("scored on a backend that is not loaded")
+
+
+class TestFailedRestart:
+    def _resident(self, tmp_path):
+        folder = tmp_path / "ce"
+        folder.mkdir()
+        (folder / "config.json").write_text("{}", encoding="utf-8")
+        hf = object.__new__(reranker.HFReranker)
+        hf.model_path = str(folder)
+        hf.active_requests = 0
+        hf._call_lock = __import__("threading").Lock()
+        hf._backend = _FailingBackend()
+        hf.cls_labels = []
+        hf._runner = None
+        reranker._RERANKER = hf
+        reranker._RERANKER_KEY = reranker._file_key(str(folder))
+        return hf
+
+    def test_the_restart_holds_the_engine_load_lock(self, tmp_path):
+        hf = self._resident(tmp_path)
+        with pytest.raises(reranker.RerankerUnavailableError):
+            hf.rerank([("q", "d")])
+        assert hf._backend.lock_held_at_load == [True]
+
+    def test_a_failed_restart_releases_the_reranker_and_latches_its_folder(
+            self, tmp_path, monkeypatch):
+        hf = self._resident(tmp_path)
+        with pytest.raises(reranker.RerankerUnavailableError) as ei:
+            hf.rerank([("q", "d")])
+        assert "worker exited during load" in str(ei.value)
+        assert reranker._RERANKER is None and reranker._RERANKER_KEY is None
+        monkeypatch.setattr(reranker, "_check_hf_head", lambda path: None)
+        monkeypatch.setattr(reranker, "HFReranker", lambda *a, **k: pytest.fail(
+            "a latched folder was loaded again"))
+        with pytest.raises(reranker.RerankerUnavailableError) as again:
+            reranker.get_reranker(hf.model_path)
+        assert "worker exited during load" in str(again.value)
+        assert hf._backend.loads == 1
+
+
 def _build_reward_model(folder):
     """A tiny random LlamaForSequenceClassification (one output) whose tokenizer
     carries a chat template, as a reward model ships."""
