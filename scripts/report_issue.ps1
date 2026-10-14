@@ -74,8 +74,8 @@ function Scrub([string]$t) {
   $t = [regex]::Replace($t, '(?<![^\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*])[^\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]*?[^@\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*](?:@|%40)[^@.%+\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]+(?:\.[^@.%+\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]+)*\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}[^\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*]*', [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $v = $m.Value; $c = $v.TrimStart([char]39); $lead = $v.Substring(0, $v.Length - $c.Length); $c = $c.TrimEnd([char[]]@('.', [char]39)); $trail = $v.Substring($lead.Length + $c.Length); $a = $c.Replace('%40', '@'); if ($email -and $a -cmatch '^[\x00-\x7f]*$' -and [string]::Equals($a, $email, [System.StringComparison]::OrdinalIgnoreCase)) { $v } else { $lead + '<redacted-email>' + $trail } })
   # Machine names: a UNC path's machine name, a host under a local-network suffix (suffix kept), and
   # this machine's own names. Same patterns as _UNC_HOST_RE / _LAN_HOST_RE in localm/bugreport/scrub.py.
-  $t = [regex]::Replace($t, '(?<![^\s\x22\x27(\[{=,;|])(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))[A-Za-z0-9][A-Za-z0-9._$-]*', '${1}<host>', $ic)
-  $t = [regex]::Replace($t, '(?<![A-Za-z0-9._-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(local|lan|home\.arpa|internal|localdomain)(?![A-Za-z0-9-]|\.[A-Za-z0-9])', '<host>.${1}', $ic)
+  $t = [regex]::Replace($t, '(?:(?<![^\s\x22\x27(\[{=,;|\x60<>*])|(?<=[A-Za-z0-9_]{2}:))(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))[A-Za-z0-9][A-Za-z0-9._$-]*', '${1}<host>', $ic)
+  $t = [regex]::Replace($t, '(?<![A-Za-z0-9._-])(?!(?:localm\.local|(?:host|gateway|kubernetes)\.docker\.internal)(?![A-Za-z0-9-]|\.[A-Za-z0-9]))[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(local|lan|home\.arpa|internal|localdomain)(?![A-Za-z0-9(-]|\.[A-Za-z0-9])', '<host>.${1}', $ic)
   $hostNames = @()
   try { $hostNames += [System.Net.Dns]::GetHostName() } catch { }
   if ($env:COMPUTERNAME) { $hostNames += $env:COMPUTERNAME }
@@ -84,10 +84,10 @@ function Scrub([string]$t) {
     $n = "$n".Trim().TrimEnd('.')
     if ($n) { $own[$n] = 1; $own[$n.Split('.')[0]] = 1 }
   }
-  $keep = @($own.Keys | Where-Object { $_.Length -ge 3 -and $_ -ne 'localhost' } | Sort-Object -Property @{ Expression = { $_.Length }; Descending = $true }, @{ Expression = { $_ } })
+  $keep = @($own.Keys | Where-Object { $_.Length -ge 3 -and @('archlinux', 'debian', 'fedora', 'host', 'kali', 'localhost', 'localm', 'raspberrypi', 'redacted', 'ubuntu', 'user') -notcontains $_.ToLower() } | Sort-Object -Property @{ Expression = { $_.Length }; Descending = $true }, @{ Expression = { $_ } })
   if ($keep.Count -gt 0) {
     $alt = ($keep | ForEach-Object { [regex]::Escape($_) }) -join '|'
-    $t = [regex]::Replace($t, '(?<![A-Za-z0-9_-])(?:' + $alt + ')(?![A-Za-z0-9_-])', '<host>', $ic)
+    $t = [regex]::Replace($t, '(?<![A-Za-z0-9_./\\-])(?:' + $alt + ')(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])', '<host>', $ic)
   }
   return $t
 }

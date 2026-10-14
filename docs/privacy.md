@@ -223,8 +223,11 @@ nothing when `perl`, which it needs to remove personal details, is missing.
   (`\\FILESERVER01\share`, also in its doubled-backslash and `\\?\UNC\` forms),
   a host name ending in a local-network suffix (`nas.local`, `pc.lan`,
   `printer.home.arpa`, `.internal`, `.localdomain`; the suffix is kept), and this
-  computer's own name wherever it appears as a whole word. `\\wsl$`,
-  `\\wsl.localhost` and `localhost` are kept, and so are public domain names.
+  computer's own name wherever it appears as a whole word (not inside a dotted
+  name or a path, and not when it is a distribution's default name such as
+  `ubuntu`). `\\wsl$`, `\\wsl.localhost`, `localhost`, localm's own
+  `localm.local`, Docker's `host.docker.internal` and public domain names are
+  kept.
 - Config values are sent only from a small allowlist of operational keys
   (port, context size, GPU layer count, mode, ...); the API key itself is
   never stored in config and never included.

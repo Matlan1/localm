@@ -198,16 +198,23 @@ def _email_replacement(m: re.Match) -> str:
 # Machine names. Byte-identical to _UNC_HOST_RE and _LAN_HOST_RE in
 # localm/bugreport/scrub.py, where the rules are described.
 _UNC_HOST_RE = re.compile(
-    r"(?<![^\s\x22\x27(\[{=,;|])"
+    r"(?:(?<![^\s\x22\x27(\[{=,;|\x60<>*])|(?<=[A-Za-z0-9_]{2}:))"
     r"(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)"
     r"(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))"
     r"[A-Za-z0-9][A-Za-z0-9._$-]*",
     re.IGNORECASE)
 _LAN_HOST_RE = re.compile(
-    r"(?<![A-Za-z0-9._-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
+    r"(?<![A-Za-z0-9._-])"
+    r"(?!(?:localm\.local|(?:host|gateway|kubernetes)\.docker\.internal)"
+    r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"
+    r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
     r"\.(local|lan|home\.arpa|internal|localdomain)"
-    r"(?![A-Za-z0-9-]|\.[A-Za-z0-9])",
+    r"(?![A-Za-z0-9(-]|\.[A-Za-z0-9])",
     re.IGNORECASE)
+
+
+_OWN_NAME_SKIP = frozenset({"archlinux", "debian", "fedora", "host", "kali", "localhost",
+                            "localm", "raspberrypi", "redacted", "ubuntu", "user"})
 
 
 def _own_host_names() -> list:
@@ -224,7 +231,8 @@ def _own_host_names() -> list:
         if name:
             names.add(name)
             names.add(name.split(".")[0])
-    return sorted((n for n in names if len(n) >= 3 and n.lower() != "localhost"),
+    return sorted((n for n in names
+                   if len(n) >= 3 and n.lower() not in _OWN_NAME_SKIP),
                   key=lambda n: (-len(n), n))
 
 
@@ -235,9 +243,10 @@ def _scrub_hosts(text: str) -> str:
     text = _LAN_HOST_RE.sub(r"<host>.\1", text)
     names = _own_host_names()
     if names:
-        own = re.compile(r"(?<![A-Za-z0-9_-])(?:"
+        own = re.compile(r"(?<![A-Za-z0-9_./\\-])(?:"
                          + "|".join(re.escape(n) for n in names)
-                         + r")(?![A-Za-z0-9_-])", re.IGNORECASE)
+                         + r")(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])",
+                         re.IGNORECASE)
         text = own.sub("<host>", text)
     return text
 

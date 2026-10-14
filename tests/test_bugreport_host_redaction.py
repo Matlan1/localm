@@ -53,6 +53,15 @@ _CASES = [
     ("https://u:p@box.lan/x", "https://<redacted>@<host>.lan/x"),
     ("config.local.json, a .env.local file, github.com and huggingface.co",
      "config.local.json, a .env.local file, github.com and huggingface.co"),
+    ("models on `" + BS * 2 + "NAS01" + BS + "llm`", "models on `" + BS * 2 + "<host>" + BS + "llm`"),
+    ("path:" + BS * 2 + "NAS01" + BS + "x", "path:" + BS * 2 + "<host>" + BS + "x"),
+    ("<" + BS * 2 + "NAS01" + BS + "x>", "<" + BS * 2 + "<host>" + BS + "x>"),
+    ("*" + BS * 2 + "NAS01" + BS + "x", "*" + BS * 2 + "<host>" + BS + "x"),
+    ("D:" + BS * 2 + "data" + BS * 2 + "x.gguf", "D:" + BS * 2 + "data" + BS * 2 + "x.gguf"),
+    ("state = threading.local()", "state = threading.local()"),
+    ("netname: advertising localm.local -> 10.0.0.5", "netname: advertising localm.local -> 10.0.0.5"),
+    ("http://host.docker.internal:8188 and gateway.docker.internal",
+     "http://host.docker.internal:8188 and gateway.docker.internal"),
 ]
 
 _SCRUBBERS = [
@@ -75,6 +84,28 @@ def test_own_host_name_is_redacted_wherever_it_stands_alone(scrub, monkeypatch):
     text = ("on ZQ-WORKSTATION as zq-workstation.corp.example.com; "
             "zq-workstation2 and my-zq-workstation stay")
     assert scrub(text) == "on <host> as <host>; zq-workstation2 and my-zq-workstation stay"
+
+
+@pytest.mark.parametrize("scrub", _SCRUBBERS)
+def test_own_host_name_inside_a_dotted_or_path_name_is_kept(scrub, monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "zqbox")
+    monkeypatch.delenv("COMPUTERNAME", raising=False)
+    text = "zqbox.inference.http_server, src/zqbox/x.py, C:" + BS + "zqbox" + BS + "y; on zqbox."
+    assert scrub(text) == ("zqbox.inference.http_server, src/zqbox/x.py, C:" + BS + "zqbox"
+                           + BS + "y; on <host>.")
+
+
+@pytest.mark.parametrize("scrub", _SCRUBBERS)
+@pytest.mark.parametrize("name", ["ubuntu", "Fedora", "localm", "host", "redacted", "user"])
+def test_default_and_placeholder_host_names_are_not_used(scrub, monkeypatch, name):
+    monkeypatch.setattr(socket, "gethostname", lambda: name)
+    monkeypatch.delenv("COMPUTERNAME", raising=False)
+    text = f"{name} 24.04 and <host> and <redacted>"
+    assert scrub(text) == text
+
+
+def test_python_reporters_skip_the_same_names():
+    assert ri._OWN_NAME_SKIP == br_scrub._OWN_NAME_SKIP
 
 
 @pytest.mark.parametrize("scrub", _SCRUBBERS)

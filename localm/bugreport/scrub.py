@@ -218,14 +218,15 @@ def _scrub_emails(text: str) -> str:
 
 # The machine name of a UNC path: ``\\NAME\share``, its doubled form
 # ``\\\\NAME\\share`` (repr() / JSON) and the ``\\?\UNC\NAME\share`` device form.
-# The run of backslashes must start the text or follow whitespace, a quote or
-# one of ``( [ { = , ; |``, so a doubled separator inside a path
+# The run of backslashes must start the text, follow whitespace, a quote, a
+# backtick or one of ``( [ { = , ; | < > *``, or follow a colon that ends a word
+# of two or more characters (``path:``), so a doubled separator inside a path
 # (``C:\\Users\\x``) is not read as one. ``wsl$``, ``wsl.localhost`` and
 # ``localhost`` are kept. Same
 # pattern as scripts/report_issue.py, scripts/report_issue.ps1 and
 # report-issue.sh. See test_host_patterns_do_not_grow_superlinearly.
 _UNC_HOST_RE = re.compile(
-    r"(?<![^\s\x22\x27(\[{=,;|])"
+    r"(?:(?<![^\s\x22\x27(\[{=,;|\x60<>*])|(?<=[A-Za-z0-9_]{2}:))"
     r"(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)"
     r"(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))"
     r"[A-Za-z0-9][A-Za-z0-9._$-]*",
@@ -233,19 +234,30 @@ _UNC_HOST_RE = re.compile(
 
 # A host name under a local-network suffix (``nas.local``, ``pc.lan``,
 # ``printer.home.arpa``, ``db.internal``, ``box.localdomain``). The suffix is
-# kept: ``nas.local`` becomes ``<host>.local``. A name continuing past the
-# suffix (``config.local.json``) is not one.
+# kept: ``nas.local`` becomes ``<host>.local``. Not one: a name continuing past
+# the suffix (``config.local.json``), a call (``threading.local()``), localm's
+# own mDNS name ``localm.local`` and Docker's ``host``/``gateway``/``kubernetes``
+# ``.docker.internal``.
 _LAN_HOST_RE = re.compile(
-    r"(?<![A-Za-z0-9._-])[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
+    r"(?<![A-Za-z0-9._-])"
+    r"(?!(?:localm\.local|(?:host|gateway|kubernetes)\.docker\.internal)"
+    r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"
+    r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
     r"\.(local|lan|home\.arpa|internal|localdomain)"
-    r"(?![A-Za-z0-9-]|\.[A-Za-z0-9])",
+    r"(?![A-Za-z0-9(-]|\.[A-Za-z0-9])",
     re.IGNORECASE)
+
+
+# Host names never treated as this machine's own: placeholders and default
+# names that are also ordinary words in a report.
+_OWN_NAME_SKIP = frozenset({"archlinux", "debian", "fedora", "host", "kali", "localhost",
+                            "localm", "raspberrypi", "redacted", "ubuntu", "user"})
 
 
 def _own_host_names() -> list:
     """This machine's names (``socket.gethostname()``, its first label, and
     ``COMPUTERNAME``), longest first. Names shorter than three characters and
-    ``localhost`` are left out. Empty when none can be read."""
+    those in ``_OWN_NAME_SKIP`` are left out. Empty when none can be read."""
     raw = []
     try:
         raw.append(socket.gethostname())
@@ -258,7 +270,8 @@ def _own_host_names() -> list:
         if name:
             names.add(name)
             names.add(name.split(".")[0])
-    return sorted((n for n in names if len(n) >= 3 and n.lower() != "localhost"),
+    return sorted((n for n in names
+                   if len(n) >= 3 and n.lower() not in _OWN_NAME_SKIP),
                   key=lambda n: (-len(n), n))
 
 
@@ -273,9 +286,10 @@ def _scrub_hosts(text: str) -> str:
     text = _LAN_HOST_RE.sub(r"<host>.\1", text)
     names = _own_host_names()
     if names:
-        own = re.compile(r"(?<![A-Za-z0-9_-])(?:"
+        own = re.compile(r"(?<![A-Za-z0-9_./\\-])(?:"
                          + "|".join(re.escape(n) for n in names)
-                         + r")(?![A-Za-z0-9_-])", re.IGNORECASE)
+                         + r")(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])",
+                         re.IGNORECASE)
         text = own.sub("<host>", text)
     return text
 
