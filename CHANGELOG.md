@@ -2207,6 +2207,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A plugin's `requires_extras` can only name pip extras.** An entry that is not an extra name
   (for example one carrying a URL or an environment marker) used to reach the dependency
   installer as part of a requirement string; such a plugin is now refused when it is read.
+- **A rejected grammar no longer lands in the debug log in privacy mode.** When a GGUF model's
+  grammar check failed, llama.cpp's error message and the whole grammar went to the debug log
+  even when privacy mode keeps chat content out of it; it now reaches the log only when chat
+  content may.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model
