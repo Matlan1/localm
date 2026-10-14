@@ -97,12 +97,14 @@ def vram_budget(backend: str, *, gpus: Optional[list] = None, status: Optional[s
     return Budget(setting=setting, free=free, total=total)
 
 
-def with_budget(ctx: dict, backend: str, say: Callable[[str], None]) -> dict:
-    """*ctx* with ``max_vram`` set from :func:`vram_budget`, saying the free
-    VRAM through *say*. *ctx* unchanged (the same object) without a setting;
-    when the reading failed, *say* and the debug log get the reason. Call it with
-    no worker of this process holding VRAM."""
-    b = vram_budget(backend)
+def with_budget(ctx: dict, backend: str, say: Callable[[str], None],
+                b: Optional[Budget] = None) -> dict:
+    """*ctx* with ``max_vram`` set from *b* (default: a fresh :func:`vram_budget`),
+    saying the free VRAM through *say*. *ctx* unchanged (the same object)
+    without a setting; when the reading failed, *say* and the debug log get the
+    reason. Call it with no worker of this process holding VRAM."""
+    if b is None:
+        b = vram_budget(backend)
     if b is None:
         return ctx
     from localm.debuglog import logger
@@ -118,27 +120,31 @@ def with_budget(ctx: dict, backend: str, say: Callable[[str], None]) -> dict:
     return dict(ctx, max_vram=b.setting)
 
 
-def _free(backend: str) -> Optional[int]:
-    b = vram_budget(backend)
-    return b.free if b is not None and b.setting is not None else None
-
-
 def reload_ctx(runner, ctx: dict, backend: str, say: Callable[[str], None]) -> dict:
     """Stop *runner*'s worker and return *ctx* for the next load, with its
     budget (:func:`with_budget`). When the stopped worker held a model and the
-    budget applies, the free VRAM is read before the stop and the budget is
-    taken once the reading has risen (``vram.wait_for_vram_release``, at most
-    ``RELEASE_TIMEOUT_S``)."""
+    budget applies, the free VRAM is read before the stop, and the budget is
+    the first reading after it that has risen (``vram.wait_for_vram_release``,
+    at most ``RELEASE_TIMEOUT_S``; the last reading when it has not)."""
     before = None
     if applies(backend) and runner.is_alive() and runner.loaded_key is not None:
-        before = _free(backend)
+        b = vram_budget(backend)
+        before = b.free if b is not None and b.setting is not None else None
     runner.shutdown()
-    if before is not None:
-        from localm.vram import wait_for_vram_release
-        released, _final = wait_for_vram_release(lambda: _free(backend), before_bytes=before,
-                                                 timeout_s=RELEASE_TIMEOUT_S)
-        if released is False:
-            from localm.debuglog import logger
-            logger.warning("native media VRAM budget: free VRAM did not rise within %.0f s "
-                           "of stopping the previous model", RELEASE_TIMEOUT_S)
-    return with_budget(ctx, backend, say)
+    if before is None:
+        return with_budget(ctx, backend, say)
+    last: list = [None]
+
+    def read_free() -> Optional[int]:
+        last[0] = vram_budget(backend)
+        b = last[0]
+        return b.free if b is not None and b.setting is not None else None
+
+    from localm.vram import wait_for_vram_release
+    released, _final = wait_for_vram_release(read_free, before_bytes=before,
+                                             timeout_s=RELEASE_TIMEOUT_S)
+    if released is False:
+        from localm.debuglog import logger
+        logger.warning("native media VRAM budget: free VRAM did not rise within %.0f s "
+                       "of stopping the previous model", RELEASE_TIMEOUT_S)
+    return with_budget(ctx, backend, say, last[0])

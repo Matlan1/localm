@@ -268,7 +268,7 @@ def test_a_runtime_change_reloads_the_same_model(image_env, tmp_path):
     assert ok, msg
     assert [k[1] for k, _ctx in runner.loads] == ["rocm", "vulkan"]
     assert [ctx["max_vram"] for _k, ctx in runner.loads] == ["12.50", "12.50"]
-    assert len(probes) == 4
+    assert len(probes) == 3
 
 
 def _switch_env(image_env, monkeypatch, release_after):
