@@ -683,7 +683,8 @@ def _session_for(url: str, *, search_backend: bool = False):
     from localm import netpin
     parsed = urllib.parse.urlparse(url)
     exempt = search_backend and is_search_backend_origin(url, _config())
-    ips = _resolve_pinned_all(_canonical_host(parsed.hostname or ""), search_backend=exempt)
+    host = _canonical_host(parsed.hostname or "")
+    ips = _resolve_pinned_all(host, search_backend=True) if exempt else _resolve_pinned_all(host)
     if not ips:
         raise UnresolvableHost(
             f"Could not resolve '{parsed.hostname}' to an address; refusing the "
@@ -716,7 +717,8 @@ def pinned_request(method: str, url: str, *, max_bytes: Optional[int] = None,
     when the decoded body is longer than *max_bytes*.
 
     *search_backend* is passed to :func:`_session_for` (see :func:`check_url`)."""
-    session = _session_for(url, search_backend=search_backend)
+    session = (_session_for(url, search_backend=True) if search_backend
+               else _session_for(url))
     headers = {**(kwargs.pop("headers", None) or {}),
                "Host": _host_header(urllib.parse.urlparse(url))}
     if max_bytes is not None:

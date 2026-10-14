@@ -169,3 +169,13 @@ def test_net_allow_private_still_opens_everything():
     _configure(net_allow_private=True, net_search_url="")
     check_url("http://192.168.1.10:8080/x")
     assert netpolicy._resolve_pinned_all("169.254.169.254") == ["169.254.169.254"]
+
+
+def test_a_unicode_and_an_a_label_spelling_are_the_same_origin(monkeypatch):
+    import socket
+    _configure(net_search_url="http://bücher.local:8080")
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("192.168.1.10", 0))])
+    assert netpolicy.is_search_backend_origin(
+        "http://xn--bcher-kva.local:8080/search", netpolicy._config()) is True
+    check_url("http://xn--bcher-kva.local:8080/search?q=x", search_backend=True)
