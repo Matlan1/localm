@@ -46,6 +46,13 @@ function Scrub([string]$t) {
   # reporters apply is applied here too, in the same order: a fallback reporter that
   # scrubs LESS than the in-app one is the shape that leaks.
   $ic = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  # The home folder itself (as given, forward-slash and doubled-backslash forms) becomes ~.
+  $h = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+  if ($h) {
+    foreach ($v in @($h, $h.Replace('\', '/'), $h.Replace('\', '\\'))) {
+      $t = [regex]::Replace($t, [regex]::Escape($v), '~', $ic)
+    }
+  }
   # Home-path username strip (Windows C:\Users\<name>, plus /home/ and /Users/ forms).
   # The Windows separator is one OR two backslashes, so a repr()'d or JSON-encoded path is matched too.
   $t = [regex]::Replace($t, '([A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)|/home/|/Users/)[^\\/\r\n]+', '${1}<redacted>', $ic)
