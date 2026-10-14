@@ -1301,7 +1301,9 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
         current_model = str(load_config().get("embedding_model") or "")
         from localm.rag import collection_provenance_note, collection_provenance_report
         unchanged = model == current_model
-        affected = [] if unchanged else collection_provenance_report(candidate_model=model)
+        affected = [] if unchanged else await asyncio.get_running_loop().run_in_executor(
+            get_plugin_executor(),
+            lambda: collection_provenance_report(candidate_model=model))
         note = collection_provenance_note(model, affected, unchanged=unchanged)
         return {"needs_confirm": True, "model": model,
                 "collections": affected, "note": note}
