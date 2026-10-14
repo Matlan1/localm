@@ -262,7 +262,7 @@ def compressed_expanded_bytes(model_path: str, value_bytes: int) -> Optional[int
                     tensors[name] = (path, data_start, info)
         bits = None
         total = 0
-        for name, (path, data_start, info) in tensors.items():
+        for name, (_path, _start, info) in tensors.items():
             prefix, _, leaf = name.rpartition(".")
             if leaf in _COMPRESSED_PARAM_LEAVES:
                 continue
