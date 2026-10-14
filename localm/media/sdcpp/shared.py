@@ -25,17 +25,33 @@ _timer_lock = threading.Lock()
 
 @contextlib.contextmanager
 def held(say: Callable[[str], None],
-         cancel_check: Optional[Callable[[], bool]] = None) -> Iterator[bool]:
+         cancel_check: Optional[Callable[[], bool]] = None,
+         on_state: Optional[Callable[[str], None]] = None) -> Iterator[bool]:
     """Hold ``lock`` for the body and yield True. When another job holds it,
     ``say`` reports the wait once and ``cancel_check`` is polled until the
     lock frees; a cancel while waiting yields False without taking the lock
-    and the body must not touch ``runner``."""
-    if not lock.acquire(blocking=False):
+    and the body must not touch ``runner``.
+
+    ``on_state`` is called only when the job had to wait: with ``"queued"``
+    when the wait starts and exactly once more when it ends (also when it ends
+    by an exception), with ``"running"`` if the lock was taken and
+    ``"cancelled"`` if not. A job that finds the lock free never calls it."""
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
         say("Waiting for the image or video job already running...")
-        while not lock.acquire(timeout=WAIT_POLL_SECONDS):
-            if cancel_check is not None and cancel_check():
-                yield False
-                return
+        if on_state is not None:
+            on_state("queued")
+        try:
+            while not acquired:
+                acquired = lock.acquire(timeout=WAIT_POLL_SECONDS)
+                if not acquired and cancel_check is not None and cancel_check():
+                    break
+        finally:
+            if on_state is not None:
+                on_state("running" if acquired else "cancelled")
+    if not acquired:
+        yield False
+        return
     try:
         yield True
     finally:
