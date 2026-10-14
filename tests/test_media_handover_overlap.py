@@ -454,7 +454,7 @@ def test_a_reload_off_job_that_is_not_last_leaves_the_deferred_reload_to_the_las
     ta, _ = _run(job_a, a)
     _wait_for(lambda: vram._handover_jobs >= 1)
     tb, _ = _run(job_b, b)
-    _wait_for(lambda: vram._handover_jobs >= 2)
+    _wait_for(b_entered.is_set)
     tc, _ = _run(job_c, c)
     for t in (ta, tb, tc):
         t.join(WAIT)
