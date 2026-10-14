@@ -218,6 +218,32 @@ class TestOllamaSharedBlob:
         assert reg["llama3-latest"].get("mmproj")
 
 
+class TestOllamaSharedProjector:
+    def _two_vision_tags(self, tmp_path) -> Path:
+        root = tmp_path / "ollama"
+        proj = _blob(root, _gguf(arch="clip", tag="proj"))
+        for tag in ("q4", "q8"):
+            model = _blob(root, _gguf(tag=f"vision-{tag}"))
+            _manifest(root, f"registry.ollama.ai/library/llava/{tag}",
+                      [_layer(_MODEL, model), _layer(_PROJECTOR, proj)])
+        return root
+
+    @pytest.mark.parametrize("store", ["copy", "move"])
+    def test_two_tags_sharing_a_projector_both_register_with_a_store(
+            self, tmp_path, isolated_home, store):
+        root = self._two_vision_tags(tmp_path)
+        assert add_local(str(root), store=store) is True
+        reg = load_registry()
+        assert set(reg) == {"llava-q4", "llava-q8"}
+        models = (isolated_home / "models").resolve()
+        assert Path(reg["llava-q4"]["mmproj"]) == Path(reg["llava-q8"]["mmproj"])
+        for entry in reg.values():
+            assert Path(entry["path"]).parent == models
+            assert Path(entry["mmproj"]).parent == models
+            assert Path(entry["mmproj"]).exists()
+        assert len([f for f in models.iterdir() if f.is_file()]) == 3
+
+
 class TestOllamaProblems:
     def test_a_non_gguf_model_layer_is_reported_and_skipped(self, tmp_path, isolated_home, capsys):
         root = _store(tmp_path,
