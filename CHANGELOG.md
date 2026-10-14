@@ -612,6 +612,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Ollama-compatible routes.** A non-streamed `/api/chat` or `/api/generate` reply now carries the
+  `X-Localm-*` response headers, as the streamed one does. `POST /api/embed` with an empty `input`
+  refuses `dimensions` and answers 404 for an unknown model instead of returning an empty result.
+  The `keep_alive: 0` unload idiom no longer unloads a local copy of a model that another instance serves.
 - **A chat answered by another localm instance keeps this instance's session persistence.** With a
   route to another instance's loaded model, a scheduled chat job on a routed model, or
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a
