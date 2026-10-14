@@ -461,6 +461,7 @@ _STOP_STRINGS: frozenset = frozenset({
     "<|endoftext|>",    # GPT-2 / StarCoder
     "[/INST]",          # Mistral v1 instruct
     "<|end|>",          # Phi
+    "<|role_end|>",     # Ling / LLaDA-MoE
 })
 
 # A harmony (gpt-oss) vocabulary ends a reply with these end-of-generation
@@ -3011,8 +3012,16 @@ class LlamaCpp:
                 logger.info("gguf diffusion: stopped before the reply was complete")
                 self.last_finish_reason = "error" if self._stop.is_set() else "stop"
                 return
+            stops = getattr(self, "_stop_strings", _STOP_STRINGS)
+
+            def _ends_reply(token: int) -> bool:
+                if tokenizer.is_eog(token):
+                    return True
+                piece = tokenizer.token_to_piece_bytes(token)
+                return piece.decode("utf-8", "replace") in stops
+
             reply, ended = _diffusion.reply_tokens(
-                canvas, n_input, params.mask_token_id, tokenizer.is_eog)
+                canvas, n_input, params.mask_token_id, _ends_reply)
             if max_new_tokens > 0 and len(reply) > max_new_tokens:
                 reply = reply[:max_new_tokens]
                 ended = False
