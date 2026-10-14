@@ -169,3 +169,37 @@ def test_the_menu_entry_is_offered_on_linux_only(tmp_path, is_macos):
         assert "No desktop entry created." not in result.stdout
     else:
         assert asked and entry.exists()
+
+
+# ------------------------------ setup-llama call --------------------------- #
+
+def _setup_llama_call_block() -> str:
+    return _block('  SL_YES=""\n', 'failed during setup."\n')
+
+
+@pytest.mark.parametrize("yes, expected", [
+    (1, "localm setup-llama --backend vulkan --yes"),
+    (0, "localm setup-llama --backend vulkan"),
+])
+def test_yes_is_passed_on_to_setup_llama(tmp_path, yes, expected):
+    calls = _recording_localm(tmp_path)
+    _run(f'handle_provision_failure() {{ :; }}\nYES={yes}\nBACKEND=vulkan\nSL_FORCE=""\n'
+         + _setup_llama_call_block(), tmp_path)
+    assert calls.read_text(encoding="utf-8").strip() == expected
+
+
+@pytest.mark.parametrize("machine, expected", [
+    ("x86_64", "<vulkan|cuda|hip|sycl|cpu>"),
+    ("aarch64", "<vulkan|cpu>"),
+    ("s390x", "cpu"),
+    ("riscv64", "<backend>"),
+])
+def test_the_fallback_list_follows_the_linux_architecture(tmp_path, machine, expected):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_uname_stub(bin_dir, os_name="Linux", arch=machine)
+    env = dict(os.environ)
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    out = _run("IS_MACOS=0\nIS_APPLE_SILICON=0\n" + _offered_block()
+               + 'printf "%s\n" "$SL_BACKENDS"\n', tmp_path, env).stdout.strip()
+    assert out == expected

@@ -858,7 +858,7 @@ uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 # Windows (self-contained) or vulkan on Linux (sycl there needs a separate
 # oneAPI install), Apple Silicon -> metal, no GPU -> cpu.
 # setup-llama fetches the matching upstream build, so a tester never compiles by hand.
-REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}')"
+REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}' || true)"
 case "$REC" in
   vulkan|cuda|hip|sycl|cpu|metal|amd-rocm) ;;   # a known backend from the policy
   *) case "$GPU" in                        # fallback if the probe failed
@@ -881,7 +881,14 @@ AVAIL="$(.venv/bin/python -m localm.hwdetect backends 2>/dev/null || true)"
 if [ -z "$AVAIL" ]; then
   if [ "$IS_APPLE_SILICON" = 1 ]; then AVAIL="cpu metal"
   elif [ "$IS_MACOS" = 1 ]; then AVAIL="cpu"
-  else AVAIL="vulkan cuda hip sycl cpu"; fi
+  else
+    case "$(uname -m 2>/dev/null || true)" in
+      x86_64|amd64)  AVAIL="vulkan cuda hip sycl cpu" ;;
+      aarch64|arm64) AVAIL="vulkan cpu" ;;
+      s390x)         AVAIL="cpu" ;;
+      *)             AVAIL="none" ;;
+    esac
+  fi
 fi
 offered() { case " $AVAIL " in *" $1 "*) return 0 ;; esac; return 1; }
 SL_BACKENDS=""
@@ -971,7 +978,10 @@ elif [ "$BACKEND" = own ]; then
     say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend $SL_BACKENDS"
   fi
 else
-  .venv/bin/localm setup-llama --backend "$BACKEND" $SL_FORCE || handle_provision_failure \
+  SL_YES=""
+  if [ "$YES" = 1 ]; then SL_YES="--yes"; fi
+  # shellcheck disable=SC2086
+  .venv/bin/localm setup-llama --backend "$BACKEND" $SL_FORCE $SL_YES || handle_provision_failure \
     ".venv/bin/localm setup-llama --backend $BACKEND --force" \
     "Provisioning the native llama.cpp runtime (--backend $BACKEND) failed during setup."
 fi

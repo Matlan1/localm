@@ -351,11 +351,23 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
         sys.exit(1)
 
 
+def _refuse_without_prebuilt(chosen: str) -> None:
+    """Exit 1, before anything is cleared or downloaded, when *chosen* has no
+    prebuilt build for this platform and CPU architecture; the message names the
+    backends that have one. No fallback backend is installed in its place."""
+    try:
+        _sl.assets._require_prebuilt(chosen, _sl._platform_key(), _sl._machine_arch())
+    except click.ClickException as e:
+        console.print(f"[red]{e.message}[/red]")
+        sys.exit(1)
+
+
 def _provision_release(backend: str, target: Path, sha256: Optional[str],
                        assume_yes: bool) -> None:
     """Install *backend* from its release asset, with the CUDA dialogue, the
     load test and its fallbacks, then record the backend and build."""
     chosen = _sl._auto_backend() if backend == "auto" else backend
+    _refuse_without_prebuilt(chosen)
     # warn-once-then-comply: an explicit off-profile choice is the user's to
     # make, but flag a vendor mismatch a single time so a misclick is visible.
     # Also captures the SAME detection for the CUDA dialogue below, so a

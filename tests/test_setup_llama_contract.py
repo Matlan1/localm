@@ -573,6 +573,7 @@ def test_linux_cpu_provision_copies_shared_objects_only(world):
 
 def test_macos_metal_provision(world):
     world.platform("darwin")
+    world.arch = "arm64"
     name = f"llama-{PIN}-bin-macos-arm64.tar.gz"
     urls = world.release(UPSTREAM, PIN, [(name, _targz(MAC_METAL), "ok")])
     r = world.invoke("--backend", "metal", "--yes")
@@ -583,6 +584,41 @@ def test_macos_metal_provision(world):
                              "libllama.dylib"]
     assert (world.lib / "LICENSE.llama-cpp").read_text(encoding="utf-8") == sl._LLAMA_CPP_MIT_NOTICE
     assert world.marker() == f"metal {PIN}\n"
+
+
+def test_intel_mac_cpu_provision_fetches_the_x64_build(world):
+    world.platform("darwin")
+    world.arch = "x64"
+    arm, x64 = f"llama-{PIN}-bin-macos-arm64.tar.gz", f"llama-{PIN}-bin-macos-x64.tar.gz"
+    urls = world.release(UPSTREAM, PIN, [(arm, _targz({"x/libllama.dylib": b"arm"}), "ok"),
+                                         (x64, _targz(MAC_METAL), "ok")])
+    r = world.invoke("--backend", "cpu", "--yes")
+    assert r.exit_code == 0, r.output
+    assert f"Downloading {urls[x64]}" in r.text
+    assert urls[arm] not in world.requests
+    assert world.marker() == f"cpu {PIN}\n"
+
+
+@pytest.mark.parametrize("plat, arch, backend, available", [
+    ("darwin", "x64", "metal", "cpu"),
+    ("linux", "arm64", "cuda", "cpu, vulkan"),
+    ("linux", "arm64", "hip", "cpu, vulkan"),
+    ("linux", "riscv64", "cpu", "none"),
+])
+def test_a_backend_with_no_build_for_this_architecture_is_refused_before_anything_changes(
+        world, plat, arch, backend, available):
+    world.platform(plat)
+    world.arch = arch
+    world.seed_target("libllama.so", marker="vulkan b1")
+    before = world.files()
+    r = world.invoke("--backend", backend, "--force", "--yes")
+    assert r.exit_code == 1, r.output
+    assert (f"backend '{backend}' has no prebuilt build for {plat} on {arch}. Available here: "
+            f"{available}. Or build llama.cpp yourself and pass --from <build dir>.") in r.text
+    assert world.files() == before
+    assert world.marker() == "vulkan b1\n"
+    assert world.requests == []
+    assert "Trying vulkan" not in r.text and "falling back" not in r.text.lower()
 
 
 @pytest.mark.parametrize("pin, note", [

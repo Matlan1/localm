@@ -367,7 +367,9 @@ def recommended_install_backend(det: Detection | None = None) -> str:
 
     A pick with no prebuilt build for this machine's CPU architecture (see
     ``has_prebuilt``) becomes vulkan when that has one, else cpu: an ARM64 Linux
-    NVIDIA box gets vulkan, an Intel Mac stays on cpu."""
+    NVIDIA box gets vulkan, an Intel Mac stays on cpu. On an architecture with
+    no build at all (riscv64, a 32-bit interpreter) the answer is cpu, which
+    setup-llama then refuses, naming ``--from``."""
     d = det or detect()
     choice = _hardware_install_backend(d)
     if has_prebuilt(choice):
