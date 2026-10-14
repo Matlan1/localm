@@ -111,7 +111,8 @@ Contents:read token and require `SHARED_SECRET`.
 ## Releases (for the updater)
 
 The updater offers a build when the latest **GitHub Release** tag is newer than the
-running `VERSION`, and verifies the shipped `.sig` (a signature envelope) against the
+running `VERSION`, and verifies the shipped `.sig` (a signature envelope from 0.3.1 on;
+the 0.3.0 `.sig` is a bare signature for 0.2.0 clients) against the
 key set pinned in `localm/updater.py`, or a newer one an earlier update installed, before
 applying. The ONE real release procedure is
 [`scripts/make_release.py`](../../scripts/make_release.py) (see

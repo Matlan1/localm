@@ -437,8 +437,12 @@ data directory that applied the update, while the install is shared by every dat
 directory that runs it (a different `LOCALM_HOME`, or a data directory that was
 reset). Every release that carries a replacement set of keys also pins that same set
 in its own code, so once it is installed, every data directory trusts the new keys,
-whichever one applied the update. Builds signed for localm 0.2.0 and earlier use a
-single-key format that 0.3.0 and later refuse; 0.2.0 updates to 0.3.0 as before. The GUI "Update now" button's restart (the only
+whichever one applied the update. Rolling that update back restores the previous
+build's code and the keys it pins, so a data directory other than the one that
+applied the update trusts the previous keys again until the update is reapplied.
+Builds signed for localm 0.2.0 and earlier use a single-key format that 0.3.0 and
+later refuse. 0.2.0 updates to 0.3.0 as before; an install still on 0.2.0 when a
+later release is published cannot verify that release and needs a fresh install. The GUI "Update now" button's restart (the only
 transition that happens with nobody watching) is followed by a detached watchdog
 that polls the relaunched build's `/whoami` for the expected version and
 auto-rolls-back if it does not come up healthy within 90 seconds. `localm update`

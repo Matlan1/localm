@@ -7,7 +7,8 @@ localm's auto-updater already relies on: its Ed25519 signature envelope against
 the update signing keys in `localm/updater.py`, and/or a plain SHA256 digest.
 
 THIS VERIFIES THE GITHUB RELEASE **ASSET** (`localm-<version>.zip` plus its
-`localm-<version>.zip.sig`, both listed under a release's "Assets" section),
+signature envelope, `localm-<version>.zip.envelope` for 0.3.0 and
+`localm-<version>.zip.sig` otherwise, listed under a release's "Assets" section),
 NOT GitHub's own auto-generated "Source code (zip)" link. The asset is built
 from `release-manifest.toml`'s file list and carries a baked version file;
 the auto-zipball is the raw tracked tree with neither, so its bytes differ
@@ -171,6 +172,7 @@ def main(argv=None) -> int:
         if not sig_source.is_file():
             could_not.append(("signature", f"--sig file not found: {sig_source}"))
         else:
+            print(f"signature file: {sig_source}")
             sig_text = sig_source.read_text(encoding="utf-8", errors="replace").strip()
             try:
                 ok, msg = verify_ed25519(zip_path.read_bytes(), sig_text)

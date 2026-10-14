@@ -168,10 +168,10 @@ async function latestRelease(request, env, url) {
   const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
   // Prefer a .zip asset (the build); else the first asset; else none.
   const asset = assets.find((a) => /\.zip$/i.test(a.name)) || assets[0] || null;
-  // Serve the signature: the text of the first *.sig asset, verbatim (trimmed). For
-  // localm 0.3.0 and later that is a JSON signature envelope the client verifies
-  // against the key set it trusts (updater.verify_signature). Absent -> null: the
-  // client refuses the unsigned build.
+  // Serve the signature: the text of the first *.sig asset, verbatim (trimmed). From
+  // 0.3.1 on that is a JSON signature envelope the client verifies against the key
+  // set it trusts (updater.verify_signature); the 0.3.0 .sig is a bare base64
+  // signature for 0.2.0 clients. Absent -> null: the client refuses the unsigned build.
   let signature = null;
   const sigAsset = assets.find((a) => /\.sig$/i.test(a.name));
   if (sigAsset) {
