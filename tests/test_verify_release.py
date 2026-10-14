@@ -238,7 +238,7 @@ def test_main_localm_error_from_malformed_signature_reported_not_raised(tmp_path
     assert rc == 1
     out = capsys.readouterr().out
     assert "signature: FAILED" in out
-    assert "malformed" in out
+    assert "0.2.0 or earlier" in out
 
 
 def test_main_signature_import_error_is_could_not_check_not_a_crash(tmp_path, monkeypatch):
