@@ -98,7 +98,10 @@ set nor read them, and the Images page and job log show only a model's file name
   ("Free VRAM: 13.9 of 16.0 GB.") and gives the runtime that budget, so a model that does
   not fit next to the other programs keeps part of its weights in RAM and streams them in,
   instead of Windows paging it to system memory, which made each step many times slower on
-  ROCm and made Vulkan fail. Close other GPU programs for the fastest runs.
+  ROCm and made Vulkan fail. The budget is taken when the model loads (after the previous
+  model's VRAM has been released), so VRAM freed later is used from the next load on;
+  close other GPU programs before generating for the fastest runs. When the free VRAM
+  cannot be measured, the job log says so and the runtime uses its own reading.
 - **Flash attention on ROCm.** Images on the ROCm runtime use the runtime's flash attention,
   which is faster and needs less VRAM there; on Vulkan it is much slower, so it stays off.
 - **Warnings that were recovered from.** A decode that does not fit in VRAM is retried in
