@@ -43,10 +43,11 @@ def _fake_torch(hip, tunable):
                                  cuda=types.SimpleNamespace(tunable=tunable), nn=torch.nn)
 
 
-def test_not_rocm_does_nothing(tmp_path):
+def test_not_rocm_does_nothing(tmp_path, monkeypatch):
     tunable = _Tunable()
-    model = torch.nn.Linear(4, 4)
-    assert gt.tune_decode_gemms(_fake_torch(None, tunable), model, tmp_path / "r") is None
+    monkeypatch.setattr(gt, "decode_gemm_weights",
+                        lambda torch_, model: [types.SimpleNamespace(shape=(4, 4))])
+    assert gt.tune_decode_gemms(_fake_torch(None, tunable), object(), tmp_path / "r") is None
     assert tunable.calls == []
     assert not (tmp_path / "r").exists()
 
