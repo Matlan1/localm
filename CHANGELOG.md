@@ -635,6 +635,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Audio clips survive a server without an audio decoder.** Sending an MP3 or another non-WAV
+  clip to an install without the voice extra no longer deletes every clip in the chat, earlier
+  working ones included; the message explaining the missing extra is shown and the clips stay.
+- **Coder sessions follow a model loaded after an unload.** When the loaded model is unloaded
+  (by hand or by idle unload) and another model is then loaded from elsewhere, unpinned coder
+  sessions now switch to it instead of reloading the old one over it.
 - **The coder knows a model's context size before its first reply.** A coder session whose
   model is an unpinned scheduled job or a Hugging Face reference now budgets its first prompt
   against the server's real context ceiling instead of the 4096 default.
