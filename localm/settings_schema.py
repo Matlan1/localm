@@ -652,8 +652,8 @@ CORE_FIELDS: list = [
     # CONTENT TO DISK, so only an owner may turn privacy off and start
     # persisting transcripts and an audit trail. Gating the READ costs the GUI
     # nothing: it reads the injected cfg["effective_mode"] /
-    # cfg["effective_coder_mode"], which routes/config.py adds AFTER the
-    # admin_only strip, never cfg["mode"].
+    # cfg["effective_chat_mode"] / cfg["effective_coder_mode"], which
+    # routes/config.py adds AFTER the admin_only strip, never cfg["mode"].
     SettingField("mode", Widget.SELECT, "Session persistence",
                  "What localm saves: privacy = nothing written automatically; "
                  "log = a JSONL audit trail; full = log plus a chat transcript.",
@@ -661,13 +661,15 @@ CORE_FIELDS: list = [
     # Both children name the parent setting rather than pointing at a position:
     # in the two-column grid the parent sits to the LEFT, not above.
     SettingField("chat_mode", Widget.SELECT, "Chat persistence override",
-                 "Overrides Session persistence for chat only. Blank inherits "
-                 "whatever Session persistence is set to.",
+                 "Overrides Session persistence for chat only. What the server "
+                 "records of chat is only ever made more private by it. Blank "
+                 "inherits whatever Session persistence is set to.",
                  group="Privacy", owner="chat", options=_PRIVACY_INHERIT,
                  admin_only=True),
     SettingField("coder_mode", Widget.SELECT, "Coder persistence override",
-                 "Overrides Session persistence for the coder only. Blank inherits "
-                 "whatever Session persistence is set to.",
+                 "Overrides Session persistence for the coder only. What the "
+                 "server records of coder requests is only ever made more private "
+                 "by it. Blank inherits whatever Session persistence is set to.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT,
                  admin_only=True),
     SettingField("memory_enabled", Widget.TOGGLE, "Memory recall",

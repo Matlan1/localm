@@ -308,6 +308,10 @@ def main(
     # answered was skipped or failed to load says so in the terminal.
     if hasattr(backend, "on_routing_note"):
         backend.on_routing_note = print_warning
+    # A localm server records this session's requests no less privately than
+    # the session's own mode.
+    if hasattr(backend, "session_mode"):
+        backend.session_mode = session_mode
 
     # --native-tools asked for a protocol the chosen backend does not send. A
     # localm server is driven on the XML tool-call convention, so the run

@@ -695,6 +695,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   hint and starts or stops saving conversations straight away. Switching to privacy also clears
   the conversation list on the chat page, as a restart into privacy mode does; conversations
   already saved come back when you leave privacy mode.
+- **The Chat and Coder persistence overrides now apply to what the server records.** Web chat and
+  coder requests went to the server's audit log and transcript under Session persistence alone,
+  so a Chat or Coder override of privacy still recorded that chat, or the files the coder sent to
+  the model, and the chat page followed Session persistence instead of the Chat override. The
+  server now records web chat and coder requests no less privately than their override (and a
+  project's own coder mode), never more than Session persistence allows, and the chat page saves
+  or keeps conversations by the Chat override.
 - **Pulling a file whose name another repository's model already uses no longer calls it
   damaged.** The pull is still refused, since the models folder keeps one file per name, but the
   message now says the name is in use, names the registered model that holds it and how to

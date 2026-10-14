@@ -43,11 +43,20 @@ def _error_detail(resp) -> str:
 class HttpEngine:
     """Engine stand-in that routes chat through a remote localm server's ``/v1`` API."""
 
+    # Sent as X-Client-Id and X-Localm-Session-Mode when set: the surface this
+    # engine serves and its resolved session mode, which a localm server records
+    # the exchange no less privately than.
+    _client_id: Optional[str] = None
+    _session_mode: Optional[str] = None
+
     def __init__(self, base_url: str, *, token: Optional[str] = None,
                  model: Optional[str] = None, display_name: Optional[str] = None,
-                 pin_model: bool = True):
+                 pin_model: bool = True, client_id: Optional[str] = None,
+                 session_mode: Optional[str] = None):
         self._base = base_url.rstrip("/")
         self._token = token
+        self._client_id = client_id
+        self._session_mode = session_mode
         self._model = model
         self.display_name = display_name or model or "remote model"
         # False: *model* is only the preferred model, and the server answers a
@@ -112,6 +121,13 @@ class HttpEngine:
         h = {"Content-Type": "application/json"}
         if self._token:
             h["Authorization"] = f"Bearer {self._token}"
+        if self._client_id or self._session_mode:
+            from localm.audit import CLIENT_ID_HEADER, SESSION_MODE_HEADER
+            if self._client_id:
+                h[CLIENT_ID_HEADER] = self._client_id
+            if self._session_mode:
+                h[SESSION_MODE_HEADER] = str(
+                    getattr(self._session_mode, "value", self._session_mode))
         return h
 
     def chat_stream(self, messages: list[dict], *,

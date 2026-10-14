@@ -774,6 +774,10 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # tool-call convention and does not send the OpenAI tools fields. Nothing
     # errors either way; saying nothing is what would make an ignored option
     # indistinguishable from an applied one.
+    # A localm server records this session's requests no less privately than
+    # the session's own mode.
+    if hasattr(backend, "session_mode"):
+        backend.session_mode = parse_mode(session_mode).value
     if req.native_tools and not backend.supports_native_tools:
         notes.append(
             "native_tools was not applied: this session talks to localm's own "
@@ -1936,12 +1940,14 @@ async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest
         # The session ESTIMATE route builds no backend at all - it calls
         # session.run_estimate and therefore already uses the session's own
         # backend, selection included.
+        from localm.audit import effective_mode
         backend = HTTPBackend(
             self_url,
             model=active_model(),
             api_key=get_api_key() or "localm",
             localm_server=True,
         )
+        backend.session_mode = effective_mode("coder", cwd=req.cwd).value
 
         def _complete(prompt: str) -> str:
             return strip_think(

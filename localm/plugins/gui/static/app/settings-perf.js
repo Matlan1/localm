@@ -7,8 +7,8 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
-import { $, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
+import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -1877,7 +1877,7 @@ export function renderNavGroup(slot, groupKey, members) {
     .id.replace("view-", "");
   const hasActiveKid = kids.some((p) => p.tab === activeView);
   const open = hasActiveKid ||
-    (chat.privacy ? true : safeStorageGet(group.key) !== "0");
+    (scopedKeyPrivate(group.key) ? true : safeStorageGet(group.key) !== "0");
 
   const wrap = el("div", "nav-group");
   const parent = el("button", "nav-group-parent" + (open ? " open" : ""));
@@ -2530,7 +2530,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   async function postChatCompletions(reqBody) {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders(CHAT_SURFACE_HEADERS),
       body: JSON.stringify(reqBody),
       signal: reqCtl.signal,
     });

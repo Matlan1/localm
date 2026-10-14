@@ -3544,6 +3544,38 @@ def principal_id(request: Request) -> Optional[str]:
     return None
 
 
+def _owner_caller_headers(request: Request) -> tuple:
+    """``(X-Client-Id, X-Localm-Session-Mode)`` of *request* when its caller is
+    the owner (open mode, or an ADMIN key or session), else ``(None, None)``."""
+    from localm import scopes
+    from localm.audit import CLIENT_ID_HEADER, SESSION_MODE_HEADER
+    held = caller_scopes(request)
+    if held is not None and scopes.ADMIN not in held:
+        return None, None
+    return (request.headers.get(CLIENT_ID_HEADER),
+            request.headers.get(SESSION_MODE_HEADER))
+
+
+def caller_recorder(recorder, request: Request):
+    """*recorder* (a :class:`localm.audit.SessionRecorder`) capped for the
+    caller of *request*: its ``X-Client-Id`` surface and
+    ``X-Localm-Session-Mode`` apply only to an owner caller (open mode, or an
+    ADMIN key or session); any other caller is recorded under the server's
+    mode. Returns a :class:`localm.audit.CallerRecorder`."""
+    return recorder.for_caller(*_owner_caller_headers(request))
+
+
+def request_session_mode(request: Request):
+    """The :class:`localm.audit.SessionMode` an exchange from the caller of
+    *request* is recorded under: the most private of ``effective_mode("server")``
+    and, for an owner caller, its surface's mode and ``X-Localm-Session-Mode``
+    (see :func:`caller_recorder`). Opens no file."""
+    from localm.audit import caller_cap, effective_mode, most_private
+    mode = effective_mode("server")
+    cap = caller_cap(*_owner_caller_headers(request))
+    return mode if cap is None else most_private(mode, cap)
+
+
 def memory_principal(request: Request) -> Optional[str]:
     """The identity used to NAMESPACE this caller's chat memory. The owner (an
     ADMIN-scoped key or the owner session) collapses to the shared "owner"
@@ -5115,11 +5147,12 @@ def _audit_exchange(audit, transcript, messages: list, reply: str,
     ``[finish_reason: ...]`` line in the transcript, so a failed or cut-off
     generation never reads as a short normal reply.
 
-    *audit* may be a :class:`localm.audit.SessionRecorder`: the exchange then
-    goes to the audit log and transcript of the session mode in force when it
-    is recorded, and *transcript* is ignored."""
-    from localm.audit import SessionRecorder
-    if isinstance(audit, SessionRecorder):
+    *audit* may be a :class:`localm.audit.SessionRecorder` or
+    :class:`localm.audit.CallerRecorder`: the exchange then goes to the audit
+    log and transcript of the session mode in force when it is recorded, and
+    *transcript* is ignored."""
+    from localm.audit import CallerRecorder, SessionRecorder
+    if isinstance(audit, (SessionRecorder, CallerRecorder)):
         audit, transcript, _mode = audit.current()
     if audit is None:
         return

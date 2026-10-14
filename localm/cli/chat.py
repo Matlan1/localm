@@ -391,7 +391,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             engine = HttpEngine(
                 target["base_url"], token=attach_token,
                 model=active or model, display_name=active or model,
-                pin_model=pin_model)
+                pin_model=pin_model, client_id="chat", session_mode=session_mode)
             # show_url(): target["base_url"] can carry a bracketed IPv6 host
             # (RFC 3986), which show_url()'s own docstring documents.
             console.print(
@@ -438,7 +438,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                     engine = HttpEngine(
                         target["base_url"],
                         token=resolve_bearer_token(target.get("token")),
-                        model=model, display_name=model, pin_model=pin_model)
+                        model=model, display_name=model, pin_model=pin_model,
+                        client_id="chat", session_mode=session_mode)
                     console.print(f"[dim]connected to newly started server at "
                                   f"{show_url(target['base_url'])}[/dim]")
                     break
