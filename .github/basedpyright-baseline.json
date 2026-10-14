@@ -9832,14 +9832,6 @@
                     "endColumn": 22,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 35,
-                    "endColumn": 67,
-                    "lineCount": 1
-                }
             }
         ],
         "./localm/tls.py": [

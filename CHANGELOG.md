@@ -816,6 +816,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   summary written when a long conversation is compacted) now starts a gpt-oss reply in its
   final channel, with no analysis before it. Before, only models that reason in `<think>`
   blocks were affected.
+- **gpt-oss tool calls come back as tool calls.** A gpt-oss GGUF model writes a function call
+  as a harmony message addressed to `functions.NAME`; that call used to end up in the
+  reasoning text with no `tool_calls` in the reply. It is now returned as a `tool_calls` entry
+  on the OpenAI, Responses, Anthropic and Ollama routes, streamed or not, and the coder agent
+  runs it, while the analysis before it stays reasoning.
 - **A llama runtime whose context-parameter layout cannot be told apart is refused.** When
   a provided llama.cpp build's default context parameters fit both the layout with and the
   one without the MoE expert cache field, loading stops with the ABI mismatch message
