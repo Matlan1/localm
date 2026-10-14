@@ -682,6 +682,58 @@ class TestProjectorTravel:
         assert mm.get_model_mmproj("qwen2.5-vl-7b-instruct-Q4_K_M") == str(dest.resolve())
 
 
+    @staticmethod
+    def _two_quants_one_generic_projector(tmp_path):
+        """A folder with two quants of one vision model and one generic
+        projector both pair with, and a different projector already holding
+        that name in the models folder."""
+        mm.ensure_dirs()
+        other = _projector(_models_dir() / "mmproj-F16.gguf", 3584, tag="another model")
+        d = tmp_path / "gemma-3-4b-it-GGUF"
+        q4 = _text_model(d / "gemma-3-4b-it-Q4_K_M.gguf", 2560)
+        q8 = _text_model(d / "gemma-3-4b-it-Q8_0.gguf", 2560)
+        proj = _projector(d / "mmproj-F16.gguf", 2560, tag="gemma")
+        assert mm.find_sibling_mmproj(q4) == proj
+        assert mm.find_sibling_mmproj(q8) == proj
+        return d, other, proj.read_bytes()
+
+    @pytest.mark.parametrize("store", ["move", "copy"])
+    def test_folder_store_records_a_shared_projector_on_both_quants(
+            self, tmp_path, isolated_home, store):
+        d, other, proj_bytes = self._two_quants_one_generic_projector(tmp_path)
+        other_bytes = other.read_bytes()
+
+        assert add_local(str(d), store=store) is True
+
+        renamed = (_models_dir() / "mmproj-F16-2.gguf").resolve()
+        assert renamed.read_bytes() == proj_bytes
+        assert other.read_bytes() == other_bytes
+        reg = load_registry()
+        paths = {n: Path(e["path"]).resolve() for n, e in reg.items()}
+        assert other.resolve() not in paths.values(), (
+            f"the unrelated projector already in the models folder was registered: {paths}")
+        assert renamed in paths.values(), f"the imported projector has no entry: {paths}"
+        for quant in ("gemma-3-4b-it-Q4_K_M", "gemma-3-4b-it-Q8_0"):
+            assert reg[quant].get("mmproj") == str(renamed), (quant, reg[quant])
+            assert mm.get_model_mmproj(quant) == str(renamed)
+
+    def test_folder_duplicate_move_registers_a_renamed_projector_where_it_landed(
+            self, tmp_path, isolated_home):
+        d, other, proj_bytes = self._two_quants_one_generic_projector(tmp_path)
+        assert add_local(str(d / "gemma-3-4b-it-Q4_K_M.gguf")) is True
+        assert add_local(str(d / "gemma-3-4b-it-Q8_0.gguf")) is True
+
+        assert add_local(str(d), on_duplicate="move") is True
+
+        renamed = (_models_dir() / "mmproj-F16-2.gguf").resolve()
+        assert renamed.read_bytes() == proj_bytes
+        reg = load_registry()
+        paths = {n: Path(e["path"]).resolve() for n, e in reg.items()}
+        assert other.resolve() not in paths.values(), (
+            f"the unrelated projector already in the models folder was registered: {paths}")
+        assert paths.get("mmproj-F16") == renamed, paths
+
+
 # --------------------------------------------------------------------------- #
 #  HF-style model directory (whole tree)
 # --------------------------------------------------------------------------- #
