@@ -3023,7 +3023,7 @@ class LlamaCpp:
 
     @staticmethod
     def _messages_with_markers(messages: list[dict], marker: str,
-                               audio_rate: int = 0):
+                               audio_rate: int = 0, should_stop=None):
         """Return (text_messages, media): a copy of *messages* where each image
         and audio content part is replaced by *marker* in the text, plus the
         decoded media in marker order: an image as ``(w, h, rgb_bytes)``, an
@@ -3033,7 +3033,9 @@ class LlamaCpp:
 
         Raises ``AudioInputError`` for an audio part when *audio_rate* is 0 and
         for a clip that cannot be decoded, ``ImageLimitError`` for an image that
-        cannot be decoded, and ``VisionInputError`` for an image that cannot be fetched."""
+        cannot be decoded, ``VisionInputError`` for an image that cannot be
+        fetched, and ``AudioDecodeCancelled`` once *should_stop* returns True
+        while an audio clip decodes."""
         from localm.inference.backends.base import (
             AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, ImageLimitError, UnsupportedInputError,
             VisionInputError)
@@ -3074,7 +3076,8 @@ class LlamaCpp:
                         raise AudioInputError(AUDIO_UNSUPPORTED_MESSAGE)
                     spec = part.get("input_audio") or {}
                     samples = decode_audio_clip(
-                        spec.get("data", ""), spec.get("format", "wav"), audio_rate)
+                        spec.get("data", ""), spec.get("format", "wav"), audio_rate,
+                        should_stop=should_stop)
                     media.append(AudioClip(samples.tobytes(), len(samples)))
                     parts.append(marker)
                 elif part.get("type") == "text":
@@ -3122,12 +3125,27 @@ class LlamaCpp:
         method's _ctx()/dedup_native_stderr usage is re-entered per native call
         - see the comment at that call site before restructuring it.
 
-        A model with parallel slots runs this inside the slot scheduler's
-        exclusive section: it starts once the text replies in flight have
-        ended, and no new one starts until it is done."""
+        The images and audio clips are decoded before the model is taken, so
+        other replies keep running meanwhile; a stop published with
+        ``stream_stop_check`` during an audio decode ends the call with no
+        output and ``last_finish_reason`` "stop". A model with parallel slots
+        then runs the rest inside the slot scheduler's exclusive section: it
+        starts once the text replies in flight have ended, and no new one
+        starts until it is done."""
+        from localm.inference.backends.base import stream_stop_requested
+        from localm.inference.media import AudioDecodeCancelled
+        mtmd = getattr(self, "_mtmd", None)
+        if not self._model_ptr or mtmd is None:
+            raise RuntimeError("vision is not available on this model")
+        try:
+            text_messages, images = self._messages_with_markers(
+                messages, mtmd.marker, getattr(mtmd, "audio_sample_rate", 0),
+                should_stop=stream_stop_requested)
+        except AudioDecodeCancelled:
+            self.last_finish_reason = "stop"
+            return
         if self._slots is not None:
-            from localm.inference.backends.base import (
-                WAITING_FOR_MODEL_STATUS, stream_stop_requested)
+            from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
             exclusive = self._slots.exclusive(
                 on_wait=(lambda: on_status(WAITING_FOR_MODEL_STATUS)) if on_status else None,
                 stop_requested=stream_stop_requested)
@@ -3162,9 +3180,6 @@ class LlamaCpp:
             sampler = None
             scorer = None
             try:
-                text_messages, images = self._messages_with_markers(
-                    messages, self._mtmd.marker,
-                    getattr(self._mtmd, "audio_sample_rate", 0))
                 prompt, fallback_reason = _apply_model_template(self._model_ptr, text_messages)
                 if fallback_reason:
                     self.chat_template_fallback_reason = fallback_reason

@@ -618,3 +618,70 @@ def test_debug_file_keeps_a_line_held_after_a_record_when_the_stream_ends(monkey
         monkeypatch, tmp_path, False, [_awaiting(5, "ZQXa"), b"last native line\n"])
     assert data == (b"Grammar still awaiting trigger after token 5\n"
                     b"last native line\n"), data
+
+
+def _open_readers():
+    return [t for t in threading.enumerate() if t.name == _READER_THREAD_NAME]
+
+
+@pytest.mark.parametrize("swap_lock", [None, threading.Lock()])
+def test_scopes_that_exit_out_of_order_restore_fd_2_and_end_both_readers(
+        monkeypatch, capfd, swap_lock):
+    monkeypatch.setattr(debuglog, "_READER_JOIN_TIMEOUT", 3.0)
+    original = os.dup(2)
+    try:
+        a = debuglog.dedup_native_stderr(swap_lock=swap_lock)
+        b = debuglog.dedup_native_stderr(swap_lock=swap_lock)
+        a.__enter__()
+        b.__enter__()
+        os.write(2, b"line-while-both-open\n")
+        t0 = time.monotonic()
+        a.__exit__(None, None, None)
+        a_exit = time.monotonic() - t0
+        os.write(2, b"line-after-the-outer-exit\n")
+        b.__exit__(None, None, None)
+        deadline = time.monotonic() + 2
+        while _open_readers() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _open_readers(), "a reader kept running after both scopes exited"
+        assert a_exit < 2.0, f"the outer scope's exit waited {a_exit:.1f}s for its reader"
+        os.write(2, b"line-after-both\n")
+        assert "line-after-both" in capfd.readouterr().err
+        recorded = "\n".join(debuglog.recent_activity())
+        assert "line-while-both-open" in recorded
+        assert "line-after-the-outer-exit" in recorded
+    finally:
+        os.dup2(original, 2)
+        os.close(original)
+
+
+def test_scopes_that_exit_in_order_still_restore_fd_2(capfd):
+    with debuglog.dedup_native_stderr():
+        with debuglog.dedup_native_stderr():
+            os.write(2, b"inner-line\n")
+    assert not debuglog._dedup_scopes
+    os.write(2, b"after-nested\n")
+    assert "after-nested" in capfd.readouterr().err
+    assert "inner-line" in "\n".join(debuglog.recent_activity())
+
+
+def test_three_scopes_closing_middle_then_outer_then_inner(capfd, monkeypatch):
+    monkeypatch.setattr(debuglog, "_READER_JOIN_TIMEOUT", 3.0)
+    original = os.dup(2)
+    try:
+        scopes = [debuglog.dedup_native_stderr() for _ in range(3)]
+        for s in scopes:
+            s.__enter__()
+        t0 = time.monotonic()
+        for i in (1, 0):
+            scopes[i].__exit__(None, None, None)
+        assert time.monotonic() - t0 < 2.0
+        os.write(2, b"through-the-innermost\n")
+        scopes[2].__exit__(None, None, None)
+        assert not debuglog._dedup_scopes
+        os.write(2, b"after-all-three\n")
+        assert "after-all-three" in capfd.readouterr().err
+        assert "through-the-innermost" in "\n".join(debuglog.recent_activity())
+    finally:
+        os.dup2(original, 2)
+        os.close(original)
