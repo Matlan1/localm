@@ -55,9 +55,9 @@ def vae_retry_message(mode: str, smaller: bool) -> str:
 
 class RecoveredWarnings:
     """Relays worker log lines to *say*, collapsing recovered sequences.
-    ``full_tile`` is the ``(width, height)`` VAE tile the current image
-    requested, or None: a retry that splits a tile of that size is reported as
-    the first split, not as a smaller split."""
+    ``full_tile`` is the ``(width, height)`` of the image whose VAE tile covers
+    the whole image, or None: a retry that splits a tile at least that large is
+    reported as the first split, not as a smaller split."""
 
     def __init__(self, say: Callable[[str], None]) -> None:
         self._say = say
@@ -77,8 +77,8 @@ class RecoveredWarnings:
             smaller = any(_TILE_FAILED.search(p) for p in self._pending)
             if smaller and self.full_tile is not None:
                 reduced = [m for p in self._pending if (m := _REDUCING.search(p))]
-                if reduced and (int(reduced[-1].group(1)),
-                                int(reduced[-1].group(2))) == tuple(self.full_tile):
+                if reduced and (int(reduced[-1].group(1)) >= self.full_tile[0]
+                                and int(reduced[-1].group(2)) >= self.full_tile[1]):
                     smaller = False
             self._pending.clear()
             self._say(vae_retry_message(retry.group(1), smaller))

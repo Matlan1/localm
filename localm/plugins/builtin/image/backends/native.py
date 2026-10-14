@@ -149,6 +149,15 @@ def resolve_models(s: dict) -> dict:
 
 FLASH_ATTENTION_BACKENDS = ("rocm",)
 
+VAE_TILE_MULTIPLE = 64
+
+
+def vae_tile(width: int, height: int) -> list:
+    """The VAE tile an image of *width* x *height* requests: each side rounded up
+    to ``VAE_TILE_MULTIPLE``, so the tile covers the size the runtime generates."""
+    m = VAE_TILE_MULTIPLE
+    return [-(-width // m) * m, -(-height // m) * m]
+
 
 def load_ctx(ctx: dict, backend: str) -> dict:
     """The context fields a load of model set *ctx* uses on a *backend*
@@ -579,8 +588,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             key = (models["key"], rt.backend)
             if runner.loaded_key != key or not runner.is_alive():
                 say(f"Loading {models['label']} (stable-diffusion.cpp, {rt.backend})...")
-                runner.shutdown()
-                ctx = sd_budget.with_budget(ctx, rt.backend, say)
+                ctx = sd_budget.reload_ctx(runner, ctx, rt.backend, say)
             info = runner.ensure_loaded(key, rt.path, ctx,
                                          extra_dirs=rt.extra_dirs, on_event=relay,
                                          cancel_check=cancel_check)
@@ -635,7 +643,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
                               for x in lora_files],
                     "hires": hires_payload,
-                    "vae_tile": None if hires else [int(width), int(height)],
+                    "vae_tile": None if hires else vae_tile(int(width), int(height)),
                 }
                 relay.vae_tile(None if hires else (int(width), int(height)))
                 label = f"image {index + 1}/{batch}, " if batch > 1 else ""

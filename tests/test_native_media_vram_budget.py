@@ -41,6 +41,10 @@ def test_a_runtime_with_its_own_device_wide_reading_gets_none(backend):
                                  platform="win32") is None
 
 
+def _unmeasured(got, reason):
+    assert got is not None and got.setting is None and reason in got.reason
+
+
 def test_off_windows_there_is_no_budget():
     assert sd_budget.vram_budget("rocm", gpus=[_gpu()], status=discover.GPU_PROBE_OK,
                                  platform="linux") is None
@@ -49,39 +53,45 @@ def test_off_windows_there_is_no_budget():
 @pytest.mark.parametrize("status", [discover.GPU_PROBE_TIMEOUT, discover.GPU_PROBE_BUSY,
                                     discover.GPU_PROBE_INCONCLUSIVE])
 def test_a_probe_that_did_not_complete_gives_no_budget(status):
-    assert sd_budget.vram_budget("rocm", gpus=[_gpu()], status=status,
-                                 platform="win32") is None
+    _unmeasured(sd_budget.vram_budget("rocm", gpus=[_gpu()], status=status,
+                                      platform="win32"), "did not complete")
 
 
 def test_a_process_scoped_reading_gives_no_budget():
     gpus = [_gpu(scope=discover.FREE_SCOPE_PROCESS)]
-    assert sd_budget.vram_budget("rocm", gpus=gpus, status=discover.GPU_PROBE_OK,
-                                 platform="win32") is None
+    _unmeasured(sd_budget.vram_budget("rocm", gpus=gpus, status=discover.GPU_PROBE_OK,
+                                      platform="win32"), "only this process")
 
 
 def test_one_unmeasured_gpu_among_several_gives_no_budget():
     gpus = [_gpu(0), {**_gpu(1), "free": None}]
-    assert sd_budget.vram_budget("rocm", gpus=gpus, status=discover.GPU_PROBE_OK,
-                                 platform="win32") is None
+    _unmeasured(sd_budget.vram_budget("rocm", gpus=gpus, status=discover.GPU_PROBE_OK,
+                                      platform="win32"), "incomplete")
+
+
+def test_a_boolean_reading_is_not_a_number():
+    gpus = [{**_gpu(), "free": True}]
+    _unmeasured(sd_budget.vram_budget("rocm", gpus=gpus, status=discover.GPU_PROBE_OK,
+                                      platform="win32"), "incomplete")
 
 
 def test_no_gpu_gives_no_budget():
-    assert sd_budget.vram_budget("rocm", gpus=[], status=discover.GPU_PROBE_OK,
-                                 platform="win32") is None
+    _unmeasured(sd_budget.vram_budget("rocm", gpus=[], status=discover.GPU_PROBE_OK,
+                                      platform="win32"), "no GPU")
 
 
 def test_several_rocm_gpus_get_one_assignment_each():
     gpus = [_gpu(1, free=4 * GIB, total=8 * GIB), _gpu(0, free=12 * GIB)]
     got = sd_budget.vram_budget("rocm", gpus=gpus, status=discover.GPU_PROBE_OK,
                                 platform="win32")
-    assert got.setting == "ROCm0=11.50,ROCm1=3.50"
+    assert got.setting == "rocm0=11.50,rocm1=3.50"
     assert (got.free, got.total) == (16 * GIB, 24 * GIB)
 
 
 def test_several_vulkan_gpus_give_no_budget():
     gpus = [_gpu(0), _gpu(1)]
-    assert sd_budget.vram_budget("vulkan", gpus=gpus, status=discover.GPU_PROBE_OK,
-                                 platform="win32") is None
+    _unmeasured(sd_budget.vram_budget("vulkan", gpus=gpus, status=discover.GPU_PROBE_OK,
+                                      platform="win32"), "several GPUs")
 
 
 def test_an_almost_full_card_gets_the_floor_not_zero():
@@ -95,7 +105,7 @@ def test_a_failing_probe_gives_no_budget(monkeypatch):
         raise RuntimeError("driver gone")
     monkeypatch.setattr(sd_budget, "_platform", lambda: "win32")
     monkeypatch.setattr(discover, "list_gpus", boom)
-    assert sd_budget.vram_budget("rocm") is None
+    _unmeasured(sd_budget.vram_budget("rocm"), "driver gone")
 
 
 def test_the_live_probe_is_asked_for_a_fresh_reading(monkeypatch):
@@ -119,6 +129,28 @@ def test_with_budget_sets_max_vram_and_says_the_free_vram(monkeypatch):
     assert got == {"diffusion_model_path": "m.gguf", "max_vram": "5.50"}
     assert ctx == {"diffusion_model_path": "m.gguf"}
     assert said == ["Free VRAM: 6.0 of 16.0 GB."]
+
+
+def test_an_unmeasured_reading_is_said_and_logged_not_silent(monkeypatch):
+    warned = []
+
+    class _Log:
+        def warning(self, fmt, *args):
+            warned.append(fmt % args)
+
+        def debug(self, fmt, *args):
+            pass
+
+        info = error = debug
+    monkeypatch.setattr("localm.debuglog.logger", _Log())
+    monkeypatch.setattr(sd_budget, "vram_budget",
+                        lambda backend: sd_budget.Budget(None, reason="the GPU probe did "
+                                                         "not complete (timeout)"))
+    said = []
+    ctx = {"diffusion_model_path": "m.gguf"}
+    assert sd_budget.with_budget(ctx, "rocm", said.append) is ctx
+    assert len(said) == 1 and "could not be measured" in said[0] and "timeout" in said[0]
+    assert len(warned) == 1 and "timeout" in warned[0]
 
 
 def test_with_budget_leaves_ctx_alone_without_a_budget(monkeypatch):
@@ -184,7 +216,7 @@ def image_env(tmp_path, monkeypatch):
 
     def probe(**kw):
         probes.append(kw)
-        return [_gpu(free=13 * GIB)], discover.GPU_PROBE_OK
+        return [_gpu(free=3 * GIB if runner.alive else 13 * GIB)], discover.GPU_PROBE_OK
     monkeypatch.setattr(sd_budget, "_platform", lambda: "win32")
     monkeypatch.setattr(discover, "list_gpus", probe)
     model = tmp_path / "model.gguf"
@@ -235,23 +267,71 @@ def test_a_runtime_change_reloads_the_same_model(image_env, tmp_path):
                                     width=64, height=64)
     assert ok, msg
     assert [k[1] for k, _ctx in runner.loads] == ["rocm", "vulkan"]
-    assert len(probes) == 2
+    assert [ctx["max_vram"] for _k, ctx in runner.loads] == ["12.50", "12.50"]
+    assert len(probes) == 4
 
 
-def test_the_worker_is_stopped_before_the_budget_is_read(image_env, tmp_path, monkeypatch):
+def _switch_env(image_env, monkeypatch, release_after):
+    """A worker holding another model (3 GiB free while it runs); after it stops,
+    the reading shows 13 GiB from the *release_after*-th read on."""
     runner, s, _backend, _probes = image_env
     runner.alive, runner.loaded_key = True, ("something else", "rocm")
     order = []
-    real = discover.list_gpus
 
     def probe(**kw):
-        order.append(("probe", runner.alive))
-        return real(**kw)
+        order.append(runner.alive)
+        stopped_reads = sum(1 for alive in order if not alive)
+        free = 3 * GIB if runner.alive or stopped_reads < release_after else 13 * GIB
+        return [_gpu(free=free)], discover.GPU_PROBE_OK
     monkeypatch.setattr(discover, "list_gpus", probe)
+    return runner, s, order
+
+
+def test_a_switch_reads_before_the_stop_and_budgets_after_the_release(image_env, tmp_path,
+                                                                       monkeypatch):
+    runner, s, order = _switch_env(image_env, monkeypatch, release_after=3)
+    said = []
+    ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
+                                    width=64, height=64, on_progress=said.append)
+    assert ok, msg
+    assert order[0] is True and all(alive is False for alive in order[1:])
+    (_key, ctx), = runner.loads
+    assert ctx["max_vram"] == "12.50"
+    assert "Free VRAM: 13.0 of 16.0 GB." in said
+
+
+def test_a_release_that_never_shows_logs_and_still_loads(image_env, tmp_path, monkeypatch):
+    runner, s, _order = _switch_env(image_env, monkeypatch, release_after=10 ** 6)
+    monkeypatch.setattr(sd_budget, "RELEASE_TIMEOUT_S", 0.05)
+    warned = []
+
+    class _Log:
+        def warning(self, fmt, *args):
+            warned.append(fmt % args)
+
+        def debug(self, fmt, *args):
+            pass
+
+        info = error = debug
+    monkeypatch.setattr("localm.debuglog.logger", _Log())
     ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
                                     width=64, height=64)
     assert ok, msg
-    assert order == [("probe", False)]
+    (_key, ctx), = runner.loads
+    assert ctx["max_vram"] == "2.50"
+    assert any("did not rise" in w for w in warned)
+
+
+def test_a_first_load_does_not_wait_for_a_release(image_env, tmp_path, monkeypatch):
+    runner, s, _backend, probes = image_env
+    waited = []
+    import localm.vram as vram
+    monkeypatch.setattr(vram, "wait_for_vram_release",
+                        lambda *a, **kw: waited.append(1) or (True, None))
+    ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
+                                    width=64, height=64)
+    assert ok, msg
+    assert waited == [] and len(probes) == 1
 
 
 def test_an_image_requests_one_vae_tile_of_its_own_size(image_env, tmp_path):
@@ -259,7 +339,25 @@ def test_an_image_requests_one_vae_tile_of_its_own_size(image_env, tmp_path):
     ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
                                     width=96, height=64)
     assert ok, msg
-    assert runner.generates[0]["vae_tile"] == [96, 64]
+    assert runner.generates[0]["vae_tile"] == [128, 64]
+
+
+@pytest.mark.parametrize("size,tile", [((768, 768), [768, 768]), ((1920, 1080), [1920, 1088]),
+                                       ((1000, 1000), [1024, 1024]), ((64, 8), [64, 64])])
+def test_the_tile_covers_the_size_the_runtime_rounds_up_to(size, tile):
+    assert image_native.vae_tile(*size) == tile
+
+
+def test_a_split_of_a_rounded_up_tile_reads_as_one_piece():
+    said = []
+    relay = logrelay.RecoveredWarnings(said.append)
+    relay.full_tile = (1920, 1080)
+    for line in SINGLE_TILE_RETRY[:-2]:
+        relay.line(line)
+    relay.line("Reducing VAE decode tiles from 1920x1088 to 960x544 image pixels "
+               "--- backend_fit.cpp:519")
+    relay.line(SINGLE_TILE_RETRY[-1])
+    assert said == ["Not enough VRAM to decode in one piece; decoding in tiles."]
 
 
 def test_a_hires_image_requests_no_vae_tile(image_env, tmp_path, monkeypatch):
