@@ -223,7 +223,7 @@ class TestReadEnvRedaction:
         assert r.ok
         assert "Pw0rdZZ" not in r.output
         assert "zzaccountname" not in r.output.replace("zzaccountnamesuffix", "")
-        assert r"ZZ_SHARE=\\fileserver\<user>\docs" in r.output
+        assert r"ZZ_SHARE=\\<host>\<user>\docs" in r.output
         assert "ZZ_MAILBOX=/var/mail/<user>" in r.output
         assert "ZZ_NOTE=zzaccountnamesuffix-not-a-segment" in r.output
         assert "zzmachinename" not in r.output
