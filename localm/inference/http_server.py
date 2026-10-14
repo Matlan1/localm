@@ -642,7 +642,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if _is_reusable(resident):
             if not preempt and _placement_heal_due(name, resident):
                 try:
-                    heal_budget = _switch_load_budget(name)
+                    heal_budget = await loop.run_in_executor(
+                        None, _switch_load_budget, name)
                 except HTTPException as exc:
                     from localm.debuglog import logger as _dbg
                     _dbg.info("switch_engine: not reloading '%s' for a better placement, "
@@ -673,11 +674,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if healing is not None:
             budget = heal_budget
         else:
-            budget = _switch_load_budget(name)
+            budget = await loop.run_in_executor(None, _switch_load_budget, name)
             if budget is not None and budget.check_split_fit:
                 sized = _engines.get(name)
                 if sized is None:
-                    built = sized = _engine_factory(name)
+                    built = sized = await loop.run_in_executor(None, _engine_factory, name)
                 budget = await _switch_with_backend_need(loop, budget, sized)
         attempt = switch_admission.EvictionAttempt(started=time.monotonic())
         evictions: list[VictimRelease] = []
@@ -705,7 +706,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         elif name in _engines:
             new_engine = _engines[name]
         else:
-            new_engine = built if built is not None else _engine_factory(name)
+            new_engine = built if built is not None else await loop.run_in_executor(
+                None, _engine_factory, name)
         interrupted = await _switch_load(loop, name, new_engine, preempt=preempt)
         if interrupted is not None:
             return interrupted
@@ -750,6 +752,8 @@ def _switch_reuse_resident(name: str, sem, *, activate: bool, on_active) -> None
 def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
     """The VRAM budget a load of *name* has to fit, read from the model
     registry, the model's on-disk footprint and the residency settings.
+    Does blocking file IO (registry and config reads, a walk over the model
+    directory); an async caller runs it in an executor.
 
     Returns None for an empty registry (single-model or direct-path startup):
     no eviction runs then. Raises HTTPException 404 when the registry is not
@@ -1337,9 +1341,10 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
     """Run ``engine.load()`` off the event loop with a fresh cancel event.
 
     Returns None when the load succeeded, a ``superseded`` result when a newer
-    explicit switch cancelled it, or a ``cancelled`` result for any other
-    ``ModelLoadCancelled``. Raises HTTPException 503 with the backend's message
-    when ``load()`` raises RuntimeError.
+    explicit switch cancelled it or was selected before the load began, or a
+    ``cancelled`` result for any other ``ModelLoadCancelled``. Raises
+    HTTPException 503 with the backend's message when ``load()`` raises
+    RuntimeError.
 
     Every load installs a new event on the engine, which may still hold the
     set event of an earlier superseded switch. See
@@ -1360,6 +1365,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
         _switch_cancel = cancel
         _switch_loading = name
     try:
+        if preempt and _switch_desired != name:
+            return {"status": "superseded", "model": name, "by": _switch_desired}
         fingerprint = await loop.run_in_executor(
             None, _routing_latch.fingerprint, name)
         await loop.run_in_executor(None, engine.load)

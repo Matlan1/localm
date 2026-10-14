@@ -608,6 +608,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Switching models no longer freezes the server while the model folder is measured.** Reading
+  the model registry, measuring a model's size on disk and building its engine ran on the
+  server's main loop, so a load of a large model folder on a slow or network disk stalled every
+  other request, including the status poll, until the disk answered.
 - **A scheduled coder job honours its project's privacy setting.** A `mode` set in the project's
   `.localcoder/config.toml` now applies to scheduled runs as it does to interactive coder sessions, so
   a project pinned to privacy mode no longer gets a transcript or audit log from a job. A project
