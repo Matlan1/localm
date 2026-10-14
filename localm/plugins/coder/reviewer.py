@@ -233,6 +233,17 @@ class Reviewer:
 #  Wiring: build the right reviewer for an Agent, honoring config + privacy     #
 # --------------------------------------------------------------------------- #
 
+def _policy_refusal(url: str):
+    """None when the network policy (``netpolicy.check_url``) allows a request
+    to *url*, else the refusal's message."""
+    from localm.netpolicy import NetworkPolicyError, check_url
+    try:
+        check_url(url)
+    except NetworkPolicyError as e:
+        return str(e)
+    return None
+
+
 def _is_privacy(mode) -> bool:
     try:
         from localm.audit import SessionMode
@@ -255,7 +266,11 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = Fals
     A NETWORK reviewer (cloud, or a non-loopback URL) sends the diff off the
     machine, so it is NOT used in privacy mode or for a restricted (shareable,
     non-owner) session - those fall back to the local same-model reviewer with a
-    warning. The "local" CPU reviewer stays on-machine and is allowed in privacy
+    warning. It is also checked against the network policy (``check_url``:
+    net_mode, net_deny / net_allow, the private-address guard) and, when
+    refused, falls back to the local same-model reviewer with a warning naming
+    the refusal; an allowed one sends its requests over the policy's pinned
+    transport. A loopback URL is not checked against the policy. The "local" CPU reviewer stays on-machine and is allowed in privacy
     mode.
 
     *force* bypasses the ``coder_review`` master switch for an explicit,
@@ -317,11 +332,23 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = Fals
                     f"('{low}') and reviewing with the local model instead.")
                 return _local_same_model()
             from .backends.http import (
-                make_anthropic_backend, make_openai_backend)
+                ANTHROPIC_BASE_URL,
+                OPENAI_BASE_URL,
+                make_anthropic_backend,
+                make_openai_backend,
+            )
+            refusal = _policy_refusal(
+                OPENAI_BASE_URL if low == "openai" else ANTHROPIC_BASE_URL)
+            if refusal:
+                print_warning(
+                    f"network policy refused the {low} reviewer ({refusal}); "
+                    "reviewing with the local model instead.")
+                return _local_same_model()
             if low == "openai":
-                b = make_openai_backend(model=rmodel or "gpt-4o")
+                b = make_openai_backend(model=rmodel or "gpt-4o", pinned=True)
             else:
-                b = make_anthropic_backend(model=rmodel or "claude-opus-4-5")
+                b = make_anthropic_backend(model=rmodel or "claude-opus-4-5",
+                                           pinned=True)
             return Reviewer(b, heterogeneous=True)
 
         if low.startswith("http://") or low.startswith("https://"):
@@ -334,14 +361,22 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool, force: bool = Fals
                     "local model instead.")
                 return _local_same_model()
             from localm.bindhost import is_loopback_host
-            if privacy and not is_loopback_host(host):
+            leaves = not is_loopback_host(host)
+            if privacy and leaves:
                 print_warning(
                     "privacy mode: skipping the off-machine reviewer URL and "
                     "reviewing with the local model instead.")
                 return _local_same_model()
+            refusal = _policy_refusal(target) if leaves else None
+            if refusal:
+                print_warning(
+                    f"network policy refused the reviewer URL ({refusal}); "
+                    "reviewing with the local model instead.")
+                return _local_same_model()
             from .backends.http import HTTPBackend
             return Reviewer(
-                HTTPBackend(base_url=target, model=rmodel or same_model_default),
+                HTTPBackend(base_url=target, model=rmodel or same_model_default,
+                            pinned=leaves),
                 heterogeneous=True)
     except Exception as e:
         print_warning(f"reviewer backend setup failed ({e}); "

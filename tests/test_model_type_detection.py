@@ -477,7 +477,6 @@ def test_pull_model_auto_upgrades_gguf_to_embedding(tmp_path, isolated_home, mon
     # _pull_gguf_file then probes the freshly-downloaded file's OWN metadata and
     # upgrades an auto-resolved 'llm' to 'embedding' when the bytes say so.
     import huggingface_hub
-    import requests
 
     embedding_bytes = _build_gguf_bytes("bert")
 
@@ -491,8 +490,10 @@ def test_pull_model_auto_upgrades_gguf_to_embedding(tmp_path, isolated_home, mon
     # preflight HEAD fails closed to total_size=0 (still a benign no-op path).
     monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
     monkeypatch.setattr(
-        requests, "head",
+        "localm.model_manager.pull._policy_head",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+    monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal",
+                        lambda: None)
 
     assert mm.pull_model("owner/repo:auto-embed.gguf") is True
     assert mm.load_registry()["auto-embed"]["model_type"] == "embedding"
@@ -505,7 +506,6 @@ def test_pull_model_auto_upgrades_gguf_to_embedding(tmp_path, isolated_home, mon
 def test_pull_model_types_acestep_components_from_their_header(
         tmp_path, isolated_home, monkeypatch, arch, mtype):
     import huggingface_hub
-    import requests
 
     component_bytes = _build_gguf_bytes(arch)
 
@@ -517,8 +517,10 @@ def test_pull_model_types_acestep_components_from_their_header(
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
     monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
     monkeypatch.setattr(
-        requests, "head",
+        "localm.model_manager.pull._policy_head",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+    monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal",
+                        lambda: None)
 
     assert mm.pull_model("owner/repo:music-part.gguf") is True
     entry = mm.load_registry()["music-part"]
@@ -532,7 +534,6 @@ def test_pull_model_explicit_llm_type_not_overridden(tmp_path, isolated_home, mo
     # _pull_gguf_file is gated on type_is_auto and must never override an
     # explicitly-passed --type.
     import huggingface_hub
-    import requests
 
     embedding_bytes = _build_gguf_bytes("bert")
 
@@ -544,8 +545,10 @@ def test_pull_model_explicit_llm_type_not_overridden(tmp_path, isolated_home, mo
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
     monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
     monkeypatch.setattr(
-        requests, "head",
+        "localm.model_manager.pull._policy_head",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+    monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal",
+                        lambda: None)
 
     assert mm.pull_model("owner/repo:forced-llm.gguf", model_type="llm") is True
     assert mm.load_registry()["forced-llm"]["model_type"] == "llm"
@@ -624,7 +627,6 @@ def test_pull_model_auto_upgrades_gguf_to_mmproj(tmp_path, isolated_home, monkey
     # metadata and upgrades an auto-resolved 'llm' to 'mmproj' when the bytes say
     # so, reached here by a direct pull of a projector file.
     import huggingface_hub
-    import requests
 
     mmproj_bytes = _build_gguf_bytes("clip")
 
@@ -636,8 +638,10 @@ def test_pull_model_auto_upgrades_gguf_to_mmproj(tmp_path, isolated_home, monkey
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
     monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
     monkeypatch.setattr(
-        requests, "head",
+        "localm.model_manager.pull._policy_head",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+    monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal",
+                        lambda: None)
 
     assert mm.pull_model("owner/repo:auto-mmproj.gguf") is True
     assert mm.load_registry()["auto-mmproj"]["model_type"] == "mmproj"
@@ -649,7 +653,6 @@ def test_pull_model_explicit_llm_type_not_overridden_for_mmproj_bytes(
     # explicit model_type="llm" must stay 'llm' - the auto-upgrade is gated on
     # type_is_auto and must never override an explicitly-passed --type.
     import huggingface_hub
-    import requests
 
     mmproj_bytes = _build_gguf_bytes("clip")
 
@@ -661,8 +664,10 @@ def test_pull_model_explicit_llm_type_not_overridden_for_mmproj_bytes(
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
     monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
     monkeypatch.setattr(
-        requests, "head",
+        "localm.model_manager.pull._policy_head",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+    monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal",
+                        lambda: None)
 
     assert mm.pull_model("owner/repo:forced-llm-mmproj.gguf", model_type="llm") is True
     assert mm.load_registry()["forced-llm-mmproj"]["model_type"] == "llm"

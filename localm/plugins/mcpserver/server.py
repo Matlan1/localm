@@ -68,6 +68,11 @@ SERVER_VERSION = _LOCALM_VERSION
 BUSY_WAIT_SECONDS = 30.0
 BUSY_POLL_SECONDS = 1.0
 
+# Longest wait evict_for_embedder makes for the cache lock. Stays below
+# BUSY_WAIT_SECONDS, so an evictor whose thread pins an engine gives up before a
+# load waiting on that pin does. See test_evict_lock_wait_is_below_busy_wait.
+EVICT_LOCK_WAIT_SECONDS = 10.0
+
 # Longest run_coder_task budget a client may ask for; the budget covers the
 # model load and the agent's construction as well as the run.
 MAX_CODER_TIMEOUT_SECONDS = 3600.0
@@ -76,6 +81,11 @@ MAX_CODER_TIMEOUT_SECONDS = 3600.0
 class ModelBusyError(RuntimeError):
     """A load was refused because every evictable resident is still serving a
     request past BUSY_WAIT_SECONDS."""
+
+
+class ModelEvictedError(RuntimeError):
+    """An engine fetched from the cache was evicted before a request pinned
+    it. Fetching it again from the cache returns a resident engine."""
 
 
 class ModelLoadSkipped(RuntimeError):
@@ -177,7 +187,12 @@ class EngineCache:
         # Held by every method that reads or changes the engines and peers to
         # pick or load one, on the protocol thread and on a coder run's worker
         # thread alike. Never acquired while holding a generation lock
-        # (generation_lock), Engine's load lock or the residency pin lock.
+        # (generation_lock), Engine's load lock or the residency pin lock,
+        # except by evict_for_embedder: the embedder's pre-load swap calls it
+        # holding neither embedder._LOCK nor the load lock, but possibly a
+        # generation lock (the embed tool), so it waits at most
+        # EVICT_LOCK_WAIT_SECONDS. Nothing holding this lock acquires a
+        # generation lock.
         self._lock = threading.RLock()
         # Created on first use by routing_latch().
         self._latch = None
@@ -210,9 +225,17 @@ class EngineCache:
     @staticmethod
     def pin(engine) -> None:
         """Count one in-flight request on *engine*. A pinned engine
-        (``active_requests > 0``) is never chosen as an eviction victim."""
-        from localm.inference.residency import pin_engine
-        pin_engine(engine)
+        (``active_requests > 0``) is never chosen as an eviction victim.
+
+        Raises ModelEvictedError, with nothing pinned, when *engine* was
+        evicted (``unloading``) before the pin landed; the check and the pin
+        are one operation against ``begin_unload``."""
+        from localm.inference.residency import try_pin_engine
+        if not try_pin_engine(engine):
+            name = getattr(engine, "display_name", None) or "the model"
+            raise ModelEvictedError(
+                f"{name} was unloaded to free VRAM before this request "
+                "started; retry the request")
 
     @staticmethod
     def unpin(engine) -> None:
@@ -827,6 +850,56 @@ class EngineCache:
                  f"{loading} anyway")
         return True
 
+    def evict_for_embedder(self, timeout_s: float) -> str:
+        """Unload every loaded resident engine that is neither serving a request
+        nor pinned by configuration, waiting for each one's VRAM to come back,
+        so the shared embedder loads with that room. Never waits for a serving
+        engine. Another instance's copy (a peer) holds no VRAM here and is left
+        alone.
+
+        Returns "unloaded" when at least one engine was unloaded; otherwise
+        "in_use" when a loaded resident is serving a request, "pinned" when a
+        loaded resident is pinned by configuration, "already_unloaded" when no
+        loaded engine is resident, and "error" when this cache's lock was not
+        acquired within the smaller of *timeout_s* and
+        ``EVICT_LOCK_WAIT_SECONDS``.
+
+        Registered with ``vram.register_embedder_evictor`` by ``serve_stdio``.
+        Caller must hold neither ``embedder._LOCK`` nor Engine's load lock."""
+        from localm.config import load_config
+        from localm.inference import residency
+        wait = max(0.0, min(timeout_s, EVICT_LOCK_WAIT_SECONDS))
+        if not self._lock.acquire(timeout=wait):
+            _log("warning: could not free VRAM for the embedding model: the "
+                 f"model cache stayed busy for {wait:.0f}s")
+            return "error"
+        try:
+            pinned = residency.pinned_model_names(load_config())
+            unloaded = False
+            tried: set = set()
+            while True:
+                candidates = [n for n in self._lru if n not in tried
+                              and getattr(self._engines.get(n), "loaded", True)]
+                victim = residency.pick_eviction_victim(
+                    candidates, self._engines, pinned=pinned)
+                if victim is None:
+                    break
+                tried.add(victim)
+                if self._evict(victim, loading="the embedding model"):
+                    unloaded = True
+            if unloaded:
+                return "unloaded"
+            loaded = [n for n in self._lru
+                      if n in self._engines
+                      and getattr(self._engines[n], "loaded", True)]
+            if any(residency.is_serving(self._engines[n]) for n in loaded):
+                return "in_use"
+            if any(n in pinned for n in loaded):
+                return "pinned"
+            return "already_unloaded"
+        finally:
+            self._lock.release()
+
     def unload_all(self) -> None:
         """Free every resident engine (shutdown). N resident means N to free."""
         with self._lock:
@@ -1157,9 +1230,12 @@ def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
     # process, on any thread, lands on stderr from here on.
     protocol_out = sys.stdout
     sys.stdout = sys.stderr
+    from localm.vram import register_embedder_evictor
+    unregister_evictor = register_embedder_evictor(engines.evict_for_embedder)
     try:
         server.run_stdio(stdout=protocol_out)
     finally:
+        unregister_evictor()
         sys.stdout = protocol_out
         # Every resident engine, not just the most recent one: freeing one of N
         # would leave the rest holding VRAM past exit.

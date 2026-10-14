@@ -473,7 +473,7 @@ def _fake_head(monkeypatch, size: int, etag: "str | None"):
     first.headers = {"X-Linked-Etag": f'"{etag}"'} if etag else {}
     head = MagicMock(status_code=200, headers={"content-length": str(size)})
     head.history = [first]
-    monkeypatch.setattr("requests.head", lambda *a, **kw: head)
+    monkeypatch.setattr("localm.model_manager.pull._policy_head", lambda *a, **kw: head)
 
 
 def _fake_download(monkeypatch, body: bytes):

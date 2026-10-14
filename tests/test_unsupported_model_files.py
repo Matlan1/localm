@@ -688,15 +688,16 @@ class TestOtherFormats:
 class TestPulledFile:
     def _fake_hub(self, monkeypatch, tmp_path, make):
         import huggingface_hub
-        import requests
 
         def _download(repo_id, filename, local_dir, **kw):
             return str(make(Path(local_dir) / filename))
 
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _download)
         monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
-        monkeypatch.setattr(requests, "head", lambda *a, **kw: (_ for _ in ()).throw(
+        monkeypatch.setattr("localm.model_manager.pull._policy_head", lambda *a, **kw: (_ for _ in ()).throw(
             RuntimeError("no network in tests")))
+        monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal",
+                            lambda: None)
 
     @pytest.mark.parametrize("label,kw,sentence", [
         ("v1", dict(version=1), V1_SENTENCE),

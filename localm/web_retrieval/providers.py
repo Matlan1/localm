@@ -2,8 +2,10 @@
 """Search providers: the built-in no-key search chain and a SearXNG instance.
 
 Every request is policy-checked through ``localm.netpolicy``: ``check_url``
-on the request URL, then ``netpolicy._session_for`` (the pinned transport
-seam) with ``allow_redirects=False``; any 3xx is refused. Every ``netpolicy``
+on the request URL, then ``netpolicy.pinned_request`` (the pinned transport)
+with ``allow_redirects=False`` and ``max_bytes=_MAX_RESPONSE_BYTES``; any 3xx
+is refused, and a response body longer than ``_MAX_RESPONSE_BYTES`` raises
+``netpolicy.ResponseTooLarge`` and is not retried. Every ``netpolicy``
 attribute is read from the module at call time. A request that fails with a
 transient transport error (``errors.is_transient``: connection reset, connect
 failure, timeout, incomplete body) is sent again on a fresh pinned
@@ -67,6 +69,7 @@ _SEARCH_ATTEMPTS = 3
 _TIMEOUT_ATTEMPTS = 2
 _RETRY_BACKOFF = (1.0, 2.0)
 _SEARCH_TIMEOUT = 10
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _SEARCH_BUDGET = 30.0
 _MIN_TIME_FOR_ROUTE = 2.0
 _MIN_INTERVAL = 1.0
@@ -418,30 +421,28 @@ def _request(method: str, url: str, *, service: str, label: str,
              timeout: float, headers: dict, data: Optional[dict] = None,
              bot_statuses: frozenset = frozenset(),
              finish_by: Optional[float] = None):
-    """One policy-checked, pinned, paced request; returns the response after
-    the redirect refusal, the bot-check status check (``BotCheckError``) and
+    """One policy-checked, pinned, paced request whose body is read and capped
+    at ``_MAX_RESPONSE_BYTES``; returns the response after the redirect
+    refusal, the bot-check status check (``BotCheckError``) and
     ``raise_for_status``. With *finish_by*, *timeout* is capped at the time
     left after pacing (at least one second)."""
     netpolicy.check_url(url)
-    parsed = urllib.parse.urlparse(url)
     _pace(service)
     if finish_by is not None:
         timeout = min(timeout, max(finish_by - _clock(), 1.0))
     _notify(url)
-    with netpolicy._session_for(url) as session:
-        send = session.post if method == "POST" else session.get
-        kwargs = {"timeout": timeout, "allow_redirects": False,
-                  "headers": {**headers, "User-Agent": netpolicy._USER_AGENT,
-                              "Host": netpolicy._host_header(parsed)}}
-        if data is not None:
-            kwargs["data"] = data
-        resp = send(url, **kwargs)
-        _refuse_redirect(resp, f"The {label} search backend")
-        if getattr(resp, "status_code", None) in bot_statuses:
-            raise BotCheckError(
-                f"{label} answered with a bot check instead of results")
-        resp.raise_for_status()
-        return resp
+    kwargs = {"timeout": timeout, "allow_redirects": False,
+              "headers": {**headers, "User-Agent": netpolicy._USER_AGENT}}
+    if data is not None:
+        kwargs["data"] = data
+    resp = netpolicy.pinned_request(
+        method, url, max_bytes=_MAX_RESPONSE_BYTES, **kwargs)
+    _refuse_redirect(resp, f"The {label} search backend")
+    if getattr(resp, "status_code", None) in bot_statuses:
+        raise BotCheckError(
+            f"{label} answered with a bot check instead of results")
+    resp.raise_for_status()
+    return resp
 
 
 class DuckDuckGoHTMLProvider:
@@ -549,6 +550,8 @@ def _cause(exc: BaseException, url: str) -> str:
         return "it answered with a bot check instead of results"
     if isinstance(exc, UnreadableResultsError):
         return "it answered with a page localm could not read results from"
+    if isinstance(exc, netpolicy.ResponseTooLarge):
+        return "it answered with a page larger than localm reads"
     return describe_failure(exc, url)
 
 
@@ -641,19 +644,16 @@ class SearXNGProvider:
         self.base_url = _searxng_base(base_url)
 
     def _get(self, url: str, accept: str, finish_by: float):
-        netpolicy.check_url(url)
-        parsed = urllib.parse.urlparse(url)
+        netpolicy.check_url(url, search_backend=True)
         _notify(url)
         timeout = min(_SEARCH_TIMEOUT, max(finish_by - _clock(), 1.0))
-        with netpolicy._session_for(url) as session:
-            resp = session.get(url, timeout=timeout,
-                               allow_redirects=False,
-                               headers={"User-Agent": netpolicy._USER_AGENT,
-                                        "Accept": accept,
-                                        "Host": netpolicy._host_header(parsed)})
-            _refuse_redirect(resp, "The SearXNG search backend")
-            resp.raise_for_status()
-            return resp
+        resp = netpolicy.pinned_request(
+            "GET", url, max_bytes=_MAX_RESPONSE_BYTES, timeout=timeout,
+            allow_redirects=False, search_backend=True,
+            headers={"User-Agent": netpolicy._USER_AGENT, "Accept": accept})
+        _refuse_redirect(resp, "The SearXNG search backend")
+        resp.raise_for_status()
+        return resp
 
     def _label(self) -> str:
         host = urllib.parse.urlparse(self.base_url).hostname or self.base_url

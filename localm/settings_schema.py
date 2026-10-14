@@ -949,9 +949,9 @@ CORE_FIELDS: list = [
     # local model instead.
     SettingField("coder_reviewer", Widget.TEXT,
                  "Reviewer model target",
-                 "Sends your diff off-machine unless left blank or set to "
-                 "'local'. Values: blank = the agent's own model; local = a "
-                 "small CPU model; openai; anthropic; or an http(s) URL.",
+                 "Sends your diff off-machine (network policy applies) unless "
+                 "blank or 'local'. Values: blank = the agent's own model; "
+                 "local = a small CPU model; openai; anthropic; or an http(s) URL.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
                  admin_only=True),
     # Gated together with coder_reviewer: gating the SELECTOR while leaving its
@@ -1218,8 +1218,8 @@ CORE_FIELDS: list = [
                  options=["off", "ask", "on"],
                  legacy_bool=("off", "on"),
                  # Reachable in the default keyless install regardless: the schema
-                 # route treats open mode as owner (is_owner = held is None or
-                 # ADMIN in held), so admin_only hides this from a SCOPED key, not
+                 # route treats open mode as operator
+                 # (caller_is_operator), so admin_only hides this from a SCOPED key, not
                  # from the ordinary single-user GUI.
                  group="Network", admin_only=True),
     # ---- Browser automation (plugin) ----

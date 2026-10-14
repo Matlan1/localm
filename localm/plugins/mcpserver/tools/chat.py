@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 from .. import server as _srv
-from ..server import EngineCache, ModelLoadSkipped, _quiet_stdout, _text_result
+from ..server import (EngineCache, ModelEvictedError, ModelLoadSkipped, _quiet_stdout,
+                      _text_result)
 from ._common import MODEL_PARAM
 
 # Largest image file the chat tool reads from disk.
@@ -92,6 +93,10 @@ def answer_with(engines: EngineCache, decision, run):
                     name, skip_if_latched=name != decision.current)
             try:
                 result = run(engine, name)
+            except ModelEvictedError:
+                with _quiet_stdout():
+                    engine = engines.get_loaded_chat(name)
+                result = run(engine, name)
             except RuntimeError as e:
                 if not engines.is_peer(engine):
                     raise
@@ -169,12 +174,19 @@ def build(engines: EngineCache) -> dict[str, dict]:
             texts = [texts]
         if not texts:
             return _text_result("'texts' is required (string or list)", is_error=True)
-        # A fresh embedder load can print to stdout too, like chat() above.
-        with _quiet_stdout():
-            engine = engines.get(args.get("model"))
-        try:
+        def _embed_once():
+            # A fresh embedder load can print to stdout too, like chat() above.
+            with _quiet_stdout():
+                engine = engines.get(args.get("model"))
             with engines.serving(engine):
-                vecs = engine.embed(texts)
+                return engine.embed(texts)
+
+        try:
+            try:
+                vecs = _embed_once()
+            except ModelEvictedError:
+                # Evicted between the fetch and the pin: fetched once more.
+                vecs = _embed_once()
         except NotImplementedError as e:
             return _text_result(str(e), is_error=True)
         return _text_result(json.dumps(vecs))

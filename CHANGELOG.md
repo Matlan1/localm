@@ -484,6 +484,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **The native image and video runtime (stable-diffusion.cpp) moved to master-964-1d0a58a.** SD 1.x, 2.x
+  and SDXL images at CFG above 1 now run the prompt and negative-prompt passes together, which makes
+  each step faster for the same image and uses more VRAM while sampling. An existing
+  install downloads the new runtime the next time a native image or video job starts.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.122.1 to v1.123.** An existing install picks it up the next time music generation starts.
 - **HF models decode about 3.5x faster on AMD GPUs.** On ROCm, loading an HF model now tunes the
   matrix kernels its one-token decoding uses (PyTorch TunableOp, rocBLAS kernels): gemma-3-4b in
@@ -617,6 +621,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   until your next message. It now reloads on every way a job can end, and a job that finishes
   last follows its own "reload the chat model afterwards" setting instead of replaying an
   earlier job's reload.
+- **A re-sync removes documents indexed from credential folders.** A collection that already
+  held files from a folder such as `~/.ssh` kept serving them; `localm rag resync` and the
+  scheduled re-sync now drop those entries from the index.
 - **`localm rag add` no longer indexes credential folders.** Adding a folder such as `~/.ssh` or
   `~/.aws` from the terminal, or a folder that contains one, used to index its files even though
   the API refuses them. The command now refuses a credential folder, UNC or device path, and (when
@@ -624,6 +631,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   credential folder while walking a folder, and a re-sync or repair skips a refused source
   instead of failing.
 - **A config lock that cannot be read on release is reported.** The lock file left behind is named in a warning instead of lingering silently until it is reclaimed.
+- **The MCP server frees VRAM for the embedding model.** When memory recall or a coder task first loads the embedding model next to a resident chat model on a tight card, `localm mcp` now unloads the idle chat model first instead of loading the embedder alongside it. A chat model that is busy or pinned stays loaded, and that, or a process with no chat model to unload, is logged as a warning.
 - **A malformed key store or credentials file is no longer overwritten.** Creating or revoking an API key, or saving a Hugging Face or CivitAI credential, now refuses and leaves the file untouched when `auth.json` is not a list or `model_source_credentials.json` is not an object, instead of replacing it with just the new entry.
 - **Self-calls to a look-alike loopback URL keep certificate verification.** An HTTPS URL containing a backslash or control character is no longer treated as loopback, so the coder agent does not disable verification for it when the local CA file is missing.
 - **Ollama-compatible routes.** A non-streamed `/api/chat` or `/api/generate` reply now carries the
@@ -2168,6 +2176,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and the owner-key-file notice on `GET /v1/keys` named the full location under your data
   directory. A caller other than the owner now gets the scrubbed form (data directory as
   `<data>`, file name kept); the owner and open mode still see the full path.
+- **The coder's network reviewer obeys the network policy.** A cloud reviewer (`openai` /
+  `anthropic`) or an off-machine reviewer URL sent the cumulative diff even with `net_mode` off or
+  the host on `net_deny`. It is now checked like the GUI coder's own model server: when the policy
+  refuses it (including a LAN address while `net_allow_private` is off), the review runs on the
+  local model with a warning naming the refusal. A reviewer URL on this machine is not affected.
+- **Hugging Face pulls are checked against the network policy.** `net_deny`, `net_allow` and the
+  private-address guard now apply to the Hugging Face endpoint before any pull, and the size check
+  before a single-file download checks every redirect hop and pins its address.
+- **Internationalised host names match the domain lists in either spelling.** A `net_deny` or
+  `net_allow` entry written in Unicode or in its `xn--` form now matches both spellings of the host.
+- **The private-address guard refuses the IPv6 site-local range `fec0::/10`.**
+- **Web search reads at most 4 MB of a search service's answer.** A larger answer is refused instead
+  of being read whole into memory.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model
@@ -2181,6 +2202,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   network is off and sends nothing. The security notes now list everything that still reaches the
   network under `off`: the two admin-only exemptions, the bug-report upload (sent only when you press
   Send), requests to your configured ComfyUI, and the native runtime downloads.
+- **A Hugging Face or CivitAI token is no longer resent after a redirect to plain HTTP or another
+  port.** A redirect kept the token whenever the host name stayed the same; it is now dropped
+  unless the scheme, host and port all match the original request.
+- **A SearXNG instance on your network no longer needs the private-address guard turned off.**
+  When `net_search_url` names the instance by its address, `localhost`, a dotless name or a
+  `.local`/`.lan`-style name, the search reaches its LAN or loopback address on exactly that
+  scheme, host and port; link-local and cloud-metadata addresses are still refused, and a public
+  host name gets no exemption. The network guide used to tell
+  you to set `net_allow_private true` for a LAN instance, which removes the guard from every
+  page the model fetches, including cloud metadata and localm's own API; it no longer does.
 - **A scoped API key no longer receives this machine's absolute paths.** The memory page, the
   image, music and video galleries (file paths and the saved generation settings, such as the source
   image of an img2img), a gallery move, the uploads list, the managed ComfyUI status,

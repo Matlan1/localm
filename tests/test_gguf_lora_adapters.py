@@ -189,7 +189,6 @@ class TestHeaderClassification:
 
     def test_pull_registers_an_adapter_as_lora(self, home, monkeypatch):
         import huggingface_hub
-        import requests
         data = _lora_bytes()
 
         def _fake_download(repo_id, filename, local_dir, **kw):
@@ -200,14 +199,15 @@ class TestHeaderClassification:
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
         monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
         monkeypatch.setattr(
-            requests, "head",
+            "localm.model_manager.pull._policy_head",
             lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+        monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal",
+                            lambda: None)
         assert mm.pull_model("owner/repo:tuned-f16.gguf") is True
         assert mm.load_registry()["tuned-f16"]["model_type"] == "lora"
 
     def test_pull_with_an_explicit_type_is_not_overridden(self, home, monkeypatch):
         import huggingface_hub
-        import requests
         data = _lora_bytes()
 
         def _fake_download(repo_id, filename, local_dir, **kw):
@@ -218,8 +218,10 @@ class TestHeaderClassification:
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
         monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, filename: None)
         monkeypatch.setattr(
-            requests, "head",
+            "localm.model_manager.pull._policy_head",
             lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+        monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal",
+                            lambda: None)
         assert mm.pull_model("owner/repo:forced.gguf", model_type="llm") is True
         assert mm.load_registry()["forced"]["model_type"] == "llm"
 

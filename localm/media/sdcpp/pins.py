@@ -11,9 +11,9 @@ from __future__ import annotations
 
 REPO = "leejet/stable-diffusion.cpp"
 
-TAG = "master-951-f89d9b1"
+TAG = "master-964-1d0a58a"
 
-COMMIT = "f89d9b13d730eabeede7314ce49dacd18d3c90c2"
+COMMIT = "1d0a58a35050d285b1d6fb1bc68a92924d35825e"
 
 _BASE_URL = f"https://github.com/{REPO}/releases/download/{TAG}/"
 
@@ -21,29 +21,29 @@ _BASE_URL = f"https://github.com/{REPO}/releases/download/{TAG}/"
 # or "macos-arm64".
 ASSETS: dict[tuple[str, str], tuple[str, str]] = {
     ("windows", "cpu"): (
-        "sd-master-f89d9b1-bin-win-cpu-x64.zip",
-        "7c46bc1f4e89b22af9dd70e8d510dea2167c619676d23d313b83deffcd9b1ecc"),
+        "sd-master-1d0a58a-bin-win-cpu-x64.zip",
+        "8e4e7bde781ff246817019a182040a087314caf4d21bc15fe4ff045167bd336d"),
     ("windows", "vulkan"): (
-        "sd-master-f89d9b1-bin-win-vulkan-x64.zip",
-        "2c5bed22585ff678ff2c9077f5088d55c2d9c0faa948db7f2e689e1ccea701a9"),
+        "sd-master-1d0a58a-bin-win-vulkan-x64.zip",
+        "74211cb5c382aec2aeb086b64f2fdf525efec5faec4200a2d3257bc2328954ab"),
     ("windows", "cuda"): (
-        "sd-master-f89d9b1-bin-win-cuda12-x64.zip",
-        "f129da40b1a85565c79a00a73bdf696164773cfa63dd06450d29d018508208a3"),
+        "sd-master-1d0a58a-bin-win-cuda12-x64.zip",
+        "2f08572e143f0b15a764197ea937d219dd70f0cc7eefb30eb84c9dae6a7cba6d"),
     ("windows", "rocm"): (
-        "sd-master-f89d9b1-bin-win-rocm-7.14.0-x64.zip",
-        "e283cb551cac313bd1c654ed39a29740cc21071edae1775c6b72183b4a6440b2"),
+        "sd-master-1d0a58a-bin-win-rocm-10.1.0-x64.zip",
+        "b83ff4e04f11b9027516f487e90833589ac19555702122a4e227385bc8ca52d3"),
     ("linux", "cpu"): (
-        "sd-master-f89d9b1-bin-Linux-Ubuntu-24.04-x86_64.zip",
-        "2390e744f0c97f452df851581262c145218aa54157db795010c3244a46e07319"),
+        "sd-master-1d0a58a-bin-Linux-Ubuntu-24.04-x86_64.zip",
+        "2c2e6d4c0ad6a183283bda586e6e42c946eebfd9019278405d31763920ac36fa"),
     ("linux", "vulkan"): (
-        "sd-master-f89d9b1-bin-Linux-Ubuntu-24.04-x86_64-vulkan.zip",
-        "441a12efaf319bebd577f09a35fff862e154ebae2a19bdfdd61185e0d6071718"),
+        "sd-master-1d0a58a-bin-Linux-Ubuntu-24.04-x86_64-vulkan.zip",
+        "bade142929edfa7aad56aba46376e55142d14390262b904f4a2deb3a03ceb21d"),
     ("linux", "rocm"): (
-        "sd-master-f89d9b1-bin-Linux-Ubuntu-24.04-x86_64-rocm-7.14.0.zip",
-        "5792ceb913af57faa2a124a5588a62ee3bc10df3d01666007ccf959e0daa50f6"),
+        "sd-master-1d0a58a-bin-Linux-Ubuntu-24.04-x86_64-rocm-10.1.0.zip",
+        "a00fcd3233e8acfc8f5aadb0a1ab4e137a37d05dc61e2a37ddf94d7232b121ca"),
     ("macos-arm64", "metal"): (
-        "sd-master-f89d9b1-bin-Darwin-macOS-26.6.2-arm64.zip",
-        "8057dbfb1529b4e0bc07d35eaf68fa821e44bca6852428c539bf70602189bf92"),
+        "sd-master-1d0a58a-bin-Darwin-macOS-26.6.2-arm64.zip",
+        "45001839e925f98ecd18ef5251725f74cff874eeac4599f1136acba65b26911e"),
 }
 
 # Extra archives installed into the same directory as the main one.

@@ -77,6 +77,8 @@ localm config net_deny  "doubleclick.net"                        # never these
 - `net_allow` empty (default) = any domain. Non-empty = only listed domains.
 - `net_deny` always wins over `net_allow`.
 - `example.com` matches `example.com` and every subdomain (`api.example.com`).
+- An internationalised name is compared in its IDNA (`xn--`) form, so an entry
+  written either way matches both spellings of the host.
 
 ## SSRF guard
 
@@ -156,8 +158,21 @@ backend, point localm at a SearXNG instance:
 
 ```bash
 localm config net_search_url http://192.168.1.10:8080
-localm config net_allow_private true    # if the instance is on your LAN
 ```
+
+An instance on your LAN or on this machine needs no other setting when
+`net_search_url` names it by its IP address, `localhost`, a name without a dot,
+or a name ending in `.local`, `.lan`, `.internal`, `.home.arpa` or
+`.localdomain`: the search then reaches the loopback or private address of
+exactly that origin (the same scheme, host and port), and nothing else. A public
+host name gets no exemption, so a public instance that resolved to a private
+address is still refused. A page the model fetches, even one on that instance,
+still gets the private-address check, and link-local and cloud-metadata
+addresses (`169.254.x.x`, in any IPv6 form) are refused for the search backend
+too. Do not
+turn on `net_allow_private` for this: it removes the private-address check from
+every model-driven request, including ones to `127.0.0.1` (the localm API
+itself) and `169.254.169.254`.
 
 ## Chat: two ways to use the web
 
@@ -222,7 +237,14 @@ coding agent's shell access, so you can grant one without the other.
   (OpenAI/Anthropic opt-ins) - explicit user actions. Note that model
   downloads DO go through this same policy's domain lists and SSRF guard
   (`check_url`); `off` is bypassed only via the separate
-  `net_allow_model_downloads` setting.
+  `net_allow_model_downloads` setting. A Hugging Face pull checks the hub
+  endpoint before any request, and the size check before a single-file
+  download checks and pins every redirect hop; the metadata requests and the
+  transfer itself are made by the `huggingface_hub` library, which follows the
+  hub's redirect to its download host on its own, without the per-hop check or
+  the DNS-rebinding pin. The
+  coder's network reviewer (a cloud model or an off-machine URL) is checked
+  the same way, and falls back to the local model when refused.
 - **Bug-report upload.** A deliberate, one-off action you trigger yourself
   (see [privacy.md](privacy.md)); it does not call `check_url` and is not
   subject to the domain lists.

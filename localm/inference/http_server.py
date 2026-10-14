@@ -3491,9 +3491,10 @@ def require_scope(scope: str):
 
 def caller_scopes(request: Request) -> Optional[set]:
     """The scope set the presented key grants (the owner key -> {ADMIN}), or
-    None in open mode / when no valid key is presented. Routes use this to make
-    authorisation decisions that depend on *who* the caller is (e.g. only an
-    owner/ADMIN principal may mint keys carrying privileged scopes)."""
+    None in open mode / when no valid key is presented. None therefore conflates
+    "open mode" with "no valid credential": never read it as "is the owner".
+    Use ``caller_auth_state`` to tell the two apart and ``caller_is_operator`` /
+    ``caller_is_admin_key`` / ``caller_grants`` for authorisation decisions."""
     from localm.auth import any_key_configured
     if not any_key_configured():
         return None
@@ -3502,13 +3503,43 @@ def caller_scopes(request: Request) -> Optional[set]:
     return prin[0] if prin else None
 
 
+CALLER_OPEN = "open"
+CALLER_ANONYMOUS = "anonymous"
+CALLER_KEYED = "keyed"
+
+
+def caller_auth_state(request: Request) -> str:
+    """``CALLER_OPEN`` when no key is configured anywhere (the local operator),
+    ``CALLER_KEYED`` when a key is configured and the request presents a valid
+    one, ``CALLER_ANONYMOUS`` when a key is configured and the request presents
+    no valid credential."""
+    from localm.auth import any_key_configured
+    if not any_key_configured():
+        return CALLER_OPEN
+    return CALLER_ANONYMOUS if caller_scopes(request) is None else CALLER_KEYED
+
+
+def caller_grants(request: Request, scope: str) -> bool:
+    """True in open mode, or when the presented valid key grants *scope* (the
+    ADMIN/owner key grants every scope). False for a request presenting no valid
+    key while a key is configured."""
+    from localm.auth import any_key_configured
+    if not any_key_configured():
+        return True
+    held = caller_scopes(request)
+    return held is not None and scopes.grants(held, scope)
+
+
 def caller_is_operator(request: Request) -> bool:
     """True for the local operator: open mode (no key configured anywhere) or
     a caller holding an ADMIN/owner key. False for any other caller, including
     a scoped key and a request presenting no valid key."""
-    from localm.auth import any_key_configured
-    if not any_key_configured():
-        return True
+    return caller_grants(request, scopes.ADMIN)
+
+
+def caller_is_admin_key(request: Request) -> bool:
+    """True only for a request presenting a valid ADMIN/owner key. False in open
+    mode, for a scoped key, and for a request presenting no valid key."""
     held = caller_scopes(request)
     return held is not None and scopes.ADMIN in held
 
@@ -3556,13 +3587,8 @@ def _owner_caller_headers(request: Request) -> tuple:
     the owner (open mode, or an ADMIN key or session), else ``(None, None)``.
     A caller presenting no valid key while a key is configured is not the
     owner."""
-    from localm import scopes
     from localm.audit import CLIENT_ID_HEADER, SESSION_MODE_HEADER
-    from localm.auth import any_key_configured
-    held = caller_scopes(request)
-    if held is None and any_key_configured():
-        return None, None
-    if held is not None and scopes.ADMIN not in held:
+    if not caller_is_operator(request):
         return None, None
     return (request.headers.get(CLIENT_ID_HEADER),
             request.headers.get(SESSION_MODE_HEADER))
@@ -3599,9 +3625,7 @@ def memory_principal(request: Request) -> Optional[str]:
     background job stays bound to the key that created it. Only the memory
     principal collapses ADMIN/owner to "owner"; a non-owner scoped key keeps its
     own hash namespace here too."""
-    from localm import scopes
-    held = caller_scopes(request)
-    if held is not None and scopes.ADMIN in held:
+    if caller_is_admin_key(request):
         return None
     return principal_id(request)
 
@@ -3613,8 +3637,7 @@ def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
     creator's. Pairs with principal_id() stamped at job creation."""
     if job_owner is None:
         return True
-    held = caller_scopes(request)
-    if held is not None and scopes.ADMIN in held:
+    if caller_is_admin_key(request):
         return True
     return principal_id(request) == job_owner
 
@@ -5079,6 +5102,45 @@ def _tokens_per_sec(completion_tokens: int, decode_elapsed: Optional[float]) -> 
     return round(completion_tokens / decode_elapsed, 2)
 
 
+def _build_usage(prompt_tokens: Optional[int], completion_tokens: int = 0, *,
+                 context_capacity: Optional[int] = None,
+                 gen_start: Optional[float] = None,
+                 first_token_at: Optional[float] = None,
+                 gen_end: Optional[float] = None,
+                 engine=None, outcome: Optional[dict] = None) -> UsageInfo:
+    """The chat-completion ``usage`` object, shared by the streamed and
+    non-streamed paths.
+
+    A *prompt_tokens* of None counts as 0. ``ttft_ms`` and ``tokens_per_sec``
+    are set when *gen_start* and *gen_end* are given; the decode rate covers
+    the first token to *gen_end* only.
+    ``mtp`` and ``speculation`` come from *outcome* (a snapshot of the finished
+    reply), falling back to *engine* for a key the snapshot lacks, and stay
+    None when no *engine* is given.
+    """
+    ttft = (_ttft_ms(gen_start, first_token_at)
+            if gen_start is not None else None)
+    tps = (_tokens_per_sec(completion_tokens,
+                           _decode_elapsed(first_token_at, gen_end))
+           if gen_end is not None else None)
+    prompt_tokens = prompt_tokens or 0
+    mtp = speculation = None
+    if engine is not None:
+        box = outcome if outcome is not None else {}
+        mtp = _outcome(box, "mtp", engine)
+        speculation = _outcome(box, "speculation", engine)
+    return UsageInfo(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        ttft_ms=ttft,
+        tokens_per_sec=tps,
+        context_capacity=context_capacity,
+        mtp=mtp,
+        speculation=speculation,
+    )
+
+
 def _last_user_text(messages: list) -> str:
     """Text of the most recent user message (for the audit trail). A row the
     client marked with an ``origin`` (a GUI web tool event sent as user-role
@@ -5591,9 +5653,8 @@ async def _stream_sse_body(
             err_chunk["localm_error"] = {"status": refusal_status, "detail": refusal}
             yield f"data: {json.dumps(err_chunk, ensure_ascii=False, separators=(',', ':'))}\n\n"
             for data in _final_chunks(model_id, chunk_id, ts, "error",
-                                      UsageInfo(prompt_tokens=prompt_tokens or 0,
-                                                total_tokens=prompt_tokens or 0,
-                                                context_capacity=capacity),
+                                      _build_usage(prompt_tokens,
+                                                   context_capacity=capacity),
                                       include_usage):
                 yield data
             return
@@ -5819,17 +5880,11 @@ async def _stream_sse_body(
     # Count tokens on the streamed text - what the client actually received
     completion_tokens = await _count_streamed_tokens(engine, streamed)
 
-    usage = UsageInfo(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        ttft_ms=_ttft_ms(gen_start, first_token_at),
-        tokens_per_sec=_tokens_per_sec(
-            completion_tokens, _decode_elapsed(first_token_at, gen_end)),
+    usage = _build_usage(
+        prompt_tokens, completion_tokens,
         context_capacity=engine.context_capacity(),
-        mtp=_outcome(call_outcome, "mtp", engine),
-        speculation=_outcome(call_outcome, "speculation", engine),
-    )
+        gen_start=gen_start, first_token_at=first_token_at, gen_end=gen_end,
+        engine=engine, outcome=call_outcome)
     meter.record(usage.prompt_tokens, usage.completion_tokens,
                  usage.ttft_ms, usage.tokens_per_sec)
     for data in _final_chunks(model_id, chunk_id, ts, finish_reason, usage, include_usage,
@@ -6868,20 +6923,10 @@ async def _complete(
                                    tool_names=tool_names, gen_kwargs=gen_kwargs)
 
     completion_tokens = await _count_streamed_tokens(engine, text)
-    usage = UsageInfo(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        # A non-streaming handler still drives chat_stream internally, so the first
-        # token boundary IS observable: report ttft_ms too, and compute tok/s over
-        # the decode window only (never folding the cold-start load into the rate).
-        ttft_ms=_ttft_ms(gen_start, first_token_at),
-        tokens_per_sec=_tokens_per_sec(
-            completion_tokens, _decode_elapsed(first_token_at, gen_end)),
-        context_capacity=capacity,
-        mtp=_outcome(timing.get("outcome", {}), "mtp", engine),
-        speculation=_outcome(timing.get("outcome", {}), "speculation", engine),
-    )
+    usage = _build_usage(
+        prompt_tokens, completion_tokens, context_capacity=capacity,
+        gen_start=gen_start, first_token_at=first_token_at, gen_end=gen_end,
+        engine=engine, outcome=timing.get("outcome", {}))
 
     _record_generation_metrics(usage.prompt_tokens, usage.completion_tokens,
                                usage.ttft_ms, usage.tokens_per_sec)

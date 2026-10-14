@@ -60,7 +60,7 @@ def _wire_fake_download(monkeypatch, body: bytes = b"fake-model-bytes"):
         h.headers = {"content-length": str(len(body))}
         return h
 
-    monkeypatch.setattr("requests.head", _fake_head)
+    monkeypatch.setattr("localm.model_manager.pull._policy_head", _fake_head)
 
 
 class TestPullGgufFileDestDir:
@@ -169,7 +169,7 @@ class TestRepoFolderSpec:
             h.headers = {"content-length": str(len(body)), "ETag": '"0123abcd"'}
             return h
 
-        monkeypatch.setattr("requests.head", _fake_head)
+        monkeypatch.setattr("localm.model_manager.pull._policy_head", _fake_head)
         return calls
 
     def test_lands_under_its_bare_name_with_no_repo_folder_in_the_destination(
@@ -238,7 +238,7 @@ class TestRepoFolderSpec:
 
         import huggingface_hub
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
-        monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(history=[], headers={}))
+        monkeypatch.setattr("localm.model_manager.pull._policy_head", lambda *a, **k: MagicMock(history=[], headers={}))
 
         results = {}
 
@@ -281,7 +281,7 @@ class TestRepoFolderSpec:
 
         import huggingface_hub
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _failing_download)
-        monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(history=[], headers={}))
+        monkeypatch.setattr("localm.model_manager.pull._policy_head", lambda *a, **k: MagicMock(history=[], headers={}))
         dest_dir = tmp_path / "comfyui-models" / "checkpoints"
 
         assert mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
@@ -452,7 +452,7 @@ class TestDestDirDuplicateSkip:
 
         import huggingface_hub
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
-        monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(
+        monkeypatch.setattr("localm.model_manager.pull._policy_head", lambda *a, **k: MagicMock(
             headers={"content-length": "16"}))
 
         ok = mm._pull_gguf_file("city96/FLUX.1-dev-gguf:brand-new.gguf", None,

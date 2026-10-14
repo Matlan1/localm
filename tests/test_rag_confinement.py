@@ -1207,6 +1207,32 @@ class TestCliCredentialFloor:
         assert "repaired: 1 re-indexed" in res.output
 
 
+    def test_resync_removes_a_document_indexed_from_a_credential_folder(
+            self, home_env):
+        home, _ = home_env
+        good = home / "docs" / "good.txt"
+        good.write_text("ordinary document about turbines", encoding="utf-8")
+        stray = home / "docs" / "stray.txt"
+        stray.write_text("stray document about bearings", encoding="utf-8")
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        bad = ssh / "config"
+        bad.write_text("Host secret-host", encoding="utf-8")
+        c = Collection("cred8").create()
+        c.add_paths([good, stray])
+        old_key, new_key = str(stray.resolve()), str(bad.resolve())
+        c._meta["docs"][new_key] = c._meta["docs"].pop(old_key)
+        for ch in c._chunks:
+            if ch.get("source") == old_key:
+                ch["source"] = new_key
+        c._save()
+        res = Collection("cred8").resync(policy=None)
+        assert res["pruned"] == [new_key]
+        fresh = Collection("cred8")
+        assert [d["path"] for d in fresh.docs()] == [str(good.resolve())]
+        assert all(ch.get("source") != new_key for ch in fresh._chunks)
+
+
 class TestRagAddRouteSecretFile:
     def test_owner_explicit_secret_file_hard_blocked(self, rag_route_app):
         app, home = rag_route_app

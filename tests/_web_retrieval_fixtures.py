@@ -110,6 +110,9 @@ class FakeSession:
     def post(self, url, **kw):
         return self._responder("POST", url, **kw)
 
+    def request(self, method, url, **kw):
+        return self._responder(method.upper(), url, **kw)
+
     def close(self) -> None:
         pass
 
@@ -157,7 +160,7 @@ class Transport:
 
     def install(self, monkeypatch) -> Transport:
         monkeypatch.setattr("localm.netpolicy._session_for",
-                            lambda url: FakeSession(self.responder))
+                            lambda url, **kw: FakeSession(self.responder))
         return self
 
     def urls(self, method: Optional[str] = None) -> list[str]:

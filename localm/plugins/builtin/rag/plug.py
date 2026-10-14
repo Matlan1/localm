@@ -712,9 +712,7 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
         raise HTTPException(400, "; ".join(blocked[:5]))
     if addable:
         import localm.inference.http_server as _hs
-        from localm import scopes
-        held = _hs.caller_scopes(request)
-        if held is None or scopes.ADMIN in held:
+        if _hs.caller_is_operator(request):
             from fastapi.responses import JSONResponse
             return JSONResponse(status_code=409, content={
                 "needs_consent": True,
@@ -1125,8 +1123,7 @@ async def rag_embedding_status(request: Request):
         DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, READ_TIMEOUT_S,
         gpu_fallback_reason, last_error, loaded_dim, resolve_embedding_model_path)
     model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
-    held = _hs.caller_scopes(request)
-    is_owner = held is None or scopes.ADMIN in held
+    is_owner = _hs.caller_is_operator(request)
     # A known key is a dict lookup and a registered name is a registry lookup;
     # neither probes a caller-influenced path. Anything else is a raw path and is
     # not stat'd for a non-owner.
@@ -1144,7 +1141,7 @@ async def rag_embedding_status(request: Request):
     if installed is False and model in KNOWN_EMBEDDING_MODELS:
         from localm.netpolicy import downloads_allowed_when_off, network_mode
         if network_mode() != "off" or downloads_allowed_when_off():
-            can_download = held is None or scopes.grants(held, scopes.CONFIG_WRITE)
+            can_download = _hs.caller_grants(request, scopes.CONFIG_WRITE)
 
     # The three embedder readers run off the event loop together: each does
     # `with _LOCK:`, and get_embedder holds that same lock across a process spawn
@@ -1203,14 +1200,13 @@ async def rag_embedding_download(request: Request):
     from localm.inference.embedder import (
         DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS,
         resolve_embedding_model_path)
-    held = _hs.caller_scopes(request)
-    if held is not None and not scopes.grants(held, scopes.CONFIG_WRITE):
+    if not _hs.caller_grants(request, scopes.CONFIG_WRITE):
         raise HTTPException(
             403, "Downloading the embedding model needs the config:write scope "
                  "(the same permission that governs the network policy).")
     model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
     if model not in KNOWN_EMBEDDING_MODELS:
-        is_owner = held is None or scopes.ADMIN in held
+        is_owner = _hs.caller_is_operator(request)
         shown = model if (is_owner or model in load_registry()) else "(set by the owner)"
         raise HTTPException(
             409, f"The configured embedding model '{shown}' is not one of the "
@@ -1287,16 +1283,14 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     as the canonical restricted key - so without this check the plugin route is a
     back door around the owner gate on PATCH /v1/config. Same shape and placement
     as the rag_allowed_roots widening check above: open mode is the trusted local
-    owner (caller_scopes None) and passes. The dry-run branch is gated identically:
+    owner and passes. The dry-run branch is gated identically:
     it names collections and chunk counts, the same information the confirmed
     switch discloses."""
     model = req.model.strip()
     if not model:
         raise HTTPException(400, "No model given")
     import localm.inference.http_server as _hs
-    from localm import scopes
-    held = _hs.caller_scopes(request)
-    if held is not None and scopes.ADMIN not in held:
+    if not _hs.caller_is_operator(request):
         raise HTTPException(
             403, "Changing the embedding model requires an owner (admin) key: it "
             "selects a file this process loads, so it widens a trust boundary. "

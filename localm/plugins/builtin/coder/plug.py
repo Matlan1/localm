@@ -270,20 +270,9 @@ def _principal_from_request(request: Request) -> tuple[bool, str | None]:
     may touch every session. A minted, non-owner scoped key is ``(False, <hash of
     its bearer>)`` and may touch only the sessions IT created. The principal is a
     SHA-256 of the presented bearer, so it identifies the key without storing it."""
-    from localm import scopes as S
-    from localm.auth import any_key_configured
-    from localm.inference.http_server import caller_scopes, principal_id
-    if not any_key_configured():
-        return True, None                       # open mode = loopback owner
-    # The browser GUI authenticates with the HttpOnly session cookie (now an opaque
-    # session id), not an Authorization header. Resolve identity through the SAME
-    # central helpers the main auth uses so a cookie session and the same key as a
-    # bearer map to one principal: caller_scopes/principal_id translate a session id
-    # to its scope snapshot and owning-key hash (a raw verify() would fail on a sid,
-    # making a cookie-authed owner look like a non-owner).
-    held = caller_scopes(request)
-    if held is not None and S.ADMIN in held:
-        return True, None                       # the owner key / owner session
+    from localm.inference.http_server import caller_is_operator, principal_id
+    if caller_is_operator(request):
+        return True, None
     return False, principal_id(request)
 
 
@@ -478,9 +467,9 @@ def _resolve_backend(req: CreateSessionRequest, *, self_url: str,
     # The calibration matches what the rest of localm already does. netpolicy
     # guards URLs that arrive from UNTRUSTED CONTENT (a model-supplied media
     # URL, a redirect chain during a model pull). An OWNER-CONFIGURED service
-    # endpoint does not go through it at all: comfy_api_url and the
-    # coder_reviewer URL both point wherever the owner says. This field is the
-    # same kind of thing, and it is already owner-gated above.
+    # endpoint on this machine does not go through it: comfy_api_url and a
+    # loopback coder_reviewer URL point wherever the owner says. This field is
+    # the same kind of thing, and it is already owner-gated above.
     #
     # An off-machine destination is different, and there check_url is exactly
     # right: net_mode=off then means what it says, the deny list applies, and a
@@ -646,9 +635,10 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # UNRESTRICTED coder, same as the owner; a plain coder-scoped key stays
     # restricted (read + confined edit, no shell).
     from localm import scopes as _S
+    from localm.inference.http_server import caller_grants as _caller_grants
     from localm.inference.http_server import caller_scopes as _caller_scopes
     held = _caller_scopes(request) or set()
-    restricted = not (is_owner or _S.CODER_FULL in held)
+    restricted = not _caller_grants(request, _S.CODER_FULL)
     # Browser automation needs BOTH: the capability on the key, and the setting
     # switched on. Held independently of coder's shell tier, so a browser key
     # need not also be a coder:full key.
@@ -1130,9 +1120,8 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
     active_model = request.app.state.active_model
     is_owner, _ = _principal_from_request(request)
     from localm import scopes as _S
-    from localm.inference.http_server import caller_scopes as _caller_scopes
-    held = _caller_scopes(request) or set()
-    restricted = not (is_owner or _S.CODER_FULL in held)
+    from localm.inference.http_server import caller_grants as _caller_grants
+    restricted = not _caller_grants(request, _S.CODER_FULL)
 
     is_local = not (session.backend_info and session.backend_info.get("backend") != "local")
     if is_local:
