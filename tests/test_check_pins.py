@@ -749,6 +749,7 @@ _NOT_A_VERSION_PIN = {
     "localm/media/koboldcpp/music.py": "a duration constant",
     "localm/inference/tool_calling.py": "tag delimiters of a chat format",
     "localm/plugins/builtin/voice/audio_model.py": "a tag of a chat format",
+    "localm/updater.py": "the built-in update signing key set",
 }
 
 

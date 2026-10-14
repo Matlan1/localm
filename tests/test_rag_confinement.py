@@ -1203,8 +1203,9 @@ class TestCliCredentialFloor:
         c, good, bad = self._collection_with_refused_doc(home, tmp_path, "cred7")
         res = CliRunner().invoke(ragcli.rag_group, ["repair", "cred7", "--yes"])
         assert res.exit_code == 0, res.output
-        assert "credential directory" in res.output
-        assert "repaired: 1 re-indexed" in res.output
+        text = " ".join(res.output.split())
+        assert "credential directory" in text
+        assert "repaired: 1 re-indexed" in text
 
 
     def test_resync_removes_a_document_indexed_from_a_credential_folder(
