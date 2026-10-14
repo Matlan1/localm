@@ -669,17 +669,40 @@ def _require_chat_template(*templated) -> None:
     raise ChatTemplateMissingError(CHAT_TEMPLATE_MISSING_MESSAGE)
 
 
+def _processor_fallback_template(processor, tokenizer) -> Optional[str]:
+    """The chat template to render a multimodal prompt with through *processor*:
+    None when the processor carries a usable template of its own, else the
+    tokenizer's (its ``default`` entry when it is a dict of named templates).
+
+    Raises :class:`ChatTemplateMissingError` when neither carries one.
+    ``ProcessorMixin.apply_chat_template`` reads only the processor's own
+    template, so a tokenizer-only template has to be passed to it explicitly."""
+    _require_chat_template(processor, tokenizer)
+    if _has_usable_template(processor):
+        return None
+    template = tokenizer.chat_template
+    return template["default"] if isinstance(template, dict) else template
+
+
 def _render_processor_prompt(processor, template_messages, *,
-                             add_generation_prompt: bool = True) -> str:
-    """The prompt text *processor* renders for *template_messages* (not tokenized).
+                             add_generation_prompt: bool = True,
+                             chat_template: Optional[str] = None) -> str:
+    """The prompt text *processor* renders for *template_messages* (not tokenized),
+    with *chat_template* in place of the processor's own when given.
 
     Passes a non-empty ``processor_kwargs`` (unused while ``tokenize`` is False),
     so SmolVLM's ``apply_chat_template`` does not put its default frame-sampling
     arguments in ``**kwargs``, which makes transformers log a warning. See
     test_render_logs_no_kwargs_warning."""
+    extra = {} if chat_template is None else {"chat_template": chat_template}
     return processor.apply_chat_template(
         template_messages, processor_kwargs={"add_special_tokens": False},
-        tokenize=False, add_generation_prompt=add_generation_prompt)
+        tokenize=False, add_generation_prompt=add_generation_prompt, **extra)
+
+
+TOKENIZER_TEMPLATE_MEDIA_MESSAGE = (
+    "This model's processor has no chat template of its own, and the chat "
+    "template its tokenizer carries could not lay out the attached media: {}")
 
 
 def _untrusted_prompt_ranges(tokenizer, template_messages, text,
@@ -1995,8 +2018,15 @@ class HFWorker:
         # --- Tokenize / process ---
         if self._processor and (images or audios):
             # Full multimodal path
-            _require_chat_template(self._processor, tokenizer)
-            text = _render_processor_prompt(self._processor, template_messages)
+            fallback_template = _processor_fallback_template(self._processor, tokenizer)
+            try:
+                text = _render_processor_prompt(self._processor, template_messages,
+                                                chat_template=fallback_template)
+            except Exception as e:
+                if fallback_template is None:
+                    raise
+                raise UnsupportedInputError(
+                    TOKENIZER_TEMPLATE_MEDIA_MESSAGE.format(f"{type(e).__name__}: {e}")) from e
             # add_special_tokens=False: the template already emitted the model's
             # BOS, so re-tokenizing with the default would prepend a SECOND one
             # (see the text-path note below). Standard processors forward this to
@@ -2031,8 +2061,10 @@ class HFWorker:
             try:
                 inputs = self._processor(**process_kwargs).to(model.device)
             except ValueError as e:
+                if fallback_template is not None:
+                    raise UnsupportedInputError(
+                        TOKENIZER_TEMPLATE_MEDIA_MESSAGE.format(e)) from e
                 if audios and not audio_rate_verified:
-                    from .base import UnsupportedInputError
                     raise UnsupportedInputError(
                         f"The attached audio was refused by the model's own "
                         f"processor ({e}). Its expected sample rate could not "
