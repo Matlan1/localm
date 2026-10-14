@@ -362,6 +362,65 @@ class TestCleanEmbedErrorKeepsTheWorker:
             "a dropped runner must have its queues/handles released, not leaked")
 
 
+class TestDeadWorkerRestartWaitsForAModelLoad:
+    def test_the_respawn_waits_for_the_engine_load_lock(self, monkeypatch):
+        from localm.inference.engine import _LOAD_LOCK
+
+        class _Runner:
+            def __init__(self, alive):
+                self.alive = alive
+
+            def is_alive(self):
+                return self.alive
+
+            def embed(self, texts):
+                return [[1.0] for _ in texts]
+
+            def shutdown(self, grace=5.0):
+                self.alive = False
+
+        reloads: list = []
+
+        def fake_reload(self):
+            reloads.append(_LOAD_LOCK._is_owned())
+            self._runner = _Runner(True)
+
+        monkeypatch.setattr(IsolatedEmbedder, "_reload", fake_reload)
+        e = IsolatedEmbedder.__new__(IsolatedEmbedder)
+        e.model_path = "x.gguf"
+        e.active_requests = 0
+        e._rpc_lock = threading.RLock()
+        e._runner = _Runner(False)
+        e.n_gpu_layers = 0
+        e.gpu_fallback_reason = None
+        e.effective_pooling = None
+        held, release = threading.Event(), threading.Event()
+
+        def _model_load():
+            with _LOAD_LOCK:
+                held.set()
+                release.wait(30)
+
+        loader = threading.Thread(target=_model_load, daemon=True)
+        loader.start()
+        assert held.wait(10)
+        result: list = []
+        call = threading.Thread(
+            target=lambda: result.append(e._call_worker(lambda r: r.embed(["a"]))),
+            daemon=True)
+        try:
+            call.start()
+            call.join(1)
+            assert call.is_alive() and reloads == [], (
+                "the worker was respawned while a model load held the engine lock")
+        finally:
+            release.set()
+            loader.join(10)
+        call.join(10)
+        assert result == [[[1.0]]]
+        assert reloads == [True]
+
+
 class TestCleanLoadErrorReapsTheWorker:
     """spawn_and_load's clean ("error", msg) branch shuts the worker down
     before raising. Compare TestCleanEmbedErrorKeepsTheWorker above, which
