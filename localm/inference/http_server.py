@@ -5511,7 +5511,9 @@ async def stream_after_prep(
             prepared = task.result()
         except HTTPException as e:
             detail = e.detail if isinstance(e.detail, str) else json.dumps(e.detail)
-            for line in _prep_error_lines(detail, e.status_code, model_id, chunk_id, ts):
+            for line in _prep_error_lines(
+                    detail, e.status_code, model_id, chunk_id, ts,
+                    refusal=(e.headers or {}).get(MEDIA_REFUSAL_HEADER)):
                 yield line
             return
         except Exception as e:
@@ -5542,15 +5544,17 @@ async def stream_after_prep(
 
 
 def _prep_error_lines(detail: str, status: int, model_id: str, chunk_id: str,
-                      ts: int) -> list:
+                      ts: int, refusal: Optional[str] = None) -> list:
     """The error reply and terminal lines that end an early-opened stream. Both
     the error text chunk and the terminal chunk carry ``localm_error``, so a
     client that knows it can raise before showing the text as a reply."""
-    refusal = {"status": status, "detail": detail}
+    localm_error = {"status": status, "detail": detail}
+    if refusal:
+        localm_error["refusal"] = refusal
     err = ChatChunk.token(detail, model_id, chunk_id, ts).model_dump()
-    err["localm_error"] = refusal
+    err["localm_error"] = localm_error
     done = ChatChunk.done(model_id, chunk_id, ts, finish_reason="error").model_dump()
-    done["localm_error"] = refusal
+    done["localm_error"] = localm_error
     return ["data: " + json.dumps(err) + "\n\n",
             "data: " + json.dumps(done) + "\n\n",
             "data: [DONE]\n\n"]

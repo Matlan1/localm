@@ -1018,22 +1018,22 @@ def _build_audio_process_kwargs(processor, audios: list[tuple]) -> tuple[dict, b
     True only when the model's own expected rate was read and matched the
     clips.
 
-    Raises :class:`UnsupportedInputError`
+    Raises :class:`AudioInputError`
     (``localm.inference.backends.base``) when several clips carry different
     sample rates, or when the model's expected rate is known and does not
     match theirs.
     """
-    from .base import UnsupportedInputError
+    from .base import AudioInputError
     rates = {sr for _audio, sr in audios}
     if len(rates) > 1:
-        raise UnsupportedInputError(
+        raise AudioInputError(
             "Several audio clips were attached at different sample rates "
             f"({sorted(rates)} Hz); localm cannot mix sample rates in one "
             "request. Resend the clips at a single, matching sample rate.")
     clip_rate = next(iter(rates))
     expected_rate = _audio_processor_sampling_rate(processor)
     if expected_rate is not None and expected_rate != clip_rate:
-        raise UnsupportedInputError(
+        raise AudioInputError(
             f"The attached audio is {clip_rate} Hz, but this model expects "
             f"{expected_rate} Hz. localm does not resample audio; resend the "
             "clip at the model's sample rate.")
@@ -2032,8 +2032,8 @@ class HFWorker:
                 inputs = self._processor(**process_kwargs).to(model.device)
             except ValueError as e:
                 if audios and not audio_rate_verified:
-                    from .base import UnsupportedInputError
-                    raise UnsupportedInputError(
+                    from .base import AudioInputError
+                    raise AudioInputError(
                         f"The attached audio was refused by the model's own "
                         f"processor ({e}). Its expected sample rate could not "
                         "be read in advance to check it.") from e

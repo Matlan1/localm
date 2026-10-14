@@ -78,6 +78,7 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
                                   type by the parent. Recognised tags:
                                   "UnsupportedInputError",
                                   "ImageLimitError",
+                                  "AudioInputError",
                                   "GrammarUnsupportedError",
                                   "InvalidGrammarError",
                                   "ContextCapacityExceededError",
@@ -316,6 +317,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
 
     from localm.inference.backends._hf_worker import HFWorker
     from localm.inference.backends.base import (
+        AudioInputError,
         ChatTemplateMissingError,
         ContextCapacityExceededError,
         GrammarUnsupportedError,
@@ -430,6 +432,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 # from a genuine native fault.
                 resp_q.put(("error", str(e),
                             "ImageLimitError" if isinstance(e, ImageLimitError)
+                            else "AudioInputError" if isinstance(e, AudioInputError)
                             else "UnsupportedInputError"))
             except GrammarUnsupportedError as e:
                 # Same shape: _grammar_processor REFUSES a grammar it cannot
@@ -872,6 +875,9 @@ class HFRunner:
                         if tag == "ImageLimitError":
                             from localm.inference.backends.base import ImageLimitError
                             raise ImageLimitError(msg)
+                        if tag == "AudioInputError":
+                            from localm.inference.backends.base import AudioInputError
+                            raise AudioInputError(msg)
                         # Re-raise the TYPE, not a bare RuntimeError: the routes
                         # map GrammarUnsupportedError and InvalidGrammarError to a
                         # 400 naming the real problem, while a RuntimeError from
