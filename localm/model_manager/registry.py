@@ -3771,7 +3771,8 @@ def _store_standalone_projector(src: Path, action: str) -> Path:
     return dest
 
 
-def _store_loose_gguf_dir(first_parts: list[Path], store: str) -> Optional[list[Path]]:
+def _store_loose_gguf_dir(first_parts: list[Path], store: str,
+                          mmprojs: Optional[dict] = None) -> Optional[list[Path]]:
     """Bring every model in a directory-of-loose-ggufs import into MODELS_DIR
     before ``_add_local_gguf_dir`` registers them (mirrors its per-file loop).
 
@@ -3803,6 +3804,18 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str) -> Optional[list[
         via :func:`_store_standalone_projector` - the same reuse-or-rename
         leniency an attached projector gets from :func:`_projector_dest`.
 
+    A claimed projector resolves to wherever an owner's call actually placed
+    it, never to a path derived from its name. When no owner's call carried it
+    it is stored on its own like an unclaimed one, and when it is gone from the
+    folder without any owner having carried it, its entry keeps its old path
+    (``_add_local_gguf_dir`` then reports it as no longer there).
+
+    When *mmprojs* is given, it is filled with each model's new path mapped to
+    the vision projector to record on its entry: the projector its own
+    transfer attached, or, for a model that pairs with a projector another
+    model's move already carried, that projector at its new location. Only a
+    projector :func:`gguf_is_mmproj` accepts is recorded.
+
     Returns the new first_parts list (paths now under MODELS_DIR), or None if
     a genuine collision, a disk-space shortfall, or a copy that verified
     corrupt means some transfer failed - the caller reports the printed error
@@ -3810,14 +3823,16 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str) -> Optional[list[
     """
     from rich.markup import escape
 
-    claimed_sibling_of: dict = {}   # resolved mmproj path -> its owning model path
+    claimed_sibling_of: dict = {}   # resolved mmproj path -> its first owning model
+    paired_with: dict = {}          # resolved model path -> resolved mmproj path
     for owner in first_parts:
         sib = find_sibling_mmproj(owner)
         if sib is None:
             continue
         sib_r = sib.resolve()
+        paired_with[owner.resolve()] = sib_r
         if any(sib_r == g.resolve() for g in first_parts):
-            claimed_sibling_of[sib_r] = owner
+            claimed_sibling_of.setdefault(sib_r, owner)
 
     def is_unclaimed_projector(gguf: Path) -> bool:
         return gguf.resolve() not in claimed_sibling_of and "mmproj" in gguf.name.lower()
@@ -3836,7 +3851,9 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str) -> Optional[list[
             return None
 
     new_parts: list[Optional[Path]] = [None] * len(first_parts)
-    owner_result: dict = {}   # owner's resolved path -> its StoredModel
+    stored_of: dict = {}      # model's resolved source path -> its StoredModel
+    carried_to: dict = {}     # projector's resolved source path -> where it landed
+    recordable: dict = {}     # projector's resolved source path -> its verified mmproj
 
     for i, gguf in enumerate(first_parts):
         if gguf.resolve() in claimed_sibling_of:
@@ -3846,11 +3863,18 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str) -> Optional[list[
             continue
         try:
             if is_unclaimed_projector(gguf):
-                new_parts[i] = _store_standalone_projector(gguf, store)
+                landed = carried_to.get(gguf.resolve())
+                new_parts[i] = (landed if landed is not None
+                                else _store_standalone_projector(gguf, store))
             else:
+                sib = find_sibling_mmproj(gguf)
                 stored = _mm._store_with_projector(gguf, store, attached_projector_only=True)
                 new_parts[i] = stored.path
-                owner_result[gguf.resolve()] = stored
+                stored_of[gguf.resolve()] = stored
+                if sib is not None and stored.attached_dest is not None:
+                    carried_to.setdefault(sib.resolve(), stored.attached_dest)
+                    if stored.mmproj is not None:
+                        recordable.setdefault(sib.resolve(), stored.mmproj)
         except RuntimeError as e:
             # e: built from Path objects derived from the caller's own
             # filesystem paths - not restricted to a safe charset.
@@ -3858,14 +3882,37 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str) -> Optional[list[
             return None
 
     for i, gguf in enumerate(first_parts):
-        owner = claimed_sibling_of.get(gguf.resolve())
-        if owner is None:
+        if gguf.resolve() not in claimed_sibling_of:
             continue
-        stored = owner_result.get(owner.resolve())
-        if stored is not None and stored.attached_dest is not None:
-            new_parts[i] = stored.attached_dest
+        if not _mm.is_external_path(gguf):
+            new_parts[i] = gguf
+            continue
+        landed = carried_to.get(gguf.resolve())
+        if landed is not None:
+            new_parts[i] = landed
+        elif gguf.exists():
+            try:
+                placed = _store_standalone_projector(gguf, store)
+            except RuntimeError as e:
+                console.print(f"[red]{escape(str(e))}[/red]")
+                return None
+            new_parts[i] = placed
+            if gguf_is_mmproj(placed):
+                recordable.setdefault(gguf.resolve(), placed)
         else:
-            new_parts[i] = _mm.MODELS_DIR / gguf.name if _mm.is_external_path(gguf) else gguf
+            new_parts[i] = gguf
+
+    if mmprojs is not None:
+        for gguf, new in zip(first_parts, new_parts, strict=True):
+            stored = stored_of.get(gguf.resolve())
+            if stored is None:
+                continue
+            own = stored.mmproj
+            if own is None:
+                sib_r = paired_with.get(gguf.resolve())
+                own = recordable.get(sib_r) if sib_r is not None else None
+            if own is not None:
+                mmprojs[new] = own
 
     return new_parts
 
@@ -3942,6 +3989,7 @@ def _add_local_gguf_dir(
     fast: bool = False,
     model_type: Optional[str] = None,
     names: Optional[dict] = None,
+    mmprojs: Optional[dict] = None,
 ) -> bool:
     """Register every loose .gguf model in a folder (the *first_parts* list).
 
@@ -3955,18 +4003,22 @@ def _add_local_gguf_dir(
 
     A duplicate answered with "copy" / "move" carries only the projector
     ``find_sibling_mmproj`` attaches (``attached_projector_only``). *names* maps
-    a GGUF path to the name it registers under instead of its filename stem. An entry
-    whose file an earlier model's move already carried into MODELS_DIR is
-    registered at ``MODELS_DIR / <its name>``; one that is gone from both
-    places is skipped with a message.
+    a GGUF path to the name it registers under instead of its filename stem.
+    *mmprojs* maps a GGUF path to the vision projector recorded on its entry
+    when its type is one that takes a projector. An entry whose file an
+    earlier model's move carried into MODELS_DIR (the projector that model
+    attached, seen leaving the folder and appearing in MODELS_DIR during that
+    model's registration) is registered where it landed; one whose new
+    location was not seen is skipped with a message.
     """
     from rich.markup import escape
 
     use_given_name = bool(name) and len(first_parts) == 1
+    carried_to: dict = {}   # resolved source path -> where an earlier move put it
     for gguf in first_parts:
         if not gguf.exists():
-            carried = _mm.MODELS_DIR / gguf.name
-            if not carried.is_file():
+            carried = carried_to.get(gguf.resolve())
+            if carried is None or not carried.is_file():
                 # gguf: a filename from the caller's own folder - not restricted
                 # to a safe charset.
                 console.print(f"[yellow]Skipped {escape(gguf.name)}: it is no "
@@ -3982,15 +4034,38 @@ def _add_local_gguf_dir(
         digest, size = _digest_for_add(gguf, reg, no_hash, fast)
 
         detected_type, gmeta = _detect_local_model_type(gguf, is_gguf=True, is_hf=False)
+        final_type = model_type if model_type is not None else detected_type
+        sib = (find_sibling_mmproj(gguf)
+               if on_duplicate in ("ask", "move") and _mm.is_external_path(gguf) else None)
+        before = _gguf_names_in(_mm.MODELS_DIR) if sib is not None else set()
         _mm._register_with_dedup(
             model_name, gguf, "local", on_duplicate=on_duplicate,
             digest=digest, size=size,
-            model_type=(model_type if model_type is not None else detected_type),
+            model_type=final_type,
+            mmproj=((mmprojs or {}).get(gguf) if final_type in _PROJECTOR_TYPES else None),
             architecture=gmeta.get("architecture"),
             expert_count=gmeta.get("expert_count"),
             attached_projector_only=True,
         )
+        if sib is not None and not sib.exists():
+            stem = sib.stem.lower()
+            landed = [n for n in _gguf_names_in(_mm.MODELS_DIR) - before
+                      if n.lower() == sib.name.lower()
+                      or re.fullmatch(re.escape(stem) + r"-\d+\.gguf", n.lower())]
+            if len(landed) == 1:
+                carried_to[sib.resolve()] = _mm.MODELS_DIR / landed[0]
     return True
+
+
+def _gguf_names_in(folder: Path) -> set:
+    """Names of the ``.gguf`` files directly in *folder*; empty when it cannot
+    be listed."""
+    try:
+        with os.scandir(folder) as entries:
+            return {e.name for e in entries
+                    if e.name.lower().endswith(".gguf") and e.is_file()}
+    except OSError:
+        return set()
 
 
 
@@ -4566,8 +4641,9 @@ def _add_local_hub_cache(
         found += 1
         models = [g for g in first_parts if "mmproj" not in g.name.lower()]
         names = {models[0]: repo_name} if len(models) == 1 else None
+        mmprojs: dict = {}
         if store:
-            stored = _mm._store_loose_gguf_dir(first_parts, store)
+            stored = _mm._store_loose_gguf_dir(first_parts, store, mmprojs=mmprojs)
             if stored is None:
                 return False
             names = {new: names[old] for old, new in zip(first_parts, stored, strict=True)
@@ -4575,7 +4651,7 @@ def _add_local_hub_cache(
             first_parts = stored
         registered_any = _add_local_gguf_dir(
             first_parts, None, on_duplicate, no_hash, fast,
-            model_type=model_type, names=names,
+            model_type=model_type, names=names, mmprojs=mmprojs,
         ) or registered_any
     if unusable:
         console.print(f"[dim]Skipped {unusable} Hugging Face cache repo(s) with no "
@@ -4736,14 +4812,15 @@ def add_local(
             only_one = len(first_parts) + len(hf_dirs) == 1
             registered_any = False
             if first_parts:
+                mmprojs: dict = {}
                 if store:
-                    stored = _mm._store_loose_gguf_dir(first_parts, store)
+                    stored = _mm._store_loose_gguf_dir(first_parts, store, mmprojs=mmprojs)
                     if stored is None:
                         return False
                     first_parts = stored
                 registered_any = _add_local_gguf_dir(
                     first_parts, name if only_one else None, on_duplicate, no_hash,
-                    fast, model_type=model_type,
+                    fast, model_type=model_type, mmprojs=mmprojs,
                 )
             for hf_dir in hf_dirs:
                 wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name

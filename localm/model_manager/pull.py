@@ -61,24 +61,32 @@ def _pid_space_id() -> str:
     return instances.pid_space_id()
 
 
-def _same_pid_space(rec: dict) -> bool:
-    """True when owner record *rec* was written in this process's pid space:
-    its id is this one (see :func:`_pid_space_id`), or it is the id an earlier
-    localm wrote on this host (see
-    :func:`localm.instances.legacy_pid_space_id` and
-    :func:`localm.instances.legacy_record_is_this_host`). A record naming no
-    pid space is not judged here."""
+def _same_pid_space(rec: dict, where: Path) -> bool:
+    """True when owner record *rec*, stored in directory *where*, was written
+    in this process's pid space: its id is this one (see
+    :func:`_pid_space_id`); or it is the id an earlier localm wrote on this
+    host (see :func:`localm.instances.legacy_pid_space_id` and
+    :func:`localm.instances.legacy_record_is_this_host`); or its host id
+    equals this one (see :func:`localm.instances.host_id`, which does not
+    depend on the host name) and *where* is on a disk attached to this machine
+    (see :func:`localm.instances.path_is_local`). A record naming no pid space
+    is not judged here."""
     space = rec.get("space")
     if space == _pid_space_id():
         return True
-    return (space is not None and space == instances.legacy_pid_space_id()
-            and instances.legacy_record_is_this_host(rec))
+    if (space is not None and space == instances.legacy_pid_space_id()
+            and instances.legacy_record_is_this_host(rec)):
+        return True
+    host = rec.get("host")
+    return (space is not None and isinstance(host, str)
+            and host == instances.host_id() and instances.path_is_local(where))
 
 
 def _write_partial_owner(partial: Path) -> None:
     """Record this process (pid, pid space and start identity) as the owner of
     *partial*."""
     rec = {"pid": os.getpid(), "space": _pid_space_id(),
+           "host": instances.host_id(),
            "start": instances.process_start_identity(os.getpid())}
     _partial_owner_path(partial).write_text(json.dumps(rec), encoding="utf-8")
 
@@ -110,7 +118,7 @@ def _partial_owner_is_gone(partial: Path) -> bool:
     """True only when the recorded owner of *partial* is PROVEN dead.
 
     Returns False for a missing or unreadable sidecar, an unparsable pid, a
-    record written in another pid space (see :func:`_pid_space_id`), a live
+    record written in another pid space (see :func:`_same_pid_space`), a live
     pid whose start identity matches the record or cannot be compared with it
     (see :func:`localm.instances.start_identity_differs`), a live pid in a
     record that names no pid space, and any probe failure. A pid that is this
@@ -127,7 +135,7 @@ def _partial_owner_is_gone(partial: Path) -> bool:
     if pid <= 0:
         return False
     space = rec.get("space")
-    if space is not None and not _same_pid_space(rec):
+    if space is not None and not _same_pid_space(rec, partial.parent):
         return False
     if pid == os.getpid():
         return not _partial_in_flight(partial)
@@ -259,8 +267,9 @@ def _resumable_download_to_tmp_and_move(
     proven gone (live, unknown, or no sidecar) is never read, renamed or
     deleted. A resume always transfers over HTTP with a Range request; Xet is
     used only for a transfer that starts from byte 0. On a failed transfer the
-    temp file and its sidecar are kept for the next attempt; a failed size
-    check deletes them. See test_xet_partial_is_resumed_over_http_range.
+    temp file and its sidecar are kept for the next attempt, and a failure
+    before the temp file exists removes the sidecar; a failed size check
+    deletes both. See test_xet_partial_is_resumed_over_http_range.
     """
     import huggingface_hub.file_download as fd
     import uuid
@@ -273,10 +282,10 @@ def _resumable_download_to_tmp_and_move(
     tmp_path = incomplete_path.with_name(
         f"{incomplete_path.stem}.{uuid.uuid4().hex[:8]}.incomplete")
 
-    _write_partial_owner(tmp_path)
     with _INFLIGHT_LOCK:
         _INFLIGHT_PARTIALS.add(str(tmp_path))
     try:
+        _write_partial_owner(tmp_path)
         resume_size = _adopt_partial(incomplete_path, tmp_path, expected_size,
                                      adopt=not force_download)
         _reap_stale_etag_partials(incomplete_path)
@@ -325,6 +334,8 @@ def _resumable_download_to_tmp_and_move(
         fd._chmod_and_move(tmp_path, destination_path)
         _unlink_quiet(_partial_owner_path(tmp_path))
     finally:
+        if not os.path.lexists(tmp_path):
+            _unlink_quiet(_partial_owner_path(tmp_path))
         with _INFLIGHT_LOCK:
             _INFLIGHT_PARTIALS.discard(str(tmp_path))
 
@@ -1693,8 +1704,11 @@ def _pull_gguf_file(
         total_size = 0
 
     # Same-repo vision projector this pull would auto-attach (mirrors
-    # _mmproj_for_registration's own gating): HEAD it too and fold its size
-    # into the preflight total.
+    # _mmproj_for_registration's own gating): HEAD it and charge its size to
+    # the disk-space preflight only, unless a file of its name and size is
+    # already in base_dir. It is fetched after the model, outside the model's
+    # progress.
+    projector_size = 0
     if (register and mmproj_spec is None and dest_dir is None
             and model_type not in ("mmproj", "embedding")
             and "mmproj" not in filename.lower()):
@@ -1704,7 +1718,12 @@ def _pull_gguf_file(
             if mmproj_name:
                 mmproj_head = _policy_head(
                     hf_hub_url(repo_id, mmproj_name, endpoint=_HF_ENDPOINT))
-                total_size += int(mmproj_head.headers.get("content-length", 0))
+                projector_size = int(mmproj_head.headers.get("content-length", 0))
+                try:
+                    if (base_dir / mmproj_name).stat().st_size == projector_size:
+                        projector_size = 0
+                except OSError:
+                    pass
         except UnresolvableHost:
             pass
         except NetworkPolicyError as e:
@@ -1726,7 +1745,8 @@ def _pull_gguf_file(
             continue
         already_have += _reusable_partial_bytes(inc, part_sizes.get(part))
 
-    if not _mm._check_disk_space(base_dir, max(0, total_size - already_have)):
+    if not _mm._check_disk_space(
+            base_dir, max(0, total_size + projector_size - already_have)):
         return False
 
     # TAG-INJECTION site: repo_id/filename sit directly inside OPEN
@@ -2338,9 +2358,9 @@ def _part_lock_owner(d: Path):
     return _read_lock_record(d)
 
 
-def _record_holder_is_gone(rec) -> bool:
+def _record_holder_is_gone(rec, where: Path) -> bool:
     """:func:`_part_lock_holder_is_gone` for the owner record *rec*, which
-    may be None."""
+    may be None, stored in directory *where*."""
     if rec is None:
         return False
     try:
@@ -2348,7 +2368,7 @@ def _record_holder_is_gone(rec) -> bool:
     except (TypeError, ValueError):
         return False
     space = rec.get("space")
-    if space is not None and not _same_pid_space(rec):
+    if space is not None and not _same_pid_space(rec, where):
         return False
     if pid == os.getpid():
         return False
@@ -2360,7 +2380,7 @@ def _record_holder_is_gone(rec) -> bool:
 
 def _part_lock_holder_is_gone(d: Path) -> bool:
     """True only when the recorded holder is PROVEN gone: its pid is dead, or
-    the record names this pid space (see :func:`_pid_space_id`) and the live
+    the record names this pid space (see :func:`_same_pid_space`) and the live
     pid's start identity differs from the one the holder recorded (see
     :func:`localm.instances.process_start_identity`). A record from another
     pid space is never gone; one that names no pid space is judged by pid
@@ -2379,7 +2399,7 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
     True when it genuinely cannot tell - so this composes rather than
     re-deciding.
     """
-    return _record_holder_is_gone(_part_lock_owner(d))
+    return _record_holder_is_gone(_part_lock_owner(d), d.parent)
 
 
 def _is_empty_dir(d: Path) -> bool:
@@ -2470,7 +2490,7 @@ def _sweep_lock_leftovers(locks: Path) -> None:
                     os.rmdir(p)
                 except OSError as e:
                     logger.debug("left %s in place: %s", p, e)
-            elif _record_holder_is_gone(rec):
+            elif _record_holder_is_gone(rec, locks):
                 shutil.rmtree(p, ignore_errors=True)
 
 
@@ -2577,6 +2597,7 @@ def _stage_lock_record(locks: Path, filename: str, token: str) -> Path:
     # inspecting the lock.
     payload = json.dumps({"pid": os.getpid(), "filename": filename,
                           "space": _pid_space_id(),
+                          "host": instances.host_id(),
                           "start": instances.process_start_identity(os.getpid()),
                           "token": token, "started": time.time()})
     for _ in range(_LOCK_ATTEMPTS):

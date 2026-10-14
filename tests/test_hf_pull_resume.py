@@ -241,15 +241,58 @@ class TestPartialOwnership:
         assert captured["resume_size"] == 0
         assert dest.read_bytes() == b"FRESH"
 
+    @pytest.mark.parametrize("local", [True, False])
+    def test_a_dead_owners_partial_from_before_a_host_rename(
+            self, cache, tmp_path, monkeypatch, dead_pid, local):
+        """A record written before the host was renamed carries another pid
+        space id but this machine's host id: its dead owner's partial is
+        adopted when the cache folder is on a local disk, and left alone
+        otherwise."""
+        import platform
+
+        from localm import instances
+        host = instances.host_id()
+        if host is None:
+            pytest.skip("no machine identifier is readable here")
+        with monkeypatch.context() as m:
+            m.setattr(platform, "node", lambda: "renamed-host-before")
+            m.setattr(instances, "_PID_SPACE", None)
+            old_space = instances.pid_space_id()
+        assert old_space != this_pid_space(), "the injected rename took no effect"
+        if not local:
+            monkeypatch.setattr(instances, "path_is_local", lambda p: False)
+        elif not instances.path_is_local(cache):
+            pytest.skip("the test folder is not on a local disk here")
+        inc_path = cache / "file.etag.incomplete"
+        orphan = cache / "file.etag.dddd4444.incomplete"
+        orphan.write_bytes(b"HELLO")
+        _partial_owner_path(orphan).write_text(json.dumps(
+            {"pid": dead_pid[0], "space": old_space, "host": host,
+             "start": dead_pid[1]}), encoding="utf-8")
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b" WORLD" if local else b"FRESH")
+
+        _call(inc_path, dest, expected_size=11 if local else 5)
+
+        if local:
+            assert captured["resume_size"] == 5
+            assert dest.read_bytes() == b"HELLO WORLD"
+            assert not orphan.exists() and not _partial_owner_path(orphan).exists()
+        else:
+            assert captured["resume_size"] == 0
+            assert orphan.read_bytes() == b"HELLO"
+            assert _partial_owner_path(orphan).exists()
+
     def test_the_owner_record_names_this_process_its_pid_space_and_start(
             self, cache):
-        from localm.instances import process_start_identity
+        from localm.instances import host_id, process_start_identity
         from localm.model_manager.pull import _pid_space_id, _write_partial_owner
         p = cache / "file.etag.cccc3333.incomplete"
         p.write_bytes(b"")
         _write_partial_owner(p)
         rec = json.loads(_partial_owner_path(p).read_text(encoding="utf-8"))
         assert rec == {"pid": os.getpid(), "space": _pid_space_id(),
+                       "host": host_id(),
                        "start": process_start_identity(os.getpid())}
 
     def test_partial_without_owner_record_is_neither_adopted_nor_deleted(
@@ -451,6 +494,26 @@ class TestXetResume:
         assert sorted(p.name for p in cache.iterdir()) == []
 
 
+    def test_a_xet_failure_before_the_temp_exists_leaves_no_owner_record(
+            self, cache, tmp_path, monkeypatch):
+        inc_path = cache / "file.etag.incomplete"
+        dest = tmp_path / "dest.gguf"
+        monkeypatch.setattr("huggingface_hub.file_download._check_disk_space", lambda *a: None)
+        monkeypatch.setattr("huggingface_hub.file_download.is_xet_available", lambda: True)
+        seen = {}
+
+        def failing_xet_get(*, incomplete_path, **kw):
+            seen["owner_present"] = _partial_owner_path(Path(incomplete_path)).exists()
+            raise ConnectionError("token refresh failed")
+
+        monkeypatch.setattr("huggingface_hub.file_download.xet_get", failing_xet_get)
+
+        with pytest.raises(ConnectionError):
+            _call(inc_path, dest, expected_size=9, xet_file_data=object())
+
+        assert seen["owner_present"], "the transfer started without an owner record"
+        assert sorted(p.name for p in cache.iterdir()) == []
+
 @pytest.fixture()
 def hf_env(tmp_path, monkeypatch):
     models = tmp_path / "models"
@@ -489,6 +552,20 @@ def _hf_incomplete(models: Path, rel: str, etag: str) -> Path:
     p = get_local_download_paths(models, rel).incomplete_path(etag)
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _spy_progress_total(monkeypatch) -> list:
+    """Record the total each model download's progress is measured against."""
+    from localm.model_manager import pull
+    real = pull._download_progress
+    totals = []
+
+    def spy(parts, total_size, **kw):
+        totals.append(total_size)
+        return real(parts, total_size, **kw)
+
+    monkeypatch.setattr(pull, "_download_progress", spy)
+    return totals
 
 
 class TestGgufPullPreflight:
@@ -562,6 +639,7 @@ class TestGgufPullPreflight:
         monkeypatch.setattr(mm, "_check_disk_space",
                             lambda path, size: checked.append(size) or True)
         monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        totals = _spy_progress_total(monkeypatch)
         _fake_head(monkeypatch, 10, "newetag")
         _fake_download(monkeypatch, b"0" * 10)
 
@@ -569,6 +647,39 @@ class TestGgufPullPreflight:
         assert checked == [20], (
             "the preflight must charge for the model AND the same-repo "
             "projector it is about to auto-attach")
+        assert totals == [10], (
+            "the model's download progress counted the projector's bytes")
+
+    @pytest.mark.parametrize("on_disk, charged", [(10, 10), (7, 20)],
+                             ids=["same-size", "other-size"])
+    def test_a_projector_name_already_in_the_models_folder(
+            self, hf_env, monkeypatch, on_disk, charged):
+        """A file of the projector's name and published size is not charged
+        again; one of another size is a different file, so the projector is
+        downloaded beside it and charged."""
+        import huggingface_hub
+        models, _ = hf_env
+        (models / "mmproj-test-f16.gguf").write_bytes(b"P" * on_disk)
+
+        class _FakeHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
+            def list_repo_files(self, repo_id):
+                return ["test.gguf", "mmproj-test-f16.gguf"]
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", _FakeHfApi)
+        checked = []
+        monkeypatch.setattr(mm, "_check_disk_space",
+                            lambda path, size: checked.append(size) or True)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        totals = _spy_progress_total(monkeypatch)
+        _fake_head(monkeypatch, 10, "newetag")
+        _fake_download(monkeypatch, b"0" * 10)
+
+        assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
+        assert checked == [charged]
+        assert totals == [10]
 
     def test_does_not_charge_a_projector_when_the_repo_has_none(
             self, hf_env, monkeypatch):
