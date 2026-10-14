@@ -2150,7 +2150,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A bug report is sent only after you have seen it.** In Settings > Report a bug, "Send to
   maintainer" used to file the report as a public GitHub issue in one click, without showing it.
   It now saves the report and shows its whole text, and nothing is sent until you press "Send this
-  report". What is sent is that saved text, without only its closing note about editing it;
+  report". What is sent is that saved text, apart from its closing note about editing it;
   Retry and the automatic retry after a rate limit send that same report again.
 - **Privacy mode no longer saves a bug report on its own.** An unexpected error used to write a
   report (with the error, settings subset and recent activity) to the data folder in every mode.
@@ -2161,6 +2161,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and remove credential values from JSON keys such as `"api_key"`, as the in-app report already
   did. The report's settings section now removes bearer tokens and API keys, and scrubs values
   stored as a list or object, not only plain text.
+- **The no-Python bug reporter asks before it sends, and scrubs what it sends.** When
+  `report-issue.sh` has no Python and falls back to curl, it used to send the report when it
+  could not ask (piped or redirected input) and sent your one-line description unchanged. It now
+  sends nothing without an answer typed at a terminal, and removes your home folder, account name,
+  credentials and email addresses from the description first; without `perl` it sends nothing.
+  The PowerShell reporter now also replaces your home folder itself, and an emailed report has its
+  subject and body scrubbed like an uploaded one.
 - **One request can no longer tie up the server with an oversized input.** A scheduled job's cron
   expression is limited to 512 characters (a longer one used to stop every scheduled job from firing
   while reporting the scheduler healthy, and the Jobs page now says when the scheduler is stuck); a

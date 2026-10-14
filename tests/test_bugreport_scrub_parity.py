@@ -148,3 +148,110 @@ def test_powershell_standalone_reporter_matches_in_app(tmp_path):
     assert len(got) == len(want), got
     mismatches = [(t, g, w) for t, g, w in zip(_CORPUS, got, want, strict=True) if g != w]
     assert not mismatches, mismatches
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="the PowerShell fallback reporter only runs on Windows")
+def test_powershell_standalone_reporter_replaces_the_home_folder(tmp_path):
+    pwsh = shutil.which("powershell") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("no PowerShell interpreter on PATH")
+    home = str(Path.home())
+    sep = "\\"
+    lines = [home + sep + "localm" + sep + "x.gguf", repr(home + sep + "localm"),
+             home.replace(sep, "/") + "/models"]
+    driver = tmp_path / "drive_scrub.ps1"
+    driver.write_text(_PS_DRIVER, encoding="utf-8")
+    infile = tmp_path / "in.txt"
+    infile.write_text("\n".join(lines), encoding="utf-8")
+    proc = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(driver), "-Target", str(_PS1_PATH), "-InFile", str(infile)],
+        capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    got = (tmp_path / "in.txt.out").read_text(encoding="utf-8").split("\n")
+    assert got == [br_scrub._scrub_secrets(t) for t in lines]
+    assert all(t.startswith(("~", "'~")) for t in got), got
+
+
+_SH_PATH = _REPO / "report-issue.sh"
+
+
+def _sh_scrub_function() -> str:
+    text = _SH_PATH.read_text(encoding="utf-8")
+    start = text.index("\nscrub() {\n") + 1
+    end = text.index("\n}\n", start) + 3
+    return text[start:end]
+
+
+def _bash_with_perl():
+    bash = shutil.which("bash")
+    if not bash or "system32" in bash.lower() or not shutil.which("perl"):
+        pytest.skip("no bash with perl on PATH")
+    return bash
+
+
+def _run_sh_scrub(tmp_path, lines, home):
+    bash = _bash_with_perl()
+    driver = tmp_path / "drive_sh_scrub.sh"
+    driver.write_text(_sh_scrub_function() + 'scrub < "$1" > "$2"\n',
+                      encoding="utf-8", newline="\n")
+    infile = tmp_path / "sh_in.txt"
+    infile.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    outfile = tmp_path / "sh_out.txt"
+    env = dict(os.environ, HOME=home, RI_EMAIL=ri.MAINTAINER_EMAIL)
+    proc = subprocess.run([bash, driver.as_posix(), infile.as_posix(), outfile.as_posix()],
+                          capture_output=True, text=True, timeout=120, env=env)
+    assert proc.returncode == 0, proc.stderr
+    return outfile.read_text(encoding="utf-8").split("\n")[:-1]
+
+
+def test_shell_standalone_reporter_matches_in_app(tmp_path):
+    got = _run_sh_scrub(tmp_path, _CORPUS, (tmp_path / "nohome").as_posix())
+    want = [br_scrub._scrub_secrets(t) for t in _CORPUS]
+    assert len(got) == len(want), got
+    mismatches = [(t, g, w) for t, g, w in zip(_CORPUS, got, want, strict=True) if g != w]
+    assert not mismatches, mismatches
+
+
+def test_shell_standalone_reporter_replaces_its_home(tmp_path):
+    home = "/home/" + USER
+    got = _run_sh_scrub(tmp_path, [home + "/localm/x.gguf", "at " + home], home)
+    assert got == ["~/localm/x.gguf", "at ~"]
+
+
+def _run_curl_fallback(tmp_path, bash, *, drop_terminal_check):
+    text = _SH_PATH.read_text(encoding="utf-8")
+    fallback_text = text[text.index("# --- No Python at all"):]
+    if drop_terminal_check:
+        assert fallback_text.count("if [ ! -t 0 ]; then") == 1
+        fallback_text = fallback_text.replace("if [ ! -t 0 ]; then", "if false; then")
+    work = tmp_path / ("ungated" if drop_terminal_check else "gated")
+    fake = work / "bin"
+    fake.mkdir(parents=True)
+    (work / "fallback.sh").write_text(fallback_text, encoding="utf-8", newline="\n")
+    sink = work / "curl_called"
+    (fake / "curl").write_text('#!/bin/sh\ntouch "' + sink.as_posix() + '"\necho 201\n',
+                               encoding="utf-8", newline="\n")
+    (fake / "curl").chmod(0o755)
+    env = dict(os.environ, LOCALM_BUGREPORT_URL="http://127.0.0.1:9/report")
+    proc = subprocess.run(
+        [bash, "-c",
+         'p="$(cygpath -u "$1" 2>/dev/null || printf %s "$1")"; '
+         'PATH="$p:$PATH"; cd "$2" && bash fallback.sh',
+         "_", fake.as_posix(), work.as_posix()],
+        input="it broke\ny\n", capture_output=True, text=True, timeout=120, env=env)
+    return proc, sink
+
+
+def test_shell_reporter_sends_nothing_without_a_terminal(tmp_path):
+    bash = _bash_with_perl()
+    control, control_sink = _run_curl_fallback(tmp_path, bash, drop_terminal_check=True)
+    assert control_sink.exists(), (
+        "control: without the terminal check the fake curl must be reached\n"
+        + control.stdout + control.stderr)
+    proc, sink = _run_curl_fallback(tmp_path, bash, drop_terminal_check=False)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "nothing was sent" in out, out
+    assert not sink.exists()

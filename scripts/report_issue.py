@@ -192,6 +192,24 @@ def _email_replacement(m: re.Match) -> str:
         return token
     return lead + "<redacted-email>" + trail
 
+def stdin_is_interactive() -> bool:
+    """True when stdin is a terminal a person can answer at: ``isatty()`` is
+    True and, on Windows, stdin is also a console (``GetConsoleMode``
+    succeeds), which the NUL device is not although it reports ``isatty()``.
+    False when either check fails or cannot run. Never raises."""
+    try:
+        if not (sys.stdin and sys.stdin.isatty()):
+            return False
+        if sys.platform != "win32":
+            return True
+        import ctypes
+        import msvcrt
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        mode = ctypes.c_uint32()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    except Exception:
+        return False
+
 
 def scrub(text: str) -> str:
     """Strip the account name from any path, any obvious credential and every
@@ -421,7 +439,7 @@ def main(argv=None) -> int:
     ap.add_argument("--yes", action="store_true")
     args = ap.parse_args(argv)
 
-    interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    interactive = stdin_is_interactive()
 
     print()
     print("  localm - report a problem")

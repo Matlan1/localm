@@ -33,7 +33,7 @@ def _handle_main_exception(exc_type, exc, tb) -> None:
         sys.__excepthook__(exc_type, exc, tb)
         return
     try:
-        interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+        interactive = _br.stdin_is_interactive()
         _br.report_failure(
             summary=getattr(exc, "summary", None) or "localm hit an unexpected error",
             reason=getattr(exc, "reason", None) or str(exc),
