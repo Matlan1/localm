@@ -549,6 +549,17 @@ IS_APPLE_SILICON=0
 if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "arm64" ]; then
   IS_APPLE_SILICON=1
 fi
+IS_MACOS=0
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then IS_MACOS=1; fi
+# The backends `setup-llama --backend` can fetch on this OS, for the
+# "provision later" hints. See test_provision_later_hint_names_this_platforms_backends.
+if [ "$IS_APPLE_SILICON" = 1 ]; then
+  SL_BACKENDS="<metal|cpu>"
+elif [ "$IS_MACOS" = 1 ]; then
+  SL_BACKENDS="cpu"
+else
+  SL_BACKENDS="<vulkan|cuda|hip|sycl|cpu>"
+fi
 # NOT presented as "Detected acceleration: $GPU" here on purpose: this crude
 # pre-venv guess and the authoritative "Recommended for your hardware: $REC"
 # line further down (sourced from `python -m localm.hwdetect`, once the venv
@@ -862,7 +873,7 @@ case "$REC" in
   *) case "$GPU" in                        # fallback if the probe failed
        cpu)   REC=cpu ;;
        metal) REC=metal ;;   # see test_probe_failed_fallback_metal_gpu_stays_metal
-       *)     REC=vulkan ;;
+       *)     if [ "${IS_MACOS:-0}" = 1 ]; then REC=cpu; else REC=vulkan; fi ;;
      esac ;;
 esac
 # The prompt above promises "n = CPU only", so honour it: hwdetect answers what
@@ -890,17 +901,21 @@ esac
 say ""
 say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
 say "    [1] $REC  (recommended)"
-say "    [2] vulkan   - any GPU, no vendor toolkit$_m2"
-say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)$_m3"
-say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"
-say "    [5] sycl     - Intel GPU (incl. integrated), often faster than Vulkan (needs a system oneAPI install)$_m5"
+# macOS builds exist only for cpu and (Apple Silicon) metal, so [2]-[5] are
+# listed elsewhere only. See test_macos_menu_lists_only_backends_with_a_macos_build.
+if [ "$IS_MACOS" != 1 ]; then
+  say "    [2] vulkan   - any GPU, no vendor toolkit$_m2"
+  say "    [3] cuda     - NVIDIA, peak performance (fetches the CUDA runtime for you)$_m3"
+  say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"
+  say "    [5] sycl     - Intel GPU (incl. integrated), often faster than Vulkan (needs a system oneAPI install)$_m5"
+fi
 say "    [6] cpu      - no GPU$_m6"
 say "    [7] I will build / provide my own (skip the download)"
 # See test_menu_shows_metal_line_only_on_apple_silicon.
-_pick_range="1-7"
+if [ "$IS_MACOS" = 1 ]; then _pick_range="1, 6 or 7"; else _pick_range="1-7"; fi
 if [ "$IS_APPLE_SILICON" = 1 ]; then
   say "    [8] metal    - Apple Silicon, native GPU acceleration$_m8"
-  _pick_range="1-8"
+  if [ "$IS_MACOS" = 1 ]; then _pick_range="1, 6, 7 or 8"; else _pick_range="1-8"; fi
 fi
 say "    (your pick is load-tested; on failure you can retry after fixing the"
 say "     cause, or continue setup and provision a runtime later - never a"
@@ -910,11 +925,21 @@ case "$bpick" in
   2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=sycl ;;
   6) BACKEND=cpu ;;    7) BACKEND=own ;;  8) BACKEND=metal ;; *) BACKEND="$REC" ;;
 esac
+# A number the menu did not list on this machine falls back to the recommendation.
+_listed=1
+if [ "$IS_MACOS" = 1 ]; then
+  case "$BACKEND" in vulkan|cuda|hip|sycl) _listed=0 ;; esac
+fi
+if [ "$BACKEND" = metal ] && [ "$IS_APPLE_SILICON" != 1 ]; then _listed=0; fi
+if [ "$_listed" = 0 ]; then
+  say "  [$bpick] is not offered on this machine; using $REC."
+  BACKEND="$REC"
+fi
 if [ "$LOCALM_BIN_OK" != 1 ]; then
   # .venv/bin/localm never got installed (warned above) - it is what setup-llama
   # runs through, so calling it here would just fail again, less clearly.
   say "  Skipped - .venv/bin/localm is missing (see the warning above)."
-  say "  Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
+  say "  Provision later:  .venv/bin/localm setup-llama --backend $SL_BACKENDS"
 elif [ "$BACKEND" = own ]; then
   buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
   if [ -n "$buildpath" ]; then
@@ -922,7 +947,7 @@ elif [ "$BACKEND" = own ]; then
       ".venv/bin/localm setup-llama --from <dir>" \
       "Provisioning the native llama.cpp runtime with --from failed during setup."
   else
-    say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
+    say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend $SL_BACKENDS"
   fi
 else
   .venv/bin/localm setup-llama --backend "$BACKEND" $SL_FORCE || handle_provision_failure \
@@ -981,7 +1006,10 @@ step_begin launcher
 # back to the venv python. `localm gui` always works; this never blocks install.
 say ""
 LAUNCHER_FILE=""
-if [ "$LOCALM_BIN_OK" = 1 ]; then
+if [ "$IS_MACOS" = 1 ]; then
+  say "  macOS: no app launcher or menu entry is created; start LocaLM with"
+  say "  ./localm-launcher.sh or ./localm.sh gui."
+elif [ "$LOCALM_BIN_OK" = 1 ]; then
   say "  Building the LocaLM app launcher ..."
   .venv/bin/localm make-launcher --force \
     || say "  [!] Could not build the LocaLM launcher - 'localm gui' still works."
@@ -995,8 +1023,12 @@ step_done launcher
 
 # ---- application menu entry --------------------------------------------------
 SHORTCUT=""
-mk="$(ask "  Create an application menu entry? [Y/n]: " Y)"
+mk=skip
+if [ "$IS_MACOS" != 1 ]; then
+  mk="$(ask "  Create an application menu entry? [Y/n]: " Y)"
+fi
 case "$mk" in
+  skip) ;;
   [Nn]*) say "  No desktop entry created." ;;
   *)
     apps="$HOME/.local/share/applications"
@@ -1062,7 +1094,10 @@ say ""
 # `localm plugin setup` prints its own header (it states chat is always on), so
 # this is just a section divider - do not repeat that line here.
 say "  Optional features (plugins):"
-if [ "$LOCALM_BIN_OK" = 1 ]; then
+if [ "$LOCALM_BIN_OK" = 1 ] && [ "$YES" = 1 ]; then
+  # --yes takes the picker's own default, which is to install none.
+  say "  Skipped (--yes) - choose later with:  .venv/bin/localm plugin setup"
+elif [ "$LOCALM_BIN_OK" = 1 ]; then
   .venv/bin/localm plugin setup \
     || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
 else
@@ -1096,7 +1131,7 @@ if [ "$LOCALM_BIN_OK" = 1 ]; then
     say ""
     say "  [!] No model can load yet - the native llama.cpp runtime did not finish"
     say "      provisioning. Finish it any time with:"
-    say "        .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
+    say "        .venv/bin/localm setup-llama --backend $SL_BACKENDS"
   fi
 else
   say "  Done, with one open issue: .venv/bin/localm never got installed (see the"

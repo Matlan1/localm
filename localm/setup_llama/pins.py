@@ -238,17 +238,20 @@ _PINNED_FALLBACK_SHA256 = {
 # Per-backend asset matcher: substrings that must appear in the release asset
 # name for (platform, backend). Substring matching (not exact names) keeps this
 # robust to upstream version suffixes drifting (e.g. cuda-12.4, rocm-7.2).
+# "{arch}" is replaced by this process's architecture (hwdetect.machine_arch),
+# and an asset whose name carries a different architecture never matches. Which
+# architectures each backend has a build for is hwdetect.PREBUILT_ARCHES.
 _ASSET_MATCH = {
     "win32": {
-        "cpu":    ["bin-win-cpu-x64"],
-        "vulkan": ["bin-win-vulkan-x64"],
+        "cpu":    ["bin-win-cpu-{arch}"],
+        "vulkan": ["bin-win-vulkan-{arch}"],
         # Keyed by CUDA LINE (NvidiaInfo.cuda_line), not a flat preference
         # list: a Blackwell-class GPU must never fall through to a 12.x asset
         # even as a "closest match" fallback, since that build's fatbin has no
         # kernels for it (see the _CUDA_LINE block for the full rationale).
         "cuda": {
-            "cuda-12": ["bin-win-cuda-12.4-x64", "bin-win-cuda-12"],
-            "cuda-13": ["bin-win-cuda-13.4-x64", "bin-win-cuda-13"],
+            "cuda-12": ["bin-win-cuda-12.4-{arch}", "bin-win-cuda-12"],
+            "cuda-13": ["bin-win-cuda-13.4-{arch}", "bin-win-cuda-13"],
         },
         "sycl":   ["bin-win-sycl-x64"],
         # Upstream renamed the Windows ROCm/HIP asset at b10356:
@@ -263,8 +266,8 @@ _ASSET_MATCH = {
         "hip":    ["bin-win-rocm-7.14-x64", "bin-win-rocm", "bin-win-hip-radeon-x64"],
     },
     "linux": {
-        "cpu":    ["bin-ubuntu-x64"],
-        "vulkan": ["bin-ubuntu-vulkan-x64"],
+        "cpu":    ["bin-ubuntu-{arch}"],
+        "vulkan": ["bin-ubuntu-vulkan-{arch}"],
         "cuda":   ["bin-ubuntu-cuda"],
         "sycl":   ["bin-ubuntu-sycl-fp16-x64", "bin-ubuntu-sycl-fp16", "bin-ubuntu-sycl"],
         # Same versioned-name drift as the Windows entry above: 7.2 at the old
@@ -272,7 +275,7 @@ _ASSET_MATCH = {
         "hip":    ["bin-ubuntu-rocm-7.14-x64", "bin-ubuntu-rocm-7.2-x64", "bin-ubuntu-rocm"],
     },
     "darwin": {
-        "cpu":    ["bin-macos-arm64", "bin-macos-x64"],
+        "cpu":    ["bin-macos-{arch}"],
         "metal":  ["bin-macos-arm64"],
     },
 }

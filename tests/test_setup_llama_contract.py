@@ -195,6 +195,7 @@ class World:
         self.vendors: list = []
         self.gpu_names = ""
         self.recommended = "vulkan"
+        self.arch = "x64"
         self.cpu_scores: dict = {}
         monkeypatch.setattr(sl, "verified_urlopen", self._urlopen)
         monkeypatch.setattr(subprocess, "run", self._run)
@@ -203,6 +204,7 @@ class World:
             vendors=list(self.vendors), gpu_names=self.gpu_names))
         monkeypatch.setattr(hwdetect, "recommended_install_backend",
                             lambda det=None: self.recommended)
+        monkeypatch.setattr(hwdetect, "machine_arch", lambda: self.arch)
         self.platform("win32")
 
     # -- environment ------------------------------------------------------- #

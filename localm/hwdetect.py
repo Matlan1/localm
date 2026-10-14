@@ -40,13 +40,91 @@ Detection is conservative: a missing tool or an unparseable name means
 
 from __future__ import annotations
 
+import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
 from dataclasses import dataclass, field
 from pathlib import Path
 
 VENDORS = ("nvidia", "amd", "intel")
+
+# CPU architectures, as machine_arch() names them, that setup-llama can fetch a
+# prebuilt llama.cpp build of each backend for, per platform key ("win32",
+# "linux", "darwin"). A backend missing for an architecture has no build there:
+# setup-llama refuses it and recommended_install_backend() never picks it.
+PREBUILT_ARCHES: dict[str, dict[str, tuple[str, ...]]] = {
+    "win32": {
+        "cpu": ("x64", "arm64"),
+        "vulkan": ("x64", "arm64"),
+        "cuda": ("x64", "arm64"),
+        "sycl": ("x64",),
+        "hip": ("x64",),
+        "amd-rocm": ("x64",),
+    },
+    "linux": {
+        "cpu": ("x64", "arm64", "s390x"),
+        "vulkan": ("x64", "arm64"),
+        "cuda": ("x64",),
+        "sycl": ("x64",),
+        "hip": ("x64",),
+    },
+    "darwin": {
+        "cpu": ("arm64", "x64"),
+        "metal": ("arm64",),
+    },
+}
+
+
+def platform_key() -> str:
+    """``"win32"``, ``"darwin"``, or ``"linux"`` for every other platform."""
+    if sys.platform == "win32":
+        return "win32"
+    if sys.platform == "darwin":
+        return "darwin"
+    return "linux"
+
+
+def machine_arch() -> str:
+    """The CPU architecture of THIS Python process, named the way llama.cpp
+    release asset names spell it: ``"x64"``, ``"arm64"``, ``"s390x"``, ``"x86"``
+    or ``"arm"`` for a 32-bit interpreter, else the lowercased machine name.
+
+    On Windows this reads the interpreter's own build
+    (``sysconfig.get_platform()``): an x64 Python emulated on an ARM64 machine
+    is ``"x64"``. Elsewhere it reads
+    ``platform.machine()``, which reports the emulated architecture under
+    Rosetta 2 and the kernel's architecture on Linux, corrected to the 32-bit
+    name when the interpreter itself is 32-bit."""
+    if sys.platform == "win32":
+        plat = sysconfig.get_platform().lower()
+        machine = {"win-amd64": "amd64", "win-arm64": "arm64", "win32": "x86"}.get(
+            plat, plat.removeprefix("win-"))
+    else:
+        machine = platform.machine().lower()
+    arch = {"x86_64": "x64", "amd64": "x64", "x64": "x64",
+            "aarch64": "arm64", "arm64": "arm64",
+            "i386": "x86", "i686": "x86"}.get(machine, machine)
+    if sys.maxsize <= 2**32:
+        arch = {"x64": "x86", "arm64": "arm"}.get(arch, arch)
+    return arch
+
+
+def has_prebuilt(backend: str, plat: str | None = None, arch: str | None = None) -> bool:
+    """Whether setup-llama can fetch a prebuilt *backend* build for *plat* and
+    *arch* (default: this machine, per platform_key() and machine_arch())."""
+    plat = plat if plat is not None else platform_key()
+    arch = arch if arch is not None else machine_arch()
+    return arch in PREBUILT_ARCHES.get(plat, {}).get(backend, ())
+
+
+def prebuilt_backends(plat: str | None = None, arch: str | None = None) -> list[str]:
+    """Every backend has_prebuilt() accepts for *plat* and *arch*, in
+    PREBUILT_ARCHES order."""
+    plat = plat if plat is not None else platform_key()
+    arch = arch if arch is not None else machine_arch()
+    return [b for b, arches in PREBUILT_ARCHES.get(plat, {}).items() if arch in arches]
 
 
 @dataclass
@@ -285,8 +363,21 @@ def recommended_install_backend(det: Detection | None = None) -> str:
         build needs a separate system oneAPI install, so it stays an explicit
         opt-in menu pick)
     The self-contained ROCm bundle is gfx103X + Windows only; self-contained CUDA
-    is both-OS, so only the AMD gfx103X case is narrowed to Windows."""
+    is both-OS, so only the AMD gfx103X case is narrowed to Windows.
+
+    A pick with no prebuilt build for this machine's CPU architecture (see
+    ``has_prebuilt``) becomes vulkan when that has one, else cpu: an ARM64 Linux
+    NVIDIA box gets vulkan, an Intel Mac stays on cpu."""
     d = det or detect()
+    choice = _hardware_install_backend(d)
+    if has_prebuilt(choice):
+        return choice
+    return "vulkan" if has_prebuilt("vulkan") else "cpu"
+
+
+def _hardware_install_backend(d: Detection) -> str:
+    """recommended_install_backend()'s pick for *d* before the CPU-architecture
+    check."""
     if "apple" in d.vendors:
         return "metal"
     if not d.has_gpu:

@@ -107,7 +107,7 @@ from localm.setup_llama.library_files import (
     _LICENSE_NAME_PREFIXES, _copy_license_files, _safe_is_file, _copy_binaries,
 )
 from localm.setup_llama.runtime_dir import (
-    _platform_key, _lib_name, _BACKEND_MARKER, _record_provisioned_backend,
+    _platform_key, _machine_arch, _lib_name, _BACKEND_MARKER, _record_provisioned_backend,
     _read_marker, _provisioned_backend, _provisioned_build, installed_backend,
     installed_build, installed_runtime_identity, _repo_runtime_lib, _runtime_pkg_dir,
     _install_runtime_wheel, _PRESERVED_TARGET_FILES, RuntimeInUseError, _clearable_files, _files_in_use,
@@ -184,7 +184,7 @@ __all__ = [
     "_MISSING_SO_RE", "_name_missing_shared_lib", "_native_loads_ok",
     "nvidia_preflight", "_nvidia_smi", "NvidiaInfo", "_pick_asset", "_PIN_CONFIRMATION",
     "_pin_note_for_backend", "_PINNED_FALLBACK_SHA256", "_PINNED_TAG", "pinned_tag",
-    "_platform_key", "_PRESERVED_TARGET_FILES", "previous_tag", "_PROBE_ABI_MISMATCH",
+    "_platform_key", "_machine_arch", "_PRESERVED_TARGET_FILES", "previous_tag", "_PROBE_ABI_MISMATCH",
     "_PROBE_NO_BACKENDS", "_PROBE_NO_GPU_DEVICE", "_GPU_LOAD_PROBE_CODE",
     "_native_gpu_loads_ok", "_provision_backend", "_provision_lock_holder_pid",
     "_PROVISION_LOCK_OWNER", "_provision_lock_path", "_provision_with_fallback",
