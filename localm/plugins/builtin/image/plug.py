@@ -58,7 +58,7 @@ from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
-from localm.vram import media_handover_job
+from localm.vram import media_handover_job, restore_chat_after_media
 from . import backend as _backend
 
 _router = APIRouter()
@@ -224,84 +224,78 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                       f"{shortfall['free'] / 1024 ** 3:.1f} GB free, but this job "
                       f"needs {shortfall['needed'] / 1024 ** 3:.1f} GB on a single "
                       "card - unloading the chat model first."})
-        gen_swap = False
-        if swap:
-            # Unload here (authenticated + logged) so the chat model is actually
-            # gone before FLUX loads; fall back to the backend's own unload only
-            # if this one could not reach the server.
-            if not unload_chat_for_media(job, self_url, "image", instance_token):
-                gen_swap = True
-        else:
-            job.push({"type": "line", "text":
-                      "Both models fit in VRAM - keeping the chat model loaded "
-                      "(no swap)."})
-        note_other_vram_holders(job, s, "image")
-        if s.get("backend") == "comfy":
-            job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
-        is_privacy = effective_mode("server") == SessionMode.PRIVACY
-        # privacy mode forces deletion of ComfyUI's own output copy: no traces
-        # left anywhere, regardless of the configured delete_outputs preference.
-        delete_outputs = bool(s.get("delete_outputs")) or is_privacy
-        size_kwargs = ({"width": width, "height": height}
-                       if width is not None and height is not None else {})
+        with restore_chat_after_media(job, self_url, s, _backend, "image", instance_token,
+                                      swapped=swap):
+            gen_swap = False
+            if swap:
+                # Unload here (authenticated + logged) so the chat model is actually
+                # gone before FLUX loads; fall back to the backend's own unload only
+                # if this one could not reach the server.
+                if not unload_chat_for_media(job, self_url, "image", instance_token):
+                    gen_swap = True
+            else:
+                job.push({"type": "line", "text":
+                          "Both models fit in VRAM - keeping the chat model loaded "
+                          "(no swap)."})
+            note_other_vram_holders(job, s, "image")
+            if s.get("backend") == "comfy":
+                job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
+            is_privacy = effective_mode("server") == SessionMode.PRIVACY
+            # privacy mode forces deletion of ComfyUI's own output copy: no traces
+            # left anywhere, regardless of the configured delete_outputs preference.
+            delete_outputs = bool(s.get("delete_outputs")) or is_privacy
+            size_kwargs = ({"width": width, "height": height}
+                           if width is not None and height is not None else {})
 
-        def _on_saved(path):
-            saved_names.append(path.name)
-            if in_gallery:
-                gallery.push_stamp_warning(
-                    job, gallery.stamp_owner("image", path.name, owner))
-            if len(saved_names) == 1:
-                job.result = path.name
-            job.push({"type": "image", "name": path.name})
-        native_kwargs = ({**{k: v for k, v in extras.items() if v is not None},
-                          "on_saved": _on_saved,
-                          "on_queue_state": lambda state: job.progress(phase=state)}
-                         if s.get("backend") == "native" else {})
-        ok, message = _backend.generate(
-            s, req.prompt, out_path,
-            self_url=self_url,
-            instance_token=instance_token,
-            # privacy mode: no sidecar (the image's own metadata is stripped
-            # in every mode)
-            write_sidecar=not is_privacy,
-            guidance=req.guidance,
-            cfg=req.cfg,
-            negative_prompt=req.negative_prompt,
-            seed=req.seed,
-            input_image=input_image,
-            denoise=req.denoise,
-            model_overrides=req.model_overrides,
-            lora_name=lora_name,
-            lora_strength_model=req.lora_strength_model,
-            lora_strength_clip=req.lora_strength_clip,
-            swap=gen_swap,
-            delete_outputs=delete_outputs,
-            cancel_check=lambda: job.cancel_requested,
-            placement=placement,
-            on_progress=lambda t: job.push({"type": "line", "text": t}),
-            **size_kwargs,
-            **({"loras": native_loras} if native_loras else {}),
-            **native_kwargs,
-            **({"steps": req.steps, "clip_skip": req.clip_skip,
-                "on_preview": lambda p: job.push(frame_event(p))}
-               if s.get("backend") == "native" else {}),
-        )
-        job.push({"type": "line", "outcome": True, "text": message})
-        if ok and not saved_names:
-            job.result = out_path.name
-            if in_gallery:
-                gallery.push_stamp_warning(
-                    job, gallery.stamp_owner("image", out_path.name, owner))
-        # Mark the outcome BEFORE the VRAM handover below, which is best-effort
-        # cleanup that can itself raise (e.g. a non-comfy backend's free_vram())
-        # and must never turn a successful generation into a reported failure.
-        job.mark_outcome("done" if ok else "failed")
-        # Restore VRAM on EVERY exit path once the chat model has been unloaded -
-        # success, failure, OR cancel. reload_chat_after_media frees the
-        # backend's VRAM first, then reloads the chat model.
-        if swap:
-            from localm.vram import reload_chat_after_media
-            reload_chat_after_media(job, self_url, s, _backend, "image", instance_token)
+            def _on_saved(path):
+                saved_names.append(path.name)
+                if in_gallery:
+                    gallery.push_stamp_warning(
+                        job, gallery.stamp_owner("image", path.name, owner))
+                if len(saved_names) == 1:
+                    job.result = path.name
+                job.push({"type": "image", "name": path.name})
+            native_kwargs = ({**{k: v for k, v in extras.items() if v is not None},
+                              "on_saved": _on_saved,
+                              "on_queue_state": lambda state: job.progress(phase=state)}
+                             if s.get("backend") == "native" else {})
+            ok, message = _backend.generate(
+                s, req.prompt, out_path,
+                self_url=self_url,
+                instance_token=instance_token,
+                # privacy mode: no sidecar (the image's own metadata is stripped
+                # in every mode)
+                write_sidecar=not is_privacy,
+                guidance=req.guidance,
+                cfg=req.cfg,
+                negative_prompt=req.negative_prompt,
+                seed=req.seed,
+                input_image=input_image,
+                denoise=req.denoise,
+                model_overrides=req.model_overrides,
+                lora_name=lora_name,
+                lora_strength_model=req.lora_strength_model,
+                lora_strength_clip=req.lora_strength_clip,
+                swap=gen_swap,
+                delete_outputs=delete_outputs,
+                cancel_check=lambda: job.cancel_requested,
+                placement=placement,
+                on_progress=lambda t: job.push({"type": "line", "text": t}),
+                **size_kwargs,
+                **({"loras": native_loras} if native_loras else {}),
+                **native_kwargs,
+                **({"steps": req.steps, "clip_skip": req.clip_skip,
+                    "on_preview": lambda p: job.push(frame_event(p))}
+                   if s.get("backend") == "native" else {}),
+            )
+            job.push({"type": "line", "outcome": True, "text": message})
+            if ok and not saved_names:
+                job.result = out_path.name
+                if in_gallery:
+                    gallery.push_stamp_warning(
+                        job, gallery.stamp_owner("image", out_path.name, owner))
+            # Recorded before the chat model reload that runs on leaving the block.
+            job.mark_outcome("done" if ok else "failed")
         return ok
     return media_handover_job(_generate)
 
@@ -751,24 +745,23 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
                                  unload_chat_for_media)
         release_other_native_media(job, s, "image")
         swap = decide_media_swap(s) or bool(media_single_device_shortfall(s))
-        if swap and not unload_chat_for_media(job, self_url, "image", instance_token):
-            say("Could not unload the chat model - the upscaler may run low on VRAM.")
-        note_other_vram_holders(job, s, "image")
-        is_privacy = effective_mode("server") == SessionMode.PRIVACY
-        ok, message = native.upscale(
-            s, source, upscaler, out_path, extra_meta=extra_meta,
-            write_sidecar=not is_privacy, cancel_check=lambda: job.cancel_requested,
-            on_progress=say,
-            on_saved=lambda p: gallery.push_stamp_warning(
-                job, gallery.stamp_owner("image", p.name, owner)),
-            on_queue_state=lambda state: job.progress(phase=state))
-        job.push({"type": "line", "outcome": True, "text": message})
-        if ok:
-            job.result = out_path.name
-        job.mark_outcome("done" if ok else "failed")
-        if swap:
-            from localm.vram import reload_chat_after_media
-            reload_chat_after_media(job, self_url, s, _backend, "image", instance_token)
+        with restore_chat_after_media(job, self_url, s, _backend, "image", instance_token,
+                                      swapped=swap):
+            if swap and not unload_chat_for_media(job, self_url, "image", instance_token):
+                say("Could not unload the chat model - the upscaler may run low on VRAM.")
+            note_other_vram_holders(job, s, "image")
+            is_privacy = effective_mode("server") == SessionMode.PRIVACY
+            ok, message = native.upscale(
+                s, source, upscaler, out_path, extra_meta=extra_meta,
+                write_sidecar=not is_privacy, cancel_check=lambda: job.cancel_requested,
+                on_progress=say,
+                on_saved=lambda p: gallery.push_stamp_warning(
+                    job, gallery.stamp_owner("image", p.name, owner)),
+                on_queue_state=lambda state: job.progress(phase=state))
+            job.push({"type": "line", "outcome": True, "text": message})
+            if ok:
+                job.result = out_path.name
+            job.mark_outcome("done" if ok else "failed")
         return ok
     return media_handover_job(_upscale)
 

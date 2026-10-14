@@ -43,6 +43,21 @@ class TestValidateUpdate:
         with pytest.raises(ValueError, match="not a boolean"):
             ss.validate_update({"n_ctx": True})
 
+    @pytest.mark.parametrize("key", ["max_tokens", "n_ctx", "main_gpu_index",
+                                     "spec_draft_tokens"])
+    @pytest.mark.parametrize("value", [1.5, "1.5", 2048.25])
+    def test_integer_field_refuses_a_fractional_number(self, key, value):
+        with pytest.raises(ValueError, match="expected an integer"):
+            ss.validate_update({key: value})
+
+    def test_integer_field_accepts_a_whole_float(self):
+        result = ss.validate_update({"max_tokens": 2048.0})
+        assert result == {"max_tokens": 2048}
+        assert isinstance(result["max_tokens"], int)
+
+    def test_float_field_still_accepts_a_fraction(self):
+        assert ss.validate_update({"temperature": 0.5}) == {"temperature": 0.5}
+
     def test_gpu_layers_out_of_range(self):
         # n_gpu_layers has a ceiling, so an absurd value never reaches the native
         # layer.
@@ -600,6 +615,13 @@ class TestPatchConfig:
         r = client.patch("/v1/config", json={"n_gpu_layers": "20"})
         assert r.status_code == 200
         assert client.get("/v1/config").json()["n_gpu_layers"] == 20
+
+    def test_fractional_number_for_an_integer_field_400(self, client):
+        before = client.get("/v1/config").json()["max_tokens"]
+        r = client.patch("/v1/config", json={"max_tokens": 1.5})
+        assert r.status_code == 400
+        assert "expected an integer" in r.text
+        assert client.get("/v1/config").json()["max_tokens"] == before
 
     def test_gpu_layers_out_of_range_400(self, client):
         r = client.patch("/v1/config", json={"n_gpu_layers": 1111})

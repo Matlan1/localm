@@ -180,8 +180,8 @@ _KERNEL_ROUTES = {
     ("api", "POST", "/v1/comfy/stop"): ("scope:config:write",),
     ("api", "POST", "/v1/comfy/restart"): ("scope:config:write",),
     # routes/keys.py
-    ("api", "GET", "/v1/keys"): ("scope:keys:admin", "caller_scopes"),
-    ("api", "POST", "/v1/keys"): ("scope:keys:admin", "caller_scopes"),
+    ("api", "GET", "/v1/keys"): ("scope:keys:admin",),
+    ("api", "POST", "/v1/keys"): ("scope:keys:admin",),
     ("api", "DELETE", "/v1/keys/{key_id}"): ("scope:keys:admin",),
     # routes/gpu.py
     ("api", "POST", "/v1/instances/cooperate-unload"): (),

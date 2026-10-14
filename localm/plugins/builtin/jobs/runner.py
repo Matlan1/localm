@@ -695,7 +695,7 @@ def _cwd_trusted(job: Job) -> bool:
                                    _legacy_owner_identity(owner_key)):
         return True
     held = scopes_for_key_hash(job.owner)
-    return held is not None and (S.ADMIN in held or S.CODER_FULL in held)
+    return held is not None and S.grants(held, S.CODER_FULL)
 
 
 def _remember_owner_key_job(job: Job) -> None:

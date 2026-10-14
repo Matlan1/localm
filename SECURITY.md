@@ -343,7 +343,12 @@ this section states the security properties and, more importantly, their edges.
   address rather than the name. It classifies by ADDRESS TYPE, so a service
   reachable on a globally-routable address is not "internal" to this guard.
   Setting `net_allow_private` true removes both the pre-flight check and the
-  pin-time re-check, not just the former.
+  pin-time re-check, not just the former, for every request. The one narrower
+  exception is the search backend: when the configured `net_search_url` names
+  a local host (an IP address, `localhost`, a dotless name or a local-network
+  suffix), the SearXNG search reaches a loopback or private address on exactly
+  that origin (scheme, host and port), never a link-local or cloud-metadata
+  one, and no other request gets it.
 - **DNS-rebinding pin.** A permitted request is pinned to the address that was
   validated, so a name cannot resolve to something else between the check and
   the connection. The pinned session also disables environment trust, so a

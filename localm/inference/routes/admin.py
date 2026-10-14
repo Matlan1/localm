@@ -317,6 +317,11 @@ def register(app: FastAPI, ctx) -> None:
         except LocalmError as e:
             raise HTTPException(502, format_localm_error(e)) from e
         if not info.get("newer"):
+            if info.get("comparable", True) is False:
+                return {"applied": False,
+                        "reason": "could not tell whether the latest release is newer "
+                                  "(unrecognized version format)",
+                        "current": info.get("current"), "latest": info.get("latest")}
             return {"applied": False, "reason": "already up to date",
                     "current": info.get("current")}
         asset = info.get("asset") or {}
@@ -367,7 +372,7 @@ def register(app: FastAPI, ctx) -> None:
     #  Update rollback: restore the previous build (owner-only)
     # -----------------------------------------------------------------------
     # Both routes are gated on the same owner check as the admin_only settings in
-    # routes/config.py: open mode (caller_scopes None) is the trusted local owner
+    # routes/config.py: open mode is the trusted local owner
     # and passes; a key must hold scopes.ADMIN. Neither route runs a signature or
     # an anti-rollback check.
 
@@ -409,8 +414,7 @@ def register(app: FastAPI, ctx) -> None:
         the ``backup`` path and error texts) is never path-scrubbed."""
         from localm import updater
         from localm.bugreport import LocalmError
-        held = _hs.caller_scopes(request)
-        if held is not None and scopes.ADMIN not in held:
+        if not _hs.caller_is_operator(request):
             raise HTTPException(
                 403, "Rolling the install back to the previous build requires an "
                 "owner (admin) key: it replaces the running code with an earlier "

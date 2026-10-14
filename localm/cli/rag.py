@@ -340,8 +340,8 @@ def rag_resync(collection, embed, url, prune_missing):
             console.print(f"  [yellow]missing:[/yellow] {escape(p)}")
     if result["pruned"]:
         console.print(f"[yellow]pruned {len(result['pruned'])} entr"
-                      f"{'y' if len(result['pruned']) == 1 else 'ies'} whose file "
-                      f"is gone.[/yellow]")
+                      f"{'y' if len(result['pruned']) == 1 else 'ies'} (file gone "
+                      f"or under a credential folder).[/yellow]")
     for r in result["unavailable_roots"] + result["blocked_roots"]:
         console.print(f"[yellow]skipped folder {escape(r['root'])}: {escape(r['reason'])} - "
                       f"nothing under it was indexed, flagged, or removed."

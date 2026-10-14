@@ -644,12 +644,12 @@ class SearXNGProvider:
         self.base_url = _searxng_base(base_url)
 
     def _get(self, url: str, accept: str, finish_by: float):
-        netpolicy.check_url(url)
+        netpolicy.check_url(url, search_backend=True)
         _notify(url)
         timeout = min(_SEARCH_TIMEOUT, max(finish_by - _clock(), 1.0))
         resp = netpolicy.pinned_request(
             "GET", url, max_bytes=_MAX_RESPONSE_BYTES, timeout=timeout,
-            allow_redirects=False,
+            allow_redirects=False, search_backend=True,
             headers={"User-Agent": netpolicy._USER_AGENT, "Accept": accept})
         _refuse_redirect(resp, "The SearXNG search backend")
         resp.raise_for_status()

@@ -217,10 +217,9 @@ def _embedder_download_status(request: Request | None) -> dict:
                     rag_mounted = True
                 except NoMatchFound:
                     rag_mounted = False
-            held = _hs.caller_scopes(request) if request is not None else None
-            if (rag_mounted
-                    and (held is None or scopes.grants(held, "rag"))
-                    and (held is None or scopes.grants(held, scopes.CONFIG_WRITE))):
+            if (rag_mounted and request is not None
+                    and _hs.caller_grants(request, "rag")
+                    and _hs.caller_grants(request, scopes.CONFIG_WRITE)):
                 return {"can_download_embedder": True, "embedder_model": model}
     except Exception as e:
         from localm.debuglog import logger

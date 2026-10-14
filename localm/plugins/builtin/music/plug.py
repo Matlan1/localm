@@ -39,7 +39,7 @@ from localm.media.native_models import apply_choice, check_request
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.selfclient import resolve_self_url
-from localm.vram import media_handover_job
+from localm.vram import media_handover_job, restore_chat_after_media
 from . import backend as _backend
 
 _router = APIRouter()
@@ -182,76 +182,65 @@ async def music(req: MusicRequest, request: Request):
                       f"{shortfall['free'] / 1024 ** 3:.1f} GB free, but this job "
                       f"needs {shortfall['needed'] / 1024 ** 3:.1f} GB on a single "
                       "card - unloading the chat model first."})
-        gen_swap = False
-        if swap:
-            if not unload_chat_for_media(job, self_url, "music", instance_token):
-                gen_swap = True
-        else:
-            job.push({"type": "line", "text":
-                      "Both models fit in VRAM - keeping the chat model loaded "
-                      "(no swap)."})
-        note_other_vram_holders(job, s, "music")
-        if s.get("backend") == "native":
-            job.push({"type": "line", "text":
-                      f"Generating a {req.duration_seconds:.0f}s track with the native "
-                      "ACE-Step runtime..."})
-        else:
-            job.push({"type": "line", "text":
-                      f"Submitting ACE-Step workflow to the music backend "
-                      f"({req.duration_seconds:.0f}s track)..."})
-        kwargs = {}
-        if req.seed is not None:
-            kwargs["seed"] = req.seed
-        if req.steps is not None:
-            kwargs["steps"] = req.steps
-        if req.cfg is not None:
-            kwargs["cfg"] = req.cfg
-        if req.lyrics_strength is not None:
-            kwargs["lyrics_strength"] = req.lyrics_strength
-        if req.sampler_name is not None:
-            kwargs["sampler_name"] = req.sampler_name
-        if req.scheduler is not None:
-            kwargs["scheduler"] = req.scheduler
-        if req.shift is not None:
-            kwargs["shift"] = req.shift
-        if req.model_overrides:
-            kwargs["model_overrides"] = req.model_overrides
-        ok, message = _backend.generate(
-            s, req.tags, track_path,
-            self_url=self_url,
-            instance_token=instance_token,
-            write_sidecar=not is_privacy,
-            # Delete ComfyUI's own copy when the user opted in OR privacy mode
-            # forces no traces.
-            delete_outputs=bool(s.get("delete_outputs")) or is_privacy,
-            on_progress=lambda t: job.push({"type": "line", "text": t}),
-            lyrics=req.lyrics,
-            duration_seconds=req.duration_seconds,
-            swap=gen_swap,
-            cancel_check=lambda: job.cancel_requested,
-            placement=placement,
-            **kwargs,
-        )
-        job.push({"type": "line", "text": message})
-        if ok:
-            job.result = track_path.name
-            gallery.push_stamp_warning(
-                job, gallery.stamp_owner("music", track_path.name, owner))
-        # The real deliverable is decided right here - mark it before the VRAM
-        # handover below, which is best-effort cleanup that can itself raise
-        # (e.g. a non-comfy backend's free_vram()) and must never be able to
-        # turn a genuinely successful generation into a reported failure - see
-        # jobs.py start_fn's mark_outcome contract.
-        job.mark_outcome("done" if ok else "failed")
-        # Restore VRAM on EVERY exit path once we have unloaded the chat model -
-        # success, failure, OR cancel. Mirrors image/plug.py. Reloading only on
-        # success would leave a failed or cancelled generation with the chat model
-        # unloaded AND the music backend resident in VRAM.
-        # reload_chat_after_media frees the backend's VRAM first, then reloads
-        # the chat model.
-        if swap:
-            from localm.vram import reload_chat_after_media
-            reload_chat_after_media(job, self_url, s, _backend, "music", instance_token)
+        with restore_chat_after_media(job, self_url, s, _backend, "music", instance_token,
+                                      swapped=swap):
+            gen_swap = False
+            if swap:
+                if not unload_chat_for_media(job, self_url, "music", instance_token):
+                    gen_swap = True
+            else:
+                job.push({"type": "line", "text":
+                          "Both models fit in VRAM - keeping the chat model loaded "
+                          "(no swap)."})
+            note_other_vram_holders(job, s, "music")
+            if s.get("backend") == "native":
+                job.push({"type": "line", "text":
+                          f"Generating a {req.duration_seconds:.0f}s track with the native "
+                          "ACE-Step runtime..."})
+            else:
+                job.push({"type": "line", "text":
+                          f"Submitting ACE-Step workflow to the music backend "
+                          f"({req.duration_seconds:.0f}s track)..."})
+            kwargs = {}
+            if req.seed is not None:
+                kwargs["seed"] = req.seed
+            if req.steps is not None:
+                kwargs["steps"] = req.steps
+            if req.cfg is not None:
+                kwargs["cfg"] = req.cfg
+            if req.lyrics_strength is not None:
+                kwargs["lyrics_strength"] = req.lyrics_strength
+            if req.sampler_name is not None:
+                kwargs["sampler_name"] = req.sampler_name
+            if req.scheduler is not None:
+                kwargs["scheduler"] = req.scheduler
+            if req.shift is not None:
+                kwargs["shift"] = req.shift
+            if req.model_overrides:
+                kwargs["model_overrides"] = req.model_overrides
+            ok, message = _backend.generate(
+                s, req.tags, track_path,
+                self_url=self_url,
+                instance_token=instance_token,
+                write_sidecar=not is_privacy,
+                # Delete ComfyUI's own copy when the user opted in OR privacy mode
+                # forces no traces.
+                delete_outputs=bool(s.get("delete_outputs")) or is_privacy,
+                on_progress=lambda t: job.push({"type": "line", "text": t}),
+                lyrics=req.lyrics,
+                duration_seconds=req.duration_seconds,
+                swap=gen_swap,
+                cancel_check=lambda: job.cancel_requested,
+                placement=placement,
+                **kwargs,
+            )
+            job.push({"type": "line", "text": message})
+            if ok:
+                job.result = track_path.name
+                gallery.push_stamp_warning(
+                    job, gallery.stamp_owner("music", track_path.name, owner))
+            # Recorded before the chat model reload that runs on leaving the block.
+            job.mark_outcome("done" if ok else "failed")
         return ok
 
     job = jobs.start_fn("music", _generate, result_path=out_path.name,

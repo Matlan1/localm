@@ -1517,7 +1517,15 @@ def _choose_embedder_gpu_layers(path: str, cfg: dict, *,
     return 0, reason
 
 
-def _maybe_swap_for_embedder(path: str, n_gpu_layers: int) -> None:
+_SWAP_DEGRADED = {
+    "in_use": "a resident chat model is serving a request and stays loaded",
+    "pinned": "a resident chat model is pinned to stay loaded",
+    "error": "freeing VRAM from the resident chat model did not complete",
+    "skipped": "no resident chat model could be unloaded from this process",
+}
+
+
+def _maybe_swap_for_embedder(path: str, n_gpu_layers: int) -> Optional[str]:
     """Before the embedder's native load, evict a resident chat model when it
     would not otherwise fit - the SAME VRAM-aware swap the image/music/video
     plugins run before their own model load (see ``localm.vram.decide_media_swap``),
@@ -1527,17 +1535,22 @@ def _maybe_swap_for_embedder(path: str, n_gpu_layers: int) -> None:
     only REFUSES a load that will not fit and never makes room. This function
     is what frees VRAM, by evicting the resident chat model first.
 
+    Returns the eviction status from ``evict_chat_for_embedder``, or None when
+    no eviction was attempted. A status in ``_SWAP_DEGRADED`` other than
+    "skipped" (which ``evict_chat_for_embedder`` already warns about) is logged
+    at WARNING.
+
     A CPU-only embedder load (``n_gpu_layers <= 0``) never contends for VRAM,
     so it is skipped. Best-effort: any failure to read the file size or decide
     the swap returns without blocking the load."""
     if n_gpu_layers <= 0:
-        return
+        return None
     try:
         file_size = Path(path).stat().st_size
     except OSError:
-        return
+        return None
     if not file_size:
-        return
+        return None
     from localm.config import load_config
     from localm.vram import decide_embedder_swap, evict_chat_for_embedder, resolve_swap_policy
     cfg = load_config()
@@ -1546,8 +1559,13 @@ def _maybe_swap_for_embedder(path: str, n_gpu_layers: int) -> None:
     # already uses (weights plus about 20% KV-cache and compute slop).
     estimate = int(file_size * 1.2)
     if not decide_embedder_swap(estimate, policy=policy):
-        return
-    evict_chat_for_embedder()
+        return None
+    status = evict_chat_for_embedder()
+    if status in _SWAP_DEGRADED and status != "skipped":
+        logger.warning("embedder: %s; the model %s loads alongside it and "
+                       "may run partly on the CPU", _SWAP_DEGRADED[status],
+                       Path(path).name)
+    return status
 
 
 def _emit_stage(on_progress: Optional[Callable[[str], None]], msg: str) -> None:
@@ -1583,7 +1601,9 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
     blocks THIS thread waiting for it, and that coroutine calls
     ``loaded_dim()``, which needs ``_LOCK``. ``_LOCK`` is a plain
     ``threading.RLock`` and is not reentrant across threads, so holding it
-    across that call is a cross-thread deadlock."""
+    across that call is a cross-thread deadlock. It also runs before the
+    engine's ``_LOAD_LOCK`` is taken, so an evictor registered with
+    ``vram.register_embedder_evictor`` runs holding neither lock."""
     global _EMBEDDER, _LOAD_FAILED_SPEC, _TRIED_DOWNLOAD, _LAST_ERROR
     cur_spec = None   # computed lazily, only once _EMBEDDER is confirmed unset;
                        # the "already loaded" path does no I/O.
@@ -1631,7 +1651,9 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
     # evict_chat_for_embedder() and decide_embedder_swap() are idempotent, and
     # the load below re-checks the singleton state.
     _emit_stage(on_progress, "Checking VRAM (may evict a resident chat model)...")
-    _maybe_swap_for_embedder(path, intent_ngl)
+    swap_status = _maybe_swap_for_embedder(path, intent_ngl)
+    if swap_status in _SWAP_DEGRADED:
+        _emit_stage(on_progress, f"Could not free VRAM: {_SWAP_DEGRADED[swap_status]}.")
     ngl, placement_reason = _choose_embedder_gpu_layers(path, _cfg)
     if placement_reason is not None:
         logger.warning("embedder placement: %s", placement_reason)

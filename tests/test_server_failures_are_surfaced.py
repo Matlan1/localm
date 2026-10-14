@@ -106,3 +106,26 @@ def test_hang_trace_write_failure_is_logged_once(tmp_path, monkeypatch, caplog):
     assert hits[0].levelno == logging.WARNING
     assert not trace.exists()
 
+
+
+def test_revoke_key_warns_when_dropping_its_sessions_raises(monkeypatch, caplog):
+    from localm import scopes as S
+    from localm import sessions
+
+    created = auth.create_key("device", [S.ADMIN], allow_privileged=True)
+
+    def _boom(key_hash):
+        raise AttributeError("'str' object has no attribute 'get'")
+    monkeypatch.setattr(sessions, "revoke_by_key_hash", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        revoked = auth.revoke_key(created["id"])
+
+    assert revoked is True
+    assert all(r["id"] != created["id"] for r in auth.list_keys())
+    hits = [r for r in caplog.records
+            if "browser sessions failed" in r.getMessage()]
+    assert len(hits) == 1
+    assert hits[0].levelno == logging.WARNING
+    assert created["id"] in hits[0].getMessage()
+    assert "has no attribute 'get'" in hits[0].getMessage()

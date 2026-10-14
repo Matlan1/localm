@@ -10,7 +10,8 @@ from typing import Optional
 
 from localm.rag import store as _st
 
-from .confine import _network_drives_allowed_fresh, _path_within, floor_refusal
+from .confine import (_network_drives_allowed_fresh, _path_within,
+                      floor_refusal, is_credential_path)
 from .types import ProgressFn
 
 
@@ -185,7 +186,8 @@ class _CollectionResync:
     def _reconcile_missing(self, skipped_roots: list, *, was_missing: set,
                            prune_missing: bool, say: ProgressFn):
         """Flag documents whose file has vanished, clear the flag on ones that
-        came back, and prune only when explicitly asked. Returns
+        came back, and prune only when explicitly asked. A document whose source
+        lies under a credential folder is always pruned. Returns
         (newly_missing, restored, pruned) as lists of doc keys.
 
         *was_missing* is the flagged set as it stood BEFORE this run indexed
@@ -210,6 +212,9 @@ class _CollectionResync:
                 # Could not ask at all: treated as present, so an unanswerable
                 # question is never resolved in the destructive direction.
                 present = True
+            if present and is_credential_path(p):
+                pruned.append(key)
+                continue
             if present:
                 entry.pop("missing", None)
                 entry.pop("missing_since", None)
@@ -233,5 +238,5 @@ class _CollectionResync:
                 self._vectors = [self._vectors[i] for i in keep]
             for key in pruned:
                 docs.pop(key, None)
-                say(f"pruned: {key} (file is gone)")
+                say(f"pruned: {key}")
         return newly_missing, restored, pruned

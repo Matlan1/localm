@@ -72,6 +72,7 @@ FOREIGN_PATH_HEADS = (r"C:\Users\alice", r"C:\\Users\\alice", "/home/bob/",
                       "/Users/carol/")
 OTHER_EMAIL = "bob.builder@example.com"
 HOST = "alice-desktop.local"
+SECRETS = SECRETS + ("alice-desktop", "FILESERVER01")
 UNC = r"\\FILESERVER01\share\report.txt"
 
 PROXY_URL = "https://bugreport-proxy.example.invalid/report"

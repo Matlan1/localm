@@ -133,6 +133,26 @@ def test_update_apply_already_current(monkeypatch):
     assert data["applied"] is False
 
 
+def test_update_apply_with_an_unorderable_release_does_not_claim_up_to_date(monkeypatch):
+    _open_mode(monkeypatch)
+    from localm import _proxy, _version
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "endpoint", lambda: ("https://proxy.invalid", None))
+    monkeypatch.setattr(updater, "_net_policy_allows_update_check", lambda: True)
+    monkeypatch.setattr(updater, "_prerelease_channel_enabled", lambda: False)
+    monkeypatch.setattr(_version, "read_version", lambda: "0.2.0")
+    monkeypatch.setattr(_proxy, "request", lambda *a, **kw: {
+        "version": "nightly", "asset": {"id": 3}, "signature": "s"})
+    called = []
+    monkeypatch.setattr(updater, "apply", lambda *a, **kw: called.append(a))
+    data = _post(create_app(_engine()), "/api/update/apply").json()
+    assert called == []
+    assert data["applied"] is False
+    assert "up to date" not in data["reason"]
+    assert "could not tell" in data["reason"]
+    assert data["latest"] == "nightly"
+
+
 def test_update_apply_failure_is_surfaced(monkeypatch):
     _open_mode(monkeypatch)
     from localm.bugreport import LocalmError

@@ -44,8 +44,9 @@ def _exit_marker(gen: dict):
 
 # LOCK ORDER: engine_lock(engine) is the OUTERMOST lock of the process. A
 # generation under it takes engine._LOAD_LOCK (auto-reload) and, below that,
-# embedder._LOCK; residency._PIN_LOCK is a leaf. Never acquire engine_lock while
-# holding any of those three.
+# embedder._LOCK; residency._PIN_LOCK is a leaf. An embed under it can take the
+# MCP EngineCache._lock (bounded wait, EngineCache.evict_for_embedder). Never
+# acquire engine_lock while holding any of those four.
 _LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _LOCKS_GUARD = threading.Lock()
 # The one lock every engine that cannot be a WeakKeyDictionary key shares, so

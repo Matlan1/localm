@@ -1218,8 +1218,8 @@ CORE_FIELDS: list = [
                  options=["off", "ask", "on"],
                  legacy_bool=("off", "on"),
                  # Reachable in the default keyless install regardless: the schema
-                 # route treats open mode as owner (is_owner = held is None or
-                 # ADMIN in held), so admin_only hides this from a SCOPED key, not
+                 # route treats open mode as operator
+                 # (caller_is_operator), so admin_only hides this from a SCOPED key, not
                  # from the ordinary single-user GUI.
                  group="Network", admin_only=True),
     # ---- Browser automation (plugin) ----
@@ -1321,6 +1321,10 @@ def _to_bool(key: str, val):
 def _to_number(key: str, val, *, want_int: bool, lo, hi):
     if isinstance(val, bool):       # bool is an int subclass - reject as a number
         raise ValueError(f"{key}: expected a number, not a boolean")
+    # A float with a fractional part is refused for an integer field, the same
+    # as the string "1.5" is; a whole float such as 2.0 is accepted.
+    if want_int and isinstance(val, float) and math.isfinite(val) and not val.is_integer():
+        raise ValueError(f"{key}: expected an integer, got {val!r}")
     try:
         # OverflowError: int(float("inf")) raises it, and it is neither a
         # TypeError nor a ValueError - without this an inf into an int field
