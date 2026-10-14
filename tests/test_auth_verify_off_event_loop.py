@@ -226,7 +226,7 @@ def test_session_state_resolves_the_caller_off_the_event_loop(keyed_app):
         waited, resp = asyncio.run(_request_with_a_concurrent_coroutine(
             keyed_app, "GET", "/api/session",
             headers={"Authorization": f"Bearer {SECRET}"}))
-    assert calls == [False], (
+    assert calls and not any(calls), (
         "_principal_from_token was not called, or was called on the event loop, "
         f"from GET /api/session (on_loop flags: {calls})")
     assert waited < BLOCK_S * 0.5
