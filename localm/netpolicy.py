@@ -295,7 +295,7 @@ def is_search_backend_origin(url: str, cfg: dict) -> bool:
 _SEARCH_BACKEND_REFUSED_V6 = (ipaddress.ip_network("fd00:ec2::/32"),)
 
 
-def _search_backend_address_ok(ip: ipaddress._BaseAddress) -> bool:
+def _search_backend_address_ok(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Whether the search backend may connect to *ip*: a public address
     (``_is_blocked_ip`` False), an IPv4 loopback or private address that is
     not link-local or unspecified (an IPv4-mapped IPv6 address is judged by its
