@@ -129,7 +129,8 @@ from typing import Any, Callable, Optional
 
 from localm.inference.backends.base import (
     AdapterLoadError, AudioDecodeUnavailable, AudioInputError, ContextCapacityExceededError,
-    GrammarUnsupportedError, ImageDecodeUnavailable, InvalidGrammarError, ModelLoadCancelled,
+    GrammarUnsupportedError, ImageDecodeUnavailable, ImageLimitError, InvalidGrammarError,
+    ModelLoadCancelled,
     PerThread,
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
     UnsupportedInputError, UnsupportedModelRoleError, VisionInputError,
@@ -139,7 +140,8 @@ from localm.inference.backends.base import (
 # so the parent re-raises the same type. Any other subclass travels as
 # "UnsupportedInputError".
 _INPUT_ERROR_TYPES = {cls.__name__: cls for cls in (
-    AudioDecodeUnavailable, AudioInputError, ImageDecodeUnavailable, VisionInputError)}
+    AudioDecodeUnavailable, AudioInputError, ImageDecodeUnavailable, ImageLimitError,
+    VisionInputError)}
 
 
 class RunnerBusy(Exception):

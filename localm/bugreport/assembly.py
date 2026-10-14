@@ -309,6 +309,24 @@ def report_title(summary: str, what_happened: str, description: str) -> str:
     return summary.strip()[:120] or "user-reported issue"
 
 
+_REPORT_H1_PREFIX = "# localm bug report:"
+
+
+def report_title_from_markdown(text: str) -> str:
+    """The title a saved report shows in its own H1 (``# localm bug report:
+    <title>``), truncated to 120 chars; the first ``# `` heading's text when it
+    lacks that prefix; ``"user-reported issue"`` when there is no H1."""
+    for line in (text or "").splitlines():
+        if line.startswith(_REPORT_H1_PREFIX):
+            title = line[len(_REPORT_H1_PREFIX):]
+        elif line.startswith("# "):
+            title = line[2:]
+        else:
+            continue
+        return title.strip()[:120] or "user-reported issue"
+    return "user-reported issue"
+
+
 _TRACE_REPORT_LIMIT = 4000
 
 

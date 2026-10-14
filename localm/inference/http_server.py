@@ -41,6 +41,7 @@ from localm.inference.backends.base import (
     EmbedBatchTooLargeError,
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
+    ImageLimitError,
     AudioDecodeUnavailable,
     InvalidGrammarError,
     ModelLoadCancelled,
@@ -3500,6 +3501,29 @@ def caller_scopes(request: Request) -> Optional[set]:
     return prin[0] if prin else None
 
 
+def caller_is_operator(request: Request) -> bool:
+    """True for the local operator: open mode (no key configured anywhere) or
+    a caller holding an ADMIN/owner key. False for any other caller, including
+    a scoped key and a request presenting no valid key."""
+    from localm.auth import any_key_configured
+    if not any_key_configured():
+        return True
+    held = caller_scopes(request)
+    return held is not None and scopes.ADMIN in held
+
+
+def path_formatter(request: Request) -> Callable[[object], str]:
+    """A function rendering a path (or any text) for this caller's response:
+    ``str`` for the local operator (``caller_is_operator``), otherwise ``str``
+    followed by a ``pathscrub.path_scrubber`` bound once (home, account name,
+    data dir, install root and env prefix replaced, file name kept)."""
+    if caller_is_operator(request):
+        return str
+    from localm.pathscrub import path_scrubber
+    scrub = path_scrubber()
+    return lambda value: scrub(str(value))
+
+
 def principal_id(request: Request) -> Optional[str]:
     """A stable, opaque per-key identity for the CURRENT caller, or None in open
     mode / when no token is presented. It is the same SHA-256 the keystore stores
@@ -6568,6 +6592,7 @@ def _memory_used_header(ctx) -> dict:
 _BACKEND_ERROR_STATUS: tuple = (
     (ImageDecodeUnavailable, 501),
     (AudioDecodeUnavailable, 501),
+    (ImageLimitError, 413),
     (VisionInputError, 400),
     (UnsupportedInputError, 400),
     (ChatTemplateMissingError, 400),

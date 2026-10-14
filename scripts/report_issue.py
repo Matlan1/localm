@@ -147,6 +147,22 @@ _HEADER_SECRET_RE = re.compile(
     r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)"
     r"(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+"
 )
+# Credential-named JSON object keys ("api_key": "..."). Byte-identical to
+# _JSON_SECRET_RE in localm/bugreport/scrub.py.
+_JSON_SECRET_RE = re.compile(
+    r"(?i)([\"'](?:"
+    r"(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"|access[_-]?token|signature)"
+    r"|[A-Za-z0-9]+[_-](?:key|auth|sig)"
+    r")[\"']\s*:\s*)"
+    r"(?!\s*[\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"[\"']?\s*(?:[,}\]]|$))"
+    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^,}\]\s]*)"
+)
+# The account segment under a well-known home root. The Windows separator is
+# one OR two backslashes, so a repr()'d or JSON-encoded path is matched too.
+# Byte-identical to _USER_ROOT_PATTERN in localm/pathscrub.py.
+_USER_ROOT_PATTERN = r"([A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)|/home/|/Users/)[^\\/\r\n]+"
 # A whole token that contains an email address. Byte-identical to _EMAIL_RE in
 # localm/bugreport/scrub.py, where the token rules are described.
 _EMAIL_TOKEN_END = r"\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\x60=?&*"
@@ -185,13 +201,14 @@ def scrub(text: str) -> str:
     below ALWAYS runs (it never depends on Path.home succeeding)."""
     if not text:
         return text
-    # Replace the real home dir first (both separator forms), when resolvable.
+    # Replace the real home dir first (as given, forward-slash and
+    # doubled-backslash forms), when resolvable.
     try:
         home = str(Path.home())
     except Exception:
         home = ""
     if home:
-        variants = {home, home.replace("\\", "/")}
+        variants = {home, home.replace("\\", "/"), home.replace("\\", "\\\\")}
         if sys.platform == "win32":
             for v in variants:
                 text = re.sub(re.escape(v), "~", text, flags=re.IGNORECASE)
@@ -200,13 +217,13 @@ def scrub(text: str) -> str:
                 text = text.replace(v, "~")
     # Strip the user segment under any common home root, not only Path.home().
     flags = re.IGNORECASE if sys.platform == "win32" else 0
-    text = re.sub(r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+",
-                  r"\1<redacted>", text, flags=flags)
+    text = re.sub(_USER_ROOT_PATTERN, r"\1<redacted>", text, flags=flags)
     # Strip user:pass@ credentials from any URL-ish value.
     text = re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
-    # Credential-named query params and header lines.
+    # Credential-named query params, header lines and JSON keys.
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
     text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _JSON_SECRET_RE.sub(r"\1<redacted>", text)
     # Bearer tokens and API keys anywhere in the text.
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)

@@ -662,6 +662,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the model registry, measuring a model's size on disk and building its engine ran on the
   server's main loop, so a load of a large model folder on a slow or network disk stalled every
   other request, including the status poll, until the disk answered.
+- **Model control markers hidden inside other markers no longer reach the reply.** A model
+  that wrote a header or turn marker with another control marker inside it (for example a
+  Llama 3 role header split by `<|message|>`, or `<start_of_turn>` followed by a marker and
+  then `model`) left half of the header or a bare `model` / `assistant` at the start of the
+  reply. The whole group is now removed, however the reply is streamed. Asking for token
+  probabilities on a reply like that now fails with an alignment error instead of being
+  matched against the wrong text.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
@@ -2088,6 +2095,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
+  value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
+  password in it, or an API key under an ordinary name, reached the model as is (an online model
+  included) while the terminal said "secrets redacted". It now also removes URL passwords,
+  credential query parameters, bearer tokens and common API key and token formats from every value,
+  removes the home directory and the account name (as a path segment, and in the variables that name
+  the account or the machine) from every value, and its summary says how
+  many values it redacted instead of claiming every secret was.
+- **`net_mode = off` now stops the issues list.** Opening the issues list in Settings, or running
+  `localm issues`, contacted the bug-report proxy even with the network switched off. It now says the
+  network is off and sends nothing. The security notes now list everything that still reaches the
+  network under `off`: the two admin-only exemptions, the bug-report upload (sent only when you press
+  Send), requests to your configured ComfyUI, and the native runtime downloads.
+- **A scoped API key no longer receives this machine's absolute paths.** The memory page, the
+  image, music and video galleries (file paths and the saved generation settings, such as the source
+  image of an img2img), a gallery move, the uploads list, the managed ComfyUI status,
+  a saved bug report and the diagnostics report returned full paths, carrying the account name and
+  data directory, to any key that could reach them. A key other than the owner's now gets those paths
+  with the data directory, home and install folders replaced by placeholders such as `<data>`; "Use
+  as input" and "Reuse settings" accept that form, so img2img from the gallery keeps working.
 - **The cross-origin exemptions match exact paths only.** The inference routes that browsers may
   call cross-origin (chat completions, embeddings, rerank, speech, images and the surface and
   instance routes) were matched as path prefixes, so a route added under one of them would have
@@ -2102,6 +2129,30 @@ permanent public record of what shipped and are never rewritten; the in-progress
   request is refused and scheduled jobs get no web tool, with a warning in the log. A configured
   `require_auth` is kept in force the same way, and the server asks for a key until the file is
   readable again.
+- **A bug report is sent only after you have seen it.** In Settings > Report a bug, "Send to
+  maintainer" used to file the report as a public GitHub issue in one click, without showing it.
+  It now saves the report and shows its whole text, and nothing is sent until you press "Send this
+  report". What is sent is that saved text, without only its closing note about editing it;
+  Retry and the automatic retry after a rate limit send that same report again.
+- **Privacy mode no longer saves a bug report on its own.** An unexpected error used to write a
+  report (with the error, settings subset and recent activity) to the data folder in every mode.
+  In privacy mode without "Keep diagnostics for bug reports", nothing is written: a command that
+  fails at a terminal asks whether to save one, and a background error saves nothing.
+- **Bug reports remove more from what they carry.** The standalone reporters now remove your
+  account name from paths written with doubled backslashes (as in a Python or JSON error message)
+  and remove credential values from JSON keys such as `"api_key"`, as the in-app report already
+  did. The report's settings section now removes bearer tokens and API keys, and scrubs values
+  stored as a list or object, not only plain text.
+- **One request can no longer tie up the server with an oversized input.** A scheduled job's cron
+  expression is limited to 512 characters (a longer one used to stop every scheduled job from firing
+  while reporting the scheduler healthy, and the Jobs page now says when the scheduler is stuck); a
+  JSON schema `format` or `response_format` whose grammar would exceed 64 KB is refused while it is
+  being built instead of after hundreds of megabytes of work; a lazy grammar takes at most 64
+  `grammar_triggers` and stops validating them after 10 seconds; and an attached image is refused,
+  before it is decoded, above 50 megapixels, past 64 images or 800 megapixels in one request
+  (earlier images in the conversation included), or when it is not a PNG, JPEG, WebP, GIF, BMP,
+  TIFF or AVIF. These refusals answer 413 with the reason, and the chat page keeps the conversation's
+  images.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move

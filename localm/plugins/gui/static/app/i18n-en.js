@@ -2102,7 +2102,7 @@ export const I18N_EN = {
   // ---- Settings > Report a bug ----
   "settings.bug.title": "Report a bug",
   "settings.bug.help":
-    "Describe what went wrong. We save an editable report to your data folder with a safe diagnostic snapshot (OS, GPU, backend, loaded model, settings subset, dependency versions, recent activity, and any browser console errors) - never your API key, config secrets, or chat content. You can review and send it to the maintainer.",
+    "Describe what went wrong. We save an editable report to your data folder with a safe diagnostic snapshot (OS, GPU, backend, loaded model, settings subset, dependency versions, recent activity, and any browser console errors) - never your API key, config secrets, or chat content. Before anything is sent to the maintainer you see the whole report and confirm it.",
   "settings.bug.descPlaceholder": "What were you doing?",
   "settings.bug.expectedPlaceholder": "What did you expect to happen? (optional)",
   "settings.bug.happenedPlaceholder": "What actually happened?",
@@ -2131,6 +2131,14 @@ export const I18N_EN = {
   "settings.bug.fileFailed": "Could not file report: {message}",
   "settings.bug.retryingIn": "Rate limited - retrying in {secs}s...",
   "settings.bug.retrying": "Retrying...",
+  "settings.bug.reviewHelp":
+    "This is the whole report as it will be sent, except the closing note about editing it, which is left out. It becomes a public GitHub issue. Nothing has been sent yet.",
+  "settings.bug.previewLabel": "Bug report to send",
+  "settings.bug.confirmSendButton": "Send this report",
+  "settings.bug.cancelSendButton": "Don't send",
+  "settings.bug.reviewPrompt": "Saved: {where}  -  review it below, then press Send this report.",
+  "settings.bug.reviewUnavailable": "Saved: {where}  -  it could not be loaded for review, so it was not sent.",
+  "settings.bug.notSent": "Not sent. The report is saved: {where}",
 
   // ---- Settings > Changelog ----
   "settings.changelog.title": "Changelog",

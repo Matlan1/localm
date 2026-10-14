@@ -37,6 +37,12 @@ class VisionInputError(UnsupportedInputError):
     """
 
 
+class ImageLimitError(VisionInputError):
+    """Raised when an attached image, or the images of one request together, are
+    over localm's size or count limits, or in a format localm does not decode.
+    The routes answer it with 413; the model and worker are unharmed."""
+
+
 class AudioInputError(UnsupportedInputError):
     """Raised when an attached audio clip cannot be used: it is malformed,
     undecodable, in a format no installed decoder reads, or outside the
