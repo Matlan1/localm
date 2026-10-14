@@ -295,6 +295,7 @@ class _LoadLib(_FakeLib):
     def __init__(self):
         super().__init__()
         self.received = None
+        self.received_model_path = None
 
     def sd_list_devices(self, buf, size):
         text = b"CPU\tfake cpu\n"
@@ -305,6 +306,7 @@ class _LoadLib(_FakeLib):
     def new_sd_ctx(self, ref):
         params = ctypes.cast(ref, ctypes.POINTER(b.sd_ctx_params_t)).contents
         self.received = b.sd_ctx_params_t.from_buffer_copy(params)
+        self.received_model_path = params.model_path
         return 1
 
     def free_sd_ctx(self, ctx):
@@ -338,8 +340,9 @@ def test_the_worker_load_passes_batched_cfg_to_the_library(monkeypatch, ctx, wan
     _child._do_load({"ctx": {"model_path": "m.safetensors", **ctx}})
     assert lib.received is not None
     assert lib.received.batched_cfg is want
-    assert ctypes.string_at(lib.received.model_path) == b"m.safetensors"
-    assert lib.received.flash_attn_mode is None and lib.received.conv_direct_mode is None
+    assert lib.received_model_path == b"m.safetensors"
+    assert b._raw_ptr(lib.received, "flash_attn_mode") == 0
+    assert b._raw_ptr(lib.received, "conv_direct_mode") == 0
 
 
 def test_the_pinned_commit_matches_the_tag():
