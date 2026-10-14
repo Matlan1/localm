@@ -838,4 +838,4 @@ def test_the_worker_records_the_wan_model_it_loaded(child_state):
 @pytest.fixture(autouse=True)
 def _no_live_vram_budget(monkeypatch):
     from localm.media.sdcpp import budget as sd_budget
-    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend: None)
+    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend, **kw: None)

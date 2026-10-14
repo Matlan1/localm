@@ -634,6 +634,72 @@ class TestBrokenIsolationIsNotRespawnedEveryRound:
             assert discover._isolated_torch_retry_at == 0.0
 
 
+class TestHalfImportedTorchOffWindowsIsInconclusive:
+    """Off Windows, a failed isolated probe while another thread is still
+    importing torch gives an inconclusive empty reading, which leaves the last
+    good reading in place."""
+
+    _GOOD = [{"index": 0, "name": "AMD Radeon RX 6900 XT", "total": 16 * 1024 ** 3,
+              "free": 8 * 1024 ** 3}]
+
+    def setup_method(self):
+        discover._reset_gpu_probe_cache()
+
+    def teardown_method(self):
+        discover._reset_gpu_probe_cache()
+
+    @staticmethod
+    def _half_imported_torch(monkeypatch):
+        import types
+
+        from localm import gpu_usage
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: False)
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
+        monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+        monkeypatch.setattr(gpu_usage, "torch_fully_imported", lambda: False)
+        monkeypatch.setattr(
+            discover, "_torch_gpus_resident",
+            lambda: pytest.fail("read a half-imported torch in this process"))
+        monkeypatch.setattr(subprocess, "Popen",
+                            MagicMock(side_effect=FileNotFoundError("no nvidia-smi")))
+        monkeypatch.setattr(discover, "_windows_largest_adapter_registry_entry",
+                            lambda: None)
+
+    def test_the_round_is_marked_unanswered(self, monkeypatch):
+        self._half_imported_torch(monkeypatch)
+        assert discover._torch_gpus_isolated_once() == []
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is True
+
+    def test_an_empty_reading_is_inconclusive_not_no_gpu(self, monkeypatch):
+        self._half_imported_torch(monkeypatch)
+        gpus, status = discover.list_gpus(return_status=True)
+        assert gpus == []
+        assert status == discover.GPU_PROBE_INCONCLUSIVE
+
+    def test_the_last_good_reading_survives_the_round(self, monkeypatch):
+        with discover._gpu_probe_lock:
+            discover._gpu_last_good = [dict(g) for g in self._GOOD]
+        self._half_imported_torch(monkeypatch)
+        discover.list_gpus(return_status=True)
+        assert discover.last_known_gpus() == self._GOOD
+
+    def test_a_conclusive_empty_reading_still_replaces_it(self, monkeypatch):
+        with discover._gpu_probe_lock:
+            discover._gpu_last_good = [dict(g) for g in self._GOOD]
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: [])
+        monkeypatch.setattr(subprocess, "Popen",
+                            MagicMock(side_effect=FileNotFoundError("no nvidia-smi")))
+        gpus, status = discover.list_gpus(return_status=True)
+        assert (gpus, status) == ([], discover.GPU_PROBE_OK)
+        assert discover.last_known_gpus() == []
+
+
 class TestChildProbeContract:
     """The child must mirror the in-process branch field for field, so a caller
     cannot tell which path produced a reading."""

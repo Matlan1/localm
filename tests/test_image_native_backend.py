@@ -1384,4 +1384,4 @@ def test_a_generation_through_the_route_embeds_and_imports_back(native_app, monk
 @pytest.fixture(autouse=True)
 def _no_live_vram_budget(monkeypatch):
     from localm.media.sdcpp import budget as sd_budget
-    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend: None)
+    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend, **kw: None)

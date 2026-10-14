@@ -564,7 +564,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             if runner.loaded_key != key or not runner.is_alive():
                 say(f"Loading {models['label']} (stable-diffusion.cpp, {rt.backend})...")
                 ctx = sd_budget.reload_ctx(runner, ctx, rt.backend, say,
-                                           cancel_check)
+                                           cancel_check, devices=rt.devices)
             info = runner.ensure_loaded(key, rt.path, ctx,
                                         extra_dirs=rt.extra_dirs, on_event=relay,
                                         cancel_check=cancel_check)

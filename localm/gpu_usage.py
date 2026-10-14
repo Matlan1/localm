@@ -721,13 +721,12 @@ def raw_reading_is_process_scoped() -> bool:
     vulkan or cpu build's worker, a torch-less NVIDIA box), False.
 
     NEVER imports torch: a cold ROCm import holds the Windows OS loader lock,
-    which blocks thread creation process-wide. While a GPU probe may be
-    mid-import (``discover._gpu_probe_inflight``, including an abandoned
-    timed-out one), while a fresh import is the known-doomed native-runtime DLL
-    conflict (``discover._torch_gpu_probe_known_doomed``), or in a process that
-    has loaded the native llama.cpp runtime (``_loader.native_lib_loaded``), the
-    resident-HIP-runtime signal answers. Reuses discover's probe-tracking lock.
-    Never raises."""
+    which blocks thread creation process-wide. While a fresh import is the
+    known-doomed native-runtime DLL conflict
+    (``discover._torch_gpu_probe_known_doomed``), or in a process that has
+    loaded the native llama.cpp runtime (``_loader.native_lib_loaded``), the
+    resident-HIP-runtime signal answers. The answer is the same while a GPU
+    probe is in flight. Never raises."""
     import sys
     if sys.platform != "win32":
         return False
@@ -735,10 +734,6 @@ def raw_reading_is_process_scoped() -> bool:
         if torch_fully_imported():
             return bool(getattr(sys.modules["torch"].version, "hip", None))
         from localm import discover as _discover
-        with _discover._gpu_probe_lock:
-            probe_may_be_mid_import = _discover._gpu_probe_inflight
-        if probe_may_be_mid_import:
-            return _known_blind_without_torch("a GPU probe may be mid-import")
         if _discover._torch_gpu_probe_known_doomed():
             return _known_blind_without_torch(
                 "a fresh torch import here is the known-doomed DLL conflict")

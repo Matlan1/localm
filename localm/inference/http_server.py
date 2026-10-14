@@ -1938,7 +1938,8 @@ async def unload_all_models(*, force: bool = False) -> dict:
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = _vram_free_reading()
+    before, before_fresh, before_scope = await loop.run_in_executor(
+        None, _vram_free_reading)
     unloaded_models = []
     skipped_in_use = []
     confirm_required: dict[str, str] = {}
@@ -2142,10 +2143,9 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     #
     # TWO layers, mirroring switch_engine's own chat-engine eviction (its LRU
     # scan's active_requests==0 check, THEN a synchronous defensive re-check
-    # right before it commits): the cheap active_requests() precheck here avoids
-    # paying for the _vram_free_reading() hardware probe below on the common busy
-    # case, since that probe is NOT executor-offloaded and can block this whole
-    # single-threaded event loop for up to discover._GPU_PROBE_DEADLINE seconds.
+    # right before it commits): the cheap active_requests() precheck here runs
+    # before the _vram_free_reading() hardware probe below, which runs in an
+    # executor and can take up to discover._GPU_PROBE_DEADLINE seconds.
     # reset_embedder(force=False) is what actually authorizes the close,
     # atomically re-checking active_requests()==0 under embedder._LOCK in the
     # SAME step as the close - never a separate unlocked active_requests() call
@@ -2165,7 +2165,8 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = _vram_free_reading()
+    before, before_fresh, before_scope = await loop.run_in_executor(
+        None, _vram_free_reading)
     cleared = await loop.run_in_executor(
         None, functools.partial(_embedder_mod.reset_embedder, force=False))
     if not cleared:
@@ -2216,7 +2217,8 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = _vram_free_reading()
+    before, before_fresh, before_scope = await loop.run_in_executor(
+        None, _vram_free_reading)
     cleared = await loop.run_in_executor(
         None, functools.partial(_reranker_mod.reset_reranker, force=False))
     if not cleared:
@@ -2262,7 +2264,8 @@ async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = _vram_free_reading()
+    before, before_fresh, before_scope = await loop.run_in_executor(
+        None, _vram_free_reading)
     cleared = await loop.run_in_executor(
         None, functools.partial(_speech_mod.reset_speech, force=False))
     if not cleared:
@@ -2332,16 +2335,18 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = _vram_free_reading()
     sem = _inference_sems.setdefault(name, InferenceGate())
     # Flag BEFORE acquiring the semaphore so no request that arrives after the pin
     # check above can fast-path-pin this engine while we free it (the pin-arrives-
     # during-the-unload-await window); such a request blocks on the same
     # semaphore and reloads cleanly afterwards. Cleared in finally so the
-    # kept-in-_engines engine reloads lazily.
+    # kept-in-_engines engine reloads lazily. No await may come between this
+    # flag and taking the semaphore; the VRAM reading is taken under it.
     engine.unloading = True
     try:
         async with exclusively(sem):
+            before, before_fresh, before_scope = await loop.run_in_executor(
+                None, _vram_free_reading)
             await loop.run_in_executor(None, engine.unload)
             if name in _engines_lru:
                 _engines_lru.remove(name)

@@ -3382,6 +3382,24 @@ class TestFreeScope:
         assert gpus[0]["free"] == 6_000_000_000    # 16G total - 10G really in use
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
 
+    def test_a_blind_reading_inside_its_own_probe_is_tagged_process(self, monkeypatch):
+        """During its own probe, a ROCm torch build's uncorrected reading is
+        tagged process-scoped."""
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delitem(sys.modules, "torch", raising=False)
+        monkeypatch.setattr(discover, "_gpu_probe_inflight", True)
+        monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(discover, "native_hip_runtime_resident", lambda: False)
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+        monkeypatch.setattr("localm.gpu_usage.torch_build_is_hip", lambda: True)
+        monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {})
+        gpus = self._gpus()
+        discover._apply_device_global_free(gpus)
+        assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
+
     def test_windows_without_a_source_keeps_number_but_tags_process(self, monkeypatch):
         """When nothing better can answer, a known-process-local figure is not
         passed off as the board's: it is kept and labelled, which is what makes
@@ -3897,44 +3915,24 @@ class TestGpuUsageSourceRobustness:
         assert gu.raw_reading_is_process_scoped() is False
         assert attempted == [], "a torch import was attempted in-process"
 
-    def test_raw_reading_is_process_scoped_skips_import_while_a_probe_is_inflight(
-            self, monkeypatch):
-        """discover._list_gpus_probe's background probe thread does its OWN first
-        `import torch` and, on a probe timeout, is ABANDONED while still possibly
-        mid-import (stuck in native ROCm library preload);
-        discover._gpu_probe_inflight stays True for exactly this window
-        (documented in _list_gpus_with_status). A fresh `import torch` from a
-        DIFFERENT thread while that flag is set blocks on CPython's per-module
-        import lock waiting for the abandoned thread, and crashes the whole
-        process (Windows fatal exception, STATUS_ENTRYPOINT_NOT_FOUND) rather
-        than merely blocking. raw_reading_is_process_scoped() must consult
-        discover._gpu_probe_inflight and skip the import entirely while it is
-        True, falling back to the conservative "unknown" default.
-
-        This machine's real torch build IS ROCm/HIP (verified: torch.version.hip
-        is set), so if the function fell back to a real `import torch` anyway,
-        this would wrongly return True - the test only passes if the import was
-        genuinely skipped.
-
-        The resident-HIP fallback signal is pinned False so this test keeps its
-        one subject (the inflight race guard): with no HIP runtime resident the
-        no-torch answer must stay the conservative False. The signal's own
-        truth (and the True case) is covered by TestScopeGateAnswersWithoutTorch
-        and TestNativeHipRuntimeResident."""
+    @pytest.mark.parametrize("hip", [True, False])
+    def test_raw_reading_answers_from_the_build_flag_while_a_probe_is_inflight(
+            self, monkeypatch, hip):
+        """With a GPU probe in flight the answer is the torch build flag, read
+        without importing torch."""
         import localm.gpu_usage as gu
         import localm.discover as _discover
         import sys as _sys
+        from localm.inference.backends.llamacpp import _loader
 
         monkeypatch.setattr(gu.sys, "platform", "win32", raising=False)
         monkeypatch.delitem(_sys.modules, "torch", raising=False)
         monkeypatch.setattr(_discover, "_gpu_probe_inflight", True)
-        monkeypatch.setattr(_discover, "native_hip_runtime_resident",
-                            lambda: False)
+        monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed", lambda: False)
+        monkeypatch.setattr(_discover, "native_hip_runtime_resident", lambda: False)
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+        monkeypatch.setattr(gu, "torch_build_is_hip", lambda: hip)
 
-        # Record every import attempt rather than raising from inside the patched
-        # __import__: raw_reading_is_process_scoped() has its own broad
-        # `except Exception: return False`, which would swallow a raised guard.
-        # Recording and asserting afterward cannot be masked that way.
         import builtins
         _real_import = builtins.__import__
         attempted = []
@@ -3946,12 +3944,8 @@ class TestGpuUsageSourceRobustness:
         monkeypatch.setattr(builtins, "__import__", _tracking_import)
 
         result = gu.raw_reading_is_process_scoped()
-        assert "torch" not in attempted, (
-            "raw_reading_is_process_scoped() triggered a fresh import of torch "
-            "while a GPU probe was in flight - it can race an abandoned probe "
-            "thread mid-import and crash the process (STATUS_ENTRYPOINT_NOT_FOUND, "
-            "observed live)")
-        assert result is False
+        assert "torch" not in attempted
+        assert result is hip
 
     def test_raw_reading_skips_fresh_import_when_known_doomed(self, monkeypatch):
         """The SECOND live site of the known-doomed torch import (the first is
