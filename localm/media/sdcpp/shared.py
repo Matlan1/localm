@@ -23,6 +23,18 @@ _idle_timer: Optional[threading.Timer] = None
 _timer_lock = threading.Lock()
 
 
+def _report(on_state: Optional[Callable[[str], None]], state: str) -> None:
+    """Call ``on_state(state)``; a failing callback is logged and never raised."""
+    if on_state is None:
+        return
+    try:
+        on_state(state)
+    except Exception as e:  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.warning("sd.cpp queue state %r was not reported: %s: %s",
+                       state, type(e).__name__, e)
+
+
 @contextlib.contextmanager
 def held(say: Callable[[str], None],
          cancel_check: Optional[Callable[[], bool]] = None,
@@ -35,20 +47,25 @@ def held(say: Callable[[str], None],
     ``on_state`` is called only when the job had to wait: with ``"queued"``
     when the wait starts and exactly once more when it ends (also when it ends
     by an exception), with ``"running"`` if the lock was taken and
-    ``"cancelled"`` if not. A job that finds the lock free never calls it."""
+    ``"cancelled"`` if not. A job that finds the lock free never calls it. An
+    exception raised by ``on_state`` is logged and does not change the
+    outcome or leave the lock held."""
     acquired = lock.acquire(blocking=False)
     if not acquired:
         say("Waiting for the image or video job already running...")
-        if on_state is not None:
-            on_state("queued")
+        _report(on_state, "queued")
         try:
             while not acquired:
                 acquired = lock.acquire(timeout=WAIT_POLL_SECONDS)
                 if not acquired and cancel_check is not None and cancel_check():
                     break
         finally:
-            if on_state is not None:
-                on_state("running" if acquired else "cancelled")
+            try:
+                _report(on_state, "running" if acquired else "cancelled")
+            except BaseException:
+                if acquired:
+                    lock.release()
+                raise
     if not acquired:
         yield False
         return

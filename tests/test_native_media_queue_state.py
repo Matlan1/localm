@@ -127,6 +127,36 @@ def test_held_clears_queued_when_the_cancel_check_itself_raises():
     shared.lock.release()
 
 
+@pytest.mark.parametrize("failing_state", ["queued", "running", "cancelled"])
+def test_held_survives_a_failing_state_callback(failing_state):
+    states = []
+    cancel = threading.Event()
+    cancel_now = failing_state == "cancelled"
+    result = []
+
+    def on_state(state):
+        states.append(state)
+        if state == failing_state:
+            raise RuntimeError("callback failed")
+
+    def body():
+        with shared.held(lambda t: None, cancel.is_set, on_state) as acquired:
+            result.append(acquired)
+
+    worker = threading.Thread(target=body)
+    with shared.lock:
+        worker.start()
+        _wait_for(lambda: states[:1] == ["queued"], "the queued state")
+        if cancel_now:
+            cancel.set()
+            _wait_for(lambda: states == ["queued", "cancelled"], "the cancelled state")
+    worker.join(5.0)
+    assert not worker.is_alive()
+    assert result == [not cancel_now]
+    assert shared.lock.acquire(blocking=False), "the lock must not stay held"
+    shared.lock.release()
+
+
 # --------------------------------------------------------------------------- #
 #  backends                                                                   #
 # --------------------------------------------------------------------------- #
