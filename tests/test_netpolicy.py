@@ -312,7 +312,7 @@ def _patch_session(monkeypatch, *, get=None, post=None):
             raise AssertionError(f"unexpected {method} to {url}")
         return fn(url, **kw)
     monkeypatch.setattr(netpolicy, "_session_for",
-                        lambda url: _FakeSession(responder))
+                        lambda url, **kw: _FakeSession(responder))
 
 
 class TestSafeFetch:
