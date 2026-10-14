@@ -5079,7 +5079,7 @@ def _tokens_per_sec(completion_tokens: int, decode_elapsed: Optional[float]) -> 
     return round(completion_tokens / decode_elapsed, 2)
 
 
-def _build_usage(prompt_tokens: int, completion_tokens: int = 0, *,
+def _build_usage(prompt_tokens: Optional[int], completion_tokens: int = 0, *,
                  context_capacity: Optional[int] = None,
                  gen_start: Optional[float] = None,
                  first_token_at: Optional[float] = None,
@@ -5088,8 +5088,9 @@ def _build_usage(prompt_tokens: int, completion_tokens: int = 0, *,
     """The chat-completion ``usage`` object, shared by the streamed and
     non-streamed paths.
 
-    ``ttft_ms`` and ``tokens_per_sec`` are set when *gen_start* and *gen_end*
-    are given; the decode rate covers the first token to *gen_end* only.
+    A *prompt_tokens* of None counts as 0. ``ttft_ms`` and ``tokens_per_sec``
+    are set when *gen_start* and *gen_end* are given; the decode rate covers
+    the first token to *gen_end* only.
     ``mtp`` and ``speculation`` come from *outcome* (a snapshot of the finished
     reply), falling back to *engine* for a key the snapshot lacks, and stay
     None when no *engine* is given.
@@ -5099,6 +5100,7 @@ def _build_usage(prompt_tokens: int, completion_tokens: int = 0, *,
     tps = (_tokens_per_sec(completion_tokens,
                            _decode_elapsed(first_token_at, gen_end))
            if gen_end is not None else None)
+    prompt_tokens = prompt_tokens or 0
     mtp = speculation = None
     if engine is not None:
         box = outcome if outcome is not None else {}
@@ -5628,7 +5630,7 @@ async def _stream_sse_body(
             err_chunk["localm_error"] = {"status": refusal_status, "detail": refusal}
             yield f"data: {json.dumps(err_chunk, ensure_ascii=False, separators=(',', ':'))}\n\n"
             for data in _final_chunks(model_id, chunk_id, ts, "error",
-                                      _build_usage(prompt_tokens or 0,
+                                      _build_usage(prompt_tokens,
                                                    context_capacity=capacity),
                                       include_usage):
                 yield data

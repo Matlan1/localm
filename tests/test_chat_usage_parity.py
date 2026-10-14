@@ -87,6 +87,10 @@ class TestBuildUsage:
         assert (usage.prompt_tokens, usage.completion_tokens,
                 usage.total_tokens) == (7, 3, 10)
 
+    def test_unknown_prompt_count_is_zero(self):
+        usage = _build_usage(None, 4)
+        assert (usage.prompt_tokens, usage.total_tokens) == (0, 4)
+
     def test_without_timing_or_engine_only_counts_and_capacity(self):
         usage = _build_usage(9, context_capacity=4096)
         assert usage.total_tokens == 9
