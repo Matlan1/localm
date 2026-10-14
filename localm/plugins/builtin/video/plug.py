@@ -216,6 +216,7 @@ async def video(req: VideoRequest, request: Request):
         kwargs.update(native_extras)
         if s.get("backend") == "native":
             kwargs["on_preview"] = lambda p: job.push(frame_event(p))
+            kwargs["on_queue_state"] = lambda state: job.progress(phase=state)
         is_privacy = effective_mode("server") == SessionMode.PRIVACY
         # privacy mode forces deletion of ComfyUI's own output copy: no traces
         # left anywhere, regardless of the configured delete_outputs preference.

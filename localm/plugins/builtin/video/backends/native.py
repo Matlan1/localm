@@ -483,6 +483,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
               sample_method: Optional[str] = None,
               scheduler: Optional[str] = None,
               on_preview=None,
+              on_queue_state: Optional[Callable[[str], None]] = None,
               **unsupported) -> tuple[bool, str]:
     """Generate one clip of *prompt* into *out_path* (MP4, H.264, with an AAC
     track when the model returns audio). Returns ``(ok, message)``. Writes only
@@ -495,7 +496,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     own unload did not succeed. *loras* (``[{"name", "strength"}]``) name
     registered LoRAs (``pairing.resolve_loras``). *on_preview*, when given,
     receives ``{"step", "steps", "width", "height", "png"}`` for each
-    in-progress frame the worker makes."""
+    in-progress frame the worker makes. *on_queue_state* is called while the
+    job waits for another image or video job (``shared.held``)."""
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, placement=placement,
                       width=width, height=height, seconds=seconds, fps=fps,
@@ -551,7 +553,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         rec.flow_shift if rec else (defaults.flow_shift if defaults else None))
     negative = negative_prompt if negative_prompt is not None else (
         rec.negative_prompt if rec else "")
-    with shared.held(say, cancel_check) as acquired:
+    with shared.held(say, cancel_check, on_queue_state) as acquired:
         if not acquired:
             return False, "Cancelled."
         shared.cancel_idle_timer()

@@ -252,7 +252,9 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 job.result = path.name
             job.push({"type": "image", "name": path.name})
         native_kwargs = ({**{k: v for k, v in extras.items() if v is not None},
-                          "on_saved": _on_saved} if s.get("backend") == "native" else {})
+                          "on_saved": _on_saved,
+                          "on_queue_state": lambda state: job.progress(phase=state)}
+                         if s.get("backend") == "native" else {})
         ok, message = _backend.generate(
             s, req.prompt, out_path,
             self_url=self_url,
@@ -746,7 +748,8 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
             s, source, upscaler, out_path, extra_meta=extra_meta,
             write_sidecar=not is_privacy, cancel_check=lambda: job.cancel_requested,
             on_progress=say,
-            on_saved=lambda p: gallery.stamp_owner("image", p.name, owner))
+            on_saved=lambda p: gallery.stamp_owner("image", p.name, owner),
+            on_queue_state=lambda state: job.progress(phase=state))
         job.push({"type": "line", "outcome": True, "text": message})
         if ok:
             job.result = out_path.name

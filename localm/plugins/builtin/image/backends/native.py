@@ -478,7 +478,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
              on_saved: Optional[Callable[[Path], None]] = None,
              steps: Optional[int] = None,
              clip_skip: Optional[int] = None,
-             on_preview=None) -> tuple[bool, str]:
+             on_preview=None,
+             on_queue_state: Optional[Callable[[str], None]] = None) -> tuple[bool, str]:
     """Generate *batch* images of *prompt* (each a PNG without embedded metadata
     unless the ``embed_params`` setting is on and the session is not in privacy
     mode). Returns ``(ok, message)``. Image ``i`` (from 0) is made with seed
@@ -501,7 +502,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     caller's own unload did not succeed. *steps* and *clip_skip* override the
     settings and the family default for this image. *on_preview*, when given,
     receives ``{"step", "steps", "width", "height", "png"}`` for each
-    in-progress frame the worker makes."""
+    in-progress frame the worker makes. *on_queue_state* is called while the
+    job waits for another image or video job (``shared.held``)."""
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, lora_name=lora_name,
                       width=width, height=height, sample_method=sample_method,
@@ -552,7 +554,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             return text
         return f"{text} {len(saved)} of {batch} images were saved."
 
-    with shared.held(say, cancel_check) as acquired:
+    with shared.held(say, cancel_check, on_queue_state) as acquired:
         if not acquired:
             return False, "Cancelled."
         shared.cancel_idle_timer()
@@ -719,14 +721,15 @@ def _load_pixels(path: Path) -> dict:
 def upscale(s: dict, source: Path, upscaler: str, out_path: Path, *,
             extra_meta: Optional[dict] = None, write_sidecar: bool = True,
             cancel_check=None, on_progress=None,
-            on_saved: Optional[Callable[[Path], None]] = None) -> tuple[bool, str]:
+            on_saved: Optional[Callable[[Path], None]] = None,
+            on_queue_state: Optional[Callable[[str], None]] = None) -> tuple[bool, str]:
     """Upscale the image *source* with the registered ESRGAN model *upscaler*
     into the PNG *out_path*. Returns ``(ok, message)``. The sidecar is
     *extra_meta* (the source's own) with the new size and an ``upscaled``
     record. Never raises: an unexpected error becomes ``(False, message)``."""
     try:
         return _upscale(s, Path(source), upscaler, Path(out_path), extra_meta or {},
-                        write_sidecar, cancel_check, on_progress, on_saved)
+                        write_sidecar, cancel_check, on_progress, on_saved, on_queue_state)
     except Exception as e:  # noqa: BLE001
         from localm.debuglog import logger
         logger.warning("native upscale failed: %s: %s", type(e).__name__, e)
@@ -734,7 +737,7 @@ def upscale(s: dict, source: Path, upscaler: str, out_path: Path, *,
 
 
 def _upscale(s, source, upscaler, out_path, extra_meta, write_sidecar, cancel_check,
-             on_progress, on_saved) -> tuple[bool, str]:
+             on_progress, on_saved, on_queue_state) -> tuple[bool, str]:
     say = _say(on_progress)
     try:
         model_file = _resolve_file(upscaler, "upscaler")
@@ -750,7 +753,7 @@ def _upscale(s, source, upscaler, out_path, extra_meta, write_sidecar, cancel_ch
     relay = _event_relay(say)
     runner = shared.runner
     started = time.monotonic()
-    with shared.held(say, cancel_check) as acquired:
+    with shared.held(say, cancel_check, on_queue_state) as acquired:
         if not acquired:
             return False, "Cancelled."
         shared.cancel_idle_timer()

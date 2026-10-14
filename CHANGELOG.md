@@ -672,7 +672,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
   cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
   dropped. A model worker that does not exit when stopped is killed.
-- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes.
+- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes. Its entry in the activity list shows the phase "queued" while it waits.
 - **Two command-line hints no longer mislead.** `localm memory list` on an empty store says that
   `localm memory add` does not work in privacy mode, and `localm mcp --help` now names the `rerank`
   tool and each plugin tool.
