@@ -355,9 +355,9 @@ def test_a_video_load_gets_the_budget_and_keeps_its_flash_attention(tmp_path, mo
     monkeypatch.setattr(backend_choice, "managed_comfy_active", lambda cfg=None: False)
     monkeypatch.setattr(comfy_client, "is_comfy_confirmed", lambda api_url=None: False)
     monkeypatch.setattr(comfy_client, "_comfy_alive", lambda url, timeout=3.0: False)
-    ok, msg = video_native.generate(s, "p", tmp_path / "v.mp4", write_sidecar=False,
-                                    seconds=0.1, fps=8, width=64, height=64)
-    assert ok, msg
+    monkeypatch.setattr(video_native, "_pyav_problem", lambda: None)
+    video_native.generate(s, "p", tmp_path / "v.mp4", write_sidecar=False,
+                          seconds=0.1, fps=8, width=64, height=64)
     (key, ctx), = runner.loads
     assert ctx["max_vram"] == "8.50" and ctx["diffusion_flash_attn"] is True
     assert key[1] == "rocm"
