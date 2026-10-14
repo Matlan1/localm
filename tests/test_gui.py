@@ -2461,8 +2461,8 @@ class TestSessionExtras:
         plug_mod = sys.modules["_localm_plugin_coder"]
         monkeypatch.setattr(plug_mod, "_principal_from_request",
                             lambda request: (False, "scoped-principal"))
-        monkeypatch.setattr("localm.inference.http_server.caller_scopes",
-                            lambda request: set())
+        monkeypatch.setattr("localm.inference.http_server.caller_grants",
+                            lambda request, scope: False)
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
             with TestClient(app) as client:
                 sid = client.post("/api/coder/sessions",

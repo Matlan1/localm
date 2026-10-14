@@ -78,9 +78,8 @@ def register(app: FastAPI, ctx) -> None:
         cfg = load_config()
         # Owner-only keys widen a trust boundary, so their values are not exposed
         # to a non-owner config:read caller; the schema hides the control too. The
-        # owner (open mode, so caller_scopes None, or an ADMIN key) sees everything.
-        held = _hs.caller_scopes(request)
-        owner = held is None or scopes.ADMIN in held
+        # operator (open mode, or an ADMIN key) sees everything.
+        owner = _hs.caller_is_operator(request)
         if not owner:
             for k in admin_only_keys():
                 cfg.pop(k, None)
@@ -128,8 +127,7 @@ def register(app: FastAPI, ctx) -> None:
         server-side regardless (see patch_config)."""
         from localm.config import load_config
         from localm.settings_schema import schema_json
-        held = _hs.caller_scopes(request)
-        is_owner = held is None or scopes.ADMIN in held
+        is_owner = _hs.caller_is_operator(request)
         return {"fields": schema_json(values=load_config(), is_owner=is_owner)}
 
     @app.patch("/v1/config", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
@@ -163,13 +161,12 @@ def register(app: FastAPI, ctx) -> None:
         # are sent and updates fetched from), and cors_origins (which browser
         # origins may call the authenticated API; "*" also opts the sensitive
         # unauthenticated GETs in _CROSS_ORIGIN_GET_REFUSED out of their
-        # cross-origin refusal). Requires an ADMIN principal; open mode has
-        # caller_scopes None and passes. Checked on the RAW body before validation,
+        # cross-origin refusal). Requires an ADMIN principal; open mode passes.
+        # Checked on the RAW body before validation,
         # so an unauthorized caller gets a 403 rather than a 400.
         locked = admin_only_keys() & set(body)
         if locked:
-            held = _hs.caller_scopes(request)
-            if held is not None and scopes.ADMIN not in held:
+            if not _hs.caller_is_operator(request):
                 raise HTTPException(
                     403, "Changing " + ", ".join(sorted(locked)) + " requires an "
                     "owner (admin) key: it widens a trust boundary (which host "
@@ -180,11 +177,10 @@ def register(app: FastAPI, ctx) -> None:
         # verbatim. Their own write surfaces (/v1/tts/config,
         # /v1/media/config/<plugin>, /api/plugins/<name>/enable) enforce stronger
         # gates, so this route requires an owner for them too. Checked on the RAW
-        # body before validation; open mode (caller_scopes None) passes.
+        # body before validation; open mode passes.
         managed = engine_managed_keys() & set(body)
         if managed:
-            held = _hs.caller_scopes(request)
-            if held is not None and scopes.ADMIN not in held:
+            if not _hs.caller_is_operator(request):
                 raise HTTPException(
                     403, "Changing " + ", ".join(sorted(managed)) + " requires an "
                     "owner (admin) key: it is plugin state, not a setting. Use the "
@@ -229,8 +225,7 @@ def register(app: FastAPI, ctx) -> None:
             validated = validate_update(body)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
-        held = _hs.caller_scopes(request)
-        is_owner = held is None or scopes.ADMIN in held
+        is_owner = _hs.caller_is_operator(request)
         # Refuse to enable require_auth while no API key exists: the next keyless
         # request would 401 and the GUI sends no Bearer, so the toggle could never
         # be undone from the GUI. Only ENABLING is blocked; turning it off or an
@@ -316,8 +311,7 @@ def register(app: FastAPI, ctx) -> None:
         cfg = load_config()
         plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
         labels = {"image": "Image", "music": "Music", "video": "Video"}
-        held = _hs.caller_scopes(request)
-        is_owner = held is None or scopes.ADMIN in held
+        is_owner = _hs.caller_is_operator(request)
         out = []
         for name in MEDIA_PLUGINS:
             block = plugins.get(name) if isinstance(plugins.get(name), dict) else {}
@@ -339,11 +333,10 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(404, f"unknown media plugin: {name}")
         # Every field media_admin_only_fields() names (launch_cmd, api_url, workdir
         # and the native model file fields) requires an ADMIN principal in protected
-        # mode. Open mode is the trusted local owner, so caller_scopes is None.
+        # mode. Open mode is the trusted local owner and passes.
         owner_only = sorted(k for k in (body or {}) if k in media_admin_only_fields())
         if owner_only:
-            held = _hs.caller_scopes(request)
-            if held is not None and scopes.ADMIN not in held:
+            if not _hs.caller_is_operator(request):
                 raise HTTPException(
                     403, f"Setting {', '.join(owner_only)} requires an admin key (it "
                     "configures a shell command, a network target, a folder a launcher "
@@ -386,8 +379,7 @@ def register(app: FastAPI, ctx) -> None:
         # Same admin_only filter as the GET route above: a non-owner config:write
         # key must not have an admin_only field's resolved value echoed back here
         # either.
-        held = _hs.caller_scopes(request)
-        is_owner = held is None or scopes.ADMIN in held
+        is_owner = _hs.caller_is_operator(request)
         return {"plugin": name, "fields": media_schema_json(name, block, cfg,
                                                               is_owner=is_owner)}
 
@@ -411,8 +403,7 @@ def register(app: FastAPI, ctx) -> None:
         # manager. is_active() touches the disk (it lists the installed-plugins dir
         # and reads the config), like the load_config() above.
         mgr = getattr(request.app.state, "plugin_manager", None)
-        held = _hs.caller_scopes(request)
-        is_owner = held is None or scopes.ADMIN in held
+        is_owner = _hs.caller_is_operator(request)
         return {"plugin": TTS_PLUGIN,
                 "active": bool(mgr and mgr.is_active(TTS_PLUGIN)),
                 "fields": tts_schema_json(block, is_owner=is_owner)}
@@ -440,11 +431,10 @@ def register(app: FastAPI, ctx) -> None:
         # library / wasm_paths become a script URL and a WASM base URL that every
         # browser client loads, so setting them requires an ADMIN principal.
         # Checked on the RAW body before validation. Open mode is the trusted local
-        # owner, so caller_scopes is None and this passes.
+        # owner and passes.
         locked = tts_admin_only_fields() & set(body or {})
         if locked:
-            held = _hs.caller_scopes(request)
-            if held is not None and scopes.ADMIN not in held:
+            if not _hs.caller_is_operator(request):
                 raise HTTPException(
                     403, "Changing " + ", ".join(sorted(locked)) + " requires an "
                     "owner (admin) key: it sets the script the text-to-speech "
@@ -499,8 +489,7 @@ def register(app: FastAPI, ctx) -> None:
             return {"plugins": []}
         cfg = load_config()
         plugins_cfg = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
-        held = _hs.caller_scopes(request)
-        is_owner = held is None or scopes.ADMIN in held
+        is_owner = _hs.caller_is_operator(request)
         out = []
         for sec in manager.get_all_plugin_settings():
             block = plugins_cfg.get(sec["plugin"])
@@ -538,8 +527,7 @@ def register(app: FastAPI, ctx) -> None:
         # key must not set it. Checked on the RAW body before validation.
         locked = plugin_settings_admin_only_fields(fields) & set(body or {})
         if locked:
-            held = _hs.caller_scopes(request)
-            if held is not None and scopes.ADMIN not in held:
+            if not _hs.caller_is_operator(request):
                 raise HTTPException(
                     403, "Changing " + ", ".join(sorted(locked)) + " requires an "
                     "owner (admin) key.")
@@ -567,8 +555,7 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(409, str(e)) from e
         cfg = load_config()
         block = (cfg.get("plugins") or {}).get(name) or {}
-        held = _hs.caller_scopes(request)
-        is_owner = held is None or scopes.ADMIN in held
+        is_owner = _hs.caller_is_operator(request)
         return {"plugin": name,
                 "fields": plugin_settings_schema_json(fields, block, is_owner=is_owner)}
 
