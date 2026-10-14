@@ -81,11 +81,16 @@ def _raise(exc):
     return _f
 
 
+def _config(monkeypatch, cfg):
+    monkeypatch.setattr("localm.config.load_config", lambda: cfg)
+    monkeypatch.setattr("localm.config.load_config_checked", lambda: (cfg, True))
+
+
 @pytest.fixture(autouse=True)
 def _policy_env(monkeypatch):
     """Deterministic policy: mode allow, no domain rules, default SSRF guard."""
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
-    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    _config(monkeypatch, {})
 
 
 def _call(url: str = "http://example.com", max_chars: int = 8000, **kwargs):
@@ -364,8 +369,7 @@ class TestPolicyEnforcement:
         m.assert_not_called()
 
     def test_localhost_reachable_with_net_allow_private(self, monkeypatch):
-        monkeypatch.setattr("localm.config.load_config",
-                            lambda: {"net_allow_private": True})
+        _config(monkeypatch, {"net_allow_private": True})
         with patch("socket.getaddrinfo", return_value=_LOOPBACK_DNS), \
              _session(get=_FakeResponse("<p>local</p>")):
             r = _call("http://127.0.0.1:8642/health")
@@ -373,8 +377,7 @@ class TestPolicyEnforcement:
         assert "local" in r.output
 
     def test_deny_list_blocks_domain(self, monkeypatch):
-        monkeypatch.setattr("localm.config.load_config",
-                            lambda: {"net_deny": ["example.com"]})
+        _config(monkeypatch, {"net_deny": ["example.com"]})
         with patch("requests.get") as m:
             r = _call("http://example.com/page")
         assert not r.ok

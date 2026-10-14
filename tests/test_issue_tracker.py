@@ -7,6 +7,7 @@ import json
 import pytest
 
 from localm import issue_tracker
+from tests._net_config import set_config
 
 
 def _opener(payload, status=200):
@@ -18,14 +19,14 @@ def _opener(payload, status=200):
 
 
 def test_available(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    set_config(monkeypatch, lambda: {})
     assert issue_tracker.available() is False
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     assert issue_tracker.available() is True
 
 
 def test_list_issues(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w", "bugreport_upload_token": "tok"})
     op = _opener({"ok": True, "issues": [
         {"number": 5, "title": "real bug", "state": "open", "labels": ["bug"]}]})
@@ -36,21 +37,21 @@ def test_list_issues(monkeypatch):
 
 
 def test_list_issues_defaults_state_all(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     op = _opener({"issues": []})
     issue_tracker.list_issues("garbage", opener=op)
     assert "state=all" in op.url
 
 
 def test_list_issues_unconfigured_raises(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    set_config(monkeypatch, lambda: {})
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
         issue_tracker.list_issues()
 
 
 def test_get_issue(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     op = _opener({"ok": True, "issue": {"number": 12, "state": "closed", "title": "t"}})
     out = issue_tracker.get_issue(12, opener=op)
     assert out["number"] == 12 and out["state"] == "closed"
@@ -58,7 +59,7 @@ def test_get_issue(monkeypatch):
 
 
 def test_get_issue_bad_number_raises(monkeypatch):
-    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
         issue_tracker.get_issue("xyz")
@@ -83,7 +84,7 @@ def test_net_mode_off_makes_no_request(monkeypatch, how):
         cfg["net_mode"] = "off"
     else:
         monkeypatch.setenv("LOCALM_NET_MODE", "off")
-    monkeypatch.setattr("localm.config.load_config", lambda: dict(cfg))
+    set_config(monkeypatch, lambda: dict(cfg))
     calls = _count_proxy_calls(monkeypatch)
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError) as e1:
@@ -98,7 +99,7 @@ def test_net_mode_off_makes_no_request(monkeypatch, how):
 @pytest.mark.parametrize("mode", ["ask", "allow"])
 def test_net_mode_other_than_off_still_requests(monkeypatch, mode):
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    monkeypatch.setattr("localm.config.load_config", lambda: {
+    set_config(monkeypatch, lambda: {
         "bugreport_upload_url": "https://w", "net_mode": mode})
     calls = _count_proxy_calls(monkeypatch)
     issue_tracker.list_issues()

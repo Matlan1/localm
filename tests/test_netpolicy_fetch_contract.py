@@ -14,12 +14,13 @@ import requests
 import localm.netpolicy as netpolicy
 from localm.netpin import _CONNECT_BUDGET_FACTOR, ReadBudgetExceeded
 from localm.netpolicy import NetworkPolicyError, safe_fetch, safe_fetch_bytes
+from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)
 def _public_allow_mode(monkeypatch):
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    monkeypatch.setattr("localm.config.load_config", lambda: {"net_mode": "allow"})
+    set_config(monkeypatch, lambda: {"net_mode": "allow"})
     monkeypatch.setattr(
         "socket.getaddrinfo",
         lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
@@ -78,7 +79,7 @@ def _ok(url, kw):
 
 class TestPolicyCheckArguments:
     def test_off_mode_refuses_by_default_even_when_downloads_are_allowed(self, monkeypatch):
-        monkeypatch.setattr("localm.config.load_config", lambda: {
+        set_config(monkeypatch, lambda: {
             "net_mode": "off", "net_allow_model_downloads": True})
         _transport(monkeypatch, _ok)
         with pytest.raises(NetworkPolicyError):
@@ -96,7 +97,7 @@ class TestPolicyCheckArguments:
                         {"allow_when_off": False}]
 
     def test_allow_when_off_lifts_the_off_floor_for_a_download(self, monkeypatch):
-        monkeypatch.setattr("localm.config.load_config", lambda: {
+        set_config(monkeypatch, lambda: {
             "net_mode": "off", "net_allow_model_downloads": True})
         _transport(monkeypatch, _ok)
         assert safe_fetch_bytes("https://example.com/", allow_when_off=True)[2] == b"ok"
@@ -581,7 +582,7 @@ class TestCheckUrlMessages:
 
         def boom():
             raise OSError("disk gone")
-        monkeypatch.setattr("localm.config.load_config", boom)
+        monkeypatch.setattr("localm.config.load_config_checked", boom)
         records = []
 
         class _Grab(logging.Handler):
@@ -604,7 +605,7 @@ class TestCheckUrlMessages:
             "net_allow from different reads"]
 
     def test_the_off_refusal_names_the_remedy_and_is_marked_off(self, monkeypatch):
-        monkeypatch.setattr("localm.config.load_config", lambda: {"net_mode": "off"})
+        set_config(monkeypatch, lambda: {"net_mode": "off"})
         with pytest.raises(NetworkPolicyError) as ei:
             netpolicy.check_url("https://example.com/")
         assert str(ei.value) == ("Network access is disabled (net_mode=off). Enable it "
@@ -614,7 +615,7 @@ class TestCheckUrlMessages:
     @pytest.mark.parametrize("env", ["off", "OFF", " Off "])
     def test_the_environment_mode_overrides_the_config_mode(self, monkeypatch, env):
         monkeypatch.setenv("LOCALM_NET_MODE", env)
-        monkeypatch.setattr("localm.config.load_config", lambda: {"net_mode": "allow"})
+        set_config(monkeypatch, lambda: {"net_mode": "allow"})
         with pytest.raises(NetworkPolicyError, match="net_mode=off"):
             netpolicy.check_url("https://example.com/")
 
@@ -622,12 +623,12 @@ class TestCheckUrlMessages:
         for cfg, flag in (({"net_mode": "off", "net_allow_model_downloads": True}, False),
                           ({"net_mode": "off", "net_allow_model_downloads": False}, True),
                           ({"net_mode": "off"}, True)):
-            monkeypatch.setattr("localm.config.load_config", lambda cfg=cfg: cfg)
+            set_config(monkeypatch, lambda cfg=cfg: cfg)
             with pytest.raises(NetworkPolicyError, match="net_mode=off"):
                 netpolicy.check_url("https://example.com/", allow_when_off=flag)
 
     def test_the_allow_list_refusal_lists_the_allowed_hosts_and_the_new_one(self, monkeypatch):
-        monkeypatch.setattr("localm.config.load_config", lambda: {
+        set_config(monkeypatch, lambda: {
             "net_mode": "allow", "net_allow": ["a.example", "b.example"]})
         with pytest.raises(NetworkPolicyError) as ei:
             netpolicy.check_url("https://c.example/")
