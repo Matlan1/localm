@@ -64,10 +64,25 @@ def _marker_names_extra(marker: str, extra: str) -> bool:
     return bool(re.search(r"extra\s*==\s*['\"]%s['\"]" % re.escape(extra), marker))
 
 
+#: The shape of an extra name (PEP 685): letters and digits, with single
+#: ``-``, ``_`` or ``.`` between them.
+_EXTRA_NAME_RE = re.compile(r"[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*")
+
+
+def is_valid_extra_name(extra: object) -> bool:
+    """Whether *extra* has the shape of a pip extra name (``_EXTRA_NAME_RE``)."""
+    return isinstance(extra, str) and _EXTRA_NAME_RE.fullmatch(extra) is not None
+
+
 def extra_requirements(extra: str) -> list:
     """Concrete requirement strings for one pip extra, read from the installed
     ``localm`` metadata. Falls back to the ``localm[extra]`` specifier when the
-    metadata cannot be read, so the install is still attempted."""
+    metadata cannot be read, so the install is still attempted.
+
+    Raises ValueError when *extra* is not an extra name
+    (:func:`is_valid_extra_name`), so no other text reaches a requirement."""
+    if not is_valid_extra_name(extra):
+        raise ValueError(f"not a pip extra name: {extra!r}")
     import importlib.metadata as md
     try:
         reqs = md.metadata(DIST_NAME).get_all("Requires-Dist") or []

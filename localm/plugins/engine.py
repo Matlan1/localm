@@ -206,6 +206,11 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False,
         if not (isinstance(value, list) and all(isinstance(t, str) for t in value)):
             raise ValueError(f"{manifest}: [plugin] {key} must be a list of strings")
         str_lists[key] = list(value)
+    from localm.plugins.deps import is_valid_extra_name
+    bad = [e for e in str_lists["requires_extras"] if not is_valid_extra_name(e)]
+    if bad:
+        raise ValueError(f"{manifest}: [plugin] requires_extras has an entry that is not "
+                         f"a pip extra name: {bad[0]!r}")
 
     # [tools] exports must be a list of strings.
     _tools = data.get("tools", {})
@@ -518,6 +523,30 @@ class PluginHost:
         raise NotImplementedError(
             "host-side scope checks are not implemented; scopes are enforced "
             "per-request on the routes mounted via mount_router()")
+
+    def caller_is_owner(self, request: Any) -> bool:
+        """True when the caller of *request* is the owner: open mode (no key
+        configured anywhere) or an ADMIN/owner key or session. False for a
+        scoped key and for a request with no valid key while one is
+        configured."""
+        from localm.inference.http_server import caller_is_operator
+        return caller_is_operator(request)
+
+    def caller_principal(self, request: Any) -> Optional[str]:
+        """A stable, opaque identity for the key behind *request* (the same
+        SHA-256 the keystore stores, never the key itself), identical for the
+        bearer header and the session cookie. None in open mode or when no
+        valid key is presented."""
+        from localm.inference.http_server import principal_id
+        return principal_id(request)
+
+    def caller_owns(self, request: Any, owner: Optional[str]) -> bool:
+        """Whether the caller of *request* may act on a resource recorded as
+        created by *owner* (a value :meth:`caller_principal` returned when it
+        was created). True when *owner* is None, for an ADMIN/owner key, and
+        when the caller's principal equals *owner*."""
+        from localm.inference.http_server import job_owner_ok
+        return job_owner_ok(request, owner)
 
     def engine(self) -> Any:
         return self._manager.inference_engine

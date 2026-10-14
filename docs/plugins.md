@@ -171,6 +171,9 @@ that has to happen regardless of install path.
 | `register_tab(surface)` | Register a GUI tab in the SPA. |
 | `plugin_config(name=None)` | Read this plugin's own config block (`config["plugins"][<own name>]`). Passing another plugin's name is refused: it is confined to the caller's own block instead, and the attempt is logged. |
 | `save_plugin_config(name=None, cfg=None)` | Write this plugin's own config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). Passing another plugin's name is confined and logged the same way as `plugin_config`. |
+| `caller_is_owner(request)` | Inside a route: `True` when the caller is the owner (open mode, or the owner key or session). |
+| `caller_principal(request)` | Inside a route: an opaque, stable id for the caller's key (never the key itself), or `None` in open mode. Store it with anything the caller creates. |
+| `caller_owns(request, owner)` | Inside a route: whether the caller may act on something created by `owner` (a value `caller_principal` returned). `True` for a `None` owner and for the owner. |
 | `engine()` | Handle to the inference engine. |
 | `driving_engine(engine=None)` | Context manager: wrap around a real generation call to pin the engine busy and reset its idle-unload clock for the duration. Never wrap a bare `.loaded`/name check with it. Raises FastAPI's `HTTPException` (503) without running the block when the engine is being unloaded; retry later. |
 | `on_startup(callback)` | Queue work to run once the server's event loop is up (register() runs before uvicorn creates it on a normal start). |
@@ -434,7 +437,8 @@ imperfect is still choosable.
 
 - **`requires_extras`** - pip extras carrying heavy Python deps. Declaring
   `requires_extras = ["voice"]` means the plugin needs `pip install "localm[voice]"`.
-  By default localm installs the extra for you on the host when the plugin is
+  Each entry must be an extra name (letters and digits, with single `-`, `_` or
+  `.` between them); a manifest with any other entry is refused. By default localm installs the extra for you on the host when the plugin is
   installed or enabled (gated by the `auto_install_plugin_deps` setting, and only
   ever on the local host - never triggered by a remote client). With the setting
   off, or on a remote client, the two stay separate steps: install the plugin,

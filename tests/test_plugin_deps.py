@@ -52,6 +52,18 @@ def test_extra_requirements_unknown_extra_falls_back(monkeypatch):
     assert deps.extra_requirements("nope") == ["localm[nope]"]
 
 
+@pytest.mark.parametrize("extra", ["x]@https://example.invalid/p.whl#", "a b", "voice;x", ""])
+def test_extra_requirements_refuses_text_that_is_not_an_extra_name(monkeypatch, extra):
+    import importlib.metadata as md
+
+    def boom(name):
+        raise md.PackageNotFoundError(name)
+
+    monkeypatch.setattr(md, "metadata", boom)
+    with pytest.raises(ValueError, match="not a pip extra name"):
+        deps.extra_requirements(extra)
+
+
 def test_extra_requirements_metadata_unreadable_falls_back(monkeypatch):
     import importlib.metadata as md
 

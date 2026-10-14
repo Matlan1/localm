@@ -12,6 +12,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Plugins can tell who is calling a route.** The plugin host offers `caller_is_owner(request)`,
+  `caller_principal(request)` and `caller_owns(request, owner)`, so a third-party plugin can
+  keep a resource to the key that created it, or an action to the owner, without reaching
+  into localm's server internals.
 - **Sentence-transformers folders embed the way their model defines.** A Hugging Face folder
   with a `modules.json` is registered as an embedding model, and its Pooling (mean, CLS, max,
   last token and the other modes), Dense and Normalize modules are applied, so a CLS-pooled
@@ -2200,6 +2204,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The private-address guard refuses the IPv6 site-local range `fec0::/10`.**
 - **Web search reads at most 4 MB of a search service's answer.** A larger answer is refused instead
   of being read whole into memory.
+- **A plugin's `requires_extras` can only name pip extras.** An entry that is not an extra name
+  (for example one carrying a URL or an environment marker) used to reach the dependency
+  installer as part of a requirement string; such a plugin is now refused when it is read.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model
