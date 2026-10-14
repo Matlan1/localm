@@ -174,20 +174,21 @@ def build(engines: EngineCache) -> dict[str, dict]:
             texts = [texts]
         if not texts:
             return _text_result("'texts' is required (string or list)", is_error=True)
-        # A fresh embedder load can print to stdout too, like chat() above.
-        # An engine evicted between the fetch and the pin is fetched once more.
-        for attempt in (0, 1):
+        def _embed_once():
+            # A fresh embedder load can print to stdout too, like chat() above.
             with _quiet_stdout():
                 engine = engines.get(args.get("model"))
+            with engines.serving(engine):
+                return engine.embed(texts)
+
+        try:
             try:
-                with engines.serving(engine):
-                    vecs = engine.embed(texts)
-                break
+                vecs = _embed_once()
             except ModelEvictedError:
-                if attempt:
-                    raise
-            except NotImplementedError as e:
-                return _text_result(str(e), is_error=True)
+                # Evicted between the fetch and the pin: fetched once more.
+                vecs = _embed_once()
+        except NotImplementedError as e:
+            return _text_result(str(e), is_error=True)
         return _text_result(json.dumps(vecs))
 
     def rerank(args: dict) -> dict:
