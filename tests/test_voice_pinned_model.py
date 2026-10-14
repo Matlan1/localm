@@ -26,7 +26,6 @@ OLD_COMMIT = "1" * 40
 def _home(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    import localm.config as cfg
     set_config(monkeypatch, lambda: {"voice_stt_model": "base", "net_mode": "allow"})
 
 
@@ -105,7 +104,6 @@ class TestPrefetch:
         assert voice.stt_model_cached() == (False, "base")
 
     def test_an_unpinned_model_is_fetched_without_a_revision(self, hub, monkeypatch):
-        import localm.config as cfg
         set_config(monkeypatch, lambda: {"voice_stt_model": "Systran/faster-whisper-large-v3",
                                      "net_mode": "allow"})
 

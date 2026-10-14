@@ -62,7 +62,6 @@ def _voice_cfg(monkeypatch, tmp_path, net_mode: str, model: str = "base"):
     """Isolated home + a controlled config for the pure voice-policy tests."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-    import localm.config as _cfg
     set_config(monkeypatch, lambda: {"voice_stt_model": model, "net_mode": net_mode})
 
 
@@ -142,7 +141,6 @@ class TestPrefetchPolicy:
         as its sibling above."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
-        import localm.config as _cfg
         set_config(monkeypatch, lambda: {"voice_stt_model": "base", "net_mode": "off",
                      "net_allow_model_downloads": True})
         calls = _snapshot_spy(monkeypatch, create=True)

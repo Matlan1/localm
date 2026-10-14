@@ -90,7 +90,6 @@ def test_stt_model_cached_resolves_hub_path_without_import(monkeypatch, tmp_path
     # snapshot file the resolver expects inside localm's OWN cache dir; it must
     # report cached=True without importing huggingface_hub, and False when absent.
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
-    import localm.config as _cfg
     set_config(monkeypatch, lambda: {"voice_stt_model": "base"})
 
     cached, name = voice.stt_model_cached()

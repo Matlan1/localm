@@ -68,7 +68,6 @@ def test_ssrf_resolver_proceeds_when_downloads_allowed_despite_off(monkeypatch):
     discipline), so this patches config.load_config, not the helper -
     _ssrf_resolve_final_url's own allow_off is computed via the helper
     (proving that path too), but check_url decides independently."""
-    import localm.config as _cfg
     import localm.netpolicy as netpolicy
     from localm.model_manager.pull import _ssrf_resolve_final_url
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
