@@ -28,8 +28,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `*ForSequenceClassification` with a single output (for example bge-reranker-v2-m3) is
   registered as a reranker and scores `POST /v1/rerank`, `localm rerank` and Knowledge
   reranking with the head's raw logit, on the CPU or the GPU like the GGUF rerankers. A
-  checkpoint saved without its classification head is refused, and a classifier with several
-  labels is not offered as a reranker.
+  checkpoint saved without its classification head is refused, and neither a classifier with
+  several labels nor a single-score model that ships a chat template (a reward model) is
+  offered as a reranker. A reranker whose worker stopped waits for a model load in progress
+  before it starts again, and one that cannot start again is retried after a minute instead of
+  on every query.
 - **Import models from StabilityMatrix, and type them by content.** Import from ComfyUI also takes a StabilityMatrix install, data or models folder. Every model file found is filed as a diffusion model, text encoder, VAE or LoRA by what is inside it, not only by the folder it sits in, and ComfyUI's `diffusion_models` and `clip_vision` folders and StabilityMatrix's `StableDiffusion`, `DiffusionModels`, `TextEncoders`, `ClipVision`, `Lora` and `VAE` folders are recognised in any letter case.
 - **Live preview while a native image or video renders.** The Images and Video pages show a
   small picture of the image taking shape under the job log, refreshed every few sampling
@@ -53,7 +56,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `config.json` declares `quant_method: compressed-tensors` is expanded to full precision
   when it loads, the way FP8 checkpoints are, and the load output says so. The `hf` and `gpu`
   extras now include the compressed-tensors package, and a torch built without
-  `torch.distributed` (the ROCm build for Windows) can import it.
+  `torch.distributed` (the ROCm build for Windows) can import it. A checkpoint whose expanded
+  weights do not fit the free memory is refused with the size it needs, as an FP8 one is.
 - **Your own image and video models in the native backend.** The built-in stable-diffusion.cpp
   backend now runs a diffusion model you pick, not only the ones localm downloads for you: a
   FLUX.1, Chroma, SD3, SDXL, Qwen-Image, Z-Image or Wan model file is recognised from its
@@ -1367,6 +1371,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   saving the session's lessons failed.** A failure while storing a finished
   session's episode used to skip closing its audit log, which on Windows left the
   file locked until the server stopped.
+- **A stopped embedding or reranker worker waits for a model load before it starts again.**
+  When the GGUF embedding or reranker worker had stopped, the next Knowledge query or
+  embeddings call started it again at once, even while a chat model was loading, so both
+  could plan for the same free VRAM. It now waits for that load to finish first.
 - **Chatting with a HuggingFace model that has no chat template now says so
   instead of crashing the model process.** Such a model (typically a base,
   non-chat checkpoint) used to load fine, then kill its worker on the first chat
@@ -1374,7 +1382,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a clear error (HTTP 400, or a message in the CLI) telling you to use an
   instruct or chat variant, and the model stays loaded. When a model process does
   stop on an unexpected error, the message now includes that error instead of
-  "no native fault trace was captured".
+  "no native fault trace was captured". A vision model whose chat template is kept
+  only with its tokenizer renders image turns with that template, and an image turn
+  the template cannot lay out is refused with a message instead of stopping the
+  model.
 - **Pulling a model again over a file it already names now updates that entry's
   source and checksum.** After `localm pull civitai:... --redownload` replaced a
   file with different bytes, or a pull recreated a file that had been deleted by
