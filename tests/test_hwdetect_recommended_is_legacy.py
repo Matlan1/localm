@@ -19,7 +19,15 @@ import ast
 import pathlib
 import sys
 
+import pytest
+
 from localm import hwdetect
+
+
+@pytest.fixture(autouse=True)
+def _x64_process(monkeypatch):
+    """Every test here runs as an x64 process."""
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
 
 
 # --------------------------------------------------------------------------- #

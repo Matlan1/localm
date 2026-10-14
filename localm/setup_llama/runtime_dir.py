@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from localm import config
+from localm import config, hwdetect
 from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.library_files import _BLAS_LIBRARY_DIRS
@@ -27,6 +27,12 @@ def _platform_key() -> str:
     if sys.platform == "darwin":
         return "darwin"
     return "linux"
+
+
+def _machine_arch() -> str:
+    """This process's CPU architecture as llama.cpp asset names spell it; see
+    ``hwdetect.machine_arch``."""
+    return hwdetect.machine_arch()
 
 
 def _lib_name() -> str:

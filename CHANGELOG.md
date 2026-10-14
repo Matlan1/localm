@@ -625,6 +625,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   until your next message. It now reloads on every way a job can end, and a job that finishes
   last follows its own "reload the chat model afterwards" setting instead of replaying an
   earlier job's reload.
+- **setup-llama fetches the build for your CPU architecture.** An Intel Mac now gets the macOS
+  x64 build instead of the Apple Silicon one, ARM64 and s390x Linux get their own builds
+  instead of x64 ones, ARM64 Windows gets its ARM64 builds, and an x64 Windows PC with a
+  Blackwell-class NVIDIA GPU gets the x64 CUDA build and runtime instead of the ARM64 ones. A
+  backend with no build for your machine is refused before anything is changed, naming the
+  backends that have one. The installers no longer recommend it, and `setup.sh` and the
+  windowed installer no longer list it.
+- **setup.sh on macOS and with `--yes`.** The macOS backend menu lists only `cpu`, `metal` on
+  Apple Silicon and your own build, and macOS no longer gets a Linux application-menu entry
+  or a launcher warning. `--yes` no longer stops at the plugin picker or the CUDA download
+  question, and the hints for provisioning later name the backends your machine has,
+  including `metal`.
 - **A re-sync removes documents indexed from credential folders.** A collection that already
   held files from a folder such as `~/.ssh` kept serving them; `localm rag resync` and the
   scheduled re-sync now drop those entries from the index.

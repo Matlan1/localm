@@ -549,6 +549,8 @@ IS_APPLE_SILICON=0
 if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "arm64" ]; then
   IS_APPLE_SILICON=1
 fi
+IS_MACOS=0
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then IS_MACOS=1; fi
 # NOT presented as "Detected acceleration: $GPU" here on purpose: this crude
 # pre-venv guess and the authoritative "Recommended for your hardware: $REC"
 # line further down (sourced from `python -m localm.hwdetect`, once the venv
@@ -856,22 +858,47 @@ uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 # Windows (self-contained) or vulkan on Linux (sycl there needs a separate
 # oneAPI install), Apple Silicon -> metal, no GPU -> cpu.
 # setup-llama fetches the matching upstream build, so a tester never compiles by hand.
-REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}')"
+REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}' || true)"
 case "$REC" in
   vulkan|cuda|hip|sycl|cpu|metal|amd-rocm) ;;   # a known backend from the policy
   *) case "$GPU" in                        # fallback if the probe failed
        cpu)   REC=cpu ;;
        metal) REC=metal ;;   # see test_probe_failed_fallback_metal_gpu_stays_metal
-       *)     REC=vulkan ;;
+       *)     if [ "${IS_MACOS:-0}" = 1 ]; then REC=cpu; else REC=vulkan; fi ;;
      esac ;;
 esac
 # The prompt above promises "n = CPU only", so honour it: hwdetect answers what
 # this HARDWARE could use, which is a different question from what the user just
 # said they WANT. Without this the next screen recommends a GPU backend and makes
 # it the default, so pressing Enter downloads and load-tests a ~195 MB GPU
-# runtime the user declined one question earlier. The menu still lists every
-# backend, so this changes the DEFAULT, never the available choice.
+# runtime the user declined one question earlier. The menu still lists the
+# same backends, so this changes the DEFAULT, never the available choice.
 if [ "$GPU" = cpu ]; then REC=cpu; fi
+# The backends setup-llama has a build of for this machine's OS and CPU
+# architecture; the menu and the "provision later" hints list only these. The
+# fallback list is used only when the probe does not answer.
+AVAIL="$(.venv/bin/python -m localm.hwdetect backends 2>/dev/null || true)"
+if [ -z "$AVAIL" ]; then
+  if [ "$IS_APPLE_SILICON" = 1 ]; then AVAIL="cpu metal"
+  elif [ "$IS_MACOS" = 1 ]; then AVAIL="cpu"
+  else
+    case "$(uname -m 2>/dev/null || true)" in
+      x86_64|amd64)  AVAIL="vulkan cuda hip sycl cpu" ;;
+      aarch64|arm64) AVAIL="vulkan cpu" ;;
+      s390x)         AVAIL="cpu" ;;
+      *)             AVAIL="none" ;;
+    esac
+  fi
+fi
+offered() { case " $AVAIL " in *" $1 "*) return 0 ;; esac; return 1; }
+SL_BACKENDS=""
+for _b in vulkan cuda hip sycl metal cpu; do
+  if offered "$_b"; then SL_BACKENDS="${SL_BACKENDS:+$SL_BACKENDS|}$_b"; fi
+done
+case "$SL_BACKENDS" in
+  *"|"*) SL_BACKENDS="<$SL_BACKENDS>" ;;
+  "")    SL_BACKENDS="<backend>" ;;
+esac
 # [1] is a shortcut for whichever backend the policy recommended, so it is ALWAYS
 # the same choice as one of the numbered entries below (vulkan on most GPUs, cpu
 # with none, metal on Apple Silicon). Listing it twice with no relation shown
@@ -890,18 +917,36 @@ esac
 say ""
 say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
 say "    [1] $REC  (recommended)"
-say "    [2] vulkan   - any GPU, no vendor toolkit$_m2"
-say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)$_m3"
-say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"
-say "    [5] sycl     - Intel GPU (incl. integrated), often faster than Vulkan (needs a system oneAPI install)$_m5"
-say "    [6] cpu      - no GPU$_m6"
-say "    [7] I will build / provide my own (skip the download)"
-# See test_menu_shows_metal_line_only_on_apple_silicon.
-_pick_range="1-7"
-if [ "$IS_APPLE_SILICON" = 1 ]; then
-  say "    [8] metal    - Apple Silicon, native GPU acceleration$_m8"
-  _pick_range="1-8"
+# Numbers stay fixed; an entry is listed only when offered. See
+# test_macos_menu_lists_only_backends_with_a_macos_build.
+_picks="1"
+if offered vulkan; then
+  say "    [2] vulkan   - any GPU, no vendor toolkit$_m2"; _picks="$_picks 2"
 fi
+if offered cuda; then
+  say "    [3] cuda     - NVIDIA, peak performance (fetches the CUDA runtime for you)$_m3"; _picks="$_picks 3"
+fi
+if offered hip; then
+  say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"; _picks="$_picks 4"
+fi
+if offered sycl; then
+  say "    [5] sycl     - Intel GPU (incl. integrated), often faster than Vulkan (needs a system oneAPI install)$_m5"; _picks="$_picks 5"
+fi
+if offered cpu; then
+  say "    [6] cpu      - no GPU$_m6"; _picks="$_picks 6"
+fi
+say "    [7] I will build / provide my own (skip the download)"; _picks="$_picks 7"
+# See test_menu_shows_metal_line_only_on_apple_silicon.
+if offered metal; then
+  say "    [8] metal    - Apple Silicon, native GPU acceleration$_m8"; _picks="$_picks 8"
+fi
+case "$_picks" in
+  "1 2 3 4 5 6 7")   _pick_range="1-7" ;;
+  "1 2 3 4 5 6 7 8") _pick_range="1-8" ;;
+  *) _pick_range=""
+     for _p in $_picks; do _pick_range="${_pick_range:+$_pick_range, }$_p"; done
+     _pick_range="$(printf '%s' "$_pick_range" | sed 's/, \([0-9]*\)$/ or \1/')" ;;
+esac
 say "    (your pick is load-tested; on failure you can retry after fixing the"
 say "     cause, or continue setup and provision a runtime later - never a"
 say "     silent swap to a different backend)"
@@ -910,11 +955,19 @@ case "$bpick" in
   2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=sycl ;;
   6) BACKEND=cpu ;;    7) BACKEND=own ;;  8) BACKEND=metal ;; *) BACKEND="$REC" ;;
 esac
+# A number the menu did not list on this machine falls back to the recommendation.
+case "$bpick" in
+  [2-8]) case " $_picks " in
+           *" $bpick "*) ;;
+           *) say "  [$bpick] is not offered on this machine; using $REC."
+              BACKEND="$REC" ;;
+         esac ;;
+esac
 if [ "$LOCALM_BIN_OK" != 1 ]; then
   # .venv/bin/localm never got installed (warned above) - it is what setup-llama
   # runs through, so calling it here would just fail again, less clearly.
   say "  Skipped - .venv/bin/localm is missing (see the warning above)."
-  say "  Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
+  say "  Provision later:  .venv/bin/localm setup-llama --backend $SL_BACKENDS"
 elif [ "$BACKEND" = own ]; then
   buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
   if [ -n "$buildpath" ]; then
@@ -922,10 +975,13 @@ elif [ "$BACKEND" = own ]; then
       ".venv/bin/localm setup-llama --from <dir>" \
       "Provisioning the native llama.cpp runtime with --from failed during setup."
   else
-    say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
+    say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend $SL_BACKENDS"
   fi
 else
-  .venv/bin/localm setup-llama --backend "$BACKEND" $SL_FORCE || handle_provision_failure \
+  SL_YES=""
+  if [ "$YES" = 1 ]; then SL_YES="--yes"; fi
+  # shellcheck disable=SC2086
+  .venv/bin/localm setup-llama --backend "$BACKEND" $SL_FORCE $SL_YES || handle_provision_failure \
     ".venv/bin/localm setup-llama --backend $BACKEND --force" \
     "Provisioning the native llama.cpp runtime (--backend $BACKEND) failed during setup."
 fi
@@ -981,7 +1037,10 @@ step_begin launcher
 # back to the venv python. `localm gui` always works; this never blocks install.
 say ""
 LAUNCHER_FILE=""
-if [ "$LOCALM_BIN_OK" = 1 ]; then
+if [ "$IS_MACOS" = 1 ]; then
+  say "  macOS: no app launcher or menu entry is created; start LocaLM with"
+  say "  ./localm-launcher.sh or ./localm.sh gui."
+elif [ "$LOCALM_BIN_OK" = 1 ]; then
   say "  Building the LocaLM app launcher ..."
   .venv/bin/localm make-launcher --force \
     || say "  [!] Could not build the LocaLM launcher - 'localm gui' still works."
@@ -995,8 +1054,12 @@ step_done launcher
 
 # ---- application menu entry --------------------------------------------------
 SHORTCUT=""
-mk="$(ask "  Create an application menu entry? [Y/n]: " Y)"
+mk=skip
+if [ "$IS_MACOS" != 1 ]; then
+  mk="$(ask "  Create an application menu entry? [Y/n]: " Y)"
+fi
 case "$mk" in
+  skip) ;;
   [Nn]*) say "  No desktop entry created." ;;
   *)
     apps="$HOME/.local/share/applications"
@@ -1062,7 +1125,10 @@ say ""
 # `localm plugin setup` prints its own header (it states chat is always on), so
 # this is just a section divider - do not repeat that line here.
 say "  Optional features (plugins):"
-if [ "$LOCALM_BIN_OK" = 1 ]; then
+if [ "$LOCALM_BIN_OK" = 1 ] && [ "$YES" = 1 ]; then
+  # --yes takes the picker's own default, which is to install none.
+  say "  Skipped (--yes) - choose later with:  .venv/bin/localm plugin setup"
+elif [ "$LOCALM_BIN_OK" = 1 ]; then
   .venv/bin/localm plugin setup \
     || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
 else
@@ -1096,7 +1162,7 @@ if [ "$LOCALM_BIN_OK" = 1 ]; then
     say ""
     say "  [!] No model can load yet - the native llama.cpp runtime did not finish"
     say "      provisioning. Finish it any time with:"
-    say "        .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|sycl|cpu>"
+    say "        .venv/bin/localm setup-llama --backend $SL_BACKENDS"
   fi
 else
   say "  Done, with one open issue: .venv/bin/localm never got installed (see the"

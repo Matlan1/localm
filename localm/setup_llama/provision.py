@@ -58,11 +58,12 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         tag = tag or _tag_for(chosen)
         build, cudart = _sl._resolve_cuda_pair(tag, cuda_line)
         if build is None:
-            # Asset listing unavailable: fall back to the templated build URL and
-            # warn that the runtime bundle could not be resolved automatically.
+            # No build in the listing: resolve the build alone (raises when this
+            # release has none for this machine) and warn that the runtime
+            # bundle could not be resolved.
+            url, fallback_sha, _t = _sl._resolve_backend_asset("cuda", cuda_line, tag=tag)
             console.print("[yellow]Could not resolve CUDA assets; fetching build only.[/yellow]\n"
                           "[yellow]If it fails to load, use --backend vulkan or install CUDA Toolkit.[/yellow]")
-            url, fallback_sha, _t = _sl._resolve_backend_asset("cuda", cuda_line, tag=tag)
             _sl._fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
             return tag
 

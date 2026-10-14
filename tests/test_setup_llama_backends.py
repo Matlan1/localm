@@ -16,6 +16,12 @@ from localm import hwdetect, setup_llama as sl
 from tests._fake_https import patch_https_transport
 
 
+@pytest.fixture(autouse=True)
+def _x64_process(monkeypatch):
+    """Every test here runs as an x64 process unless it says otherwise."""
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
+
+
 # --------------------------- hwdetect ------------------------------------- #
 
 def test_detect_returns_valid_shape():
@@ -31,8 +37,9 @@ def test_recommended_install_backend_policy(monkeypatch):
     # test-running machine's own ROCm install. The with-a-detected-toolkit
     # escalation to hip has its own tests.
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
-    def rec(vendors, names, platform="win32"):
+    def rec(vendors, names, platform="win32", arch="x64"):
         monkeypatch.setattr(hwdetect.sys, "platform", platform)
+        monkeypatch.setattr(hwdetect, "machine_arch", lambda: arch)
         return hwdetect.recommended_install_backend(
             hwdetect.Detection(vendors=vendors, gpu_names=names))
     # AMD on Windows: RX 6000 / unknown keep the self-contained gfx103X ROCm build...
@@ -55,7 +62,7 @@ def test_recommended_install_backend_policy(monkeypatch):
     assert rec(["intel"], "intel arc a770") == "sycl"
     assert rec(["intel"], "intel arc a770", platform="linux") == "vulkan"
     assert rec([], "") == "cpu"
-    assert rec(["apple"], "", platform="darwin") == "metal"
+    assert rec(["apple"], "", platform="darwin", arch="arm64") == "metal"
 
 
 def test_hwdetect_cli_prints_vendor_and_backend(capsys):
@@ -156,10 +163,15 @@ def test_every_asset_fragment_resolves_against_the_real_latest_release():
             if (plat, backend) in excluded:
                 continue
             # cuda on win32 is a dict keyed by cuda_line, not a flat list.
-            groups = matchers.values() if isinstance(matchers, dict) else [matchers]
-            for group in groups:
-                if not any(m in n for m in group for n in names):
-                    unmatched.append((plat, backend, group))
+            lines = matchers.items() if isinstance(matchers, dict) else [(None, matchers)]
+            for line, group in lines:
+                for arch in hwdetect.PREBUILT_ARCHES[plat][backend]:
+                    if (plat, backend, line, arch) == ("win32", "cuda", "cuda-12", "arm64"):
+                        continue  # upstream builds Windows ARM64 CUDA for the 13.x line only
+                    frags = [m.format(arch=arch) for m in group]
+                    if not any(f in n and sl.assets._asset_arch_ok(n, arch)
+                               for f in frags for n in names):
+                        unmatched.append((plat, backend, line, arch, group))
 
     assert not unmatched, (
         f"these _ASSET_MATCH fragments match NOTHING in the real {tag!r} "
@@ -377,13 +389,16 @@ def test_resolve_backend_asset_fallback_uses_pinned_sha256(monkeypatch):
     assert sha, "the pin must ship a checksum, or the offline path is unverified"
 
 
-@pytest.mark.parametrize("plat, backend", [
-    ("win32", "cpu"), ("win32", "vulkan"), ("win32", "sycl"), ("win32", "hip"),
-    ("linux", "cpu"), ("linux", "vulkan"), ("linux", "sycl"), ("linux", "hip"),
-    ("darwin", "cpu"), ("darwin", "metal"),
+@pytest.mark.parametrize("plat, backend, arch", [
+    (plat, backend, arch)
+    for plat, backends in hwdetect.PREBUILT_ARCHES.items()
+    for backend, arches in backends.items()
+    if backend in sl._ASSET_MATCH[plat] and (plat, backend) not in (("linux", "cuda"),
+                                                                   ("win32", "cuda"))
+    for arch in arches
 ])
 def test_offline_resolution_names_a_real_pinned_asset_for_every_backend(
-        monkeypatch, plat, backend):
+        monkeypatch, plat, backend, arch):
     """WITH THE LISTING UNAVAILABLE, every backend must still resolve to a
     filename the pinned table actually has - i.e. to a real asset of the pinned
     release, with a checksum.
@@ -393,8 +408,10 @@ def test_offline_resolution_names_a_real_pinned_asset_for_every_backend(
     representative, since a rename hits exactly one cell of that grid.
 
     linux/cuda is excluded: upstream publishes no bare Linux CUDA asset, so it
-    resolves against a third party entirely."""
+    resolves against a third party entirely; win32/cuda depends on the CUDA
+    line and is driven separately."""
     monkeypatch.setattr(sl, "_platform_key", lambda: plat)
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: arch)
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
     url, sha, tag = sl._resolve_backend_asset(backend)
@@ -405,6 +422,8 @@ def test_offline_resolution_names_a_real_pinned_asset_for_every_backend(
         f"{plat}/{backend} offline resolved to {fname!r}, which is not an asset "
         f"of the pinned release {sl._PINNED_TAG}")
     assert sha == sl._PINNED_FALLBACK_SHA256[fname]
+    assert f"-{arch}." in fname or f"-{arch}-" in fname, (
+        f"{plat}/{backend} on {arch} resolved to another architecture's {fname!r}")
 
 
 def test_every_pinned_asset_belongs_to_a_pinned_tag():
