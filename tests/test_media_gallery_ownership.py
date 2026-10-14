@@ -163,6 +163,7 @@ class TestImageGalleryOwnership:
             assert c.get(f"/api/imagine/file/{name}", headers=_h(a)).status_code == 200
 
     def test_the_openai_route_returns_the_stamp_warning(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
         app = _gallery_app(tmp_path, monkeypatch, "image")
         a, b = _mk_keys(["image"], ["image"])
         with TestClient(app) as c:
@@ -190,6 +191,7 @@ class TestImageGalleryOwnership:
 
     def test_the_openai_route_carries_no_warnings_when_the_stamp_lands(
             self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
         app = _gallery_app(tmp_path, monkeypatch, "image")
         (a,) = _mk_keys(["image"])
         with TestClient(app) as c:
@@ -197,6 +199,7 @@ class TestImageGalleryOwnership:
             r = c.post("/v1/images/generations", headers=_h(a),
                        json={"prompt": "a third fox"})
             assert r.status_code == 200, r.text
+            assert "url" in r.json()["data"][0]
             assert "warnings" not in r.json()
 
     def test_owner_admin_sees_every_image(self, tmp_path, monkeypatch):

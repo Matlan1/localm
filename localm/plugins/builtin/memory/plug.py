@@ -819,6 +819,7 @@ def _read_episodic_failures(store) -> dict:
 def _write_episodic_watermark(store, mtime: float, stems=(), failures=None) -> None:
     p = _episodic_watermark_path(store)
     try:
+        p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_name(p.name + ".tmp")
         record = {"last_mtime": float(mtime), "stems": sorted(stems)}
         if failures:
@@ -827,7 +828,8 @@ def _write_episodic_watermark(store, mtime: float, stems=(), failures=None) -> N
         tmp.replace(p)
     except OSError as e:
         from localm.debuglog import logger
-        logger.debug("episodic watermark write skipped: %s", e)
+        logger.warning("episodic watermark write failed, so this run's sessions are "
+                       "checked again next run: %s", e)
 
 
 def _session_text(path: Path, max_chars: int = 6000) -> str:
