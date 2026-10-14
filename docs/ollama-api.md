@@ -48,11 +48,17 @@ Send the key as `Authorization: Bearer <key>`. Most Ollama clients support this
 ## Errors
 
 Errors on these routes are `{"error": "<message>"}`, the shape Ollama clients
-read. A malformed request is a 400, an unknown model a 404, a refused
-credential a 401 or 403, and a failed generation a 500. A stream that fails
-after it has started ends with one `{"error": "..."}` line. The one exception is
-the open-mode origin and shell-token refusal of a model-management route, which
-keeps the `{"detail": "..."}` body the rest of localm's API uses.
+read. A malformed request (including a body that fails validation) is a 400, an
+unknown model a 404, a refused credential a 401 or 403, a taken name or a model
+in use a 409, a model-management route localm does not serve a 501, and a failed
+generation a 500. A chat, generate or embedding request that the OpenAI-shaped
+route behind it refuses keeps that route's status (for example 413 for a prompt
+longer than the context window, 422 for a model that cannot embed, 503 while a
+model cannot be loaded). A reply from that route that is not JSON, and an
+embedding model that returns the wrong number of vectors, are a 502. A stream
+that fails after it has started ends with one `{"error": "..."}` line. The one
+exception is the open-mode origin and shell-token refusal of a model-management
+route, which keeps the `{"detail": "..."}` body the rest of localm's API uses.
 
 ## Chat and generate
 
@@ -70,21 +76,25 @@ defaults to true, as in Ollama); send `"stream": false` for one JSON document.
 | `format` | `"json"` constrains the reply to a JSON object. A JSON schema constrains it to that schema: `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `prefixItems`, `minItems`, `maxItems`, `minLength`, `maxLength`, integer `minimum` and `maximum`, `format` (`date`, `time`, `date-time`, `uuid`), `anyOf`, `oneOf`, `allOf` and local `$ref` (recursive schemas included). Properties come out in the order the schema lists them, and an object with listed properties has no others unless `additionalProperties` allows it. A keyword the grammar cannot enforce (`pattern`, `multipleOf`, `not`, number bounds, ...) is a 400 naming it. |
 | `tools` | `/api/chat` only. Function tools, as Ollama sends them. The model's calls come back in `message.tool_calls` (`function.name`, `function.arguments` as an object, `id`, `function.index`); a streamed call is its own line before the `done` line, and `done_reason` is `stop`. An earlier turn's `assistant` message with `tool_calls` and the `tool` messages after it are given back to the model; they are matched to the calls by order, so `tool_name` is accepted and not needed. The rules in [Tool calling](server-api.md#tool-calling) apply, with `tool_choice` always `auto`. |
 | `think` | `true` (or a level string) returns the model's reasoning in `message.thinking` (`thinking` on generate); `false` turns reasoning off. |
-| `keep_alive` | On a request with no messages or prompt: `0` unloads the model, anything else loads it (a model served by another instance is left to that instance, for a load and for an unload). Unloading needs `models:write`; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`. Ignored on a normal request; localm manages residency itself (`idle_unload_seconds`). |
+| `keep_alive` | On `/api/chat` with no messages, or `/api/generate` with no prompt and no images: a zero (`0`, `"0"`, or a zero duration such as `"0s"`) unloads the model, anything else loads it. The reply is `{"model", "created_at", "message": {"role": "assistant", "content": ""}, "done": true, "done_reason": "unload"}` (`"load"` for a load; `"response": ""` in place of `message` on generate). A model that another instance serves is left to that instance, for a load and for an unload. Unloading needs `models:write` (a 403 without it; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`), an unknown model is a 404, and a model still in use after a short grace period a 409. Ignored on a normal request; localm manages residency itself (`idle_unload_seconds`). |
 | other `options` keys, unknown request keys | Accepted and ignored (named in the debug log). |
 
 Refused with a 400, rather than silently dropped: `raw`, `suffix`, a
-request-level `template`, and a non-empty `context`.
+request-level `template`, and a non-empty `context`. Also a 400: a missing
+`model`, a `format` string other than `"json"`, an `options.stop` that is not a
+string or a list of strings, a `think` that is not a boolean or a string, a
+message with a role other than `system`, `user`, `assistant` or `tool`,
+`tool_calls` on a message that is not from the assistant (or one without a
+function name), and `images` that are not base64 image data.
 
-Each reply object carries `model`, `created_at`, the content (`message` or
-`response`) and `done`. The last one adds `done_reason` (`stop` or `length`)
+Each reply object carries `model` (as the request named it), `created_at`, the
+content (`message` or `response`) and `done`. A stream is `application/x-ndjson`,
+one object per line. The last object adds `done_reason` (`stop` or `length`)
 and the timing fields `total_duration`, `prompt_eval_count`,
-`prompt_eval_duration`, `eval_count` and `eval_duration` in nanoseconds.
-`prompt_eval_duration` is the time to the first token and `eval_duration` the
-decode time implied by the measured tokens per second; a field with no
-measurement behind it is left out. `load_duration` is never sent. A reply cut by
-a stop sequence reports `total_duration` only.
-
+`prompt_eval_duration`, `eval_count` and `eval_duration` (the durations in
+nanoseconds). `prompt_eval_duration` is the time to the first token and
+`eval_duration` the decode time implied by the measured tokens per second; a
+field with no measurement behind it is left out. `load_duration` is never sent.
 The `X-Localm-*` response headers of the underlying chat route (for example
 `X-Localm-Model-Routing`) are forwarded as HTTP headers on both streamed and
 non-streamed replies. When a request spends a long time being prepared, the
@@ -93,35 +103,47 @@ no place to carry them.
 
 ## Embeddings
 
-`POST /api/embed` takes `input` (a string or a list) and returns `embeddings`.
-`POST /api/embeddings` takes `prompt` and returns `embedding`. The vectors are
-whatever the embedding model produces; they are not renormalised.
-`prompt_eval_count` is sent only when the backend counted the input tokens. `dimensions`
-is refused with a 400, and `truncate` is accepted and ignored. An empty `input` list
-returns `"embeddings": []` without loading the model, but it still refuses `dimensions`
-and answers 404 for a model that is not registered (a model served by another instance
-counts as registered).
+`POST /api/embed` takes `input` (a string or a list) and returns `{"model",
+"embeddings", "total_duration"}`, plus `prompt_eval_count` when the backend
+counted the input tokens. `POST /api/embeddings` takes `prompt` and returns
+`{"embedding": [...]}` only. The vectors are whatever the embedding model
+produces; they are not renormalised. A missing `model`, `input` or `prompt` is a
+400, as is `dimensions`; `truncate` is accepted and ignored. An empty `input` list
+returns `{"model", "embeddings": []}` without loading the model, but it still
+refuses `dimensions` and answers 404 for a model that is not registered (a model
+served by another instance counts as registered).
 
 ## Listings
 
-- `GET /api/tags` lists the registered chat and embedding models, with
-  `name`, `model`, `size`, `modified_at` (the weights file's modification time, or
+- `GET /api/tags` returns `{"models": [...]}`: the registered chat and embedding
+  models (and the startup model when it is not registered), each with
+  `name`, `model`, `size` (the weights' size in bytes, 0 when unreadable),
+  `modified_at` (the weights file's modification time, or
   `1970-01-01T00:00:00Z` when it cannot be read), `digest` (the recorded SHA-256, or
-  empty) and `details` (`format`, and `family` when the model's architecture is
-  recorded). `parameter_size` and `quantization_level` are empty.
-- `GET /api/ps` lists the loaded models with `context_length` (the loaded
-  window) and `expires_at` (the idle-unload time, or a date in 2318 when no idle
-  timeout is set). `size_vram` is not reported.
-- `POST /api/show` returns `details`, `model_info` (`general.architecture` and
-  `<architecture>.context_length` when recorded), `capabilities`
+  empty) and `details`: `parent_model` (empty), `format`, `family` (the model's
+  architecture when recorded, else empty), `families` (a list holding `family`,
+  or null), and empty `parameter_size` and `quantization_level`.
+- `GET /api/ps` returns `{"models": [...]}`: the loaded models, each with the
+  `name`, `model`, `size`, `digest` and `details` of a tag (no `modified_at`),
+  `expires_at` (the idle-unload time, or a date in 2318 when no idle
+  timeout is set) and `context_length` (the loaded window, when known).
+  `size_vram` is not reported.
+- `POST /api/show` takes `model` (or `name`; `verbose` is accepted and ignored)
+  and returns `details`, `model_info` (`general.architecture` and
+  `<architecture>.context_length` when recorded), `modified_at`, `capabilities`
   (`completion` and `tools` for a chat model, `embedding` for an embedding
   model, plus `vision` and `thinking` when known) and empty `modelfile`,
-  `parameters` and `template`.
-- `GET /api/version` returns localm's own version.
+  `parameters` and `template`. A missing model name is a 400 and an unknown
+  model a 404.
+- `GET /api/version` returns `{"version": "<localm's own version>"}`.
 
 ## Model management
 
-`POST /api/copy` registers a second name for a model (an alias, the same file).
-`/api/pull`, `/api/push`, `/api/create`, `/api/delete` and `/api/blobs/{digest}`
-answer 501 with the localm equivalent in the message: `localm pull`,
-`localm rm`, or the GUI.
+`POST /api/copy` takes `source` and `destination`, registers a second name for a
+model (an alias, the same file) and returns `{"status": "success"}`. A missing
+field or a destination that is not a usable name (letters, digits, `.`, `_` and
+`-`) is a 400, an unknown source a 404 and a destination that already exists a
+409.
+`POST /api/pull`, `POST /api/push`, `POST /api/create`, `DELETE /api/delete` and
+`POST` or `HEAD /api/blobs/{digest}` answer 501 with the localm equivalent in the
+message: `localm pull`, `localm rm`, or the GUI.

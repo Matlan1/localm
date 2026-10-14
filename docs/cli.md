@@ -38,7 +38,12 @@ localm run asr-model --audio clip.wav --prompt "Transcribe this."
 localm run mymodel --debug                # write debug log
 localm run mymodel --mode privacy         # privacy/log/full persistence mode
 localm run mymodel --pin-model            # always answer with mymodel
+localm run mymodel --mmproj mmproj-model-f16.gguf --image photo.jpg   # explicit vision projector (GGUF)
+localm run hf-model --device cpu          # HuggingFace models: device override (cuda / cpu)
+localm run mymodel --no-server            # load the model in this process
 ```
+
+By default `run` attaches to the localm server already serving the current directory, so no second copy of the model is loaded. When none is running it starts one in the background (`localm gui --no-browser --api-mode`), which keeps running after `run` exits; `localm stop` ends it. If that server holds a different model, or has no model loaded, `run` exits 1 instead of answering with it - use `--no-server` to load MODEL in this process.
 
 A message mymodel cannot handle - an image it cannot read, or a conversation
 that has outgrown the context window it was trained for - is answered by an
@@ -66,10 +71,23 @@ localm gui --no-model            # open model-less, straight to the Models page
 localm gui --no-browser          # start the server, open the URL yourself
 localm gui --pull <spec>         # start a download immediately
 localm gui -H 0.0.0.0            # bind to all interfaces (requires auth key)
-localm gui --qr                  # [PoC] scannable QR of LAN URL for phones
+localm gui --qr                  # [PoC] scannable QR of LAN URL for phones (needs a network bind)
+localm gui -p 8650               # explicit port (must be free, else errors)
+localm gui -c 8192 -g 99         # context window, GPU layers
+localm gui --mode log            # privacy (default) | log | full session persistence
+localm gui --keep-diagnostics    # keep diagnostics (hang trace, debug log) even in privacy mode
+localm gui --project D:\path\to\project   # project root that keys this instance
+localm gui --new                 # start a fresh server instead of attaching to the running one
+localm gui --isolated            # private server invisible to discovery (implies --new)
+localm gui --api-mode            # API only, no Web GUI
+localm gui --mmproj mmproj.gguf --device cuda:0   # projector file, explicit device
 ```
 
 Chat, the coder agent, model management, and any enabled plugin tabs in one page. The model preloads in the background so the first reply is fast. See [docs/gui.md](gui.md) for details.
+
+A second `localm gui` for the same project attaches to the server already running instead of starting another (`--new` or `--isolated` start one). `gui` and `serve` run in the foreground until Ctrl+C.
+
+Past loopback, built-in TLS is on by default: `--no-tls` serves plain HTTP, and `--tls-cert FILE --tls-key FILE` use your own PEM certificate instead of localm's local-CA one. Without an API key, a bind past loopback is refused unless `--insecure` is passed (see [Configuration](#configuration)).
 
 ### Server (OpenAI-compatible API)
 
@@ -81,7 +99,11 @@ localm serve mymodel --ctx 8192             # context window
 localm serve mymodel --gpu-layers 99        # GPU layers
 localm serve mymodel -H 0.0.0.0              # bind to all interfaces
 localm serve mymodel --debug                # debug logging
+localm serve mymodel --mode log             # privacy (default) | log | full session persistence
+localm serve mymodel --new                  # start another server even if one already serves this project
 ```
+
+`serve` takes the same `--project`, `--isolated`, `--insecure`, `--no-tls`, `--tls-cert`, `--tls-key`, `--mmproj` and `--device` options as `gui` (see above), serves the API only, and opens no browser. When a server is already serving the project, `serve` reports it and starts nothing unless `--new` is passed.
 
 localm owns the port range 8642-8741: the default is 8642, and when no `--port` is given the server bumps to the next free port in that range automatically if it is taken. An explicit `--port` is different - it must be free, or startup errors rather than moving you onto another port. Use it with any OpenAI client - set `base_url="http://localhost:8642/v1"` and `api_key="localm"`.
 
@@ -104,7 +126,7 @@ localm bench-mtp mymodel
 localm bench-mtp mymodel --gen-tokens 256   # tokens per round (default 160)
 localm bench-mtp mymodel --rounds 3         # measurements to average (default 2)
 localm bench-mtp mymodel --ctx 8192 --gpu-layers 99
-localm bench-mtp mymodel --draft-tokens 3   # draft tokens per step for the MTP runs
+localm bench-mtp mymodel --draft-tokens 3   # draft tokens per step for the MTP runs (1-3)
 ```
 
 Loads the model twice per round, once with Multi-Token Prediction off and once on, and reports which was faster, how many drafted tokens the model accepted, and whether the replies were identical to MTP off. Nothing is written to your config; the settings are left as they were.
@@ -113,11 +135,11 @@ Loads the model twice per round, once with Multi-Token Prediction off and once o
 localm bench-spec mymodel                    # n-gram drafting vs none
 localm bench-spec mymodel --source mtp       # MTP vs none
 localm bench-spec mymodel --source draft --draft-model small   # a draft model vs none
-localm bench-spec mymodel --draft-tokens 4   # draft tokens per step for the "on" runs
+localm bench-spec mymodel --draft-tokens 4   # draft tokens per step for the "on" runs (MTP 1-3, otherwise 1-16)
 localm spec-drafts mymodel                   # downloaded models that can draft for mymodel
 ```
 
-Same comparison for any draft source (`--source ngram`, the default, `mtp`, or `draft` with `--draft-model`, which defaults to the `spec_draft_model` setting), over the MTP prompts plus a rewrite that repeats its input, and it also reports whether a greedy reply matched. For `ngram` and `draft` it prints the step costs measured at load and the step times seen per draft length. Takes the same `--gen-tokens`, `--rounds`, `--ctx` and `--gpu-layers` options. Nothing is written to your config. `spec-drafts` reads each downloaded GGUF's metadata, loads nothing, and lists the causal chat models that share the model's vocabulary, smallest first.
+Same comparison for any draft source (`--source ngram`, the default, `mtp`, or `draft` with `--draft-model`, which defaults to the `spec_draft_model` setting), over the MTP prompts plus a rewrite that repeats its input, and it also reports whether a greedy reply matched. For `ngram` and `draft` it prints the step costs measured at load and the step times seen per draft length. Takes the same `--gen-tokens`, `--rounds` (1-5; default 3 here, 2 for `bench-mtp`), `--ctx` and `--gpu-layers` options. Nothing is written to your config. `spec-drafts` reads each downloaded GGUF's metadata, loads nothing, and lists the causal chat models that share the model's vocabulary, smallest first.
 
 ---
 
@@ -155,7 +177,10 @@ Duplicate downloads are detected by path and SHA256. When you add or pull someth
 ```bash
 localm search qwen2.5 7b instruct            # find GGUF repos
 localm search bartowski/Qwen2.5-7B-GGUF --files  # quants + sizes + VRAM fit
+localm search qwen2.5 -n 25                  # up to 25 results (default 10)
 ```
+
+An empty query lists the most downloaded repos.
 
 ### Search and pull from CivitAI
 
@@ -215,9 +240,14 @@ localm add D:\models\my-hf-model --name mymodel
 localm add D:\ollama\manifests\registry.ollama.ai\library\<model>
 localm add D:\models\mymodel.gguf --on-duplicate alias   # ask|alias|copy|move|register|skip
 localm add D:\models\bulk-dir --fast                     # dedup on file size, skip the SHA256 hash
+localm add D:\models\mymodel.gguf --type embedding       # set the type instead of auto-detecting it
 localm alias mymodel short                   # second name for the same file
 localm rename mymodel newname                # rename it outright (unlike alias, the old name stops working)
 ```
+
+`add` takes a model file, a HuggingFace model directory, or a folder of models (every GGUF and safetensors model inside is registered). It also reads where other tools keep models: the Hugging Face hub cache, an Ollama model store, Jan's data folder, GPT4All's download folder (finished GGUF files only), and a `.llamafile` (its model is unpacked into `<data dir>/models`). `--type` takes the values listed under [Model type](#model-type) (default `auto`).
+
+`localm rename` also updates, best effort, the references to the old name inside the data directory (config, jobs, Knowledge collections); a per-project `.localcoder/config.toml` `model` setting is not touched. When a localm server is serving the current directory it performs the rename, so a loaded model keeps serving under its new name.
 
 Duplicate detection is two-tier: the resolved path first, then the file's SHA256 against digests already in the registry (large files hash off the main thread with a progress bar; `--fast` skips the hash and dedups on file size alone; `--no-hash` disables content-level dedup entirely). `--on-duplicate` picks the answer non-interactively instead of prompting (default `ask`).
 
@@ -234,11 +264,11 @@ localm add D:\models\mymodel.gguf --store move   # relocate into <data dir>/mode
 
 Every registered model has a type, detected deterministically from the file
 itself, never from fuzzy tag matching: a GGUF or Ollama blob is classified from
-its own metadata (a vision-projector signal makes it `mmproj`, an
-embedding/pooling signal makes it `embedding`, otherwise it is an `llm`); a
-HuggingFace directory is read from its `config.json` architectures (or
-`adapter_config.json` for a `lora`). Anything without a hard signal is left as
-`unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
+its own metadata (an adapter signal makes it `lora`, a vision-projector signal
+makes it `mmproj`, an embedding/pooling signal makes it `embedding`, otherwise it
+is an `llm`); a HuggingFace directory is read from its `config.json`
+architectures (or `adapter_config.json` for a `lora`). Anything without a hard
+signal is left as `unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
 `text-encoder`, `vae`, `lora`, `embedding`, `tts`, `upscaler`, and `unknown`.
 
 An `unknown` model still runs when you name it explicitly (`localm run NAME`, or an
@@ -253,7 +283,9 @@ localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder
 Registering a lone `.safetensors` file scans its parent directory: if that folder
 is a real HuggingFace model (config plus weights and tokenizer), the folder is
 registered; otherwise the file is rejected with an "incomplete model" message
-rather than added as a half-model.
+rather than added as a half-model. The exception is an image or video model file
+(a diffusion model, text encoder, VAE or LoRA recognised from its tensor layout,
+or named with `--type`), which registers on its own as that type.
 
 ### Rerankers
 
@@ -287,8 +319,9 @@ localm speak "Hello there." -o hello.wav --voice-file my-voice.wav   # imitate a
 localm speak --list-voices
 ```
 
-`--model` can be left out when exactly one speech model is registered. A named `--voice`
-is a WAV recording saved as `<name>.wav` in the `voices` folder of the data directory. The
+`-o/--output` is required (except with `--list-voices`). `--model` can be left out when exactly one speech model is registered. A named `--voice`
+is a WAV recording saved as `<name>.wav` in the `voices` folder of the data directory;
+`--voice-file` takes a WAV recording of at most 30 seconds instead (not together with a named `--voice`). The
 model runs in this process; a status line shows how much audio has been made, and Ctrl+C
 stops it. The seed is printed so a result can be reproduced. The server's
 `POST /v1/audio/speech` does the same.
@@ -323,7 +356,7 @@ localm relocate MODEL NEW_PATH  # re-point a registered model after you moved it
 localm unload [MODEL]           # free VRAM on the running server: all models, or just one
 ```
 
-`localm rm` only deletes the file when the last alias pointing at it is removed, and the confirmation prompt states exactly what will happen. It also refuses when a running localm server (this directory's or another one's) still has the model's file loaded - checked regardless of `--yes`, before the confirmation prompt, since this one-shot process shares no memory with a server and has to ask over HTTP; a server it cannot reach counts as "cannot rule it out", not as a green light. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model, and a named model that is not loaded is a no-op.
+`localm rm` only deletes the file when the last alias pointing at it is removed and the file lives in `<data dir>/models`; a model registered in place is only unregistered. The confirmation prompt states exactly what will happen. It also refuses when a running localm server (this directory's or another one's) still has the model's file loaded - checked regardless of `--yes`, before the confirmation prompt, since this one-shot process shares no memory with a server and has to ask over HTTP; a server it cannot reach counts as "cannot rule it out", not as a green light. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model, and a named model that is not loaded is a no-op.
 
 ---
 
@@ -337,6 +370,8 @@ localm image "a lighthouse at dusk" --size 768x512
 localm music "lofi, jazzy, mellow" --lyrics song.txt -d 180
 localm video "a fox runs through snow" --duration 5
 ```
+
+Options (all optional): `localm image` takes `--negative`, `--guidance`, `--cfg`, `--seed`, `--image PATH` (image-to-image) with `--denoise`, `--lora`, `--size WIDTHxHEIGHT` and `-o/--out` (default `./image_<timestamp>.png`). `localm music` takes `--lyrics FILE`, `-d/--duration` seconds (default 120), `-o/--out` (default `./music_<timestamp>.wav` natively, `.flac` with ComfyUI), `--seed`, `--steps` and `--cfg`. `localm video` takes `--negative`, `-d/--duration` seconds (default 5), `--fps` (default 24), `--width`, `--height`, `--image PATH` (image-to-video), `-o/--out` (default `./video_<timestamp>.mp4`), `--seed`, `--steps` (default 30) and `--cfg`. See `localm <command> --help` for each default.
 
 `localm image`, `localm video` and `localm music` need no ComfyUI: with nothing set up
 they use the built-in native backends (stable-diffusion.cpp for images and video, ACE-Step
@@ -357,7 +392,7 @@ localm comfy setup                 # provision it (copies your ComfyUI, or a fre
                                     # media routes to it right away (comfy_target defaults to "own")
 localm comfy status                # is one installed, which ComfyUI is targeted, and is it running
 localm comfy update                # advance to the shipped pinned version, re-apply localm's patches
-localm comfy remove [--models]     # delete it (keeps the managed models unless --models)
+localm comfy remove [--models] [-y]   # delete it (keeps the managed models unless --models; -y skips the confirmation)
 ```
 
 `localm comfy setup` takes `--copy-custom-nodes` / `--no-custom-nodes` (copy path
@@ -377,15 +412,15 @@ localm comfy stop                  # abort the render, clear the queue, free its
 localm comfy restart               # stop it, then launch a fresh one
 ```
 
-These need a running localm server (`localm gui` or `localm serve`), because the
+`start`, `stop` and `restart` need a running localm server (`localm gui` or `localm serve`; they exit 1 without one), because the
 handle on a ComfyUI localm launched belongs to the process that launched it -
 only that process can end it. `localm comfy stop` never kills a ComfyUI you
 started yourself: it aborts the render and frees the VRAM, and says so rather
 than implying the process is gone. A cold start compiles GPU kernels and can take
-minutes, so `start` and `restart` wait for the configured `comfy_launch_timeout`.
+minutes, so `start` and `restart` wait for the configured `comfy_launch_timeout`. `localm comfy status` also works without a server, but then reports whether localm launched the running ComfyUI as unknown.
 
-Pressing Ctrl-C during `localm image` / `localm music` / `localm video` now tells
-ComfyUI to abort that render and free its VRAM, instead of leaving it running.
+Pressing Ctrl-C during `localm image` / `localm music` / `localm video` tells
+ComfyUI to abort that render and free its VRAM.
 
 Whether localm targets the managed instance is decided by one setting,
 `comfy_target` (`own` by default, or `user` to force your own ComfyUI) - localm
@@ -404,8 +439,11 @@ localm comfy workflow list image                    # uploaded workflows, and wh
 localm comfy workflow add image my_flux.json --use   # upload, and select it
 localm comfy workflow use image my_flux.json         # select an already-uploaded one
 localm comfy workflow use image --clear              # back to the shipped default
-localm comfy workflow rm image my_flux.json          # delete (refuses the active one)
+localm comfy workflow rm image my_flux.json          # delete (refuses the active one; -y skips the confirmation)
+localm comfy workflow add image my_flux.json --name flux2.json   # store it under another filename
 ```
+
+The media argument is `image`, `music` or `video`.
 
 `localm plugin config <name> workflow <file>` reaches the same selection - it
 is what `add --use`/`use` write to - but only `workflow list` shows what is
@@ -419,22 +457,27 @@ actually uploaded.
 localm rag add NAME PATH... [--embed] [--force]   # index files/folders into a collection
 localm rag list                  # collections with doc/chunk counts
 localm rag docs NAME             # list a collection's documents: path, chunks, status
-localm rag query NAME "text" [--embed] [-k N] [--relevant-only] [--context "previous message"]   # show the top matching excerpts
+localm rag query NAME "text" [--embed] [-k N] [--relevant-only] [--context "previous message"] [--rerank|--no-rerank]   # show the top matching excerpts (-k: how many, default 4)
                                  # (--relevant-only: only those over the chat's relevance floor;
                                  # --context: the previous chat message, searched together with a
-                                 # "text" that refers back to it)
+                                 # "text" that refers back to it, with --relevant-only;
+                                 # --rerank/--no-rerank: re-score the best hits with an installed
+                                 # reranker; default is the rag_rerank setting)
 localm rag resync NAME [--embed] [--prune-missing]  # re-walk the indexed folders: pick up new and
                                  # changed files, flag ones that have vanished
-localm rag repair NAME [--embed]  # re-index every known document from scratch
-localm rag reembed NAME          # recompute vectors with the current embedding model, without re-reading source files
+localm rag repair NAME [--embed] [-y]  # re-index every known document from scratch
+localm rag reembed NAME [-y]     # recompute vectors with the current embedding model, without re-reading source files
 localm rag rm-doc NAME PATH      # remove one document from the index (file kept)
 localm rag rm NAME [--yes]       # delete a collection (index only, files kept)
 ```
 
 CLI indexing is lexical-only (BM25) by default, with no engine involved; pass
 `--embed` to `add`/`query`/`resync`/`repair` to also compute embeddings via a
-running localm server (`--url` to point at a non-default one), matching the
-GUI's hybrid retrieval.
+running localm server (`--url` to point at a non-default one, also on `reembed`),
+matching the GUI's hybrid retrieval; `add` and `query` fall back to lexical-only
+when no server is reachable. `repair` without `--embed` on a collection that has embeddings drops
+them for every re-indexed document, so it asks first (`-y` accepts the drop); with
+nobody to answer (a script, cron) it keeps the embeddings by recomputing them.
 
 `resync` is the incremental one to run regularly (`--prune-missing` to also drop
 entries whose file is gone; off by default so an unplugged drive cannot delete
@@ -454,7 +497,8 @@ Enable the rag plugin and install `pip install "localm[rag]"` for PDF parsing. S
 ## Scheduled jobs
 
 ```bash
-localm job add NAME --prompt "..." [--cron "0 9 * * 1-5" | --every SECONDS]
+localm job add NAME --prompt "..." [--cron "0 9 * * 1-5" | --every SECONDS]   # neither: every 3600 seconds
+localm job add NAME --prompt "..." --disabled      # create it disabled until `job enable`
 localm job add NAME --prompt "..." --coder --cwd DIR --scope "tests/**"
 localm job add NAME --memory --every 21600         # synthesise memory facts, no prompt needed
 localm job add NAME --rag --collection COLL --cron "0 3 * * *"   # keep a Knowledge collection current
@@ -467,7 +511,7 @@ localm job disable JOB_ID
 localm job remove JOB_ID         # delete the job and its results
 ```
 
-A job's `--model NAME` picks a specific registered model to run it with (chat
+`--cron` and `--every` are mutually exclusive, as are `--coder`, `--memory` and `--rag`; `--rag` needs `--collection`. A job's `--model NAME` picks a specific registered model to run it with (chat
 and coder jobs; otherwise the server's active model, unless the job needs
 something it lacks, in which case an installed model that has it runs it
 instead), and a coder job needs `--allow-shell` to run unrestricted (off by
@@ -488,14 +532,17 @@ localm memory forgotten                    # facts localm archived on its own
 localm memory restore ID                   # bring an archived fact back
 localm memory corrections [--json]         # proposals consolidation left for review
 localm memory accept ID | reject ID        # resolve one proposal
-localm memory clear [-y]                   # erase everything (not recoverable)
+localm memory clear [-y]                   # erase everything, archive included (not recoverable)
 ```
 
 Reads and writes the same store the app and the `memory` plugin's chat recall
 use, and works whether or not that plugin is installed - the plugin only adds
 the automatic recall-on-chat and background consolidation hooks. `add`,
 `restore`, `accept` and `reject` write to the store, so they refuse in the
-default `privacy` mode (set `mode` or `chat_mode` to `log` or `full` first). See
+default `privacy` mode (set `mode` or `chat_mode` to `log` or `full` first), and
+`corrections` lists nothing there (it prints why and exits 0). `forgotten` lists
+the archive, which is filled when the record cap evicts a fact or an accepted
+correction replaces one; `forget` is a hard delete that never reaches it. See
 [docs/memory.md](memory.md).
 
 ---
@@ -513,7 +560,7 @@ localm config autoprune_missing_models true
 localm config language de                        # interface language: en (default) or de
 ```
 
-Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead); `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
+`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead); `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -525,9 +572,9 @@ localm config n_ctx_grow 8192    # grow in bigger steps (fewer rebuilds)
 localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of VRAM sizing
 ```
 
-`ctx_auto` is **on by default**: it sizes the ceiling from free VRAM at load time (clamped to 4k-64k), overriding `n_ctx_max`. When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
+`ctx_auto` is **on by default**: it sizes the ceiling from free VRAM at load time (clamped to 4k-64k; `n_ctx_max 0` lifts the 64k clamp), overriding a non-zero `n_ctx_max`. When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
 
-Reading free VRAM needs `torch` (the `[gpu]` extra). On a CPU-only install without it, `ctx_auto` cannot measure VRAM and falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
+When free VRAM cannot be measured (for example on a CPU-only machine), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
 
 Long chats compact automatically before they collide with the ceiling. See [docs/architecture.md](architecture.md) for the compaction and VRAM-sizing details.
 
@@ -662,18 +709,18 @@ localm's HTTP surface is protected by a bearer key. Manage the owner key and min
 ```bash
 localm key show [--reveal]      # show the active owner key (masked, or full with --reveal) or "open mode"
 localm key generate             # generate a random owner key, persist it, print it once
-localm key set KEY              # persist a specific owner key you provide
-localm key clear                # remove the owner key, return to open mode
-localm key create NAME --scope chat --scope rag   # mint a named key limited to those scopes
+localm key set KEY              # persist a specific owner key you provide (8+ characters: letters, digits, - and _)
+localm key clear [-y]           # remove the owner key, return to open mode (-y skips the confirmation)
+localm key create NAME --scope chat --scope rag   # mint a named key limited to those scopes (--scope/-s is required)
 localm key create NAME -s rag --fs-access host --rag-root D:\docs --expires-in 86400
 localm key list                 # list named keys (metadata only, never the secret)
-localm key rm KEY_ID            # revoke a named key by ID
-localm key recover              # recover owner access after a lockout (run locally on the server machine)
+localm key rm KEY_ID [-y]       # revoke a named key by ID (-y skips the confirmation)
+localm key recover              # recover owner access after a lockout (run locally on the server machine): mints a new owner key, signs out browser sessions, leaves named keys working
 ```
 
 The owner key can also be set outside these commands: the `LOCALM_API_KEY` env var, or a `<data dir>/auth.key` file.
 
-`key create` takes three optional confinements beyond `--scope`, each narrowing what the key can do below what the owner can:
+`key create` takes three optional confinements beyond `--scope`/`-s`, each narrowing what the key can do below what the owner can:
 
 - `--fs-access [none|host]` - host filesystem reach for the coder/file tools. Defaults to `none` (device-upload-only); `host` grants the whole server disk, same as the owner.
 - `--rag-root DIR` (repeatable) - confines the key's whole RAG reach (indexing and every other collection route) to exactly these folders instead of the global folder policy. Omit for no per-key restriction. See [docs/rag.md](rag.md#per-key-folder-scoping).
@@ -697,14 +744,16 @@ In bash/zsh/fish, model names complete everywhere a model argument is expected. 
 
 ```bash
 localm plugin status            # what is installed and which installs are active
-localm plugin install NAME      # copy NAME from the store and enable it
+localm plugin install NAME      # copy NAME from the store and enable it (or a path to a plugin folder; --force overwrites an existing install from a folder)
 localm plugin enable NAME       # enable an already-installed plugin
 localm plugin disable NAME      # disable but keep it installed
 localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
 localm plugin refresh [NAME]    # re-sync installed first-party plugin(s) with the bundled store
 localm plugin setup             # pick a starter set interactively
+localm plugin setup --defaults  # coder, rag, web and tts, no prompt (also: --all, or --plugins a,b)
 localm plugin install-deps NAME # install a plugin's pip extras on this host
-localm plugin install-deps --all# fill in missing extras for every enabled plugin
+localm plugin install-deps --all  # fill in missing extras for every enabled plugin
+localm plugin install-deps      # no NAME: only list what is missing
 localm plugin config NAME       # show one plugin's own settings and their values
 localm plugin config NAME KEY   # show one setting
 localm plugin config NAME KEY VALUE   # set it (a blank VALUE clears the override)
@@ -727,7 +776,7 @@ value for a field instead of sharing the global `comfy_*` default. Any other
 plugin declares its settings as it loads, so listing or setting those needs a
 running localm (found the way `localm status` finds it, or set `LOCALM_URL`).
 
-The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). Installing from the CLI changes configuration only: a running GUI server picks up the plugin's HTTP routes and tabs on its next start; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](plugins.md).
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, on `install`, `enable` and `setup`, or `localm plugin install-deps` later). Installing from the CLI changes configuration only: a running GUI server picks up the plugin's HTTP routes and tabs on its next start; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](plugins.md).
 
 Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](plugins.md) for the full authoring contract.
 
@@ -738,13 +787,26 @@ Third-party plugins are folders containing a `plugin.toml` manifest and Python f
 ```bash
 localm coder --model mymodel              # interactive session in the current repo
 localm coder "fix the failing test"       # single task
-localcoder --model mymodel                # same thing, standalone entry point (installed with the coder plugin)
+localcoder --model mymodel                # same thing, standalone entry point
 localm coder --model mymodel --pin-model  # always answer with mymodel
 localm coder --system "always run pytest before finishing"   # custom instructions for this run
 localm coder "make the suite pass" --until "pytest -x"       # one-shot, verified by exit code
 localm coder --model mymodel --verify "pytest -x"            # interactive, same check per turn
 localm coder --model mymodel --seed 1234                     # reproducible sampling
+localm coder "add type hints" --cwd D:\path\to\repo --scope "src/**/*.py"   # other directory, confined file access
+localm coder "review this" --online --model gpt-4o           # OpenAI (--anthropic for Anthropic, via ANTHROPIC_API_KEY)
+localm coder --url http://localhost:11434/v1 --model llama3.2 --no-server   # any OpenAI-compatible server
+localm coder "fix the bug" --ci --output-format json         # CI: auto-approve, no colors; exit 0 done, 1 incomplete (max turns), 2 startup error
 ```
+
+`localm coder` and `localcoder` refuse to run (exit 1) until the coder plugin is installed and enabled: `localm plugin install coder`. The rest of the options:
+
+- `-m/--model` (or `LOCALCODER_MODEL`), `-u/--url` (or `LOCALCODER_URL`), `-k/--api-key` (default `localm`, or `LOCALM_API_KEY`; a `require_auth` server needs the real key), `-p/--port` for the auto-started server (first free in 8642-8741), `-c/--cwd`.
+- `--no-server` starts no server; `--new` starts a dedicated one instead of attaching to the one already running for the project.
+- `--max-turns` (default 40) and `--max-tokens` (default 2048) may also come from `.localcoder/config.toml`; `--temperature`, `--verbose`.
+- `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` auto-approves file writes but still asks before shell commands, `--dry-run` runs without executing destructive tools.
+- `--estimate` plans only and exits; `--patch-mode FILE` captures all file writes as a unified diff written to FILE (`-` for stdout); `--native-tools` uses the OpenAI-compatible tools API (automatic for `--online` and `--anthropic`).
+- `--mode privacy|log|full` (default `privacy`); `--output-format text|json` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
 
 Every request the agent makes needs structured tool calls. When `--model`
 names a model whose chat template cannot format them and an installed model
@@ -910,6 +972,10 @@ localm mcp --print-config     # JSON block for Claude Desktop and friends
 localm mcp                    # run as an MCP server over stdio (launched by the client)
 localm mcp --no-images        # do not expose generate_image
 localm mcp --no-coder         # do not expose run_coder_task
+localm mcp --no-memory        # do not expose memory_recall
+localm mcp --memory-write     # also expose memory_append (off by default; both memory tools refuse in privacy mode)
+localm mcp -m mymodel         # default model for chat/embed tools (default: LOCALM_MODEL env, else first registered)
+localm mcp --share-loaded-models   # answer chat with a model another localm instance here has loaded, instead of loading a second copy
 ```
 
 Exposes your local models and localm management (chat, model and plugin management, diagnostics, and more) to Claude Desktop and other MCP clients, with tool annotations so a client can confirm destructive calls. See [docs/mcp.md](mcp.md) for the full tool list and both directions: localm as an MCP server, and the coder consuming external MCP tool servers.
@@ -921,26 +987,32 @@ Exposes your local models and localm management (chat, model and plugin manageme
 ```bash
 localm setup-llama                       # auto-detect the GPU, fetch the right backend
 localm setup-llama --backend vulkan      # any GPU (AMD/NVIDIA/Intel), no vendor toolkit
-localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  /  --backend cpu
+localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  /  --backend cpu  /  also: hip, sycl, metal
 localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
+localm setup-llama --url <archive-url> --sha256 <hex>   # explicit prebuilt archive, optionally pinned to a digest
+localm setup-llama --tag b10355          # install and pin an exact llama.cpp release (--tag latest: upstream's newest, untested here; --tag default: the confirmed build)
+localm setup-llama --rollback            # back to the previous llama.cpp build
+localm setup-llama --force -y            # re-provision even if present; -y accepts the recommended action at every prompt
 localm setup-llama --backend cuda --cuda-line cuda-12   # Linux: CUDA runtime without a GPU, for building images
 localm setup-sdcpp                       # install the native image runtime (stable-diffusion.cpp), auto-picking the build
 localm setup-sdcpp --backend vulkan      # or cpu / cuda (Windows) / rocm / metal
-localm setup-sdcpp --status              # which builds are installed, and their devices
+localm setup-sdcpp --status              # which builds are installed, and their devices (--force reinstalls)
 localm setup-music                       # install native music: the KoboldCpp runtime, the default ACE-Step 1.5 models, a test track
 localm setup-music --backend vulkan      # or cpu / cuda / metal
 localm setup-music --status              # installed builds, which backends worked, the default models
+localm setup-music --no-models --no-test # runtime only, no default models, no test track (--force reinstalls)
 localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
 localm setup-browser                     # download Chromium for the automated browser (coder tool)
 localm setup-browser --force             # reinstall even if already present
 
 localm make-launcher                     # build the native LocaLM app launcher (see docs/native-app.md)
-localm make-launcher --force             # rebuild it (use after a Python upgrade)
+localm make-launcher --force             # rebuild it (use after a Python upgrade); --quiet reports only problems
 
 localm doctor                            # check Python, llama.dll, GPU driver, VRAM, packages
-localm info                              # models dir, registry file, config file, native binaries dir, and the full config
+localm info                              # models dir, registry file, config file, native binaries dir, install mode, temp dir, and the full config
 localm memory list                       # what localm has remembered about you (see docs/memory.md)
 localm status                            # show the localm server serving this directory, and what it is doing
+localm status --project D:\path\to\dir   # check that directory instead of the current one
 localm ps                                # list running localm servers (per-directory instances)
 localm cancel <id>                       # cancel one operation that server is running (id from `status`)
 localm stop                              # stop the server serving this directory
@@ -950,7 +1022,7 @@ localm stop --all                        # stop every running localm instance
 
 `--cuda-line cuda-12|cuda-13` (Linux, with `--backend cuda`) fetches the CUDA build and runtime libraries of that line on a machine with no NVIDIA GPU, which is how the `cuda` and `cuda13` Docker images are built (see [docs/docker.md](docker.md)). The driver check and the load test are skipped, the runtime is recorded as not load-tested, and `localm doctor` tests it on the machine it runs on. A failed fetch exits with an error; it never falls back to another backend.
 
-`localm run`/`localm gui`/`localm serve` start a background server that keeps running after the command exits; `localm stop` is how you end it - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
+`localm run` (when no server is serving the directory) and `localm coder` start a background server that keeps running after the command exits; `localm gui` and `localm serve` run in the foreground until Ctrl+C. `localm stop` ends any of them - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
 
 `localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those.
 
@@ -970,8 +1042,12 @@ localm update --check           # only report whether an update is available; do
 localm update -y                # apply without the confirmation prompt
 localm update --rollback        # restore the previous build from the last update backup
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
+localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
 localm issues [NUMBER]          # list the project's issues, or show one by number
+localm issues --state open      # open | closed | all (default all)
 ```
+
+`bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of this run's debug log when one exists (`--no-log` to leave it out), never chat content. `issues` is read-only and needs the bug-report proxy to be configured.
 
 Updates are signed: localm verifies an Ed25519 signature against a key pinned in
 its own source before applying anything, and refuses a build that is not newer.

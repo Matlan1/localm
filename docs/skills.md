@@ -11,7 +11,8 @@ importer (see [docs/plugin-interop.md](plugin-interop.md)).
 The agent looks in two places, project overriding global on a name clash:
 
 - **Global** (reusable across projects): `<data dir>/skills/`
-- **Project** (this repo only): `<project>/.localcoder/skills/`
+- **Project** (this repo only): `<project>/.localcoder/skills/`, where
+  `<project>` is the coder's working directory
 
 Each skill is a sub-folder containing a `SKILL.md`:
 
@@ -33,9 +34,11 @@ only. Review any skill from an unknown source first (see [Security](#security)).
 
 ## The `SKILL.md` format
 
-YAML-style frontmatter (a flat `key: value` block) followed by the instruction
-body. `name` and `description` are used; `allowed-tools` is parsed and
-**enforced** (see [Enforcement](#enforcement-of-allowed-tools) below):
+YAML-style frontmatter (a flat `key: value` block, one line per key; blank lines
+and `#` comment lines are skipped) followed by the instruction body. `name` and
+`description` are used; `allowed-tools` is parsed and **enforced** (see
+[Enforcement](#enforcement-of-allowed-tools) below). The key `allowed_tools` is
+accepted as well:
 
 ```markdown
 ---
@@ -54,6 +57,12 @@ To fill a PDF form:
 surrounding `[...]`). It is optional; most skills omit it, and an absent or
 empty list restricts nothing.
 
+`name` is optional: without one the folder name is used. A name must be 1 to 64
+characters, start with a letter or digit, and contain only letters, digits, `_`,
+`.` and `-`; a skill whose name does not fit is skipped. `description` is
+optional too (`list_skills` shows "(no description)"). A folder without a
+`SKILL.md`, or one that cannot be read, is skipped.
+
 ## How the agent uses skills
 
 When at least one skill is present, the coder agent gains two tools and follows
@@ -69,7 +78,10 @@ When at least one skill is present, the coder agent gains two tools and follows
   restriction; only loading the body does.
 
 The agent runs bundled scripts with its normal `run_shell` using the folder path
-the skill reports. With no skills present, the feature is inactive until you add one.
+the skill reports. With no skills present, the feature is inactive until you add
+one: the two tools are registered only when at least one skill is found when the
+agent starts, and a restricted (shared, non-owner) coder session never gets them.
+The instruction body is cut at 64,000 characters and a bundled file at 200,000.
 
 ## Enforcement of `allowed-tools`
 

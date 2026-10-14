@@ -22,7 +22,10 @@ setup for a 16 GB VRAM card and how localm drives it.
 
 ### 1. Install ComfyUI
 
-Clone the ComfyUI repository and install it:
+Install the PyTorch build for your GPU first (see
+[gpu-setup.md](gpu-setup.md#huggingface-transformers-pytorch) for the wheel index
+per vendor): ComfyUI's `requirements.txt` lists `torch` unpinned, so it does not
+choose a GPU build for you. Then clone the ComfyUI repository and install it:
 
 ```bash
 git clone https://github.com/comfyanonymous/ComfyUI
@@ -36,10 +39,11 @@ this and manages plugins.
 ### 2. Install the ComfyUI-GGUF extension
 
 Add support for GGUF quantized models (FLUX with lower VRAM overhead) by
-installing the ComfyUI-GGUF extension.
+installing the ComfyUI-GGUF extension. From the `ComfyUI` folder:
 
 ```bash
-git clone https://github.com/city96/ComfyUI-GGUF ComfyUI/custom_nodes/ComfyUI-GGUF
+git clone https://github.com/city96/ComfyUI-GGUF custom_nodes/ComfyUI-GGUF
+pip install -r custom_nodes/ComfyUI-GGUF/requirements.txt
 ```
 
 ### 3. Download model files
@@ -90,20 +94,28 @@ python main.py
 ### 5. Configure localm (optional: for auto-launch)
 
 If you want localm to automatically start ComfyUI when you request an image,
-configure the launch command:
-
-```bash
-localm config comfy_launch_cmd "D:\path\to\launch-comfyui.bat"
-```
-
-(On Windows, use your launcher's full path; on Linux/macOS, use the path to
-your `main.py`.)
-
-If your launcher expects to run from its own folder (common for batch scripts):
+point it at the ComfyUI folder:
 
 ```bash
 localm config comfy_workdir "D:\path\to\ComfyUI"
 ```
+
+localm then runs the first launcher script it finds there (`launch-comfyui`,
+`comfyui`, `run_nvidia_gpu`, `run_amd_gpu`, `run_cpu` or `run`, as `.bat` on
+Windows and `.sh` elsewhere) or, failing that, `main.py` with the folder's own
+`venv/` or `.venv/` interpreter. To name the command yourself, set
+`comfy_launch_cmd` to a full command line, which localm splits into arguments
+and starts directly:
+
+```bash
+localm config comfy_launch_cmd "D:\path\to\launch-comfyui.bat"      # Windows
+localm config comfy_launch_cmd "/path/to/ComfyUI/venv/bin/python /path/to/ComfyUI/main.py"   # Linux/macOS
+```
+
+A bare path to `main.py` is not a launch command: it is executed as a program
+rather than run by Python, so it will not start. If a launcher
+script expects to run from its own folder (common for batch scripts) and
+`comfy_workdir` is not set, localm runs it from the script's folder.
 
 localm resolves ComfyUI's URL in this order: the `FLUX_API_URL` environment
 variable, then a localm-managed ComfyUI instance if one is active, then the
