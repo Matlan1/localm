@@ -645,6 +645,33 @@ def _run_coder_task(engines, project, **args):
 
 
 class TestCoderTaskRuns:
+    def test_an_engine_evicted_before_the_run_pins_it_refuses_to_start(
+            self, reg, coder_project, monkeypatch):
+        """The embedder's evictor unloads the chosen engine between
+        coder_engine() and the run's pin: the task refuses to start, nothing
+        stays pinned and the evicted engine never answers."""
+        import localm.plugins.mcpserver.tools.media_coder as mc
+        monkeypatch.setattr("localm.vram._vram_free_reading",
+                            lambda: (None, False, None))
+        engines = _cache()
+        real = mc.coder_engine
+        chosen = []
+
+        def _evicted_after_choice(cache, decision):
+            got = real(cache, decision)
+            chosen.append(got[0])
+            assert cache.evict_for_embedder(5.0) == "unloaded"
+            return got
+
+        monkeypatch.setattr(mc, "coder_engine", _evicted_after_choice)
+        res = _run_coder_task(engines, coder_project)
+        text = res["content"][0]["text"]
+        assert res["isError"] is True, text
+        assert "coder task failed to start" in text and "unloaded to free VRAM" in text
+        (engine,) = chosen
+        assert engine.unloading is True and engine.active_requests == 0
+        assert engine.answered == 0
+
     def test_a_candidate_that_fails_to_load_is_skipped_for_the_run(
             self, reg, coder_project):
         engines = TestCoderRouting._lazy_tool_models(reg, {"tooly"})
