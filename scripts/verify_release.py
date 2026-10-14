@@ -3,8 +3,8 @@
 """Verify a downloaded localm release asset (CHK-UPDATER-INTEGRITY).
 
 Checks a `localm-<version>.zip` release download against the same trust
-localm's auto-updater already relies on: an Ed25519 signature against the
-public key pinned in `localm/updater.py`, and/or a plain SHA256 digest.
+localm's auto-updater already relies on: its Ed25519 signature envelope against
+the update signing keys in `localm/updater.py`, and/or a plain SHA256 digest.
 
 THIS VERIFIES THE GITHUB RELEASE **ASSET** (`localm-<version>.zip` plus its
 `localm-<version>.zip.sig`, both listed under a release's "Assets" section),
@@ -25,9 +25,10 @@ Usage:
 Signature check: runs when --sig is given, or, when neither --sig nor
 --sha256 is given at all, when a file named "<path-to-zip>.sig" sits next to
 the zip (the default name scripts/sign_release.py itself writes). Verifies
-against the same pinned Ed25519 key the auto-updater trusts
-(localm/updater.py _UPDATE_PUBKEYS) via localm.updater.verify_signature -
-never re-implemented here.
+against the same signing keys the auto-updater trusts (the key set pinned in
+localm/updater.py, or a newer one this install has accepted, plus any key set
+the envelope carries) via localm.updater.verify_signature - never
+re-implemented here, and never saving anything.
 
 SHA256 check: runs when --sha256 is given, either a bare 64-character hex
 digest or a path to a file holding one (a plain hex string, or the standard
@@ -95,11 +96,11 @@ def parse_sha256_arg(value: str) -> str:
 
 
 def verify_ed25519(data: bytes, sig_text: str) -> tuple[bool, str]:
-    """Verify *sig_text* (base64 Ed25519 signature) over *data* against the
-    key pinned in localm.updater - the same check and the same pinned key
-    the auto-updater uses, reused rather than reimplemented. Returns
-    (ok, message). Raises ImportError if localm.updater or one of its own
-    dependencies (cryptography, rich) is not installed."""
+    """Verify *sig_text* (the release's signature envelope) over *data* with
+    localm.updater.verify_signature - the same check and the same keys the
+    auto-updater uses, reused rather than reimplemented. Returns (ok, message).
+    Raises ImportError if localm.updater or one of its own dependencies
+    (cryptography, rich) is not installed."""
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
     from localm import updater
@@ -109,7 +110,7 @@ def verify_ed25519(data: bytes, sig_text: str) -> tuple[bool, str]:
     except LocalmError as e:
         detail = f"{e.summary} ({e.reason})" if e.reason else e.summary
         return False, detail
-    return True, "verifies against the pinned update key (localm/updater.py _UPDATE_PUBKEYS)"
+    return True, "verifies against localm's update signing keys (localm/updater.py)"
 
 
 def _import_error_message(e: BaseException) -> str:

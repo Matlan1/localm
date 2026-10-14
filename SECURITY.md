@@ -409,11 +409,19 @@ in [docs/tls.md](docs/tls.md).
 localm never updates itself. An update runs only when you initiate it (`localm
 update`, or the GUI "Update now" button). The client is signature-verifying:
 
-- **Signed builds.** A downloaded build is verified against an **Ed25519** public
-  key **pinned in localm's own source** before anything is extracted or executed.
-  A missing, invalid, or tampered signature is refused before any file is swapped
-  (fail closed). The pinned key is a list, so a key can be rotated in before an
-  old one retires.
+- **Signed builds.** A downloaded build must carry an **Ed25519** signature from
+  localm's **release key**, checked before anything is extracted or executed. A
+  missing, invalid, or tampered signature, a signature from any other key, or a
+  signature in an older format is refused before any file is swapped (fail closed).
+- **Replaceable keys.** localm's own source pins two sets of keys: the release key,
+  which signs builds, and three **recovery keys**, kept offline, which never sign a
+  build. An update can carry a new set of keys (for example a new release key); it
+  is accepted only when it is numbered higher than the set in use and signed by two
+  of the three current recovery keys, and is then kept in the data directory
+  (`updates/trust.json`) and used from then on. A lower-numbered set is refused, so
+  a replaced key cannot be brought back by replaying an old one. A refused update
+  leaves the keys in use unchanged, and a damaged `updates/trust.json` stops updates
+  with an error naming it rather than falling back to the built-in keys.
 - **No downgrades.** A validly signed but older, equal, or version-less build is
   refused: a signature proves authenticity, not freshness.
 - **HTTPS only.** The download endpoint must be HTTPS and a redirect that would
@@ -423,10 +431,11 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   native binaries (the llama.cpp runtime) are preserved across the swap. It backs
   up first and rolls back on failure rather than leaving a half-applied tree.
 
-Honest limits: signature verification enforces only while a key is pinned. Shipped
-builds do pin one (a test keeps the pin non-empty), but if the pin were ever empty
-the updater would fall back to transport trust (HTTPS plus the private channel)
-rather than brick itself. The GUI "Update now" button's restart (the only
+Honest limits: until an install receives an update that replaces a key, a build
+signed with that key is still accepted, so replacing a stolen release key protects
+an install from its next update on. Builds signed for localm 0.2.0 and earlier use
+a single-key format that 0.3.0 and later refuse, and 0.2.0 cannot verify 0.3.0, so
+moving from 0.2.0 to 0.3.0 is a fresh install, once. The GUI "Update now" button's restart (the only
 transition that happens with nobody watching) is followed by a detached watchdog
 that polls the relaunched build's `/whoami` for the expected version and
 auto-rolls-back if it does not come up healthy within 90 seconds. `localm update`
@@ -444,7 +453,7 @@ deps-class update's package installs.
 
 **A first-time (non-updater) install can be verified too.** `scripts/verify_release.py`
 checks a downloaded release Asset (`localm-<version>.zip` plus its `.zip.sig`) against
-the same pinned Ed25519 key described above, and/or a plain SHA256 digest - useful if
+the same signing keys described above, and/or a plain SHA256 digest - useful if
 you obtained the zip some other way than the recommended `git clone` install. The
 `git clone` path itself is unchanged by this: it never downloads a zip, so it continues
 to rely on git+HTTPS+GitHub's own trust model, not this signing mechanism.

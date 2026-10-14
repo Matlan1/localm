@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """scripts/verify_release.py: checksum/signature verification for a downloaded
 release asset. Reuses localm.updater.verify_signature (never reimplementing
-key loading) against the same pinned Ed25519 key the auto-updater trusts, and
+the envelope check) against the same signing keys the auto-updater trusts, and
 independently supports a plain SHA256 digest check."""
 
-import base64
 import hashlib
 import sys
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import updater
+from tests._update_signing import envelope, keyset
 
 SCRIPTS_DIR = str(Path(__file__).resolve().parents[1] / "scripts")
 if SCRIPTS_DIR not in sys.path:
@@ -21,15 +20,25 @@ if SCRIPTS_DIR not in sys.path:
 import verify_release as vr  # noqa: E402
 
 
-def _keypair():
-    priv = Ed25519PrivateKey.generate()
-    pub_hex = priv.public_key().public_bytes(
-        encoding=_ser.Encoding.Raw, format=_ser.PublicFormat.Raw).hex()
-    return priv, pub_hex
+@pytest.fixture(autouse=True)
+def _home(monkeypatch, tmp_path):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+
+
+def _pin(monkeypatch):
+    """Pin a fresh trust root; returns its release key."""
+    release = Ed25519PrivateKey.generate()
+    recovery = [Ed25519PrivateKey.generate() for _ in range(3)]
+    monkeypatch.setattr(updater, "_PINNED_KEYSET", keyset(1, [release], recovery))
+    return release
+
+
+def _stranger():
+    return Ed25519PrivateKey.generate()
 
 
 def _sig(priv, data: bytes) -> str:
-    return base64.b64encode(priv.sign(data)).decode("ascii")
+    return envelope(data, [priv])
 
 
 def _write(tmp_path, name: str, data: bytes) -> Path:
@@ -80,47 +89,42 @@ def test_import_error_message_is_actionable():
 # --------------------------------- verify_ed25519 ---------------------------
 
 def test_verify_ed25519_valid_signature(monkeypatch):
-    priv, pub = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (pub,))
+    priv = _pin(monkeypatch)
     data = b"a release build"
     ok, msg = vr.verify_ed25519(data, _sig(priv, data))
     assert ok
-    assert "pinned update key" in msg
+    assert "update signing keys" in msg
 
 
 def test_verify_ed25519_tampered_data_fails(monkeypatch):
-    priv, pub = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (pub,))
+    priv = _pin(monkeypatch)
     sig = _sig(priv, b"the original build")
     ok, msg = vr.verify_ed25519(b"a tampered build", sig)
     assert not ok
-    assert "did not match" in msg
+    assert "not signed by a trusted release key" in msg
 
 
 def test_verify_ed25519_wrong_key_fails(monkeypatch):
-    priv, _ = _keypair()
-    _, other_pub = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (other_pub,))
+    _pin(monkeypatch)
+    priv = _stranger()
     data = b"build"
     ok, _msg = vr.verify_ed25519(data, _sig(priv, data))
     assert not ok
 
 
 def test_verify_ed25519_malformed_signature_is_caught_not_raised(monkeypatch):
-    _, pub = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (pub,))
+    _pin(monkeypatch)
     # Must return a (False, message) tuple; a LocalmError from verify_signature
-    # (malformed base64) must never escape as a raw traceback.
+    # (not an envelope) must never escape as a raw traceback.
     ok, msg = vr.verify_ed25519(b"build", "!!! not base64 !!!")
     assert not ok
-    assert "malformed" in msg
+    assert "0.2.0 or earlier" in msg
 
 
 # ------------------------------------ main() --------------------------------
 
 def test_main_signature_ok_exit_0(tmp_path, monkeypatch, capsys):
-    priv, pub = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (pub,))
+    priv = _pin(monkeypatch)
     data = b"a release zip's bytes"
     zpath = _write(tmp_path, "localm-0.1.5.zip", data)
     sig_path = _write(tmp_path, "localm-0.1.5.zip.sig", _sig(priv, data).encode())
@@ -131,8 +135,7 @@ def test_main_signature_ok_exit_0(tmp_path, monkeypatch, capsys):
 
 
 def test_main_adjacent_sig_file_auto_discovered(tmp_path, monkeypatch):
-    priv, pub = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (pub,))
+    priv = _pin(monkeypatch)
     data = b"another release zip"
     zpath = _write(tmp_path, "localm-0.1.6.zip", data)
     _write(tmp_path, "localm-0.1.6.zip.sig", _sig(priv, data).encode())
@@ -141,8 +144,7 @@ def test_main_adjacent_sig_file_auto_discovered(tmp_path, monkeypatch):
 
 
 def test_main_tampered_zip_exit_1(tmp_path, monkeypatch, capsys):
-    priv, pub = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (pub,))
+    priv = _pin(monkeypatch)
     good = b"the real bytes"
     sig_path = _write(tmp_path, "z.zip.sig", _sig(priv, good).encode())
     tampered = _write(tmp_path, "z.zip", b"tampered bytes, not the original")
@@ -153,9 +155,8 @@ def test_main_tampered_zip_exit_1(tmp_path, monkeypatch, capsys):
 
 
 def test_main_wrong_key_exit_1(tmp_path, monkeypatch):
-    priv, _pub = _keypair()
-    _, other_pub = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (other_pub,))
+    _pin(monkeypatch)
+    priv = _stranger()
     data = b"build content"
     zpath = _write(tmp_path, "z.zip", data)
     sig_path = _write(tmp_path, "z.zip.sig", _sig(priv, data).encode())
@@ -230,8 +231,7 @@ def test_main_sha256_only_does_not_auto_check_adjacent_sig(tmp_path):
 
 
 def test_main_localm_error_from_malformed_signature_reported_not_raised(tmp_path, monkeypatch, capsys):
-    _, pub = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (pub,))
+    _pin(monkeypatch)
     zpath = _write(tmp_path, "z.zip", b"data")
     sig_path = _write(tmp_path, "z.zip.sig", b"!!! not base64 !!!")
     rc = vr.main([str(zpath), "--sig", str(sig_path)])   # must not raise
@@ -251,3 +251,18 @@ def test_main_signature_import_error_is_could_not_check_not_a_crash(tmp_path, mo
     sig_path = _write(tmp_path, "z.zip.sig", b"c2ln")
     rc = vr.main([str(zpath), "--sig", str(sig_path)])   # must not raise/crash
     assert rc == 2
+
+
+
+def test_verify_ed25519_accepts_an_embedded_key_set_without_saving(monkeypatch, tmp_path):
+    release = Ed25519PrivateKey.generate()
+    a, b, c = (Ed25519PrivateKey.generate() for _ in range(3))
+    monkeypatch.setattr(updater, "_PINNED_KEYSET", keyset(1, [release], [a, b, c]))
+    new_release = Ed25519PrivateKey.generate()
+    ks = keyset(2, [new_release], [a, b, c], signers=[a, b])
+    data = b"a rotated release"
+    ok, _msg = vr.verify_ed25519(data, envelope(data, [new_release], keyset=ks))
+    assert ok
+    assert not (tmp_path / "home").exists()
+    ok, _msg = vr.verify_ed25519(data, envelope(data, [new_release]))
+    assert not ok

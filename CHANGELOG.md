@@ -2320,6 +2320,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   default level although an admin session cookie for that key could stay usable. It now logs a
   warning naming the key.
 ### Security
+- **Updates are signed under a new key scheme.** A release key signs every build, and three
+  offline recovery keys can replace any key through a signed update, with no action from
+  you. 0.2.0 cannot verify 0.3.0, so an install of 0.2.0 does not update itself to 0.3.0:
+  install 0.3.0 fresh, once. Updates after that apply as before.
 - **Update and key-listing replies no longer hand a scoped key your file paths.** The backup
   path from `GET /api/update/rollback` and `POST /api/update/apply`, the text of a failed apply,
   and the owner-key-file notice on `GET /v1/keys` named the full location under your data
