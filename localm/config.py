@@ -1572,10 +1572,13 @@ def _read_json_checked(path: Path, default):
     state in which the returned *default* is indistinguishable from a genuinely
     absent file.
 
-    Read-only consumers take that fallback and keep calling _read_json (auth,
-    netpolicy, netname and updater all rely on it). A read-modify-write must
-    not: writing the default back replaces every setting the user had, so
-    update_config / update_registry refuse on ``read_ok`` False.
+    Read-only consumers whose default is the safe answer take that fallback
+    and keep calling _read_json (the key verify path, netname and updater). A
+    consumer whose default is looser than a setting the user may have stored
+    (netpolicy, require_auth_enabled) calls load_config_checked and fails
+    safe on ``read_ok`` False. A read-modify-write must not take the
+    fallback: writing the default back replaces every setting the user had,
+    so update_config / update_registry refuse on ``read_ok`` False.
 
     Note the asymmetry: a file that PARSES but holds the wrong shape (a JSON
     string, a list) is read_ok True and keeps its documented fall-back-to-
@@ -1885,9 +1888,11 @@ def _reclaim_stale_lock(lockpath: Path, judged: bytes, judged_mtime: float) -> b
 
 
 @contextlib.contextmanager
-def _cross_process_lock(target: Path):
+def _cross_process_lock(target: Path, *, timeout: Optional[float] = None):
     """Hold an exclusive, cross-process lock on *target* (a sibling ``<name>.lock``
     marker file) for the duration of the ``with`` block.
+
+    *timeout* is the wait budget in seconds; None means _CROSS_LOCK_TIMEOUT.
 
     Bounded retry with an escalating backoff, matching _replace_atomic's
     established pattern, but on a wall-clock budget (_CROSS_LOCK_TIMEOUT) rather
@@ -1923,7 +1928,8 @@ def _cross_process_lock(target: Path):
     is logged."""
     lockpath = target.with_name(target.name + ".lock")
     token = f"{os.getpid()}:{uuid.uuid4().hex}".encode("ascii")
-    deadline = time.time() + _CROSS_LOCK_TIMEOUT
+    budget = _CROSS_LOCK_TIMEOUT if timeout is None else timeout
+    deadline = time.time() + budget
     attempt = 0
     while True:
         try:
@@ -1956,7 +1962,7 @@ def _cross_process_lock(target: Path):
                 continue
             if time.time() >= deadline:
                 raise TimeoutError(
-                    f"timed out after {_CROSS_LOCK_TIMEOUT:.0f}s waiting for "
+                    f"timed out after {budget:g}s waiting for "
                     f"{lockpath.name}, held by another localm process") from None
             _cross_lock_backoff(attempt)
             attempt += 1

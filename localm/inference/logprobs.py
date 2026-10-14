@@ -180,7 +180,7 @@ class LogprobAligner:
                             "text the generated tokens spell")
                     if replacement is None:
                         self._emit(s0 + lo - o0, s0 + hi - o0, lo, spans, src_starts, out)
-                    elif not _structural(replacement):
+                    elif s1 > s0 and not _structural(replacement):
                         self._emit(s0, s1, lo, spans, src_starts, out)
                 i += 1
         return out

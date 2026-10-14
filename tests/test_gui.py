@@ -3198,6 +3198,40 @@ class TestConversationStore:
             data = client.get("/api/conversations").json()
         assert [c["id"] for c in data["conversations"]] == ["ok"]
 
+    @pytest.mark.parametrize("meta", [False, True])
+    def test_unreadable_conversation_is_reported_in_the_list(
+            self, persist_app, monkeypatch, caplog, meta):
+        import logging
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, chats = persist_app
+        chats.mkdir(parents=True)
+        (chats / "broken.json").write_text("{nope", encoding="utf-8")
+        (chats / "shape.json").write_text("[1]", encoding="utf-8")
+        url = "/api/conversations?meta=true" if meta else "/api/conversations"
+        with TestClient(app) as client:
+            client.put("/api/conversations/ok",
+                       json={"title": "secret title", "updated_at": 1, "messages": []})
+            with caplog.at_level(logging.WARNING, logger="localm"):
+                first = client.get(url).json()
+                second = client.get(url).json()
+        assert [c["id"] for c in first["conversations"]] == ["ok"]
+        assert first["total"] == 1
+        assert first["unreadable"] == second["unreadable"] == ["broken", "shape"]
+        msgs = [r.getMessage() for r in caplog.records if "chat store" in r.getMessage()]
+        assert len(msgs) == 2, f"one warning per unreadable file, once: {msgs}"
+        assert any("broken" in m for m in msgs) and any("shape" in m for m in msgs)
+        assert not any("secret title" in m for m in msgs)
+
+    def test_list_with_nothing_unreadable_reports_an_empty_list(
+            self, persist_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, _chats = persist_app
+        with TestClient(app) as client:
+            client.put("/api/conversations/ok",
+                       json={"title": "ok", "updated_at": 1, "messages": []})
+            data = client.get("/api/conversations").json()
+        assert data["unreadable"] == []
+
     @pytest.mark.parametrize("doc", ["[]", "5", "null"])
     def test_conversation_file_that_is_not_an_object_is_unreadable(
             self, persist_app, monkeypatch, doc):

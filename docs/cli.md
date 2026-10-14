@@ -20,7 +20,7 @@ localm setup-sdcpp [opts]        # install the native image runtime (stable-diff
 localm setup-browser [opts]      # download Chromium for the automated browser
 ```
 
-`--debug` on `gui`, `serve`, and `run` writes a log to `<data dir>/logs/` with request timing and the native llama.cpp stderr stream (including crash abort reasons), and shows raw model output without marker scrubbing.
+`--debug` on `gui`, `serve`, and `run` writes a log to `<data dir>/logs/` with request timing and the native llama.cpp stderr stream (including crash abort reasons). Outside privacy mode it also writes the raw model output, before marker scrubbing, to that log; the reply you see is always scrubbed.
 
 ### Running models
 
@@ -212,7 +212,7 @@ info` or `localm config`.
 ```bash
 localm add D:\models\mymodel.gguf
 localm add D:\models\my-hf-model --name mymodel
-localm add D:\ollama\manifests\registry.ollama.ai\library\<model>\<tag>
+localm add D:\ollama\manifests\registry.ollama.ai\library\<model>
 localm add D:\models\mymodel.gguf --on-duplicate alias   # ask|alias|copy|move|register|skip
 localm add D:\models\bulk-dir --fast                     # dedup on file size, skip the SHA256 hash
 localm alias mymodel short                   # second name for the same file
@@ -239,7 +239,7 @@ embedding/pooling signal makes it `embedding`, otherwise it is an `llm`); a
 HuggingFace directory is read from its `config.json` architectures (or
 `adapter_config.json` for a `lora`). Anything without a hard signal is left as
 `unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
-`text-encoder`, `vae`, `lora`, `embedding`, and `unknown`.
+`text-encoder`, `vae`, `lora`, `embedding`, `tts`, `upscaler`, and `unknown`.
 
 An `unknown` model still runs when you name it explicitly (`localm run NAME`, or an
 API request naming it), but is never auto-picked as the default chat model, so a
@@ -247,7 +247,7 @@ diffusion checkpoint or text encoder cannot get loaded as if it were a chat mode
 Correct a misdetected or `unknown` type at any time:
 
 ```bash
-localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora embedding unknown
+localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora embedding tts upscaler unknown
 ```
 
 Registering a lone `.safetensors` file scans its parent directory: if that folder
@@ -493,7 +493,9 @@ localm memory clear [-y]                   # erase everything (not recoverable)
 
 Reads and writes the same store the app and the `memory` plugin's chat recall
 use, and works whether or not that plugin is installed - the plugin only adds
-the automatic recall-on-chat and background consolidation hooks. See
+the automatic recall-on-chat and background consolidation hooks. `add`,
+`restore`, `accept` and `reject` write to the store, so they refuse in the
+default `privacy` mode (set `mode` or `chat_mode` to `log` or `full` first). See
 [docs/memory.md](memory.md).
 
 ---
@@ -511,7 +513,7 @@ localm config autoprune_missing_models true
 localm config language de                        # interface language: en (default) or de
 ```
 
-Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; localm warns when binding to a non-loopback address without a key; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
+Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead); `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -725,7 +727,7 @@ value for a field instead of sharing the global `comfy_*` default. Any other
 plugin declares its settings as it loads, so listing or setting those needs a
 running localm (found the way `localm status` finds it, or set `LOCALM_URL`).
 
-The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). A running GUI server picks up new HTTP routes and tabs at runtime; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](plugins.md).
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). Installing from the CLI changes configuration only: a running GUI server picks up the plugin's HTTP routes and tabs on its next start; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](plugins.md).
 
 Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](plugins.md) for the full authoring contract.
 
@@ -810,7 +812,7 @@ installed and enabled, and are always unavailable to a restricted session -
 "a restricted session never browses" is a deliberate exclusion, not an
 oversight. See [network.md](network.md#the-browser-plugin).
 
-Four things the table cannot express, and each of them matters:
+Five things the table cannot express, and each of them matters:
 
 - **`fetch_url`, `web_search`, and `browser_navigate`/`browser_click`/`browser_fill`
   follow the network policy, not this column.** They confirm when `net_mode` is

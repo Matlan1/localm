@@ -27,7 +27,8 @@ import click
               help="Answer chat with a model another localm instance on this "
                    "machine already has loaded, instead of loading a second copy "
                    "into VRAM. Another install's instance is used only when it "
-                   "needs no API key.")
+                   "needs no API key, and any instance only while it records "
+                   "chat no more than this machine's chat persistence allows.")
 @click.option("--print-config", is_flag=True,
               help="Print the mcpServers JSON block for your MCP client and exit.")
 def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
@@ -42,10 +43,11 @@ def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
         localm mcp --print-config
 
     \b
-    Exposed tools: chat, model management (list_models, search_models,
+    Exposed tools: chat, rerank, server_activity, model management (list_models, search_models,
     list_model_files, pull_model, remove_model, setup_embeddings),
-    system_stats, run_doctor, plugin management (list/install/enable/
-    disable/uninstall_plugin), and, conditionally, embed, generate_image
+    system_stats, run_doctor, plugin management (list_plugins,
+    install_plugin, enable_plugin, disable_plugin, uninstall_plugin), and,
+    conditionally, embed, generate_image
     (unless --no-images), run_coder_task (coder plugin active, unless
     --no-coder), and memory_recall (memory plugin active, unless --no-memory).
     remove_model and uninstall_plugin are marked destructive.

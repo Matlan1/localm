@@ -40,6 +40,11 @@ and its five non-English dictionaries are committed beside the bundle. Section 1
 of the AGPL permits combining an AGPL-covered work with a GPL-3.0 work, so the
 combination is licensed, and the combined bundle carries eSpeak NG under the GPL.
 
+The test suite carries four Gemma 4 chat templates from Google's `google/gemma-4-E2B-it` and
+`google/gemma-4-31B-it` model repositories (Apache-2.0, (c) Google LLC) as test fixtures in
+[`tests/fixtures/gemma4_chat_templates/`](tests/fixtures/gemma4_chat_templates/README.md). They are
+not shipped in the package.
+
 ## Bundled at release time (native inference binaries)
 
 The `localm-llama-runtime` package carries native inference binaries that are NOT

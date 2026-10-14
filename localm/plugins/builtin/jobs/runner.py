@@ -274,13 +274,28 @@ def _served_engine(job: Job, live):
 
 def _peer_served_engine(route):
     """An engine that answers *route*'s model through its peer, loading
-    nothing here."""
+    nothing here. Raises RuntimeError, sending nothing, when the peer does not
+    confirm it records the job's chat no more than this instance's chat mode
+    allows (``peer_routing.chat_route_mode``)."""
     from localm import peer_routing
     from localm.inference.http_engine import HttpEngine
+    mode = peer_routing.chat_route_mode()
+    try:
+        peer_routing.ensure_peer_keeps_mode(route.safe_dict(), route.api_key, mode)
+    except peer_routing.PeerUnreachable as e:
+        raise RuntimeError(
+            f"'{route.model}' is routed to the localm instance at {route.host}:"
+            f"{route.port}, but {e}. Clear the route to run the job here.") from e
+    except peer_routing.PeerWouldRecord as e:
+        raise RuntimeError(
+            f"'{route.model}' is routed to another localm instance, but {e}; this "
+            f"localm records chat in {mode.value} mode, so the job was not sent "
+            "there. Clear the route to run it here.") from e
     base = peer_routing._peer_url(route, "/v1")
     eng = HttpEngine(base, token=route.api_key or None,
                      model=route.peer_model or route.model,
-                     display_name=route.model, pin_model=True)
+                     display_name=route.model, pin_model=True,
+                     session_mode=mode.value)
     eng.active_requests = 0
     eng.unloading = False
     return eng
@@ -743,7 +758,8 @@ def _run_coder(job: Job, *, engine=None) -> str:
             "directory.", job.name, job.id)
 
     backend = _coder_backend(job)
-    mode = effective_mode("coder")
+    # Resolved with the job's project dir, where a .localcoder/config.toml mode applies.
+    mode = effective_mode("coder", cwd=cwd)
 
     # Safe-by-default: an unattended scheduled run has nobody to approve a destructive
     # tool, so it runs RESTRICTED (read plus confined edit, no run_shell, no network,

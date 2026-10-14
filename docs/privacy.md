@@ -43,6 +43,18 @@ per-surface config (`chat_mode` / `coder_mode`) > global config (`mode`) >
 Notes:
 - The mode is resolved per surface, so you can, for example, keep the coder in
   `log` while chat stays `privacy` (`coder_mode = log`).
+- The chat page in the app and `localm run` save conversations by the chat mode,
+  and a coder session saves its own log and transcript by the coder mode.
+- The server's own audit log and transcript (`*_server.jsonl` / `*_server.md`)
+  record a chat or coder request under the more private of the global mode and
+  that surface's mode (for the coder, the session's own mode, including a
+  project's `.localcoder/config.toml`). So `chat_mode = privacy` keeps chat out
+  of the server's records even when `mode = full`, while `chat_mode = full`
+  under `mode = privacy` saves conversations but adds nothing to the server's
+  records. Any other client of the server's API is recorded under the global
+  mode. The surface's mode applies only to requests made with the owner key (or
+  in open mode); a scoped key's requests are recorded under the global mode,
+  and the chat page opened with one follows the global mode too.
 - "Nothing written automatically" is the promise privacy mode makes; anything you
   do explicitly (saving a conversation, filing a bug report, `--debug`) is a
   deliberate action, not an automatic trace.
@@ -76,6 +88,22 @@ None of this is silent: each is something you explicitly asked localm to
 keep, not a trace of a conversation. But if you are relying on privacy mode
 alone to leave nothing behind, know that a job you scheduled, a document you
 indexed, a persona you saved, or a file you uploaded still lands on disk.
+
+### Another localm instance answering for this one
+
+A chat can be answered by another localm instance on this machine that
+already has the model loaded: a route you accept in the GUI, a scheduled job
+on a routed model, or `localm mcp --share-loaded-models`. That instance would
+otherwise record the chat in its own session mode. So unless this instance
+records the chat in `full` mode, the other instance must first confirm that it
+records it no more than this instance's mode allows: it is in that mode or a
+more private one, or it is reached with its owner key and agrees to record
+less. If it does not confirm, nothing is sent to it: accepting the route and
+each routed request are refused with a message naming that instance (and its
+mode, when it reports one), a routed job fails saying so, and the MCP server
+loads the model itself. Reached with any other key, that instance records at
+its own mode as checked before each request, so a change it makes to its own
+mode while a request is running is not covered.
 
 ---
 
@@ -127,8 +155,13 @@ report needs, even in privacy mode:
 
 - the hang watchdog trace,
 - the crash/restart breadcrumb log (`pre_restart.log` + the in-memory activity
-  ring), and
+  ring),
+- the bug report localm saves on its own when it hits an unexpected error, and
 - a debug log (operational lines only).
+
+Without it, privacy mode saves no such bug report: a command that fails at a
+terminal asks whether to save one (the default is no), and an error with no
+terminal to ask (a background task, a server) saves nothing.
 
 Set it in **Settings > Privacy** (in-app, persistent), with the **desktop
 launcher** checkbox, with `--keep-diagnostics` on `localm gui` (`serve` and
@@ -157,21 +190,26 @@ localm will not start at all on a pip install, file an
 `localm bug-report` itself needs a working localm to run.
 
 **You always see the full report before anything is sent, and sending needs
-your explicit OK.** The GUI shows the assembled text and requires you to
-press Send. The standalone reporter and `localm bug-report` preview the
-same text at a terminal prompt - and when there is no terminal to prompt
-(piped/redirected stdin, or run non-interactively), both the Python and
-PowerShell standalone reporters now treat that exactly like you said no: the
-report is saved locally and nothing is sent. This was a real gap: the
-PowerShell fallback used to fall through to sending on its own when it had
-no way to show the confirmation prompt at all.
+your explicit OK.** In the GUI, "Send to maintainer" saves the report and
+shows its whole text; nothing is uploaded until you press "Send this
+report", and what is uploaded is that saved text, apart from its closing
+note about editing the report, which is left out. The standalone reporter
+and `localm bug-report` preview the same text at a terminal prompt - and when
+there is no terminal to prompt (piped/redirected stdin, or run
+non-interactively), every standalone reporter (Python, PowerShell, and the
+`report-issue.sh` curl fallback used when there is no Python) treats that
+exactly like you said no: nothing is sent. The curl fallback also sends
+nothing when `perl`, which it needs to remove personal details, is missing.
 
 **What is redacted from a report:**
-- Your account name and home directory, in every textual form the report
-  might quote it in (a plain path, a `repr()`'d or JSON-encoded one with
-  doubled backslashes, or a path embedded in a native crash traceback's own
-  message) - the backstop regex runs unconditionally, so one unresolvable
-  path lookup can't leave the raw text unscrubbed.
+- Your home directory, replaced by `~`, and your account name wherever it is
+  the folder under a home root (`C:\Users\<name>`, `/home/<name>`,
+  `/Users/<name>`), in every textual form the report might quote it in (a
+  plain path, a `repr()`'d or JSON-encoded one with doubled backslashes, or a
+  path embedded in a native crash traceback's own message) - the backstop
+  regex runs unconditionally, so one unresolvable path lookup can't leave the
+  raw text unscrubbed. The account name is not searched for elsewhere (a
+  folder like `D:\<name>\localm`, or the name in prose).
 - URL credentials (`user:pass@...`), credential-named query parameters and
   HTTP header lines (`api_key=`, `token=`, `X-Api-Key:`, `Auth-Token:`, ...),
   and bearer / API-key-shaped tokens - an `Authorization:` value is caught
@@ -179,7 +217,7 @@ no way to show the confirmation prompt at all.
   appear in diagnostic text, recent log tails, or the activity ring.
 - Email addresses in the usual `name@domain` form (also URL-encoded as
   `name%40domain`), anywhere in the report including the configuration
-  section, replaced with `<redacted-email>`, except the maintainer's contact
+  section and the subject of an emailed report, replaced with `<redacted-email>`, except the maintainer's contact
   address the report is addressed to.
 - Config values are sent only from a small allowlist of operational keys
   (port, context size, GPU layer count, mode, ...); the API key itself is
@@ -188,8 +226,8 @@ no way to show the confirmation prompt at all.
 **What a report deliberately keeps**, because it is what makes the report
 useful to debug: your install location, data directory path, native runtime
 library names, dependency versions, the loaded model's name and backend, and
-a tail of the crashed run's own log. Only the account name is stripped from
-these, not the whole path - unlike an HTTP response handed to a
+a tail of the crashed run's own log. Only the home directory and the account
+name under a home root are stripped from these, not the whole path - unlike an HTTP response handed to a
 lower-privileged API caller, which strips the install/data-dir paths too.
 
 None of this is affected by session persistence mode: filing a report is the
@@ -211,9 +249,10 @@ policy](network.md) instead.
   press "Check for updates" in the GUI or run `localm update` / `localm update
   --check`.
 - **What it sends, and what it does not.** A bare GET request identifying itself
-  as `localm`, plus a shared-secret header if one is configured. It does **not**
-  send your installed version, chat content, or anything else - the comparison
-  to the latest release happens locally, on your machine. What it does expose to
+  as `localm`, plus a shared-secret header if one is configured. The request path
+  names the release channel (stable, or prerelease if you opted in). It does
+  **not** send your installed version or chat content - the comparison to the
+  latest release happens locally, on your machine. What it does expose to
   the update server is your IP address, the time you checked, and the fact that
   a localm install checked in.
 - **It obeys `net_mode`.** The update check reads the network mode you set
@@ -224,8 +263,10 @@ policy](network.md) instead.
   than a URL you or a fetched page supplied - see
   [network.md](network.md#what-the-policy-does-not-govern). Turn on "Check
   for updates even when network access is off" in **Settings > Updates** to
-  exempt just this one channel; it is off by default, so `net_mode=off` is a
-  real kill switch unless you opt back in.
+  exempt just this one channel; it is off by default. `net_mode=off` blocks
+  the update check and everything a model triggers unless you opt back in; the
+  separate admin-only `net_allow_model_downloads` setting (also off by default)
+  exempts only the downloads you trigger yourself.
 - **Turning the channel off entirely.** Clear the update endpoint
   (`update_url` and `bugreport_upload_url` both blank) to disable update
   checks regardless of network policy.

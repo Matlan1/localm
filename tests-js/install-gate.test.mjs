@@ -99,7 +99,7 @@ test("show/dismiss: gate covers the app, Continue reveals it and remembers", asy
 
 test("privacy mode: Continue does NOT persist the onboarded flag (no traces)", () => {
   const { window } = loadApp({ fetchImpl: allOk });
-  runScript(window, "chat.privacy = true;");
+  runScript(window, "chat.privacy = true; chat.serverPrivacy = true;");
   window.localStorage.removeItem("localm.onboarded");
   window.showInstallGate();
   window.dismissInstallGate();

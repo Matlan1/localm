@@ -60,9 +60,14 @@ _IDLE_REAP_SECONDS = 24 * 3600
 # The longest close_all_for_exit() waits for live sessions to close.
 _EXIT_CLOSE_BUDGET_S = 5.0
 
-# Every SessionManager created in this process, for close_all_for_exit().
+# Every SessionManager created in this process, for close_all_for_exit() and
+# stop_all_live_sessions().
 _live_managers: weakref.WeakSet[SessionManager] = weakref.WeakSet()
 _live_managers_lock = threading.Lock()
+
+# Daemon threads stop_all_live_sessions() started to finish closing the sessions
+# it removed; close_all_for_exit() waits for them within its budget.
+_closing_threads: list[threading.Thread] = []
 
 
 class SessionUnavailable(RuntimeError):
@@ -1104,14 +1109,57 @@ class SessionManager:
         return closed
 
 
+def stop_all_live_sessions() -> int:
+    """End every live session of every SessionManager in this process, for the
+    coder plugin's ``unregister()`` (plugin disable / uninstall).
+
+    Each session is removed from its manager and its agent is told to stop
+    before this returns; the rest of ``close()`` (checkpoint, audit close, the
+    session's browser) finishes on a daemon thread, so the caller never waits
+    on it. A session whose stop or close raises is logged at WARNING and the
+    others still end. Returns how many sessions were removed."""
+    from localm.debuglog import logger
+    with _live_managers_lock:
+        managers = list(_live_managers)
+    sessions: list[CoderSession] = []
+    for manager in managers:
+        with manager._lock:
+            sessions.extend(manager._sessions.values())
+            manager._sessions.clear()
+    for s in sessions:
+        try:
+            s.stop()
+        except Exception:
+            logger.warning("coder: stopping session %s failed",
+                           getattr(s, "id", "?"), exc_info=True)
+
+    def _close() -> None:
+        for s in sessions:
+            try:
+                s.close()
+            except Exception:
+                logger.warning("coder: closing session %s failed",
+                               getattr(s, "id", "?"), exc_info=True)
+
+    if sessions:
+        worker = threading.Thread(target=_close, name="coder-sessions-disable-close",
+                                  daemon=True)
+        with _live_managers_lock:
+            _closing_threads[:] = [t for t in _closing_threads if t.is_alive()]
+            _closing_threads.append(worker)
+        worker.start()
+    return len(sessions)
+
+
 def close_all_for_exit(timeout_s: Optional[float] = None) -> int:
     """Close the sessions of every SessionManager in this process, from the
     server's ``os._exit``/``os.execv`` exit paths.
 
     The closes run on a daemon thread; this waits at most *timeout_s* seconds
-    (default ``_EXIT_CLOSE_BUDGET_S``) for them and logs at WARNING when they
-    have not finished by then. Returns how many sessions had closed when it
-    returned. Never raises."""
+    (default ``_EXIT_CLOSE_BUDGET_S``) for them, and for any closes
+    ``stop_all_live_sessions`` still has in flight, and logs at WARNING when
+    they have not finished by then. Returns how many sessions had closed when
+    it returned. Never raises."""
     budget = _EXIT_CLOSE_BUDGET_S if timeout_s is None else timeout_s
     closed = [0]
     try:
@@ -1130,8 +1178,13 @@ def close_all_for_exit(timeout_s: Optional[float] = None) -> int:
         worker = threading.Thread(target=_close_managers,
                                   name="coder-sessions-exit-close", daemon=True)
         worker.start()
+        deadline = time.monotonic() + budget
         worker.join(budget)
-        if worker.is_alive():
+        with _live_managers_lock:
+            pending = [t for t in _closing_threads if t.is_alive()]
+        for t in pending:
+            t.join(max(0.0, deadline - time.monotonic()))
+        if worker.is_alive() or any(t.is_alive() for t in pending):
             from localm.debuglog import logger
             logger.warning("coder: live sessions were still closing after %.1fs "
                            "at exit; the exit goes ahead without them", budget)

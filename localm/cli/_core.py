@@ -322,7 +322,7 @@ class _GracefulGroup(click.Group):
         # report falls back to a one-line message.
         try:
             from localm import bugreport
-            interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+            interactive = bugreport.stdin_is_interactive()
             if isinstance(e, bugreport.LocalmError):
                 bugreport.report_failure(
                     summary=e.summary, reason=e.reason,

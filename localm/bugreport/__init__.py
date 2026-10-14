@@ -25,7 +25,8 @@ report - while staying safe:
     (privacy) mode, debug flag, and enabled plugins.
   * An ALLOWLISTED, scrubbed subset of config (context sizing, ports, media URLs,
     privacy mode) - never the whole config, so a future secret-bearing key cannot
-    leak; path values are home-scrubbed and URL values credential-scrubbed.
+    leak; every string in a value, nested ones included, goes through the
+    same scrub as the rest of the report.
   * Versions of the dependencies that shape a failure (native runtime, HF + server
     stacks).
   * The in-memory recent-activity log (INFO+ breadcrumbs; the raw model output is
@@ -49,7 +50,7 @@ regardless of what the content itself says.
 from __future__ import annotations
 
 from localm.bugreport._common import (
-    console, MAINTAINER_EMAIL,
+    console, MAINTAINER_EMAIL, stdin_is_interactive,
 )
 from localm.bugreport.errors import (
     LocalmError, RateLimitedError,
@@ -72,10 +73,10 @@ from localm.bugreport.logs import (
 from localm.bugreport.assembly import (
     _format_error, _kv_lines, _app_state_lines, build_report, _report_footer,
     _strip_report_footer, _client_lines, report_title, _TRACE_REPORT_LIMIT,
-    trim_trace_for_report,
+    trim_trace_for_report, report_title_from_markdown,
 )
 from localm.bugreport.persistence import (
-    save_report, _SAVE_REPORT_LOCK, save_user_report,
+    save_report, _SAVE_REPORT_LOCK, save_user_report, read_saved_report, report_digest,
 )
 from localm.bugreport.transport import (
     _MAX_PREFILL_BODY, _truncate_body, mailto_url, upload_config, upload_available,
@@ -111,7 +112,7 @@ _armed_instance_id = None   # instance_id of the last arm_crash_guard() in THIS 
 __all__ = [
     "_all_crash_markers", "_all_crash_stopping_records", "_APIKEY_RE",
     "_app_state_lines", "arm_crash_guard", "_armed_instance_id", "armed_instance_id",
-    "_BEARER_RE", "build_report", "check_and_report_prior_crash",
+    "_BEARER_RE", "build_report", "stdin_is_interactive", "check_and_report_prior_crash",
     "_classify_prior_death", "_classify_url_error", "clear_crash_marker",
     "_client_lines", "collect_diagnostics", "_config_unreadable", "console",
     "_crash_dir", "_crash_marker_path", "_crash_stopping_path", "_crash_trace_fh",
@@ -130,6 +131,7 @@ __all__ = [
     "_recent_hang_traces", "_recent_log_tail", "_recent_log_tail_result",
     "release_crash_trace", "report_failure", "_report_footer",
     "_report_one_crash_marker", "_report_one_stopping_record", "report_title",
+    "report_title_from_markdown", "read_saved_report", "report_digest",
     "_REPORTED_DISTS", "_retry_after_from", "_ring_activity", "_runtime_libs",
     "_runtime_state", "_SAFE_CONFIG_KEYS", "_safe_config_subset", "save_report",
     "_SAVE_REPORT_LOCK", "save_user_report", "_scrub_home",

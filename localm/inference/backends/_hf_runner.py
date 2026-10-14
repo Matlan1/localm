@@ -77,6 +77,7 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
                                   optional typed-exception tag, re-raised as that
                                   type by the parent. Recognised tags:
                                   "UnsupportedInputError",
+                                  "ImageLimitError",
                                   "GrammarUnsupportedError",
                                   "InvalidGrammarError",
                                   "ContextCapacityExceededError",
@@ -318,6 +319,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
         ChatTemplateMissingError,
         ContextCapacityExceededError,
         GrammarUnsupportedError,
+        ImageLimitError,
         InvalidGrammarError,
         RerankInputError,
         UnsupportedInputError,
@@ -426,7 +428,9 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 # Report it cleanly and keep serving, mirroring how
                 # GgufWorker's chat_stream distinguishes InvalidGrammarError
                 # from a genuine native fault.
-                resp_q.put(("error", str(e), "UnsupportedInputError"))
+                resp_q.put(("error", str(e),
+                            "ImageLimitError" if isinstance(e, ImageLimitError)
+                            else "UnsupportedInputError"))
             except GrammarUnsupportedError as e:
                 # Same shape: _grammar_processor REFUSES a grammar it cannot
                 # apply rather than generating unconstrained text. Raised
@@ -865,6 +869,9 @@ class HFRunner:
                         if tag == "UnsupportedInputError":
                             from localm.inference.backends.base import UnsupportedInputError
                             raise UnsupportedInputError(msg)
+                        if tag == "ImageLimitError":
+                            from localm.inference.backends.base import ImageLimitError
+                            raise ImageLimitError(msg)
                         # Re-raise the TYPE, not a bare RuntimeError: the routes
                         # map GrammarUnsupportedError and InvalidGrammarError to a
                         # 400 naming the real problem, while a RuntimeError from

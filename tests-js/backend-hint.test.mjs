@@ -173,7 +173,7 @@ test("dismissing in privacy mode hides it now but leaves no localStorage trace",
   const dismiss = window.document.getElementById("perf-backend-hint-dismiss");
   assert.ok(await waitFor(() => hint.hidden === false));
 
-  runScript(window, "chat.privacy = true;");
+  runScript(window, "chat.privacy = true; chat.serverPrivacy = true;");
   dismiss.click();
   assert.equal(hint.hidden, true, "still hides for the rest of this session");
   assert.equal(window.localStorage.getItem("localm.backendHintDismissed"), null,

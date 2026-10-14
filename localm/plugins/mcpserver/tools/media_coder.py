@@ -363,10 +363,13 @@ def build(engines: EngineCache) -> dict[str, dict]:
             # Another localm instance's loaded copy, reached over its own API;
             # the model is loaded here if that instance stops answering.
             from localm.plugins.coder.backends.http import HTTPBackend
-            backend = peer_backend = PeerCoderBackend(engines, model_name, engine, HTTPBackend(
+            peer_http = HTTPBackend(
                 engine._base, model=getattr(engine, "_model", None) or model_name,
                 api_key=getattr(engine, "_token", None) or "localm",
-                localm_server=True))
+                localm_server=True)
+            peer_http.session_mode = cfg.session_mode
+            backend = peer_backend = PeerCoderBackend(engines, model_name, engine,
+                                                      peer_http)
         else:
             backend = SharedEngineBackend(
                 engine, model_name, lock=engines.generation_lock(engine),

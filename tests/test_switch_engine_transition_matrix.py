@@ -1318,6 +1318,26 @@ class TestPlacementHeal:
         assert any(line.startswith("switch_engine: loaded 'model-b': 32/32 layers")
                    for line in lines)
 
+    def test_a_heal_that_never_recommits_leaves_the_engine_unpinnable(
+            self, monkeypatch):
+        from fastapi import HTTPException
+        from localm.inference import residency
+        a, b, env = _degraded_beside(monkeypatch)
+        a.active_requests = 0
+
+        def _fail_reload():
+            b.load_calls += 1
+            raise RuntimeError("reload failed")
+        monkeypatch.setattr(b, "load", _fail_reload)
+
+        with pytest.raises(HTTPException):
+            asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert "model-b" not in hs._engines and b.unload_calls == 1
+        assert b.unloading is True
+        assert residency.try_pin_engine(b) is False
+        assert b.active_requests == 0
+
     def test_a_degraded_model_is_reloaded_when_its_blocker_is_gone(self, monkeypatch):
         a, b, env = _degraded_beside(monkeypatch)
         a.active_requests = 0

@@ -27,6 +27,11 @@ def _truncate_body(body: str) -> str:
 
 
 def mailto_url(summary: str, body: str) -> str:
+    """A ``mailto:`` link to MAINTAINER_EMAIL whose subject and body are
+    *summary* and *body* after ``_scrub_secrets``, the body truncated to
+    ``_MAX_PREFILL_BODY`` characters."""
+    summary = _br._scrub_secrets(summary)
+    body = _br._scrub_secrets(body)
     q = urllib.parse.urlencode(
         {"subject": f"localm bug: {summary}", "body": _truncate_body(body)},
         quote_via=urllib.parse.quote)

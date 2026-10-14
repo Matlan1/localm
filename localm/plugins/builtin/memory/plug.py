@@ -142,7 +142,7 @@ def _recall_enabled() -> bool:
         from localm.config import load_config
         return bool(load_config().get("memory_enabled", True))
     except Exception:
-        return True                                # config unreadable -> default on
+        return True                                # config could not be loaded -> default on
 
 
 def _recall_in_privacy(surface: str) -> bool:
@@ -405,6 +405,7 @@ def _rendered_text(store) -> str:
 
 @_router.get("/api/memory")
 async def memory_get(request: Request = None):
+    from localm.inference.http_server import path_formatter as _path_formatter
     store = _request_store(request)
     writable = _persist_enabled()
     if writable:
@@ -417,7 +418,7 @@ async def memory_get(request: Request = None):
     return {"text": _rendered_text(store), "writable": writable,
             "items": [_item(r) for r in store.all()],
             "corrections": _corrections_payload(store) if writable else [],
-            "path": str(store.path),
+            "path": _path_formatter(request)(store.path),
             **_embedder_download_status(request)}
 
 

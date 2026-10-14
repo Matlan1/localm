@@ -9,8 +9,9 @@ or reserved vocabulary placeholders (``<unused7>``). These are model internals,
 not content.
 
 Thinking-channel markers are not dropped but normalised to canonical
-``<think> ... </think>`` so every frontend handles reasoning one way; the rest
-are removed. This lives in one place and is applied once at the engine boundary
+``<think> ... </think>`` so every frontend handles reasoning one way, a harmony
+function call (``to=functions.NAME``) becomes a canonical ``<tool_call>`` block,
+and the rest are removed. This lives in one place and is applied once at the engine boundary
 (:meth:`localm.inference.engine.Engine.chat_stream`) so every backend - GGUF, HF,
 or any future one - inherits it instead of each re-implementing (or forgetting)
 it. The functions are idempotent: a second pass over already-scrubbed text is a
@@ -39,6 +40,25 @@ _THINK_CLOSE_RE = re.compile(
     r"|<\|?\s{0,4}channel\s{0,4}\|?>final\n?(<\|?\s{0,4}message\s{0,4}\|?>)?"  # harmony final-channel switch
 )
 
+# Harmony tool-call header, with the recipient in the role or the channel
+# section: <|start|>assistant<|channel|>commentary to=functions.NAME <|constrain|>json<|message|>
+# or <|start|>assistant to=functions.NAME<|channel|>commentary json<|message|>, the
+# "functions." prefix optional. The call's JSON arguments follow until <|call|>
+# (or the next harmony boundary).
+_HARMONY_CALL_RE = re.compile(
+    r"(?:<\|start\|>assistant\s{0,4}to=(?:functions\.)?[A-Za-z0-9_.-]{1,64}\s{0,4}"
+    r"<\|channel\|>(?:commentary|analysis)"
+    r"|<\|channel\|>(?:commentary|analysis)\s{0,4}to=(?:functions\.)?[A-Za-z0-9_.-]{1,64})"
+    r"\s{0,4}(?:<\|constrain\|>\s{0,4})?(?:json)?\s{0,4}<\|message\|>"
+)
+_HARMONY_CALL_NAME_RE = re.compile(r"to=(functions\.)?([A-Za-z0-9_.-]{1,64})")
+# Recipients of harmony's built-in tools; a header addressed to one is not a
+# function call.
+_HARMONY_BUILTIN_RE = re.compile(r"python|(?:browser|container)\.[A-Za-z0-9_.-]*")
+# Markers that end an open harmony call message.
+_HARMONY_BOUNDARY_RE = re.compile(r"<\|(?:call|end|return|start)\|>|<\|?\s{0,4}channel")
+_CALL_CLOSE = "}\n</tool_call>"
+
 # Native reasoning tags emitted without the harmony/Gemma channel wrapper.
 # "think" alone is excluded so canonical <think>/</think> tags pass through
 # untouched and the transform stays idempotent.
@@ -47,14 +67,34 @@ _THINK_BARE_OPEN_RE = re.compile(
 _THINK_BARE_CLOSE_RE = re.compile(
     r"<\s{0,4}/\s{0,4}(?:reasoning|thinking|thought|reflection)\s{0,4}>", re.IGNORECASE)
 
+# Markers that scrub to nothing wherever they sit. A turn-open marker followed by
+# one of these is left for the next pass, so the role word the marker owns is
+# adjacent to it once the inert marker is gone.
+_INERT_AHEAD = (
+    r"<\|\s{0,4}channel\s{0,4}\|?>(?!thought|thinking|analysis|reasoning|commentary"
+    r"|reflection|final)"
+    r"|<\s{0,4}channel\s{0,4}>(?!thought|thinking|analysis|reasoning|commentary"
+    r"|reflection|final)"
+    r"|<\|?\s{0,4}message\s{0,4}\|?>"
+    r"|<\|return\|>"
+    r"|<\|end\|>"
+    r"|<turn\|>"
+    r"|<\|tool>|<tool\|>"
+    r"|<\|think\|>|<think\|>"
+    r"|<unused\d{1,8}>?"
+    r"|\[TOOL_CALLS\]"
+    r"|<\|start_header_id\|>(?:user|model|assistant|system|tool|ipython)?<\|end_header_id\|>"
+)
+
 _MARKER_RE = re.compile(
     r"<\|?\s{0,4}channel\s{0,4}\|?>"                                  # leftover channel tag
     r"|<\s{0,4}channel\s{0,4}\|>"                                     # leftover gemma4 close
     r"|<\|?\s{0,4}message\s{0,4}\|?>"                                 # stray harmony separator
-    r"|<\|start\|>(assistant|user|system)?"
+    r"|<\|start\|>(?:(?:assistant|user|system)|(?!" + _INERT_AHEAD + r"))"
     r"|<\|return\|>"
+    r"|<\|call\|>"                                             # harmony tool-call end
     r"|<\|end\|>"                                              # harmony message end
-    r"|<\|turn>(user|model|assistant|system)?\n?"            # Gemma 4 turn open
+    r"|<\|turn>(?:(?:user|model|assistant|system)\n?|(?!" + _INERT_AHEAD + r")\n?)"  # Gemma 4 turn open
     r"|<turn\|>"                                              # Gemma 4 turn close
     # <|tool_call> / <|tool_response> are not scrubbed: the coder agent parses
     # them out of this same stream.
@@ -67,8 +107,8 @@ _MARKER_RE = re.compile(
     # the head of the reply. The matching turn-CLOSE markers are not listed
     # here: the backend handles those as stop strings, ending the turn rather
     # than editing the text.
-    r"|<start_of_turn>(?:user|model|assistant|system|tool)?\n?"   # Gemma 1-3 turn open
-    r"|<\|im_start\|>(?:user|model|assistant|system|tool)?\n?"    # ChatML turn open
+    r"|<start_of_turn>(?:(?:user|model|assistant|system|tool)\n?|(?!" + _INERT_AHEAD + r")\n?)"
+    r"|<\|im_start\|>(?:(?:user|model|assistant|system|tool)\n?|(?!" + _INERT_AHEAD + r")\n?)"
     r"|<\|start_header_id\|>"
     r"(?:user|model|assistant|system|tool|ipython)?"
     r"<\|end_header_id\|>\n?"                                 # Llama 3 role header
@@ -78,15 +118,17 @@ _MARKER_RE = re.compile(
 # above the longest string _SCRUB_RE can match, or scrub_stream commits a cut
 # inside a marker and leaks its tail as text.
 # See test_marker_hold_covers_the_longest_possible_match.
-_MARKER_HOLD = 56
+_MARKER_HOLD = 168
 
 
 # Every substitution scrub_text makes, first listed wins at a position. Each
 # pattern starts with a character in _MARKER_START, which scrub_stream relies on
-# to release text early.
+# to release text early. A ``None`` replacement is computed per match by
+# _ScrubState.marker.
 # See test_every_scrub_pattern_starts_with_a_marker_start_character.
 _SCRUB_SUBS = (
     (re.compile(re.escape('<|"|>')), '"'),            # Gemma 4 quote token
+    (_HARMONY_CALL_RE, None),                          # harmony function call
     (_THINK_OPEN_RE, "<think>\n"),
     (_THINK_CLOSE_RE, "\n</think>\n"),
     (_THINK_BARE_OPEN_RE, "<think>"),                  # native <reasoning> etc.
@@ -102,17 +144,213 @@ _SCRUB_RE = re.compile("|".join(
     f"(?P<s{i}>{'(?i:' + rx.pattern + ')' if rx.flags & re.IGNORECASE else rx.pattern})"
     for i, (rx, _replacement) in enumerate(_SCRUB_SUBS)))
 _SCRUB_REPLACEMENTS = {f"s{i}": replacement
-                       for i, (_rx, replacement) in enumerate(_SCRUB_SUBS)}
+                       for i, (_rx, replacement) in enumerate(_SCRUB_SUBS)
+                       if replacement is not None}
+# _SCRUB_RE without the harmony call header, for a header addressed to a
+# built-in tool.
+_SCRUB_NO_CALL_RE = re.compile("|".join(
+    f"(?P<s{i}>{'(?i:' + rx.pattern + ')' if rx.flags & re.IGNORECASE else rx.pattern})"
+    for i, (rx, _replacement) in enumerate(_SCRUB_SUBS) if rx is not _HARMONY_CALL_RE))
+_G_CALL, _G_THINK_OPEN, _G_THINK_CLOSE = (
+    f"s{i}" for i, (rx, _r) in enumerate(_SCRUB_SUBS)
+    if rx in (_HARMONY_CALL_RE, _THINK_OPEN_RE, _THINK_CLOSE_RE))
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+class _ScrubState:
+    """What scrubbing has read and written so far, as far as the next rewrite
+    depends on it: whether the output has an open ``<think>`` block (the last
+    think tag in it is an opening one), whether a harmony call is open, and how
+    far its JSON arguments have been read.
+
+    A harmony call header is rewritten to the opening of a ``<tool_call>``
+    block whose JSON is ``{"name": NAME, "arguments": `` followed by the
+    model's arguments; an open think block is closed first. The block is closed
+    right after the arguments' JSON object or array ends, or at the next harmony
+    boundary marker. A think-close marker after a call header closed the think
+    block is rewritten to a line break. Every output character depends only on
+    the text before it."""
+
+    __slots__ = ("think", "call", "_tail", "_scan", "_depth", "_quote", "_escape",
+                 "_call_ended_think")
+
+    def __init__(self) -> None:
+        self.think = False
+        self.call = False
+        self._tail = ""
+        self._scan = False       # reading an open call's JSON arguments
+        self._depth = 0
+        self._quote = False
+        self._escape = False
+        self._call_ended_think = False   # a call header closed the last think block
+
+    def copy(self) -> _ScrubState:
+        other = _ScrubState()
+        for slot in self.__slots__:
+            setattr(other, slot, getattr(self, slot))
+        return other
+
+    def see(self, out: str) -> None:
+        """Note *out*, the next text written."""
+        if not out:
+            return
+        window = self._tail + out
+        opened, closed = window.rfind(_THINK_OPEN), window.rfind(_THINK_CLOSE)
+        if opened > closed:
+            self.think = True
+            self._call_ended_think = False
+        elif closed > opened:
+            self.think = False
+        self._tail = window[-(len(_THINK_CLOSE) - 1):]
+
+    def text(self, seg: str) -> int:
+        """Note *seg*, the next text copied unchanged, up to the end of an open
+        call's arguments. Returns how many characters that is (call
+        :meth:`close` next) or -1 when all of *seg* was noted."""
+        end = self._args_end(seg) if self._scan else -1
+        self.see(seg if end < 0 else seg[:end])
+        return end
+
+    def _args_end(self, seg: str) -> int:
+        for i, ch in enumerate(seg):
+            if self._quote:
+                if self._escape:
+                    self._escape = False
+                elif ch == "\\":
+                    self._escape = True
+                elif ch == '"':
+                    self._quote = False
+            elif self._depth == 0:
+                if ch in "{[":
+                    self._depth = 1
+                elif not ch.isspace():
+                    self._scan = False
+                    return -1
+            elif ch == '"':
+                self._quote = True
+            elif ch in "{[":
+                self._depth += 1
+            elif ch in "}]":
+                self._depth -= 1
+                if self._depth == 0:
+                    self._scan = False
+                    return i + 1
+        return -1
+
+    def close(self) -> str:
+        """The close of the open call, noted as written."""
+        self.call = self._scan = False
+        self.see(_CALL_CLOSE)
+        return _CALL_CLOSE
+
+    def marker(self, m: re.Match[str]) -> str:
+        """The replacement for scrub match *m*, noted as written."""
+        group = str(m.lastgroup)
+        out = ""
+        if self.call and (group in (_G_CALL, _G_THINK_OPEN, _G_THINK_CLOSE)
+                          or _HARMONY_BOUNDARY_RE.match(m.group())):
+            out = self.close()
+        name_match = _HARMONY_CALL_NAME_RE.search(m.group()) if group == _G_CALL else None
+        name = name_match.group(2) if name_match else ""
+        builtin = (name_match is not None and not name_match.group(1)
+                   and _HARMONY_BUILTIN_RE.fullmatch(name) is not None)
+        if builtin:
+            replacement = _SCRUB_NO_CALL_RE.sub(
+                lambda inner: _SCRUB_REPLACEMENTS[str(inner.lastgroup)], m.group())
+        elif group == _G_CALL:
+            replacement = "\n" + _THINK_CLOSE if self.think else ""
+            self._call_ended_think = self.think
+            replacement += '<tool_call>\n{"name": "' + name + '", "arguments": '
+            self.call = self._scan = True
+            self._depth = 0
+            self._quote = self._escape = False
+        elif group == _G_THINK_CLOSE and not self.think and self._call_ended_think:
+            replacement = "\n"
+            self._call_ended_think = False
+        else:
+            replacement = _SCRUB_REPLACEMENTS[group]
+        self.see(replacement)
+        return out + replacement
+
+
+def _scrub_part(text: str, state: _ScrubState, rx: re.Pattern[str] = _SCRUB_RE) -> str:
+    """*text* scrubbed in one marker pass, continuing from *state* (which is
+    advanced)."""
+    out: list[str] = []
+
+    def copied(seg: str) -> None:
+        while seg:
+            k = state.text(seg)
+            if k < 0:
+                out.append(seg)
+                return
+            out.append(seg[:k])
+            out.append(state.close())
+            seg = seg[k:]
+
+    pos = 0
+    for m in rx.finditer(text):
+        copied(text[pos:m.start()])
+        out.append(state.marker(m))
+        pos = m.end()
+    copied(text[pos:])
+    return "".join(out)
+
+# The same alternation with every turn-open marker matched bare, as one marker
+# pass matched it before a turn-open marker waited out the inert markers after
+# it. ScrubMap maps this one pass.
+_ONE_PASS_RE = re.compile(_SCRUB_RE.pattern.replace("(?!" + _INERT_AHEAD + ")", ""))
+
+
+_MAX_SCRUB_PASSES = 32
+
+
+def _scrub_once(text: str) -> str:
+    """One marker pass after the first. A harmony call header is scrubbed like
+    one addressed to a built-in tool."""
+    return _SCRUB_NO_CALL_RE.sub(lambda m: _SCRUB_REPLACEMENTS[str(m.lastgroup)], text)
+
+
+def _scrub_all(text: str, state: _ScrubState) -> str:
+    """*text* scrubbed to a fixed point: the first pass continues from *state*
+    (which is advanced), the later passes are :func:`_scrub_once`."""
+    out = _scrub_part(text, state)
+    for _ in range(_MAX_SCRUB_PASSES - 1):
+        if out is text or out == text:
+            return out
+        text = out
+        out = _scrub_once(text)
+    if out is text or out == text:
+        return out
+    from localm.debuglog import logger
+    logger.warning(
+        "scrub_text still changed the text after %d passes; markers nested that "
+        "deep were left in the reply", _MAX_SCRUB_PASSES)
+    return out
 
 
 def scrub_text(text: str) -> str:
-    """Apply marker normalisation/removal to a complete text chunk."""
-    return _SCRUB_RE.sub(lambda m: _SCRUB_REPLACEMENTS[m.lastgroup], text)
+    """Apply marker normalisation/removal to a complete text chunk.
+
+    Repeats the single marker pass until the text stops changing, so removing a
+    marker that sat inside another one (``<|start_header_id|><|message|>
+    <|end_header_id|>``) also removes the marker it exposed, and the result is
+    a fixed point. Gives up after ``_MAX_SCRUB_PASSES`` passes and logs a
+    warning; the text returned then still holds markers nested that deep."""
+    return _scrub_all(text, _ScrubState())
 
 
 class ScrubMap:
     """Where each part of :func:`scrub_text`'s output came from, for a text
     that only grows.
+
+    Maps one marker pass in which a turn-open marker is matched bare. For a text
+    that needs another pass (a marker nested inside another marker, or a
+    turn-open marker followed by inert markers and then its role word) the
+    spans rebuild the first pass's output, which differs from
+    :func:`scrub_text`'s; LogprobAligner then refuses the reply with
+    LogprobAlignmentError instead of aligning against the wrong text.
 
     :meth:`spans` takes the text so far (each call's text must extend the
     previous call's) and returns ``(src_start, src_end, out_start, out_end,
@@ -120,12 +358,14 @@ class ScrubMap:
     in order: ``replacement`` is None for text copied unchanged and the
     replacement string for a rewritten marker. Text within ``_MARKER_HOLD``
     characters of the end is mapped as if the text ended there; a marker it
-    turns into once more text arrives is mapped on a later call."""
+    turns into once more text arrives is mapped on a later call. The close of
+    a harmony call is a replacement span with ``src_start == src_end``."""
 
     def __init__(self) -> None:
         self._final: list[tuple[int, int, int, int, Optional[str]]] = []
         self._src = 0
         self._out = 0
+        self._state = _ScrubState()
         self._spans: list[tuple[int, int, int, int, Optional[str]]] = []
         self._seen = -1
 
@@ -133,31 +373,53 @@ class ScrubMap:
         n = len(text)
         if n == self._seen:
             return self._spans
-        tail: list[tuple[int, int, int, int, Optional[str]]] = []
+        tail: list[tuple[tuple[int, int, int, int, Optional[str]], _ScrubState, _ScrubState]] = []
+        state = self._state.copy()
         src, out = self._src, self._out
-        for m in _SCRUB_RE.finditer(text, src):
-            if m.start() > src:
-                tail.append((src, m.start(), out, out + m.start() - src, None))
-                out += m.start() - src
-            replacement = _SCRUB_REPLACEMENTS[str(m.lastgroup)]
-            tail.append((m.start(), m.end(), out, out + len(replacement), replacement))
+
+        def copied(s0: int, s1: int) -> int:
+            o = out
+            while s0 < s1:
+                before = state.copy()
+                k = state.text(text[s0:s1])
+                stop = s1 if k < 0 else s0 + k
+                tail.append(((s0, stop, o, o + stop - s0, None), before, state.copy()))
+                o += stop - s0
+                if k < 0:
+                    break
+                before = state.copy()
+                close = state.close()
+                tail.append(((stop, stop, o, o + len(close), close), before, state.copy()))
+                o += len(close)
+                s0 = stop
+            return o
+
+        for m in _ONE_PASS_RE.finditer(text, src):
+            out = copied(src, m.start())
+            before = state.copy()
+            replacement = state.marker(m)
+            tail.append(((m.start(), m.end(), out, out + len(replacement), replacement),
+                         before, state.copy()))
             out += len(replacement)
             src = m.end()
-        if src < n:
-            tail.append((src, n, out, out + n - src, None))
+        copied(src, n)
         settled = n - _MARKER_HOLD
         rest: list[tuple[int, int, int, int, Optional[str]]] = []
-        for i, span in enumerate(tail):
+        for i, (span, before, after) in enumerate(tail):
             s0, s1, o0, o1, replacement = span
-            if (s1 <= settled) if replacement is None else (s0 < settled):
+            if ((s1 <= settled) if replacement is None
+                    else (s0 <= settled) if s0 == s1 else (s0 < settled)):
                 _join_span(self._final, span)
+                self._state = after
             elif replacement is None and s0 < settled:
                 cut = settled - s0
                 _join_span(self._final, (s0, settled, o0, o0 + cut, None))
-                rest = [(settled, s1, o0 + cut, o1, None)] + tail[i + 1:]
+                before.text(text[s0:settled])
+                self._state = before
+                rest = [(settled, s1, o0 + cut, o1, None)] + [t[0] for t in tail[i + 1:]]
                 break
             else:
-                rest = tail[i:]
+                rest = [t[0] for t in tail[i:]]
                 break
         if self._final:
             self._src, self._out = self._final[-1][1], self._final[-1][3]
@@ -199,6 +461,9 @@ def _char_in_class(ch: str, members, ignorecase: bool) -> bool:
         elif op == c.CATEGORY and value == c.CATEGORY_DIGIT:
             if ch.isdecimal():
                 return True
+        elif op == c.RANGE:
+            if value[0] <= ord(ch) <= value[1]:
+                return True
         else:
             raise ValueError(f"unsupported character class member {op} {value}")
     return False
@@ -226,6 +491,8 @@ def _prefix_fits(items: list, s: str, k: int) -> bool:
         return _char_in_class(s[k], av, ignorecase) and _prefix_fits(rest, s, k + 1)
     if op == c.BRANCH:
         return any(_prefix_fits(_tagged(alt, ignorecase) + rest, s, k) for alt in av[1])
+    if op == c.ASSERT_NOT:
+        return _prefix_fits(rest, s, k)
     if op == c.SUBPATTERN:
         _group, add_flags, _del_flags, sub = av
         inner = ignorecase or bool(add_flags & re.IGNORECASE)
@@ -245,10 +512,6 @@ def _prefix_fits(items: list, s: str, k: int) -> bool:
 def _could_become_marker(text: str) -> bool:
     """True when *text* is a prefix of some string scrub_text would rewrite."""
     return _prefix_fits(_SCRUB_TREE, text, 0)
-
-
-_THINK_OPEN = "<think>"
-_THINK_CLOSE = "</think>"
 
 
 def split_think(text: str, exit_marker: Optional[str] = None) -> tuple[str, str]:
@@ -472,6 +735,27 @@ def _commit_point(buf: str) -> int:
     return cut
 
 
+def _scrub_released(chunk: str, state: _ScrubState) -> Optional[tuple[str, _ScrubState]]:
+    """``(_scrub_all(chunk, state), the advanced state)`` with *state* left as
+    it was, or None when text that follows *chunk* could still change it: the
+    end of the text is held back (:func:`_commit_point`) before the first marker
+    pass or after any pass, as a marker removed in one pass can leave the end of
+    the text open to a marker in the next."""
+    if _commit_point(chunk) < len(chunk):
+        return None
+    after = state.copy()
+    text, out = chunk, _scrub_part(chunk, after)
+    for _ in range(_MAX_SCRUB_PASSES - 1):
+        if out is text or out == text:
+            return out, after
+        text = out
+        if _commit_point(text) < len(text):
+            return None
+        out = _scrub_once(text)
+    after = state.copy()
+    return _scrub_all(chunk, after), after
+
+
 def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     """Normalise/remove internal model markers in a text stream.
 
@@ -486,18 +770,29 @@ def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     A stream that emits ``[TOOL_CALLS]`` more than ``_MARKER_FLOOD_LIMIT`` times
     is cut at that marker and the source iterator is closed, ending the
     generation.
+
+    The scrubbing state (an open think block, an open harmony call) carries
+    from piece to piece, so the output equals ``scrub_text`` of the whole
+    stream.
     """
     buf = ""
     seen = 0
+    state = _ScrubState()
     for piece in pieces:
         buf += piece
         cut = _commit_point(buf)
         if cut <= 0:
             continue
-        chunk = buf[:cut]
+        chunk, counted, flooded = _cut_marker_flood(buf[:cut], seen)
+        if flooded:
+            out = _scrub_all(chunk, state)
+        else:
+            released = _scrub_released(chunk, state)
+            if released is None:
+                continue
+            out, state = released
         buf = buf[cut:]
-        chunk, seen, flooded = _cut_marker_flood(chunk, seen)
-        out = scrub_text(chunk)
+        seen = counted
         if out:
             yield out
         if flooded:
@@ -505,7 +800,7 @@ def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
             _close_source(pieces)
             return
     chunk, seen, flooded = _cut_marker_flood(buf, seen)
-    buf = scrub_text(chunk)
+    buf = _scrub_all(chunk, state)
     if buf:
         yield buf
     if flooded:

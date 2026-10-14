@@ -56,6 +56,25 @@ _HUNK_RE = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@"
 )
 
+_EOL_RE = re.compile(r"(\r\n|\n|\r)")
+
+
+def _split_lines(text: str) -> tuple[list[str], list[str]]:
+    """Split *text* on CRLF, LF and CR only.
+
+    Returns ``(texts, terms)``: each line without its terminator and the
+    terminator it had (``""`` for an unterminated final line). Every other
+    character, including the Unicode line separators ``str.splitlines`` honours,
+    stays inside the line text.
+    """
+    parts = _EOL_RE.split(text)
+    texts = parts[0:-1:2]
+    terms = parts[1::2]
+    if parts[-1] != "":
+        texts.append(parts[-1])
+        terms.append("")
+    return texts, terms
+
 
 def _parse_hunks(diff_text: str) -> list[_Hunk]:
     """Parse a unified diff string into a list of _Hunk objects."""
@@ -63,7 +82,7 @@ def _parse_hunks(diff_text: str) -> list[_Hunk]:
     current: Optional[_Hunk] = None
     in_hunk = False
 
-    for line in diff_text.splitlines():
+    for line in _split_lines(diff_text)[0]:
         if not in_hunk:
             # Outside a hunk: skip file headers and noise
             if line.startswith(("--- ", "+++ ")):
@@ -160,15 +179,14 @@ def apply_diff(original_text: str, diff_text: str) -> str:
     Returns the patched text.
     Raises ``PatchError`` if a hunk cannot be applied.
     """
-    # Detect and preserve line ending style
-    eol = "\r\n" if "\r\n" in original_text else "\n"
-
     hunks = _parse_hunks(diff_text)
     if not hunks:
         raise PatchError("No hunks found in the diff string.")
 
-    orig = original_text.splitlines()
-    result: list[str] = list(orig)
+    texts, terms = _split_lines(original_text)
+    default_eol = terms[0] if terms and terms[0] else "\n"
+    result: list[str] = list(texts)
+    result_terms: list[Optional[str]] = list(terms)
     offset = 0  # cumulative line-count delta from hunks already applied
 
     for idx, hunk in enumerate(hunks):
@@ -191,12 +209,30 @@ def apply_diff(original_text: str, diff_text: str) -> str:
         old_count = len([l for l in hunk.lines if l.startswith((" ", "-"))])
         new_lines = [l[1:] for l in hunk.lines if l.startswith((" ", "+"))]
 
+        # A line that replaces an old one keeps that line's terminator; lines
+        # beyond the old span take their terminator from the line above.
+        replaced_terms = result_terms[pos : pos + old_count]
+        new_terms = [
+            replaced_terms[i] if i < len(replaced_terms) else None
+            for i in range(len(new_lines))
+        ]
         result[pos : pos + old_count] = new_lines
+        result_terms[pos : pos + old_count] = new_terms
         offset += len(new_lines) - old_count
 
-    # Preserve trailing newline behaviour of the original
-    patched = eol.join(result)
-    if original_text.endswith(("\n", "\r\n")) and not patched.endswith(("\n", "\r\n")):
-        patched += eol
+    ended_with_newline = bool(terms) and terms[-1] != ""
+    if not result:
+        return default_eol if ended_with_newline else ""
 
-    return patched
+    last = len(result) - 1
+    pieces: list[str] = []
+    prev_term = default_eol
+    for i, line in enumerate(result):
+        term = result_terms[i]
+        if i == last and not ended_with_newline:
+            term = ""
+        elif not term:
+            term = prev_term
+        prev_term = term or prev_term
+        pieces.append(line + term)
+    return "".join(pieces)

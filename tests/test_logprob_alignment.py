@@ -27,7 +27,10 @@ ATOMS = ["<think>", "</think>", OPEN_TAG, CLOSE_TAG,
          '{"name": "f", "arguments": {}}', "STOP", "ab", " ", "\n", "x", "<", "{",
          "}", "[", "<|channel|>analysis<|message|>", "<|channel|>final<|message|>",
          "<|end|>", "<|start|>assistant", '<|"|>', "<unused3>", "[TOOL_CALLS]",
-         "é", "€", "<reasoning>", "</reasoning>", "<|im_end|>"]
+         "é", "€", "<reasoning>", "</reasoning>", "<|im_end|>",
+         "<|channel|>commentary to=functions.f <|constrain|>json<|message|>",
+         "<|start|>assistant to=functions.f<|channel|>commentary json<|message|>",
+         "<|call|>"]
 
 
 def random_text(rng: random.Random, n: int) -> str:

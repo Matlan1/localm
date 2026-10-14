@@ -45,6 +45,46 @@ def test_an_ordinary_backend_gets_a_new_backend_for_the_requested_model(built):
     assert detail == ""
 
 
+def test_a_new_backend_keeps_the_parent_session_mode(built):
+    backend, _detail = par._child_backend(_backend(session_mode="privacy"),
+                                          "other-model")
+    assert backend.session_mode == "privacy"
+
+
+def test_a_spawned_agent_on_another_model_keeps_the_parent_session_mode(
+        tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    from localm.plugins.coder.agent import Agent
+    from localm.plugins.coder.audit import SessionMode
+    from localm.plugins.coder.backends.http import HTTPBackend
+    from localm.plugins.coder.tools.agents import _prepare_child
+
+    parent_backend = HTTPBackend("http://127.0.0.1:9123/v1", "parent-model",
+                                 localm_server=True)
+    parent_backend.session_mode = "privacy"
+    monkeypatch.setattr(
+        "localm.plugins.coder.backends.http.make_localm_backend",
+        lambda model, port=None, **kw: HTTPBackend(
+            f"http://127.0.0.1:{port}/v1", model, localm_server=True))
+    with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+         patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        MockPM.build.return_value.file_count.return_value = 0
+        parent = Agent(backend=parent_backend, cwd=tmp_path, mode=SessionMode.LOG,
+                       auto_approve=True)
+        try:
+            child, _task = _prepare_child(
+                tmp_path, "do it", "child", None, "other-model", 3, None, parent,
+                confirm_handler=None, tool="spawn_agent")
+            assert child.backend is not parent_backend
+            assert child.backend.model_id == "other-model"
+            assert child.backend._headers()["X-Localm-Session-Mode"] == "privacy"
+            child.close()
+        finally:
+            parent.close()
+
+
 def test_no_override_or_the_same_model_keeps_the_parent_backend(built):
     parent = _backend()
     assert par._child_backend(parent, None) == (parent, "")

@@ -76,6 +76,17 @@ SDXL_CKPT = {"model.diffusion_model.input_blocks.0.0.weight": (320, 4, 3, 3),
              "first_stage_model.decoder.conv_in.weight": (512, 4, 3, 3)}
 QWEN_IMAGE = {"transformer_blocks.0.img_mod.1.weight": (18432, 3072)}
 Z_IMAGE = {"cap_embedder.0.weight": (2560,), "layers.0.attention.qkv.weight": (11520, 3840)}
+SD1_UNET_DIFFUSERS = {
+    "conv_in.weight": (320, 4, 3, 3),
+    "down_blocks.0.attentions.0.transformer_blocks.0.attn2.to_k.weight": (320, 768),
+    "mid_block.attentions.0.norm.weight": (1280,)}
+SD2_UNET_DIFFUSERS = dict(SD1_UNET_DIFFUSERS, **{
+    "down_blocks.0.attentions.0.transformer_blocks.0.attn2.to_k.weight": (320, 1024)})
+SD1_UNET = {"model.diffusion_model.input_blocks.0.0.weight": (320, 4, 3, 3),
+            "model.diffusion_model.input_blocks.1.1.transformer_blocks.0.attn2.to_k.weight":
+                (320, 768)}
+DIFFUSERS_UNET_WITHOUT_CROSS_ATTENTION = {
+    "conv_in.weight": (320, 4, 3, 3), "down_blocks.0.resnets.0.norm1.weight": (320,)}
 SD2_CKPT = {"model.diffusion_model.input_blocks.0.0.weight": (320, 4, 3, 3),
             "first_stage_model.decoder.conv_in.weight": (512, 4, 3, 3),
             "cond_stage_model.transformer.text_model.embeddings.token_embedding.weight":
@@ -85,6 +96,8 @@ CLIP_L = {"text_model.embeddings.token_embedding.weight": (49408, 768),
 CLIP_L_FULL = dict(CLIP_L, **{"vision_model.encoder.layers.0.mlp.fc1.weight": (4096, 1024),
                               "text_projection": (768, 768)})
 CLIP_G = {"text_model.embeddings.token_embedding.weight": (49408, 1280)}
+CLIP_H = {"text_model.embeddings.token_embedding.weight": (49408, 1024),
+          "text_model.encoder.layers.0.layer_norm1.weight": (1024,)}
 CLIP_VISION = {"vision_model.encoder.layers.0.mlp.fc1.weight": (5120, 1280)}
 T5XXL = {"shared.weight": (32128, 4096),
          "encoder.block.0.layer.0.SelfAttention.k.weight": (4096, 4096)}
@@ -126,12 +139,18 @@ WAN22_5B_LORA = {"diffusion_model.blocks.0.cross_attn.k.lora_down.weight": (128,
     (WAN22_5B, "st", None, "diffusion", "wan2.2"),
     (SD3, "st", None, "diffusion", "sd3"),
     (SDXL_UNET, "st", None, "diffusion", "sdxl"),
-    (SDXL_UNET_DIFFUSERS, "gguf", "stable-diffusion-xl-unet", "unknown", None),
+    (SDXL_UNET_DIFFUSERS, "gguf", "stable-diffusion-xl-unet", "diffusion", "sdxl"),
+    (SD1_UNET_DIFFUSERS, "gguf", "stable-diffusion-unet", "diffusion", "sd1"),
     (SDXL_UNET_DIFFUSERS, "st", None, "diffusion", "sdxl"),
     (SDXL_CKPT, "st", None, "checkpoint", "sdxl"),
     (QWEN_IMAGE, "st", None, "diffusion", "qwen-image"),
     (Z_IMAGE, "st", None, "diffusion", "z-image"),
     (SD2_CKPT, "gguf", None, "checkpoint", "sd2"),
+    (SD1_UNET_DIFFUSERS, "st", None, "diffusion", "sd1"),
+    (SD2_UNET_DIFFUSERS, "st", None, "diffusion", "sd2"),
+    (SD1_UNET, "st", None, "diffusion", "sd1"),
+    (DIFFUSERS_UNET_WITHOUT_CROSS_ATTENTION, "st", None, "unknown", None),
+    (CLIP_H, "st", None, "clip_h", None),
     (CLIP_L, "st", None, "clip_l", None),
     (CLIP_L_FULL, "st", None, "clip_l", None),
     (CLIP_G, "st", None, "clip_g", None),
@@ -631,11 +650,77 @@ def test_an_sdxl_checkpoint_scales_an_external_vae_and_needs_no_hint(sdxl_set):
 
 def test_the_version_hint_file_is_rewritten_when_it_differs(sdxl_set):
     from localm.media.sdcpp import versionhint
-    path = versionhint.sdxl_hint_path()
-    assert path.read_bytes() == versionhint.hint_bytes()
-    path.write_bytes(b"damaged")
-    assert versionhint.sdxl_hint_path() == path
-    assert path.read_bytes() == versionhint.hint_bytes()
+    for family in ("sdxl", "sd1", "sd2"):
+        path = versionhint.hint_path(family)
+        assert path.read_bytes() == versionhint.hint_bytes(family)
+        path.write_bytes(b"damaged")
+        assert versionhint.hint_path(family) == path
+        assert path.read_bytes() == versionhint.hint_bytes(family)
+
+
+@pytest.fixture
+def sd_set(tmp_path):
+    d = tmp_path / "sd"
+    d.mkdir()
+    files = {
+        "sd1-unet": (write_safetensors(d / "sd15_unet.safetensors", SD1_UNET_DIFFUSERS),
+                     "diffusion-unet"),
+        "sd2-unet": (write_safetensors(d / "sd21_unet.safetensors", SD2_UNET_DIFFUSERS),
+                     "diffusion-unet"),
+        "clip_l": (write_safetensors(d / "clip_l.safetensors", CLIP_L), "text-encoder"),
+        "openclip_h": (write_safetensors(d / "model.fp16.safetensors", CLIP_H),
+                       "text-encoder"),
+        "sd_vae": (write_safetensors(d / "vae-ft-mse.safetensors", SD_VAE), "vae"),
+    }
+    for name, (path, mtype) in files.items():
+        _register(name, path, mtype)
+    return {k: v[0] for k, v in files.items()}
+
+
+@pytest.mark.parametrize("model,encoder,width", [("sd1-unet", "clip_l", 768),
+                                                  ("sd2-unet", "openclip_h", 1024)])
+def test_an_sd1_or_sd2_unet_alone_gets_its_parts_and_the_version_hint(sd_set, model, encoder,
+                                                                      width):
+    m = image_native.resolve_models({"native": {"model": model}})
+    ctx = m["ctx"]
+    assert ctx["diffusion_model_path"] == str(sd_set[model])
+    assert ctx["clip_l_path"] == str(sd_set[encoder])
+    assert ctx["vae_path"] == str(sd_set["sd_vae"])
+    assert set(ctx) == {"diffusion_model_path", "clip_l_path", "vae_path", "model_path"}
+    names = families.read_tensors(Path(ctx["model_path"]))[0]
+    assert names["text_model.embeddings.token_embedding.weight"] == (1, width)
+    assert any("middle_block.1" in n for n in names)
+    assert not any("conditioner.embedders" in n for n in names)
+
+
+def test_an_sd2_unet_is_not_paired_with_a_clip_l_and_offers_openclip_h(tmp_path):
+    from localm.media.sdcpp import pairing as pr
+    d = tmp_path / "sd"
+    d.mkdir()
+    _register("sd2-unet", write_safetensors(d / "sd21_unet.safetensors", SD2_UNET_DIFFUSERS),
+              "diffusion-unet")
+    _register("clip_l", write_safetensors(d / "clip_l.safetensors", CLIP_L), "text-encoder")
+    _register("sd_vae", write_safetensors(d / "vae-ft-mse.safetensors", SD_VAE), "vae")
+    with pytest.raises(pr.MissingComponents) as err:
+        image_native.resolve_models({"native": {"model": "sd2-unet"}})
+    (missing,) = err.value.missing
+    assert missing["slot"] == "clip_l" and missing["label"] == "OpenCLIP-H text encoder"
+    assert missing["download"]["file"] == "text_encoder/model.fp16.safetensors"
+    assert "--name openclip_h" in missing["download"]["pull_args"]
+    assert "OpenCLIP-H text encoder" in str(err.value)
+
+
+def test_an_openclip_h_file_is_not_a_model(sd_set):
+    with pytest.raises(ModelFileError, match="OpenCLIP-H text encoder, not an image model"):
+        image_native.resolve_models({"native": {"model": "openclip_h"}})
+
+
+def test_a_text_encoder_of_the_wrong_width_is_noted_for_an_sd_family(sd_set):
+    sd1 = image_native.resolve_models({"native": {"model": "sd1-unet",
+                                                  "clip_l": "openclip_h"}})
+    assert any("does not look like" in n for n in sd1["notes"])
+    sd2 = image_native.resolve_models({"native": {"model": "sd2-unet", "clip_l": "clip_l"}})
+    assert any("OpenCLIP-H text encoder 'clip_l' does not look like" in n for n in sd2["notes"])
 
 
 def test_the_worker_accepts_the_sdxl_vae_scale_flag():

@@ -1,7 +1,12 @@
 # FLUX Image Generation with localm
 
+Images generate out of the box with the built-in native backend (see
+[native-image.md](native-image.md)). This guide covers the other backend, where
 localm generates images through a local ComfyUI instance running a FLUX
-GGUF workflow. Everything runs on your own GPU; nothing leaves the machine.
+GGUF workflow. With ComfyUI on this machine (the default
+`http://127.0.0.1:8188`), everything runs on your own GPU and nothing leaves
+it. If you point `comfy_api_url` at another host, every request goes there
+over plain HTTP: the prompt, the negative prompt and any input image.
 localm drives ComfyUI over HTTP (VRAM handoff, model loading, and output
 retrieval are automatic); you do not need to learn the ComfyUI UI, just ask
 for images through localm's chat, CLI, or MCP interface. This guide covers the

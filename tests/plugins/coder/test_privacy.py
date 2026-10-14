@@ -106,7 +106,7 @@ class TestSubprocessPrivacyEnv:
 
 class TestWarnExternalProvider:
     # console is imported at module level in privacy.py - patch it there
-    _PATCH = "localm.plugins.coder.privacy.console"
+    _PATCH = "localm.plugins.coder.privacy.err_console"
 
     @pytest.mark.parametrize("provider,expected_substr", [
         ("openai", "OpenAI"),

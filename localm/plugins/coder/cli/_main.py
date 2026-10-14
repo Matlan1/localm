@@ -43,6 +43,7 @@ from ..privacy import (
     clear_shell_history_traces,
     suppress_readline_history,
     warn_external_provider,
+    warn_external_url,
 )
 from ..project_config import ProjectConfigUnreadable
 from ..runner import (
@@ -278,6 +279,7 @@ def main(
         _resolve_session_config(
             work_dir, model, max_turns, max_tokens, temperature, seed, yes,
             interactive_confirm, mode, ci, provider))
+    _warn_if_url_leaves_machine(session_mode, provider, url)
 
     # The in-loop exit-code oracle is for INTERACTIVE sessions (this REPL and the
     # GUI). A one-shot TASK keeps its own outer loop (--until, below), so the two
@@ -306,6 +308,10 @@ def main(
     # answered was skipped or failed to load says so in the terminal.
     if hasattr(backend, "on_routing_note"):
         backend.on_routing_note = print_warning
+    # A localm server records this session's requests no less privately than
+    # the session's own mode.
+    if hasattr(backend, "session_mode"):
+        backend.session_mode = session_mode
 
     # --native-tools asked for a protocol the chosen backend does not send. A
     # localm server is driven on the XML tool-call convention, so the run
@@ -672,6 +678,29 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
         warn_external_provider(provider)
     return (model, max_turns, yes, always_confirm, session_mode, gen_kw,
             cfg.max_tokens_explicit)
+
+
+def _warn_if_url_leaves_machine(session_mode, provider, url) -> None:
+    """In privacy mode, warn when the session's model server is an explicit
+    ``--url`` / ``LOCALCODER_URL`` whose host is not this machine. Silent for a
+    provider flag (it warns on its own and takes precedence over *url*), for no
+    *url*, and for a loopback host. A URL that cannot be classified counts as
+    off-machine."""
+    if session_mode != SessionMode.PRIVACY or provider or not url:
+        return
+    from urllib.parse import urlparse
+    from localm.bindhost import is_loopback_host
+    try:
+        local = is_loopback_host((urlparse(url).hostname or "").lower())
+    except Exception:
+        local = False
+    if local:
+        return
+    from click.core import ParameterSource
+    ctx = click.get_current_context(silent=True)
+    from_env = (ctx is not None
+                and ctx.get_parameter_source("url") == ParameterSource.ENVIRONMENT)
+    warn_external_url(url, from_env=from_env)
 
 
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,

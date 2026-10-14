@@ -27,6 +27,14 @@ DEFAULT_POLL_SECONDS = 30
 # older than this is not back-fired. One day.
 _CATCHUP_WINDOW_SECONDS = 24 * 60 * 60
 
+# Longest cron expression accepted, in characters. A 5-field expression that
+# lists every value of every field one by one is 358 characters.
+MAX_CRON_EXPR_CHARS = 512
+
+# How long one tick may spend deciding which jobs are due (reading the store and
+# matching schedules, not running jobs) before tick_error() reports it stalled.
+_TICK_STALL_SECONDS = 60.0
+
 
 # --------------------------------------------------------------------------- #
 #  Cron matcher (minute hour day-of-month month day-of-week)                  #
@@ -89,10 +97,15 @@ def _parse_field(field: str, lo: int, hi: int) -> set:
 
 def parse_cron(expr: str) -> list:
     """Parse a 5-field cron expression into a list of 5 value-sets. Raises
-    ValueError when the expression does not have exactly 5 fields or a field is
-    malformed."""
+    ValueError when the expression is longer than ``MAX_CRON_EXPR_CHARS``, does
+    not have exactly 5 fields, or has a malformed field. The length is checked
+    before anything else is done with the string."""
     if not isinstance(expr, str):
         raise ValueError("cron expression must be a string")
+    if len(expr) > MAX_CRON_EXPR_CHARS:
+        raise ValueError(
+            f"cron expression is {len(expr)} characters, over the "
+            f"{MAX_CRON_EXPR_CHARS}-character limit")
     fields = expr.split()
     if len(fields) != 5:
         raise ValueError(
@@ -115,6 +128,15 @@ def validate_cron(expr: str) -> None:
     parse_cron(expr)
 
 
+def compile_cron(expr: str) -> tuple:
+    """Parse *expr* once into the form ``matches_cron`` takes: the 5 value-sets
+    plus whether day-of-month and day-of-week are restricted. Raises ValueError
+    as ``parse_cron`` does."""
+    sets = parse_cron(expr)
+    fields = expr.split()
+    return (sets, fields[2].strip() != "*", fields[4].strip() != "*")
+
+
 def cron_match(expr: str, when: Optional[float] = None) -> bool:
     """True if the cron *expr* fires at the wall-clock time *when* (epoch
     seconds; defaults to now). Pure: no global state, no side effects.
@@ -122,9 +144,14 @@ def cron_match(expr: str, when: Optional[float] = None) -> bool:
     Day-of-month and day-of-week are matched cron-style: if BOTH are restricted
     (neither is ``*``), the job fires when EITHER matches; otherwise both must
     match. (This mirrors Vixie cron.)"""
+    return matches_cron(compile_cron(expr), when)
+
+
+def matches_cron(compiled: tuple, when: Optional[float] = None) -> bool:
+    """``cron_match`` for an expression already parsed by ``compile_cron``."""
     if when is None:
         when = time.time()
-    minute_s, hour_s, dom_s, month_s, dow_s = parse_cron(expr)
+    (minute_s, hour_s, dom_s, month_s, dow_s), dom_restricted, dow_restricted = compiled
     lt = time.localtime(when)
     # Python weekday(): Monday=0..Sunday=6; cron dow: Sunday=0..Saturday=6.
     cron_dow = (lt.tm_wday + 1) % 7
@@ -134,9 +161,6 @@ def cron_match(expr: str, when: Optional[float] = None) -> bool:
         return False
     if lt.tm_mon not in month_s:
         return False
-    fields = expr.split()
-    dom_restricted = fields[2].strip() != "*"
-    dow_restricted = fields[4].strip() != "*"
     dom_ok = lt.tm_mday in dom_s
     dow_ok = cron_dow in dow_s
     if dom_restricted and dow_restricted:
@@ -147,6 +171,11 @@ def cron_match(expr: str, when: Optional[float] = None) -> bool:
 # --------------------------------------------------------------------------- #
 #  Scheduler                                                                   #
 # --------------------------------------------------------------------------- #
+
+class TickStalledError(RuntimeError):
+    """A tick has spent more than ``_TICK_STALL_SECONDS`` deciding which jobs
+    are due without returning."""
+
 
 class JobScheduler:
     """Runs enabled + due jobs on a periodic asyncio loop.
@@ -178,6 +207,9 @@ class JobScheduler:
         # Log-once/on-change state for a FAILING tick: the signature of the last
         # logged failure, so an identical one is not re-logged every poll.
         self._last_tick_error: Optional[str] = None
+        # time.monotonic() at which the running tick started deciding which jobs
+        # are due, or None outside that phase.
+        self._choosing_since: Optional[float] = None
 
     # ---- pure decision logic ----------------------------------------------
     def due(self, job: Job, now: float) -> bool:
@@ -216,13 +248,14 @@ class JobScheduler:
     def _missed_cron_slot(self, job: Job, now: float) -> bool:
         """True if a cron-matching minute lies in ``(last_run, now)`` within the
         bounded catch-up window. Scans minute-by-minute from just after now back
-        to the window floor, short-circuiting on the first match."""
+        to the window floor, short-circuiting on the first match. The expression
+        is parsed once, not once per minute scanned."""
         try:
-            expr = str(job.schedule)
+            compiled = compile_cron(str(job.schedule))
             floor = max(float(job.last_run), now - _CATCHUP_WINDOW_SECONDS)
             m = int(now // 60) * 60 - 60          # the minute before "now"
             while m > floor:
-                if cron_match(expr, m):
+                if matches_cron(compiled, m):
                     return True
                 m -= 60
         except (ValueError, TypeError):
@@ -248,13 +281,17 @@ class JobScheduler:
         minute is not consumed."""
         if now is None:
             now = time.time()
-        current = self.store.list()
-        # Prune _cron_fired for jobs that no longer exist.
-        if self._cron_fired:
-            live = {j.id for j in current}
-            for jid in [k for k in self._cron_fired if k not in live]:
-                del self._cron_fired[jid]
-        due_jobs = [j for j in current if j.enabled and self.due(j, now)]
+        self._choosing_since = time.monotonic()
+        try:
+            current = self.store.list()
+            # Prune _cron_fired for jobs that no longer exist.
+            if self._cron_fired:
+                live = {j.id for j in current}
+                for jid in [k for k in self._cron_fired if k not in live]:
+                    del self._cron_fired[jid]
+            due_jobs = [j for j in current if j.enabled and self.due(j, now)]
+        finally:
+            self._choosing_since = None
         if not due_jobs:
             return []
 
@@ -318,17 +355,38 @@ class JobScheduler:
 
     def tick_error(self) -> Optional[str]:
         """The current failing-tick signature, or None while ticks are healthy.
-        Reflects _note_tick_error's latch; calling this does not itself run a
-        tick."""
-        return self._last_tick_error
+        Reflects _note_tick_error's latch, and also reports a tick that has spent
+        more than ``_TICK_STALL_SECONDS`` deciding which jobs are due and has not
+        returned. Calling this does not itself run a tick."""
+        if self._last_tick_error is not None:
+            return self._last_tick_error
+        return self._stall_message()
+
+    def _stall_message(self) -> Optional[str]:
+        """A description of the running tick when it has been deciding which
+        jobs are due for more than ``_TICK_STALL_SECONDS``, else None."""
+        since = self._choosing_since
+        if since is None or time.monotonic() - since <= _TICK_STALL_SECONDS:
+            return None
+        return (f"the scheduler has spent more than {_TICK_STALL_SECONDS:.0f}s "
+                "deciding which jobs are due and has not finished")
 
     async def _loop(self) -> None:
         assert self._stop is not None
         while not self._stop.is_set():
             try:
                 # Run the (blocking) tick off the event loop so a slow job run
-                # never stalls the loop or the server.
-                await asyncio.get_running_loop().run_in_executor(None, self.tick)
+                # never stalls the loop or the server. While it runs, a stall in
+                # deciding which jobs are due is logged once.
+                fut = asyncio.get_running_loop().run_in_executor(None, self.tick)
+                while True:
+                    done, _ = await asyncio.wait({fut}, timeout=self.poll_seconds)
+                    if done:
+                        break
+                    stalled = self._stall_message()
+                    if stalled is not None:
+                        self._note_tick_error(TickStalledError(stalled))
+                fut.result()
             except Exception as e:
                 # A tick must never kill the loop; the failure is logged
                 # once/on-change instead.

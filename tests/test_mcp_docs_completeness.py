@@ -71,3 +71,9 @@ def test_every_mcp_cli_option_is_documented(monkeypatch):
     doc = _doc_text()
     missing = sorted(opt for opt in _long_options(mcp_cli) if opt not in doc)
     assert not missing, f"options missing from docs/mcp.md: {missing}"
+
+
+def test_cli_help_names_every_buildable_tool(monkeypatch):
+    help_text = " ".join((mcp_cli.help or "").split())
+    missing = [n for n in _all_tools(monkeypatch) if n not in help_text]
+    assert not missing, f"`localm mcp --help` does not name: {missing}"

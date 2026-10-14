@@ -41,6 +41,7 @@ from localm.inference.backends.base import (
     EmbedBatchTooLargeError,
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
+    ImageLimitError,
     AudioDecodeUnavailable,
     InvalidGrammarError,
     ModelLoadCancelled,
@@ -106,12 +107,9 @@ _active_model_name: str | None = None
 # stale name from an unrelated, long-past eviction.
 _last_active_model_name: str | None = None
 
-# The server's audit log, published by create_app() (see the `global _audit`
-# there). Must default to None here so _do_restart's `global _audit` guard
-# always resolves to a real (possibly None) value even if it runs in a
-# process/interpreter where create_app() was never called first - reading an
-# unassigned global raises NameError, not a clean "None" check.
-_audit = None
+# The server's SessionRecorder (audit log + transcript), published by
+# create_app(). None until create_app() runs.
+_session_recorder = None
 
 # Per-model admission, display name -> InferenceGate: generations share it up
 # to the model's parallel slots, loads and unloads hold it alone.
@@ -644,7 +642,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if _is_reusable(resident):
             if not preempt and _placement_heal_due(name, resident):
                 try:
-                    heal_budget = _switch_load_budget(name)
+                    heal_budget = await loop.run_in_executor(
+                        None, _switch_load_budget, name)
                 except HTTPException as exc:
                     from localm.debuglog import logger as _dbg
                     _dbg.info("switch_engine: not reloading '%s' for a better placement, "
@@ -675,11 +674,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         if healing is not None:
             budget = heal_budget
         else:
-            budget = _switch_load_budget(name)
+            budget = await loop.run_in_executor(None, _switch_load_budget, name)
             if budget is not None and budget.check_split_fit:
                 sized = _engines.get(name)
                 if sized is None:
-                    built = sized = _engine_factory(name)
+                    built = sized = await loop.run_in_executor(None, _engine_factory, name)
                 budget = await _switch_with_backend_need(loop, budget, sized)
         attempt = switch_admission.EvictionAttempt(started=time.monotonic())
         evictions: list[VictimRelease] = []
@@ -707,11 +706,14 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         elif name in _engines:
             new_engine = _engines[name]
         else:
-            new_engine = built if built is not None else _engine_factory(name)
+            new_engine = built if built is not None else await loop.run_in_executor(
+                None, _engine_factory, name)
         interrupted = await _switch_load(loop, name, new_engine, preempt=preempt)
         if interrupted is not None:
             return interrupted
 
+        if healing is not None:
+            healing.unloading = False
         _switch_commit(name, new_engine, sem, activate=activate or was_active,
                        on_active=on_active)
         _log_switch_placement(name, new_engine, evictions)
@@ -750,6 +752,8 @@ def _switch_reuse_resident(name: str, sem, *, activate: bool, on_active) -> None
 def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
     """The VRAM budget a load of *name* has to fit, read from the model
     registry, the model's on-disk footprint and the residency settings.
+    Does blocking file IO (registry and config reads, a walk over the model
+    directory); an async caller runs it in an executor.
 
     Returns None for an empty registry (single-model or direct-path startup):
     no eviction runs then. Raises HTTPException 404 when the registry is not
@@ -1337,9 +1341,10 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
     """Run ``engine.load()`` off the event loop with a fresh cancel event.
 
     Returns None when the load succeeded, a ``superseded`` result when a newer
-    explicit switch cancelled it, or a ``cancelled`` result for any other
-    ``ModelLoadCancelled``. Raises HTTPException 503 with the backend's message
-    when ``load()`` raises RuntimeError.
+    explicit switch cancelled it or was selected before the load began, or a
+    ``cancelled`` result for any other ``ModelLoadCancelled``. Raises
+    HTTPException 503 with the backend's message when ``load()`` raises
+    RuntimeError.
 
     Every load installs a new event on the engine, which may still hold the
     set event of an earlier superseded switch. See
@@ -1360,6 +1365,8 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
         _switch_cancel = cancel
         _switch_loading = name
     try:
+        if preempt and _switch_desired != name:
+            return {"status": "superseded", "model": name, "by": _switch_desired}
         fingerprint = await loop.run_in_executor(
             None, _routing_latch.fingerprint, name)
         await loop.run_in_executor(None, engine.load)
@@ -1470,8 +1477,11 @@ async def _switch_free_for_reload(loop, name: str, engine,
     semaphore kept) so switch_engine can load it again at a better placement.
     Logs why at INFO, frees it like an eviction victim (``_switch_free_victim``
     against *probe*, the VRAM reading taken before the detach, for a load that
-    needs *needed* bytes) and clears its ``unloading`` flag and
-    ``placement_heal``. Returns the ``VictimRelease``."""
+    needs *needed* bytes) and clears its ``placement_heal``. Its ``unloading``
+    flag stays set until switch_engine commits it as resident again, so a
+    heal that never reaches the commit leaves an engine outside ``_engines``
+    that no ``try_pin_engine`` accepts. Returns the ``VictimRelease``.
+    See test_a_heal_that_never_recommits_leaves_the_engine_unpinnable."""
     from localm.debuglog import logger as _dbg
     heal = getattr(engine, "placement_heal", None)
     placement = getattr(engine, "gpu_placement", None) or {}
@@ -1484,7 +1494,6 @@ async def _switch_free_for_reload(loop, name: str, engine,
     try:
         return await _switch_free_victim(loop, name, engine, probe, needed=needed)
     finally:
-        engine.unloading = False
         engine.placement_heal = None
 
 
@@ -3493,6 +3502,29 @@ def caller_scopes(request: Request) -> Optional[set]:
     return prin[0] if prin else None
 
 
+def caller_is_operator(request: Request) -> bool:
+    """True for the local operator: open mode (no key configured anywhere) or
+    a caller holding an ADMIN/owner key. False for any other caller, including
+    a scoped key and a request presenting no valid key."""
+    from localm.auth import any_key_configured
+    if not any_key_configured():
+        return True
+    held = caller_scopes(request)
+    return held is not None and scopes.ADMIN in held
+
+
+def path_formatter(request: Request) -> Callable[[object], str]:
+    """A function rendering a path (or any text) for this caller's response:
+    ``str`` for the local operator (``caller_is_operator``), otherwise ``str``
+    followed by a ``pathscrub.path_scrubber`` bound once (home, account name,
+    data dir, install root and env prefix replaced, file name kept)."""
+    if caller_is_operator(request):
+        return str
+    from localm.pathscrub import path_scrubber
+    scrub = path_scrubber()
+    return lambda value: scrub(str(value))
+
+
 def principal_id(request: Request) -> Optional[str]:
     """A stable, opaque per-key identity for the CURRENT caller, or None in open
     mode / when no token is presented. It is the same SHA-256 the keystore stores
@@ -3517,6 +3549,43 @@ def principal_id(request: Request) -> Optional[str]:
         held, key_hash, _fs, _rag_roots = prin
         return key_hash
     return None
+
+
+def _owner_caller_headers(request: Request) -> tuple:
+    """``(X-Client-Id, X-Localm-Session-Mode)`` of *request* when its caller is
+    the owner (open mode, or an ADMIN key or session), else ``(None, None)``.
+    A caller presenting no valid key while a key is configured is not the
+    owner."""
+    from localm import scopes
+    from localm.audit import CLIENT_ID_HEADER, SESSION_MODE_HEADER
+    from localm.auth import any_key_configured
+    held = caller_scopes(request)
+    if held is None and any_key_configured():
+        return None, None
+    if held is not None and scopes.ADMIN not in held:
+        return None, None
+    return (request.headers.get(CLIENT_ID_HEADER),
+            request.headers.get(SESSION_MODE_HEADER))
+
+
+def caller_recorder(recorder, request: Request):
+    """*recorder* (a :class:`localm.audit.SessionRecorder`) capped for the
+    caller of *request*: its ``X-Client-Id`` surface and
+    ``X-Localm-Session-Mode`` apply only to an owner caller (open mode, or an
+    ADMIN key or session); any other caller is recorded under the server's
+    mode. Returns a :class:`localm.audit.CallerRecorder`."""
+    return recorder.for_caller(*_owner_caller_headers(request))
+
+
+def request_session_mode(request: Request):
+    """The :class:`localm.audit.SessionMode` an exchange from the caller of
+    *request* is recorded under: the most private of ``effective_mode("server")``
+    and, for an owner caller, its surface's mode and ``X-Localm-Session-Mode``
+    (see :func:`caller_recorder`). Opens no file."""
+    from localm.audit import caller_cap, effective_mode, most_private
+    mode = effective_mode("server")
+    cap = caller_cap(*_owner_caller_headers(request))
+    return mode if cap is None else most_private(mode, cap)
 
 
 def memory_principal(request: Request) -> Optional[str]:
@@ -4283,9 +4352,8 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
                      "misreport this intentional restart as a crash", level="warning")
 
     try:
-        global _audit
-        if _audit is not None and hasattr(_audit, "close"):
-            _audit.close()
+        if _session_recorder is not None:
+            _session_recorder.close()
     except Exception:
         _dbg_swallow("audit log close during restart failed (non-fatal)")
 
@@ -4420,25 +4488,16 @@ def _init_engine_state(engine: Optional[Engine]) -> None:
 
 
 def _init_session_audit():
-    """Open the server's audit log and transcript for the "server" session mode,
-    publish the audit log as the module global _audit, and return all three as
-    the AppContext create_app() hands to the route groups."""
-    global _audit
-
-    # Session-persistence mode for this server (privacy -> no traces). One audit
-    # log / transcript covers the server lifetime; GUI + API chat traffic flows
-    # through /v1/chat/completions and lands here. _audit is published as a
-    # module global (unlike _mode/_transcript, which reach the route groups
-    # only on the AppContext returned below) because _do_restart is a
-    # separate top-level function with no other way to reach it - without
-    # `global _audit` here, its cleanup could never reach the real object.
-    # The lifespan's shutdown closes it through the same global.
-    from localm.audit import effective_mode, make_audit_log, make_transcript
-    _mode = effective_mode("server")
-    _audit = make_audit_log(_mode, label="server")
-    _transcript = make_transcript(_mode, label="server")
+    """Open the server's SessionRecorder for the "server" session mode (its
+    audit log and transcript follow later changes to the configured mode),
+    publish it as the module global _session_recorder for _do_restart and the
+    lifespan's shutdown to close, and return the AppContext create_app() hands
+    to the route groups."""
+    global _session_recorder
+    from localm.audit import SessionRecorder
+    _session_recorder = SessionRecorder("server", label="server")
     from localm.inference.app_assembly.context import AppContext
-    return AppContext(audit=_audit, transcript=_transcript, mode=_mode)
+    return AppContext(recorder=_session_recorder)
 
 
 def _make_lifespan():
@@ -4449,7 +4508,7 @@ def _make_lifespan():
     saturation watch, the hang alarm, the cross-install GPU registry and the
     mmproj backfill. Most of those stay off under pytest; each guard says which.
     Shutdown stops them, leaves the GPU registry, clears _server_loop and closes
-    the module global _audit.
+    the module global _session_recorder.
 
     It lives here, not in app_assembly, because every process-lifetime global
     it writes belongs to this module (ADR-0023)."""
@@ -4730,7 +4789,8 @@ def _make_lifespan():
             # falls back to the safe "no loop" path instead of a dead loop reference
             # (_server_loop is already declared global at the top of lifespan).
             _server_loop = None
-            _audit.close()
+            if _session_recorder is not None:
+                _session_recorder.close()
 
     return lifespan
 
@@ -5097,7 +5157,15 @@ def _audit_exchange(audit, transcript, messages: list, reply: str,
     """Record one chat exchange (log/full modes; no-op log in privacy). A
     non-"success" *outcome* is recorded as an audit notice and as a trailing
     ``[finish_reason: ...]`` line in the transcript, so a failed or cut-off
-    generation never reads as a short normal reply."""
+    generation never reads as a short normal reply.
+
+    *audit* may be a :class:`localm.audit.SessionRecorder` or
+    :class:`localm.audit.CallerRecorder`: the exchange then goes to the audit
+    log and transcript of the session mode in force when it is recorded, and
+    *transcript* is ignored."""
+    from localm.audit import CallerRecorder, SessionRecorder
+    if isinstance(audit, (SessionRecorder, CallerRecorder)):
+        audit, transcript, _mode = audit.current()
     if audit is None:
         return
     try:
@@ -5230,10 +5298,20 @@ def driving_engine(engine):
     nothing re-touches it between rounds unless every round does so itself.
     Touching the clock again on exit resets the idle countdown to "now" the
     moment the task genuinely finishes, so the model is not instantly eligible
-    for eviction the second a long task ends."""
+    for eviction the second a long task ends.
+
+    The pin is taken with ``residency.try_pin_engine``: an engine flagged
+    ``unloading`` (being freed, or evicted out of ``_engines``) is refused with
+    HTTPException 503 asking the caller to retry, and nothing is pinned or
+    touched. An engine evicted out of ``_engines`` keeps that flag, so it is
+    never loaded again here behind the server's back.
+    See test_driving_engine_refuses_an_evicted_engine."""
     name = getattr(engine, "display_name", None)
+    if not residency.try_pin_engine(engine):
+        raise HTTPException(
+            503, f"The model '{name}' is being unloaded and cannot run this "
+            "task now; retry once it has finished unloading.")
     _touch_activity(name)
-    _pin(engine)
     try:
         yield engine
     finally:
@@ -6561,6 +6639,7 @@ def _memory_used_header(ctx) -> dict:
 _BACKEND_ERROR_STATUS: tuple = (
     (ImageDecodeUnavailable, 501),
     (AudioDecodeUnavailable, 501),
+    (ImageLimitError, 413),
     (VisionInputError, 400),
     (UnsupportedInputError, 400),
     (ChatTemplateMissingError, 400),

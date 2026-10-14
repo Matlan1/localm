@@ -24,6 +24,14 @@ from click.testing import CliRunner
 from localm import bugreport
 
 
+@pytest.fixture(autouse=True)
+def _keep_diagnostics(monkeypatch):
+    """These tests exercise the saved-report flow, which an automatic report
+    reaches only when diagnostics are kept; privacy mode's own behaviour is in
+    tests/test_bugreport_contract.py."""
+    monkeypatch.setenv("LOCALM_KEEP_DIAGNOSTICS", "1")
+
+
 # --------------------------- the typed error ------------------------------ #
 
 def test_localm_error_carries_summary_reason_context():
@@ -461,6 +469,20 @@ def test_prefill_body_is_capped():
     capped = bugreport._truncate_body(big)
     assert len(capped) < len(big)
     assert "truncated" in capped
+
+
+def test_mailto_subject_and_body_are_scrubbed():
+    from urllib.parse import parse_qs, urlsplit
+    secret = "MAILCANARY4K2Q"
+    summary = "crash loading /home/zqalice/models/x.gguf token=" + secret
+    body = "contact carol@example.org with Bearer " + secret + "\nmore"
+    query = parse_qs(urlsplit(bugreport.mailto_url(summary, body)).query)
+    subject, sent_body = query["subject"][0], query["body"][0]
+    for text in (subject, sent_body):
+        assert "zqalice" not in text
+        assert secret not in text
+        assert "carol@example.org" not in text
+    assert subject == "localm bug: crash loading /home/<redacted>/models/x.gguf token=<redacted>"
 
 
 # --------------------------- saving --------------------------------------- #

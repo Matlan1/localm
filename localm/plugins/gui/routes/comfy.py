@@ -37,7 +37,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
 from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threadpool_bounded
-from localm.inference.http_server import principal_id, require_scope
+from localm.inference.http_server import path_formatter, principal_id, require_scope
 
 # remove_managed_comfy() rmtrees a checkout that can include a full venv and
 # ComfyUI's custom_nodes - potentially tens of thousands of files - with no
@@ -56,7 +56,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/comfy/managed-status",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    async def comfy_managed_status():
+    async def comfy_managed_status(request: Request):
         """Whether localm's OWN ComfyUI is installed, where it lives, and whether
         media calls currently route to it (the coexistence state). Drives the
         GUI's swap between the Set-up button, the installed/Remove view, and a
@@ -79,6 +79,7 @@ def register(app: FastAPI, ctx) -> None:
         cfg = load_config()
         installed = is_managed_comfy_installed()
         paths = managed_comfy_paths()
+        show_path = path_formatter(request)
         if installed:
             state = "installed"
         elif jobs.has_running("comfy-setup"):
@@ -90,8 +91,9 @@ def register(app: FastAPI, ctx) -> None:
         body = {
             "installed": installed,
             "state": state,
-            "path": str(paths.root) if (installed or state == "corrupt") else None,
-            "models_dir": str(paths.models_dir) if installed else None,
+            "path": (show_path(paths.root)
+                     if (installed or state == "corrupt") else None),
+            "models_dir": show_path(paths.models_dir) if installed else None,
             "api_url": MANAGED_COMFY_API_URL,
             "target": cfg.get("comfy_target", "own"),
             "managed_active": managed_comfy_active(cfg),

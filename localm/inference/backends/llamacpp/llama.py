@@ -36,6 +36,7 @@ from localm.textguard import (
 
 from . import _api as api
 from . import _diffusion
+from ._chat_formats import render_known_family
 from ._drafting import (
     SPEC_DRAFT, SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource, counted_source,
     resolve_spec_source)
@@ -482,7 +483,9 @@ def model_stop_strings(tokenizer) -> frozenset:
 
 
 def _extract_text(content) -> str:
-    """Return the plain-text portion of a message content field."""
+    """Return the plain-text portion of a message content field; "" for None."""
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -594,6 +597,10 @@ def _apply_model_template(model_ptr: int, messages: list[dict]) -> tuple[str, Op
     """
     Format *messages* using the model's own embedded Jinja chat template.
 
+    A template of a family listed in ``_chat_formats`` (Gemma 4) is rendered
+    by :func:`render_known_family`; any other goes through llama.cpp's
+    ``llama_chat_apply_template``.
+
     Falls back to :func:`_format_chatml` if:
     * The model has no embedded template (``llama_model_chat_template`` returns None).
     * The template call fails for any reason.
@@ -624,6 +631,13 @@ def _render_template(model_ptr: int, messages: list[dict]) -> tuple[str, Optiona
     if not tmpl_str:
         reason = "model has no embedded chat template"
         return _format_chatml(messages), reason
+
+    # Families llama.cpp's built-in matcher does not recognise are rendered here.
+    known = render_known_family(tmpl_str, [
+        (_extract_text(m.get("role", "user")), _extract_text(m.get("content", "")))
+        for m in messages])
+    if known is not None:
+        return known, None
 
     tmpl_bytes = tmpl_str.encode()
 
@@ -3020,12 +3034,14 @@ class LlamaCpp:
         cannot be decoded or fetched."""
         from localm.inference.backends.base import (
             AUDIO_UNSUPPORTED_MESSAGE, UnsupportedInputError, VisionInputError)
-        from localm.inference.media import decode_audio_clip, decode_image_url
+        from localm.inference.media import (
+            ImageBudget, decode_audio_clip, decode_image_url)
         from localm.netpolicy import NetworkPolicyError
 
         from .mtmd import AudioClip
         out: list[dict] = []
         media: list = []
+        budget = ImageBudget()
         for msg in messages:
             content = msg.get("content")
             if not isinstance(content, list):
@@ -3038,7 +3054,7 @@ class LlamaCpp:
                 if part.get("type") == "image_url":
                     url = (part.get("image_url") or {}).get("url", "")
                     try:
-                        pil = decode_image_url(url).convert("RGB")
+                        pil = decode_image_url(url, budget=budget).convert("RGB")
                     except UnsupportedInputError:
                         raise
                     except NetworkPolicyError as e:

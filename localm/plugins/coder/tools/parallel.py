@@ -333,7 +333,9 @@ def _child_backend(backend: Any, model: Any) -> tuple:
     except Exception:
         port = 8642
     try:
-        return make_localm_backend(model, port=port), ""
+        child = make_localm_backend(model, port=port)
+        child.session_mode = getattr(backend, "session_mode", None)
+        return child, ""
     except Exception as exc:
         return backend, (f"requested model '{model}' unavailable ({exc}); "
                          "ran on the parent's model instead")

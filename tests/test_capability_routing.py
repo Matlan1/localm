@@ -953,6 +953,8 @@ class TestAPeerRoutedModelIsARoutingTarget:
             return Resp()
 
         monkeypatch.setattr("requests.post", fake_post)
+        # Full session mode: forwarding asks the peer nothing first.
+        monkeypatch.setenv("LOCALM_MODE", "full")
         peer_routing.set_route(peer_routing.PeerRoute(
             model="tooly", instance_id="p", host="127.0.0.1", port=1,
             scheme="http", api_key=""))

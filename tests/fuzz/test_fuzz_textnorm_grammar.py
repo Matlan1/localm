@@ -27,9 +27,39 @@ _FRAGMENTS = [
     "x", "hello", "<start_of_turn>", "<|im_start|>", "<|start_header_id|>",
     "<|end_header_id|>", "<tool_call>", "<reasoning>", "</reasoning>", "<|\"|>",
     "<|think|>", "<|start|>", "<|return|>", "é", "\x00",
+    "user", "system", "<|end|>", "<unused7>", "<think|>", "<|tool>", "<tool|>", "<|turn",
+    "<|call|>", "commentary", " to=functions.f", "<|constrain|>", "json", "{", "}",
 ]
 
-_text = st.lists(st.sampled_from(_FRAGMENTS), max_size=30).map("".join)
+_INERT_MARKERS = ["<|message|>", "[TOOL_CALLS]", "<unused7>", "<|channel|>", "<|end|>",
+                  "<|return|>", "<turn|>", "<|tool>", "<tool|>", "<think|>", "<|think|>"]
+_WHOLE_MARKERS = [
+    "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<unused7>", "[TOOL_CALLS]",
+    "<start_of_turn>model", "<|im_start|>assistant", "<|turn>model", "<|start|>assistant",
+    "<|start_header_id|>user<|end_header_id|>", "<|channel|>analysis<|message|>",
+    "<channel|>", "<reasoning>", '<|"|>',
+]
+
+
+@st.composite
+def _nested_marker_text(draw):
+    """A whole marker cut at a random point with inert markers pasted into the
+    cut, optionally inside another such pair, so removing the inner markers
+    joins the two halves into a marker."""
+    marker = draw(st.sampled_from(_WHOLE_MARKERS))
+    cut = draw(st.integers(1, len(marker) - 1))
+    inner = draw(st.lists(st.sampled_from(_INERT_MARKERS), min_size=1, max_size=3)
+                 .map("".join))
+    text = marker[:cut] + inner + marker[cut:]
+    if draw(st.booleans()):
+        outer = draw(st.sampled_from(_WHOLE_MARKERS))
+        at = draw(st.integers(1, len(outer) - 1))
+        text = outer[:at] + text + outer[at:]
+    return draw(st.sampled_from(["", "a ", "\n"])) + text + draw(st.sampled_from(["", " b"]))
+
+
+_fragment_text = st.lists(st.sampled_from(_FRAGMENTS), max_size=30).map("".join)
+_text = st.one_of(_fragment_text, _fragment_text, _nested_marker_text())
 
 
 @st.composite
@@ -75,6 +105,49 @@ def test_scrub_text_is_idempotent_and_strip_think_never_raises(text):
     once = textnorm.scrub_text(text)
     assert textnorm.scrub_text(once) == once
     textnorm.strip_think(text)
+
+
+_TURN_OPEN_ROLES = [("<start_of_turn>", "model"), ("<start_of_turn>", "assistant"),
+                    ("<start_of_turn>", "user"), ("<|im_start|>", "assistant"),
+                    ("<|im_start|>", "system"), ("<|im_start|>", "tool"),
+                    ("<|turn>", "model"), ("<|turn>", "system"), ("<|start|>", "assistant"),
+                    ("<|start|>", "user")]
+_inert_run = st.lists(st.sampled_from(_INERT_MARKERS), max_size=6).map("".join)
+
+
+@given(pair=st.sampled_from(_TURN_OPEN_ROLES), inner=_inert_run,
+       tail=st.sampled_from(["", " hi", "\nhi", "x", "<|end|>"]))
+def test_inert_markers_between_a_turn_open_and_its_role_change_nothing(pair, inner, tail):
+    opener, role = pair
+    out = textnorm.scrub_text(opener + inner + role + tail)
+    assert out == textnorm.scrub_text(opener + role + tail)
+    if tail == "":
+        assert out == "", f"a bare role word is left at the head of the reply: {out!r}"
+
+
+@given(role=st.sampled_from(["", "user", "model", "assistant", "system", "tool", "ipython"]),
+       before=_inert_run, after=_inert_run, tail=st.sampled_from(["", " hi", "\nhi"]))
+def test_inert_markers_inside_a_role_header_change_nothing(role, before, after, tail):
+    header = "<|start_header_id|>{}<|end_header_id|>"
+    assert (textnorm.scrub_text(header.format(before + role + after) + tail)
+            == textnorm.scrub_text(header.format(role) + tail))
+    assert textnorm.scrub_text(header.format(before + role + after)) == ""
+
+
+@pytest.mark.parametrize("marker", _INERT_MARKERS)
+def test_the_inert_run_strategy_can_produce_every_inert_marker(marker):
+    from hypothesis import find, settings
+
+    find(_inert_run, lambda run: marker in run,
+         settings=settings(max_examples=2000, database=None))
+
+
+def test_the_text_strategy_makes_texts_that_need_a_second_marker_pass():
+    from hypothesis import find, settings
+
+    find(_nested_marker_text(),
+         lambda t: textnorm._scrub_once(t) != textnorm.scrub_text(t),
+         settings=settings(max_examples=2000, database=None))
 
 
 _PATHOLOGICAL_UNIT = ["<", "< ", "<|", "<|    channel", "<unused", "<unused9", "[TOOL_CALLS",

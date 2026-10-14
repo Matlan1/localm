@@ -5,9 +5,10 @@ user-initiated report.
 
 from __future__ import annotations
 
+import string
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TypeGuard
 
 from localm.bugreport.logs import _recent_hang_traces, _recent_log_tail_result
 from localm.bugreport.assembly import build_report, report_title
@@ -46,6 +47,48 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         return path
     except Exception:
         return None
+
+
+_SAVED_REPORT_STAMP_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+_SAVED_REPORT_NAME_MAX = 128
+
+
+def _is_saved_report_name(name: object) -> TypeGuard[str]:
+    """True for ``bug-<stamp>.md`` where <stamp> is one or more ASCII letters,
+    digits, ``_`` or ``-``, and the whole name is at most 128 characters."""
+    if not isinstance(name, str) or len(name) > _SAVED_REPORT_NAME_MAX:
+        return False
+    if not (name.startswith("bug-") and name.endswith(".md")):
+        return False
+    stamp = name[len("bug-"):-len(".md")]
+    return bool(stamp) and all(c in _SAVED_REPORT_STAMP_CHARS for c in stamp)
+
+
+def read_saved_report(filename: object) -> str:
+    """The text of the saved report *filename* in ``<data dir>/bug-reports``.
+
+    *filename* must be a bare ``bug-<stamp>.md`` name as ``save_report``
+    writes it. Raises ValueError for anything else (a non-string, a path, a
+    separator, a different extension) and OSError when the file cannot be read or is not
+    valid UTF-8."""
+    if not _is_saved_report_name(filename):
+        raise ValueError("not a saved bug-report file name")
+    from localm.config import home_dir
+    base = (home_dir() / "bug-reports").resolve()
+    path = (base / filename).resolve()
+    if path.parent != base:
+        raise ValueError("not a saved bug-report file name")
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise OSError(f"{filename} is not valid UTF-8") from e
+
+
+def report_digest(text: str) -> str:
+    """Hex SHA-256 of *text* encoded as UTF-8: the identity the GUI echoes back
+    to send exactly the report it showed."""
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # The GUI route offloads save_user_report() to a real worker thread (it does

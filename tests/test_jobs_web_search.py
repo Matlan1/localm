@@ -16,6 +16,7 @@ import pytest
 
 from localm.plugins.builtin.jobs import webtool
 from tests._web_retrieval_fixtures import html_page, stub_retrieval
+from tests._net_config import set_config
 
 
 # --------------------------------------------------------------------------- #
@@ -273,8 +274,7 @@ class TestGrammarWiring:
 
     def test_grammar_off_via_config_flag(self, home, monkeypatch):
         monkeypatch.setenv("LOCALM_NET_MODE", "allow")
-        monkeypatch.setattr("localm.config.load_config",
-                            lambda: {"chat_tool_grammar": False})
+        set_config(monkeypatch, lambda: {"chat_tool_grammar": False})
         eng = ScriptedEngine([_ANSWER], supports_grammar=True)
 
         webtool.run_chat_with_web(eng, "what is 2+2?")

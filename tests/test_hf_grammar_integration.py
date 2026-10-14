@@ -98,6 +98,37 @@ def test_grammar_forces_parseable_json(hf_backend):
     assert "ok" in obj and isinstance(obj["ok"], bool)
 
 
+def test_grammar_constrains_on_the_available_accelerator():
+    """The grammar processor masks for real on the best device torch reports
+    (a CUDA or ROCm GPU when present, else CPU), and the constraint is not
+    dropped mid-generation."""
+    torch = pytest.importorskip("torch", exc_type=ImportError)
+    transformers = pytest.importorskip("transformers", exc_type=ImportError)
+    pytest.importorskip("xgrammar", exc_type=ImportError)
+    from localm.inference.backends._hf_worker import _auto_device, _grammar_processor
+
+    try:
+        tok = transformers.AutoTokenizer.from_pretrained(_MODEL)
+        model = transformers.AutoModelForCausalLM.from_pretrained(_MODEL)
+    except Exception as e:                       # offline / hub unreachable
+        pytest.skip(f"could not fetch {_MODEL}: {e}")
+    device = _auto_device(torch)
+    model = model.to(device)
+    inputs = tok("Pick a colour:", return_tensors="pt").to(device)
+
+    def run(procs):
+        out = model.generate(**inputs, max_new_tokens=6, do_sample=False,
+                             logits_processor=procs, pad_token_id=tok.eos_token_id)
+        return tok.decode(out[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
+
+    procs = _grammar_processor('root ::= "red" | "green" | "blue"', tok, model)
+    constrained = run(procs)
+    assert procs[0].failed is False, f"grammar constraint was dropped on {device}"
+    assert constrained.strip() in ("red", "green", "blue"), (
+        f"grammar did not constrain output on {device}: {constrained!r}")
+    assert run(None).strip() not in ("red", "green", "blue")
+
+
 def test_unconstrained_baseline_is_not_json(hf_backend):
     """Guards the negative side of the JSON test: the same tiny model, free-
     running, does NOT emit valid JSON - so test_grammar_forces_parseable_json

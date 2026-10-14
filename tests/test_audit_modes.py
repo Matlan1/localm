@@ -3,6 +3,7 @@
 
 import json
 import sys
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -239,17 +240,40 @@ def _engine():
     engine = MagicMock()
     engine.display_name = "test-model"
     type(engine).loaded = property(lambda self: True)
-    engine.chat_stream.side_effect = lambda messages, **kw: iter(["Hi", " there"])
+    engine.chat_stream.side_effect = lambda messages, **kw: (t for t in ["Hi", " there"])
     engine.count_tokens.side_effect = lambda text: max(1, len(text.split()))
     return engine
 
 
-def _make_app(tmp_path, mode):
+class _Config:
+    """A config whose session mode a test can change while the server runs."""
+
+    def __init__(self, mode):
+        self.cfg = _cfg(mode=mode, n_ctx_max=16384)
+
+    def set_mode(self, mode):
+        self.cfg = {**self.cfg, "mode": mode}
+
+    def set(self, **kw):
+        self.cfg = {**self.cfg, **kw}
+
+    def load(self):
+        return dict(self.cfg)
+
+
+@contextmanager
+def _server(tmp_path, mode, engine=None):
+    """A TestClient for a server whose config starts in *mode*, with its session
+    files in *tmp_path*. Yields ``(client, config)``; ``config.set_mode`` changes
+    the configured mode for every later read."""
     from localm.inference.http_server import create_app
+    config = _Config(mode)
     with patch("localm.audit._SESSIONS_DIR", tmp_path), \
-         patch("localm.config.load_config",
-               return_value=_cfg(mode=mode, n_ctx_max=16384)):
-        return create_app(_engine())
+         patch("localm.config.load_config", side_effect=config.load):
+        app = create_app(engine or _engine())
+        with TestClient(app) as client:
+            client.headers["Authorization"] = f"Bearer {app.state.shell_token}"
+            yield client, config
 
 
 _CHAT_BODY = {
@@ -258,27 +282,32 @@ _CHAT_BODY = {
 }
 
 
+def _chat(client, text):
+    r = client.post("/v1/chat/completions", json={
+        "model": "test-model", "messages": [{"role": "user", "content": text}]})
+    assert r.status_code == 200
+    return r
+
+
+def _session_text(tmp_path, pattern):
+    return "".join(p.read_text(encoding="utf-8") for p in sorted(tmp_path.glob(pattern)))
+
+
 class TestServerModes:
     @pytest.fixture(autouse=True)
     def _no_env(self, monkeypatch):
         monkeypatch.delenv("LOCALM_MODE", raising=False)
 
     def test_privacy_writes_nothing(self, tmp_path):
-        app = _make_app(tmp_path, "privacy")
-        with patch("localm.audit._SESSIONS_DIR", tmp_path):
-            with TestClient(app) as client:
-                r = client.post("/v1/chat/completions", json=_CHAT_BODY)
-        assert r.status_code == 200
+        with _server(tmp_path, "privacy") as (client, _config):
+            _chat(client, "what is up")
         entries = list(tmp_path.iterdir())
         assert [p.name for p in entries if p.is_file()] == []
         assert [p.name for p in entries if p.is_dir()] == [".localm"]
 
     def test_log_mode_audits_exchange(self, tmp_path):
-        app = _make_app(tmp_path, "log")
-        with patch("localm.audit._SESSIONS_DIR", tmp_path):
-            with TestClient(app) as client:
-                r = client.post("/v1/chat/completions", json=_CHAT_BODY)
-        assert r.status_code == 200
+        with _server(tmp_path, "log") as (client, _config):
+            _chat(client, "what is up")
         files = list(tmp_path.glob("*_server.jsonl"))
         assert len(files) == 1
         text = files[0].read_text(encoding="utf-8")
@@ -288,41 +317,390 @@ class TestServerModes:
         assert not list(tmp_path.glob("*.md"))
 
     def test_log_mode_audits_streamed_exchange(self, tmp_path):
-        app = _make_app(tmp_path, "log")
-        with patch("localm.audit._SESSIONS_DIR", tmp_path):
-            with TestClient(app) as client:
-                with client.stream("POST", "/v1/chat/completions",
-                                   json={**_CHAT_BODY, "stream": True}) as r:
-                    assert r.status_code == 200
-                    for _ in r.iter_lines():
-                        pass
+        with _server(tmp_path, "log") as (client, _config):
+            with client.stream("POST", "/v1/chat/completions",
+                               json={**_CHAT_BODY, "stream": True}) as r:
+                assert r.status_code == 200
+                for _ in r.iter_lines():
+                    pass
         files = list(tmp_path.glob("*_server.jsonl"))
         assert len(files) == 1
         text = files[0].read_text(encoding="utf-8")
         assert "what is up" in text and "Hi there" in text
 
     def test_full_mode_also_writes_markdown(self, tmp_path):
-        app = _make_app(tmp_path, "full")
-        with patch("localm.audit._SESSIONS_DIR", tmp_path):
-            with TestClient(app) as client:
-                r = client.post("/v1/chat/completions", json=_CHAT_BODY)
-        assert r.status_code == 200
+        with _server(tmp_path, "full") as (client, _config):
+            _chat(client, "what is up")
         md = list(tmp_path.glob("*_server.md"))
         assert len(md) == 1
         text = md[0].read_text(encoding="utf-8")
         assert "what is up" in text and "Hi there" in text
 
     def test_config_reports_effective_mode(self, tmp_path):
-        app = _make_app(tmp_path, "log")
-        with TestClient(app) as client:
-            with patch("localm.config.load_config",
-                       return_value=_cfg(mode="log")):
-                data = client.get("/v1/config", headers={"Authorization": f"Bearer {app.state.shell_token}"}).json()
+        with _server(tmp_path, "log") as (client, _config):
+            data = client.get("/v1/config").json()
         assert data["effective_mode"] == "log"
         # /v1/config always carries a stable per-data-directory id so the GUI can
         # tell a restart of THIS install apart from a different install on the
         # same browser origin.
         assert data["instance_id"], "instance_id must be present and non-empty"
+
+
+class TestServerModeFollowsTheConfig:
+    """A change of the configured mode applies to the running server at once."""
+
+    @pytest.fixture(autouse=True)
+    def _no_env(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_MODE", raising=False)
+
+    def test_switching_privacy_to_full_records_the_next_exchange(self, tmp_path):
+        with _server(tmp_path, "privacy") as (client, config):
+            _chat(client, "said in privacy")
+            config.set_mode("full")
+            assert client.get("/v1/config").json()["effective_mode"] == "full"
+            _chat(client, "said in full")
+        log = _session_text(tmp_path, "*_server.jsonl")
+        md = _session_text(tmp_path, "*_server.md")
+        assert "said in full" in log and "said in full" in md
+        assert "said in privacy" not in log + md
+
+    def test_switching_full_to_privacy_stops_recording_at_once(self, tmp_path):
+        with _server(tmp_path, "full") as (client, config):
+            _chat(client, "said in full")
+            config.set_mode("privacy")
+            assert client.get("/v1/config").json()["effective_mode"] == "privacy"
+            _chat(client, "said in privacy")
+        log = _session_text(tmp_path, "*_server.jsonl")
+        md = _session_text(tmp_path, "*_server.md")
+        assert "said in full" in log and "said in full" in md
+        assert "said in privacy" not in log + md
+        assert log.rstrip().endswith('"data": {"msg": "session ended"}}')
+
+    def test_switching_full_to_privacy_mid_stream_does_not_record_that_reply(self, tmp_path):
+        engine = _engine()
+        holder = {}
+
+        def _tokens(messages, **kw):
+            yield "Hi"
+            holder["config"].set_mode("privacy")
+            yield " there"
+
+        engine.chat_stream.side_effect = _tokens
+        with _server(tmp_path, "full", engine=engine) as (client, config):
+            holder["config"] = config
+            with client.stream("POST", "/v1/chat/completions", json={
+                    "model": "test-model", "stream": True,
+                    "messages": [{"role": "user", "content": "streamed secret"}]}) as r:
+                assert r.status_code == 200
+                body = "".join(r.iter_lines())
+        assert "there" in body
+        assert config.load()["mode"] == "privacy"
+        assert "streamed secret" not in _session_text(tmp_path, "*_server.*")
+
+    def test_a_settings_save_of_the_mode_applies_without_a_restart(self, tmp_path):
+        """The real PATCH /v1/config path the Settings page uses, against the
+        real config file, not a patched load_config."""
+        from localm.inference.http_server import create_app
+        with patch("localm.audit._SESSIONS_DIR", tmp_path):
+            app = create_app(_engine())
+            with TestClient(app) as client:
+                client.headers["Authorization"] = f"Bearer {app.state.shell_token}"
+                assert client.get("/v1/config").json()["effective_mode"] == "privacy"
+                r = client.patch("/v1/config", json={"mode": "full"})
+                assert r.status_code == 200, r.text
+                cfg = client.get("/v1/config").json()
+                assert (cfg["mode"], cfg["effective_mode"]) == ("full", "full")
+                _chat(client, "after the save")
+                r = client.patch("/v1/config", json={"mode": "privacy"})
+                assert r.status_code == 200, r.text
+        assert "after the save" in _session_text(tmp_path, "*_server.md")
+
+
+class TestSessionRecorder:
+    @pytest.fixture(autouse=True)
+    def _no_env(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_MODE", raising=False)
+
+    def test_a_mode_whose_files_cannot_open_keeps_the_previous_mode_and_warns_once(
+            self, tmp_path, caplog):
+        from localm.audit import SessionRecorder
+        config = _Config("privacy")
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("localm.config.load_config", side_effect=config.load):
+            recorder = SessionRecorder("server", label="server")
+            config.set_mode("log")
+            with patch("localm.audit.AuditLog", side_effect=PermissionError("denied")), \
+                 caplog.at_level("WARNING", logger="localm"):
+                first = recorder.current()
+                second = recorder.current()
+            warnings = [r for r in caplog.records
+                        if "could not take effect" in r.getMessage()]
+            assert len(warnings) == 1
+            assert "denied" in warnings[0].getMessage()
+            assert first[2] == second[2] == SessionMode.PRIVACY
+            assert isinstance(second[0], NullAuditLog)
+            audit, _transcript, mode = recorder.current()
+            assert mode == SessionMode.LOG and isinstance(audit, AuditLog)
+            recorder.close()
+
+    def test_full_to_log_keeps_the_open_log_and_drops_the_transcript(self, tmp_path):
+        from localm.audit import SessionRecorder
+        config = _Config("full")
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("localm.config.load_config", side_effect=config.load):
+            recorder = SessionRecorder("server", label="server")
+            audit_full, transcript_full, _ = recorder.current()
+            assert transcript_full is not None
+            config.set_mode("log")
+            with patch("localm.audit.AuditLog", side_effect=PermissionError("denied")):
+                audit, transcript, mode = recorder.current()
+            assert mode == SessionMode.LOG
+            assert audit is audit_full and transcript is None
+            config.set_mode("full")
+            audit, transcript, mode = recorder.current()
+            assert mode == SessionMode.FULL and audit is audit_full
+            assert transcript is not None and transcript is not transcript_full
+            recorder.close()
+        assert len(list(tmp_path.glob("*.jsonl"))) == 1
+
+    def test_close_ends_the_log_and_reports_privacy_after(self, tmp_path, caplog):
+        from localm.audit import SessionRecorder
+        config = _Config("log")
+        with patch("localm.audit._SESSIONS_DIR", tmp_path), \
+             patch("localm.config.load_config", side_effect=config.load):
+            recorder = SessionRecorder("server", label="server")
+            path = recorder.current()[0].path
+            recorder.close()
+            recorder.close()
+            with caplog.at_level("WARNING", logger="localm"):
+                audit, transcript, mode = recorder.current()
+                config.set_mode("full")
+                again = recorder.current()
+            assert isinstance(audit, NullAuditLog) and transcript is None
+            assert mode == again[2] == SessionMode.PRIVACY
+            assert isinstance(again[0], NullAuditLog) and again[1] is None
+            closed = [r for r in caplog.records if "recording is closed" in r.getMessage()]
+            assert len(closed) == 1
+        assert path.read_text(encoding="utf-8").count("session ended") == 1
+        assert list(tmp_path.glob("*.jsonl")) == [path]
+
+
+class TestSurfaceOverridesOnServerTraffic:
+    """A request to the server's chat routes from the GUI chat (X-Client-Id:
+    chat) or the coder (X-Client-Id: coder, plus its session mode in
+    X-Localm-Session-Mode) is recorded no less privately than that surface's
+    persistence override, and never less privately than the server's mode."""
+
+    @pytest.fixture(autouse=True)
+    def _no_env(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_MODE", raising=False)
+
+    @staticmethod
+    def _post(client, text, headers=None, stream=False, route="chat"):
+        if route == "chat":
+            url, body = "/v1/chat/completions", {
+                "model": "test-model", "messages": [{"role": "user", "content": text}]}
+        else:
+            url, body = "/v1/completions", {"model": "test-model", "prompt": text}
+        if stream:
+            with client.stream("POST", url, json={**body, "stream": True},
+                               headers=headers or {}) as r:
+                assert r.status_code == 200
+                for _ in r.iter_lines():
+                    pass
+        else:
+            r = client.post(url, json=body, headers=headers or {})
+            assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("route,stream", [
+        ("chat", False), ("chat", True), ("completions", False), ("completions", True)])
+    def test_chat_privacy_override_keeps_gui_chat_out_of_a_full_server(
+            self, tmp_path, route, stream):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="privacy")
+            self._post(client, "gui chat secret", {"X-Client-Id": "chat"},
+                       stream=stream, route=route)
+            self._post(client, "plain api call", stream=stream, route=route)
+        assert "plain api call" in _session_text(tmp_path, "*_server.jsonl")
+        assert "plain api call" in _session_text(tmp_path, "*_server.md")
+        assert "gui chat secret" not in _session_text(tmp_path, "*_server.*")
+
+    def test_chat_log_override_drops_the_transcript_only(self, tmp_path):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="log")
+            self._post(client, "gui chat line", {"X-Client-Id": "chat"})
+        assert "gui chat line" in _session_text(tmp_path, "*_server.jsonl")
+        assert "gui chat line" not in _session_text(tmp_path, "*_server.md")
+
+    def test_chat_full_override_never_records_above_a_privacy_server(self, tmp_path):
+        with _server(tmp_path, "privacy") as (client, config):
+            config.set(chat_mode="full")
+            self._post(client, "gui chat line", {"X-Client-Id": "chat"})
+            data = client.get("/v1/config").json()
+        assert (data["effective_mode"], data["effective_chat_mode"]) == (
+            "privacy", "full")
+        assert "gui chat line" not in _session_text(tmp_path, "*_server.*")
+
+    def test_config_reports_the_chat_mode_for_the_gui(self, tmp_path):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="privacy")
+            data = client.get("/v1/config").json()
+            assert (data["effective_mode"], data["effective_chat_mode"]) == (
+                "full", "privacy")
+            config.set(chat_mode=None)
+            assert client.get("/v1/config").json()["effective_chat_mode"] == "full"
+
+    def test_a_chat_mode_change_mid_stream_keeps_that_reply_out(self, tmp_path):
+        engine = _engine()
+        holder = {}
+
+        def _tokens(messages, **kw):
+            yield "Hi"
+            holder["config"].set(chat_mode="privacy")
+            yield " there"
+
+        engine.chat_stream.side_effect = _tokens
+        with _server(tmp_path, "full", engine=engine) as (client, config):
+            holder["config"] = config
+            self._post(client, "streamed gui secret", {"X-Client-Id": "chat"},
+                       stream=True)
+        assert "streamed gui secret" not in _session_text(tmp_path, "*_server.*")
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_coder_privacy_override_keeps_coder_calls_out_of_a_full_server(
+            self, tmp_path, stream):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(coder_mode="privacy")
+            self._post(client, "contents of secret.py", {"X-Client-Id": "coder"},
+                       stream=stream)
+        assert "contents of secret.py" not in _session_text(tmp_path, "*_server.*")
+
+    @pytest.mark.parametrize("asserted,in_log,in_md", [
+        ("privacy", False, False),
+        ("log", True, False),
+        ("full", True, True),
+        ("PRIVACY ", False, False),
+        ("not-a-mode", False, False),
+        ("", True, True),
+    ])
+    def test_the_coder_session_mode_header_caps_recording(
+            self, tmp_path, asserted, in_log, in_md):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(coder_mode="full")
+            self._post(client, "coder prompt", {
+                "X-Client-Id": "coder", "X-Localm-Session-Mode": asserted})
+        assert ("coder prompt" in _session_text(tmp_path, "*_server.jsonl")) is in_log
+        assert ("coder prompt" in _session_text(tmp_path, "*_server.md")) is in_md
+
+    def test_a_caller_mode_header_never_records_above_the_server(self, tmp_path):
+        with _server(tmp_path, "log") as (client, config):
+            config.set(coder_mode="full")
+            self._post(client, "asks for full", {
+                "X-Client-Id": "coder", "X-Localm-Session-Mode": "full"})
+            self._post(client, "untagged asks for full",
+                       {"X-Localm-Session-Mode": "full"})
+        log = _session_text(tmp_path, "*_server.jsonl")
+        assert "asks for full" in log and "untagged asks for full" in log
+        assert not list(tmp_path.glob("*_server.md"))
+
+    def test_an_unknown_client_id_stays_on_the_server_mode(self, tmp_path):
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="privacy", coder_mode="privacy")
+            self._post(client, "other client", {"X-Client-Id": "my-script"})
+        assert "other client" in _session_text(tmp_path, "*_server.md")
+
+    def test_the_coder_backend_headers_carry_the_session_mode(self, tmp_path):
+        """The headers HTTPBackend sends to a localm server, replayed through
+        the real route: a project-pinned privacy session records nothing."""
+        from localm.plugins.coder.backends.http import HTTPBackend
+        backend = HTTPBackend("http://127.0.0.1:1/v1", "test-model",
+                              localm_server=True)
+        backend.session_mode = SessionMode.PRIVACY
+        headers = backend._headers()
+        assert headers["X-Localm-Session-Mode"] == "privacy"
+        with _server(tmp_path, "full") as (client, config):
+            config.set(coder_mode="full")
+            headers["Authorization"] = client.headers["Authorization"]
+            self._post(client, "pinned project file", headers)
+        assert "pinned project file" not in _session_text(tmp_path, "*_server.*")
+
+    @pytest.mark.parametrize("held,recorded", [
+        ({"chat"}, True),
+        ({"admin"}, False),
+    ])
+    def test_only_an_owner_caller_can_narrow_recording(self, tmp_path, held, recorded):
+        """A scoped (non-ADMIN) key's chat- or coder-tagged traffic is recorded
+        under the server's mode; the owner's is capped."""
+        from localm import scopes
+        held = {scopes.ADMIN} if held == {"admin"} else held
+        with _server(tmp_path, "full") as (client, config), \
+             patch("localm.inference.http_server.caller_scopes", return_value=held):
+            config.set(chat_mode="privacy", coder_mode="privacy")
+            self._post(client, "tagged chat", {"X-Client-Id": "chat"})
+            self._post(client, "tagged coder", {
+                "X-Client-Id": "coder", "X-Localm-Session-Mode": "privacy"})
+        text = _session_text(tmp_path, "*_server.*")
+        assert ("tagged chat" in text) is recorded
+        assert ("tagged coder" in text) is recorded
+
+    @pytest.mark.parametrize("owner,chat_mode", [(True, "privacy"), (False, "full")])
+    def test_config_reports_the_chat_mode_the_server_applies_to_the_caller(
+            self, tmp_path, owner, chat_mode):
+        """A non-owner caller's chat is recorded under the server's mode, so
+        /v1/config gives it that mode as its chat mode."""
+        from localm import scopes
+        held = {scopes.ADMIN} if owner else {"chat"}
+        with _server(tmp_path, "full") as (client, config), \
+             patch("localm.inference.http_server.caller_scopes", return_value=held):
+            config.set(chat_mode="privacy")
+            data = client.get("/v1/config").json()
+            self._post(client, "chat line", {"X-Client-Id": "chat"})
+        assert data["effective_chat_mode"] == chat_mode
+        recorded = "chat line" in _session_text(tmp_path, "*_server.*")
+        assert recorded is (chat_mode != "privacy")
+
+    @pytest.mark.parametrize("headers,held,expected", [
+        ({}, None, SessionMode.FULL),
+        ({"X-Client-Id": "coder"}, None, SessionMode.PRIVACY),
+        ({"X-Localm-Session-Mode": "log"}, None, SessionMode.LOG),
+        ({"X-Client-Id": "coder"}, {"chat"}, SessionMode.FULL),
+    ])
+    def test_request_session_mode_answers_what_the_server_records_under(
+            self, headers, held, expected):
+        from starlette.requests import Request
+
+        from localm.inference.http_server import request_session_mode
+        config = _Config("full")
+        config.set(coder_mode="privacy")
+        request = Request({"type": "http", "method": "POST", "path": "/",
+                           "headers": [(k.lower().encode(), v.encode())
+                                       for k, v in headers.items()]})
+        with patch("localm.config.load_config", side_effect=config.load),              patch("localm.inference.http_server.caller_scopes", return_value=held):
+            assert request_session_mode(request) == expected
+
+    def test_localm_run_attached_to_the_server_records_by_the_chat_mode(self, tmp_path):
+        """The headers `localm run`'s HttpEngine sends when attached to a
+        server, replayed through the real route."""
+        from localm.inference.http_engine import HttpEngine
+        engine = HttpEngine("http://127.0.0.1:1/v1", token="t", model="test-model",
+                            client_id="chat", session_mode=SessionMode.PRIVACY)
+        headers = engine._headers()
+        assert (headers["X-Client-Id"], headers["X-Localm-Session-Mode"]) == (
+            "chat", "privacy")
+        assert "X-Client-Id" not in HttpEngine("http://127.0.0.1:1/v1")._headers()
+        with _server(tmp_path, "full") as (client, config):
+            config.set(chat_mode="full")
+            headers["Authorization"] = client.headers["Authorization"]
+            self._post(client, "run --mode privacy line", headers)
+        assert "run --mode privacy line" not in _session_text(tmp_path, "*_server.*")
+
+    def test_the_coder_backend_sends_no_session_mode_off_localm(self):
+        from localm.plugins.coder.backends.http import HTTPBackend
+        backend = HTTPBackend("http://127.0.0.1:1/v1", "m")
+        backend.session_mode = "privacy"
+        assert "X-Localm-Session-Mode" not in backend._headers()
+        local = HTTPBackend("http://127.0.0.1:1/v1", "m", localm_server=True)
+        assert "X-Localm-Session-Mode" not in local._headers()
 
 
 # ------------------------------------------------------------------ #

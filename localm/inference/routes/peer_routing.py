@@ -124,27 +124,39 @@ def register(app: FastAPI, ctx) -> None:
                 identity=peer_routing.local_identity(registry, canonical),
                 instance_id=instance_id)
             if peer is None or peer.get("instance_id") != instance_id:
-                return None, None
+                return None, None, None
             try:
                 peer_routing.verify_peer_credential(peer, api_key)
             except peer_routing.PeerCredentialError as e:
-                return None, str(e)
+                return None, str(e), None
             except requests.RequestException as e:
-                return None, f"the peer could not be reached ({e})"
+                return None, f"the peer could not be reached ({e})", None
+            try:
+                peer_routing.ensure_peer_keeps_mode(peer, api_key, mode)
+            except peer_routing.PeerUnreachable as e:
+                return None, str(e), None
+            except peer_routing.PeerWouldRecord as e:
+                return None, None, str(e)
             return peer_routing.PeerRoute(
                 model=name, instance_id=peer.get("instance_id"),
                 host=peer.get("host"), port=int(peer.get("port")),
                 scheme=peer.get("scheme") or "http", api_key=api_key,
-                peer_model=peer.get("matched_model") or None), None
+                peer_model=peer.get("matched_model") or None), None, None
 
+        mode = peer_routing.chat_route_mode()
         try:
-            route, refused = await run_in_threadpool_bounded(
+            route, refused, would_record = await run_in_threadpool_bounded(
                 _verify, timeout=_PEER_LOOKUP_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Verifying peer '{instance_id}' timed out: {e}") from e
         if refused is not None:
             raise HTTPException(
                 403, f"Peer instance '{instance_id}' refused the route: {refused}.")
+        if would_record is not None:
+            raise HTTPException(
+                409, f"Chats with '{name}' are recorded in {mode.value} mode here, "
+                f"and {would_record}, so the route was not set up. Accept it with "
+                "that instance's owner key, or change its Session persistence.")
         if route is None:
             raise HTTPException(
                 409, f"Peer instance '{instance_id}' is no longer live, no "

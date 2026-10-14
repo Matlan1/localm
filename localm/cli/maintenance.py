@@ -333,7 +333,7 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     needed."""
     from localm import bugreport
     from rich.markup import escape
-    interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    interactive = bugreport.stdin_is_interactive()
     description, what_expected, what_happened = message, expected, happened
     if interactive:
         console.print("[bold]Filing a bug report.[/bold] Press Enter to skip a question.")
