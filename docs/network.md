@@ -225,10 +225,11 @@ coding agent's shell access, so you can grant one without the other.
   downloads DO go through this same policy's domain lists and SSRF guard
   (`check_url`); `off` is bypassed only via the separate
   `net_allow_model_downloads` setting. A Hugging Face pull checks the hub
-  endpoint before any request, and its size check before the download
-  checks and pins every redirect hop; the transfer itself is made by the
-  `huggingface_hub` library, which follows the hub's redirect to its download
-  host on its own, without the per-hop check or the DNS-rebinding pin. The
+  endpoint before any request, and the size check before a single-file
+  download checks and pins every redirect hop; the metadata requests and the
+  transfer itself are made by the `huggingface_hub` library, which follows the
+  hub's redirect to its download host on its own, without the per-hop check or
+  the DNS-rebinding pin. The
   coder's network reviewer (a cloud model or an off-machine URL) is checked
   the same way, and falls back to the local model when refused.
 - **Bug-report upload.** A deliberate, one-off action you trigger yourself

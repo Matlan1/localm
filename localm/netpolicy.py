@@ -205,9 +205,9 @@ def check_url_shape(url: str) -> str:
 
     ``check_url`` calls this, so there is exactly one implementation. A caller
     that wants THESE checks without the destination ones calls it directly: an
-    OWNER-CONFIGURED service endpoint (localm's own ``comfy_api_url`` and
-    ``coder_reviewer`` URL) points at a local server, which the public-address
-    arm of ``check_url`` refuses.
+    OWNER-CONFIGURED service endpoint (localm's own ``comfy_api_url``, and a
+    loopback ``coder_reviewer`` URL or coder model server) points at a local
+    server, which the public-address arm of ``check_url`` refuses.
 
     RUN THIS BEFORE CLASSIFYING A URL AS LOCAL OR REMOTE. Until the
     backslash/control-character check has passed, ``urlparse``'s host can
@@ -529,6 +529,11 @@ def _host_header(parsed) -> str:
     return host
 
 
+class UnresolvableHost(NetworkPolicyError):
+    """The host could not be resolved to an address the policy validated, so
+    no connection was opened."""
+
+
 def _session_for(url: str):
     """A ``requests.Session`` whose socket is pinned to *url*'s pre-validated
     IPs (``_resolve_pinned_all``: the next one is dialled only when the TCP
@@ -547,7 +552,7 @@ def _session_for(url: str):
     parsed = urllib.parse.urlparse(url)
     ips = _resolve_pinned_all(_canonical_host(parsed.hostname or ""))
     if not ips:
-        raise NetworkPolicyError(
+        raise UnresolvableHost(
             f"Could not resolve '{parsed.hostname}' to an address; refusing the "
             "request rather than connecting through an unvalidated re-resolution.")
     return netpin.pinned_session(ips)

@@ -864,8 +864,8 @@ agent's own model (the default, same-model self-review), a second small model lo
 CPU (`coder_reviewer = "local"`), a cloud model (`"openai"`/`"anthropic"`), or a second
 OpenAI-compatible server (a URL) - set with `coder_reviewer` / `coder_reviewer_model`. A
 network reviewer (cloud, or a non-loopback URL) is skipped in privacy mode, or when the
-network policy refuses it (`net_mode` off, `net_deny` / `net_allow`), falling back to the
-same-model reviewer with a warning; a restricted session runs no reviewer at all,
+network policy refuses it (`net_mode` off, `net_deny` / `net_allow`, or a LAN address while
+`net_allow_private` is off), falling back to the same-model reviewer with a warning; a restricted session runs no reviewer at all,
 regardless of `coder_reviewer`. Ask for a second opinion on demand, at any point in a
 REPL session and independent of the `coder_review` setting, with `/review`.
 

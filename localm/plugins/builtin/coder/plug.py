@@ -478,9 +478,9 @@ def _resolve_backend(req: CreateSessionRequest, *, self_url: str,
     # The calibration matches what the rest of localm already does. netpolicy
     # guards URLs that arrive from UNTRUSTED CONTENT (a model-supplied media
     # URL, a redirect chain during a model pull). An OWNER-CONFIGURED service
-    # endpoint does not go through it at all: comfy_api_url and the
-    # coder_reviewer URL both point wherever the owner says. This field is the
-    # same kind of thing, and it is already owner-gated above.
+    # endpoint on this machine does not go through it: comfy_api_url and a
+    # loopback coder_reviewer URL point wherever the owner says. This field is
+    # the same kind of thing, and it is already owner-gated above.
     #
     # An off-machine destination is different, and there check_url is exactly
     # right: net_mode=off then means what it says, the deny list applies, and a

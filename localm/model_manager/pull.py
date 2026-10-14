@@ -1670,7 +1670,7 @@ def _pull_gguf_file(
 
     # Disk space pre-flight - HEAD each missing part's CDN URL for its
     # Content-Length and the etag huggingface_hub will name its temp file by.
-    from localm.netpolicy import NetworkPolicyError
+    from localm.netpolicy import NetworkPolicyError, UnresolvableHost
     part_sizes: dict[str, int] = {}
     etags: dict[str, str | None] = {}
     try:
@@ -1683,6 +1683,8 @@ def _pull_gguf_file(
             part_sizes[part] = size
             etags[part] = _etag_from_head(head)
             total_size += size
+    except UnresolvableHost:
+        total_size = 0
     except NetworkPolicyError as e:
         console.print(f"[red]Network policy refused the download:[/red] "
                       f"{escape(str(e))}")
@@ -1703,6 +1705,8 @@ def _pull_gguf_file(
                 mmproj_head = _policy_head(
                     hf_hub_url(repo_id, mmproj_name, endpoint=_HF_ENDPOINT))
                 total_size += int(mmproj_head.headers.get("content-length", 0))
+        except UnresolvableHost:
+            pass
         except NetworkPolicyError as e:
             console.print(f"[red]Network policy refused the download:[/red] "
                           f"{escape(str(e))}")
@@ -2276,8 +2280,9 @@ def _policy_head(url: str):
     ``check_url`` (net_allow_model_downloads applied to the net_mode=off
     floor) and is sent over the pinned transport. Returns the last response
     with ``history`` set to the earlier hops' responses, first hop first.
-    Raises NetworkPolicyError when a hop is refused; transport errors
-    propagate."""
+    Raises NetworkPolicyError when a hop is refused, ``UnresolvableHost`` (a
+    NetworkPolicyError) when a hop's host cannot be resolved; transport
+    errors propagate."""
     import urllib.parse
 
     from localm import netpolicy

@@ -169,6 +169,29 @@ class TestPolicyHead:
         assert hub["calls"]["download"] == []
         assert "Network policy refused the download" in capsys.readouterr().out
 
+    def test_an_unresolvable_preflight_host_still_downloads(self, hub, monkeypatch, capsys):
+        hub["stop_at_sha"] = False
+        downloads = []
+
+        def unresolvable(url):
+            raise netpolicy.UnresolvableHost("Could not resolve 'huggingface.co'")
+
+        def download(repo_id, filename, local_dir, **kw):
+            downloads.append(filename)
+            raise RuntimeError("stop after the download call")
+        import huggingface_hub
+        monkeypatch.setattr(pull_mod, "_policy_head", unresolvable)
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+        assert mm.pull_model(SPEC) is False
+        assert downloads == ["model.gguf"]
+        assert "Network policy refused" not in capsys.readouterr().out
+
+    def test_session_for_raises_unresolvable_host(self, monkeypatch):
+        set_config(monkeypatch, {"net_mode": "ask"})
+        monkeypatch.setattr(netpolicy, "_resolve_pinned_all", lambda host: [])
+        with pytest.raises(netpolicy.UnresolvableHost):
+            netpolicy._session_for("https://huggingface.co/")
+
     def test_an_allowed_preflight_downloads(self, hub, monkeypatch):
         hub["stop_at_sha"] = False
         seen, downloads = [], []

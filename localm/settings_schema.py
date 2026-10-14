@@ -951,7 +951,8 @@ CORE_FIELDS: list = [
                  "Reviewer model target",
                  "Sends your diff off-machine unless left blank or set to "
                  "'local'. Values: blank = the agent's own model; local = a "
-                 "small CPU model; openai; anthropic; or an http(s) URL.",
+                 "small CPU model; openai; anthropic; or an http(s) URL. "
+                 "Off-machine targets follow the network policy.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
                  admin_only=True),
     # Gated together with coder_reviewer: gating the SELECTOR while leaving its

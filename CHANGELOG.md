@@ -2159,10 +2159,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The coder's network reviewer obeys the network policy.** A cloud reviewer (`openai` /
   `anthropic`) or an off-machine reviewer URL sent the cumulative diff even with `net_mode` off or
   the host on `net_deny`. It is now checked like the GUI coder's own model server: when the policy
-  refuses it, the review runs on the local model with a warning naming the refusal.
+  refuses it (including a LAN address while `net_allow_private` is off), the review runs on the
+  local model with a warning naming the refusal. A reviewer URL on this machine is not affected.
 - **Hugging Face pulls are checked against the network policy.** `net_deny`, `net_allow` and the
   private-address guard now apply to the Hugging Face endpoint before any pull, and the size check
-  before a download checks every redirect hop and pins its address.
+  before a single-file download checks every redirect hop and pins its address.
 - **Internationalised host names match the domain lists in either spelling.** A `net_deny` or
   `net_allow` entry written in Unicode or in its `xn--` form now matches both spellings of the host.
 - **The private-address guard refuses the IPv6 site-local range `fec0::/10`.**
