@@ -502,3 +502,69 @@ def test_a_real_full_mode_peer_records_a_full_mode_forward(tmp_path, monkeypatch
     assert status == 200
     assert b"peer reply" in body
     assert "peer reply" in recorded and '"hi"' in recorded
+
+
+# --------------------------------------------------------------------------- #
+#  A peer that stops answering or refuses the key is dropped, in every mode    #
+# --------------------------------------------------------------------------- #
+
+def test_a_dead_peer_drops_the_route_in_privacy_mode(monkeypatch, peers):
+    _mode(monkeypatch, mode="privacy")
+    peer = peers(own_mode="privacy")
+    route = _route(peer)
+    peer_routing.set_route(route)
+    peer.close()
+
+    err = _forward_error(route)
+
+    assert err.status_code == 502
+    assert "cleared" in err.detail
+    assert peer_routing.get_route("m") is None
+
+
+def test_a_peer_refusing_the_key_drops_the_route_in_privacy_mode(monkeypatch):
+    import http.server as hsrv
+
+    class H(hsrv.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    srv = hsrv.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        _mode(monkeypatch, mode="privacy")
+        route = peer_routing.PeerRoute(model="m", instance_id="peer-1",
+                                       host="127.0.0.1", port=srv.server_address[1],
+                                       scheme="http", api_key="stale")
+        peer_routing.set_route(route)
+
+        err = _forward_error(route)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert err.status_code == 502
+    assert "HTTP 401" in err.detail
+    assert peer_routing.get_route("m") is None
+
+
+def test_mcp_names_the_mode_checked_last_not_the_one_it_started_with(
+        monkeypatch, peers):
+    _mode(monkeypatch, mode="full")
+    peer = peers(own_mode="full")
+    cache = _mcp_cache(monkeypatch, peer)
+    eng = cache._peer_engine("m")
+    assert eng is not None
+    cache._peers["m"] = eng
+
+    _mode(monkeypatch, mode="privacy")
+    peer.own_mode = "privacy"
+    assert cache._peer_still_answers("m") is True
+    "".join(eng.chat_stream([{"role": "user", "content": "hi"}]))
+
+    assert peer.mode_headers[-1] == "privacy"

@@ -613,7 +613,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a
   privacy-mode chat could land in another instance's session log. Unless the chat is recorded in
   full mode here, the other instance must now confirm it records it no more than this mode allows.
-  If it does not, nothing is sent and the message names that instance and its mode.
+  If it does not, nothing is sent and the message says which instance and why.
 - **Switching models no longer freezes the server while the model folder is measured.** Reading
   the model registry, measuring a model's size on disk and building its engine ran on the
   server's main loop, so a load of a large model folder on a slow or network disk stalled every

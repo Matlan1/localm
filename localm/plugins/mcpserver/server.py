@@ -454,14 +454,18 @@ class EngineCache:
             _log(f"not using the cached copy of {name}: no endpoint is recorded for it")
             return False
         from localm import peer_routing
+        mode = peer_routing.chat_route_mode()
         try:
             peer_routing.verify_peer_credential(target, token)
-            peer_routing.ensure_peer_keeps_mode(
-                target, token, peer_routing.chat_route_mode())
+            peer_routing.ensure_peer_keeps_mode(target, token, mode)
         except Exception as e:
             _log(f"not using {name} loaded by the localm instance on port "
                  f"{target.get('port')} any more: {e}")
             return False
+        eng = self._peers.get(name)
+        if eng is not None:
+            # Later requests through the cached copy name the mode checked now.
+            eng._session_mode = mode.value
         return True
 
     def _discard(self, name: str, engine) -> None:

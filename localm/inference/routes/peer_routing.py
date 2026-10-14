@@ -133,6 +133,8 @@ def register(app: FastAPI, ctx) -> None:
                 return None, f"the peer could not be reached ({e})", None
             try:
                 peer_routing.ensure_peer_keeps_mode(peer, api_key, mode)
+            except peer_routing.PeerUnreachable as e:
+                return None, str(e), None
             except peer_routing.PeerWouldRecord as e:
                 return None, None, str(e)
             return peer_routing.PeerRoute(

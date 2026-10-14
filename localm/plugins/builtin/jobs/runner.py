@@ -282,6 +282,10 @@ def _peer_served_engine(route):
     mode = peer_routing.chat_route_mode()
     try:
         peer_routing.ensure_peer_keeps_mode(route.safe_dict(), route.api_key, mode)
+    except peer_routing.PeerUnreachable as e:
+        raise RuntimeError(
+            f"'{route.model}' is routed to another localm instance, but {e}. Clear "
+            "the route to run the job here.") from e
     except peer_routing.PeerWouldRecord as e:
         raise RuntimeError(
             f"'{route.model}' is routed to another localm instance, but {e}; this "

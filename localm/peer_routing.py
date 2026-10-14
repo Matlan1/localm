@@ -400,21 +400,33 @@ class PeerWouldRecord(Exception):
     session mode allows. ``str()`` names the peer and why, for the user."""
 
 
+class PeerUnreachable(Exception):
+    """A peer did not answer the session-mode check, or refused the credential
+    (HTTP 401/403). ``str()`` says which, for the user."""
+
+
 def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
                         timeout: float = 5.0) -> Optional[str]:
     """The session mode *peer* reports for a request that asks it to record no
     more than *mode*: ``GET /v1/config`` with *api_key* and the session-mode
-    header, field ``request_session_mode``. None when the peer does not answer
-    with a valid mode (an older localm, a credential without ``config:read``, a
-    network error). Sends nothing to an endpoint that fails
-    :func:`is_routable_peer_endpoint`."""
+    header, field ``request_session_mode``. None when the peer answers without
+    a valid mode (an older localm, a credential without ``config:read``).
+    Raises :class:`PeerUnreachable` on a network error or an HTTP 401/403.
+    Sends nothing to an endpoint that fails :func:`is_routable_peer_endpoint`,
+    or whose host or port is malformed (None)."""
     from localm.audit import SESSION_MODE_HEADER, SessionMode
     scheme = peer.get("scheme") or "http"
-    if not is_routable_peer_endpoint(peer.get("host"), scheme):
+    host, port = peer.get("host"), peer.get("port")
+    if not isinstance(host, str) or not is_routable_peer_endpoint(host, scheme):
+        return None
+    if not isinstance(port, (int, str)):
+        return None
+    try:
+        port = int(port)
+    except ValueError:
         return None
     probe = PeerRoute(model="", instance_id=str(peer.get("instance_id") or ""),
-                      host=peer.get("host"), port=int(peer.get("port")),
-                      scheme=scheme, api_key=api_key or "")
+                      host=host, port=port, scheme=scheme, api_key=api_key or "")
     url = _peer_url(probe, "/v1/config")
     import requests
     try:
@@ -426,11 +438,16 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
     try:
         resp = requests.get(url, headers=headers, timeout=timeout, verify=verify,
                             allow_redirects=False)
+    except requests.RequestException as e:
+        raise PeerUnreachable(f"it could not be reached ({e})") from e
+    if resp.status_code in (401, 403):
+        raise PeerUnreachable(f"it refused the API key (HTTP {resp.status_code})")
+    try:
         data = resp.json() if resp.status_code == 200 else None
-    except (requests.RequestException, ValueError, RecursionError) as e:
-        logger.info("peer_routing: could not read the session mode of peer %s "
-                    "(%s:%s): %s", peer.get("instance_id"), peer.get("host"),
-                    peer.get("port"), e)
+    except (ValueError, RecursionError) as e:
+        logger.info("peer_routing: peer %s (%s:%s) answered the session-mode check "
+                    "with something that is not JSON: %s", peer.get("instance_id"),
+                    host, port, e)
         return None
     got = data.get("request_session_mode") if isinstance(data, dict) else None
     try:
@@ -441,8 +458,9 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
 
 def ensure_peer_keeps_mode(peer: dict, api_key: Optional[str], mode) -> None:
     """Return when *peer* will record a conversation forwarded with *api_key*
-    no more than *mode* allows; raise :class:`PeerWouldRecord` otherwise.
-    Full mode needs no check and sends nothing."""
+    no more than *mode* allows; raise :class:`PeerWouldRecord` otherwise, or
+    :class:`PeerUnreachable` when the peer does not answer or refuses the
+    credential. Full mode needs no check and sends nothing."""
     from localm.audit import SessionMode, mode_at_least_as_private
     mode = SessionMode(mode)
     if mode == SessionMode.FULL:
@@ -488,9 +506,12 @@ async def forward(route: PeerRoute, request, path: str, *,
 
     Unless this request's own session mode is full, the peer must first confirm
     (:func:`ensure_peer_keeps_mode`) that it records the request no more than
-    that mode allows. If it does not, nothing is sent, the route is KEPT, and
-    ``HTTPException(409, ...)`` names the peer and its mode. The forwarded
-    request carries the mode in the session-mode header."""
+    that mode allows. If it answers that it would record more, or answers
+    without a mode, nothing is sent, the route is KEPT, and
+    ``HTTPException(409, ...)`` says why. If it cannot be reached or refuses
+    the credential, the route is CLEARED and ``HTTPException(502, ...)`` is
+    raised, as for a failed forward. The forwarded request carries the mode in
+    the session-mode header."""
     from fastapi import HTTPException
     from fastapi.responses import StreamingResponse
 
@@ -512,6 +533,15 @@ async def forward(route: PeerRoute, request, path: str, *,
     try:
         await loop.run_in_executor(
             None, ensure_peer_keeps_mode, route.safe_dict(), route.api_key, mode)
+    except PeerUnreachable as e:
+        clear_route(route.model)
+        logger.warning("peer_routing: peer %s (%s:%s) failed the session-mode "
+                       "check for '%s', clearing the route: %s", route.instance_id,
+                       route.host, route.port, route.model, e)
+        raise HTTPException(
+            502, f"Peer instance at {route.host}:{route.port} could not be used for "
+            f"'{route.model}': {e}. The route has been cleared. Retry to load a "
+            "local copy, or re-offer routing.") from e
     except PeerWouldRecord as e:
         logger.info("peer_routing: not forwarding '%s' to peer %s: %s",
                     route.model, route.instance_id, e)

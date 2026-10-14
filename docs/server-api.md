@@ -446,8 +446,13 @@ no more than this instance's mode allows (it reports this in the
 `request_session_mode` field of `GET /v1/config` for a request carrying the
 `X-Localm-Session-Mode` header; it agrees to record less only for its owner
 key). Otherwise accepting is a 409 and nothing is stored, and a forwarded
-request is a 409 naming that instance and its mode; nothing is sent and the
-route stays. A forwarded request carries `X-Localm-Session-Mode`.
+request is a 409 saying why (naming that instance, and its mode when it
+reports one); nothing is sent and the route stays. An instance that does not
+answer this check, or refuses the key, drops the route with a 502 as above. A
+forwarded request carries `X-Localm-Session-Mode`. With a key that is not that
+instance's owner key, it records at its own mode, which is checked before
+each request; a change it makes to its mode while a request is running is not
+covered.
 
 ### `POST /v1/completions`
 

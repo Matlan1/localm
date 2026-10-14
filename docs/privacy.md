@@ -99,8 +99,11 @@ records the chat in `full` mode, the other instance must first confirm that it
 records it no more than this instance's mode allows: it is in that mode or a
 more private one, or it is reached with its owner key and agrees to record
 less. If it does not confirm, nothing is sent to it: accepting the route and
-each routed request are refused with a message naming that instance and its
-mode, a routed job fails saying so, and the MCP server loads the model itself.
+each routed request are refused with a message naming that instance (and its
+mode, when it reports one), a routed job fails saying so, and the MCP server
+loads the model itself. Reached with any other key, that instance records at
+its own mode as checked before each request, so a change it makes to its own
+mode while a request is running is not covered.
 
 ---
 
