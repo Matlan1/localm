@@ -616,6 +616,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **The chat model comes back after a failed image, video or music job.** When a generation
+  crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
+  until your next message. It now reloads on every way a job can end, and a job that finishes
+  last follows its own "reload the chat model afterwards" setting instead of replaying an
+  earlier job's reload.
 - **A re-sync removes documents indexed from credential folders.** A collection that already
   held files from a folder such as `~/.ssh` kept serving them; `localm rag resync` and the
   scheduled re-sync now drop those entries from the index.
