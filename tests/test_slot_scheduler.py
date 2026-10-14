@@ -949,7 +949,7 @@ def test_progress_stops_once_a_decode_runs_past_its_limit(made, monkeypatch):
     t0 = time.monotonic()
     stream.close()
     _drain(stream)
-    beats = [ts - t0 for s, ts in zip(statuses, stamps) if s == _slots.PROCESSING_STATUS]
+    beats = [ts - t0 for s, ts in zip(statuses, stamps, strict=True) if s == _slots.PROCESSING_STATUS]
     assert beats, "no progress was sent"
     assert max(beats) < 0.3 + 0.2, beats
 
