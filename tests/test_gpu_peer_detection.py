@@ -101,6 +101,31 @@ class TestSocketTableParsing:
     def test_an_empty_buffer_is_empty(self):
         assert listeners.parse_windows_table(b"", 2) == []
 
+    def test_proc_net_tcp_owners_carry_the_uid(self):
+        got = listeners.parse_proc_net_tcp_owners(_PROC_TCP, socket.AF_INET)
+        assert got == [("127.0.0.1", 0x21D2, 1000), ("0.0.0.0", 0x21D3, 1000)]
+
+    def test_windows_owner_rows_carry_the_pid_for_both_families(self):
+        def row4(port, pid):
+            net_port = ((port & 0xFF) << 8) | (port >> 8)
+            return struct.pack("<6I", 2, 0x0100007F, net_port, 0, 0, pid)
+
+        def row6(port, pid):
+            net_port = ((port & 0xFF) << 8) | (port >> 8)
+            local = bytes(15) + b"\x01"
+            return (local + struct.pack("<II", 0, net_port) + bytes(16)
+                    + struct.pack("<IIII", 0, 0, 2, pid))
+        v4 = struct.pack("<I", 1) + row4(8642, 4321)
+        v6 = struct.pack("<I", 1) + row6(8643, 8765)
+        assert len(v6) == 4 + 56
+        assert listeners.parse_windows_table_owners(v4, 2) == [("127.0.0.1", 8642, 4321)]
+        assert listeners.parse_windows_table_owners(v6, 23) == [("::1", 8643, 8765)]
+
+    def test_lsof_output_gives_each_socket_its_process_uid(self):
+        text = "p100\nu501\nf5\nn127.0.0.1:8642\nf6\nn*:8643\np200\nu0\nf3\nn[::1]:8644\n"
+        assert listeners.parse_lsof_listen_owners(text) == [
+            ("127.0.0.1", 8642, 501), ("0.0.0.0", 8643, 501), ("::1", 8644, 0)]
+
 
 class TestRealSocketTable:
     def test_a_listening_socket_is_found_and_a_closed_port_is_not(self):

@@ -2223,6 +2223,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   data directory, to any key that could reach them. A key other than the owner's now gets those paths
   with the data directory, home and install folders replaced by placeholders such as `<data>`; "Use
   as input" and "Reuse settings" accept that form, so img2img from the gallery keeps working.
+- **Model routing only goes to a localm run by your own user account.** Any program on the
+  computer that answered like a localm instance on a port in localm's range could be offered
+  as a peer for a loaded model, and accepting it sent it your chats and the peer's key. A peer
+  is now offered, checked and used only when the process listening on its port runs under the
+  same user account as this localm.
 - **The cross-origin exemptions match exact paths only.** The inference routes that browsers may
   call cross-origin (chat completions, embeddings, rerank, speech, images and the surface and
   instance routes) were matched as path prefixes, so a route added under one of them would have
