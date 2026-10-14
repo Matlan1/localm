@@ -261,23 +261,87 @@ def _origin(url: str) -> Optional[tuple]:
     return scheme, host, port or (443 if scheme == "https" else 80)
 
 
+_LOCAL_NAME_SUFFIXES = (".local", ".lan", ".internal", ".home.arpa", ".localdomain",
+                        ".localhost")
+
+
+def _is_local_name_or_literal(host: str) -> bool:
+    """True when *host* names this machine or the local network by its form:
+    an IP literal (any numeric spelling), ``localhost``, a name without a dot,
+    or a name under a local-network suffix (``_LOCAL_NAME_SUFFIXES``)."""
+    if _literal_ipv4(host) is not None:
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    return host == "localhost" or "." not in host or host.endswith(_LOCAL_NAME_SUFFIXES)
+
+
 def is_search_backend_origin(url: str, cfg: dict) -> bool:
     """True when *url* has the same scheme, host and port as the SearXNG
-    instance configured in *cfg*'s ``net_search_url``. False when none is
-    configured."""
+    instance configured in *cfg*'s ``net_search_url``, and that configured host
+    is local by its form (:func:`_is_local_name_or_literal`). False when none
+    is configured, and for a public host name."""
     configured = cfg.get("net_search_url") if isinstance(cfg, dict) else None
     if not configured:
         return False
     mine = _origin(configured)
-    return mine is not None and _origin(url) == mine
+    return (mine is not None and _is_local_name_or_literal(mine[1])
+            and _origin(url) == mine)
 
 
-def _is_link_local_ip(ip: ipaddress._BaseAddress) -> bool:
-    """True for a link-local address, including an IPv4-mapped IPv6 one."""
-    if ip.is_link_local:
+_SEARCH_BACKEND_REFUSED_V6 = (ipaddress.ip_network("fd00:ec2::/32"),)
+
+
+def _search_backend_address_ok(ip: ipaddress._BaseAddress) -> bool:
+    """Whether the search backend may connect to *ip*: a public address
+    (``_is_blocked_ip`` False), an IPv4 loopback or private address that is
+    not link-local or unspecified (an IPv4-mapped IPv6 address is judged by its
+    IPv4 address), ``::1``, or an IPv6 unique-local address outside the cloud
+    metadata range fd00:ec2::/32. Every other address, including link-local in
+    NAT64, IPv4-compatible and 6to4 form, is refused."""
+    if not _is_blocked_ip(ip):
         return True
     mapped = getattr(ip, "ipv4_mapped", None)
-    return bool(mapped is not None and mapped.is_link_local)
+    if mapped is not None:
+        ip = mapped
+    if ip.version == 4:
+        return bool((ip.is_loopback or ip.is_private)
+                    and not ip.is_link_local and not ip.is_unspecified)
+    if ip == ipaddress.IPv6Address("::1"):
+        return True
+    return (ip in ipaddress.ip_network("fc00::/7")
+            and not any(ip in net for net in _SEARCH_BACKEND_REFUSED_V6))
+
+
+def _check_search_backend_address(host: str) -> None:
+    """:func:`_check_public_address` for the search backend: *host* (or every
+    address it resolves to) must pass :func:`_search_backend_address_ok`.
+    Unresolvable hosts pass, as there."""
+    literal = _literal_ipv4(host)
+    if literal is not None:
+        ips = [literal]
+    else:
+        try:
+            ips = [ipaddress.ip_address(host)]
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(host, None)
+            except (socket.gaierror, ValueError):
+                return
+            ips = []
+            for info in infos:
+                try:
+                    ips.append(ipaddress.ip_address(info[4][0]))
+                except ValueError:
+                    continue
+    for ip in ips:
+        if not _search_backend_address_ok(ip):
+            raise NetworkPolicyError(
+                f"'{host}' is or resolves to {ip}, which the search backend set in "
+                "net_search_url cannot use (link-local or cloud-metadata address).")
 
 
 def check_url(url: str, *, allow_when_off: bool = False,
@@ -302,10 +366,12 @@ def check_url(url: str, *, allow_when_off: bool = False,
     toggle, the jobs webtool) - those stay governed by net_mode alone.
 
     *search_backend*, default False: pass True only from the SearXNG search
-    provider. When *url* is then on the configured ``net_search_url`` origin
-    (:func:`is_search_backend_origin`), a loopback or private address is
-    permitted without ``net_allow_private``; a link-local one is still refused.
-    Every other URL, and every other caller, gets the full address check.
+    provider. When *url* is then on the configured ``net_search_url`` origin and
+    that host is local by its form (:func:`is_search_backend_origin`), a
+    loopback or private address is permitted without ``net_allow_private``
+    (:func:`_search_backend_address_ok`); link-local and cloud-metadata
+    addresses, in any embedded form, are still refused. Every other URL, and
+    every other caller, gets the full address check.
     """
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     unreadable = NetworkPolicyError(
@@ -352,10 +418,7 @@ def check_url(url: str, *, allow_when_off: bool = False,
 
     if not cfg.get("net_allow_private", False):
         if search_backend and is_search_backend_origin(url, cfg):
-            if is_link_local_host(host):
-                raise NetworkPolicyError(
-                    f"'{host}' is a link-local address; the search backend set in "
-                    "net_search_url cannot be on one.")
+            _check_search_backend_address(host)
         else:
             _check_public_address(host)
 
@@ -518,16 +581,16 @@ def _resolve_pinned_all(host: str, *, search_backend: bool = False) -> list[str]
     lookup.
 
     *search_backend* True (the caller has established that the request is the
-    search provider's, to the configured ``net_search_url`` origin) permits a
-    loopback or private address without net_allow_private; a link-local one is
-    still never returned."""
+    search provider's, to the configured ``net_search_url`` origin) returns only
+    addresses :func:`_search_backend_address_ok` accepts, without
+    net_allow_private."""
     allow_private = bool(_config().get("net_allow_private", False))
 
     def _refused(ip_obj) -> bool:
         if allow_private:
             return False
         if search_backend:
-            return _is_link_local_ip(ip_obj)
+            return not _search_backend_address_ok(ip_obj)
         return _is_blocked_ip(ip_obj)
 
     def _guard(ip_obj) -> None:

@@ -98,21 +98,61 @@ def test_any_other_origin_keeps_the_address_check(configured, requested):
         check_url(requested, search_backend=True)
 
 
-@pytest.mark.parametrize("configured", ["http://169.254.169.254", "http://[fe80::1]:8080"])
-def test_a_link_local_search_backend_is_refused(configured):
+_METADATA_FORMS = ["169.254.169.254", "::ffff:169.254.169.254", "fe80::1",
+                   "64:ff9b::a9fe:a9fe", "::a9fe:a9fe", "2002:a9fe:a9fe::1",
+                   "fd00:ec2::254", "0.0.0.0"]
+
+
+def _url_host(ip: str) -> str:
+    return f"[{ip}]" if ":" in ip else ip
+
+
+@pytest.mark.parametrize("ip", _METADATA_FORMS)
+def test_a_link_local_or_metadata_search_backend_is_refused(ip):
+    configured = f"http://{_url_host(ip)}:8080"
     _configure(net_search_url=configured)
-    with pytest.raises(NetworkPolicyError, match="link-local"):
+    with pytest.raises(NetworkPolicyError, match="search backend"):
         check_url(configured + "/search?q=x", search_backend=True)
 
 
-def test_pin_time_check_permits_private_but_never_link_local():
-    assert netpolicy._resolve_pinned_all("127.0.0.1", search_backend=True) == ["127.0.0.1"]
-    assert netpolicy._resolve_pinned_all("192.168.1.10", search_backend=True) == ["192.168.1.10"]
-    for host in ("169.254.169.254", "::ffff:169.254.169.254", "fe80::1"):
-        with pytest.raises(NetworkPolicyError):
-            netpolicy._resolve_pinned_all(host, search_backend=True)
+@pytest.mark.parametrize("ip", _METADATA_FORMS)
+def test_pin_time_refuses_link_local_and_metadata_in_every_form(ip):
+    with pytest.raises(NetworkPolicyError):
+        netpolicy._resolve_pinned_all(ip, search_backend=True)
+
+
+@pytest.mark.parametrize("ip", ["127.0.0.1", "192.168.1.10", "10.0.0.5", "172.16.3.4",
+                                "::1", "fd12:3456::7", "::ffff:192.168.1.10", "8.8.8.8"])
+def test_pin_time_permits_loopback_private_ula_and_public(ip):
+    assert netpolicy._resolve_pinned_all(ip, search_backend=True)
+
+
+def test_pin_time_without_the_exemption_refuses_loopback():
     with pytest.raises(NetworkPolicyError):
         netpolicy._resolve_pinned_all("127.0.0.1")
+
+
+@pytest.mark.parametrize("configured", [
+    "https://searx.example.org", "http://search.example.com:8080"])
+def test_a_public_host_name_gets_no_exemption(configured, monkeypatch):
+    import socket
+    _configure(net_search_url=configured)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("127.0.0.1", 0))])
+    assert netpolicy.is_search_backend_origin(configured + "/search", netpolicy._config()) is False
+    with pytest.raises(NetworkPolicyError, match="non-public"):
+        check_url(configured + "/search?q=x", search_backend=True)
+
+
+@pytest.mark.parametrize("configured", [
+    "http://searx:8080", "http://localhost:8888", "http://nas.local:8080",
+    "http://searx.lan", "http://box.home.arpa", "http://s.internal:1"])
+def test_a_local_host_name_is_exempt(configured, monkeypatch):
+    import socket
+    _configure(net_search_url=configured)
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("192.168.1.10", 0))])
+    check_url(configured + "/search?q=x", search_backend=True)
 
 
 def test_session_exemption_follows_the_configured_origin():

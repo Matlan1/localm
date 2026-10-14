@@ -2193,8 +2193,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   port.** A redirect kept the token whenever the host name stayed the same; it is now dropped
   unless the scheme, host and port all match the original request.
 - **A SearXNG instance on your network no longer needs the private-address guard turned off.**
-  The search reaches a LAN or loopback address on exactly the `net_search_url` you set (same
-  scheme, host and port), and a link-local one is still refused. The network guide used to tell
+  When `net_search_url` names the instance by its address, `localhost`, a dotless name or a
+  `.local`/`.lan`-style name, the search reaches its LAN or loopback address on exactly that
+  scheme, host and port; link-local and cloud-metadata addresses are still refused, and a public
+  host name gets no exemption. The network guide used to tell
   you to set `net_allow_private true` for a LAN instance, which removes the guard from every
   page the model fetches, including cloud metadata and localm's own API; it no longer does.
 - **A scoped API key no longer receives this machine's absolute paths.** The memory page, the

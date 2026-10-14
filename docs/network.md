@@ -160,11 +160,16 @@ backend, point localm at a SearXNG instance:
 localm config net_search_url http://192.168.1.10:8080
 ```
 
-An instance on your LAN or on this machine needs no other setting: the search
-reaches the private address of exactly that `net_search_url` (the same scheme,
-host and port), and nothing else. A page the model fetches, even one on that
-instance, still gets the private-address check, and a link-local address
-(`169.254.x.x`, cloud metadata) is refused for the search backend too. Do not
+An instance on your LAN or on this machine needs no other setting when
+`net_search_url` names it by its IP address, `localhost`, a name without a dot,
+or a name ending in `.local`, `.lan`, `.internal`, `.home.arpa` or
+`.localdomain`: the search then reaches the loopback or private address of
+exactly that origin (the same scheme, host and port), and nothing else. A public
+host name gets no exemption, so a public instance that resolved to a private
+address is still refused. A page the model fetches, even one on that instance,
+still gets the private-address check, and link-local and cloud-metadata
+addresses (`169.254.x.x`, in any IPv6 form) are refused for the search backend
+too. Do not
 turn on `net_allow_private` for this: it removes the private-address check from
 every model-driven request, including ones to `127.0.0.1` (the localm API
 itself) and `169.254.169.254`.
