@@ -94,6 +94,22 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         else:
             console.print("[yellow]No cudart bundle found; CUDA Toolkit may be required.[/yellow]")
         return tag
+    if (chosen == "cuda" and with_cudart and sys.platform not in ("win32", "darwin")
+            and _sl._machine_arch() == "arm64"):
+        # Linux ARM64: both the build and the runtime bundle come from upstream's
+        # release at one tag. A line with no ARM64 build raises from
+        # _resolve_backend_asset, and a missing runtime bundle raises from
+        # _resolve_linux_cudart_asset; either becomes the vulkan fallback.
+        url, fallback_sha, tag = _sl._resolve_backend_asset("cuda", cuda_line, tag=tag)
+        _sl._fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
+        if sha256:
+            console.print("[yellow]Note:[/yellow] --sha256 pins the CUDA build only; "
+                          "the runtime bundle is verified by its release digest instead.")
+        cudart_url, cudart_sha = _sl._resolve_linux_cudart_asset(tag, cuda_line)
+        console.print("[dim]CUDA runtime:[/dim] " + cudart_url.rsplit("/", 1)[-1]
+                      + " - no Toolkit install needed")
+        _sl._fetch_and_place(cudart_url, target, cudart_sha)
+        return tag
     if chosen == "cuda" and with_cudart and sys.platform not in ("win32", "darwin"):
         # sys.platform, not _platform_key(): matches this function's OWN
         # existing style two lines up (the win32 cudart branch), rather than

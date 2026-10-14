@@ -366,7 +366,9 @@ def test_main_threads_cuda_line_detection_on_linux(monkeypatch, tmp_path):
     _resolve_backend_asset/_fetch_cuda_runtime_libs already handle cuda-13 on
     Linux (test_linux_cuda_runtime_provisioning.py); this covers main()
     detecting and passing it through."""
+    from localm import hwdetect
     monkeypatch.setattr(sl.sys, "platform", "linux")
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
     # A real Blackwell compute capability; NvidiaInfo.cuda_line resolves it to
     # "cuda-13".
     monkeypatch.setattr(sl, "nvidia_preflight", lambda: sl.NvidiaInfo(

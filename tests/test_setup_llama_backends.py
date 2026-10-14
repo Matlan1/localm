@@ -156,7 +156,7 @@ def test_every_asset_fragment_resolves_against_the_real_latest_release():
         "problem here means this test proves nothing, not that everything "
         "matched; investigate rather than treat this as a pass")
 
-    excluded = {("linux", "cuda")}
+    excluded = set()
     unmatched = []
     for plat, backends in sl._ASSET_MATCH.items():
         for backend, matchers in backends.items():
@@ -166,8 +166,8 @@ def test_every_asset_fragment_resolves_against_the_real_latest_release():
             lines = matchers.items() if isinstance(matchers, dict) else [(None, matchers)]
             for line, group in lines:
                 for arch in hwdetect.PREBUILT_ARCHES[plat][backend]:
-                    if (plat, backend, line, arch) == ("win32", "cuda", "cuda-12", "arm64"):
-                        continue  # upstream builds Windows ARM64 CUDA for the 13.x line only
+                    if (backend, line, arch) == ("cuda", "cuda-12", "arm64"):
+                        continue  # upstream builds ARM64 CUDA for the 13.x line only
                     frags = [m.format(arch=arch) for m in group]
                     if not any(f in n and sl.assets._asset_arch_ok(n, arch)
                                for f in frags for n in names):

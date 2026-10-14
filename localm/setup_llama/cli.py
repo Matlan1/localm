@@ -70,7 +70,8 @@ BACKENDS: tuple[str, ...] = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
               help="With --backend cuda on Linux: fetch the CUDA build and runtime "
                    "libraries of this line without an NVIDIA GPU present, for building "
                    "container images. cuda-12 covers every architecture before "
-                   "Blackwell, cuda-13 is for Blackwell. The driver check and the load "
+                   "Blackwell, cuda-13 is for Blackwell and is the only line with an "
+                   "ARM64 build. The driver check and the load "
                    "test are skipped, the runtime is recorded as not load-tested, and "
                    "the container's start check tests it on the GPU host.")
 @click.option("--yes", "-y", "assume_yes", is_flag=True,

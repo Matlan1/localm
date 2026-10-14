@@ -190,7 +190,7 @@ def test_yes_is_passed_on_to_setup_llama(tmp_path, yes, expected):
 
 @pytest.mark.parametrize("machine, expected", [
     ("x86_64", "<vulkan|cuda|hip|sycl|cpu>"),
-    ("aarch64", "<vulkan|cpu>"),
+    ("aarch64", "<vulkan|cuda|cpu>"),
     ("s390x", "cpu"),
     ("riscv64", "<backend>"),
 ])

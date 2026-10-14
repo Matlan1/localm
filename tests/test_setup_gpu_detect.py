@@ -517,11 +517,11 @@ def _menu_with_probe(tmp_path: Path, avail: str, bpick: str, rec: str) -> tuple[
 
 
 def test_menu_lists_what_the_probe_offers_on_arm64_linux(tmp_path):
-    out, prompt = _menu_with_probe(tmp_path, "cpu vulkan", "1", "vulkan")
-    assert "[2] vulkan" in out and "[6] cpu" in out and "[7] I will" in out
-    for line in ("[3] cuda", "[4] hip", "[5] sycl", "[8] metal"):
+    out, prompt = _menu_with_probe(tmp_path, "cpu vulkan cuda", "1", "vulkan")
+    assert "[2] vulkan" in out and "[3] cuda" in out and "[6] cpu" in out and "[7] I will" in out
+    for line in ("[4] hip", "[5] sycl", "[8] metal"):
         assert line not in out
-    assert "Pick 1, 2, 6 or 7" in prompt
+    assert "Pick 1, 2, 3, 6 or 7" in prompt
 
 
 def test_a_pick_the_probe_does_not_offer_uses_the_recommendation(tmp_path):

@@ -109,12 +109,12 @@ def test_linux_gets_the_build_for_its_architecture(machine, listing, arch, backe
     assert sha == sl._PINNED_FALLBACK_SHA256[_name(url)]
 
 
-@pytest.mark.parametrize("backend", ["cuda", "hip", "sycl"])
+@pytest.mark.parametrize("backend", ["hip", "sycl"])
 def test_linux_arm64_refuses_x64_only_backends(machine, backend):
     machine("linux", "arm64")
     assert _refusal(backend) == (
         f"backend {backend!r} has no prebuilt build for linux on arm64. Available "
-        "here: cpu, vulkan. Or build llama.cpp yourself and pass --from <build dir>.")
+        "here: cpu, cuda, vulkan. Or build llama.cpp yourself and pass --from <build dir>.")
 
 
 @pytest.mark.parametrize("backend", ["cpu", "vulkan"])
@@ -266,7 +266,7 @@ def test_machine_arch_names_the_process_architecture(
 
 
 @pytest.mark.parametrize("plat, arch, vendors, expected", [
-    ("linux", "arm64", ["nvidia"], "vulkan"),
+    ("linux", "arm64", ["nvidia"], "cuda"),
     ("linux", "x64", ["nvidia"], "cuda"),
     ("linux", "s390x", ["nvidia"], "cpu"),
     ("linux", "arm64", [], "cpu"),

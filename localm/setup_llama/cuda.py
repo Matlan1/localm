@@ -50,6 +50,9 @@ import localm.setup_llama as _sl
 # architecture information is available at all (see NvidiaInfo.cuda_line).
 _CUDA_LINE = "cuda-12"
 
+# The CUDA lines upstream publishes an ARM64 build for, on Windows and Linux.
+_ARM64_CUDA_LINES = ("cuda-13",)
+
 
 # Compute-capability floor for "needs the 13.x line" (nvidia-smi's
 # ``compute_cap`` query, e.g. "8.9", "12.0" - the GPU's sm/arch level, NOT the
@@ -409,6 +412,14 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
     else:
         console.print("  [yellow]?[/yellow] Could not run nvidia-smi - no NVIDIA driver "
                       "detected here (or it is not on PATH).")
+
+    # A GPU whose line has no build for this CPU architecture: nothing to fetch.
+    if (info.present and _sl._machine_arch() == "arm64"
+            and info.cuda_line not in _ARM64_CUDA_LINES):
+        console.print(f"  This GPU needs the {info.cuda_line} line, which has no "
+                      "ARM64 build (only Blackwell-class and newer GPUs do).")
+        console.print("  [green]Using Vulkan now[/green].")
+        return "vulkan", False
 
     # Driver too old: the one thing we cannot fetch for the user.
     if info.present and info.cuda_capability and not info.driver_ok:
