@@ -8,7 +8,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from rich.markup import escape
 
@@ -337,7 +337,7 @@ class Engine:
         self._load_lock = _LOAD_LOCK
         # The explicit arguments; every setting left as None is read from the
         # config each time the backend is built.
-        self._backend_args = dict(
+        self._backend_args: dict[str, Any] = dict(
             mmproj_path=mmproj_path,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
