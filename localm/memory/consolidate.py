@@ -162,18 +162,31 @@ def _balanced_spans(text: str, limit: int = 16) -> list[str]:
     return spans
 
 
+class ConsolidationModelError(RuntimeError):
+    """The model call behind a consolidation step raised (engine error, eviction,
+    decode failure, context overflow). Raised in place of the step's empty
+    result."""
+
+
+def _call_model(complete: Complete, prompt: str) -> str:
+    """``complete(prompt) or ""``. Raises ConsolidationModelError, chained to
+    the original exception, when the call raises."""
+    try:
+        return complete(prompt) or ""
+    except Exception as e:
+        raise ConsolidationModelError(f"{type(e).__name__}: {e}") from e
+
+
 def extract(complete: Complete, session_text: str, *,
             max_candidates: int = MAX_CANDIDATES) -> list[dict]:
     """Distil ``[{"text","confidence"}]`` durable-fact candidates from *session_text*.
 
-    Never raises (a model/parse failure yields []); bounds every field so a hostile
-    session cannot flood or bloat the store."""
+    A reply that does not parse yields []. Raises ConsolidationModelError when the
+    model call itself raises. Bounds every field so a hostile session cannot flood
+    or bloat the store."""
     if not (session_text or "").strip():
         return []
-    try:
-        raw = complete(_EXTRACT_PROMPT + session_text[:8000] + "\n=== end ===\n") or ""
-    except Exception:
-        return []
+    raw = _call_model(complete, _EXTRACT_PROMPT + session_text[:8000] + "\n=== end ===\n")
     # Thinking models emit a <think> scratchpad before the JSON; stored raw it
     # poisons the store and breaks parsing. Strip it first.
     obj = _parse_json_object(strip_think(raw))
@@ -246,15 +259,14 @@ _EPISODE_BAD_PREFIXES = (
 
 def summarize_session(complete: Complete, session_text: str) -> str:
     """A one-sentence episodic summary of a session ('what we talked about'), for
-    episodic recall. Never raises; returns '' on any model/parse failure. Hardened
-    against instruction-laundering (the conversation is data, not commands) and
-    against a weak model echoing the prompt or narrating itself as a 'summary'."""
+    episodic recall. Returns '' when the model declines or the reply is not a
+    usable summary. Raises ConsolidationModelError when the model call itself
+    raises. Hardened against instruction-laundering (the conversation is data, not
+    commands) and against a weak model echoing the prompt or narrating itself as a
+    'summary'."""
     if not (session_text or "").strip():
         return ""
-    try:
-        raw = complete(_EPISODE_PROMPT + session_text[:8000] + "\n=== end ===\n") or ""
-    except Exception:
-        return ""
+    raw = _call_model(complete, _EPISODE_PROMPT + session_text[:8000] + "\n=== end ===\n")
     # Strip the reasoning channel BEFORE picking the first line: on a thinking
     # model the first line of the raw reply is the <think> opener.
     raw = strip_think(str(raw))
@@ -341,14 +353,12 @@ def _nearest(candidate: str, records: list[MemoryRecord]) -> tuple:
 
 def _decide(complete: Complete, candidate: str, existing: str) -> tuple:
     """Ask the model ADD/UPDATE/DELETE/NO_OP for *candidate* vs *existing*.
-    Returns (decision, confidence); defaults to NO_OP (safe: touch nothing) on any
-    parse/model failure."""
+    Returns (decision, confidence); defaults to NO_OP (safe: touch nothing) when the
+    reply does not parse. Raises ConsolidationModelError when the model call itself
+    raises."""
     prompt = (_DECIDE_PROMPT + f"EXISTING: {existing}\nCANDIDATE: {candidate}\n"
               "\nJSON:")
-    try:
-        raw = complete(prompt) or ""
-    except Exception:
-        return "NO_OP", 0.0
+    raw = _call_model(complete, prompt)
     obj = _parse_json_object(raw)
     decision = str(obj.get("decision", "NO_OP")).strip().upper()
     if decision not in ("ADD", "UPDATE", "DELETE", "NO_OP"):
@@ -373,7 +383,9 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
 
     Gated at entry on ``writes_allowed(surface)``; in privacy mode ``complete`` is
     never called and nothing is written. Applies all decisions in ONE atomic batch.
-    Returns ``{status, added, updated, deleted, noop, [reason]}``.
+    Returns ``{status, added, updated, deleted, noop, [reason], [error]}``. When a
+    model call raises, nothing is written and the result is ``status: "error"``,
+    ``reason: "model_failed"`` with the failure in ``error``.
 
     The ADD/UPDATE/DELETE decision loop makes potentially many slow LLM calls
     (``_decide()`` per candidate), so it does NOT hold the namespace lock: a
@@ -390,7 +402,10 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     from localm.debuglog import logger
     now = time.time() if now is None else now
     logger.info("memory consolidation: extracting candidate facts from session history (%d chars)...", len(session_text))
-    candidates = extract(complete, session_text, max_candidates=max_candidates)
+    try:
+        candidates = extract(complete, session_text, max_candidates=max_candidates)
+    except ConsolidationModelError as e:
+        return _model_failed(counts, e)
     logger.info("memory consolidation: extracted %d candidate fact(s)", len(candidates))
     if not candidates:
         logger.info("memory consolidation: no candidate facts found, pruning store")
@@ -413,9 +428,13 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
         store._load()
         snapshot = store.all()
     snapshot_ids = {r.id for r in snapshot}
-    working, updated_ids, proposals = _decide_changeset(
-        store, snapshot, candidates, complete, embed_fn=embed_fn, now=now,
-        counts=counts)
+    try:
+        working, updated_ids, proposals = _decide_changeset(
+            store, snapshot, candidates, complete, embed_fn=embed_fn, now=now,
+            counts=counts)
+    except ConsolidationModelError as e:
+        return _model_failed({**counts, "added": 0, "updated": 0, "deleted": 0,
+                              "noop": 0}, e)
     # APPLY UNDER LOCK (brief, no LLM): reload fresh and MERGE the decided deltas by
     # id onto the CURRENT on-disk state, so a write another thread committed during
     # the lock-free decide window survives instead of being clobbered by a
@@ -448,6 +467,15 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
             counts["added"], counts["updated"], counts["deleted"], counts["noop"], counts["proposed"],
         )
         return _with_eviction_note(counts, store)
+
+
+def _model_failed(counts: dict, err: ConsolidationModelError) -> dict:
+    """The run_consolidation result for a model call that raised: nothing was
+    written."""
+    from localm.debuglog import logger
+    logger.warning("memory consolidation: the model call failed (%s); nothing was "
+                   "changed", err)
+    return {**counts, "status": "error", "reason": "model_failed", "error": str(err)}
 
 
 def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,

@@ -74,6 +74,22 @@ def _wait_job(client, job_id, headers, timeout=30):
     return end
 
 
+def _job_events(client, job_id, headers, timeout=30):
+    events = []
+    deadline = _time.monotonic() + timeout
+    with client.stream("GET", f"/api/jobs/{job_id}/events", headers=headers) as r:
+        for raw in r.iter_lines():
+            if _time.monotonic() > deadline:
+                break
+            if not raw.startswith("data: "):
+                continue
+            ev = json.loads(raw[6:])
+            events.append(ev)
+            if ev["type"] == "end":
+                break
+    return events
+
+
 class TestImageGalleryOwnership:
     @staticmethod
     def _generate(client, monkeypatch, key):
@@ -114,6 +130,77 @@ class TestImageGalleryOwnership:
                       c.get("/api/imagine/history", headers=_h(a)).json()["images"])
             # A reaches its own image fine, and it is untouched (still on disk).
             assert c.get(f"/api/imagine/file/{name}", headers=_h(a)).status_code == 200
+
+    def test_a_stamp_that_cannot_read_the_index_is_reported_and_still_enforced(
+            self, tmp_path, monkeypatch):
+        app = _gallery_app(tmp_path, monkeypatch, "image")
+        a, b = _mk_keys(["image"], ["image"])
+        with TestClient(app) as c:
+            self._generate(c, monkeypatch, a)
+            from localm.media import gallery
+            index = gallery._index_path("image")
+            real_read_text = Path.read_text
+
+            def locked_read_text(self_, *args, **kw):
+                if Path(self_) == index:
+                    raise PermissionError(32, "being used by another process")
+                return real_read_text(self_, *args, **kw)
+            monkeypatch.setattr(Path, "read_text", locked_read_text)
+
+            r = c.post("/api/imagine", headers=_h(a), json={"prompt": "a second fox"})
+            assert r.status_code == 200
+            events = _job_events(c, r.json()["job_id"], _h(a))
+            end = events[-1]
+            assert end["type"] == "end" and end["status"] == "done"
+            name = end["result"]
+            lines = [e.get("text", "") for e in events if e.get("type") == "line"]
+            assert any("WARNING" in t and name in t and "owner" in t for t in lines), lines
+
+            monkeypatch.setattr(Path, "read_text", real_read_text)
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(b)).status_code == 404
+            assert all(it["name"] != name for it in
+                       c.get("/api/imagine/history", headers=_h(b)).json()["images"])
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(a)).status_code == 200
+
+    def test_the_openai_route_returns_the_stamp_warning(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app = _gallery_app(tmp_path, monkeypatch, "image")
+        a, b = _mk_keys(["image"], ["image"])
+        with TestClient(app) as c:
+            self._generate(c, monkeypatch, a)
+            from localm.media import gallery
+            index = gallery._index_path("image")
+            real_read_text = Path.read_text
+
+            def locked_read_text(self_, *args, **kw):
+                if Path(self_) == index:
+                    raise PermissionError(32, "being used by another process")
+                return real_read_text(self_, *args, **kw)
+            monkeypatch.setattr(Path, "read_text", locked_read_text)
+
+            r = c.post("/v1/images/generations", headers=_h(a),
+                       json={"prompt": "a third fox"})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            name = body["data"][0]["url"].rsplit("/", 1)[-1]
+            assert any(name in w and "owner" in w for w in body.get("warnings", [])), body
+
+            monkeypatch.setattr(Path, "read_text", real_read_text)
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(b)).status_code == 404
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(a)).status_code == 200
+
+    def test_the_openai_route_carries_no_warnings_when_the_stamp_lands(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app = _gallery_app(tmp_path, monkeypatch, "image")
+        (a,) = _mk_keys(["image"])
+        with TestClient(app) as c:
+            self._generate(c, monkeypatch, a)
+            r = c.post("/v1/images/generations", headers=_h(a),
+                       json={"prompt": "a third fox"})
+            assert r.status_code == 200, r.text
+            assert "url" in r.json()["data"][0]
+            assert "warnings" not in r.json()
 
     def test_owner_admin_sees_every_image(self, tmp_path, monkeypatch):
         app = _gallery_app(tmp_path, monkeypatch, "image")
@@ -263,6 +350,24 @@ class TestGalleryIndexReadContract:
         assert p.read_text(encoding="utf-8") == corrupt     # untouched
 
 
+def _locked_index_write(monkeypatch):
+    from localm.media import gallery
+
+    def locked_write(media_kind, data):
+        raise PermissionError(32, "being used by another process")
+    monkeypatch.setattr(gallery, "_write_index", locked_write)
+
+
+def _assert_warned_and_enforced(c, events, kind_route, key_a, key_b):
+    end = events[-1]
+    assert end["type"] == "end" and end["status"] == "done", events
+    name = end["result"]
+    assert any(e.get("type") == "line" and "WARNING" in e.get("text", "")
+               and name in e["text"] for e in events), events
+    assert c.get(f"{kind_route}/file/{name}", headers=_h(key_b)).status_code == 404
+    assert c.get(f"{kind_route}/file/{name}", headers=_h(key_a)).status_code == 200
+
+
 class TestMusicGalleryOwnership:
     @staticmethod
     def _generate(client, monkeypatch, key):
@@ -283,6 +388,19 @@ class TestMusicGalleryOwnership:
         end = _wait_job(client, r.json()["job_id"], _h(key))
         assert end and end["status"] == "done"
         return end["result"]
+
+    def test_an_owner_that_cannot_be_written_is_reported_and_enforced(
+            self, tmp_path, monkeypatch):
+        app = _gallery_app(tmp_path, monkeypatch, "music")
+        a, b = _mk_keys(["music"], ["music"])
+        with TestClient(app) as c:
+            self._generate(c, monkeypatch, a)
+            _locked_index_write(monkeypatch)
+            r = c.post("/api/music", headers=_h(a),
+                       json={"tags": "lofi", "duration_seconds": 10})
+            assert r.status_code == 200
+            _assert_warned_and_enforced(c, _job_events(c, r.json()["job_id"], _h(a)),
+                                        "/api/music", a, b)
 
     def test_a_music_key_cannot_touch_b_music_key_media(self, tmp_path, monkeypatch):
         app = _gallery_app(tmp_path, monkeypatch, "music")
@@ -320,6 +438,18 @@ class TestVideoGalleryOwnership:
         end = _wait_job(client, r.json()["job_id"], _h(key))
         assert end and end["status"] == "done"
         return end["result"]
+
+    def test_an_owner_that_cannot_be_written_is_reported_and_enforced(
+            self, tmp_path, monkeypatch):
+        app = _gallery_app(tmp_path, monkeypatch, "video")
+        a, b = _mk_keys(["video"], ["video"])
+        with TestClient(app) as c:
+            self._generate(c, monkeypatch, a)
+            _locked_index_write(monkeypatch)
+            r = c.post("/api/video", headers=_h(a), json={"prompt": "a fox"})
+            assert r.status_code == 200
+            _assert_warned_and_enforced(c, _job_events(c, r.json()["job_id"], _h(a)),
+                                        "/api/video", a, b)
 
     def test_a_video_key_cannot_touch_b_video_key_media(self, tmp_path, monkeypatch):
         app = _gallery_app(tmp_path, monkeypatch, "video")

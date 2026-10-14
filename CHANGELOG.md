@@ -643,6 +643,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   refuses `dimensions` and answers 404 for an unknown model instead of returning an empty result.
   The `keep_alive: 0` unload idiom no longer unloads a local copy of a model that another instance serves.
 - **Two image, video or music jobs no longer load their models on top of the chat model coming back.** A second job that started while the first job's chat model was reloading loaded its own model beside it, which made the second job several times slower on a full card. A job now waits for a running chat reload, and the chat model reloads once, after the last job.
+- **A memory consolidation whose model call fails says so.** When the model raised during
+  memory consolidation (an engine error, an eviction, a decode failure), the run reported
+  "no new durable facts found" and the scheduled memory job was marked done. Nothing is
+  written now, the job is recorded as an error, the Memory panel's synthesize action shows
+  the failure, and a session whose summary failed is retried on the next run.
 - **A fractional number for a whole-number setting is refused over the API too.**
   `PATCH /v1/config {"max_tokens": 1.5}` used to store 1 while `localm config max_tokens 1.5`
   was refused; both now refuse it with "expected an integer". A whole number written as
@@ -2216,6 +2221,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The private-address guard refuses the IPv6 site-local range `fec0::/10`.**
 - **Web search reads at most 4 MB of a search service's answer.** A larger answer is refused instead
   of being read whole into memory.
+- **A generated image, clip or track no longer loses its owner when the gallery index is
+  briefly locked.** If another program held the ownership index while the file was saved, the
+  owner was not recorded and the file later became reachable by every key. The read is now
+  retried, an owner that still cannot be written is enforced in memory and recorded with the
+  next gallery change, and the job output, the rename response and
+  `/v1/images/generations` warn until it is on disk. Renames and deletes keep ownership
+  correct the same way.
 - **A plugin's `requires_extras` can only name pip extras.** An entry that is not an extra name
   (for example one carrying a URL or an environment marker) used to reach the dependency
   installer as part of a requirement string; such a plugin is now refused when it is read.

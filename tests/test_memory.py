@@ -433,8 +433,8 @@ def test_consolidation_idempotent_with_embedder(tmp_path):
 
 def test_extract_parse_failure_returns_empty(tmp_path):
     assert extract(lambda p: "totally not json", "some session") == []
-    assert extract(lambda p: (_ for _ in ()).throw(RuntimeError("boom")),
-                   "x") == []
+    with pytest.raises(M.ConsolidationModelError):
+        extract(lambda p: (_ for _ in ()).throw(RuntimeError("boom")), "x")
 
 
 def test_extract_bounds(tmp_path):

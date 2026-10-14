@@ -645,6 +645,65 @@ def test_batch_images_and_upscales_belong_to_the_key_that_made_them(tmp_path, mo
                    c.get("/api/imagine/history", headers=_h(b)).json()["images"])
 
 
+def test_an_owner_that_cannot_be_written_is_reported_and_still_enforced(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    from localm.media import gallery
+    from localm.media.sdcpp import runtime as sd_runtime
+    from localm.media.sdcpp import shared
+    from tests.test_media_gallery_ownership import _gallery_app, _h, _job_events, _mk_keys
+
+    app = _gallery_app(tmp_path, monkeypatch, "image")
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"w")
+    up = tmp_path / "up.safetensors"
+    up.write_bytes(b"x")
+    update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault("image", {}).update(
+        {"backend": "native", "native": {"model": str(model)}}))
+    _register("up4x", up, "upscaler")
+    monkeypatch.setattr(shared, "runner", _QolRunner())
+    monkeypatch.setattr(shared, "arm_idle_timer", lambda seconds=None: None)
+    rt = sd_runtime.Runtime(backend="vulkan", path=tmp_path / "rt")
+    monkeypatch.setattr(sd_runtime, "resolve", lambda choice="auto": rt)
+    monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: False)
+    monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda s: None)
+
+    def locked_write(media_kind, data):
+        raise PermissionError(32, "being used by another process")
+    monkeypatch.setattr(gallery, "_write_index", locked_write)
+    a, b = _mk_keys(["image"], ["image"])
+
+    def warned(events, name):
+        return any(e.get("type") == "line" and "WARNING" in e.get("text", "")
+                   and name in e["text"] for e in events)
+
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", headers=_h(a), json={"prompt": "p", "size": "64x64"})
+        assert r.status_code == 200, r.text
+        events = _job_events(c, r.json()["job_id"], _h(a))
+        assert events[-1]["status"] == "done"
+        name = events[-1]["result"]
+        assert warned(events, name), events
+        assert c.get(f"/api/imagine/file/{name}", headers=_h(b)).status_code == 404
+
+        r = c.post(f"/api/imagine/file/{name}/upscale", headers=_h(a),
+                   json={"upscaler": "up4x"})
+        assert r.status_code == 200, r.text
+        events = _job_events(c, r.json()["job_id"], _h(a))
+        assert events[-1]["status"] == "done"
+        bigger = events[-1]["result"]
+        assert warned(events, bigger), events
+        assert c.get(f"/api/imagine/file/{bigger}", headers=_h(b)).status_code == 404
+
+        r = c.post(f"/api/imagine/file/{name}/rename", headers=_h(a),
+                   json={"new_name": "renamed.png"})
+        assert r.status_code == 200, r.text
+        assert "renamed.png" in r.json()["warning"]
+        assert c.get("/api/imagine/file/renamed.png", headers=_h(b)).status_code == 404
+        assert c.get("/api/imagine/file/renamed.png", headers=_h(a)).status_code == 200
+
+
 def test_a_stop_between_batch_images_ends_the_batch_before_the_next_image(qol, tmp_path):
     runner, s = qol
     saved = []
