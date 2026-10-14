@@ -19,9 +19,11 @@ from tests.test_image_native_backend import (  # noqa: F401  (fixtures)
     no_comfy,
 )
 from tests.test_native_image_qol import (  # noqa: F401  (fixtures)
+    _generate_one,
     _png,
     _register,
     qol,
+    qol_app,
 )
 from tests.test_video_native_backend import (  # noqa: F401  (fixtures)
     _wait_job as _wait_video_job,
@@ -242,3 +244,26 @@ def test_a_job_that_never_waits_never_reports_queued(native_app):  # noqa: F811
     assert job.status == "done"
     assert "queued" not in _phases(job)
     assert "phase" not in job.summary()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_an_upscale_job_row_is_queued_only_while_it_waits(qol_app, tmp_path, cancel):  # noqa: F811
+    from fastapi.testclient import TestClient
+    app, _runner = qol_app
+    up = tmp_path / "up.safetensors"
+    up.write_bytes(b"x")
+    _register("up4x", up, "upscaler")
+    with TestClient(app) as client:
+        name = _generate_one(client, app)
+        with shared.lock:
+            r = client.post(f"/api/imagine/file/{name}/upscale", json={"upscaler": "up4x"})
+            assert r.status_code == 200, r.text
+            job = app.state.jobs.get(r.json()["job_id"])
+            _wait_for(lambda: job.summary().get("phase") == "queued", "the queued row")
+            if cancel:
+                job.cancel()
+                _wait_for(lambda: job.summary().get("phase") == "cancelled",
+                          "the cancelled row")
+        _wait_image_job(app, job.id)
+    assert job.summary().get("phase") == ("cancelled" if cancel else "running")
+    assert _phases(job)[0] == "queued"
