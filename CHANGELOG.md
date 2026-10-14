@@ -2189,6 +2189,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   network is off and sends nothing. The security notes now list everything that still reaches the
   network under `off`: the two admin-only exemptions, the bug-report upload (sent only when you press
   Send), requests to your configured ComfyUI, and the native runtime downloads.
+- **A Hugging Face or CivitAI token is no longer resent after a redirect to plain HTTP or another
+  port.** A redirect kept the token whenever the host name stayed the same; it is now dropped
+  unless the scheme, host and port all match the original request.
 - **A SearXNG instance on your network no longer needs the private-address guard turned off.**
   The search reaches a LAN or loopback address on exactly the `net_search_url` you set (same
   scheme, host and port), and a link-local one is still refused. The network guide used to tell

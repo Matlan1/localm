@@ -826,8 +826,9 @@ def safe_fetch_bytes(
     pair below, which always win on a key collision - a caller-supplied dict
     can add a header (e.g. an optional Authorization bearer token) but can
     never override the pinned Host or User-Agent. Stripped entirely on any
-    hop whose host differs from the ORIGINAL request's host, so a redirect
-    can never carry a caller's credential to a different host.
+    hop whose scheme, host or port differs from the ORIGINAL request's
+    (:func:`_origin`), so a redirect can never carry a caller's credential to
+    a different host, to another port, or from https to plain http.
 
     *timeout* bounds each connect attempt and each wait for data; a host
     with several addresses may use up to ``netpin._CONNECT_BUDGET_FACTOR``
@@ -850,11 +851,12 @@ def safe_fetch_bytes(
     deadline = (time.monotonic() + total_timeout
                 if total_timeout is not None else None)
     current = url
-    original_host = urllib.parse.urlparse(url).hostname
+    original_origin = _origin(url)
     for _ in range(_MAX_REDIRECTS + 1):
         check_url(current, allow_when_off=allow_when_off)
         parsed = urllib.parse.urlparse(current)
-        hop_headers = extra_headers if parsed.hostname == original_host else None
+        hop_headers = (extra_headers if original_origin is not None
+                       and _origin(current) == original_origin else None)
         hop_timeout = timeout
         fixed_headers = {"User-Agent": _USER_AGENT, "Host": _host_header(parsed)}
         if deadline is not None:
