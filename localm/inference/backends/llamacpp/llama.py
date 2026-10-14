@@ -61,7 +61,7 @@ _INVALID_GRAMMAR_MSG = "invalid GBNF grammar (the native parser could not parse 
 
 
 @contextlib.contextmanager
-def _quiet_stderr():
+def _quiet_stderr(to_log: bool = True):
     """
     Redirect fd 2 (stderr) away from the terminal for the duration of the block.
 
@@ -73,12 +73,13 @@ def _quiet_stderr():
     In debug mode the stream goes into the debug log file instead of
     /dev/null - native abort messages (the reason for a hard crash) land
     there, which is the difference between a diagnosable crash and a
-    silent one.
+    silent one. With *to_log* False the stream goes to /dev/null even in
+    debug mode, for a block whose native output can carry chat content.
     """
     global _devnull_fd
     with _stderr_lock:
         from localm.debuglog import native_stderr_target
-        target_fd = native_stderr_target()
+        target_fd = native_stderr_target() if to_log else None
         should_close = False
         if target_fd is None:
             if _devnull_fd is None:
@@ -2178,9 +2179,11 @@ class LlamaCpp:
 
         if not grammar or not self._model_ptr:
             return
-        # The native parser prints "failed to parse grammar" to stderr on rejection;
-        # keep that off the terminal (it still lands in the debug log via _quiet_stderr).
-        with _quiet_stderr():
+        # The native parser prints its error and the whole grammar source to
+        # stderr on rejection. It is kept off the terminal, and reaches the debug
+        # log only when debug_content_enabled() allows chat content there.
+        from localm.debuglog import debug_content_enabled
+        with _quiet_stderr(to_log=debug_content_enabled()):
             sampler = api.llama_sampler_init_grammar(
                 self._tokenizer._vocab, grammar.encode(), b"root")
         if sampler is None:
