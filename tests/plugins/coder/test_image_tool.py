@@ -115,7 +115,7 @@ class TestFluxImageTool(unittest.TestCase):
         with a hardcoded loopback fallback. default_api_url is mocked to a
         distinct URL and that value is asserted to reach generate_image()."""
         mock_gen.return_value = (True, "Image saved to x")
-        with patch("localm.media.comfy_client.default_api_url",
+        with patch("localm.image_gen.comfy.default_api_url",
                    return_value="http://127.0.0.1:8189"):
             tool_generate_image(self.cwd, "p", self.output_path)
         _, kwargs = mock_gen.call_args
@@ -134,7 +134,7 @@ class TestFluxImageTool(unittest.TestCase):
                 "api_url": "http://127.0.0.1:8190"}
         update_config(_set)
         mock_gen.return_value = (True, "Image saved to x")
-        with patch("localm.media.comfy_client.default_api_url",
+        with patch("localm.image_gen.comfy.default_api_url",
                    return_value="http://127.0.0.1:8189"):
             tool_generate_image(self.cwd, "p", self.output_path)
         _, kwargs = mock_gen.call_args
