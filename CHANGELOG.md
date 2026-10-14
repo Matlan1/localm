@@ -612,6 +612,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **`localm rag add` no longer indexes credential folders.** Adding a folder such as `~/.ssh` or
+  `~/.aws` from the terminal, or a folder that contains one, used to index its files even though
+  the API refuses them. The command now refuses a credential folder, skips any file under one
+  while walking a folder, and a re-sync skips them too.
 - **A chat answered by another localm instance keeps this instance's session persistence.** With a
   route to another instance's loaded model, a scheduled chat job on a routed model, or
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a

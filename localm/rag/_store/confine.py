@@ -23,6 +23,12 @@ _SENSITIVE_HOME_SUBDIRS = (
 _SENSITIVE_NAMES = frozenset(s.lower() for s in _SENSITIVE_HOME_SUBDIRS)
 
 
+def is_credential_path(p) -> bool:
+    """True when any component of *p* names a third-party credential folder
+    (``.ssh``, ``.aws``, ...), compared case-insensitively."""
+    return any(part.lower() in _SENSITIVE_NAMES for part in Path(p).parts)
+
+
 def _path_within(child: Path, parent: Path) -> bool:
     """True when *child* is *parent* or lives underneath it (both resolved)."""
     try:
@@ -195,7 +201,7 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     # Credential folders are denied wherever they appear in the resolved path,
     # not only at the home root. rp is already resolved, so a symlink pointing
     # into a credential dir is caught too.
-    if any(part.lower() in _SENSITIVE_NAMES for part in rp.parts):
+    if is_credential_path(rp):
         raise ConfinementError(f"Refusing to index a credential directory: {p}",
                                path=rp, reason="credential")
 

@@ -262,8 +262,8 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/api/update/check", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def update_check_ep():
         """Check the proxy for a newer release. Read-only; never applies. Returns
-        ``{available, current, latest, newer, notes, asset}`` or ``{available:false}``
-        / ``{error}``."""
+        ``{available, current, latest, newer, comparable, notes, published_at, asset,
+        signature}`` or ``{available:false}`` / ``{available:true, error}``."""
         from localm import updater
         from localm.bugreport import LocalmError
         if not updater.available():

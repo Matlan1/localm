@@ -82,8 +82,10 @@ an allowed folder, its contents are indexable like any other file, since the
 owner already has direct filesystem access to their own data; this is a
 deliberate choice for a local, single-user tool, not an oversight. Picking a
 folder outside the whitelist offers an "add this folder and continue" prompt
-rather than a dead end. The local CLI (`localm rag add`) is unconfined: the
-person running it can already read their own files.
+rather than a dead end. The local CLI (`localm rag add`) is not bound by the
+folder policy: the person running it can already read their own files. It still
+refuses the well-known credential folders, and skips any file under one when it
+walks a folder.
 
 ### Per-key folder scoping
 

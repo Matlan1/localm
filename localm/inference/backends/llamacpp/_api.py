@@ -1123,9 +1123,9 @@ def llama_kv_cache_seq_rm(
 # Architectures whose llama.cpp model class actually BUILDS an MTP draft graph:
 # it declares a nested `struct graph_mtp` and `build_arch_graph` returns it when
 # `params.gtype == LLM_GRAPH_TYPE_DECODER_MTP`. Carrying the `nextn_predict_layers`
-# metadata key does NOT imply this - glm4moe (GLM-4.5 / 4.5-Air / 4.6) ships the key
-# and the NextN tensors while `build_arch_graph` ignores gtype, so an MTP context on
-# it is a second full decoder rather than a draft head.
+# metadata key does NOT imply this - an architecture can ship the key and the NextN
+# tensors while `build_arch_graph` ignores gtype, and an MTP context on it is then a
+# second full decoder rather than a draft head.
 #
 # Derived mechanically from upstream at MTP_ARCH_SOURCE_TAG, which must track
 # localm.setup_llama._PINNED_TAG. scripts/check_mtp_arch_allowlist.py is the gate

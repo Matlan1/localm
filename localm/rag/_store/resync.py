@@ -102,13 +102,12 @@ class _CollectionResync:
                 unavailable.append({"root": raw, "reason": reason})
                 say(f"skipping {raw}: {reason} - nothing under it was changed")
                 continue
-            if policy is not None:
-                try:
-                    _st.confine_index_path(root, policy)
-                except ValueError as e:
-                    blocked.append({"root": raw, "reason": str(e)})
-                    say(f"skipping {raw}: {e}")
-                    continue
+            try:
+                _st.confine_index_path(root, policy)
+            except ValueError as e:
+                blocked.append({"root": raw, "reason": str(e)})
+                say(f"skipping {raw}: {e}")
+                continue
             available.append(root)
         return available, unavailable, blocked
 
@@ -173,6 +172,9 @@ class _CollectionResync:
                 except ValueError as e:
                     say(f"skipping {key}: {e}")
                     continue
+            elif _st.is_credential_path(p):
+                say(f"skipping {key}: under a credential folder")
+                continue
             out.append(p)
         return out
 

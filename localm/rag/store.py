@@ -51,7 +51,7 @@ from ._store.cache import (  # noqa: F401
 from ._store.confine import (  # noqa: F401
     _INDEX_MODES, _SENSITIVE_HOME_SUBDIRS, _SENSITIVE_NAMES, ConfinementError,
     _network_drives_allowed_fresh, _path_within, confine_index_path,
-    indexing_policy)
+    indexing_policy, is_credential_path)
 from ._store.embedding import _CollectionEmbedding
 from ._store.files import (  # noqa: F401
     _STATS_CACHE_KEY, _WARNED_DEGRADES, _CollectionFiles, _plain_chunks,

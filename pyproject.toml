@@ -309,9 +309,7 @@ docs = [
 # console_main wraps the CLI group with the venv guard (NEW-J); the bare `main`
 # stays importable for in-process callers (tests, the `localm coder` route).
 localm    = "localm.cli:console_main"
-# backward-compat alias - installed only when the [coder] extra is present.
-# pip/uv honours this because the package is installed; the command always
-# works as long as localm[coder] was requested.
+# backward-compat alias for `localm coder`; installed with every localm install.
 localcoder = "localm.plugins.coder.cli:console_main"
 
 [project.urls]

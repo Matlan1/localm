@@ -103,7 +103,8 @@ class _CollectionIndexing:
         When *policy* is given, files that fail confinement (system paths,
         credential dirs, denied roots, symlinks escaping an allowed folder, or a
         model-weight / binary / credential FILE) are dropped by the confine loop
-        below. With no policy (the CLI) explicit picks are unfiltered."""
+        below. With no policy (the CLI) only files under a credential folder
+        are dropped; other explicit picks are unfiltered."""
         out: list[Path] = []
         for p in paths:
             p = Path(p).expanduser()
@@ -122,7 +123,7 @@ class _CollectionIndexing:
         seen: set = set()
         deduped = [p for p in out if not (p in seen or seen.add(p))]
         if policy is None:
-            return deduped
+            return [p for p in deduped if not _st.is_credential_path(p)]
         kept: list[Path] = []
         for p in deduped:
             try:
@@ -177,11 +178,10 @@ class _CollectionIndexing:
         """The add_paths read-modify-write body. MUST run under
         _collection_lock(self.name) after a fresh _load() (see add_paths)."""
         say = on_progress or (lambda _t: None)
-        if policy is not None:
-            # confine_index_path returns the RESOLVED path it validated, and
-            # that is what the walk below starts from, rather than the caller's
-            # original string.
-            paths = [_st.confine_index_path(p, policy) for p in paths]  # raises ValueError
+        # confine_index_path returns the RESOLVED path it validated, and that is
+        # what the walk below starts from, rather than the caller's original
+        # string. With no policy it enforces only the hard floor.
+        paths = [_st.confine_index_path(p, policy) for p in paths]  # raises ValueError
         # Persist the FOLDER roots now that confinement has accepted them, and
         # before the expand, so an add that finds no indexable file still records
         # the folder.

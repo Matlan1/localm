@@ -36,6 +36,9 @@ WEB   = "web"
 VOICE = "voice"
 MCP   = "mcp"
 BROWSER = "browser"
+JOBS = "jobs"
+MEMORY = "memory"
+TTS = "tts"
 
 KERNEL_SCOPES: dict[str, str] = {
     MODELS_READ:   "List and inspect installed models",
@@ -60,6 +63,9 @@ BUILTIN_PLUGIN_SCOPES: dict[str, str] = {
     VOICE: "Speech-to-text",
     MCP:   "MCP server interface",
     BROWSER: "Automated web browser (navigate, read, click, fill)",
+    JOBS:  "Scheduled recurring tasks",
+    MEMORY: "Durable chat memory",
+    TTS:   "Text-to-speech",
 }
 
 # Capability variants that are not a plugin name of their own.

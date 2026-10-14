@@ -1089,6 +1089,62 @@ class TestExpandAndAddPathsSecretFilter:
         assert res["added"] == 1
 
 
+class TestCliCredentialFloor:
+    """The CLI passes no policy (no mode confinement) but the credential-folder
+    hard floor still applies to add, folder walks and re-sync."""
+
+    def test_add_paths_refuses_credential_dir(self, home_env, tmp_path):
+        home, _ = home_env
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        (ssh / "config").write_text("Host secret-host", encoding="utf-8")
+        c = Collection("cred1", base=tmp_path / "rag").create()
+        with pytest.raises(ConfinementError) as ei:
+            c.add_paths([ssh])
+        assert ei.value.reason == "credential"
+        assert c.docs() == []
+
+    def test_add_paths_refuses_file_inside_credential_dir(self, home_env, tmp_path):
+        home, _ = home_env
+        aws = home / ".aws"
+        aws.mkdir()
+        f = aws / "notes.txt"
+        f.write_text("access key notes", encoding="utf-8")
+        c = Collection("cred2", base=tmp_path / "rag").create()
+        with pytest.raises(ConfinementError) as ei:
+            c.add_paths([f])
+        assert ei.value.reason == "credential"
+        assert c.docs() == []
+
+    def test_folder_walk_skips_nested_credential_dir(self, home_env, tmp_path):
+        home, _ = home_env
+        proj = home / "proj"
+        (proj / ".ssh").mkdir(parents=True)
+        (proj / ".ssh" / "config").write_text("Host secret-host", encoding="utf-8")
+        (proj / "good.txt").write_text("ordinary document", encoding="utf-8")
+        c = Collection("cred3", base=tmp_path / "rag").create()
+        res = c.add_paths([proj])
+        assert res["added"] == 1
+        sources = " ".join(d["path"] for d in c.docs())
+        assert "good.txt" in sources
+        assert ".ssh" not in sources
+
+    def test_resync_blocks_credential_root_and_file(self, home_env, tmp_path):
+        home, _ = home_env
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        cfgfile = ssh / "config"
+        cfgfile.write_text("Host secret-host", encoding="utf-8")
+        c = Collection("cred4", base=tmp_path / "rag").create()
+        c._meta["roots"] = {str(ssh): {"added": 0}}
+        c._meta["docs"] = {str(cfgfile): {}}
+        notes = []
+        available, _unavail, blocked = c._partition_roots(None, notes.append)
+        assert available == []
+        assert [b["root"] for b in blocked] == [str(ssh)]
+        assert c._resyncable_files([], None, notes.append) == []
+
+
 class TestRagAddRouteSecretFile:
     def test_owner_explicit_secret_file_hard_blocked(self, rag_route_app):
         app, home = rag_route_app
