@@ -652,6 +652,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Embedder GPU layers set to 0 keeps the embedding model on the CPU.** A value typed in
+  Settings or with `localm config embedding_gpu_layers` was stored as a decimal number that the
+  embedder did not recognise, so it placed the embedding model automatically (usually on the GPU)
+  instead of following the setting.
 - **A request body that is not JSON gets a clear error, not a server error.** Sending a file or
   other binary data where an API route expects JSON now returns the usual 422 explaining the
   problem, instead of a 500 "Internal server error".

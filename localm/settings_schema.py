@@ -1456,7 +1456,7 @@ def _validate_user_name(key: str, val) -> str:
 
 # NUMBER fields whose default is None (unset) and whose value is an integer;
 # a blank value clears them.
-_NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens", "diffusion_steps"})
+_NULLABLE_INT_NUMBERS = frozenset({"spec_draft_tokens", "diffusion_steps", "embedding_gpu_layers"})
 _NULLABLE_FLOAT_NUMBERS = frozenset({"rag_rerank_min_score"})
 
 
