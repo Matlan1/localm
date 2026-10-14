@@ -408,10 +408,10 @@ class PeerUnreachable(Exception):
 def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
                         timeout: float = 5.0) -> Optional[str]:
     """The session mode *peer* reports for a request that asks it to record no
-    more than *mode*: ``GET /v1/config`` with *api_key* and the session-mode
-    header, field ``request_session_mode``. None when the peer answers without
-    a valid mode (an older localm, a credential without ``config:read``).
-    Raises :class:`PeerUnreachable` on a network error or an HTTP 401/403.
+    more than *mode*: ``GET /api/session`` with *api_key* and the session-mode
+    header, field ``session_mode``. None when the peer answers without a valid
+    mode (an older localm). Raises :class:`PeerUnreachable` on a network error,
+    an HTTP 401/403, or an answer that the peer requires a key *api_key* is not.
     Sends nothing to an endpoint that fails :func:`is_routable_peer_endpoint`,
     or whose host or port is malformed (None)."""
     from localm.audit import SESSION_MODE_HEADER, SessionMode
@@ -427,7 +427,7 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
         return None
     probe = PeerRoute(model="", instance_id=str(peer.get("instance_id") or ""),
                       host=host, port=port, scheme=scheme, api_key=api_key or "")
-    url = _peer_url(probe, "/v1/config")
+    url = _peer_url(probe, "/api/session")
     import requests
     try:
         from localm.tls import requests_verify
@@ -449,7 +449,10 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
                     "with something that is not JSON: %s", peer.get("instance_id"),
                     host, port, e)
         return None
-    got = data.get("request_session_mode") if isinstance(data, dict) else None
+    if isinstance(data, dict) and data.get("required") and not data.get("authed"):
+        raise PeerUnreachable("it requires its own API key" if not api_key
+                              else "it refused the API key")
+    got = data.get("session_mode") if isinstance(data, dict) else None
     try:
         return SessionMode(got).value if isinstance(got, str) else None
     except ValueError:

@@ -443,9 +443,9 @@ A route keeps this instance's session persistence. Unless the chat is recorded
 in `full` mode here, the other instance must confirm, when the route is
 accepted and again before every forwarded request, that it records the chat
 no more than this instance's mode allows (it reports this in the
-`request_session_mode` field of `GET /v1/config` for a request carrying the
+`session_mode` field of `GET /api/session` for a request carrying the
 `X-Localm-Session-Mode` header; it agrees to record less only for its owner
-key). Otherwise accepting is a 409 and nothing is stored, and a forwarded
+key, or for any caller when it has no key). Otherwise accepting is a 409 and nothing is stored, and a forwarded
 request is a 409 saying why (naming that instance, and its mode when it
 reports one); nothing is sent and the route stays. An instance that does not
 answer this check, or refuses the key, makes accepting a 403 and drops an

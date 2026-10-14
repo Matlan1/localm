@@ -727,7 +727,7 @@ class TestCoderTaskRuns:
 
 class _Peer:
     """A real HTTP server standing in for another localm instance with a
-    model loaded: GET /v1/models, GET /v1/config (in privacy mode) and POST
+    model loaded: GET /v1/models, GET /api/session (in privacy mode) and POST
     /v1/chat/completions, streamed or not, with no API key (open mode),
     listening on *host*. *replies* are its
     answers in order, the last one repeating. Every POST after the first
@@ -755,7 +755,7 @@ class _Peer:
                 outer.auth.append(self.headers.get("Authorization"))
                 self._send(200, "application/json",
                            b'{"object": "list", "data": [], '
-                           b'"request_session_mode": "privacy"}')
+                           b'"session_mode": "privacy"}')
 
             def do_POST(self):
                 outer.auth.append(self.headers.get("Authorization"))

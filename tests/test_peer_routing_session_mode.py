@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A chat answered by another localm instance keeps THIS instance's session
-mode: unless that mode is full, the peer must first confirm (``GET /v1/config``
-with ``X-Localm-Session-Mode``, field ``request_session_mode``) that it records
+mode: unless that mode is full, the peer must first confirm (``GET /api/session``
+with ``X-Localm-Session-Mode``, field ``session_mode``) that it records
 the chat no more than this mode allows. Covers the HTTP route forward, route
 acceptance, a scheduled chat job on a routed model, and the MCP server's
 ``--share-loaded-models``. The peer is a real HTTP server on loopback."""
@@ -28,7 +28,7 @@ _RANK = {"privacy": 0, "log": 1, "full": 2}
 
 
 class _Peer:
-    """A peer localm: answers ``GET /v1/config`` with ``request_session_mode``
+    """A peer localm: answers ``GET /api/session`` with ``session_mode``
     (its own mode, narrowed to the requested one when the caller presents
     *owner_key*; omitted when *reports* is False, like an older localm), and
     ``POST /v1/chat/completions`` with a reply. Records every chat body and the
@@ -54,14 +54,17 @@ class _Peer:
             def do_GET(self):
                 asked = self.headers.get(SESSION_MODE_HEADER)
                 outer.mode_headers.append(asked)
-                if self.path.startswith("/v1/config"):
+                if self.path.startswith("/api/session"):
                     outer.config_gets += 1
                     mode = outer.own_mode
                     owner = (outer.owner_key is not None and self.headers.get(
                         "Authorization") == f"Bearer {outer.owner_key}")
                     if owner and asked in _RANK and _RANK[asked] < _RANK[mode]:
                         mode = asked
-                    body = {"request_session_mode": mode} if outer.reports else {}
+                    body = {"authed": bool(self.headers.get("Authorization")),
+                            "required": outer.owner_key is not None}
+                    if outer.reports:
+                        body["session_mode"] = mode
                     return self._send(200, body)
                 self._send(200, {"object": "list", "data": []})
 
@@ -386,7 +389,7 @@ def test_mcp_stops_using_a_peer_that_switched_to_recording(monkeypatch, peers):
 
 
 # --------------------------------------------------------------------------- #
-#  The peer side: GET /v1/config request_session_mode, and a real round trip   #
+#  The peer side: GET /api/session session_mode, and a real round trip        #
 # --------------------------------------------------------------------------- #
 
 def _real_engine():
@@ -407,34 +410,48 @@ def _peer_app(tmp_path, monkeypatch, mode):
     return create_app(_real_engine()), sessions
 
 
-def test_config_reports_the_server_mode_without_a_header(tmp_path, monkeypatch):
+def test_session_reports_the_server_mode_without_a_header(tmp_path, monkeypatch):
     app, _ = _peer_app(tmp_path, monkeypatch, "log")
     with TestClient(app) as c:
-        r = c.get("/v1/config", headers={"Authorization": f"Bearer {app.state.shell_token}"})
-    assert r.json()["request_session_mode"] == "log"
+        r = c.get("/api/session")
+    assert r.json()["session_mode"] == "log"
 
 
 @pytest.mark.parametrize("asked,expected", [("privacy", "privacy"), ("full", "log"),
                                             ("bogus", "privacy")])
-def test_config_reports_an_owners_narrowing(tmp_path, monkeypatch, asked, expected):
+def test_an_open_instance_reports_any_callers_narrowing(tmp_path, monkeypatch,
+                                                        asked, expected):
     app, _ = _peer_app(tmp_path, monkeypatch, "log")
     with TestClient(app) as c:
-        r = c.get("/v1/config", headers={
-            "Authorization": f"Bearer {app.state.shell_token}",
-            SESSION_MODE_HEADER: asked})
-    assert r.json()["request_session_mode"] == expected
+        r = c.get("/api/session", headers={SESSION_MODE_HEADER: asked})
+    assert r.status_code == 200, r.text
+    assert r.json()["session_mode"] == expected
 
 
-def test_config_ignores_a_scoped_keys_narrowing(tmp_path, monkeypatch):
+@pytest.mark.parametrize("who", ["scoped", "nobody"])
+def test_a_keyed_instance_ignores_a_non_owners_narrowing(tmp_path, monkeypatch, who):
     from localm import auth
     app, _ = _peer_app(tmp_path, monkeypatch, "log")
     auth.set_api_key("owner-key-session-mode-0123456789")
-    scoped = auth.create_key("reader", ["config:read"], allow_privileged=False)
+    headers = {SESSION_MODE_HEADER: "privacy"}
+    if who == "scoped":
+        scoped = auth.create_key("chatter", ["chat"], allow_privileged=False)
+        headers["Authorization"] = f"Bearer {scoped['key']}"
     with TestClient(app) as c:
-        r = c.get("/v1/config", headers={"Authorization": f"Bearer {scoped['key']}",
-                                         SESSION_MODE_HEADER: "privacy"})
+        r = c.get("/api/session", headers=headers)
     assert r.status_code == 200, r.text
-    assert r.json()["request_session_mode"] == "log"
+    assert r.json()["session_mode"] == "log"
+
+
+def test_a_keyed_instance_reports_its_owners_narrowing(tmp_path, monkeypatch):
+    from localm import auth
+    app, _ = _peer_app(tmp_path, monkeypatch, "log")
+    auth.set_api_key("owner-key-session-mode-0123456789")
+    with TestClient(app) as c:
+        r = c.get("/api/session", headers={
+            SESSION_MODE_HEADER: "privacy",
+            "Authorization": "Bearer owner-key-session-mode-0123456789"})
+    assert r.json()["session_mode"] == "privacy"
 
 
 class _Bridge:
@@ -476,7 +493,7 @@ def _round_trip(tmp_path, monkeypatch, peer_mode, local_mode):
                             lambda request: SessionMode(local_mode))
         route = peer_routing.PeerRoute(model="m", instance_id="real-peer",
                                        host="127.0.0.1", port=1, scheme="http",
-                                       api_key=app.state.shell_token)
+                                       api_key="")
 
         async def go():
             resp = await peer_routing.forward(route, _Req(), "/v1/chat/completions")
