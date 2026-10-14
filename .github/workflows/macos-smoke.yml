@@ -3,8 +3,9 @@ name: macOS smoke
 # Installs localm on an Apple Silicon runner the way setup.sh does for a user,
 # then checks the pieces a Mac user meets first: `localm doctor`, the backend
 # auto-pick (Metal), a server that starts with no model and answers
-# /v1/models, a tiny GGUF model that loads and generates on the CPU, and a
-# small platform-neutral test selection.
+# /v1/models, a tiny GGUF model that loads and generates on the CPU, a small
+# platform-neutral test selection, and the tests of the macOS process start
+# identity, host id and local-disk check the download locks rely on.
 #
 # Not a required check: it is not in the merge-policy job's needs. It joins
 # that list only after it has been green on several consecutive scheduled runs
@@ -13,6 +14,7 @@ on:
   pull_request:
     paths:
       - "localm/hwdetect*"
+      - "localm/instances.py"
       - "localm/setup_llama/**"
       - "localm/inference/backends/**"
       - "setup.sh"
@@ -123,6 +125,14 @@ jobs:
           tests/test_hwdetect_recommended_is_legacy.py
           tests/test_setup_llama_backend_marker.py
           tests/test_setup_llama_backends.py
+          -m "not integration" -q -rs
+
+      - name: Process start identity, host id and download locks on macOS
+        run: >-
+          .venv/bin/python -m pytest
+          tests/test_instances.py
+          tests/test_pull_part_lock.py
+          tests/test_hf_pull_resume.py
           -m "not integration" -q -rs
 
       - name: Keep the logs

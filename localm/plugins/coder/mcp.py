@@ -82,9 +82,8 @@ class MCPServer:
     def start(self) -> None:
         """Spawn the server, run the MCP handshake, and fetch its tool list."""
         import os
-        full_env = None
-        if self.env:
-            full_env = {**os.environ, **self.env}
+        from localm.config import user_command_env
+        full_env = user_command_env({**os.environ, **self.env} if self.env else None)
         try:
             self._proc = subprocess.Popen(
                 [self.command, *self.args],

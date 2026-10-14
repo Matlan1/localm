@@ -257,9 +257,17 @@ def test_pid_alive_is_false_for_an_unreaped_child():
     """
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     try:
-        # Block until exited but leave it UNREAPED (WNOWAIT), so the zombie
-        # state is deterministic rather than a timing guess.
-        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        if hasattr(os, "waitid"):
+            # Block until exited but leave it UNREAPED (WNOWAIT), so the zombie
+            # state is deterministic rather than a timing guess.
+            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        else:
+            psutil = pytest.importorskip("psutil")
+            deadline = time.monotonic() + 30
+            while (psutil.Process(proc.pid).status() != psutil.STATUS_ZOMBIE
+                   and time.monotonic() < deadline):
+                time.sleep(0.02)
+            assert psutil.Process(proc.pid).status() == psutil.STATUS_ZOMBIE
         assert instances.pid_alive(proc.pid) is False
     finally:
         proc.wait(timeout=10)
@@ -296,6 +304,135 @@ def test_start_identity_matches_only_one_comparable_start(recorded, current,
     assert instances.start_identity_matches(recorded, current) is matches
     assert not (instances.start_identity_matches(recorded, current)
                 and instances.start_identity_differs(recorded, current))
+
+
+@pytest.mark.parametrize("recorded, current, differs", [
+    ({"boot": _BOOT, "ticks": 5}, {"boot": _BOOT, "ticks": 5}, False),
+    ({"boot": _BOOT, "ticks": 5}, {"boot": _BOOT, "ticks": 6}, True),
+    ({"boot": _BOOT, "ticks": 5}, {"boot": "another-boot", "ticks": 5}, True),
+    ({"boot": _BOOT, "ticks": 5}, {"boot": "another-boot", "ticks": 9}, True),
+    ({"boot": None, "ticks": 5}, {"boot": _BOOT, "ticks": 6}, False),
+    ({"boot": _BOOT, "ticks": 5}, {"boot": None, "ticks": 6}, False),
+    ({"created": 10.0}, {"created": 11.5}, True),
+    ({"created": 10.0}, {"created": 10.5}, False),
+    ({"created": 10.0}, {"boot": _BOOT, "ticks": 5}, False),
+], ids=["same", "other-ticks", "other-boot", "other-boot-and-ticks",
+        "no-recorded-boot", "no-current-boot", "created-apart",
+        "created-close", "other-shapes"])
+def test_start_identity_differs_for_another_boot_or_start(recorded, current,
+                                                          differs):
+    """Ticks under two different boot ids name two processes; an unknown
+    boot id names nothing."""
+    assert instances.start_identity_differs(recorded, current) is differs
+
+
+def test_macos_start_identity_is_the_kernel_creation_time(monkeypatch):
+    """On macOS the start identity is psutil's create_time, the start time
+    the kernel stores when the process is created."""
+    psutil = pytest.importorskip("psutil")
+    expected = {"created": float(psutil.Process(os.getpid()).create_time())}
+    monkeypatch.setattr(instances.sys, "platform", "darwin")
+    got = instances.process_start_identity(os.getpid())
+    monkeypatch.undo()
+    assert got == expected
+
+
+def test_host_id_does_not_depend_on_the_host_name(monkeypatch):
+    """A rename leaves the host id unchanged and changes the pid space id."""
+    import platform
+    host = instances.host_id()
+    if host is None:
+        pytest.skip("no machine identifier is readable here")
+    space = instances.pid_space_id()
+    monkeypatch.setattr(platform, "node", lambda: "some-other-host-name")
+    monkeypatch.setattr(instances, "_PID_SPACE", None)
+    monkeypatch.setattr(instances, "_HOST_ID", None)
+    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
+    assert instances.pid_space_id() != space
+    assert instances.host_id() == host
+
+
+def test_host_id_is_none_without_a_machine_identifier(monkeypatch):
+    for name in ("machine_guid", "linux_machine_id", "darwin_host_uuid"):
+        monkeypatch.setattr(instances, name, lambda: "")
+    monkeypatch.setattr(instances, "_HOST_ID", None)
+    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
+    assert instances.host_id() is None
+
+
+def test_linux_host_id_is_none_when_the_pid_namespace_is_unreadable(
+        monkeypatch, tmp_path):
+    """Without the pid namespace two containers sharing a machine-id would
+    share a host id, so none is given."""
+    monkeypatch.setattr(instances, "linux_machine_id", lambda: "a-machine-id")
+    monkeypatch.setattr(instances, "machine_guid", lambda: "")
+    monkeypatch.setattr(instances, "darwin_host_uuid", lambda: "")
+    monkeypatch.setattr(instances, "_HOST_ID", None)
+    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
+    monkeypatch.setattr(instances, "_LINUX_PID_NS", str(tmp_path / "absent"))
+    monkeypatch.setattr(instances.sys, "platform", "linux")
+    got = instances.host_id()
+    monkeypatch.setattr(instances.sys, "platform", sys.platform)
+    assert got is None
+    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
+    monkeypatch.setattr(instances, "_LINUX_PID_NS", str(tmp_path))
+    monkeypatch.setattr(instances.sys, "platform", "linux")
+    got = instances.host_id()
+    monkeypatch.undo()
+    assert isinstance(got, str) and got
+
+
+def test_darwin_host_uuid_reads_only_on_macos():
+    if sys.platform == "darwin":
+        assert re.fullmatch(r"[0-9a-f-]{36}", instances.darwin_host_uuid())
+    else:
+        assert instances.darwin_host_uuid() == ""
+
+
+_MOUNTINFO = "\n".join([
+    "22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw",
+    "30 22 0:40 / /mnt/share rw,relatime shared:9 - nfs4 srv:/export rw",
+    r"31 22 0:41 / /mnt/my\040models rw - cifs //srv/models rw",
+    "32 30 8:3 / /mnt/share/local rw - xfs /dev/sda3 rw",
+    "33 22 0:42 / /mnt/c rw - 9p drvfs rw",
+    "34 22 0:43 / /srv rw - nfs srv:/a rw",
+    "35 22 8:4 / /srv rw - btrfs /dev/sdb1 rw",
+    "garbage line without separator",
+])
+
+
+@pytest.mark.parametrize("path, fstype", [
+    ("/home/u/.localm/locks", "ext4"),
+    ("/", "ext4"),
+    ("/mnt/share", "nfs4"),
+    ("/mnt/share/models/x.gguf", "nfs4"),
+    ("/mnt/shared", "ext4"),
+    ("/mnt/share/local/locks", "xfs"),
+    ("/mnt/my models/locks", "cifs"),
+    ("/mnt/c/Users", "9p"),
+    ("/srv/data", "btrfs"),
+])
+def test_linux_fstype_of_takes_the_longest_last_mount(path, fstype):
+    assert instances.linux_fstype_of(path, _MOUNTINFO) == fstype
+
+
+def test_linux_fstype_of_with_no_mounts_is_none():
+    assert instances.linux_fstype_of("/a", "") is None
+
+
+def test_a_local_temp_folder_is_local(tmp_path):
+    if sys.platform.startswith("linux"):
+        text = instances._LINUX_MOUNTINFO.read_text(encoding="utf-8")
+        if instances.linux_fstype_of(os.path.realpath(tmp_path), text) not in (
+                instances._LINUX_LOCAL_FSTYPES):
+            pytest.skip("the temp folder is not on a local filesystem here")
+    elif sys.platform not in ("win32", "darwin"):
+        pytest.skip(f"no local-disk check on {sys.platform}")
+    assert instances.path_is_local(tmp_path) is True
+
+
+def test_path_is_local_is_false_for_a_folder_that_does_not_resolve():
+    assert instances.path_is_local("\0bad") is False
 
 
 def test_thread_start_identity_names_a_running_thread_of_that_process_only():

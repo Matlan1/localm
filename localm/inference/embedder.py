@@ -74,6 +74,21 @@ _EMBEDDING_PINS = {
         "d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac"),
 }
 
+
+def known_embedding_model_for_sha256(digest: str) -> Optional[str]:
+    """The KNOWN_EMBEDDING_MODELS key whose pinned file has sha256 *digest*
+    (case-insensitive), else None: identifies a known embedding model by its
+    file, whatever it is registered or named as."""
+    want = str(digest or "").lower()
+    if not want:
+        return None
+    for key, file_id in KNOWN_EMBEDDING_MODELS.items():
+        pin = _EMBEDDING_PINS.get(file_id)
+        if pin is not None and pin[1].lower() == want:
+            return key
+    return None
+
+
 # HF endpoint for embedding-model downloads. The ambient HF_ENDPOINT /
 # HF_HUB_ENDPOINT env vars are not read.
 _HF_ENDPOINT = "https://huggingface.co"

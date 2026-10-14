@@ -410,8 +410,10 @@ class _ExecutionMixin:
         # file with another hard link. Checked ahead of the patch-mode
         # intercept, so such a write is not captured as a diff either.
         if self.restricted and call.name in _RESTRICTED_PATH_WRITE_TOOLS:
+            walk_memo: dict = {}
             for value in _call_target_paths(call.name, call.args):
-                refusal = restricted_write_refusal(self.cwd, value)
+                refusal = restricted_write_refusal(
+                    self.cwd, value, walk_memo=walk_memo)
                 if refusal is not None:
                     result = ToolResult.error(
                         f"'{value}' was not written: {refusal}.")

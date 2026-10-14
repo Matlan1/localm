@@ -168,9 +168,9 @@ def _process_create_time(pid: int) -> dict | None:
     """The process start identity, or None when it cannot be read.
 
     See :func:`localm.instances.process_start_identity`: a boot id plus start
-    ticks on Linux, the psutil creation timestamp on Windows. None is the
-    normal case on a core install with no psutil extra on a platform whose
-    identity needs it (Windows), not an error.
+    ticks on Linux, the psutil creation timestamp on Windows and macOS. None
+    is the normal case on a core install with no psutil extra on a platform
+    whose identity needs it (Windows, macOS), not an error.
     """
     return instances.process_start_identity(pid)
 
@@ -412,6 +412,8 @@ class ShellJob(BackgroundJob):
         self.stdout = RingBuffer(max_chars)
         self.stderr = RingBuffer(max_chars)
 
+        from localm.config import user_command_env
+        env = user_command_env(env)
         kwargs: dict = {
             "cwd": str(cwd),
             "stdout": subprocess.PIPE,

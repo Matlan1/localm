@@ -337,37 +337,105 @@ def test_a_live_pid_now_naming_a_different_process_is_reclaimed(home):
         _release(other)
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"),
-                    reason="the boot id is read from Linux's /proc")
 @pytest.mark.parametrize("ticks", ["same", "earlier"])
-def test_a_record_under_another_boot_id_keeps_the_lock_while_its_pid_is_alive(
-        home, ticks):
-    """A record under another boot id comes from before a reboot or from
-    another machine with this host name, which cannot be told apart here, so a
-    live pid keeps the lock whatever its start ticks."""
+def test_a_record_from_an_earlier_boot_is_reclaimed_from_a_reused_pid(
+        home, monkeypatch, ticks):
+    """A record in this pid space under another boot id was written in an
+    earlier boot of this machine, so the live process now holding its pid is
+    another one and the lock is reclaimed, whatever its start ticks. Off Linux
+    the live pid's boot id and ticks are supplied, since only Linux has
+    them."""
+    from localm import instances
     other = _idle_child()
     try:
-        ident = start_identity_of(other.pid)
-        assert ident["boot"], "no boot id was read on Linux"
-        if ticks == "earlier":
-            ident = started_an_hour_earlier(ident)
+        if sys.platform.startswith("linux"):
+            ident = start_identity_of(other.pid)
+            assert ident["boot"], "no boot id was read on Linux"
+        else:
+            ident = {"boot": "5f0c3a4e-1111-4222-8333-944455556666",
+                     "ticks": 424242}
+            real = instances.process_start_identity
+            monkeypatch.setattr(
+                instances, "process_start_identity",
+                lambda pid: dict(ident) if pid == other.pid else real(pid))
+        assert instances.process_start_identity(other.pid) == ident
+        recorded = (ident if ticks == "same"
+                    else {**ident, "ticks": ident["ticks"] - 360000})
         d = _part_lock_dir("m.gguf")
         _write_owner(d, other.pid, started=time.time(), start={
-            **ident, "boot": "00000000-0000-0000-0000-000000000000"})
-        before = _record(d)
+            **recorded, "boot": "00000000-0000-0000-0000-000000000000"})
+        assert other.poll() is None, "the pid's current process died early"
 
-        refused = None
-        try:
-            with _part_lock("m.gguf"):
-                pass
-        except PullInFlight as e:
-            refused = e
-        assert _record(d) == before, (
-            "a lock recorded under another boot id was reclaimed from a live "
-            "pid")
-        assert refused is not None
+        with _part_lock("m.gguf"):
+            rec = json.loads(_record(d))
+        assert rec["pid"] == os.getpid(), (
+            "a lock recorded in an earlier boot was not reclaimed")
     finally:
         _release(other)
+
+
+def _dead_pid() -> int:
+    """The pid of a process that has exited and was not reused."""
+    from localm import instances
+    for _ in range(20):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait(timeout=30)
+        if not instances.pid_alive(dead.pid):
+            return dead.pid
+    pytest.fail("every exited child's pid was immediately reused")
+
+
+def _space_under_host_name(monkeypatch, name: str) -> str:
+    """The pid space id this process would carry under host name *name*."""
+    import platform
+
+    from localm import instances
+    with monkeypatch.context() as m:
+        m.setattr(platform, "node", lambda: name)
+        m.setattr(instances, "_PID_SPACE", None)
+        return instances.pid_space_id()
+
+
+@pytest.mark.parametrize("case", ["local", "not-local", "other-host",
+                                  "no-host"])
+def test_a_dead_holder_recorded_under_an_earlier_host_name(home, monkeypatch,
+                                                           case):
+    """A record written before the host was renamed carries another pid space
+    id. Its dead holder's lock is reclaimed when the record's host id is this
+    machine's and the lock folder is on a local disk; it is kept when the
+    folder is not local, the host id is another machine's, or the record has
+    none."""
+    from localm import instances
+    host = instances.host_id()
+    if host is None:
+        pytest.skip("no machine identifier is readable here")
+    old_space = _space_under_host_name(monkeypatch, "renamed-host-before")
+    assert old_space != this_pid_space(), "the injected rename took no effect"
+    fields = {"space": old_space, "started": 0.0}
+    if case != "no-host":
+        fields["host"] = host if case != "other-host" else "0123456789abcdef"
+    if case == "not-local":
+        monkeypatch.setattr(instances, "path_is_local", lambda p: False)
+    elif not instances.path_is_local(_part_lock_dir("m.gguf").parent.parent):
+        pytest.skip("the test folder is not on a local disk here")
+    pid = _dead_pid()
+    d = _part_lock_dir("m.gguf")
+    _write_owner(d, pid, **fields)
+    before = _record(d)
+
+    refused = None
+    try:
+        with _part_lock("m.gguf"):
+            rec = json.loads(_record(d))
+    except PullInFlight as e:
+        refused = e
+    if case == "local":
+        assert refused is None, f"the stale lock was kept: {refused}"
+        assert rec["pid"] == os.getpid()
+        assert rec["host"] == host
+    else:
+        assert refused is not None and str(pid) in str(refused)
+        assert _record(d) == before
 
 
 def _foreign(ident):
@@ -577,28 +645,24 @@ def test_a_process_and_an_observer_read_the_same_start_identity(home):
 def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
         home, monkeypatch):
     """A holder on another machine that shares the data folder and the host
-    name records a pid that may be alive here as an unrelated process. On
-    Windows its MachineGuid gives it another pid space; on Linux the pid space
-    matches but its start identity carries another boot id. Either way the
-    lock stays."""
+    name records a pid that may be alive here as an unrelated process. Its
+    MachineGuid or Linux machine-id gives it another pid space, so the lock
+    stays."""
     from localm import instances
     from localm.model_manager import pull
     other = _idle_child()
     try:
         ident = start_identity_of(other.pid)
-        if "ticks" in ident:
-            remote_space = this_pid_space()
-            remote_start = {**started_an_hour_earlier(ident),
-                            "boot": "00000000-0000-0000-0000-000000000000"}
-        else:
-            with monkeypatch.context() as m:
-                m.setattr(instances, "_PID_SPACE", None)
-                m.setattr(instances, "machine_guid",
-                          lambda: "another-machine-guid")
-                remote_space = pull._pid_space_id()
-            # The injection took: the same host name, another MachineGuid.
-            assert remote_space != this_pid_space()
-            remote_start = started_an_hour_earlier(ident)
+        with monkeypatch.context() as m:
+            m.setattr(instances, "_PID_SPACE", None)
+            m.setattr(instances, "machine_guid", lambda: "another-machine-guid")
+            m.setattr(instances, "linux_machine_id", lambda: "another-machine-id")
+            remote_space = pull._pid_space_id()
+        # The injection took: the same host name, another machine identifier.
+        assert remote_space != this_pid_space()
+        remote_start = started_an_hour_earlier(ident)
+        if "ticks" in remote_start:
+            remote_start["boot"] = "00000000-0000-0000-0000-000000000000"
         d = _part_lock_dir("m.gguf")
         _write_owner(d, other.pid, space=remote_space, start=remote_start,
                      started=time.time())

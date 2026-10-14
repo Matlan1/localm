@@ -1067,9 +1067,23 @@ async def rag_repair(name: str, req: RagRepairRequest, request: Request):
                 f"{upload_only} document(s) here were added via upload and "
                 "have no server-side source - they cannot be rebuilt and are "
                 "left as-is.")})
+        from localm.rag.store import _network_drives_allowed_fresh, floor_refusal
+        allow_net = _network_drives_allowed_fresh()
+        sources = []
+        for src in repairable:
+            reason = floor_refusal(src, allow_net)
+            if reason:
+                job.push({"type": "line", "text": f"skipping {src}: {reason}"})
+            else:
+                sources.append(src)
+        if not sources:
+            job.push({"type": "line", "text": (
+                f"error: '{name}' has no document source that may be "
+                "re-indexed.")})
+            return False
         try:
             result = coll.add_paths(
-                repairable, force=True, embed_fn=embed_fn,
+                sources, force=True, embed_fn=embed_fn,
                 classify_fn=self_classify, describe_image_fn=self_describe,
                 model_name=model_name, on_progress=_job_progress(job))
         except (ValueError, CollectionLockedError) as e:

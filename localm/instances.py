@@ -26,6 +26,7 @@ import concurrent.futures
 import json
 import math
 import os
+import re
 import secrets
 import sys
 from contextlib import contextmanager
@@ -317,8 +318,9 @@ def _is_zombie(pid: int) -> bool:
     liveness rather than elapsed time (the pull .part lock, the updater
     lock, setup_llama's provision lock, the managed-comfy update lock), so
     a zombie holder read as alive wedges that lock for good. Linux answers
-    this in /proc/<pid>/stat; where that is unavailable (macOS, BSD) this
-    returns False and the signal-0 answer stands unchanged.
+    this in /proc/<pid>/stat; elsewhere (macOS, BSD) psutil's process status
+    answers it. Where neither can be read this returns False and the
+    signal-0 answer stands unchanged.
 
     The state is the first field after ``comm``, which is parenthesised and
     may itself contain ``)`` - so split on the LAST ``)``, never the first.
@@ -327,7 +329,18 @@ def _is_zombie(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat", "rb") as fh:
             return fh.read().decode("utf-8", "replace").rpartition(")")[2].split()[0] == "Z"
+    except FileNotFoundError:
+        if sys.platform.startswith("linux"):
+            return False
     except (OSError, IndexError):
+        return False
+    try:
+        import psutil
+    except ImportError:
+        return False
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except (psutil.Error, OSError):
         return False
 
 
@@ -364,9 +377,10 @@ def process_start_identity(pid: int) -> dict | None:
     clock alters, or None when it cannot be read.
 
     Linux: ``{"boot": <boot id or None>, "ticks": <start time in clock ticks
-    since boot>}``, read from /proc. Windows: ``{"created": <psutil
-    create_time>}``, the creation timestamp Windows stores when the process
-    starts. Every other platform: None.
+    since boot>}``, read from /proc. Windows and macOS: ``{"created": <psutil
+    create_time>}``, the creation timestamp the kernel stores when the process
+    starts; None there when psutil is not installed. Every other platform:
+    None.
     """
     if sys.platform.startswith("linux"):
         # Start ticks come from /proc, not psutil's create_time. See
@@ -381,7 +395,7 @@ def process_start_identity(pid: int) -> dict | None:
         except (OSError, ValueError):
             boot = None
         return {"boot": boot, "ticks": ticks}
-    if sys.platform == "win32":
+    if sys.platform in ("win32", "darwin"):
         try:
             import psutil
             return {"created": float(psutil.Process(pid).create_time())}
@@ -392,20 +406,25 @@ def process_start_identity(pid: int) -> dict | None:
 
 def start_identity_differs(recorded, current) -> bool:
     """True only when *recorded* and *current* are start identities of the
-    same shape that name two different processes: a different start tick
-    under the same boot id, or creation times more than a second apart.
+    same shape that name two different processes: ticks under two different
+    boot ids, a different start tick under the same boot id, or creation
+    times more than a second apart.
 
-    Anything missing, malformed, of different shapes, or ticks under different
-    or unknown boot ids returns False.
+    Two boot ids name two boots of one machine only when the caller has
+    established that both identities were read on one machine (one pid
+    space, see :func:`pid_space_id`); this function does not check that.
+
+    Anything missing, malformed, of different shapes, or ticks under an
+    unknown boot id returns False.
     """
     if not isinstance(recorded, dict) or not isinstance(current, dict):
         return False
     rt, ct = recorded.get("ticks"), current.get("ticks")
     if type(rt) is int and type(ct) is int:
         rb, cb = recorded.get("boot"), current.get("boot")
-        if not (isinstance(rb, str) and isinstance(cb, str) and rb == cb):
+        if not (isinstance(rb, str) and isinstance(cb, str)):
             return False
-        return rt != ct
+        return rb != cb or rt != ct
     rc, cc = recorded.get("created"), current.get("created")
     if type(rc) in (int, float) and type(cc) in (int, float):
         if math.isfinite(rc) and math.isfinite(cc):
@@ -619,6 +638,141 @@ def legacy_record_is_this_host(rec: dict) -> bool:
         except (OSError, ValueError):
             return False
         return isinstance(recorded, str) and recorded == boot
+    return False
+
+
+def darwin_host_uuid() -> str:
+    """This Mac's hardware UUID from ``gethostuuid``, or "" on other platforms
+    and when it cannot be read."""
+    if sys.platform != "darwin":
+        return ""
+    try:
+        import ctypes
+        import uuid
+
+        class _Timespec(ctypes.Structure):
+            _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        buf = (ctypes.c_ubyte * 16)()
+        wait = _Timespec(1, 0)
+        if libc.gethostuuid(buf, ctypes.byref(wait)) != 0:
+            return ""
+        raw = bytes(buf)
+    except (OSError, AttributeError, ValueError):
+        return ""
+    if not any(raw):
+        return ""
+    return str(uuid.UUID(bytes=raw))
+
+
+_HOST_ID: str | None = None
+_HOST_ID_READ = False
+_LINUX_PID_NS = "/proc/self/ns/pid"
+
+
+def host_id() -> str | None:
+    """An opaque id for this machine's pid table that does not depend on the
+    host name: the platform, the Windows MachineGuid, the Linux machine-id,
+    the Mac hardware UUID and, on Linux, the pid namespace, hashed. None when
+    none of the three machine identifiers can be read, and on Linux when the
+    pid namespace cannot be read."""
+    global _HOST_ID, _HOST_ID_READ
+    if not _HOST_ID_READ:
+        import hashlib
+        ids = [machine_guid(), linux_machine_id(), darwin_host_uuid()]
+        parts = [sys.platform, *ids] if any(ids) else None
+        if parts is not None and sys.platform.startswith("linux"):
+            try:
+                parts.append(str(os.stat(_LINUX_PID_NS).st_ino))
+            except OSError:
+                parts = None
+        if parts is not None:
+            _HOST_ID = hashlib.sha256(
+                "\0".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
+        _HOST_ID_READ = True
+    return _HOST_ID
+
+
+_LINUX_LOCAL_FSTYPES = frozenset({
+    "ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "jfs", "reiserfs", "zfs",
+    "bcachefs", "tmpfs", "ramfs", "overlay", "vfat", "msdos", "exfat", "ntfs",
+    "ntfs3", "fuseblk", "hfsplus",
+})
+
+
+def _unescape_mountinfo(field: str) -> str:
+    """A mountinfo path field with its octal escapes (``\\040`` and the like)
+    decoded."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def _longest_mount(path: str, mounts) -> tuple | None:
+    """The entry of *mounts* (``(mount point, ...)`` tuples, POSIX paths)
+    whose mount point is the longest one containing *path* (the last such
+    entry when several share it), or None."""
+    best, best_len = None, -1
+    for entry in mounts:
+        mp = entry[0].rstrip("/") or "/"
+        if mp == "/" or path == mp or path.startswith(mp + "/"):
+            if len(mp) >= best_len:
+                best, best_len = entry, len(mp)
+    return best
+
+
+_LINUX_MOUNTINFO = Path("/proc/self/mountinfo")
+
+
+def linux_fstype_of(path: str, mountinfo: str) -> str | None:
+    """The filesystem type of the mount holding absolute POSIX *path*,
+    according to the text of a Linux ``/proc/<pid>/mountinfo``, or None when
+    no mount in it holds *path*."""
+    mounts = []
+    for line in mountinfo.splitlines():
+        head, sep, tail = line.partition(" - ")
+        fields, rest = head.split(), tail.split()
+        if not sep or len(fields) < 5 or not rest:
+            continue
+        mounts.append((_unescape_mountinfo(fields[4]), rest[0]))
+    best = _longest_mount(path, mounts)
+    return None if best is None else best[1]
+
+
+def path_is_local(path) -> bool:
+    """True only when directory *path* is on a filesystem of a disk attached
+    to this machine: a fixed, removable or RAM drive on Windows, a mount the
+    kernel flags local on macOS, a mount of a known local filesystem type on
+    Linux. False for a network or virtual-machine share, a FUSE filesystem
+    that is not block-device backed, an unknown type, and whenever it cannot
+    be determined."""
+    try:
+        real = os.path.realpath(os.fspath(path))
+    except (OSError, ValueError, TypeError):
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        try:
+            k = ctypes.WinDLL("kernel32", use_last_error=True)
+            buf = ctypes.create_unicode_buffer(1024)
+            if not k.GetVolumePathNameW(real, buf, len(buf)):
+                return False
+            return k.GetDriveTypeW(buf.value) in (2, 3, 6)
+        except (OSError, AttributeError, ValueError, ctypes.ArgumentError):
+            return False
+    if sys.platform.startswith("linux"):
+        try:
+            text = _LINUX_MOUNTINFO.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return linux_fstype_of(real, text) in _LINUX_LOCAL_FSTYPES
+    if sys.platform == "darwin":
+        try:
+            import psutil
+            parts = psutil.disk_partitions(all=True)
+        except Exception:
+            return False
+        best = _longest_mount(real, [(p.mountpoint, p.opts) for p in parts])
+        return best is not None and "local" in best[1].split(",")
     return False
 
 

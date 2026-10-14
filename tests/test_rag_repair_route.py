@@ -229,3 +229,63 @@ class TestRepairEmbeddingsLossGuard:
             assert "job_id" in r.json(), (
                 "a BM25-only collection has nothing to lose and must run "
                 "the job directly, not ask for confirmation")
+
+
+class TestRepairSkipsASourceTheHardFloorNowRefuses:
+    def _collection_with_a_refused_source(self, home):
+        import json
+        good = home / "good.txt"
+        good.write_text("alpha beta gamma about turbines", encoding="utf-8")
+        other = home / "other.txt"
+        other.write_text("delta epsilon about generators", encoding="utf-8")
+        Collection("kb").add_paths([good, other])
+        meta_file = home / ".localm" / "rag" / "kb" / "meta.json"
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        refused = str(home / ".aws" / "creds.txt")
+        meta["docs"][refused] = meta["docs"].pop(
+            next(k for k in meta["docs"] if k.endswith("other.txt")))
+        meta_file.write_text(json.dumps(meta), encoding="utf-8")
+        assert refused in Collection("kb").documents(), "fixture precondition"
+        return good, refused
+
+    def test_the_other_sources_are_still_repaired(self, repair_app):
+        app, home = repair_app
+        with TestClient(app) as c:
+            c.post("/api/rag/collections", json={"name": "kb"})
+            good, refused = self._collection_with_a_refused_source(home)
+            rag_dir = home / ".localm" / "rag" / "kb"
+            with (rag_dir / "chunks.jsonl").open("a", encoding="utf-8") as f:
+                f.write("\nnot json at all")
+            assert Collection("kb").stats()["chunks_bad_lines"] == 1
+
+            r = c.post("/api/rag/collections/kb/repair", json={})
+            assert r.status_code == 200, r.text
+            job = _await_job(app, r.json()["job_id"])
+            assert job.status == "done", f"job ended {job.status}"
+            log_text = "\n".join(
+                e.get("text", "") for e in job._history if e.get("type") == "line")
+            assert "skipping" in log_text and "creds.txt" in log_text, log_text
+            assert Collection("kb").stats()["chunks_bad_lines"] == 0
+
+    def test_a_collection_with_only_refused_sources_ends_with_a_clear_error(
+            self, repair_app):
+        import json
+        app, home = repair_app
+        with TestClient(app) as c:
+            c.post("/api/rag/collections", json={"name": "kb"})
+            only = home / "only.txt"
+            only.write_text("alpha beta gamma about turbines", encoding="utf-8")
+            Collection("kb").add_paths([only])
+            meta_file = home / ".localm" / "rag" / "kb" / "meta.json"
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            meta["docs"] = {str(home / ".aws" / "creds.txt"): next(
+                iter(meta["docs"].values()))}
+            meta_file.write_text(json.dumps(meta), encoding="utf-8")
+
+            r = c.post("/api/rag/collections/kb/repair", json={})
+            assert r.status_code == 200, r.text
+            job = _await_job(app, r.json()["job_id"])
+            assert job.status != "done"
+            log_text = "\n".join(
+                e.get("text", "") for e in job._history if e.get("type") == "line")
+            assert "no document source that may be re-indexed" in log_text, log_text

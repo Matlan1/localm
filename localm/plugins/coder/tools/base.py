@@ -326,7 +326,8 @@ def has_other_hard_link(resolved: Path) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
 
 
-def restricted_write_refusal(cwd: Path, path: str) -> Optional[str]:
+def restricted_write_refusal(cwd: Path, path: str, *,
+                             walk_memo: Optional[dict] = None) -> Optional[str]:
     """Why a restricted session must refuse to write the model-named *path*,
     or None when it may.
 
@@ -337,6 +338,9 @@ def restricted_write_refusal(cwd: Path, path: str) -> Optional[str]:
     anywhere in the project redirects to; an existing file with another hard
     link; and any path when the project walk itself fails. A path ``_confine``
     refuses is not reported here: the write tool refuses it on its own.
+
+    *walk_memo*, when given, holds the outcome of the project walk, so the
+    paths of one tool call share a single walk.
     """
     raw = Path(str(path).replace("\\", "/"))
     lexical: tuple = raw.parts
@@ -355,11 +359,19 @@ def restricted_write_refusal(cwd: Path, path: str) -> Optional[str]:
     except PermissionError:
         return None
     cwd_resolved = cwd.resolve()
-    try:
-        redirects = unwritable_redirects(cwd_resolved)
-    except OSError as e:
+    if walk_memo is not None and "outcome" in walk_memo:
+        outcome = walk_memo["outcome"]
+    else:
+        try:
+            outcome = unwritable_redirects(cwd_resolved)
+        except OSError as e:
+            outcome = e
+        if walk_memo is not None:
+            walk_memo["outcome"] = outcome
+    if isinstance(outcome, OSError):
         return ("the project could not be checked for .localcoder or .git links "
-                f"({e}), and a restricted session cannot write until it can")
+                f"({outcome}), and a restricted session cannot write until it can")
+    redirects = outcome
     if (inside_unwritable_dir(cwd_resolved, resolved, redirects)
             or has_other_hard_link(resolved)):
         return RESTRICTED_UNWRITABLE_MESSAGE
@@ -478,6 +490,8 @@ def run_subprocess(
     tools/git.py, and cli/goal.py.
     """
     argv = platform_shell(argv_or_cmd) if shell_wrap else argv_or_cmd
+    from localm.config import user_command_env
+    env = user_command_env(env)
     if cancel is not None:
         return _run_cancellable(argv, cwd, timeout=timeout, env=env, cancel=cancel)
 

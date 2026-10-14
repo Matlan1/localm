@@ -393,6 +393,28 @@ def contain_gpu_caches() -> None:
                 os.environ[key] = env[key]
 
 
+def user_command_env(base: Optional[dict] = None) -> dict:
+    """*base* (default: a copy of the process environment) without the cache
+    locations localm pinned for itself, for a command the USER asked to run.
+
+    Drops ``HF_HOME`` and ``HF_TOKEN_PATH`` when localm set them (``HF_HOME``
+    equal to the pin marker, ``HF_TOKEN_PATH`` equal to the default login
+    location localm pinned it to), each GPU cache variable equal to its pin
+    marker, and the markers. A value the user set is left exactly as set, so a
+    command sees the caches and login it would see outside localm."""
+    env = dict(os.environ if base is None else base)
+    hf_pin = env.pop(_HF_PIN_MARKER, None)
+    if hf_pin is not None and env.get("HF_HOME") == hf_pin:
+        del env["HF_HOME"]
+        if env.get("HF_TOKEN_PATH") == _default_hf_token_path(env):
+            del env["HF_TOKEN_PATH"]
+    for var, _ in _GPU_CACHE_PINS:
+        pin = env.pop(_gpu_pin_marker(var), None)
+        if pin is not None and env.get(var) == pin:
+            del env[var]
+    return env
+
+
 TEMP_DIR_ENV = "LOCALM_TMPDIR"
 TEMP_LOCATION_KEY = "temp_location"
 
