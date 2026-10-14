@@ -1566,7 +1566,7 @@
   "settings.field.modelAutoswitch.label": "Automatischer Modellwechsel",
   "settings.field.modelSwapPolicy.help": "auto = Chat geladen lassen, wenn das Medienmodell daneben passt; always = Chat immer entladen; never = Chat immer geladen halten.",
   "settings.field.modelSwapPolicy.label": "Medien-VRAM-Swap",
-  "settings.field.mtpEnabled.help": "Spekulatives Entwerfen bei MTP-/Next-n-Head-Modellen. Standardmäßig aus: beschleunigt manche Modelle, verlangsamt andere, je nach Modell und Rechner. Führen Sie `localm bench-mtp <model>` aus, um Ihr Modell zu prüfen.",
+  "settings.field.mtpEnabled.help": "Spekulatives Entwerfen bei MTP-/Next-n-Head-Modellen. Gilt nur, solange Spekulative Entwürfe auf Erben stehen. Standardmäßig aus: beschleunigt manche Modelle, verlangsamt andere. Führen Sie `localm bench-mtp <model>` aus, um Ihr Modell zu prüfen.",
   "settings.field.mtpEnabled.label": "Multi-Token Prediction (MTP)",
   "settings.field.mtpDraftTokens.help": "Tokens, die MTP pro Schritt vorschlägt, wenn es aktiv ist. Mehr lohnt sich, wenn die meisten Entwürfe angenommen werden; `localm bench-mtp <model> --draft-tokens N` misst es.",
   "settings.field.mtpDraftTokens.label": "MTP-Entwurfstokens",
