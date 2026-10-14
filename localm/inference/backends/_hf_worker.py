@@ -350,6 +350,13 @@ def _define_missing_distributed_work(torch) -> None:
     dist.Work = type("Work", (), {})
 
 
+def _cast_floating_weights(model, dtype) -> None:
+    """Cast *model* to *dtype* when any floating-point parameter has another
+    dtype. See test_an_nvfp4_checkpoint_runs_at_the_cpu_load_dtype."""
+    if any(p.is_floating_point() and p.dtype != dtype for p in model.parameters()):
+        model.to(dtype)
+
+
 def _hub_kernel_blocked_message(model_path: str, blocked: tuple) -> str:
     from localm.inference.backends._hf_fp8 import one_line
     method, refusal = blocked
@@ -399,6 +406,23 @@ def _refuse_fp8_too_big(model_path: str, plan, torch, device: str,
     logger.debug("hf load: fp8 expanded=%s budget=%s", plan.expanded_bytes, budget)
     if budget is not None and plan.expanded_bytes > budget:
         raise RuntimeError(_hf_fp8.too_big_message(model_path, plan, budget))
+
+
+def _refuse_compressed_too_big(model_path: str, torch, dtype, device: str,
+                               device_map_kwargs: dict) -> None:
+    """Raise RuntimeError when the weights of the compressed-tensors checkpoint
+    at *model_path*, expanded to *dtype*, exceed the memory the load can use
+    (``_hf_fp8.memory_budget``). Returns when either figure cannot be read."""
+    from localm.inference.backends import _hf_fp8
+    value_bytes = int(torch.empty((), dtype=dtype).element_size())
+    needed = _hf_fp8.compressed_expanded_bytes(model_path, value_bytes)
+    if not needed:
+        return
+    budget = _hf_fp8.memory_budget(torch, device, device_map_kwargs)
+    logger.debug("hf load: compressed-tensors expanded=%s budget=%s", needed, budget)
+    if budget is not None and needed > budget:
+        label = f"{str(dtype).removeprefix('torch.')} (about {value_bytes} bytes per parameter)"
+        raise RuntimeError(_hf_fp8.compressed_too_big_message(model_path, needed, budget, label))
 
 
 def _require_transformers():
@@ -669,17 +693,55 @@ def _require_chat_template(*templated) -> None:
     raise ChatTemplateMissingError(CHAT_TEMPLATE_MISSING_MESSAGE)
 
 
+def _processor_fallback_template(processor, tokenizer) -> Optional[str]:
+    """The chat template to render a multimodal prompt with through *processor*:
+    None when the processor carries a usable template of its own, else the
+    tokenizer's (its ``default`` entry when it is a dict of named templates).
+
+    Raises :class:`ChatTemplateMissingError` when neither carries one.
+    ``ProcessorMixin.apply_chat_template`` reads only the processor's own
+    template, so a tokenizer-only template has to be passed to it explicitly."""
+    _require_chat_template(processor, tokenizer)
+    if _has_usable_template(processor):
+        return None
+    template = tokenizer.chat_template
+    return template["default"] if isinstance(template, dict) else template
+
+
 def _render_processor_prompt(processor, template_messages, *,
-                             add_generation_prompt: bool = True) -> str:
-    """The prompt text *processor* renders for *template_messages* (not tokenized).
+                             add_generation_prompt: bool = True,
+                             chat_template: Optional[str] = None) -> str:
+    """The prompt text *processor* renders for *template_messages* (not tokenized),
+    with *chat_template* in place of the processor's own when given.
 
     Passes a non-empty ``processor_kwargs`` (unused while ``tokenize`` is False),
     so SmolVLM's ``apply_chat_template`` does not put its default frame-sampling
     arguments in ``**kwargs``, which makes transformers log a warning. See
     test_render_logs_no_kwargs_warning."""
+    extra = {} if chat_template is None else {"chat_template": chat_template}
     return processor.apply_chat_template(
         template_messages, processor_kwargs={"add_special_tokens": False},
-        tokenize=False, add_generation_prompt=add_generation_prompt)
+        tokenize=False, add_generation_prompt=add_generation_prompt, **extra)
+
+
+def _require_media_placeholders(processor, text: str, n_images: int,
+                                n_audios: int) -> None:
+    """Raise :class:`UnsupportedInputError` when the rendered prompt *text*
+    holds fewer of *processor*'s ``image_token`` (``audio_token``) placeholders
+    than *n_images* (*n_audios*). A processor that names no such token is not
+    checked."""
+    from .base import UnsupportedInputError
+    for attr, count in (("image_token", n_images), ("audio_token", n_audios)):
+        token = getattr(processor, attr, None)
+        if count and isinstance(token, str) and token and text.count(token) < count:
+            raise UnsupportedInputError(TOKENIZER_TEMPLATE_MEDIA_MESSAGE.format(
+                f"the prompt has {text.count(token)} {token} placeholder(s) "
+                f"for {count} attached item(s)"))
+
+
+TOKENIZER_TEMPLATE_MEDIA_MESSAGE = (
+    "This model's processor has no chat template of its own, and the chat "
+    "template its tokenizer carries could not lay out the attached media: {}")
 
 
 def _untrusted_prompt_ranges(tokenizer, template_messages, text,
@@ -1373,6 +1435,9 @@ class HFWorker:
         if fp8 is not None and not fp8.native:
             dtype = torch.bfloat16
             _refuse_fp8_too_big(self.model_path, fp8, torch, device, device_map_kwargs)
+        if fp8 is None and _is_compressed_tensors(self.model_path):
+            _refuse_compressed_too_big(self.model_path, torch, dtype, device,
+                                       device_map_kwargs)
         self.fp8_plan = fp8
         self.load_notes = []
         if fp8 is not None:
@@ -1503,6 +1568,7 @@ class HFWorker:
             if note:
                 self.load_notes.append(note)
             if _is_compressed_tensors(self.model_path):
+                _cast_floating_weights(self._model, dtype)
                 self.load_notes.append(
                     f"compressed-tensors weights expanded to {_param_dtype_label(self._model)}")
 
@@ -1642,7 +1708,10 @@ class HFWorker:
                         template_messages.append(msg)
 
                 if self._processor and self._is_multimodal:
-                    text = _render_processor_prompt(self._processor, template_messages)
+                    text = _render_processor_prompt(
+                        self._processor, template_messages,
+                        chat_template=_processor_fallback_template(
+                            self._processor, self._tokenizer))
                 else:
                     text = self._tokenizer.apply_chat_template(
                         template_messages, tokenize=False, add_generation_prompt=True
@@ -1678,7 +1747,8 @@ class HFWorker:
         *device*. Text-only outputs are left out."""
         text = _render_processor_prompt(
             self._processor, [{"role": "user", "content": [{"type": "image"}]}],
-            add_generation_prompt=False)
+            add_generation_prompt=False,
+            chat_template=_processor_fallback_template(self._processor, self._tokenizer))
         out: dict[str, Mapping] = {}
         for key in wanted:
             image = images[keys.index(key)]
@@ -1995,8 +2065,17 @@ class HFWorker:
         # --- Tokenize / process ---
         if self._processor and (images or audios):
             # Full multimodal path
-            _require_chat_template(self._processor, tokenizer)
-            text = _render_processor_prompt(self._processor, template_messages)
+            fallback_template = _processor_fallback_template(self._processor, tokenizer)
+            try:
+                text = _render_processor_prompt(self._processor, template_messages,
+                                                chat_template=fallback_template)
+            except Exception as e:
+                if fallback_template is None:
+                    raise
+                raise UnsupportedInputError(
+                    TOKENIZER_TEMPLATE_MEDIA_MESSAGE.format(f"{type(e).__name__}: {e}")) from e
+            if fallback_template is not None:
+                _require_media_placeholders(self._processor, text, len(images), len(audios))
             # add_special_tokens=False: the template already emitted the model's
             # BOS, so re-tokenizing with the default would prepend a SECOND one
             # (see the text-path note below). Standard processors forward this to
@@ -2031,6 +2110,9 @@ class HFWorker:
             try:
                 inputs = self._processor(**process_kwargs).to(model.device)
             except ValueError as e:
+                if fallback_template is not None:
+                    raise UnsupportedInputError(
+                        TOKENIZER_TEMPLATE_MEDIA_MESSAGE.format(e)) from e
                 if audios and not audio_rate_verified:
                     from .base import AudioInputError
                     raise AudioInputError(

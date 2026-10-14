@@ -32,7 +32,8 @@ from localm.debuglog import logger
 from localm.inference.backends.base import RerankerHeadMissingError
 
 # LOCK ORDER: engine._LOAD_LOCK (outer) -> _LOCK (inner), never the reverse, the
-# same order embedder._LOCK documents. _LOCK is held for the whole of a worker
+# same order embedder._LOCK documents. An HFReranker restart nests its own
+# _call_lock between them: _LOAD_LOCK -> _call_lock -> _LOCK. _LOCK is held for the whole of a worker
 # spawn and native model load, so every reader below is cheap in work and
 # unbounded in waiting: none of them may be called from an `async def` handler.
 _LOCK = threading.RLock()
@@ -229,23 +230,72 @@ class HFReranker:
         self._runner = self._backend._runner
 
     def rerank(self, pairs: list[tuple[str, str]]) -> list[dict]:
-        """Score *pairs*, starting the worker again first when it has died."""
+        """Score *pairs*, starting the worker again first when it has died.
+
+        The restart holds the engine's ``_LOAD_LOCK`` (outer) and ``_call_lock``
+        (inner); ``_call_lock`` is never held while ``_LOAD_LOCK`` is awaited. A
+        restart that fails releases this reranker and latches its folder like a
+        failed first load, and raises :class:`RerankerUnavailableError`."""
         self.active_requests += 1
         try:
             with self._call_lock:
-                if not self._backend.loaded:
-                    logger.warning("reranker worker is not running; reloading %s",
-                                   self.model_path)
-                    self._backend.unload()
-                    self._backend.load()
-                    self._runner = self._backend._runner
+                alive = self._backend.loaded
+                if alive:
+                    return self._backend.rerank(pairs)
+            self._restart()
+            with self._call_lock:
                 return self._backend.rerank(pairs)
         finally:
             self.active_requests = max(0, self.active_requests - 1)
 
+    def _restart(self) -> None:
+        """Load the worker again under the engine's load lock when it is not
+        running. Raises :class:`RerankerUnavailableError` without loading when
+        this reranker is no longer the resident one."""
+        from localm.inference.engine import _LOAD_LOCK
+        with _LOAD_LOCK:
+            if self._backend.loaded:
+                return
+            with self._call_lock:
+                if self._backend.loaded:
+                    return
+                if not self._is_resident():
+                    raise RerankerUnavailableError(
+                        f"{Path(self.model_path).name} was released while this "
+                        "request waited for it; retry the request")
+                logger.warning("reranker worker is not running; reloading %s",
+                               self.model_path)
+                try:
+                    self._backend.unload()
+                    self._backend.load()
+                except Exception as e:
+                    reason = pathscrub.scrub_paths(str(e))
+                    logger.warning("could not reload reranker %s (%s)",
+                                   Path(self.model_path).name, e)
+                    self.close()
+                    _release_failed(self, reason)
+                    raise RerankerUnavailableError(reason) from e
+                self._runner = self._backend._runner
+
+    def _is_resident(self) -> bool:
+        """Whether this reranker is still the module's resident one."""
+        with _LOCK:
+            return _RERANKER is self
+
     def close(self) -> None:
         self._backend.unload()
         self._runner = None
+
+
+def _release_failed(failed, reason: str) -> None:
+    """Drop *failed* as the resident reranker when it still is, and latch its
+    file as a failed load with *reason*."""
+    global _RERANKER, _RERANKER_KEY
+    with _LOCK:
+        if _RERANKER is failed:
+            _RERANKER = None
+            _RERANKER_KEY = None
+        _LOAD_FAILED[_file_key(failed.model_path)] = (reason, time.monotonic())
 
 
 def get_reranker(path: str):

@@ -100,6 +100,50 @@ class TestConfigState:
                          id2label={"0": "a", "1": "b"})
         assert _detect_local_model_type(folder, is_gguf=False, is_hf=True)[0] == "unknown"
 
+    @pytest.mark.parametrize("where", ["tokenizer_config", "jinja", "json"])
+    def test_a_single_score_head_with_a_chat_template_is_a_reward_model(self, tmp_path, where):
+        folder = _config(tmp_path / "m", architectures=["LlamaForSequenceClassification"],
+                         id2label={"0": "LABEL_0"})
+        if where == "tokenizer_config":
+            (folder / "tokenizer_config.json").write_text(
+                json.dumps({"chat_template": "{{ messages }}"}), encoding="utf-8")
+        elif where == "jinja":
+            (folder / "chat_template.jinja").write_text("{{ messages }}", encoding="utf-8")
+        else:
+            (folder / "chat_template.json").write_text(
+                json.dumps({"chat_template": "{{ messages }}"}), encoding="utf-8")
+        assert hf_reranker_state(folder) is False
+        assert _detect_local_model_type(folder, is_gguf=False, is_hf=True)[0] == "unknown"
+
+    def test_a_reward_model_stored_as_a_reranker_is_classified_again(
+            self, tmp_path, isolated_home):
+        import localm.model_manager as mm
+        folder = _config(tmp_path / "rm", architectures=["LlamaForSequenceClassification"],
+                         id2label={"0": "LABEL_0"})
+        (folder / "chat_template.jinja").write_text("{{ messages }}", encoding="utf-8")
+        entry = {"model_type": "embedding", "reranker": True, "path": str(folder)}
+        mm.update_registry(lambda reg: reg.__setitem__("rm", dict(entry)))
+        assert entry_is_reranker("rm", entry) is False
+        assert load_registry()["rm"]["reranker"] is False
+
+    def test_a_stored_gguf_reranker_flag_is_read_without_touching_the_file(
+            self, tmp_path, monkeypatch):
+        import localm.model_manager.registry as registry
+        monkeypatch.setattr(registry, "hf_reranker_state",
+                            lambda folder: pytest.fail("the GGUF was classified again"))
+        entry = {"model_type": "embedding", "reranker": True,
+                 "path": str(tmp_path / "missing.gguf")}
+        assert entry_is_reranker("r", entry) is True
+
+    @pytest.mark.parametrize("tok_cfg", [
+        {}, {"chat_template": None}, {"chat_template": ""}, "not json"])
+    def test_a_tokenizer_config_without_a_template_keeps_the_reranker(self, tmp_path, tok_cfg):
+        folder = _config(tmp_path / "m", architectures=["XLMRobertaForSequenceClassification"],
+                         id2label={"0": "LABEL_0"})
+        (folder / "tokenizer_config.json").write_text(
+            tok_cfg if isinstance(tok_cfg, str) else json.dumps(tok_cfg), encoding="utf-8")
+        assert hf_reranker_state(folder) is True
+
 
 class TestHeadCheck:
     @staticmethod
@@ -255,6 +299,42 @@ class TestRealCrossEncoder:
         assert resident._runner._proc.pid != old.pid
         assert after.scored == before.scored
 
+    def test_a_dead_worker_waits_for_a_model_load_in_progress_before_restarting(
+            self, cross_encoder):
+        import threading
+
+        from localm.inference.engine import _LOAD_LOCK
+        reranker.rerank(str(cross_encoder), _QUERY, ["w3"])
+        resident = reranker._RERANKER
+        old = resident._runner._proc
+        old.kill()
+        old.join(10)
+        held, release = threading.Event(), threading.Event()
+
+        def _model_load():
+            with _LOAD_LOCK:
+                held.set()
+                release.wait(60)
+
+        loader = threading.Thread(target=_model_load, daemon=True)
+        loader.start()
+        assert held.wait(10)
+        result: list = []
+        call = threading.Thread(
+            target=lambda: result.append(reranker.rerank(str(cross_encoder), _QUERY, ["w3"])),
+            daemon=True)
+        try:
+            call.start()
+            call.join(3)
+            assert call.is_alive(), "the reranker restarted while a model load held the lock"
+            assert resident._runner is None or resident._runner._proc is old
+        finally:
+            release.set()
+            loader.join(10)
+        call.join(120)
+        assert not call.is_alive() and len(result) == 1
+        assert resident._runner._proc.pid != old.pid
+
     def test_more_than_one_chunk_of_documents_keeps_the_request_order(self, cross_encoder):
         docs = [f"w{i} w{i + 1}" for i in range(1, 41)]
         outcome = reranker.rerank(str(cross_encoder), _QUERY, docs)
@@ -272,6 +352,111 @@ class TestRealCrossEncoder:
         save_file(tensors, str(folder / "model.safetensors"))
         with pytest.raises(RerankerHeadMissingError, match="classification head"):
             reranker.rerank(str(folder), _QUERY, ["w3"])
+
+
+class _FailingBackend:
+    loaded = False
+    _runner = None
+
+    def __init__(self):
+        self.loads = 0
+        self.lock_held_at_load: list = []
+
+    def unload(self):
+        pass
+
+    def load(self):
+        from localm.inference.engine import _LOAD_LOCK
+        self.loads += 1
+        self.lock_held_at_load.append(_LOAD_LOCK._is_owned())
+        raise RuntimeError("worker exited during load")
+
+    def rerank(self, pairs):
+        raise AssertionError("scored on a backend that is not loaded")
+
+
+class TestFailedRestart:
+    def _resident(self, tmp_path):
+        folder = tmp_path / "ce"
+        folder.mkdir()
+        (folder / "config.json").write_text("{}", encoding="utf-8")
+        hf = object.__new__(reranker.HFReranker)
+        hf.model_path = str(folder)
+        hf.active_requests = 0
+        hf._call_lock = __import__("threading").Lock()
+        hf._backend = _FailingBackend()
+        hf.cls_labels = []
+        hf._runner = None
+        reranker._RERANKER = hf
+        reranker._RERANKER_KEY = reranker._file_key(str(folder))
+        return hf
+
+    def test_the_restart_holds_the_engine_load_lock(self, tmp_path):
+        hf = self._resident(tmp_path)
+        with pytest.raises(reranker.RerankerUnavailableError):
+            hf.rerank([("q", "d")])
+        assert hf._backend.lock_held_at_load == [True]
+
+    def test_a_released_reranker_is_not_loaded_again_by_a_waiting_request(self, tmp_path):
+        hf = self._resident(tmp_path)
+        reranker._RERANKER = None
+        reranker._RERANKER_KEY = None
+        with pytest.raises(reranker.RerankerUnavailableError) as ei:
+            hf.rerank([("q", "d")])
+        assert "was released" in str(ei.value)
+        assert hf._backend.loads == 0
+
+    def test_a_failed_restart_releases_the_reranker_and_latches_its_folder(
+            self, tmp_path, monkeypatch):
+        hf = self._resident(tmp_path)
+        with pytest.raises(reranker.RerankerUnavailableError) as ei:
+            hf.rerank([("q", "d")])
+        assert "worker exited during load" in str(ei.value)
+        assert reranker._RERANKER is None and reranker._RERANKER_KEY is None
+        monkeypatch.setattr(reranker, "_check_hf_head", lambda path: None)
+        monkeypatch.setattr(reranker, "HFReranker", lambda *a, **k: pytest.fail(
+            "a latched folder was loaded again"))
+        with pytest.raises(reranker.RerankerUnavailableError) as again:
+            reranker.get_reranker(hf.model_path)
+        assert "worker exited during load" in str(again.value)
+        assert hf._backend.loads == 1
+
+
+def _build_reward_model(folder):
+    """A tiny random LlamaForSequenceClassification (one output) whose tokenizer
+    carries a chat template, as a reward model ships."""
+    import torch
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import LlamaConfig, LlamaForSequenceClassification, PreTrainedTokenizerFast
+
+    torch.manual_seed(0)
+    cfg = LlamaConfig(vocab_size=64, hidden_size=32, intermediate_size=64,
+                      num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=4,
+                      max_position_embeddings=64, num_labels=1, pad_token_id=0)
+    LlamaForSequenceClassification(cfg).save_pretrained(folder)
+    tok = Tokenizer(models.WordLevel({"<pad>": 0, "<unk>": 1}, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    fast = PreTrainedTokenizerFast(tokenizer_object=tok, unk_token="<unk>", pad_token="<pad>")
+    fast.chat_template = "{% for m in messages %}{{ m['content'] }}{% endfor %}"
+    fast.save_pretrained(folder)
+
+
+@needs_stack
+class TestRewardModelBesideAReranker:
+    def test_adding_a_reward_model_keeps_automatic_reranking(
+            self, cross_encoder, isolated_home, tmp_path):
+        from localm.config import update_config
+        from localm.rag.rerank import rerank_plan
+        reward = tmp_path / "rm"
+        _build_reward_model(reward)
+        assert add_local(str(cross_encoder), name="ce") is True
+        assert add_local(str(reward), name="rm") is True
+        update_config(lambda c: c.update({"rag_rerank": True, "rag_rerank_model": ""}))
+        plan = rerank_plan()
+        assert plan.note is None, plan.note
+        assert plan.model == "ce" and plan.fn is not None
+        assert reranker.registered_rerankers() == ["ce"]
+        assert load_registry()["rm"]["model_type"] != "embedding"
 
 
 @needs_stack

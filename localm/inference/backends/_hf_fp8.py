@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Load planning for FP8 checkpoints (``quantization_config.quant_method ==
-"fp8"``) in the HF worker.
+"fp8"``) in the HF worker, and the expanded size of a compressed-tensors
+checkpoint.
 
 An FP8 checkpoint runs natively only on an NVIDIA CUDA GPU with compute
 capability 8.9 or newer, with triton installed and the
@@ -191,6 +192,111 @@ def expanded_bf16_bytes(model_path: str) -> Optional[int]:
             logger.debug("hf fp8: could not size %s: %s", path, e)
             return None
     return total
+
+
+_COMPRESSED_PARAM_LEAVES = frozenset({
+    "weight_scale", "weight_zero_point", "weight_shape", "weight_global_scale",
+    "weight_g_idx", "input_scale", "input_zero_point", "input_global_scale",
+    "output_scale", "output_zero_point"})
+_FLOAT8_DTYPES = frozenset({"F8_E4M3", "F8_E5M2", "F8_E8M0", "F4"})
+_INT_STRUCT = {"I64": "q", "I32": "i", "U64": "Q", "U32": "I"}
+
+
+def _safetensors_entries(path: Path) -> tuple[dict, int]:
+    """The header of the safetensors file *path* and the file offset its data
+    region starts at."""
+    header = _safetensors_header(path)
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+    return header, 8 + n
+
+
+def _small_int_tensor(path: Path, data_start: int, info: dict) -> list[int]:
+    """The values of the 1-D integer tensor *info* (at most 8 elements) stored in
+    *path*."""
+    code = _INT_STRUCT[str(info["dtype"])]
+    begin, end = (int(x) for x in info["data_offsets"])
+    count = (end - begin) // struct.calcsize(code)
+    if not 0 < count <= 8:
+        raise ValueError(f"unexpected weight_shape size {count}")
+    with open(path, "rb") as f:
+        f.seek(data_start + begin)
+        return list(struct.unpack(f"<{count}{code}", f.read(end - begin)))
+
+
+def _uniform_weight_bits(model_path: str) -> Optional[int]:
+    """The ``weights.num_bits`` every config group of the checkpoint's
+    compressed-tensors ``quantization_config`` declares, or None when the groups
+    disagree or none declares one."""
+    try:
+        cfg = json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8"))
+        groups = cfg["quantization_config"]["config_groups"].values()
+        bits = {int(g["weights"]["num_bits"]) for g in groups
+                if isinstance(g, dict) and isinstance(g.get("weights"), dict)}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
+        logger.debug("hf compressed-tensors: no weight bit width in %s: %s", model_path, e)
+        return None
+    return bits.pop() if len(bits) == 1 else None
+
+
+def compressed_expanded_bytes(model_path: str, value_bytes: int) -> Optional[int]:
+    """Bytes the weights of the compressed-tensors checkpoint at *model_path*
+    take once dequantized to a dtype of *value_bytes* bytes per value.
+
+    A packed weight (``<name>.weight_packed``) counts the element count its
+    ``<name>.weight_shape`` holds, else its packed bits divided by the
+    checkpoint's uniform ``weights.num_bits``; an integer or 8-bit float
+    ``<name>.weight`` and every floating tensor count their element count;
+    scales, zero points and shapes count nothing; other integer tensors count
+    their stored size. None when there are
+    no weight files, one cannot be parsed, or a packed weight cannot be sized."""
+    files = weight_files(model_path)
+    if not files:
+        return None
+    tensors: dict[str, tuple[Path, int, dict]] = {}
+    try:
+        for path in files:
+            header, data_start = _safetensors_entries(path)
+            for name, info in header.items():
+                if name != "__metadata__":
+                    tensors[name] = (path, data_start, info)
+        bits = None
+        total = 0
+        for name, (_path, _start, info) in tensors.items():
+            prefix, _, leaf = name.rpartition(".")
+            if leaf in _COMPRESSED_PARAM_LEAVES:
+                continue
+            dtype = str(info["dtype"])
+            numel = math.prod(int(d) for d in info["shape"])
+            if leaf == "weight_packed":
+                shape = tensors.get(f"{prefix}.weight_shape")
+                if shape is not None:
+                    numel = math.prod(_small_int_tensor(shape[0], shape[1], shape[2]))
+                else:
+                    bits = bits or _uniform_weight_bits(model_path)
+                    width = _INT_ITEMSIZE.get(dtype)
+                    if not bits or width is None:
+                        logger.debug("hf compressed-tensors: cannot size %s", name)
+                        return None
+                    numel = numel * width * 8 // bits
+                total += numel * value_bytes
+            elif leaf == "weight" and (dtype in _INT_ITEMSIZE or dtype in _FLOAT8_DTYPES):
+                total += numel * value_bytes
+            else:
+                total += numel * _INT_ITEMSIZE.get(dtype, value_bytes)
+    except (OSError, ValueError, KeyError, TypeError, struct.error, RecursionError) as e:
+        logger.debug("hf compressed-tensors: could not size %s: %s", model_path, e)
+        return None
+    return total
+
+
+def compressed_too_big_message(model_path: str, needed: int, budget: int,
+                               dtype_label: str) -> str:
+    return (
+        f"'{Path(model_path).name}' is a compressed-tensors checkpoint, and localm "
+        f"runs it with its weights expanded to {dtype_label}: it needs about "
+        f"{_gb(needed)}, but only about {_gb(budget)} of memory is available. A GGUF "
+        "quantization of this model needs far less memory.")
 
 
 def _xpu_memory(torch) -> Optional[int]:

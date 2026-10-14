@@ -218,13 +218,28 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
     return p
 
 
+def _hf_folder_has_chat_template(folder: Path) -> bool:
+    """Whether the Hugging Face model folder *folder* carries a chat template: a
+    ``chat_template.jinja`` or ``chat_template.json`` file, or a non-empty
+    ``chat_template`` in ``tokenizer_config.json``."""
+    if (folder / "chat_template.jinja").is_file() or (folder / "chat_template.json").is_file():
+        return True
+    try:
+        tok_cfg = json.loads((folder / "tokenizer_config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    return isinstance(tok_cfg, dict) and bool(tok_cfg.get("chat_template"))
+
+
 def hf_reranker_state(folder: Path) -> Optional[bool]:
     """Whether the Hugging Face model folder *folder* is a cross-encoder reranker:
     its config.json declares a ``*ForSequenceClassification`` architecture with a
-    single output label. None when config.json cannot be read.
+    single output label and its tokenizer carries no chat template. None when
+    config.json cannot be read.
 
     A head with several labels is a classifier (sentiment, NLI), not a reranker,
-    and answers False."""
+    and answers False. A single-label head whose tokenizer carries a chat
+    template scores a conversation (a reward model) and answers False."""
     try:
         config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
@@ -237,9 +252,8 @@ def hf_reranker_state(folder: Path) -> Optional[bool]:
         return False
     id2label = config.get("id2label")
     num_labels = config.get("num_labels")
-    if isinstance(id2label, dict):
-        return len(id2label) == 1
-    return num_labels == 1
+    single = len(id2label) == 1 if isinstance(id2label, dict) else num_labels == 1
+    return single and not _hf_folder_has_chat_template(folder)
 
 
 def _is_sentence_transformers_folder(path: Path) -> bool:
@@ -2106,6 +2120,15 @@ def _register(
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
 
 
+def _local_hf_folder(path: str) -> bool:
+    """Whether *path* is a local directory: not a ``.gguf`` file name and not a
+    UNC or device path, so no network share is touched."""
+    from localm.pathsafe import is_unc_or_device_path
+    if path.lower().endswith(".gguf") or is_unc_or_device_path(path):
+        return False
+    return Path(path).is_dir()
+
+
 def entry_is_reranker(name: str, entry: dict) -> bool:
     """True when the registered model *name* is a reranker or classifier: an
     ``embedding``-type model whose GGUF header marks it so (see
@@ -2114,18 +2137,22 @@ def entry_is_reranker(name: str, entry: dict) -> bool:
 
     Reads the stored ``reranker`` flag. An entry registered before the flag
     existed has none, so the GGUF is classified once here and the answer is
-    written back to the registry. A file that cannot be read, or whose tensor
-    list cannot be read in full, answers False and stores nothing, so the next
-    call tries again."""
+    written back to the registry. A Hugging Face folder stored as a reranker is
+    classified again on every call, and a False answer is written back. A file
+    that cannot be read, or whose tensor list cannot be read in full, answers
+    False and stores nothing, so the next call tries again."""
     if entry.get("model_type") != "embedding":
         return False
     flag = entry.get("reranker")
-    if isinstance(flag, bool):
-        return flag
     path = _entry_path(entry)
-    if path is None:
+    if isinstance(flag, bool):
+        if not (flag and path is not None and _local_hf_folder(path)
+                and hf_reranker_state(Path(path)) is False):
+            return flag
+        flag = False
+    elif path is None:
         return False
-    if Path(path).is_dir():
+    elif Path(path).is_dir():
         flag = hf_reranker_state(Path(path))
     elif Path(path).is_file():
         flag = gguf_reranker_state(Path(path))

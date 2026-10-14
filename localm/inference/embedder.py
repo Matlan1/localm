@@ -146,6 +146,10 @@ _EMBED_BATCH_TARGET = 32
 # call has its own worker timeout, so a long document list is sent in chunks.
 RERANK_PAIRS_PER_CALL = 32
 
+# Times IsolatedEmbedder._call_worker checks the worker and respawns it when
+# dead before it calls whatever runner is there.
+_RESPAWN_ATTEMPTS = 3
+
 
 def configure_embed_context(cp, n_ctx: int, n_seq_max: int, pooling_type: int):
     """Fill a llama_context_params for EMBEDDING and return it.
@@ -1162,7 +1166,8 @@ class IsolatedEmbedder(VramSizingMixin):
         # correlation (one req_q/resp_q pair, one command at a time), so two
         # overlapping RPCs are two threads blocked in the same resp_q.get(),
         # each taking whichever response arrives first, which can hand a caller
-        # vectors belonging to a DIFFERENT text.
+        # vectors belonging to a DIFFERENT text. Lock order: engine._LOAD_LOCK
+        # (outer) -> _rpc_lock (inner).
         self._rpc_lock = threading.RLock()
         # In-flight embed() calls, mirroring Engine.active_requests. Checked by
         # http_server.py's unload/shutdown/restart paths (via active_requests()
@@ -1344,57 +1349,89 @@ class IsolatedEmbedder(VramSizingMixin):
         """Run ``call(runner)`` against the worker: pinned via
         ``active_requests`` for the whole call, serialised on ``_rpc_lock``,
         respawning a dead worker first and recovering from a GPU crash as
-        described on :meth:`embed`."""
+        described on :meth:`embed`.
+
+        A worker found dead before the call is respawned holding the engine's
+        ``_LOAD_LOCK`` (outer) and ``_rpc_lock`` (inner); ``_rpc_lock`` is never
+        held while ``_LOAD_LOCK`` is awaited. The CPU retry after a GPU crash
+        reloads under ``_rpc_lock`` alone. The liveness check and the call share one
+        ``_rpc_lock`` hold; a worker found dead again after a respawn is
+        respawned again, up to ``_RESPAWN_ATTEMPTS`` times, and the last attempt
+        calls whatever runner is there."""
         self.active_requests += 1
         try:
+            for attempt in range(_RESPAWN_ATTEMPTS):
+                with self._rpc_lock:
+                    last = attempt == _RESPAWN_ATTEMPTS - 1
+                    if last or (self._runner is not None and self._runner.is_alive()):
+                        if self._runner is None:
+                            raise RuntimeError(
+                                f"the embedding worker for {Path(self.model_path).name} "
+                                "could not be started")
+                        return self._call_locked(call)
+                self._respawn_dead_worker()
+            raise AssertionError("unreachable")
+        finally:
+            self.active_requests = max(0, self.active_requests - 1)
+
+    def _respawn_dead_worker(self) -> None:
+        """Start the worker again under the engine's ``_LOAD_LOCK`` when it is
+        not running. Must not be called with ``_rpc_lock`` held."""
+        from localm.inference.engine import _LOAD_LOCK
+        with _LOAD_LOCK:
+            runner = self._runner
+            if runner is not None and runner.is_alive():
+                return
             with self._rpc_lock:
                 if self._runner is None or not self._runner.is_alive():
                     logger.warning("embedder worker is not running; reloading %s",
                                    self.model_path)
                     self._reload()
-                try:
-                    return call(self._runner)
-                except RuntimeError:
-                    # Discard the worker ONLY if it is actually gone. The child's
-                    # dispatch loop answers an ordinary embed failure with a
-                    # clean (error, msg) envelope and keeps serving, and the
-                    # parent sees the SAME RuntimeError for that as for a crash.
-                    # Dropping the reference unconditionally would orphan a LIVE
-                    # child that no close(), reset_embedder() or
-                    # release_for_exit() can reach.
-                    if self._runner is not None and self._runner.is_alive():
-                        logger.exception(
-                            "embedding failed; the worker is healthy and will "
-                            "serve the next call")
-                        raise
-                    logger.exception(
-                        "embedding worker fault; it will reload on the next call")
-                    runner, self._runner = self._runner, None
-                    if runner is not None:
-                        # Release its queues/handles. Safe and idempotent when
-                        # the child is already dead, and _wait's own timeout path
-                        # has already done it.
-                        runner.shutdown(grace=0)
-                    # A crash while GPU-offloaded falls back to CPU ONCE per
-                    # embedder instance, retries THIS call inline, and warns.
-                    # In-memory only: the user's n_gpu_layers setting still
-                    # governs the chat model.
-                    if self.n_gpu_layers > 0 and self.gpu_fallback_reason is None:
-                        self.gpu_fallback_reason = (
-                            "GPU-offloaded embedding crashed natively (worker "
-                            "exit); retrying on CPU. Chat-model GPU settings "
-                            "are unaffected. Run 'localm setup-llama --force' "
-                            "to reprovision the GPU runtime and restore "
-                            "GPU-accelerated embedding.")
-                        logger.warning("embedder %s: %s",
-                                       Path(self.model_path).name,
-                                       self.gpu_fallback_reason)
-                        self.n_gpu_layers = 0
-                        self._reload()
-                        return call(self._runner)
-                    raise
-        finally:
-            self.active_requests = max(0, self.active_requests - 1)
+
+    def _call_locked(self, call: Callable):
+        """Run ``call(runner)`` on the current worker, recovering from a GPU
+        crash as described on :meth:`embed`. Caller must hold ``_rpc_lock``."""
+        try:
+            return call(self._runner)
+        except RuntimeError:
+            # Discard the worker ONLY if it is actually gone. The child's
+            # dispatch loop answers an ordinary embed failure with a
+            # clean (error, msg) envelope and keeps serving, and the
+            # parent sees the SAME RuntimeError for that as for a crash.
+            # Dropping the reference unconditionally would orphan a LIVE
+            # child that no close(), reset_embedder() or
+            # release_for_exit() can reach.
+            if self._runner is not None and self._runner.is_alive():
+                logger.exception(
+                    "embedding failed; the worker is healthy and will "
+                    "serve the next call")
+                raise
+            logger.exception(
+                "embedding worker fault; it will reload on the next call")
+            runner, self._runner = self._runner, None
+            if runner is not None:
+                # Release its queues/handles. Safe and idempotent when
+                # the child is already dead, and _wait's own timeout path
+                # has already done it.
+                runner.shutdown(grace=0)
+            # A crash while GPU-offloaded falls back to CPU ONCE per
+            # embedder instance, retries THIS call inline, and warns.
+            # In-memory only: the user's n_gpu_layers setting still
+            # governs the chat model.
+            if self.n_gpu_layers > 0 and self.gpu_fallback_reason is None:
+                self.gpu_fallback_reason = (
+                    "GPU-offloaded embedding crashed natively (worker "
+                    "exit); retrying on CPU. Chat-model GPU settings "
+                    "are unaffected. Run 'localm setup-llama --force' "
+                    "to reprovision the GPU runtime and restore "
+                    "GPU-accelerated embedding.")
+                logger.warning("embedder %s: %s",
+                               Path(self.model_path).name,
+                               self.gpu_fallback_reason)
+                self.n_gpu_layers = 0
+                self._reload()
+                return call(self._runner)
+            raise
 
     def close(self) -> None:
         if self._runner is not None:

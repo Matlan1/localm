@@ -28,7 +28,9 @@ from localm.textnorm import scrub_stream
 # LOCK ORDER with localm.inference.embedder._LOCK: _LOAD_LOCK is the OUTER lock
 # of the pair. The load path under this lock calls embedder status reads that
 # take embedder._LOCK (backend ctx sizing -> loaded_path), so code holding
-# embedder._LOCK must NEVER acquire _LOAD_LOCK or start a load.
+# embedder._LOCK must NEVER acquire _LOAD_LOCK or start a load. A dead embedder
+# or reranker worker restarts under _LOAD_LOCK (outer) with the instance's
+# IsolatedEmbedder._rpc_lock or HFReranker._call_lock (inner).
 _LOAD_LOCK = threading.RLock()
 
 
