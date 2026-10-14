@@ -164,22 +164,24 @@ localm will not start at all on a pip install, file an
 **You always see the full report before anything is sent, and sending needs
 your explicit OK.** In the GUI, "Send to maintainer" saves the report and
 shows its whole text; nothing is uploaded until you press "Send this
-report", and what is uploaded is that saved text, without only its closing
-note about editing the report. The standalone
-reporter and `localm bug-report` preview the
-same text at a terminal prompt - and when there is no terminal to prompt
-(piped/redirected stdin, or run non-interactively), both the Python and
-PowerShell standalone reporters now treat that exactly like you said no: the
-report is saved locally and nothing is sent. This was a real gap: the
-PowerShell fallback used to fall through to sending on its own when it had
-no way to show the confirmation prompt at all.
+report", and what is uploaded is that saved text, apart from its closing
+note about editing the report, which is left out. The standalone reporter
+and `localm bug-report` preview the same text at a terminal prompt - and when
+there is no terminal to prompt (piped/redirected stdin, or run
+non-interactively), every standalone reporter (Python, PowerShell, and the
+`report-issue.sh` curl fallback used when there is no Python) treats that
+exactly like you said no: nothing is sent. The curl fallback also sends
+nothing when `perl`, which it needs to remove personal details, is missing.
 
 **What is redacted from a report:**
-- Your account name and home directory, in every textual form the report
-  might quote it in (a plain path, a `repr()`'d or JSON-encoded one with
-  doubled backslashes, or a path embedded in a native crash traceback's own
-  message) - the backstop regex runs unconditionally, so one unresolvable
-  path lookup can't leave the raw text unscrubbed.
+- Your home directory, replaced by `~`, and your account name wherever it is
+  the folder under a home root (`C:\Users\<name>`, `/home/<name>`,
+  `/Users/<name>`), in every textual form the report might quote it in (a
+  plain path, a `repr()`'d or JSON-encoded one with doubled backslashes, or a
+  path embedded in a native crash traceback's own message) - the backstop
+  regex runs unconditionally, so one unresolvable path lookup can't leave the
+  raw text unscrubbed. The account name is not searched for elsewhere (a
+  folder like `D:\<name>\localm`, or the name in prose).
 - URL credentials (`user:pass@...`), credential-named query parameters and
   HTTP header lines (`api_key=`, `token=`, `X-Api-Key:`, `Auth-Token:`, ...),
   and bearer / API-key-shaped tokens - an `Authorization:` value is caught
@@ -187,7 +189,7 @@ no way to show the confirmation prompt at all.
   appear in diagnostic text, recent log tails, or the activity ring.
 - Email addresses in the usual `name@domain` form (also URL-encoded as
   `name%40domain`), anywhere in the report including the configuration
-  section, replaced with `<redacted-email>`, except the maintainer's contact
+  section and the subject of an emailed report, replaced with `<redacted-email>`, except the maintainer's contact
   address the report is addressed to.
 - Config values are sent only from a small allowlist of operational keys
   (port, context size, GPU layer count, mode, ...); the API key itself is
@@ -196,8 +198,8 @@ no way to show the confirmation prompt at all.
 **What a report deliberately keeps**, because it is what makes the report
 useful to debug: your install location, data directory path, native runtime
 library names, dependency versions, the loaded model's name and backend, and
-a tail of the crashed run's own log. Only the account name is stripped from
-these, not the whole path - unlike an HTTP response handed to a
+a tail of the crashed run's own log. Only the home directory and the account
+name under a home root are stripped from these, not the whole path - unlike an HTTP response handed to a
 lower-privileged API caller, which strips the install/data-dir paths too.
 
 None of this is affected by session persistence mode: filing a report is the

@@ -104,6 +104,8 @@ def test_interactive_no_flags_prompts_for_all_three_fields(cli_runner, monkeypat
     from click.testing import _NamedTextIOWrapper
     from localm.cli import main
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
+    from localm import bugreport
+    monkeypatch.setattr(bugreport, "stdin_is_interactive", lambda: True)
     result = cli_runner.invoke(
         main, ["bug-report"],
         # A 4th blank line answers the interactive send-menu prompt
@@ -125,6 +127,8 @@ def test_interactive_flags_skip_only_their_own_prompt(cli_runner, monkeypatch):
     from click.testing import _NamedTextIOWrapper
     from localm.cli import main
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
+    from localm import bugreport
+    monkeypatch.setattr(bugreport, "stdin_is_interactive", lambda: True)
     result = cli_runner.invoke(
         main, ["bug-report", "-m", "already given"],
         # skip "expected" (optional), answer "happened", blank line for the

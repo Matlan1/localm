@@ -49,8 +49,63 @@ if [ -z "$tok" ] && [ -f "$cfg" ]; then
   tok="$(sed -n 's/.*"bugreport_upload_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cfg" | head -1)"
 fi
 
-printf '  One line - what went wrong? '; IFS= read -r summary
+# Strip the account name, URL credentials, credential-named parameters, header
+# lines and JSON keys, bearer tokens, API keys and email addresses other than
+# RI_EMAIL from stdin, line by line. The same rules, in the same order, as
+# _scrub_secrets in localm/bugreport/scrub.py. Returns non-zero, printing
+# nothing, when perl is not available.
+scrub() {
+  command -v perl >/dev/null 2>&1 || return 1
+  perl -CS -e "$(cat <<'PERL'
+    use strict;
+    use warnings;
+    my $home = $ENV{HOME} // '';
+    my $maint = $ENV{RI_EMAIL} // '';
+    my $E = '\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\\\x60=?&*';
+    sub email_repl {
+      my $tok = shift;
+      (my $core = $tok) =~ s/^'+//;
+      my $lead = substr($tok, 0, length($tok) - length($core));
+      $core =~ s/['.]+\z//;
+      my $trail = substr($tok, length($lead) + length($core));
+      (my $addr = $core) =~ s/%40/\@/g;
+      return $tok if $maint ne '' && $addr !~ /[^\x00-\x7f]/ && lc($addr) eq lc($maint);
+      return $lead . '<redacted-email>' . $trail;
+    }
+    while (my $t = <STDIN>) {
+      my $nl = ($t =~ s/\n\z//) ? "\n" : '';
+      if ($home ne '') {
+        (my $fwd = $home) =~ tr{\\}{/};
+        (my $dbl = $home) =~ s{\\}{\\\\}g;
+        for my $v ($home, $fwd, $dbl) { $t =~ s{\Q$v\E}{~}g; }
+      }
+      $t =~ s{([A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)|/home/|/Users/)[^\\/\r\n]+}{$1<redacted>}g;
+      $t =~ s{(://)[^/@\s]+\@}{$1<redacted>\@}g;
+      $t =~ s{(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature|key|auth|sig))=)(?!["']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[`"'\)\]\}]{0,4}(?:[\s&#]|$))(?:"[^"\r\n]*"?|'[^'\r\n]*'?|[^&\s#"'\)\]\}]*)}{$1<redacted>}g;
+      $t =~ s{(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+}{$1<redacted>}g;
+      $t =~ s{(?i)(["'](?:(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|[A-Za-z0-9]+[_-](?:key|auth|sig))["']\s*:\s*)(?!\s*["']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])["']?\s*(?:[,\}\]]|$))(?:"[^"\r\n]*"?|'[^'\r\n]*'?|[^,\}\]\s]*)}{$1<redacted>}g;
+      $t =~ s{(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}}{$1<redacted>}g;
+      $t =~ s{(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}}{<redacted>}g;
+      $t =~ s{(?<![^$E])[^$E]*?[^\@$E](?:\@|%40)[^\@.%+$E]+(?:\.[^\@.%+$E]+)*\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}[^$E]*}{email_repl($&)}ge;
+      print $t . $nl;
+    }
+PERL
+)"
+}
+
+# Nothing is sent without an answer typed at a terminal.
+if [ ! -t 0 ]; then
+  echo "  No terminal to confirm on, so nothing was sent. Email ${email} instead."
+  exit 0
+fi
+
+printf '  One line - what went wrong? '; IFS= read -r summary || summary=""
 [ -n "$summary" ] || summary="localm would not start"
+if ! summary="$(printf '%s\n' "$summary" | RI_EMAIL="$email" scrub)" || [ -z "$summary" ]; then
+  echo "  Cannot remove personal details from the report here (perl is not installed),"
+  echo "  so nothing was sent. Please email a short description to ${email}."
+  exit 1
+fi
 os="$(uname -srm 2>/dev/null || echo unknown)"
 # Single-line body so JSON escaping stays simple and safe (quotes + backslashes).
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -61,7 +116,12 @@ echo "  ----- this is exactly what will be sent -----"
 echo "  title: $summary"
 echo "  body:  $body"
 echo "  ---------------------------------------------"
-printf '  Send this to the maintainer now? [Y/n]: '; IFS= read -r ans
+printf '  Send this to the maintainer now? [Y/n]: '
+if ! IFS= read -r ans; then
+  echo ""
+  echo "  Not sent. Email ${email} if you change your mind."
+  exit 0
+fi
 case "$ans" in [Nn]*) echo "  Not sent. Email ${email} if you change your mind."; exit 0 ;; esac
 
 if [ -z "$url" ]; then
