@@ -334,7 +334,6 @@ class TestRealCrossEncoder:
             reranker.rerank(str(folder), _QUERY, ["w3"])
 
 
-@needs_stack
 class _FailingBackend:
     loaded = False
     _runner = None
@@ -431,6 +430,7 @@ class TestRewardModelBesideAReranker:
         assert load_registry()["rm"]["model_type"] != "embedding"
 
 
+@needs_stack
 class TestMultiLabelHead:
     def test_the_label_names_come_back_with_every_output(self, tmp_path):
         folder = tmp_path / "ce3"
