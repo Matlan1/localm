@@ -634,7 +634,8 @@ class TestSurfaceOverridesOnServerTraffic:
         from localm import scopes
         held = {scopes.ADMIN} if held == {"admin"} else held
         with _server(tmp_path, "full") as (client, config), \
-             patch("localm.inference.http_server.caller_scopes", return_value=held):
+             patch("localm.inference.http_server.caller_is_operator",
+                   return_value=scopes.ADMIN in held):
             config.set(chat_mode="privacy", coder_mode="privacy")
             self._post(client, "tagged chat", {"X-Client-Id": "chat"})
             self._post(client, "tagged coder", {
@@ -651,7 +652,8 @@ class TestSurfaceOverridesOnServerTraffic:
         from localm import scopes
         held = {scopes.ADMIN} if owner else {"chat"}
         with _server(tmp_path, "full") as (client, config), \
-             patch("localm.inference.http_server.caller_scopes", return_value=held):
+             patch("localm.inference.http_server.caller_is_operator",
+                   return_value=scopes.ADMIN in held):
             config.set(chat_mode="privacy")
             data = client.get("/v1/config").json()
             self._post(client, "chat line", {"X-Client-Id": "chat"})

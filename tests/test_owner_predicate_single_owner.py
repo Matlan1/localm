@@ -112,6 +112,11 @@ def test_admin_scoped_minted_key_is_operator_and_admin_key(client):
 _OWNERS_OF_THE_PATTERN = {("inference/http_server.py", "caller_grants"),
                           ("inference/http_server.py", "caller_is_admin_key")}
 
+# Checks on a scope set that is not a request caller's: mount_gui verifies a raw
+# presented token, _cwd_trusted reads a stored keystore record.
+_NOT_A_REQUEST_CALLER = {("inference/routes/system.py", "mount_gui"),
+                         ("plugins/builtin/jobs/runner.py", "_cwd_trusted")}
+
 
 def _none_checked_names(boolop: ast.BoolOp) -> set:
     names = set()
@@ -185,7 +190,7 @@ def test_no_module_re_derives_the_owner_answer_inline():
         rel = path.relative_to(PKG).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for lineno, fn in inline_owner_derivations(tree):
-            if (rel, fn) not in _OWNERS_OF_THE_PATTERN:
+            if (rel, fn) not in _OWNERS_OF_THE_PATTERN | _NOT_A_REQUEST_CALLER:
                 offenders.append(f"{rel}:{lineno} in {fn}")
     assert not offenders, (
         "inline owner/scope derivation from a None scope set; use "
