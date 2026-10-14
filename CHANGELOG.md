@@ -667,6 +667,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`localm unload` no longer reports a model it could not unload as unloaded.** When the
   server keeps a model because a request is still using it, the command now says so and exits
   with an error instead of printing it as unloaded.
+- **Engine settings apply when the same model is loaded again.** Settings marked "next load" (context
+  size, GPU layers, MoE expert layers, memory-mapping, speculative drafting, parallel requests) took
+  effect only for a different model or after a server restart: unloading a model and loading it again
+  kept the old values. A reload now uses the current settings; values given on the command line still
+  win.
 - **A request body that is not JSON gets a clear error, not a server error.** Sending a file or
   other binary data where an API route expects JSON now returns the usual 422 explaining the
   problem, instead of a 500 "Internal server error".

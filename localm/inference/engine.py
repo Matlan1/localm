@@ -335,8 +335,9 @@ class Engine:
         # serialise across the server, jobs and embeds, not just within a single
         # Engine instance.
         self._load_lock = _LOAD_LOCK
-        self._backend = create_backend(
-            model_path,
+        # The explicit arguments; every setting left as None is read from the
+        # config each time the backend is built.
+        self._backend_args = dict(
             mmproj_path=mmproj_path,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
@@ -347,6 +348,9 @@ class Engine:
             spec_draft_tokens=spec_draft_tokens,
             spec_draft_model=spec_draft_model,
         )
+        self._backend = create_backend(model_path, **self._backend_args)
+        self._backend_fresh = True
+        self._load_cancel = None
         self.active_requests = 0
         # Set by http_server.switch_engine after a load placed partly on the
         # CPU: a PlacementHeal naming what held the VRAM, else None.
@@ -368,6 +372,7 @@ class Engine:
         aborted mid-flight when a newer model selection supersedes it (preemptive
         switching). Best-effort: backends that cannot abort a partial load ignore
         it. ``None`` clears it."""
+        self._load_cancel = event
         self._backend.set_load_cancel(event)
 
     def load(self) -> None:
@@ -376,6 +381,14 @@ class Engine:
         with self._load_lock:
             if self._backend.loaded:
                 return
+            args = getattr(self, "_backend_args", None)
+            if args is not None and not getattr(self, "_backend_fresh", True):
+                # A reload builds a new backend: config-read settings take their
+                # current values, the explicit arguments are kept.
+                self._backend = create_backend(self.model_path, **args)
+                if getattr(self, "_load_cancel", None) is not None:
+                    self._backend.set_load_cancel(self._load_cancel)
+            self._backend_fresh = False
             backend_type = type(self._backend).__name__.replace("Backend", "")
             console.print(
                 f"Loading [bold cyan]{self.display_name}[/bold cyan] "
