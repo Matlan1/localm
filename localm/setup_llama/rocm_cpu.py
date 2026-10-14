@@ -33,6 +33,10 @@ import localm.setup_llama as _sl
 # other provisioned file on a re-provision.
 CPU_OVERLAY_MARKER = ".localm-cpu-overlay"
 
+# Written after an overlay attempt that did not install it: {"tag": <upstream
+# tag the attempt was for>}. Removed by a successful attempt.
+CPU_OVERLAY_FAILED_MARKER = ".localm-cpu-overlay-failed"
+
 _CPU_DLL = "ggml-cpu.dll"
 # OpenMP runtime file names upstream CPU archives ship beside the variants.
 _OPENMP_DLLS = ("libomp.dll", "libomp140.x86_64.dll")
@@ -67,6 +71,39 @@ def rocm_build(target: Path) -> str:
     return _ROCM_TAG
 
 
+def cpu_overlay_failed(target: Path) -> bool:
+    """True when installing the SIMD CPU backend for the current
+    ``_ROCM_CPU_TAG`` was attempted in *target* and did not succeed. Never
+    raises."""
+    try:
+        data = json.loads((target / CPU_OVERLAY_FAILED_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    return isinstance(data, dict) and data.get("tag") == _ROCM_CPU_TAG
+
+
+def rocm_build_is_current(target: Path, build: Optional[str]) -> bool:
+    """Whether *build* (the amd-rocm build recorded in *target*) is what a
+    provision there would record now: ``_ROCM_BUILD``, or ``_ROCM_TAG`` once the
+    overlay for ``_ROCM_CPU_TAG`` has been attempted there and did not install."""
+    if build == _ROCM_BUILD:
+        return True
+    return build == _ROCM_TAG and cpu_overlay_failed(target)
+
+
+def _record_overlay_attempt(target: Path, installed: bool) -> None:
+    """Record whether the last overlay attempt in *target* installed it."""
+    marker = target / CPU_OVERLAY_FAILED_MARKER
+    try:
+        if installed:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.write_text(json.dumps({"tag": _ROCM_CPU_TAG}), encoding="utf-8")
+    except OSError as e:
+        logger.warning("amd-rocm CPU backend: could not record the overlay attempt in %s: %s",
+                       marker, e)
+
+
 def _best_variant(variants: list[Path]) -> tuple[Optional[Path], dict]:
     """The variant with the highest positive ``ggml_backend_score()`` on this
     CPU, and every variant's score (None when its probe failed)."""
@@ -85,9 +122,17 @@ def install_rocm_simd_cpu(target: Path) -> Optional[str]:
     (``_native_loads_ok``). Returns the installed variant's file name, or None
     when the overlay was not installed: the download, checksum, scoring or load
     check failed, or *target* has no ggml-cpu.dll. On None, *target* holds the
-    amd-rocm build's own CPU backend and a yellow warning names why.
+    amd-rocm build's own CPU backend, a yellow warning names why, and
+    ``CPU_OVERLAY_FAILED_MARKER`` records the attempt.
 
     Never raises."""
+    winner = _install_overlay(target)
+    _record_overlay_attempt(target, winner is not None)
+    return winner
+
+
+def _install_overlay(target: Path) -> Optional[str]:
+    """The install itself; see :func:`install_rocm_simd_cpu`."""
     original = target / _CPU_DLL
     backup = target / (_CPU_DLL + _BACKUP_SUFFIX)
     omp: list[Path] = []

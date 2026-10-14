@@ -145,7 +145,8 @@ from localm.setup_llama.load_probe import (
     _PROBE_NO_GPU_DEVICE, _GPU_LOAD_PROBE_CODE, _native_gpu_loads_ok,
 )
 from localm.setup_llama.rocm_cpu import (
-    CPU_OVERLAY_MARKER, install_rocm_simd_cpu, installed_cpu_overlay, rocm_build,
+    CPU_OVERLAY_FAILED_MARKER, CPU_OVERLAY_MARKER, cpu_overlay_failed,
+    install_rocm_simd_cpu, installed_cpu_overlay, rocm_build, rocm_build_is_current,
     rocm_cpu_overlay_url,
 )
 from localm.setup_llama.provision import (
@@ -165,6 +166,7 @@ __all__ = [
     "STAGED_NOTE", "IMAGE_TAG_FOR_LINE", "CUDA_CHECK_FAILED", "record_staged_cuda",
     "staged_cuda_line", "check_staged_cuda_runtime", "cuda_container_check",
     "_copy_binaries", "_copy_blas_library_dirs", "_copy_license_files", "CPU_OVERLAY_MARKER",
+    "CPU_OVERLAY_FAILED_MARKER", "cpu_overlay_failed", "rocm_build_is_current",
     "_CUDA_LINE",
     "_CUDA_LINUX_REPO", "_CUDA_RUNTIME_PYPI_PACKAGES", "_CUDA_RUNTIME_PIN", "_cuda_setup_dialogue",
     "DEFAULT_URL", "DEFAULT_URL_SHA256", "_diagnose_bad_artifact", "_download",

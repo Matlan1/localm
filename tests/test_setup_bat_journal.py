@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -202,6 +203,57 @@ class TestACutShortVenv:
         assert "uv venv" not in uv_log, uv_log
         assert (folder / ".venv" / "half-written").is_file()
 
+    def test_a_foreign_venv_left_at_the_replace_prompt_is_not_wiped_on_the_next_run(
+            self, folder, tmp_path, uv_stub_dir):
+        (folder / ".venv").mkdir()
+        (folder / ".venv" / "mine").write_text("x", encoding="utf-8")
+        log = tmp_path / "uv.log"
+        log.write_text("", encoding="utf-8")
+        env = dict(os.environ, STUB_LOG=str(log))
+        env.pop("LOCALM_SETUP_ABORT_AFTER", None)
+        env["PATH"] = str(uv_stub_dir) + os.pathsep + env["PATH"]
+        captured = tmp_path / "interrupted.out.txt"
+        with open(captured, "wb") as sink:
+            proc = subprocess.Popen([os.environ.get("COMSPEC", "cmd.exe"), "/c", r".\setup.bat"],
+                                    cwd=str(folder), env=env, stdin=subprocess.PIPE,
+                                    stdout=sink, stderr=subprocess.STDOUT)
+            try:
+                proc.stdin.write(b"2\r\n")
+                proc.stdin.flush()
+                text = ""
+                for _ in range(600):
+                    text = captured.read_text(encoding="utf-8", errors="replace")
+                    if "Foreign .venv found" in text or proc.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                assert "Foreign .venv found" in text, text
+            finally:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=60)
+                proc.wait(timeout=60)
+        assert b"begin\tvenv" not in _journal_bytes(folder).replace(b"\r\n", b"\n")
+        rc, out = _setup(folder, abort_after="venv", answers="2\n\n\n\n\n",
+                         extra_env={"STUB_LOG": str(log)}, path_prefix=uv_stub_dir)
+        assert rc == 99, out
+        assert "recreating it" not in out
+        assert "uv venv" not in log.read_text(encoding="utf-8")
+        assert (folder / ".venv" / "mine").is_file()
+
+    def test_a_localm_venv_known_only_by_its_console_script_is_not_wiped_on_resume(
+            self, folder, tmp_path, uv_stub_dir):
+        (folder / ".venv" / "Scripts").mkdir(parents=True)
+        (folder / ".venv" / "Scripts" / "localm.exe").write_text("x", encoding="utf-8")
+        (folder / ".localm-setup-journal").write_bytes(
+            b"begin\tportable-choice\r\ndone\tportable-choice\r\nbegin\tvenv\r\n")
+        log = tmp_path / "uv.log"
+        log.write_text("", encoding="utf-8")
+        rc, out = _setup(folder, abort_after="venv", answers="2\n\n\n\n\n",
+                         extra_env={"STUB_LOG": str(log)}, path_prefix=uv_stub_dir)
+        assert rc == 99, out
+        assert "recreating it" not in out
+        assert "uv venv" not in log.read_text(encoding="utf-8")
+        assert (folder / ".venv" / "Scripts" / "localm.exe").is_file()
+
     def test_the_scratch_files_stay_inside_the_folder(self, folder, tmp_path, uv_stub_dir):
         rc, out, uv_log, temp = self._run(
             folder, tmp_path,
@@ -241,12 +293,14 @@ class TestTheScriptItself:
 
     def test_no_scratch_file_goes_to_the_system_temp_folder(self):
         assert "%TEMP%" not in self.text and "%TMP%" not in self.text
+        assert "GetTempPath" not in self.text and "$env:TEMP" not in self.text
+        assert "$env:TMP" not in self.text
 
     def test_every_step_that_begins_also_finishes(self):
         begun = re.findall(r"call :jr begin (\S+)", self.code)
         done = re.findall(r"call :step_done (\S+)", self.code)
-        assert sorted(b for b in begun if not b.startswith("%")) == \
-            sorted(d for d in done if not d.startswith("%"))
+        assert {b for b in begun if not b.startswith("%")} == \
+            {d for d in done if not d.startswith("%")}
         assert begun, "no steps are journaled"
 
     def test_the_script_ends_by_marking_the_install_complete(self):

@@ -455,6 +455,24 @@ def parse_image_size(size: str | None) -> tuple[int, int] | None:
     return w, h
 
 
+def _private_temp_root() -> Path | None:
+    """The folder private generation directories are made in: localm's temp
+    folder, created when missing, or None (the system temp folder) when it cannot
+    be created, after a warning."""
+    from localm.config import temp_dir
+    root = temp_dir()
+    if root is None:
+        return None
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("cannot create the temp folder %s (%s); private images use "
+                       "the system temp folder", root, e)
+        return None
+    return root
+
+
 def _is_private_session() -> bool:
     from localm.audit import SessionMode, effective_mode
     return effective_mode("server") == SessionMode.PRIVACY
@@ -603,8 +621,7 @@ async def create_image(req: ImageGenerationRequest, request: Request):
     warnings = []
     try:
         if private:
-            from localm.config import temp_dir
-            private_dir = Path(tempfile.mkdtemp(prefix="localm-img-", dir=temp_dir()))
+            private_dir = Path(tempfile.mkdtemp(prefix="localm-img-", dir=_private_temp_root()))
             out_dir = private_dir
         else:
             out_dir = _images_dir()

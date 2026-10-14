@@ -623,6 +623,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Backing out of the "Replace this .venv?" question no longer deletes it on the next run.**
+  Pressing Ctrl+C at that question in `setup.sh` or `setup.bat` made the next run treat the
+  environment as half-built and recreate it, wiping a `.venv` that was yours (or a finished
+  localm one, with a multi-gigabyte reinstall). Setup now only recreates an environment it
+  was in the middle of creating, and `setup.sh` remembers every step that was cut short, not
+  only the last one, so a half-downloaded runtime is still redone after a second interruption.
+- **`setup.bat` keeps its scratch files in its own folder.** The uv installer was downloaded to
+  the system temp folder, which broke the "nothing outside this folder" promise of a portable
+  install and left a file behind if setup was stopped mid-download.
+- **A private image no longer fails when the temp folder does not exist yet.** After changing
+  the temporary-files location (or setting `LOCALM_TMPDIR` to a new folder), the next image
+  generated in privacy mode returned an error until localm restarted. The folder is now
+  created, and if it cannot be, localm uses the system temp folder and logs why.
+- **A failed AMD CPU-backend download no longer shows "runtime update available" forever.**
+  On an AMD GPU install where the optional SIMD CPU backend could not be installed, the
+  Setup page offered an update on every visit and `setup-llama` announced an upgrade that
+  re-installed the same build. The install is now reported as current until a newer CPU
+  backend is released; `setup-llama --backend amd-rocm --force` still retries it.
 - **The chat model comes back after a failed image, video or music job.** When a generation
   crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
   until your next message. It now reloads on every way a job can end, and a job that finishes
