@@ -81,6 +81,13 @@ class TestOpenModeGate:
         c, _ = open_app
         assert c.get("/api/session").status_code == 200
 
+    def test_post_session_is_gated_then_refused_as_nothing_to_log_into(self, open_app):
+        c, app = open_app
+        assert c.post("/api/session", json={"key": "x"}).status_code == 403
+        r = c.post("/api/session", json={"key": "x"}, headers=_bearer(app))
+        assert r.status_code == 400 and "open mode" in r.json()["detail"]
+        assert not r.headers.get_list("set-cookie")
+
     def test_wrong_token_refused(self, open_app):
         c, _ = open_app
         r = c.post("/v1/models/unload",

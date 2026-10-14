@@ -522,6 +522,15 @@ def test_load_idiom_leaves_a_peer_routed_model_to_its_peer(client, engine):
     assert engine.loaded is False
 
 
+def test_unload_idiom_leaves_a_peer_routed_model_to_its_peer(client, engine):
+    with patch("localm.inference.routes.ollama.peer_routing.get_route",
+               return_value=object()):
+        r = client.post("/api/chat",
+                        json={"model": MODEL, "messages": [], "keep_alive": 0})
+    assert r.status_code == 200 and r.json()["done_reason"] == "unload"
+    assert engine.loaded is True
+
+
 def test_chat_unload_idiom_unloads(client, engine):
     with patch("localm.discover.vram_info", return_value={}):
         r = client.post("/api/chat",
@@ -623,6 +632,23 @@ def test_embed_accepts_a_single_string(client, embedding_engine):
 def test_embed_empty_input_list_is_an_empty_result(client):
     body = client.post("/api/embed", json={"model": MODEL, "input": []}).json()
     assert body == {"model": MODEL, "embeddings": []}
+
+
+def test_embed_empty_input_still_refuses_dimensions(client):
+    r = client.post("/api/embed", json={"model": MODEL, "input": [], "dimensions": 8})
+    assert r.status_code == 400 and "dimensions" in _error_of(r)
+
+
+def test_embed_empty_input_for_an_unknown_model_is_a_404(client):
+    r = client.post("/api/embed", json={"model": "no-such-model", "input": []})
+    assert r.status_code == 404 and "no-such-model" in _error_of(r)
+
+
+def test_embed_empty_input_for_a_peer_routed_model_is_an_empty_result(client):
+    with patch("localm.inference.routes.ollama.peer_routing.get_route",
+               return_value=object()):
+        body = client.post("/api/embed", json={"model": "remote", "input": []}).json()
+    assert body == {"model": "remote", "embeddings": []}
 
 
 def test_embed_requires_input_and_refuses_dimensions(client, embedding_engine):
@@ -861,3 +887,37 @@ def test_the_gui_embedding_warmup_route_is_not_exempted_by_the_embed_paths(app):
         r = c.post("/api/embedding/warmup", json={}, headers=EVIL)
     assert r.status_code == 403
     assert "Cross-origin" in r.json()["detail"]
+
+
+# ------------------------------------------------------------------ X-Localm-* headers
+
+@pytest.fixture
+def tagged_chat(app):
+    """The real /v1/chat/completions endpoint, whose reply carries an
+    X-Localm-Test header."""
+    from localm.inference.routes import ollama as ollama_routes
+    real = ollama_routes._endpoint
+
+    def _tagged(app_, path):
+        endpoint = real(app_, path)
+
+        async def _call(*args, **kwargs):
+            inner = await endpoint(*args, **kwargs)
+            inner.headers["X-Localm-Test"] = "1"
+            return inner
+        return _call
+
+    with patch.object(ollama_routes, "_endpoint", _tagged):
+        yield
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("route, body", [
+    ("/api/chat", {"messages": [{"role": "user", "content": "hi"}]}),
+    ("/api/generate", {"prompt": "hi"}),
+])
+def test_localm_response_headers_are_forwarded_in_both_modes(
+        client, tagged_chat, route, body, stream):
+    r = client.post(route, json={"model": MODEL, "stream": stream, **body})
+    assert r.status_code == 200
+    assert r.headers.get("x-localm-test") == "1"

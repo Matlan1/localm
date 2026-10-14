@@ -485,6 +485,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 - **The bundled koboldcpp runtime (native music generation) moved from v1.122.1 to v1.123.** An existing install picks it up the next time music generation starts.
+- **HF models decode about 3.5x faster on AMD GPUs.** On ROCm, loading an HF model now tunes the
+  matrix kernels its one-token decoding uses (PyTorch TunableOp, rocBLAS kernels): gemma-3-4b in
+  bf16 on an RX 6900 XT goes from 4.3 to 15 tokens per second with identical output. The first load
+  of a model on a card takes a few seconds longer; the results are cached and reused.
 - **Speculative drafting measures the verification cost of 4, 8 and 16 tokens.** On several MoE and
   hybrid models a batch of 5, 9 or 17 tokens costs much more than one token fewer, and the load-time
   measurement used to see only the larger size, so it priced 4- and 8-token drafts too high and drafted
@@ -608,6 +612,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A malformed key store or credentials file is no longer overwritten.** Creating or revoking an API key, or saving a Hugging Face or CivitAI credential, now refuses and leaves the file untouched when `auth.json` is not a list or `model_source_credentials.json` is not an object, instead of replacing it with just the new entry.
+- **Self-calls to a look-alike loopback URL keep certificate verification.** An HTTPS URL containing a backslash or control character is no longer treated as loopback, so the coder agent does not disable verification for it when the local CA file is missing.
+- **Ollama-compatible routes.** A non-streamed `/api/chat` or `/api/generate` reply now carries the
+  `X-Localm-*` response headers, as the streamed one does. `POST /api/embed` with an empty `input`
+  refuses `dimensions` and answers 404 for an unknown model instead of returning an empty result.
+  The `keep_alive: 0` unload idiom no longer unloads a local copy of a model that another instance serves.
 - **Revoking an admin-scoped key says when its browser sessions could not be dropped.** If
   removing the revoked key's sessions failed with an error, the server log said nothing at the
   default level although an admin session cookie for that key could stay usable. It now logs a
@@ -668,7 +678,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
   cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
   dropped. A model worker that does not exit when stopped is killed.
-- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes.
+- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes. Its entry in the activity list shows the phase "queued" while it waits.
 - **Two command-line hints no longer mislead.** `localm memory list` on an empty store says that
   `localm memory add` does not work in privacy mode, and `localm mcp --help` now names the `rerank`
   tool and each plugin tool.
@@ -2144,6 +2154,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **Update and key-listing replies no longer hand a scoped key your file paths.** The backup
+  path from `GET /api/update/rollback` and `POST /api/update/apply`, the text of a failed apply,
+  and the owner-key-file notice on `GET /v1/keys` named the full location under your data
+  directory. A caller other than the owner now gets the scrubbed form (data directory as
+  `<data>`, file name kept); the owner and open mode still see the full path.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model

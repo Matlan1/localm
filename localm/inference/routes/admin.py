@@ -300,12 +300,14 @@ def register(app: FastAPI, ctx) -> None:
                 "markdown": _strip_unreleased(markdown)}
 
     @app.post("/api/update/apply", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    async def update_apply_ep():
+    async def update_apply_ep(request: Request):
         """Apply the latest update (download + swap + class step), then restart in
         place so the new code loads. EXPLICIT only (a button calls this); localm never
         self-updates on its own. A failed apply rolls back and is surfaced honestly,
         never as success. The asset is re-derived from the latest release server-side
-        (not taken from the client)."""
+        (not taken from the client). The ``backup`` field and an ``error`` text are
+        path-scrubbed (``http_server.path_formatter``) for a caller other than the
+        local operator."""
         from localm import updater
         from localm.bugreport import LocalmError
         if not updater.available():
@@ -325,7 +327,10 @@ def register(app: FastAPI, ctx) -> None:
                 updater.apply, asset["id"], signature=info.get("signature"))
         except LocalmError as e:
             # apply() already rolled back; report the failure, do not fake success.
-            return {"applied": False, "error": format_localm_error(e)}
+            return {"applied": False,
+                    "error": _hs.path_formatter(request)(format_localm_error(e))}
+        if res.get("backup") is not None:
+            res["backup"] = _hs.path_formatter(request)(res["backup"])
         res["available"] = True
         # Restart in place so the swapped (editable) code loads - except a setup-class
         # update, which needs setup.bat re-run by the user.
@@ -368,13 +373,18 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/update/rollback",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    async def update_rollback_info_ep():
+    async def update_rollback_info_ep(request: Request):
         """Whether a rollback is possible and which build it would restore.
         Read-only: it never rolls anything back, and never creates the updates dir.
-        Returns ``{available, backup, version, current}``. Scoped like its
-        /api/update/check sibling; the POST below is the owner-gated half."""
+        Returns ``{available, backup, version, current}``; ``backup`` is
+        path-scrubbed (``http_server.path_formatter``) for a caller other than the
+        local operator. Scoped like its /api/update/check sibling; the POST below
+        is the owner-gated half."""
         from localm import updater
-        return await asyncio.to_thread(updater.rollback_info)
+        info = await asyncio.to_thread(updater.rollback_info)
+        if info.get("backup") is not None:
+            info["backup"] = _hs.path_formatter(request)(info["backup"])
+        return info
 
     @app.post("/api/update/rollback",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
@@ -394,7 +404,9 @@ def register(app: FastAPI, ctx) -> None:
 
         LIMIT: this restores the previous build's FILES, the same as the CLI. It
         does not undo a deps-class update's package installs, and the class of the
-        last apply is not recorded anywhere, so it cannot warn about that case."""
+        last apply is not recorded anywhere, so it cannot warn about that case.
+        Only open mode or an owner key reaches this route, so its reply (including
+        the ``backup`` path and error texts) is never path-scrubbed."""
         from localm import updater
         from localm.bugreport import LocalmError
         held = _hs.caller_scopes(request)

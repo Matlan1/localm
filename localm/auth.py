@@ -871,16 +871,18 @@ def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
 
 
 def _load_keystore_checked() -> tuple:
-    """``(records, read_ok)``. ``read_ok`` is False ONLY when auth.json is
-    PRESENT and could not be read (even after ``config._read_json_checked``'s
-    own bounded retry over a transient Windows sharing violation) - the one
-    state in which an empty list is indistinguishable from a genuinely empty
-    keystore. Mirrors ``config.load_config_checked`` exactly; see
+    """``(records, read_ok)``. ``read_ok`` is False when auth.json is PRESENT
+    and either could not be read (even after ``config._read_json_checked``'s
+    own bounded retry over a transient Windows sharing violation) or parses to
+    something other than a JSON list - the states in which an empty list is
+    indistinguishable from a genuinely empty keystore. See
     ``_load_keystore_for_write`` for the read-modify-write callers that must
     act on ``read_ok``."""
     from localm.config import _read_json_checked
     data, read_ok = _read_json_checked(keystore_file(), [])
-    return (data if isinstance(data, list) else []), read_ok
+    if not isinstance(data, list):
+        return [], False
+    return data, read_ok
 
 
 def _load_keystore() -> list:
@@ -903,7 +905,8 @@ def _load_keystore() -> list:
 
 def _load_keystore_for_write() -> list:
     """The keystore records for a read-modify-write, RAISING ``ConfigUnreadable``
-    instead of returning [] when auth.json exists but cannot be read - the
+    instead of returning [] when auth.json exists but cannot be read or does
+    not hold a JSON list - the
     same refusal ``config.update_config``/``update_registry`` apply to
     config.json/registry.json, extended to this store. Silently returning []
     here is exactly the bug: the caller then appends/mutates and persists a
@@ -917,8 +920,8 @@ def _load_keystore_for_write() -> list:
     if not read_ok:
         name = keystore_file().name
         raise ConfigUnreadable(
-            f"{name} exists but could not be read, so saving would replace "
-            f"every key in it with just this change; refused. Fix or remove "
+            f"{name} exists but could not be read as a JSON list, so saving "
+            f"would replace every key in it with just this change; refused. Fix or remove "
             f"{name} (deleting it resets to no scoped keys).")
     return records
 

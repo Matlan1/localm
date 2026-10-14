@@ -113,8 +113,11 @@ jobs:
           python -m venv /tmp/wheelcheck
           /tmp/wheelcheck/bin/python -m pip install --quiet --require-hashes --no-deps \
             -r /tmp/wheelcheck-requirements.txt
-          /tmp/wheelcheck/bin/python -m pip install --quiet --no-deps \
-            "dist/localm-${file_version}-py3-none-any.whl"
+          wheel="${PWD}/dist/localm-${file_version}-py3-none-any.whl"
+          wheel_sha256="$(sha256sum "${wheel}" | cut -d' ' -f1)"
+          echo "localm @ file://${wheel} --hash=sha256:${wheel_sha256}" > /tmp/wheelcheck-localm.txt
+          /tmp/wheelcheck/bin/python -m pip install --quiet --require-hashes --no-deps \
+            -r /tmp/wheelcheck-localm.txt
           mkdir -p /tmp/neutral
           cd /tmp/neutral
           PYTHONPATH= /tmp/wheelcheck/bin/python - <<'PY'
