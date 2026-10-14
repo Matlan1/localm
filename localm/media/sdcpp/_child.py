@@ -8,7 +8,7 @@ command at a time:
     ("load", {"runtime_dir", "extra_dirs", "ctx": {<sd_ctx_params_t path fields>, ...}})
     ("generate_image", {"prompt", "negative_prompt", "width", "height", "steps",
                         "cfg_scale", "guidance", "seed", "strength", "sample_method",
-                        "scheduler", "clip_skip", "init_image", "loras",
+                        "scheduler", "clip_skip", "init_image", "loras", "vae_tile",
                         "hires": {"upscaler", "model_path", "scale", "steps",
                                   "denoising_strength", "tile_size"}})
     ("generate_video", {"prompt", "negative_prompt", "width", "height", "video_frames",
@@ -387,6 +387,21 @@ def _set_hires(lib, b, p, payload):
     return keep
 
 
+def _set_vae_tile(p, payload) -> None:
+    """Turn on VAE tiling in image params *p* with the ``[width, height]`` tile
+    (image pixels) in ``payload["vae_tile"]``; nothing without one."""
+    tile = payload.get("vae_tile")
+    if not tile:
+        return
+    w, h = int(tile[0]), int(tile[1])
+    if w <= 0 or h <= 0:
+        raise ValueError(f"invalid VAE tile size {w}x{h}")
+    t = p.vae_tiling_params
+    t.enabled = True
+    t.tile_size_w = w
+    t.tile_size_h = h
+
+
 def _set_loras(b, p, payload):
     """Fill *p*'s ``loras``/``lora_count`` from ``payload["loras"]`` (each
     ``{"path", "multiplier", "is_high_noise"}``). Returns the ctypes objects
@@ -441,6 +456,7 @@ def _do_generate_image(payload, cancel_event):
     if sched is not None:
         p.sample_params.scheduler = sched
     hires_refs = _set_hires(lib, b, p, payload)
+    _set_vae_tile(p, payload)
     keep = None
     init = payload.get("init_image")
     if init:

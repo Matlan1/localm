@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.media.sdcpp import budget as sd_budget
 from localm.media.sdcpp import families, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
@@ -558,9 +559,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             return False, "Cancelled."
         shared.cancel_idle_timer()
         try:
-            if runner.loaded_key != models["key"] or not runner.is_alive():
+            ctx = models["ctx"]
+            key = (models["key"], rt.backend)
+            if runner.loaded_key != key or not runner.is_alive():
                 say(f"Loading {models['label']} (stable-diffusion.cpp, {rt.backend})...")
-            info = runner.ensure_loaded(models["key"], rt.path, models["ctx"],
+                runner.shutdown()
+                ctx = sd_budget.with_budget(ctx, rt.backend, say)
+            info = runner.ensure_loaded(key, rt.path, ctx,
                                         extra_dirs=rt.extra_dirs, on_event=relay,
                                         cancel_check=cancel_check)
             if not info.get("video"):

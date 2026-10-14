@@ -766,3 +766,9 @@ def test_the_relay_words_upscale_progress_as_upscaling():
     relay(("progress", {"phase": "upscaling", "step": 2, "steps": 6, "secs": 0.1}))
     relay(("progress", {"phase": "upscaling", "step": 6, "steps": 6, "secs": 0.1}))
     assert lines == ["Upscaling 2/6", "Upscaling 6/6"]
+
+
+@pytest.fixture(autouse=True)
+def _no_live_vram_budget(monkeypatch):
+    from localm.media.sdcpp import budget as sd_budget
+    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend: None)

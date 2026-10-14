@@ -833,3 +833,9 @@ def test_the_worker_records_the_wan_model_it_loaded(child_state):
     log_cb(2, b"Wan2.1-I2V-14B --- wan.hpp:917", None)
     assert _child._State.model_desc == "Wan2.1-T2V-1.3B"
     assert q.empty()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_vram_budget(monkeypatch):
+    from localm.media.sdcpp import budget as sd_budget
+    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend: None)

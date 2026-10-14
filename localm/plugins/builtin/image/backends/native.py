@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from localm.media.image_params import png_text_entries
+from localm.media.sdcpp import budget as sd_budget
 from localm.media.sdcpp import families, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared
@@ -144,6 +145,17 @@ def resolve_models(s: dict) -> dict:
     return {"key": key, "ctx": ctx, "label": label, "recommended": rec,
             "family": info.family, "components": built["components"],
             "notes": built["notes"], "defaults": families.defaults_for(info)}
+
+
+FLASH_ATTENTION_BACKENDS = ("rocm",)
+
+
+def load_ctx(ctx: dict, backend: str) -> dict:
+    """The context fields a load of model set *ctx* uses on a *backend*
+    runtime: *ctx* plus diffusion flash attention on ``FLASH_ATTENTION_BACKENDS``."""
+    if backend in FLASH_ATTENTION_BACKENDS:
+        return dict(ctx, diffusion_flash_attn=True)
+    return dict(ctx)
 
 
 def _runtime_choice(s: dict) -> str:
@@ -355,6 +367,10 @@ class _EventRelay:
     def flush(self) -> None:
         self._warnings.flush()
 
+    def vae_tile(self, size) -> None:
+        """The VAE tile ``(width, height)`` the next image requests, or None."""
+        self._warnings.full_tile = size
+
     def __call__(self, event) -> None:
         kind = event[0]
         if kind == "log":
@@ -559,9 +575,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             return False, "Cancelled."
         shared.cancel_idle_timer()
         try:
-            if runner.loaded_key != models["key"] or not runner.is_alive():
+            ctx = load_ctx(models["ctx"], rt.backend)
+            key = (models["key"], rt.backend)
+            if runner.loaded_key != key or not runner.is_alive():
                 say(f"Loading {models['label']} (stable-diffusion.cpp, {rt.backend})...")
-            info = runner.ensure_loaded(models["key"], rt.path, models["ctx"],
+                runner.shutdown()
+                ctx = sd_budget.with_budget(ctx, rt.backend, say)
+            info = runner.ensure_loaded(key, rt.path, ctx,
                                          extra_dirs=rt.extra_dirs, on_event=relay,
                                          cancel_check=cancel_check)
             if not info.get("image"):
@@ -615,7 +635,9 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
                               for x in lora_files],
                     "hires": hires_payload,
+                    "vae_tile": None if hires else [int(width), int(height)],
                 }
+                relay.vae_tile(None if hires else (int(width), int(height)))
                 label = f"image {index + 1}/{batch}, " if batch > 1 else ""
                 say(f"Generating {label}{width}x{height}"
                     + (f", {steps} steps" if steps else "")
