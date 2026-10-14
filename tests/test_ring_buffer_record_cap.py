@@ -67,18 +67,13 @@ def test_native_line_is_truncated_too(fresh_ring):
 
 
 def test_a_long_traceback_keeps_its_exception_line(fresh_ring):
-    def deep(n):
-        if n == 0:
-            raise ValueError("the actual cause " + "z" * 50)
-        deep(n - 1)
-
     try:
-        deep(120)
+        raise ValueError("the actual cause " + "z" * 50)
     except ValueError:
-        logging.getLogger("localm.web").exception("handler failed")
+        logging.getLogger("localm.web").exception("handler failed " + "p" * 3000)
     entry = debuglog.recent_activity()[-1]
     assert "(truncated," in entry
-    assert entry.splitlines()[-1].startswith("ValueError: the actual cause")
+    assert entry.splitlines()[-1] == "ValueError: the actual cause " + "z" * 50
 
 
 def test_a_clipped_traceback_tail_is_bounded(fresh_ring):
