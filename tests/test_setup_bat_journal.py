@@ -293,8 +293,8 @@ class TestTheScriptItself:
 
     def test_no_scratch_file_goes_to_the_system_temp_folder(self):
         assert "%TEMP%" not in self.text and "%TMP%" not in self.text
-        assert "GetTempPath" not in self.text and "$env:TEMP" not in self.text
-        assert "$env:TMP" not in self.text
+        assert "$env:TEMP" not in self.text and "$env:TMP" not in self.text
+        assert "$d=$env:STMP" in self.text
 
     def test_every_step_that_begins_also_finishes(self):
         begun = re.findall(r"call :jr begin (\S+)", self.code)
