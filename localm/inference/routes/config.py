@@ -9,6 +9,7 @@ from the http_server module global and the session-scoped audit mode from ctx.
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 
 import localm.inference.http_server as _hs
 from localm import scopes
@@ -216,7 +217,8 @@ def register(app: FastAPI, ctx) -> None:
             current_model = str(load_config().get("embedding_model") or "")
             if new_model and new_model != current_model:
                 from localm.rag import collection_provenance_note, collection_provenance_report
-                affected = collection_provenance_report(candidate_model=new_model)
+                affected = await run_in_threadpool(
+                    collection_provenance_report, candidate_model=new_model)
                 if affected:
                     return {"needs_confirm": True, "model": new_model,
                             "collections": affected,

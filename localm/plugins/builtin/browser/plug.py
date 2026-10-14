@@ -369,7 +369,11 @@ async def type_text(req: TypeRequest, request: Request):
 @_router.post("/api/browser/stop")
 async def stop_browser(request: Request):
     sid = _gui_session_id(request)
-    closed = bsession.close(sid)
+    from localm.executor import get_plugin_executor
+    loop = asyncio.get_running_loop()
+    # stop() waits on the browser's own loop and thread, so it never runs on this one.
+    closed = await loop.run_in_executor(get_plugin_executor(),
+                                        lambda: bsession.close(sid))
     return {"closed": closed}
 
 

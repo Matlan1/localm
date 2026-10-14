@@ -29,6 +29,7 @@ class _State:
         self.load_calls = []
         self.config_calls = 0
         self.report_model = True
+        self.load_refusal = None
 
 
 def _make_server(state):
@@ -61,6 +62,10 @@ def _make_server(state):
                 return
             name = parse_qs(url.query).get("model", [""])[0]
             state.load_calls.append(name)
+            if state.load_refusal:
+                code, detail = state.load_refusal
+                self._send(code, {"detail": detail})
+                return
             if name not in _CTX:
                 self._send(404, {"detail": f"Model '{name}' is not registered."})
                 return
@@ -187,3 +192,38 @@ def test_config_route_names_the_model_the_context_ceiling_belongs_to(tmp_path, m
         body = c.get("/v1/config", headers=auth).json()
         assert body["effective_ctx_max"] is None
         assert body["effective_ctx_model"] is None
+
+
+def test_repl_model_command_names_the_missing_scope_on_a_403(server, tmp_path, capsys):
+    from localm.plugins.coder.cli.repl import _handle_command
+    state, base = server
+    state.load_refusal = (403, "Key lacks required scope: models:write")
+    agent = _agent(_backend(base), tmp_path)
+    _handle_command("/model model-b", agent)
+    out = capsys.readouterr().out
+    assert "models:write" in out
+    assert "requires an API key" not in out
+    assert "Model switched" not in out
+    assert agent.backend.model_id == "model-a"
+
+
+def test_load_model_still_reports_a_missing_key_on_a_401(server):
+    from localm.plugins.coder.backends.http import CoderAuthError
+    state, base = server
+    state.load_refusal = (401, "Invalid or missing API key")
+    with pytest.raises(CoderAuthError, match="requires an API key"):
+        _backend(base).load_model("model-b")
+
+
+def test_repl_model_command_does_not_claim_a_load_on_a_backend_without_one(
+        server, tmp_path, capsys):
+    from localm.plugins.coder.cli.repl import _handle_command
+    state, base = server
+    agent = _agent(HTTPBackend(base, "model-a", localm_server=False), tmp_path)
+    _handle_command("/model typo", agent)
+    out = capsys.readouterr().out
+    assert "Loading" not in out
+    assert "Model switched" not in out
+    assert "cannot confirm" in out
+    assert agent.backend.model_id == "typo"
+    assert state.load_calls == []

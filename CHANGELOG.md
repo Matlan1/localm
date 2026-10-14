@@ -377,11 +377,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Switch models in running coder sessions and resume any session with any model.**
   You can now change the model powering an active coder session in place without
   starting a new session or losing history. In the GUI, click the session model
-  badge in the session bar or use the Model section in session controls; switching
-  the active model in the sidebar also updates every local coder session that was not
-  started with a chosen model (a busy one once its task ends), and never a session on
-  another backend such as Ollama on localhost. A model switch made from a coder session
-  now refreshes the sidebar model list straight away.
+  badge in the session bar or use the Model section in session controls; whenever the
+  loaded model changes (from the sidebar, another coder session, a chat or the command
+  line) every local coder session that was not started with a chosen model follows it
+  (a busy one once its task ends, and only to the model that is still loaded), and a
+  session on another backend such as Ollama on localhost never does. A model switch
+  made from a coder session now refreshes the sidebar model list straight away.
   When loading the chosen model would evict a model that is in use, or would only
   partly fit in VRAM, the coder asks first, as the sidebar model picker does. If
   the load does not complete, starting a session reports why instead of starting
@@ -635,6 +636,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   precedence over the MTP toggle, and the toggle's help says it applies only while Speculative
   drafting is Inherit.
 - **The ACE-Step music model is no longer offered as an image or video model.**
+- **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
+  several seconds, and while it did, every other request and stream waited. The close now runs
+  in the background pool like the browser's other actions.
+- **Changing the embedding model no longer freezes the server while it checks your collections.** The preview of which collections the switch would affect now reads them off the main thread, so chat and the page keep responding while a large collection is read.
+- **Clear now removes a plugin's saved secret setting.** Clicking Clear on a plugin's API key field and saving previously said "Nothing changed" and kept the key; it now removes it.
 - **The chat model comes back after a failed image, video or music job.** When a generation
   crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
   until your next message. It now reloads on every way a job can end, and a job that finishes
@@ -1197,7 +1203,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`/model` in the coder REPL loads the model before it says it switched.** A name the
   server does not have is refused with the server's explanation instead of failing every
   turn afterwards, and the coder sizes its history to the new model's context window
-  instead of keeping the previous model's.
+  instead of keeping the previous model's. A key that can chat but lacks the
+  `models:write` scope is told that, instead of being sent to look for an API key, and a
+  backend that cannot be asked to load models (a `--url` server or an OpenAI or Anthropic
+  provider) says it cannot confirm the name instead of reporting a load.
 - **Compacting a long conversation now shows that it is happening.** While older
   messages are being summarised to fit the context window, the chat shows
   "Compacting conversation…" instead of sitting silent, in the browser, in
