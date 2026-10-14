@@ -36,6 +36,7 @@ from localm import __version__ as _LOCALM_VERSION
 from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.inference.backends.base import (
+    AudioInputError,
     ChatTemplateMissingError,
     ContextCapacityExceededError,
     EmbedBatchTooLargeError,
@@ -3061,6 +3062,7 @@ class _BodyStreamCapMiddleware:
             await JSONResponse(
                 status_code=413,
                 content={"detail": "Request body too large."},
+                headers={MEDIA_REFUSAL_HEADER: "body-size"},
             )(scope, receive, send)
             return
 
@@ -3138,6 +3140,7 @@ class _BodyStreamCapMiddleware:
             await JSONResponse(
                 status_code=413,
                 content={"detail": "Request body too large."},
+                headers={MEDIA_REFUSAL_HEADER: "body-size"},
             )(scope, receive, send)
 
 
@@ -5508,7 +5511,9 @@ async def stream_after_prep(
             prepared = task.result()
         except HTTPException as e:
             detail = e.detail if isinstance(e.detail, str) else json.dumps(e.detail)
-            for line in _prep_error_lines(detail, e.status_code, model_id, chunk_id, ts):
+            for line in _prep_error_lines(
+                    detail, e.status_code, model_id, chunk_id, ts,
+                    refusal=(e.headers or {}).get(MEDIA_REFUSAL_HEADER)):
                 yield line
             return
         except Exception as e:
@@ -5539,15 +5544,17 @@ async def stream_after_prep(
 
 
 def _prep_error_lines(detail: str, status: int, model_id: str, chunk_id: str,
-                      ts: int) -> list:
+                      ts: int, refusal: Optional[str] = None) -> list:
     """The error reply and terminal lines that end an early-opened stream. Both
     the error text chunk and the terminal chunk carry ``localm_error``, so a
     client that knows it can raise before showing the text as a reply."""
-    refusal = {"status": status, "detail": detail}
+    localm_error = {"status": status, "detail": detail}
+    if refusal:
+        localm_error["refusal"] = refusal
     err = ChatChunk.token(detail, model_id, chunk_id, ts).model_dump()
-    err["localm_error"] = refusal
+    err["localm_error"] = localm_error
     done = ChatChunk.done(model_id, chunk_id, ts, finish_reason="error").model_dump()
-    done["localm_error"] = refusal
+    done["localm_error"] = localm_error
     return ["data: " + json.dumps(err) + "\n\n",
             "data: " + json.dumps(done) + "\n\n",
             "data: [DONE]\n\n"]
@@ -5844,6 +5851,9 @@ async def _stream_sse_body(
             err_body = err_chunk.model_dump(mode="json")
             err_body["localm_error"] = {"status": err_status,
                                         "detail": scrub_paths(str(gen_error))}
+            refusal = media_refusal_kind(gen_error)
+            if refusal:
+                err_body["localm_error"]["refusal"] = refusal
             yield f"data: {json.dumps(err_body, ensure_ascii=False, separators=(',', ':'))}\n\n"
         else:
             yield f"data: {err_chunk.model_dump_json()}\n\n"
@@ -6730,6 +6740,27 @@ def backend_error_status(exc: BaseException) -> Optional[int]:
     return None
 
 
+MEDIA_REFUSAL_HEADER = "X-Localm-Refusal"
+
+
+def media_refusal_kind(exc: BaseException) -> Optional[str]:
+    """``"audio"`` or ``"image"`` when *exc* refuses an attached clip or image,
+    else ``None``. Sent to clients (response header, or the ``refusal`` field of
+    a streamed ``localm_error``) so a client can tell which attachment a refusal
+    was about instead of inferring it from the status. The request-body size
+    refusal sends ``"body-size"`` the same way."""
+    if isinstance(exc, AudioInputError):
+        return "audio"
+    if isinstance(exc, (VisionInputError, ImageDecodeUnavailable)):
+        return "image"
+    return None
+
+
+def media_refusal_headers(exc: BaseException) -> Optional[dict]:
+    kind = media_refusal_kind(exc)
+    return {MEDIA_REFUSAL_HEADER: kind} if kind else None
+
+
 async def _count_streamed_tokens(engine, streamed: str) -> int:
     """Token count of text already delivered to the client, for the usage block.
 
@@ -6833,7 +6864,8 @@ async def _complete(
             # before generation starts), but it does carry the same reason and
             # marks finish_reason="error" - so both paths tell the caller what went
             # wrong, which is the property that was actually broken.
-            raise HTTPException(backend_error_status(e), str(e)) from e
+            raise HTTPException(backend_error_status(e), str(e),
+                                headers=media_refusal_headers(e)) from e
         except RuntimeError as e:
             # A generation FAILURE (not enough free VRAM for this prompt, a
             # conversation that outgrew n_ctx_max, a native decode error) is raised

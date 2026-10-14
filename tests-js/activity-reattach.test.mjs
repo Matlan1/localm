@@ -466,3 +466,28 @@ test("showActivityDetails: the modal notes staleness once reads have failed 3 ti
   assert.match(modalBody.textContent, /[Cc]ould not reach the server/);
   assert.match(modalBody.textContent, /Model pull/, "the last known op list is still shown below the notice");
 });
+
+test("a running operation in the phase 'queued' is shown as queued, in the pill and the list", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    [{ id: "j1", kind: "imagine", label: "Image", status: "running", phase: "queued" }],
+  ]);
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await tick(); await tick(); await tick();
+
+  assert.match(win.document.getElementById("activity-pill").textContent, /Image - queued/);
+  win.showActivityDetails();
+  const state = win.document.querySelector("#modal-body .job-state");
+  assert.equal(state.textContent, "queued");
+});
+
+test("a running operation past the queue is shown as running", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    [{ id: "j1", kind: "imagine", label: "Image", status: "running", phase: "running", pct: 30 }],
+  ]);
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await tick(); await tick(); await tick();
+
+  assert.match(win.document.getElementById("activity-pill").textContent, /Image 30%/);
+  win.showActivityDetails();
+  assert.equal(win.document.querySelector("#modal-body .job-state").textContent, "running");
+});

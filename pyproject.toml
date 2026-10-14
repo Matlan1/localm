@@ -106,6 +106,8 @@ dependencies = [
     # path needs it and needs no torch, while pillow used to ship only with the
     # gpu extra - so a GGUF-only install crashed on any attached image.
     "pillow>=12.3.0",
+    # PDF text extraction for chat/coder attachments and Knowledge. Pure Python.
+    "pypdf>=6.16.1",
 ]
 
 [project.optional-dependencies]
@@ -217,8 +219,8 @@ hf = [
 audio = [
     "soundfile>=0.14.0",
 ]
-# Knowledge collections (chat with your documents) - only PDF parsing needs
-# a package; txt/md/docx/html/code extraction is stdlib.
+# Knowledge collections (chat with your documents). pypdf is a core dependency;
+# this extra remains so existing "localm[rag]" installs keep resolving.
 # Install with:  pip install "localm[rag]"
 rag = [
     "pypdf>=6.16.1",

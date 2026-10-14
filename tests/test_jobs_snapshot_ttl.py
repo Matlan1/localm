@@ -185,6 +185,12 @@ def test_summary_reports_the_latest_progress():
     assert row["phase"] == "download"
 
 
+def test_summary_reports_a_waiting_job_as_queued_while_it_runs():
+    job = Job(id="a", kind="image", argv=[])
+    job.push({"type": "progress", "phase": "queued"})
+    assert job.summary()["phase"] == "queued"
+
+
 def test_summary_omits_a_non_numeric_pct():
     job = Job(id="a", kind="pull", argv=[])
     job.push({"type": "progress", "pct": None, "phase": "download"})

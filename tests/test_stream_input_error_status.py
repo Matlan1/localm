@@ -7,7 +7,8 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from localm.inference.backends.base import AudioInputError
+from localm.inference.backends.base import (
+    AudioInputError, ContextCapacityExceededError, ImageLimitError, VisionInputError)
 from localm.inference.http_server import create_app
 
 
@@ -50,9 +51,25 @@ def _post(engine):
 def test_audio_decode_failure_before_any_token_carries_400():
     chunks = _post(_engine((), AudioInputError("The audio could not be decoded")))
     errs = [c["localm_error"] for c in chunks if "localm_error" in c]
-    assert errs == [{"status": 400, "detail": "The audio could not be decoded"}]
+    assert errs == [{"status": 400, "detail": "The audio could not be decoded",
+                     "refusal": "audio"}]
     assert any("[inference error" in (c["choices"][0]["delta"].get("content") or "")
                for c in chunks if c.get("choices"))
+
+
+def test_image_refusals_name_the_image_as_the_refused_attachment():
+    for exc, status in ((VisionInputError("cannot read this image"), 400),
+                        (ImageLimitError("too many images"), 413)):
+        errs = [c["localm_error"] for c in _post(_engine((), exc))
+                if "localm_error" in c]
+        assert errs == [{"status": status, "detail": str(exc), "refusal": "image"}]
+
+
+def test_a_refusal_unrelated_to_attachments_names_no_attachment():
+    errs = [c["localm_error"]
+            for c in _post(_engine((), ContextCapacityExceededError("too long")))
+            if "localm_error" in c]
+    assert errs == [{"status": 413, "detail": "too long"}]
 
 
 def test_failure_after_tokens_stays_in_stream_only():

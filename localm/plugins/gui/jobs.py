@@ -330,7 +330,8 @@ class Job:
         attach to it. Does not carry argv or the owner id.
 
         pct/phase come from the last progress event. Both are absent, not zero,
-        when the job has not reported progress."""
+        when the job has not reported progress. phase is the last one reported
+        and stays on the row after the job ends; status is authoritative."""
         with self._sub_lock:
             progress = self._last_progress
         out = {
