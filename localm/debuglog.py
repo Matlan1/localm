@@ -163,13 +163,21 @@ def uvicorn_log_level() -> str:
 
 _RING_CAPACITY = 400
 _RING_MAX_RECORD_CHARS = 2000
+_RING_MAX_TAIL_CHARS = 500
 
 
-def _clip_record(text: str) -> str:
-    """Return text cut to _RING_MAX_RECORD_CHARS with a visible truncation suffix."""
+def _clip_record(text: str, exc_text: Optional[str] = None) -> str:
+    """Return text cut to _RING_MAX_RECORD_CHARS with a visible truncation suffix.
+    A clipped record that carries a traceback (*exc_text*) keeps the traceback's
+    final ``ExceptionType: message`` line after the suffix, cut to
+    _RING_MAX_TAIL_CHARS."""
     if len(text) <= _RING_MAX_RECORD_CHARS:
         return text
-    return f"{text[:_RING_MAX_RECORD_CHARS]}...(truncated, {len(text)} chars)"
+    clipped = f"{text[:_RING_MAX_RECORD_CHARS]}...(truncated, {len(text)} chars)"
+    lines = [ln for ln in (exc_text or "").splitlines() if ln.strip()]
+    if lines:
+        clipped += "\n" + lines[-1][:_RING_MAX_TAIL_CHARS]
+    return clipped
 
 
 class _RingBufferHandler(logging.Handler):
@@ -184,7 +192,7 @@ class _RingBufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             render = self.format          # bound logging.Handler renderer
-            self._buf.append(_clip_record(render(record)))
+            self._buf.append(_clip_record(render(record), record.exc_text))
         except Exception:
             # A logging handler must never raise into the code that logged.
             self.handleError(record)

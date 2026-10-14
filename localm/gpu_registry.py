@@ -5,7 +5,7 @@ this machine (multi-instance GPU/VRAM cooperation).
 Nothing is written to disk. Running instances are found the way any program finds
 a listening server: the operating system's table of listening TCP ports
 (:mod:`localm.listeners`), narrowed to the range localm claims
-(``config.PORT_RANGE``), then asked who they are (``GET /whoami``, must answer
+(``config.PORT_RANGE``) plus :data:`EXTRA_PEER_PORTS`, then asked who they are (``GET /whoami``, must answer
 ``app == "localm"``) and what they hold (``GET /v1/instances/status``). When the
 socket table cannot be read, every port in the range is probed instead.
 
@@ -46,6 +46,10 @@ _WILDCARDS = ("0.0.0.0", "::", "*", "")
 _SCHEMES = ("http", "https")
 _FALLBACK_PROBE_WORKERS = 100
 _FALLBACK_PROBE_TIMEOUT = 0.5
+
+# Ports outside localm's range that discovery also looks at: Ollama's default
+# port, which docs/ollama-api.md tells users to serve on.
+EXTRA_PEER_PORTS = (11434,)
 
 
 # ------------------------------------------------------------------ #
@@ -94,9 +98,10 @@ def _dial_address(address: str) -> Optional[str]:
         return None
 
 
-def _probe_range(lo: int, hi: int) -> list:
-    """Every port in ``lo..hi`` accepting a TCP connection on loopback, as
-    ``(address, port)`` pairs. The fallback when the socket table is unreadable."""
+def _probe_range(lo: int, hi: int, extra: tuple = ()) -> list:
+    """Every port in ``lo..hi``, and every port in *extra*, accepting a TCP
+    connection on loopback, as ``(address, port)`` pairs. The fallback when the
+    socket table is unreadable."""
     def _try(port: int):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(_FALLBACK_PROBE_TIMEOUT)
@@ -109,12 +114,13 @@ def _probe_range(lo: int, hi: int) -> list:
             s.close()
 
     with ThreadPoolExecutor(max_workers=_FALLBACK_PROBE_WORKERS) as ex:
-        return [r for r in ex.map(_try, range(lo, hi + 1)) if r is not None]
+        return [r for r in ex.map(_try, (*range(lo, hi + 1), *extra)) if r is not None]
 
 
 def candidate_endpoints() -> list:
     """``(dial address, port)`` for every listening TCP port inside localm's claimed
-    range that this machine could dial on loopback, one per port. Empty when
+    range, or in :data:`EXTRA_PEER_PORTS`, that this machine could dial on
+    loopback, one per port. Empty when
     ``LOCALM_PEER_DETECTION=off``."""
     if os.environ.get(DETECTION_ENV, "").strip().lower() == "off":
         return []
@@ -123,9 +129,10 @@ def candidate_endpoints() -> list:
     lo, hi = PORT_RANGE
     endpoints = listening_endpoints()
     if endpoints is None:
-        found = _probe_range(lo, hi)
+        found = _probe_range(lo, hi, EXTRA_PEER_PORTS)
     else:
-        found = [(a, p) for a, p in endpoints if lo <= p <= hi]
+        found = [(a, p) for a, p in endpoints
+                 if lo <= p <= hi or p in EXTRA_PEER_PORTS]
     chosen: dict = {}
     for address, port in found:
         dial = _dial_address(address)
@@ -192,7 +199,8 @@ def _probe_peer(endpoint: tuple, exclude_self_id: Optional[str],
 def list_gpu_peers(*, exclude_self_id: Optional[str] = None,
                    timeout: float = 0.7) -> list:
     """The other localm instances running on this machine that coordinate GPU use,
-    found live: each candidate port inside localm's range must answer
+    found live: each candidate port inside localm's range, or in
+    :data:`EXTRA_PEER_PORTS`, must answer
     ``GET /whoami`` as localm and ``GET /v1/instances/status`` as the same
     instance. Excludes *exclude_self_id* and, unconditionally, THIS process.
 
