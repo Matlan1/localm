@@ -619,6 +619,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   credential folder while walking a folder, and a re-sync or repair skips a refused source
   instead of failing.
 - **A config lock that cannot be read on release is reported.** The lock file left behind is named in a warning instead of lingering silently until it is reclaimed.
+- **The MCP server frees VRAM for the embedding model.** When memory recall or a coder task first loads the embedding model next to a resident chat model on a tight card, `localm mcp` now unloads the idle chat model first instead of loading the embedder alongside it. A chat model that is busy or pinned stays loaded, and that, or a process with no chat model to unload, is logged as a warning.
 - **A malformed key store or credentials file is no longer overwritten.** Creating or revoking an API key, or saving a Hugging Face or CivitAI credential, now refuses and leaves the file untouched when `auth.json` is not a list or `model_source_credentials.json` is not an object, instead of replacing it with just the new entry.
 - **Self-calls to a look-alike loopback URL keep certificate verification.** An HTTPS URL containing a backslash or control character is no longer treated as loopback, so the coder agent does not disable verification for it when the local CA file is missing.
 - **Ollama-compatible routes.** A non-streamed `/api/chat` or `/api/generate` reply now carries the

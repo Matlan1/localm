@@ -178,6 +178,8 @@ class EngineCache:
         # pick or load one, on the protocol thread and on a coder run's worker
         # thread alike. Never acquired while holding a generation lock
         # (generation_lock), Engine's load lock or the residency pin lock.
+        # evict_for_embedder takes it, with a timeout, from the embedder's
+        # pre-load swap, which holds neither embedder._LOCK nor the load lock.
         self._lock = threading.RLock()
         # Created on first use by routing_latch().
         self._latch = None
@@ -827,6 +829,54 @@ class EngineCache:
                  f"{loading} anyway")
         return True
 
+    def evict_for_embedder(self, timeout_s: float) -> str:
+        """Unload every loaded resident engine that is neither serving a request
+        nor pinned by configuration, waiting for each one's VRAM to come back,
+        so the shared embedder loads with that room. Never waits for a serving
+        engine. Another instance's copy (a peer) holds no VRAM here and is left
+        alone.
+
+        Returns "unloaded" when at least one engine was unloaded; otherwise
+        "in_use" when a loaded resident is serving a request, "pinned" when a
+        loaded resident is pinned by configuration, "already_unloaded" when no
+        loaded engine is resident, and "error" when this cache's lock was not
+        acquired within *timeout_s* seconds.
+
+        Registered with ``vram.register_embedder_evictor`` by ``serve_stdio``.
+        Caller must hold neither ``embedder._LOCK`` nor Engine's load lock."""
+        from localm.config import load_config
+        from localm.inference import residency
+        if not self._lock.acquire(timeout=max(0.0, timeout_s)):
+            _log("warning: could not free VRAM for the embedding model: the "
+                 f"model cache stayed busy for {timeout_s:.0f}s")
+            return "error"
+        try:
+            pinned = residency.pinned_model_names(load_config())
+            unloaded = False
+            tried: set = set()
+            while True:
+                candidates = [n for n in self._lru if n not in tried
+                              and getattr(self._engines.get(n), "loaded", True)]
+                victim = residency.pick_eviction_victim(
+                    candidates, self._engines, pinned=pinned)
+                if victim is None:
+                    break
+                tried.add(victim)
+                if self._evict(victim, loading="the embedding model"):
+                    unloaded = True
+            if unloaded:
+                return "unloaded"
+            loaded = [n for n in self._lru
+                      if n in self._engines
+                      and getattr(self._engines[n], "loaded", True)]
+            if any(residency.is_serving(self._engines[n]) for n in loaded):
+                return "in_use"
+            if any(n in pinned for n in loaded):
+                return "pinned"
+            return "already_unloaded"
+        finally:
+            self._lock.release()
+
     def unload_all(self) -> None:
         """Free every resident engine (shutdown). N resident means N to free."""
         with self._lock:
@@ -1157,9 +1207,12 @@ def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
     # process, on any thread, lands on stderr from here on.
     protocol_out = sys.stdout
     sys.stdout = sys.stderr
+    from localm.vram import register_embedder_evictor
+    unregister_evictor = register_embedder_evictor(engines.evict_for_embedder)
     try:
         server.run_stdio(stdout=protocol_out)
     finally:
+        unregister_evictor()
         sys.stdout = protocol_out
         # Every resident engine, not just the most recent one: freeing one of N
         # would leave the rest holding VRAM past exit.
