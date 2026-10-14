@@ -1,4 +1,4 @@
-# localm bug report: Crashed posting to http://<redacted>@alice-desktop.local/ with Bearer <redacted>
+# localm bug report: Crashed posting to http://<redacted>@<host>.local/ with Bearer <redacted>
 
 ## What I was doing
 I opened C:\Users\<redacted>\Documents\localm\notes.txt with token=<redacted>
@@ -7,7 +7,7 @@ I opened C:\Users\<redacted>\Documents\localm\notes.txt with token=<redacted>
 It should load /home/<redacted>/.cache/localm/model.gguf
 
 ## What happened
-Crashed posting to http://<redacted>@alice-desktop.local/ with Bearer <redacted>
+Crashed posting to http://<redacted>@<host>.local/ with Bearer <redacted>
 second line
 
 ## App state
@@ -47,7 +47,7 @@ second line
 - require_auth: yes
 - mode: log
 - comfy_workdir: ~/ComfyUI
-- comfy_api_url: http://<redacted>@alice-desktop.local:8188/?api_key=<redacted>
+- comfy_api_url: http://<redacted>@<host>.local:8188/?api_key=<redacted>
 - net_search_url: https://search.example.org/search?q=x&token=<redacted>
 - coder_reviewer: http://reviewer.example.net/v1?key=<redacted>&model=m&cc=<redacted-email>
 
@@ -59,9 +59,9 @@ second line
 ## Recent log (tail)
 ```
 ... (1 debug record(s) withheld - chat content is never included in a bug report) ...
-2026-10-09 11:59:00,001 INFO     localm: server start on alice-desktop.local:8765
+2026-10-09 11:59:00,001 INFO     localm: server start on <host>.local:8765
 2026-10-09 11:59:01,300 INFO     localm.http: GET /api/stats 200 3ms  (repeated 3x, 2026-10-09 11:59:01 .. 2026-10-09 11:59:01)
-2026-10-09 11:59:02,003 WARNING  localm.net: GET http://<redacted>@alice-desktop.local/?api_key=<redacted> failed for ~/models/private-model.gguf
+2026-10-09 11:59:02,003 WARNING  localm.net: GET http://<redacted>@<host>.local/?api_key=<redacted> failed for ~/models/private-model.gguf
 2026-10-09 11:59:03,004 ERROR    localm.engine: load failed
 Traceback (most recent call last):
   File "C:\Users\<redacted>\Documents\localm\notes.txt", line 7, in load
@@ -85,8 +85,8 @@ Thread 0x0003
 11:59:59 INFO localm: before restart Bearer <redacted>
 --- RESTART ---
 12:00:00 INFO localm: loaded ~/models/private-model.gguf
-12:00:01 WARNING localm: GET http://<redacted>@alice-desktop.local/?sig=<redacted> failed
-12:00:02 INFO localm: reviewer <redacted-email> at \\FILESERVER01\share\report.txt
+12:00:01 WARNING localm: GET http://<redacted>@<host>.local/?sig=<redacted> failed
+12:00:02 INFO localm: reviewer <redacted-email> at \\<host>\share\report.txt
 12:00:03 ERROR localm: header X-Api-Key: <redacted> key <redacted>
 ```
 

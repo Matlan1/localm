@@ -219,14 +219,14 @@ def _scrub_emails(text: str) -> str:
 # The machine name of a UNC path: ``\\NAME\share``, its doubled form
 # ``\\\\NAME\\share`` (repr() / JSON) and the ``\\?\UNC\NAME\share`` device form.
 # The run of backslashes must start the text, follow whitespace, a quote, a
-# backtick or one of ``( [ { = , ; | < > *``, or follow a colon that ends a word
+# backtick or one of ``( [ { = , ; | < *``, or follow a colon that ends a word
 # of two or more characters (``path:``), so a doubled separator inside a path
 # (``C:\\Users\\x``) is not read as one. ``wsl$``, ``wsl.localhost`` and
 # ``localhost`` are kept. Same
 # pattern as scripts/report_issue.py, scripts/report_issue.ps1 and
 # report-issue.sh. See test_host_patterns_do_not_grow_superlinearly.
 _UNC_HOST_RE = re.compile(
-    r"(?:(?<![^\s\x22\x27(\[{=,;|\x60<>*])|(?<=[A-Za-z0-9_]{2}:))"
+    r"(?:(?<![^\s\x22\x27(\[{=,;|\x60<*])|(?<=[A-Za-z0-9_]{2}:))"
     r"(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)"
     r"(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))"
     r"[A-Za-z0-9][A-Za-z0-9._$-]*",

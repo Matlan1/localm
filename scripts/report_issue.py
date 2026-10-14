@@ -198,7 +198,7 @@ def _email_replacement(m: re.Match) -> str:
 # Machine names. Byte-identical to _UNC_HOST_RE and _LAN_HOST_RE in
 # localm/bugreport/scrub.py, where the rules are described.
 _UNC_HOST_RE = re.compile(
-    r"(?:(?<![^\s\x22\x27(\[{=,;|\x60<>*])|(?<=[A-Za-z0-9_]{2}:))"
+    r"(?:(?<![^\s\x22\x27(\[{=,;|\x60<*])|(?<=[A-Za-z0-9_]{2}:))"
     r"(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)"
     r"(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))"
     r"[A-Za-z0-9][A-Za-z0-9._$-]*",

@@ -83,6 +83,7 @@ def test_bug_report_activity_section_is_bounded_and_scrubbed_before_it_is_cut(
 
     start = joined().index(key)
     log.info("%s", "t" * 1500)
+    log.info("%s", "s" * 1500)
     entry_overhead = len(debuglog.recent_activity()[-1]) - 1500
     want_total = start + 23 + 4000
     remaining = want_total - len(joined()) - 1 - entry_overhead
@@ -90,7 +91,7 @@ def test_bug_report_activity_section_is_bounded_and_scrubbed_before_it_is_cut(
     log.info("%s", "u" * remaining)
     text = joined()
     assert len(text) - 4000 == start + 23
-    assert text[start + 23:].startswith("AAAA") and "TAILCANARY" in text[start + 23:]
+    assert text[start + 23:].startswith("TAILCANARY")
 
     report = bugreport.build_report("activity bound check")
     assert joined() == text
