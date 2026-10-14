@@ -626,6 +626,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   refuses `dimensions` and answers 404 for an unknown model instead of returning an empty result.
   The `keep_alive: 0` unload idiom no longer unloads a local copy of a model that another instance serves.
 - **Two image, video or music jobs no longer load their models on top of the chat model coming back.** A second job that started while the first job's chat model was reloading loaded its own model beside it, which made the second job several times slower on a full card. A job now waits for a running chat reload, and the chat model reloads once, after the last job.
+- **A memory consolidation whose model call fails says so.** When the model raised during
+  memory consolidation (an engine error, an eviction, a decode failure), the run reported
+  "no new durable facts found" and the scheduled memory job was marked done. Nothing is
+  written now, the job is recorded as an error, the Memory panel's synthesize action shows
+  the failure, and a session whose summary failed is retried on the next run.
 - **A chat answered by another localm instance keeps this instance's session persistence.** With a
   route to another instance's loaded model, a scheduled chat job on a routed model, or
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a
@@ -2176,6 +2181,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The private-address guard refuses the IPv6 site-local range `fec0::/10`.**
 - **Web search reads at most 4 MB of a search service's answer.** A larger answer is refused instead
   of being read whole into memory.
+- **A generated image, clip or track no longer loses its owner when the gallery index is
+  briefly locked.** If another program held the ownership index while the file was saved, the
+  owner was not recorded and the file later became reachable by every key. The read is now
+  retried, an owner that still cannot be written is enforced in memory and recorded with the
+  next gallery change, and the job output, the rename response and
+  `/v1/images/generations` warn until it is on disk. Renames and deletes keep ownership
+  correct the same way.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model

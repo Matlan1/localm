@@ -197,9 +197,12 @@ def test_a_session_is_never_skipped_while_no_model_call_succeeds(memhome):
         assert plug._store_episodes(store, _boom, embed_fn=None, errors=[],
                                     model_answered=False) == 0
 
-    assert plug._store_episodes(
-        store, lambda p: "Planned the billing service Postgres migration",
-        embed_fn=None) == 2
+    def working(prompt):
+        if "Postgres migration" in prompt:
+            return "Planned the billing service Postgres migration"
+        return "Worked through the release checklist"
+
+    assert plug._store_episodes(store, working, embed_fn=None) == 2
 
 
 def test_synthesize_memory_reports_a_failed_model_call(memhome):
