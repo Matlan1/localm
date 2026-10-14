@@ -7,6 +7,7 @@ a chosen layout, the way the real ``*_init`` functions do."""
 from __future__ import annotations
 
 import ctypes
+import importlib.util
 import os
 from ctypes import Structure, c_int, c_int64
 from pathlib import Path
@@ -75,6 +76,7 @@ def _fill_ctx(s):
     s.n_threads, s.conditioning_cache_size = 6, 4
     s.wtype, s.rng_type, s.sampler_rng_type = b._SD_TYPE_COUNT, b._CUDA_RNG, b._RNG_TYPE_COUNT
     s.prediction, s.vae_format, s.auto_fit = b._PREDICTION_COUNT, b._SD_VAE_FORMAT_AUTO, True
+    s.batched_cfg = True
 
 
 def _with_extra_int_before(struct_type, field_name):
@@ -186,6 +188,158 @@ def test_a_different_commit_is_refused(commit):
     lib = _FakeLib(commit=commit)
     with pytest.raises(b.AbiMismatch, match=f"localm binds commit {pins.COMMIT[:7]}"):
         b.verify_abi(lib)
+
+
+# sd_ctx_params_t as include/stable-diffusion.h declares it at the pinned commit.
+_CTX_HEADER = """
+typedef struct {
+    const char* model_path;
+    const char* clip_l_path;
+    const char* clip_g_path;
+    const char* clip_vision_path;
+    const char* t5xxl_path;
+    const char* llm_path;
+    const char* llm_vision_path;
+    const char* diffusion_model_path;
+    const char* high_noise_diffusion_model_path;
+    const char* uncond_diffusion_model_path;
+    const char* embeddings_connectors_path;
+    const char* vae_path;
+    const char* audio_vae_path;
+    const char* audio_encoder_path;
+    const char* taesd_path;
+    const char* control_net_path;
+    const char* ip_adapter_path;
+    const char* motion_module_path;
+    const sd_embedding_t* embeddings;
+    uint32_t embedding_count;
+    const char* photo_maker_path;
+    const char* pulid_weights_path;
+    const char* tensor_type_rules;
+    int n_threads;
+    enum sd_type_t wtype;
+    enum rng_type_t rng_type;
+    enum rng_type_t sampler_rng_type;
+    enum prediction_t prediction;
+    enum lora_apply_mode_t lora_apply_mode;
+    bool enable_mmap;
+    bool flash_attn;
+    bool diffusion_flash_attn;
+    bool tae_preview_only;
+    bool diffusion_conv_direct;
+    bool vae_conv_direct;
+    bool force_sdxl_vae_conv_scale;
+    enum sd_vae_format_t vae_format;
+    const char* max_vram;
+    bool disable_prefetch;
+    bool eager_load;
+    const char* backend;
+    const char* params_backend;
+    const char* split_mode;
+    bool auto_fit;
+    const char* rpc_servers;
+    const char* model_args;
+    bool disable_segmented_compute;
+    bool batched_cfg;
+    float linear_scale;
+    float attn_scale;
+    const char* tokenizer;
+    bool sage_attn;
+    int conditioning_cache_size;
+    const char* flash_attn_mode;
+    const char* conv_direct_mode;
+} sd_ctx_params_t;
+"""
+
+
+def _confirm_script():
+    path = Path(__file__).resolve().parent.parent / "scripts" / "confirm_sdcpp_runtime.py"
+    spec = importlib.util.spec_from_file_location("_confirm_sdcpp_for_binding", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_ctx_params_match_the_header_declaration_field_for_field():
+    cf = _confirm_script()
+    header = cf.parse_header_structs(_CTX_HEADER)
+    bound = cf.binding_structs(b)
+    assert cf.compare_layout(header, {"sd_ctx_params_t": bound["sd_ctx_params_t"]}) == []
+    names = [f for f, _t in b.sd_ctx_params_t._fields_]
+    assert names.index("batched_cfg") == names.index("disable_segmented_compute") + 1
+    assert names[-2:] == ["flash_attn_mode", "conv_direct_mode"]
+
+
+@pytest.mark.parametrize("field,value,expect", [
+    ("batched_cfg", False, "ctx.batched_cfg"),
+    ("flash_attn_mode", b"auto", "ctx string pointers not null"),
+    ("conv_direct_mode", b"on", "ctx string pointers not null"),
+])
+def test_a_ctx_default_other_than_the_pinned_init_is_reported(field, value, expect):
+    lib = _FakeLib()
+
+    def fill(s):
+        _fill_ctx(s)
+        setattr(s, field, value)
+
+    lib.sd_ctx_params_init = lambda ptr: lib._write("ctx", ptr, fill)
+    assert expect in b.check_layouts(lib)
+    with pytest.raises(b.AbiMismatch, match="struct layout does not match"):
+        b.verify_abi(lib)
+
+
+class _LoadLib(_FakeLib):
+    """A library the worker's load request can run against; records the
+    ``sd_ctx_params_t`` that ``new_sd_ctx`` receives."""
+
+    def __init__(self):
+        super().__init__()
+        self.received = None
+
+    def sd_list_devices(self, buf, size):
+        text = b"CPU\tfake cpu\n"
+        if buf is not None:
+            ctypes.memmove(buf, text, min(len(text), size))
+        return len(text)
+
+    def new_sd_ctx(self, ref):
+        params = ctypes.cast(ref, ctypes.POINTER(b.sd_ctx_params_t)).contents
+        self.received = b.sd_ctx_params_t.from_buffer_copy(params)
+        return 1
+
+    def free_sd_ctx(self, ctx):
+        pass
+
+    def sd_get_model_version_name(self, ctx):
+        return b"SD 1.x"
+
+    def sd_ctx_supports_image_generation(self, ctx):
+        return True
+
+    def sd_ctx_supports_video_generation(self, ctx):
+        return False
+
+    def sd_get_default_sample_method(self, ctx):
+        return 0
+
+    def sd_get_default_scheduler(self, ctx, method):
+        return 0
+
+
+@pytest.mark.parametrize("ctx,want", [({}, True), ({"batched_cfg": False}, False),
+                                      ({"batched_cfg": True}, True)])
+def test_the_worker_load_passes_batched_cfg_to_the_library(monkeypatch, ctx, want):
+    from localm.media.sdcpp import _child
+    lib = _LoadLib()
+    monkeypatch.setattr(_child._State, "lib", lib)
+    for name in ("ctx", "last_errors", "model_desc", "paths"):
+        monkeypatch.setattr(_child._State, name, getattr(_child._State, name))
+    monkeypatch.setattr(_child._State, "ctx", None)
+    _child._do_load({"ctx": {"model_path": "m.safetensors", **ctx}})
+    assert lib.received is not None
+    assert lib.received.batched_cfg is want
+    assert ctypes.string_at(lib.received.model_path) == b"m.safetensors"
+    assert lib.received.flash_attn_mode is None and lib.received.conv_direct_mode is None
 
 
 def test_the_pinned_commit_matches_the_tag():
