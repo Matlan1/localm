@@ -121,6 +121,28 @@ def test_system_blocks_and_sampling_reach_the_model(home):
     assert (kw["temperature"], kw["top_p"], kw["top_k"], kw["max_tokens"]) == (0.2, 0.9, 20, 33)
 
 
+def test_a_system_message_inside_messages_joins_the_system_prompt(home):
+    """The request shape Claude Code sends: a system-role entry after the user
+    turn, with cache_control, alongside adaptive thinking and output_config."""
+    served = Served()
+    r = served.post(
+        system=[{"type": "text", "text": "Be terse."}],
+        messages=[
+            {"role": "user", "content": [{"type": "text", "text": "Reply PONG"}]},
+            {"role": "system", "content": [{"type": "text", "text": "Today's date is 2026-10-14.",
+                                            "cache_control": {"type": "ephemeral"}}]},
+        ],
+        thinking={"type": "adaptive", "display": "omitted"},
+        output_config={"effort": "medium"},
+        context_management={"edits": []})
+    assert r.status_code == 200, r.text
+    msgs = served.messages
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"].startswith("Be terse.\n\nToday's date is 2026-10-14.")
+    assert [m["role"] for m in msgs] == ["system", "user"]
+    assert msgs[1]["content"] == "Reply PONG"
+
+
 def test_thinking_is_off_unless_asked_and_returned_only_when_asked(home):
     served = Served(["<think>hmm</think>", "Yes"])
     r = served.post()
@@ -304,7 +326,10 @@ def test_anthropic_sdk_reads_the_stream_and_the_reply(home):
 
 
 @pytest.mark.parametrize("extra, needle", [
-    ({"messages": [{"role": "system", "content": "x"}]}, "role"),
+    ({"messages": [{"role": "tool", "content": "x"}]}, "role"),
+    ({"messages": [{"role": "user", "content": "hi"}, {"role": "system", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                     "data": "AA=="}}]}]}, "system"),
     ({"messages": [{"role": "user", "content": [{"type": "document", "source": {}}]}]},
      "document"),
     ({"tools": [{"type": "web_search_20250305", "name": "web_search"}]}, "web_search"),
