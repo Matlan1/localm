@@ -416,6 +416,8 @@ def test_a_dead_holder_recorded_under_an_earlier_host_name(home, monkeypatch,
         fields["host"] = host if case != "other-host" else "0123456789abcdef"
     if case == "not-local":
         monkeypatch.setattr(instances, "path_is_local", lambda p: False)
+    elif not instances.path_is_local(_part_lock_dir("m.gguf").parent.parent):
+        pytest.skip("the test folder is not on a local disk here")
     pid = _dead_pid()
     d = _part_lock_dir("m.gguf")
     _write_owner(d, pid, **fields)
@@ -643,28 +645,24 @@ def test_a_process_and_an_observer_read_the_same_start_identity(home):
 def test_a_record_from_another_machine_with_this_host_name_is_never_reclaimed(
         home, monkeypatch):
     """A holder on another machine that shares the data folder and the host
-    name records a pid that may be alive here as an unrelated process. On
-    Windows its MachineGuid gives it another pid space; on Linux the pid space
-    matches but its start identity carries another boot id. Either way the
-    lock stays."""
+    name records a pid that may be alive here as an unrelated process. Its
+    MachineGuid or Linux machine-id gives it another pid space, so the lock
+    stays."""
     from localm import instances
     from localm.model_manager import pull
     other = _idle_child()
     try:
         ident = start_identity_of(other.pid)
-        if "ticks" in ident:
-            remote_space = this_pid_space()
-            remote_start = {**started_an_hour_earlier(ident),
-                            "boot": "00000000-0000-0000-0000-000000000000"}
-        else:
-            with monkeypatch.context() as m:
-                m.setattr(instances, "_PID_SPACE", None)
-                m.setattr(instances, "machine_guid",
-                          lambda: "another-machine-guid")
-                remote_space = pull._pid_space_id()
-            # The injection took: the same host name, another MachineGuid.
-            assert remote_space != this_pid_space()
-            remote_start = started_an_hour_earlier(ident)
+        with monkeypatch.context() as m:
+            m.setattr(instances, "_PID_SPACE", None)
+            m.setattr(instances, "machine_guid", lambda: "another-machine-guid")
+            m.setattr(instances, "linux_machine_id", lambda: "another-machine-id")
+            remote_space = pull._pid_space_id()
+        # The injection took: the same host name, another machine identifier.
+        assert remote_space != this_pid_space()
+        remote_start = started_an_hour_earlier(ident)
+        if "ticks" in remote_start:
+            remote_start["boot"] = "00000000-0000-0000-0000-000000000000"
         d = _part_lock_dir("m.gguf")
         _write_owner(d, other.pid, space=remote_space, start=remote_start,
                      started=time.time())

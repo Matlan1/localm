@@ -1704,9 +1704,10 @@ def _pull_gguf_file(
         total_size = 0
 
     # Same-repo vision projector this pull would auto-attach (mirrors
-    # _mmproj_for_registration's own gating) and that is not already in
-    # base_dir: HEAD it too and charge its size to the disk-space preflight
-    # only. It is fetched after the model, outside the model's progress.
+    # _mmproj_for_registration's own gating): HEAD it and charge its size to
+    # the disk-space preflight only, unless a file of its name and size is
+    # already in base_dir. It is fetched after the model, outside the model's
+    # progress.
     projector_size = 0
     if (register and mmproj_spec is None and dest_dir is None
             and model_type not in ("mmproj", "embedding")
@@ -1714,10 +1715,15 @@ def _pull_gguf_file(
         try:
             mmproj_name = _mm._hf_repo_mmproj_filename(
                 repo_id, filename, base_dir, speech=model_type == "tts")
-            if mmproj_name and not (base_dir / mmproj_name).exists():
+            if mmproj_name:
                 mmproj_head = _policy_head(
                     hf_hub_url(repo_id, mmproj_name, endpoint=_HF_ENDPOINT))
                 projector_size = int(mmproj_head.headers.get("content-length", 0))
+                try:
+                    if (base_dir / mmproj_name).stat().st_size == projector_size:
+                        projector_size = 0
+                except OSError:
+                    pass
         except UnresolvableHost:
             pass
         except NetworkPolicyError as e:

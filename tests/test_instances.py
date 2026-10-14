@@ -352,6 +352,28 @@ def test_host_id_is_none_without_a_machine_identifier(monkeypatch):
     assert instances.host_id() is None
 
 
+def test_linux_host_id_is_none_when_the_pid_namespace_is_unreadable(
+        monkeypatch, tmp_path):
+    """Without the pid namespace two containers sharing a machine-id would
+    share a host id, so none is given."""
+    monkeypatch.setattr(instances, "linux_machine_id", lambda: "a-machine-id")
+    monkeypatch.setattr(instances, "machine_guid", lambda: "")
+    monkeypatch.setattr(instances, "darwin_host_uuid", lambda: "")
+    monkeypatch.setattr(instances, "_HOST_ID", None)
+    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
+    monkeypatch.setattr(instances, "_LINUX_PID_NS", str(tmp_path / "absent"))
+    monkeypatch.setattr(instances.sys, "platform", "linux")
+    got = instances.host_id()
+    monkeypatch.setattr(instances.sys, "platform", sys.platform)
+    assert got is None
+    monkeypatch.setattr(instances, "_HOST_ID_READ", False)
+    monkeypatch.setattr(instances, "_LINUX_PID_NS", str(tmp_path))
+    monkeypatch.setattr(instances.sys, "platform", "linux")
+    got = instances.host_id()
+    monkeypatch.undo()
+    assert isinstance(got, str) and got
+
+
 def test_darwin_host_uuid_reads_only_on_macos():
     if sys.platform == "darwin":
         assert re.fullmatch(r"[0-9a-f-]{36}", instances.darwin_host_uuid())

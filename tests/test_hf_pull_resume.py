@@ -261,6 +261,8 @@ class TestPartialOwnership:
         assert old_space != this_pid_space(), "the injected rename took no effect"
         if not local:
             monkeypatch.setattr(instances, "path_is_local", lambda p: False)
+        elif not instances.path_is_local(cache):
+            pytest.skip("the test folder is not on a local disk here")
         inc_path = cache / "file.etag.incomplete"
         orphan = cache / "file.etag.dddd4444.incomplete"
         orphan.write_bytes(b"HELLO")
@@ -648,11 +650,16 @@ class TestGgufPullPreflight:
         assert totals == [10], (
             "the model's download progress counted the projector's bytes")
 
-    def test_does_not_charge_a_projector_already_in_the_models_folder(
-            self, hf_env, monkeypatch):
+    @pytest.mark.parametrize("on_disk, charged", [(10, 10), (7, 20)],
+                             ids=["same-size", "other-size"])
+    def test_a_projector_name_already_in_the_models_folder(
+            self, hf_env, monkeypatch, on_disk, charged):
+        """A file of the projector's name and published size is not charged
+        again; one of another size is a different file, so the projector is
+        downloaded beside it and charged."""
         import huggingface_hub
         models, _ = hf_env
-        (models / "mmproj-test-f16.gguf").write_bytes(b"P" * 10)
+        (models / "mmproj-test-f16.gguf").write_bytes(b"P" * on_disk)
 
         class _FakeHfApi:
             def __init__(self, *a, **kw):
@@ -671,7 +678,7 @@ class TestGgufPullPreflight:
         _fake_download(monkeypatch, b"0" * 10)
 
         assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
-        assert checked == [10]
+        assert checked == [charged]
         assert totals == [10]
 
     def test_does_not_charge_a_projector_when_the_repo_has_none(

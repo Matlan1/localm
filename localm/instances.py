@@ -656,23 +656,26 @@ def darwin_host_uuid() -> str:
 
 _HOST_ID: str | None = None
 _HOST_ID_READ = False
+_LINUX_PID_NS = "/proc/self/ns/pid"
 
 
 def host_id() -> str | None:
     """An opaque id for this machine's pid table that does not depend on the
     host name: the platform, the Windows MachineGuid, the Linux machine-id,
     the Mac hardware UUID and, on Linux, the pid namespace, hashed. None when
-    none of the three machine identifiers can be read."""
+    none of the three machine identifiers can be read, and on Linux when the
+    pid namespace cannot be read."""
     global _HOST_ID, _HOST_ID_READ
     if not _HOST_ID_READ:
         import hashlib
         ids = [machine_guid(), linux_machine_id(), darwin_host_uuid()]
-        if any(ids):
-            parts = [sys.platform, *ids]
+        parts = [sys.platform, *ids] if any(ids) else None
+        if parts is not None and sys.platform.startswith("linux"):
             try:
-                parts.append(str(os.stat("/proc/self/ns/pid").st_ino))
+                parts.append(str(os.stat(_LINUX_PID_NS).st_ino))
             except OSError:
-                pass
+                parts = None
+        if parts is not None:
             _HOST_ID = hashlib.sha256(
                 "\0".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
         _HOST_ID_READ = True

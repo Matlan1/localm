@@ -3902,7 +3902,7 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
             new_parts[i] = gguf
 
     if mmprojs is not None:
-        for gguf, new in zip(first_parts, new_parts):
+        for gguf, new in zip(first_parts, new_parts, strict=True):
             stored = stored_of.get(gguf.resolve())
             if stored is None:
                 continue
