@@ -484,6 +484,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   differ. The model details list the adapters a loaded model runs with.
 
 ### Changed
+- **The native image and video runtime (stable-diffusion.cpp) moved to master-964-1d0a58a.** SD 1.x, 2.x
+  and SDXL images at CFG above 1 now run the prompt and negative-prompt passes together, which makes
+  each step faster for the same image and uses more VRAM while sampling. An existing
+  install downloads the new runtime the next time a native image or video job starts.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.122.1 to v1.123.** An existing install picks it up the next time music generation starts.
 - **HF models decode about 3.5x faster on AMD GPUs.** On ROCm, loading an HF model now tunes the
   matrix kernels its one-token decoding uses (PyTorch TunableOp, rocBLAS kernels): gemma-3-4b in
