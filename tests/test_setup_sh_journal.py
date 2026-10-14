@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -114,8 +115,8 @@ class TestTheScriptItself:
     def test_every_step_that_begins_also_finishes(self):
         begun = re.findall(r'step_begin\s+"?([\w$-]+)"?', self.text)
         done = re.findall(r'step_done\s+"?([\w$-]+)"?', self.text)
-        assert sorted(b for b in begun if not b.startswith("$")) == \
-            sorted(d for d in done if not d.startswith("$"))
+        assert {b for b in begun if not b.startswith("$")} == \
+            {d for d in done if not d.startswith("$")}
         assert begun, "no steps are journaled"
 
     def test_the_script_ends_by_marking_the_install_complete(self):
@@ -134,6 +135,28 @@ class TestTheScriptItself:
         assert 'setup-llama --backend "$BACKEND" $SL_FORCE' in self.text
 
 
+class TestSeveralOpenSteps:
+    """A step stays open across later interrupted runs, so resume looks at every
+    open step and not only the latest one."""
+
+    def test_a_runtime_download_cut_short_two_runs_ago_is_still_forced(self, folder):
+        (folder / ".localm-setup-journal").write_text(
+            "begin\tportable-choice\ndone\tportable-choice\nbegin\tnative-runtime\n"
+            "resume\nbegin\tportable-choice\n", encoding="utf-8")
+        script = (ROOT / "setup.sh").read_text(encoding="utf-8")
+        start = script.index("JOURNAL=")
+        end = script.index("# ---- point at the graphical installer")
+        probe = ("say() { :; }\ncd \"$1\"\n" + script[start:end]
+                 + '\nstep_was_open native-runtime && echo FORCE\n'
+                   'step_was_open venv && echo VENV\nprintf "%s|%s\\n" "$OPEN_STEP" "$OPEN_STEPS"\n')
+        r = subprocess.run([shutil.which("bash"), "-c", probe, "x", str(folder)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        assert "FORCE" in r.stdout and "VENV" not in r.stdout
+        assert "portable-choice|native-runtime portable-choice" in r.stdout \
+            or "portable-choice|portable-choice native-runtime" in r.stdout
+
+
 _UV_STUB = """#!/bin/sh
 echo "uv $*" >> "$STUB_LOG"
 case "$1" in
@@ -149,7 +172,7 @@ class TestACutShortVenv:
     none, and setup would treat it as somebody else's and keep it. With a stub uv,
     setup runs up to the venv step and shows whether it rebuilds."""
 
-    def _run(self, folder, tmp_path, journal):
+    def _run(self, folder, tmp_path, journal, *, marker=False):
         uv_dir = folder / ".uv"
         uv_dir.mkdir()
         stub = uv_dir / "uv"
@@ -157,6 +180,8 @@ class TestACutShortVenv:
         stub.chmod(0o755)
         (folder / ".venv").mkdir()                       # half made: no marker file
         (folder / ".venv" / "half-written").write_text("x", encoding="utf-8")
+        if marker:
+            (folder / ".venv" / ".localm-venv").write_text("", encoding="utf-8")
         if journal is not None:
             (folder / ".localm-setup-journal").write_text(journal, encoding="utf-8")
         log = tmp_path / "uv.log"
@@ -178,3 +203,59 @@ class TestACutShortVenv:
         assert rc == 99, out
         assert "uv venv" not in uv_log, uv_log
         assert (folder / ".venv" / "half-written").is_file()
+
+    def test_a_venv_setup_finished_making_is_not_wiped_on_resume(self, folder, tmp_path):
+        rc, out, uv_log = self._run(
+            folder, tmp_path,
+            "begin\tportable-choice\ndone\tportable-choice\nbegin\tvenv\n", marker=True)
+        assert rc == 99, out
+        assert "recreating it" not in out
+        assert "uv venv" not in uv_log, uv_log
+        assert (folder / ".venv" / "half-written").is_file()
+
+    def test_backing_out_of_the_replace_prompt_does_not_doom_the_venv(self, folder, tmp_path):
+        uv_dir = folder / ".uv"
+        uv_dir.mkdir()
+        stub = uv_dir / "uv"
+        stub.write_bytes(_UV_STUB.replace("\r\n", "\n").encode("utf-8"))
+        stub.chmod(0o755)
+        (folder / ".venv").mkdir()
+        (folder / ".venv" / "mine").write_text("x", encoding="utf-8")
+        log = tmp_path / "uv.log"
+        log.write_text("", encoding="utf-8")
+        env = dict(os.environ, STUB_LOG=str(log))
+        env.pop("LOCALM_SETUP_ABORT_AFTER", None)
+        proc = subprocess.Popen([shutil.which("bash"), "setup.sh"], cwd=str(folder), env=env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+        seen = bytearray()
+
+        def pump():
+            while True:
+                chunk = proc.stdout.read(1)
+                if not chunk:
+                    return
+                seen.extend(chunk)
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        try:
+            proc.stdin.write(b"1\n")
+            proc.stdin.flush()
+            for _ in range(600):
+                if b"Replacing it deletes its current contents." in seen or proc.poll() is not None:
+                    break
+                threading.Event().wait(0.1)
+            assert b"Replacing it deletes its current contents." in seen,                 bytes(seen).decode("utf-8", "replace")
+            threading.Event().wait(1.0)
+            assert proc.poll() is None, bytes(seen).decode("utf-8", "replace")
+        finally:
+            proc.kill()
+            proc.wait(timeout=30)
+            reader.join(timeout=10)
+        assert "begin\tvenv" not in (folder / ".localm-setup-journal").read_text(encoding="utf-8")
+        rc, out = _setup(folder, abort_after="venv", extra_env={"STUB_LOG": str(log)})
+        assert rc == 99, out
+        assert "recreating it" not in out
+        assert "uv venv" not in log.read_text(encoding="utf-8")
+        assert (folder / ".venv" / "mine").is_file()

@@ -153,6 +153,27 @@ class TestPrivacyMode:
         assert backend.calls[0]["delete_outputs"] is True
         assert not (home / "gui_images").exists() or _gallery(home) == []
 
+    def test_a_temp_folder_that_does_not_exist_yet_is_created(
+            self, client, backend, home, monkeypatch):
+        fresh = home / "later" / "scratch"
+        monkeypatch.setenv("LOCALM_TMPDIR", str(fresh))
+        r = client.post(URL, json={"prompt": "a cat"})
+        assert r.status_code == 200, r.text
+        assert fresh.is_dir() and list(fresh.iterdir()) == []
+        assert backend.calls[0]["out_path"].parent.parent == fresh
+
+    def test_a_temp_folder_that_cannot_be_created_falls_back_and_says_so(
+            self, client, backend, home, monkeypatch, caplog):
+        blocker = home / "blocker"
+        blocker.write_text("a file where a folder would go", encoding="utf-8")
+        monkeypatch.setenv("LOCALM_TMPDIR", str(blocker / "scratch"))
+        with caplog.at_level("WARNING", logger="localm"):
+            r = client.post(URL, json={"prompt": "a cat"})
+        assert r.status_code == 200, r.text
+        assert any("cannot create the temp folder" in rec.getMessage()
+                   for rec in caplog.records)
+        assert backend.calls[0]["out_path"].parent.parent != blocker / "scratch"
+
     def test_a_directory_that_cannot_be_removed_fails_the_request(
             self, client, backend, home, monkeypatch):
         import shutil

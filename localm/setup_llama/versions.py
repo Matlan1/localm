@@ -253,6 +253,8 @@ def check_runtime_update() -> dict:
     else:
         target = _PINNED_TAG
     newer = bool(target) and target != current
+    if backend == "amd-rocm" and _sl.rocm_build_is_current(_sl._repo_runtime_lib(), current):
+        newer = False
     return {"installed": True, "backend": backend, "current": current,
             "target": target, "newer": newer, "pinned": pin,
             "previous": previous_tag(backend)}
