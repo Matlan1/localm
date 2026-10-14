@@ -1,10 +1,10 @@
-# localm bug report: model load failed for ~/models/private-model.gguf on alice-desktop.local token=<redacted>
+# localm bug report: model load failed for ~/models/private-model.gguf on <host>.local token=<redacted>
 
 ## What I was doing
 <!-- Please describe what you ran and what you expected. -->
 
 ## What happened
-model load failed for ~/models/private-model.gguf on alice-desktop.local token=<redacted>
+model load failed for ~/models/private-model.gguf on <host>.local token=<redacted>
 
 Reason: backend said api_key=<redacted> reading C:\Users\<redacted>\Documents\localm\notes.txt; ask <redacted-email>
 
@@ -48,7 +48,7 @@ Reason: backend said api_key=<redacted> reading C:\Users\<redacted>\Documents\lo
 - require_auth: yes
 - mode: log
 - comfy_workdir: ~/ComfyUI
-- comfy_api_url: http://<redacted>@alice-desktop.local:8188/?api_key=<redacted>
+- comfy_api_url: http://<redacted>@<host>.local:8188/?api_key=<redacted>
 - net_search_url: https://search.example.org/search?q=x&token=<redacted>
 - coder_reviewer: http://reviewer.example.net/v1?key=<redacted>&model=m&cc=<redacted-email>
 
@@ -59,7 +59,7 @@ Reason: backend said api_key=<redacted> reading C:\Users\<redacted>\Documents\lo
 
 ## Error detail
 ```
-RuntimeError: POST http://<redacted>@alice-desktop.local:8188/prompt?token=<redacted>&mode=fast failed: Authorization: <redacted> key <redacted> at /home/<redacted>/.cache/localm/model.gguf
+RuntimeError: POST http://<redacted>@<host>.local:8188/prompt?token=<redacted>&mode=fast failed: Authorization: <redacted> key <redacted> at /home/<redacted>/.cache/localm/model.gguf
 ```
 
 ## Native fault trace
@@ -79,7 +79,7 @@ env OPENAI_API_KEY=<redacted>
 
 ## Recent log (tail)
 ```
-2026-10-09 12:00:00,000 WARNING  localm: upstream \\FILESERVER01\share\report.txt rejected X-Api-Key: <redacted>
+2026-10-09 12:00:00,000 WARNING  localm: upstream \\<host>\share\report.txt rejected X-Api-Key: <redacted>
 payload {"api_key": <redacted>, "has_token": false}
 state {"path": "C:\\Users\\<redacted>\\AppData\\Roaming\\localm\\state.json"}
 SECRET_KEY=<redacted> key=visible monkey=visible
@@ -99,14 +99,14 @@ Thread 0x0001 (most recent call first):
 11:59:59 INFO localm: before restart token=<redacted>
 --- RESTART ---
 12:00:00 INFO localm: loaded ~/models/private-model.gguf
-12:00:01 WARNING localm: GET http://<redacted>@alice-desktop.local/?sig=<redacted> failed
-12:00:02 INFO localm: reviewer <redacted-email> at \\FILESERVER01\share\report.txt
+12:00:01 WARNING localm: GET http://<redacted>@<host>.local/?sig=<redacted> failed
+12:00:02 INFO localm: reviewer <redacted-email> at \\<host>\share\report.txt
 12:00:03 ERROR localm: header X-Api-Key: <redacted> key <redacted>
 ```
 
 ## Browser / client
 - User agent: Mozilla/5.0 (contract)
-- Page: http://alice-desktop.local:8765/#/chat?api_key=<redacted>
+- Page: http://<host>.local:8765/#/chat?api_key=<redacted>
 - Viewport: 1280x720
 - GUI build: contract-build
 

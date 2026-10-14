@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
+import socket
 import sys
 import urllib.error
 import urllib.parse
@@ -192,6 +194,110 @@ def _email_replacement(m: re.Match) -> str:
         return token
     return lead + "<redacted-email>" + trail
 
+
+# Machine names. _UNC_HOST_RE is byte-identical to localm/bugreport/scrub.py and
+# the local-network functions are the same code; the rules are described there.
+_UNC_HOST_RE = re.compile(
+    r"(?:(?<![^\s\x22\x27(\[{=,;|\x60<*])|(?<=[A-Za-z0-9_]{2}:))"
+    r"(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)"
+    r"(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))"
+    r"[A-Za-z0-9][A-Za-z0-9._$-]*",
+    re.IGNORECASE)
+_LAN_SUFFIXES = (("home", "arpa"), ("local",), ("lan",), ("internal",), ("localdomain",))
+_LAN_KEEP = ("localm.local", "host.docker.internal", "gateway.docker.internal",
+             "kubernetes.docker.internal")
+_LAN_TOKEN_RE = re.compile(r"[A-Za-z0-9.-]+")
+
+
+def _lan_boundary(rest: str) -> bool:
+    """Whether *rest* (the first two characters after a candidate name inside
+    its token) ends the name: empty, or a dot not followed by a letter or
+    digit."""
+    return not rest or (rest[0] == "." and not rest[1:2].isalnum())
+
+
+def _lan_token(token: str, after: str) -> str:
+    """*token*, a maximal run of letters, digits, dots and hyphens, with a host
+    name under a local-network suffix at its start replaced by ``<host>`` (the
+    suffix kept). *after* is the character following the token. The longest
+    such name wins; a name followed inside the token by a dot and a letter or
+    digit, or followed by ``(`` at the token's end, is not one, and a token
+    starting with one of ``_LAN_KEEP`` is kept whole."""
+    lowered = token.lower()
+    for keep in _LAN_KEEP:
+        if lowered.startswith(keep) and _lan_boundary(token[len(keep):len(keep) + 2]):
+            return token
+    parts = token.split(".")
+    labels = parts.index("") if "" in parts else len(parts)
+    ends = []
+    pos = -1
+    for part in parts[:labels]:
+        pos += len(part) + 1
+        ends.append(pos)
+    for k in range(labels, 1, -1):
+        end = ends[k - 1]
+        if end < len(token):
+            if not _lan_boundary(token[end:end + 2]):
+                continue
+        elif after == "(":
+            continue
+        tail = (parts[k - 2].lower(), parts[k - 1].lower())
+        for suffix in _LAN_SUFFIXES:
+            if k > len(suffix) and tail[-len(suffix):] == suffix:
+                return "<host>." + ".".join(parts[k - len(suffix):k]) + token[end:]
+    return token
+
+
+def _scrub_lan_hosts(text: str) -> str:
+    """Every host name under a local-network suffix replaced by ``<host>``
+    (``_lan_token``). A token right after an underscore is part of a longer
+    identifier and is kept."""
+    def replace(match):
+        start, end = match.start(), match.end()
+        if start and text[start - 1] == "_":
+            return match.group(0)
+        return _lan_token(match.group(0), text[end:end + 1])
+    return _LAN_TOKEN_RE.sub(replace, text)
+
+
+_OWN_NAME_SKIP = frozenset({"archlinux", "debian", "fedora", "host", "kali", "localhost",
+                            "localm", "raspberrypi", "redacted", "ubuntu", "user"})
+
+
+def _own_host_names() -> list:
+    """This machine's names, longest first. Mirrors localm/bugreport/scrub.py."""
+    raw = []
+    try:
+        raw.append(socket.gethostname())
+    except OSError:
+        pass
+    raw.append(os.environ.get("COMPUTERNAME", ""))
+    names = set()
+    for name in raw:
+        name = (name or "").strip().rstrip(".")
+        if name:
+            names.add(name)
+            names.add(name.split(".")[0])
+    return sorted((n for n in names
+                   if len(n) >= 3 and n.lower() not in _OWN_NAME_SKIP),
+                  key=lambda n: (-len(n), n))
+
+
+def _scrub_hosts(text: str) -> str:
+    """UNC machine names, local-network host names and this machine's own
+    names replaced with ``<host>``. Mirrors localm/bugreport/scrub.py."""
+    text = _UNC_HOST_RE.sub(r"\1<host>", text)
+    text = _scrub_lan_hosts(text)
+    names = _own_host_names()
+    if names:
+        own = re.compile(r"(?<![A-Za-z0-9_./\\-])(?:"
+                         + "|".join(re.escape(n) for n in names)
+                         + r")(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])",
+                         re.IGNORECASE)
+        text = own.sub("<host>", text)
+    return text
+
+
 def stdin_is_interactive() -> bool:
     """True when stdin is a terminal a person can answer at: ``isatty()`` is
     True and, on Windows, stdin is also a console (``GetConsoleMode``
@@ -247,6 +353,8 @@ def scrub(text: str) -> str:
     text = _APIKEY_RE.sub("<redacted>", text)
     # Email addresses, except the maintainer's.
     text = _EMAIL_RE.sub(_email_replacement, text)
+    # Machine names.
+    text = _scrub_hosts(text)
     return text
 
 

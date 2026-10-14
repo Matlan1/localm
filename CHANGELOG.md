@@ -927,6 +927,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   replaced with `<redacted-email>` before the report is shown, saved or sent, in the
   app and in the standalone `report-issue` scripts. The maintainer's contact address
   is kept.
+- **Bug reports no longer carry machine names.** The server in a network path
+  (`\\FILESERVER01\share`), a local-network host name such as `nas.local` or `pc.lan`,
+  and this computer's own name are replaced with `<host>` in the app and in the
+  standalone `report-issue` scripts.
 - **Models you already have on disk are found where LM Studio and llama.cpp keep them.**
   `localm add <folder>` and the models-folder scan now look inside subfolders (as far
   as the Folder import depth setting allows, three levels by default, so LM Studio's
