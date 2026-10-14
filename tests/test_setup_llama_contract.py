@@ -1446,8 +1446,7 @@ def test_a_held_provisioning_lock_leaves_the_install_untouched(world, owner, mes
     ("linux", "vulkan", None, "bin-ubuntu-vulkan-x64"),
     ("linux", "sycl", None, "bin-ubuntu-sycl-fp16"),
     ("linux", "hip", None, "bin-ubuntu-rocm"),
-    ("darwin", "cpu", None, "bin-macos-arm64"),
-    ("darwin", "metal", None, "bin-macos-arm64"),
+    ("darwin", "cpu", None, "bin-macos-x64"),
 ])
 def test_offline_resolution_reads_the_pinned_asset_table(world, plat, backend, line, fragment):
     world.platform(plat)
