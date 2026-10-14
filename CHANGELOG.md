@@ -619,6 +619,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `X-Localm-*` response headers, as the streamed one does. `POST /api/embed` with an empty `input`
   refuses `dimensions` and answers 404 for an unknown model instead of returning an empty result.
   The `keep_alive: 0` unload idiom no longer unloads a local copy of a model that another instance serves.
+- **Two image, video or music jobs no longer load their models on top of the chat model coming back.** A second job that started while the first job's chat model was reloading loaded its own model beside it, which made the second job several times slower on a full card. A job now waits for a running chat reload, and the chat model reloads once, after the last job.
 - **A chat answered by another localm instance keeps this instance's session persistence.** With a
   route to another instance's loaded model, a scheduled chat job on a routed model, or
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a

@@ -58,6 +58,7 @@ from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
+from localm.vram import media_handover_job
 from . import backend as _backend
 
 _router = APIRouter()
@@ -300,7 +301,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             from localm.vram import reload_chat_after_media
             reload_chat_after_media(job, self_url, s, _backend, "image", instance_token)
         return ok
-    return _generate
+    return media_handover_job(_generate)
 
 
 @_router.post("/api/imagine")
@@ -758,7 +759,7 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
             from localm.vram import reload_chat_after_media
             reload_chat_after_media(job, self_url, s, _backend, "image", instance_token)
         return ok
-    return _upscale
+    return media_handover_job(_upscale)
 
 
 @_router.post("/api/imagine/file/{name}/upscale",
