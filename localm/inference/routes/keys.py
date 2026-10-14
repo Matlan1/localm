@@ -121,9 +121,11 @@ def register(app: FastAPI, ctx) -> None:
             from localm import sessions
             # owner_key_minted: see sessions.create. _is_owner_key re-compares
             # against the live value, so a seed that did not take reports False.
-            sid = sessions.create(scopes={scopes.ADMIN},
-                                  key_hash=auth._hash_key(owner), fs_access="host",
-                                  owner_key_minted=auth._is_owner_key(owner))
+            from fastapi.concurrency import run_in_threadpool
+            sid = await run_in_threadpool(
+                lambda: sessions.create(scopes={scopes.ADMIN},
+                                        key_hash=auth._hash_key(owner), fs_access="host",
+                                        owner_key_minted=auth._is_owner_key(owner)))
             secure = request.url.scheme == "https"
             response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",

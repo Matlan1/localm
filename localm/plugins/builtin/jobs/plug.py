@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from localm.plugins.builtin.jobs import runner as _runner
@@ -381,7 +382,7 @@ async def create_job(req: JobCreate, request: Request):
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    _store().add(job)
+    await run_in_threadpool(_store().add, job)
     return _job_dict(job)
 
 
@@ -426,7 +427,7 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
     if _needs_owner_key_restamp(job, request):
         changes["owner_is_owner_key"] = True
     try:
-        job = store.update(job_id, **changes)
+        job = await run_in_threadpool(lambda: store.update(job_id, **changes))
     except KeyError as exc:
         raise HTTPException(404, f"No such job: {job_id}") from exc
     except ValueError as e:
@@ -437,7 +438,7 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
 @_router.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str, job: Job = Depends(owned_job)):
     store = _store()
-    if not store.remove(job_id):
+    if not await run_in_threadpool(store.remove, job_id):
         raise HTTPException(404, f"No such job: {job_id}")
     return {"status": "deleted", "id": job_id}
 
@@ -459,7 +460,8 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
     # very run, not just the next one.
     if _needs_owner_key_restamp(job, request):
         try:
-            job = store.update(job_id, owner_is_owner_key=True)
+            job = await run_in_threadpool(
+                lambda: store.update(job_id, owner_is_owner_key=True))
         except (KeyError, ValueError) as e:
             from localm.debuglog import logger
             logger.debug(
@@ -484,7 +486,7 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
     if result is None:
         raise HTTPException(
             409, "A job run is already in progress; try again once it finishes.")
-    result_id = store.record_result(job_id, result)
+    result_id = await run_in_threadpool(store.record_result, job_id, result)
     return {"result_id": result_id, **result}
 
 

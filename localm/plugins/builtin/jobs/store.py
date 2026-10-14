@@ -17,6 +17,7 @@ crafted job id (``../../etc``) can never escape it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -32,7 +33,8 @@ from localm.pathsafe import is_unc_or_device_path
 # Process-wide lock serialising the read-modify-write of jobs.json. The scheduler
 # records results from a worker thread (run_in_executor) while route handlers
 # create/edit jobs on the event-loop thread, and several JobStore instances may point
-# at the same file, so an instance lock is not enough.
+# at the same file, so an instance lock is not enough. LOCK ORDER: _STORE_LOCK
+# (outer) -> jobs.json.lock (inner, JobStore._locked).
 _STORE_LOCK = threading.RLock()
 
 
@@ -261,6 +263,19 @@ class JobStore:
     def _ensure_root(self) -> None:
         self._root.mkdir(parents=True, exist_ok=True)
 
+    @contextlib.contextmanager
+    def _locked(self):
+        """Hold ``_STORE_LOCK`` and the cross-process lock on jobs.json for a
+        read-modify-write, so a writer in another process (``localm jobs ...``
+        against a running server's scheduler) cannot undo it. Creates the jobs
+        dir. Raises ``TimeoutError`` when another process holds the lock past the
+        config default wait."""
+        from localm.config import _cross_process_lock
+        with _STORE_LOCK:
+            self._ensure_root()
+            with _cross_process_lock(self._defs_file):
+                yield
+
     def _read_all(self) -> dict:
         if not self._defs_file.is_file():
             return {}            # genuinely absent: an empty store is correct
@@ -383,7 +398,7 @@ class JobStore:
 
     def add(self, job: Job) -> Job:
         job.validate()
-        with _STORE_LOCK:
+        with self._locked():
             jobs = self._read_all()
             jobs[job.id] = job
             self._write_all(jobs)
@@ -392,7 +407,7 @@ class JobStore:
     def update(self, job_id: str, **changes) -> Job:
         """Apply *changes* to an existing job and persist. Re-validates the
         result. Raises KeyError if the job does not exist."""
-        with _STORE_LOCK:
+        with self._locked():
             jobs = self._read_all()
             job = jobs.get(job_id)
             if job is None:
@@ -407,7 +422,7 @@ class JobStore:
 
     def remove(self, job_id: str) -> bool:
         """Delete a job def and its results dir. Returns True if it existed."""
-        with _STORE_LOCK:
+        with self._locked():
             jobs = self._read_all()
             if job_id not in jobs:
                 return False
@@ -444,26 +459,33 @@ class JobStore:
         path.write_text(json.dumps(record, indent=2, ensure_ascii=False),
                         encoding="utf-8")
         # Stamp the job def (best-effort: a run for a now-deleted job is fine).
-        with _STORE_LOCK:
+        try:
+            self._stamp_result(job_id, result, result_id)
+        except Exception as e:
+            # The result file IS persisted (result_id above); only the job's
+            # last_run/last_status stamp failed, so the API will under-report
+            # this run until the next successful write.
+            from localm.debuglog import logger
+            logger.warning(
+                "jobs: result %s for job %s is persisted but its metadata "
+                "stamp failed (%s); last_run will under-report this run",
+                result_id, job_id, e)
+        return result_id
+
+    def _stamp_result(self, job_id: str, result: dict, result_id: str) -> None:
+        """Record *result_id* as *job_id*'s latest run (last_run, last_status,
+        last_result_id). A job that no longer exists is left alone. Raises when
+        the store cannot be locked, read or written."""
+        with self._locked():
             jobs = self._read_all()
             job = jobs.get(job_id)
-            if job is not None:
-                job.last_run = result.get("finished") or time.time()
-                job.last_status = result.get("status")
-                job.last_result_id = result_id
-                jobs[job.id] = job
-                try:
-                    self._write_all(jobs)
-                except Exception as e:
-                    # The result file IS persisted (result_id above); only the
-                    # job's last_run/last_status stamp failed, so the API will
-                    # under-report this run until the next successful write.
-                    from localm.debuglog import logger
-                    logger.warning(
-                        "jobs: result %s for job %s is persisted but its metadata "
-                        "stamp failed (%s); last_run will under-report this run",
-                        result_id, job_id, e)
-        return result_id
+            if job is None:
+                return
+            job.last_run = result.get("finished") or time.time()
+            job.last_status = result.get("status")
+            job.last_result_id = result_id
+            jobs[job.id] = job
+            self._write_all(jobs)
 
     def list_results(self, job_id: str, *, limit: Optional[int] = None,
                      offset: int = 0) -> list:
