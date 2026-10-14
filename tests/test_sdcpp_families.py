@@ -951,4 +951,4 @@ def test_native_models_route_without_a_model_marks_nothing(media_app, flux_set):
 @pytest.fixture(autouse=True)
 def _no_live_vram_budget(monkeypatch):
     from localm.media.sdcpp import budget as sd_budget
-    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend: None)
+    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend, **kw: None)

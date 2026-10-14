@@ -172,7 +172,7 @@ def test_the_live_probe_is_asked_for_a_fresh_reading(monkeypatch):
 
 def test_with_budget_sets_max_vram_and_says_the_free_vram(monkeypatch):
     monkeypatch.setattr(sd_budget, "vram_budget",
-                        lambda backend: sd_budget.Budget("5.50", 6 * GIB, 16 * GIB))
+                        lambda backend, **kw: sd_budget.Budget("5.50", 6 * GIB, 16 * GIB))
     said = []
     ctx = {"diffusion_model_path": "m.gguf"}
     got = sd_budget.with_budget(ctx, "rocm", said.append)
@@ -194,7 +194,7 @@ def test_an_unmeasured_reading_is_said_and_logged_not_silent(monkeypatch):
         info = error = debug
     monkeypatch.setattr("localm.debuglog.logger", _Log())
     monkeypatch.setattr(sd_budget, "vram_budget",
-                        lambda backend: sd_budget.Budget(None, reason="the GPU probe did "
+                        lambda backend, **kw: sd_budget.Budget(None, reason="the GPU probe did "
                                                          "not complete (timeout)"))
     said = []
     ctx = {"diffusion_model_path": "m.gguf"}
@@ -204,7 +204,7 @@ def test_an_unmeasured_reading_is_said_and_logged_not_silent(monkeypatch):
 
 
 def test_with_budget_leaves_ctx_alone_without_a_budget(monkeypatch):
-    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend: None)
+    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend, **kw: None)
     said = []
     ctx = {"diffusion_model_path": "m.gguf"}
     assert sd_budget.with_budget(ctx, "cpu", said.append) is ctx

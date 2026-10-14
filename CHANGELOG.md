@@ -654,6 +654,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   precedence over the MTP toggle, and the toggle's help says it applies only while Speculative
   drafting is Inherit.
 - **The ACE-Step music model is no longer offered as an image or video model.**
+- **GGUF sizing measures free VRAM again on Windows with two or more GPUs.** With torch
+  installed, a box whose llama.cpp runtime sees two GPUs (two cards, or a card beside integrated
+  graphics) skipped the VRAM fit check and sized context and layers blind. The load now reads the
+  free VRAM of the GPU it loads on.
+- **Free VRAM on Windows AMD counts other programs while a GPU check runs.** A model load that
+  started while the GUI was refreshing its GPU readings used a figure that missed VRAM held by
+  other programs, and the GUI could show such a figure as exact.
+- **A failed GPU check no longer reports "no GPU".** On Linux, a GPU check that could not ask
+  torch while it was still loading said the machine had no GPU and replaced the last good
+  reading; it now reports the check as inconclusive and keeps the last reading.
+- **Native image and video budgets name the right GPU.** On Windows with ROCm and two GPUs, the
+  VRAM budget was assigned by localm's GPU number, which need not be the runtime's; it is now
+  matched to each runtime device by name, so a card beside integrated graphics gets its own
+  budget and a GPU the runtime does not list gets none.
+- **Unloading a reranker, speech or embedding model no longer pauses other requests.** The
+  free-VRAM reading taken before an unload ran on the server's main thread and could hold every
+  other request and stream for up to 15 seconds; it now runs in the background pool.
 - **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
   several seconds, and while it did, every other request and stream waited. The close now runs
   in the background pool like the browser's other actions.

@@ -2862,6 +2862,53 @@ def single_gpu_load_slot(config: Optional[dict] = None, *,
     return next(iter(placement.mapping)) if placement is not None else None
 
 
+def load_device_memory_isolated(config: Optional[dict] = None) -> Optional[tuple]:
+    """``(free, total)`` bytes of the device a single-device GGUF load reads
+    from (:func:`resolve_load_gpu_index`), as the active native runtime's own
+    registry reports it through the crash-isolated probe daemon
+    (:func:`_runtime_device_registry`), or ``None`` when that device cannot be
+    named in the registry.
+
+    The device's registry position comes from :func:`_torch_llama_numbering`
+    of the last completed :func:`list_gpus` reading (:func:`last_gpu_reading`);
+    without one, a probe is taken, except in a process that has loaded the
+    native runtime, which answers ``None``. A build whose GPU index space is
+    opaque to list_gpus (:func:`_native_gpu_index_space_is_opaque`) answers
+    ``None``. Never raises."""
+    from localm.inference.backends.llamacpp import _loader
+    try:
+        readings = last_gpu_reading()
+        if not readings:
+            if _loader.native_lib_loaded():
+                return None
+            readings, _status = _list_gpus_reading(wait_for_inflight=True)
+        readings = [g for g in (readings or []) if isinstance(g, dict)]
+        if not readings or _native_gpu_index_space_is_opaque():
+            return None
+        from localm.config import load_config
+        cfg = config if config is not None else load_config()
+        idx = resolve_load_gpu_index(cfg, gpus=readings, quiet=True)
+        slot_of, reason = _torch_llama_numbering(readings)
+        if slot_of is None or idx not in slot_of:
+            logger.debug("load device memory: GPU %s cannot be placed in the "
+                         "llama.cpp runtime's device list (%s)", idx,
+                         reason or "llama.cpp does not use it")
+            return None
+        registry = _runtime_device_registry()
+        native = _registry_gpus(registry) if registry is not None else []
+        slot = slot_of[idx]
+        if slot >= len(native):
+            return None
+        free, total = native[slot].get("free"), native[slot].get("total")
+        if not (isinstance(free, int) and isinstance(total, int) and total > 0):
+            return None
+        return free, total
+    except Exception as e:
+        logger.debug("load device memory: the per-device reading failed (%s: %s)",
+                     type(e).__name__, e)
+        return None
+
+
 def configured_split_placement(config: Optional[dict] = None, *,
                                ratios: Optional[list] = None,
                                gpus: Optional[list] = None,

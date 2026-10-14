@@ -331,7 +331,9 @@ class VramSizingMixin:
         Prefers torch.cuda on the configured main GPU (honours main_gpu_index
         for a multi-GPU split) when torch is available, bounded by
         _free_total_vram_bytes. Falls back to loader.gpu_memory_isolated() when
-        torch cannot answer, which includes "did not answer in time". Never
+        torch cannot answer, which includes "did not answer in time", and on a
+        runtime with 2+ GPU devices, where that probe declines, to
+        discover.load_device_memory_isolated() for the load's device. Never
         calls loader.gpu_memory() directly in this process: that call's
         ggml_backend_dev_memory -> hipMemGetInfo path can abort the whole
         process from C on a transient driver condition, which no Python
@@ -355,6 +357,10 @@ class VramSizingMixin:
             from localm.inference.backends.llamacpp import _loader
             mem = _loader.gpu_memory_isolated()
             src = "isolated-probe"
+            if mem is None:
+                from localm.discover import load_device_memory_isolated
+                mem = load_device_memory_isolated()
+                src = "isolated-probe-device"
             if mem is not None:
                 free_raw, total = int(mem[0]), int(mem[1])
         if free_raw is None:
@@ -427,7 +433,7 @@ class VramSizingMixin:
     @classmethod
     def _total_vram_bytes(cls) -> Optional[int]:
         """Total VRAM in bytes on the configured main GPU device, or None when
-        not measurable by ANY path - same torch-then-isolated-probe fallback
+        not measurable by ANY path - same torch-then-isolated-probe fallbacks
         as _free_vram_bytes, so a caller that already has a real free reading
         via the isolated probe (torch unavailable/broken/wedged) is not left
         holding a None total purely because torch specifically could not
@@ -438,6 +444,9 @@ class VramSizingMixin:
             return total
         from localm.inference.backends.llamacpp import _loader
         mem = _loader.gpu_memory_isolated()
+        if mem is None:
+            from localm.discover import load_device_memory_isolated
+            mem = load_device_memory_isolated()
         return int(mem[1]) if mem is not None else None
 
     @classmethod
