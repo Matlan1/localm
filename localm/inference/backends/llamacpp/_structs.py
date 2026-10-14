@@ -90,7 +90,7 @@ Verified NATIVE sizes:
                            (adds a trailing ``ctx_other`` pointer); 168 bytes
                            on upstream b11480+ (``moe_cache_size`` inserted
                            mid-struct, see the context_params layouts below).
-    llama_batch          = 56 bytes (7 pointers + 1 int32 + padding)
+    llama_batch          = 56 bytes (6 pointers + 1 int32 + padding)
 
 The ``sizeof`` asserts below guard against editing these definitions wrong; they
 do NOT validate against the loaded DLL (a struct is the same size whatever the

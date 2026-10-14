@@ -489,8 +489,9 @@ def bench_mtp(model, gen_tokens, rounds, ctx, gpu_layers, draft_tokens):
     Whether speculation pays depends on the model, the quantisation, how much
     of it fits on the GPU, and the speed of this specific machine, so it is
     measured here rather than predicted. Nothing is written to your config:
-    the MTP setting is left exactly as it was. Same as
-    ``localm bench-spec --source mtp`` with the original three prompts.
+    the MTP setting is left exactly as it was. Like
+    ``localm bench-spec --source mtp``, but with only the first three of its four
+    prompts (no rewrite prompt) and --rounds defaulting to 2 rather than 3.
     """
     from rich.markup import escape
 

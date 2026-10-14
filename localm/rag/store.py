@@ -51,7 +51,7 @@ from ._store.cache import (  # noqa: F401
 from ._store.confine import (  # noqa: F401
     _INDEX_MODES, _SENSITIVE_HOME_SUBDIRS, _SENSITIVE_NAMES, ConfinementError,
     _network_drives_allowed_fresh, _path_within, confine_index_path,
-    indexing_policy)
+    floor_refusal, indexing_policy)
 from ._store.embedding import _CollectionEmbedding
 from ._store.files import (  # noqa: F401
     _STATS_CACHE_KEY, _WARNED_DEGRADES, _CollectionFiles, _plain_chunks,
@@ -310,7 +310,8 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
 
         When *policy* is given (the HTTP API passes ``indexing_policy()``), an
         out-of-bounds top-level path raises ``ValueError`` and nested escapes are
-        dropped. CLI callers omit it and stay unconfined. Indexing with an
+        dropped. CLI callers omit it: only the hard floor (credential folders, UNC or
+        device paths, and mapped network drives when that setting is off) applies. Indexing with an
         embedding model whose dimensionality differs from the collection's also
         raises ``ValueError``.
 

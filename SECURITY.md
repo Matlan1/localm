@@ -196,7 +196,9 @@ localm process's own permissions rather than a sandbox:
   folder, its contents are indexable like any other file, on the reasoning that
   the owner already has direct filesystem access to their own data; this is a
   deliberate choice for a local, single-user tool, not an oversight.
-  The `localm rag` CLI is unconfined (a local user can already read their own files).
+  The `localm rag` CLI is not bound by that folder policy (a local user can already read
+  their own files) but it refuses the same credential folders, UNC and device paths,
+  and mapped network drives when that setting is off.
   A `rag`-scoped key can still read documents under the allowed roots back through a
   query, so issue one only to clients you trust. A key can also be confined to a
   specific folder allowlist at mint time (`rag_roots`) instead of that default

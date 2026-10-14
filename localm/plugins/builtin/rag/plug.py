@@ -11,6 +11,11 @@ Routes (mounted by the engine, auto-scoped to the ``rag`` capability):
   POST   /api/rag/collections/{name}/query     - retrieve top-k chunks
   POST   /api/rag/collections/{name}/remove-doc - drop one doc
   POST   /api/rag/collections/{name}/repair    - rebuild a damaged index (job)
+  POST   /api/rag/collections/{name}/reembed   - recompute vectors with the current model
+  GET    /api/rag/rerank                       - whether results are reranked
+  GET    /api/rag/embedding                    - embedding-model config + availability
+  POST   /api/rag/embedding                    - select the embedding model (job)
+  POST   /api/rag/embedding/download           - fetch the configured embedding model
   POST   /api/rag/extract                       - attachment -> text (in memory)
 
 Collections are explicit user data - indexing writes to <data dir>/rag/ in every
@@ -682,9 +687,9 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     # Confinement runs before anything touches the filesystem, so an out-of-policy
     # path gets the same answer whether or not it exists. Confines API-driven
     # indexing under the owner's policy (whitelist/blacklist, plus the always-denied
-    # localm data dir and credential folders). A whitelist miss is offered back to
+    # credential folders). A whitelist miss is offered back to
     # the owner as "add these folders and continue" (409); a hard denial (credential
-    # folder, data dir, or an explicit deny-list entry) is refused (400). Only the
+    # folder or an explicit deny-list entry) is refused (400). Only the
     # owner may widen the allow-list, so a non-owner shared key gets 403 for a miss.
     #
     # A caller whose key carries its own rag_roots allowlist is confined to exactly

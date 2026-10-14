@@ -967,13 +967,13 @@ CORE_FIELDS: list = [
                  admin_only=True),
     # ---- Knowledge (RAG plugin) ----
     # All three are OWNER-ONLY: they define which host folders document indexing
-    # may read (a filesystem-read boundary). The localm data folder and credential
-    # folders (.ssh, .aws, ...) are refused in BOTH modes regardless - a hard floor.
+    # may read (a filesystem-read boundary). Credential folders (.ssh, .aws, ...)
+    # are refused in BOTH modes regardless - a hard floor.
     SettingField("rag_indexing_mode", Widget.SELECT, "Indexing folder rule",
                  "Which folders document indexing may read. whitelist = home, "
                  "the working directory and Allowed folders only. blacklist = "
-                 "anything except Denied folders. Data and credential folders "
-                 "are always refused.",
+                 "anything except Denied folders. Credential folders are "
+                 "always refused.",
                  group="Knowledge", owner="rag", admin_only=True,
                  options=["whitelist", "blacklist"]),
     SettingField("rag_allowed_roots", Widget.PATHLIST, "Allowed folders",

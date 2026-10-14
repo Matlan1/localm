@@ -26,6 +26,18 @@ def _refuse_if_locked(console):
         sys.exit(1)
 
 
+@contextlib.contextmanager
+def _refuse_bad_path(console):
+    """Turn a ValueError raised while indexing (a refused path, a dimension
+    mismatch) into a red message and exit 1 instead of a traceback."""
+    from rich.markup import escape
+    try:
+        yield
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        sys.exit(1)
+
+
 @main.group("rag")
 def rag_group():
     """Knowledge collections - chat with your documents (offline RAG).
@@ -106,7 +118,7 @@ def rag_add(collection, paths, force, embed, url):
         from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
         model_name = str(load_config().get("embedding_model")
                           or DEFAULT_EMBEDDING_MODEL).strip()
-    with _refuse_if_locked(console):
+    with _refuse_if_locked(console), _refuse_bad_path(console):
         coll.create()             # a write too: takes the same lock
         result = coll.add_paths(
             list(paths), force=force, embed_fn=embed_fn, model_name=model_name,
@@ -181,7 +193,19 @@ def rag_repair(collection, embed, url, yes):
                 f"[yellow]'{escape(collection)}' has no server-side document sources "
                 "to repair (every document here was added via upload).[/yellow]")
         return
-    paths = repairable
+    from localm.rag.store import _network_drives_allowed_fresh, floor_refusal
+    allow_net = _network_drives_allowed_fresh()
+    paths = []
+    for p in repairable:
+        reason = floor_refusal(p, allow_net)
+        if reason:
+            console.print(f"[yellow]skipping {escape(p)}: {escape(reason)}[/yellow]")
+        else:
+            paths.append(p)
+    if not paths:
+        console.print(f"[yellow]'{escape(collection)}' has no document source that "
+                      "may be re-indexed.[/yellow]")
+        return
     if coll.corrupt:
         console.print(f"[yellow]'{escape(collection)}' index was corrupt; rebuilding "
                       f"from {len(paths)} source(s).[/yellow]")
@@ -222,7 +246,7 @@ def rag_repair(collection, embed, url, yes):
         from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
         model_name = str(load_config().get("embedding_model")
                           or DEFAULT_EMBEDDING_MODEL).strip()
-    with _refuse_if_locked(console):
+    with _refuse_if_locked(console), _refuse_bad_path(console):
         result = coll.add_paths(
             paths, force=True, embed_fn=embed_fn, model_name=model_name,
             on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
@@ -295,7 +319,7 @@ def rag_resync(collection, embed, url, prune_missing):
     # unconfined (the credential-dir hard floor still applies inside
     # confine_index_path). The SCHEDULED job path passes indexing_policy()
     # instead.
-    with _refuse_if_locked(console):
+    with _refuse_if_locked(console), _refuse_bad_path(console):
         result = coll.resync(
             embed_fn=embed_fn, policy=None, prune_missing=prune_missing,
             model_name=model_name,

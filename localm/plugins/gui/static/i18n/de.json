@@ -1606,7 +1606,7 @@
   "settings.field.ragClassifyUnknownFiles.label": "Unbekannte Dateien mit KI klassifizieren",
   "settings.field.ragDeniedRoots.help": "Ordner, die im blacklist-Modus nie indiziert werden (alles andere ist erlaubt). Im whitelist-Modus ignoriert.",
   "settings.field.ragDeniedRoots.label": "Verweigerte Ordner",
-  "settings.field.ragIndexingMode.help": "Welche Ordner die Dokumentindizierung lesen darf. whitelist = nur Home, das Arbeitsverzeichnis und Erlaubte Ordner. blacklist = alles außer Verweigerte Ordner. Daten- und Zugangsdatenordner werden immer abgelehnt.",
+  "settings.field.ragIndexingMode.help": "Welche Ordner die Dokumentindizierung lesen darf. whitelist = nur Home, das Arbeitsverzeichnis und Erlaubte Ordner. blacklist = alles außer Verweigerte Ordner. Zugangsdaten-Ordner werden immer abgelehnt.",
   "settings.field.ragIndexingMode.label": "Indizierungs-Ordnerregel",
   "settings.field.reloadLlmAfterImagine.help": "Gibt den VRAM des Medienmodells frei und lädt das Chat-Modell nach einer Generierung neu. Bei vielen aufeinanderfolgenden Generierungen ausschalten.",
   "settings.field.reloadLlmAfterImagine.label": "Chat-Modell nach der Generierung neu laden",

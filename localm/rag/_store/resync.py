@@ -10,7 +10,7 @@ from typing import Optional
 
 from localm.rag import store as _st
 
-from .confine import _path_within
+from .confine import _network_drives_allowed_fresh, _path_within, floor_refusal
 from .types import ProgressFn
 
 
@@ -102,13 +102,12 @@ class _CollectionResync:
                 unavailable.append({"root": raw, "reason": reason})
                 say(f"skipping {raw}: {reason} - nothing under it was changed")
                 continue
-            if policy is not None:
-                try:
-                    _st.confine_index_path(root, policy)
-                except ValueError as e:
-                    blocked.append({"root": raw, "reason": str(e)})
-                    say(f"skipping {raw}: {e}")
-                    continue
+            try:
+                _st.confine_index_path(root, policy)
+            except ValueError as e:
+                blocked.append({"root": raw, "reason": str(e)})
+                say(f"skipping {raw}: {e}")
+                continue
             available.append(root)
         return available, unavailable, blocked
 
@@ -154,8 +153,10 @@ class _CollectionResync:
         Uploads have no source file (``upload:`` keys) and are skipped. So is
         anything under a skipped root, and anything the current policy refuses;
         the last of those is filtered HERE rather than handed to
-        ``_add_paths_locked``, whose top-level confinement check raises."""
+        ``_add_paths_locked``, whose top-level confinement check raises. With no
+        policy the hard floor alone applies."""
         out: list = []
+        allow_net = _network_drives_allowed_fresh() if policy is None else None
         for key in sorted(self._meta.get("docs", {})):
             if str(key).startswith("upload:"):
                 continue
@@ -172,6 +173,11 @@ class _CollectionResync:
                     _st.confine_index_path(p, policy)
                 except ValueError as e:
                     say(f"skipping {key}: {e}")
+                    continue
+            else:
+                reason = floor_refusal(p, allow_net)
+                if reason:
+                    say(f"skipping {key}: {reason}")
                     continue
             out.append(p)
         return out
