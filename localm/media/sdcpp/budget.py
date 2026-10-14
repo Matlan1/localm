@@ -65,7 +65,7 @@ def vram_budget(backend: str, *, gpus: Optional[list] = None, status: Optional[s
                            "runtime sizes the load from its own reading",
                            type(e).__name__, e)
             return None
-    if status != discover.GPU_PROBE_OK:
+    if status != discover.GPU_PROBE_OK or not gpus:
         return None
     usable = [g for g in gpus if isinstance(g, dict) and isinstance(g.get("free"), int)
               and isinstance(g.get("total"), int) and isinstance(g.get("index"), int)
