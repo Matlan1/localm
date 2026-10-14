@@ -160,7 +160,7 @@ class Transport:
 
     def install(self, monkeypatch) -> Transport:
         monkeypatch.setattr("localm.netpolicy._session_for",
-                            lambda url: FakeSession(self.responder))
+                            lambda url, **kw: FakeSession(self.responder))
         return self
 
     def urls(self, method: Optional[str] = None) -> list[str]:

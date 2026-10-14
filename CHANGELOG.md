@@ -2189,6 +2189,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   network is off and sends nothing. The security notes now list everything that still reaches the
   network under `off`: the two admin-only exemptions, the bug-report upload (sent only when you press
   Send), requests to your configured ComfyUI, and the native runtime downloads.
+- **A SearXNG instance on your network no longer needs the private-address guard turned off.**
+  The search reaches a LAN or loopback address on exactly the `net_search_url` you set (same
+  scheme, host and port), and a link-local one is still refused. The network guide used to tell
+  you to set `net_allow_private true` for a LAN instance, which removes the guard from every
+  page the model fetches, including cloud metadata and localm's own API; it no longer does.
 - **A scoped API key no longer receives this machine's absolute paths.** The memory page, the
   image, music and video galleries (file paths and the saved generation settings, such as the source
   image of an img2img), a gallery move, the uploads list, the managed ComfyUI status,
