@@ -806,14 +806,17 @@ def note_other_vram_holders(
 # ``media_handover_job`` counts the jobs in flight so those steps never
 # interleave: the job that finishes while another is still in flight leaves the
 # reload to the last one, and a job that starts while a reload runs waits for it.
-# ``_handover_cv`` guards the four fields below and is never held across a
-# backend call, a lock of ``localm.media.sdcpp.shared`` or a request.
+# A job that leaves the reload to a later job also leaves its backend to be freed
+# there, so the chat model never reloads beside a media runtime still in VRAM.
+# ``_handover_cv`` guards the fields below and is never held across a backend
+# call, a lock of ``localm.media.sdcpp.shared`` or a request.
 
 HANDOVER_POLL_SECONDS = 0.25
 _handover_cv = threading.Condition()
 _handover_jobs = 0
 _handover_reloading = False
 _handover_deferred: Optional[tuple] = None
+_handover_deferred_backends: list = []
 
 
 def _handover_enter(job: Any) -> bool:
@@ -879,8 +882,9 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     ``unload_chat_for_media``'s docstring.
 
     Inside a ``media_handover_job`` with another media job still in flight, nothing
-    is freed or reloaded here: the reload is left to the last job to finish.
-    While the reload runs, jobs that start wait for it."""
+    is freed or reloaded here: the reload, and the freeing of this job's backend, is
+    left to the last job to finish. While the reload runs, jobs that start wait for
+    it."""
     if not s["reload_after"]:
         job.push({"type": "line", "text":
                   f"Keeping the {media_label} backend loaded (reload is off) - "
@@ -890,12 +894,22 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     with _handover_cv:
         if _handover_jobs > 1:
             _handover_deferred = (self_url, s, backend, media_label, instance_token)
+            if all(b is not backend for b, _s, _label in _handover_deferred_backends):
+                _handover_deferred_backends.append((backend, s, media_label))
             job.push({"type": "line", "text":
                       "Another media job is waiting - the chat model reloads after "
                       "the last one."})
             return
         _handover_reloading = True
+        others = [d for d in _handover_deferred_backends if d[0] is not backend]
+        _handover_deferred_backends.clear()
     try:
+        for other_backend, other_s, other_label in others:
+            if not other_backend.free_vram(other_s):
+                job.push({"type": "line", "text":
+                          f"The {other_label} backend kept its models in VRAM - the chat "
+                          "model will reload on the next message instead."})
+                return
         if not backend.free_vram(s):
             job.push({"type": "line", "text":
                       f"The {media_label} backend kept its models in VRAM - the chat "
@@ -922,4 +936,5 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
         with _handover_cv:
             _handover_reloading = False
             _handover_deferred = None
+            _handover_deferred_backends.clear()
             _handover_cv.notify_all()

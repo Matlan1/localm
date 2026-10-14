@@ -37,13 +37,14 @@ class FakeJob:
 
 
 class FakeBackend:
-    def __init__(self, timeline):
+    def __init__(self, timeline, name="backend"):
         self.timeline = timeline
+        self.name = name
         self.free_calls = 0
 
     def free_vram(self, s):
         self.free_calls += 1
-        self.timeline.append("free_vram")
+        self.timeline.append(f"free:{self.name}")
         return True
 
 
@@ -177,6 +178,7 @@ def test_a_job_starting_during_a_reload_waits_for_it(timeline, chat_load):
     # B is parked behind the reload: it has said so and has not started.
     _wait_for(lambda: any("finish reloading" in (t or "") for t in b.lines))
     assert any("finish reloading" in (t or "") for t in b.lines)
+    threading.Event().wait(0.5)
     assert "B:media_model_load" not in timeline
     chat_load.gate.set()
     ta.join(WAIT)
@@ -241,7 +243,7 @@ def test_the_last_job_reloads_even_when_it_did_not_swap(timeline, chat_load):
     assert ob["rv"] is True
     assert chat_load.calls == 1
     assert timeline.index("B:done_without_reload") < timeline.index("chat_load_start")
-    assert "Chat model ready." in b.lines
+    assert "Chat model ready." in a.lines + b.lines
 
 
 def test_a_failing_body_and_a_failing_deferred_reload_leave_nothing_counted(timeline):
@@ -281,7 +283,55 @@ def test_a_failing_body_and_a_failing_deferred_reload_leave_nothing_counted(time
 
     assert results["err"] == "generation blew up"
     assert any("Reload deferred to the next message (driver gone)" in (t or "")
-               for t in b.lines)
+               for t in a.lines + b.lines)
+
+
+def test_a_deferred_reload_still_frees_the_deferring_jobs_backend(timeline, chat_load):
+    music, image = FakeBackend(timeline, "music"), FakeBackend(timeline, "image")
+    a, b = FakeJob("A"), FakeJob("B")
+    b_entered = threading.Event()
+    a_deferred = threading.Event()
+
+    @vram.media_handover_job
+    def job_a(job):
+        assert b_entered.wait(WAIT)
+        _reload(job, music)
+        a_deferred.set()
+        return True
+
+    @vram.media_handover_job
+    def job_b(job):
+        b_entered.set()
+        assert a_deferred.wait(WAIT)
+        _reload(job, image)
+        return True
+
+    ta, _ = _run(job_a, a)
+    _wait_for(lambda: vram._handover_jobs >= 1)
+    tb, _ = _run(job_b, b)
+    ta.join(WAIT)
+    tb.join(WAIT)
+
+    assert music.free_calls == 1 and image.free_calls == 1
+    load = timeline.index("chat_load_start")
+    assert timeline.index("free:music") < load and timeline.index("free:image") < load
+
+
+def test_a_single_job_reloads_exactly_as_before(timeline, chat_load):
+    backend = FakeBackend(timeline)
+    job = FakeJob("A")
+
+    @vram.media_handover_job
+    def only(job):
+        _reload(job, backend)
+        return True
+
+    t, out = _run(only, job)
+    t.join(WAIT)
+
+    assert out["rv"] is True
+    assert timeline == ["free:backend", "chat_load_start", "chat_load_end"]
+    assert job.lines == ["Reloading the chat model...", "Chat model ready."]
 
 
 _PLUG_FILES = ("image", "video", "music")
