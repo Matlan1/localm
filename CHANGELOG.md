@@ -635,6 +635,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Text-to-speech in Safari older than 26 without WebGPU loads the runtime build transformers.js
   selects for it.** localm shipped only the asyncify onnxruntime build, which every browser got,
   including that one. The plain build is now bundled too and used there.
+- **Changing the embedding model no longer freezes the server while it checks your collections.** The preview of which collections the switch would affect now reads them off the main thread, so chat and the page keep responding while a large collection is read.
+- **Clear now removes a plugin's saved secret setting.** Clicking Clear on a plugin's API key field and saving previously said "Nothing changed" and kept the key; it now removes it.
 - **The chat model comes back after a failed image, video or music job.** When a generation
   crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
   until your next message. It now reloads on every way a job can end, and a job that finishes
