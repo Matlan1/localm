@@ -59,7 +59,7 @@ def tool_generate_image(
     # else default_api_url() (FLUX_API_URL, then the loopback default). The same
     # target the GUI, REPL and MCP image paths use.
     from localm.config import load_config
-    api_url = image_backend.settings(load_config()).get("api_url")
+    api_url = str(image_backend.settings(load_config()).get("api_url") or "")
     ok, message = generate_image(
         prompt, out_p,
         api_url=api_url,

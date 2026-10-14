@@ -1282,10 +1282,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
-    # The native ctypes binding does not expose create_embedding, so this backend
-    # cannot produce embeddings. Callers read this flag to avoid advertising an
-    # embed capability that would always raise, without loading a model first.
-    can_embed: bool = False
+    @property
+    def can_embed(self) -> bool:
+        """Always False: the native ctypes binding does not expose
+        create_embedding, so this backend cannot produce embeddings, and the
+        answer is known without loading a model."""
+        return False
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not self._loaded:
