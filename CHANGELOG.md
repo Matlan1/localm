@@ -33,6 +33,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   offered as a reranker. A reranker whose worker stopped waits for a model load in progress
   before it starts again, and one that cannot start again is retried after a minute instead of
   on every query.
+  A Qwen3-Reranker sequence-classification conversion, which ships a chat template and
+  declares its yes/no token mapping, still counts as a reranker, and a folder stored as a
+  reranker that no longer counts as one is filed as a fresh registration of it would file
+  it, not as an embedding model.
 - **Import models from StabilityMatrix, and type them by content.** Import from ComfyUI also takes a StabilityMatrix install, data or models folder. Every model file found is filed as a diffusion model, text encoder, VAE or LoRA by what is inside it, not only by the folder it sits in, and ComfyUI's `diffusion_models` and `clip_vision` folders and StabilityMatrix's `StableDiffusion`, `DiffusionModels`, `TextEncoders`, `ClipVision`, `Lora` and `VAE` folders are recognised in any letter case.
 - **Live preview while a native image or video renders.** The Images and Video pages show a
   small picture of the image taking shape under the job log, refreshed every few sampling
