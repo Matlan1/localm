@@ -124,7 +124,74 @@ class TestConfigState:
         entry = {"model_type": "embedding", "reranker": True, "path": str(folder)}
         mm.update_registry(lambda reg: reg.__setitem__("rm", dict(entry)))
         assert entry_is_reranker("rm", entry) is False
-        assert load_registry()["rm"]["reranker"] is False
+        stored = load_registry()["rm"]
+        assert stored["model_type"] == "unknown"
+        assert "reranker" not in stored
+
+    @staticmethod
+    def _qwen3_seq_cls_reranker(folder):
+        _config(folder, architectures=["Qwen3ForSequenceClassification"],
+                id2label={"0": "LABEL_0"}, label2id={"LABEL_0": 0},
+                classifier_from_token=["no", "yes"], is_original_qwen3_reranker=False)
+        (folder / "tokenizer_config.json").write_text(
+            json.dumps({"chat_template": "{{ messages }}"}), encoding="utf-8")
+        return folder
+
+    @staticmethod
+    def _reward_model(folder):
+        _config(folder, architectures=["Qwen3ForSequenceClassification"],
+                id2label={"0": "LABEL_0"})
+        (folder / "tokenizer_config.json").write_text(
+            json.dumps({"chat_template": "{{ messages }}"}), encoding="utf-8")
+        return folder
+
+    @staticmethod
+    def _cross_encoder(folder):
+        return _config(folder, architectures=["XLMRobertaForSequenceClassification"],
+                       id2label={"0": "LABEL_0"})
+
+    def test_a_qwen3_seq_cls_reranker_with_a_chat_template_is_a_reranker(self, tmp_path):
+        folder = self._qwen3_seq_cls_reranker(tmp_path / "q")
+        assert hf_reranker_state(folder) is True
+        assert _detect_local_model_type(folder, is_gguf=False, is_hf=True)[0] == "embedding"
+
+    def test_a_reward_model_without_the_reranker_token_mapping_stays_one(self, tmp_path):
+        folder = self._reward_model(tmp_path / "r")
+        assert hf_reranker_state(folder) is False
+
+    def test_a_stored_qwen3_seq_cls_reranker_stays_a_reranker_and_unchanged(
+            self, tmp_path, isolated_home):
+        import localm.model_manager as mm
+        folder = self._qwen3_seq_cls_reranker(tmp_path / "q")
+        entry = {"model_type": "embedding", "reranker": True, "path": str(folder)}
+        mm.update_registry(lambda reg: reg.__setitem__("q", dict(entry)))
+        assert entry_is_reranker("q", entry) is True
+        assert load_registry()["q"] == entry
+
+    @pytest.mark.parametrize("build", ["_qwen3_seq_cls_reranker", "_reward_model", "_cross_encoder"])
+    def test_reclassifying_a_stored_reranker_equals_a_fresh_registration(
+            self, build, tmp_path, isolated_home):
+        import localm.model_manager as mm
+        fresh_dir = getattr(self, build)(tmp_path / "fresh")
+        stale_dir = getattr(self, build)(tmp_path / "stale")
+        assert add_local(str(fresh_dir), name="fresh", on_duplicate="skip", no_hash=True)
+        fresh = load_registry()["fresh"]
+        stale = {"model_type": "embedding", "reranker": True, "path": str(stale_dir)}
+        mm.update_registry(lambda reg: reg.__setitem__("stale", dict(stale)))
+        assert entry_is_reranker("stale", stale) is fresh.get("reranker", False)
+        reclassified = load_registry()["stale"]
+        for key in ("model_type", "reranker"):
+            assert reclassified.get(key) == fresh.get(key), key
+
+    def test_a_reclassified_reward_model_is_no_longer_an_embedding_model(
+            self, tmp_path, isolated_home):
+        import localm.model_manager as mm
+        folder = self._reward_model(tmp_path / "rm")
+        entry = {"model_type": "embedding", "reranker": True, "path": str(folder)}
+        mm.update_registry(lambda reg: reg.__setitem__("rm", dict(entry)))
+        assert entry_is_reranker("rm", entry) is False
+        assert load_registry()["rm"]["model_type"] != "embedding"
+        assert entry_is_reranker("rm", load_registry()["rm"]) is False
 
     def test_a_stored_gguf_reranker_flag_is_read_without_touching_the_file(
             self, tmp_path, monkeypatch):
