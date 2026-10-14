@@ -217,7 +217,7 @@ def _embedder_download_status(request: Request | None) -> dict:
                     rag_mounted = True
                 except NoMatchFound:
                     rag_mounted = False
-            if (rag_mounted
+            if (rag_mounted and request is not None
                     and _hs.caller_grants(request, "rag")
                     and _hs.caller_grants(request, scopes.CONFIG_WRITE)):
                 return {"can_download_embedder": True, "embedder_model": model}
