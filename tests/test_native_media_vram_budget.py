@@ -348,14 +348,16 @@ def test_the_tile_covers_the_size_the_runtime_rounds_up_to(size, tile):
     assert image_native.vae_tile(*size) == tile
 
 
-def test_a_split_of_a_rounded_up_tile_reads_as_one_piece():
+@pytest.mark.parametrize("image,generated", [((1920, 1080), (1920, 1088)),
+                                             ((1080, 1920), (1088, 1920))])
+def test_a_split_of_a_rounded_up_tile_reads_as_one_piece(image, generated):
     said = []
     relay = logrelay.RecoveredWarnings(said.append)
-    relay.full_tile = (1920, 1080)
+    relay.full_tile = image
     for line in SINGLE_TILE_RETRY[:-2]:
         relay.line(line)
-    relay.line("Reducing VAE decode tiles from 1920x1088 to 960x544 image pixels "
-               "--- backend_fit.cpp:519")
+    relay.line(f"Reducing VAE decode tiles from {generated[0]}x{generated[1]} to "
+               f"{generated[0] // 2}x{generated[1] // 2} image pixels --- backend_fit.cpp:519")
     relay.line(SINGLE_TILE_RETRY[-1])
     assert said == ["Not enough VRAM to decode in one piece; decoding in tiles."]
 
