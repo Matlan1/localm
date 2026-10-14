@@ -350,6 +350,24 @@ class TestGalleryIndexReadContract:
         assert p.read_text(encoding="utf-8") == corrupt     # untouched
 
 
+def _locked_index_write(monkeypatch):
+    from localm.media import gallery
+
+    def locked_write(media_kind, data):
+        raise PermissionError(32, "being used by another process")
+    monkeypatch.setattr(gallery, "_write_index", locked_write)
+
+
+def _assert_warned_and_enforced(c, events, kind_route, key_a, key_b):
+    end = events[-1]
+    assert end["type"] == "end" and end["status"] == "done", events
+    name = end["result"]
+    assert any(e.get("type") == "line" and "WARNING" in e.get("text", "")
+               and name in e["text"] for e in events), events
+    assert c.get(f"{kind_route}/file/{name}", headers=_h(key_b)).status_code == 404
+    assert c.get(f"{kind_route}/file/{name}", headers=_h(key_a)).status_code == 200
+
+
 class TestMusicGalleryOwnership:
     @staticmethod
     def _generate(client, monkeypatch, key):
@@ -370,6 +388,19 @@ class TestMusicGalleryOwnership:
         end = _wait_job(client, r.json()["job_id"], _h(key))
         assert end and end["status"] == "done"
         return end["result"]
+
+    def test_an_owner_that_cannot_be_written_is_reported_and_enforced(
+            self, tmp_path, monkeypatch):
+        app = _gallery_app(tmp_path, monkeypatch, "music")
+        a, b = _mk_keys(["music"], ["music"])
+        with TestClient(app) as c:
+            self._generate(c, monkeypatch, a)
+            _locked_index_write(monkeypatch)
+            r = c.post("/api/music", headers=_h(a),
+                       json={"tags": "lofi", "duration_seconds": 10})
+            assert r.status_code == 200
+            _assert_warned_and_enforced(c, _job_events(c, r.json()["job_id"], _h(a)),
+                                        "/api/music", a, b)
 
     def test_a_music_key_cannot_touch_b_music_key_media(self, tmp_path, monkeypatch):
         app = _gallery_app(tmp_path, monkeypatch, "music")
@@ -407,6 +438,18 @@ class TestVideoGalleryOwnership:
         end = _wait_job(client, r.json()["job_id"], _h(key))
         assert end and end["status"] == "done"
         return end["result"]
+
+    def test_an_owner_that_cannot_be_written_is_reported_and_enforced(
+            self, tmp_path, monkeypatch):
+        app = _gallery_app(tmp_path, monkeypatch, "video")
+        a, b = _mk_keys(["video"], ["video"])
+        with TestClient(app) as c:
+            self._generate(c, monkeypatch, a)
+            _locked_index_write(monkeypatch)
+            r = c.post("/api/video", headers=_h(a), json={"prompt": "a fox"})
+            assert r.status_code == 200
+            _assert_warned_and_enforced(c, _job_events(c, r.json()["job_id"], _h(a)),
+                                        "/api/video", a, b)
 
     def test_a_video_key_cannot_touch_b_video_key_media(self, tmp_path, monkeypatch):
         app = _gallery_app(tmp_path, monkeypatch, "video")

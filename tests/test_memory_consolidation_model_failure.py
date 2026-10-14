@@ -258,3 +258,15 @@ def test_the_consolidate_route_returns_500_when_the_model_call_raises(
 
     assert ei.value.status_code == 500
     assert "model call failed" in ei.value.detail and "evicted" in ei.value.detail
+
+
+def test_the_background_pass_logs_a_failed_model_call_as_a_warning(memhome, monkeypatch,
+                                                                    caplog):
+    monkeypatch.setattr(plug, "_live_engine", lambda: _Engine())
+
+    with caplog.at_level("INFO", logger="localm"):
+        plug._auto_consolidate_bg()
+
+    hits = [r for r in caplog.records if "auto-consolidate: pass complete" in r.getMessage()]
+    assert hits and hits[-1].levelname == "WARNING"
+    assert "status=error" in hits[-1].getMessage() and "evicted" in hits[-1].getMessage()
