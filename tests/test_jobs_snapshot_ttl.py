@@ -185,6 +185,22 @@ def test_summary_reports_the_latest_progress():
     assert row["phase"] == "download"
 
 
+def test_summary_reports_a_waiting_job_as_queued_while_it_runs():
+    job = Job(id="a", kind="image", argv=[])
+    job.push({"type": "progress", "phase": "queued"})
+    assert job.summary()["phase"] == "queued"
+
+
+@pytest.mark.parametrize("status", ["done", "failed", "cancelled", "interrupted"])
+def test_summary_drops_the_phase_of_a_job_that_is_no_longer_running(status):
+    job = Job(id="a", kind="image", argv=[])
+    job.push({"type": "progress", "pct": 100.0, "phase": "running"})
+    job.status = status
+    row = job.summary()
+    assert "phase" not in row
+    assert row["pct"] == 100.0
+
+
 def test_summary_omits_a_non_numeric_pct():
     job = Job(id="a", kind="pull", argv=[])
     job.push({"type": "progress", "pct": None, "phase": "download"})

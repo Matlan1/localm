@@ -623,6 +623,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A refused chat message no longer deletes attachments that were not the problem.** An audio clip from an earlier turn is now kept when a later message fails for another reason (a conversation that is too long, an image the model cannot read, a rejected grammar), and images are kept when the refusal was not about an image. The server now says which attachment a refusal was about; the chat strips clips or images only for a refusal of that kind.
+- **A photo localm cannot read (an SVG, an iPhone HEIC, a cut-off upload) is reported on its own.** The reply says the attached image could not be read instead of making the chat delete every earlier image and claim the model cannot see.
+- **PDF attachments work on a default install.** `pypdf` is now installed with localm, so a PDF attached in Chat or the Coder is read even when the Knowledge plugin was never enabled.
+- **Enhance prompt works with reasoning models.** The request now asks the chat model not to think, and a reply cut off while it was still reasoning is reported with a clear message instead of an empty reply or reasoning text pasted into the prompt.
+- **The routed-model tooltip names the audio need.** Sending an audio clip to a model that cannot hear it no longer shows a raw `chat.routed.cap.audio_input` in the tooltip.
+- **Unload no longer says "Unloaded" for a model that is still in use.** Unloading an embedding, reranker or speech model that is serving a request now shows that it stays loaded.
+- **The activity list shows a waiting image or video job as queued, and a finished job no longer reports a stale phase.**
 - **The chat model comes back after a failed image, video or music job.** When a generation
   crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
   until your next message. It now reloads on every way a job can end, and a job that finishes

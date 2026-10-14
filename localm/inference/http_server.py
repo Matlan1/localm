@@ -36,6 +36,7 @@ from localm import __version__ as _LOCALM_VERSION
 from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.inference.backends.base import (
+    AudioInputError,
     ChatTemplateMissingError,
     ContextCapacityExceededError,
     EmbedBatchTooLargeError,
@@ -3061,6 +3062,7 @@ class _BodyStreamCapMiddleware:
             await JSONResponse(
                 status_code=413,
                 content={"detail": "Request body too large."},
+                headers={MEDIA_REFUSAL_HEADER: "body-size"},
             )(scope, receive, send)
             return
 
@@ -3138,6 +3140,7 @@ class _BodyStreamCapMiddleware:
             await JSONResponse(
                 status_code=413,
                 content={"detail": "Request body too large."},
+                headers={MEDIA_REFUSAL_HEADER: "body-size"},
             )(scope, receive, send)
 
 
@@ -5844,6 +5847,9 @@ async def _stream_sse_body(
             err_body = err_chunk.model_dump(mode="json")
             err_body["localm_error"] = {"status": err_status,
                                         "detail": scrub_paths(str(gen_error))}
+            refusal = media_refusal_kind(gen_error)
+            if refusal:
+                err_body["localm_error"]["refusal"] = refusal
             yield f"data: {json.dumps(err_body, ensure_ascii=False, separators=(',', ':'))}\n\n"
         else:
             yield f"data: {err_chunk.model_dump_json()}\n\n"
@@ -6730,6 +6736,27 @@ def backend_error_status(exc: BaseException) -> Optional[int]:
     return None
 
 
+MEDIA_REFUSAL_HEADER = "X-Localm-Refusal"
+
+
+def media_refusal_kind(exc: BaseException) -> Optional[str]:
+    """``"audio"`` or ``"image"`` when *exc* refuses an attached clip or image,
+    else ``None``. Sent to clients (response header, or the ``refusal`` field of
+    a streamed ``localm_error``) so a client can tell which attachment a refusal
+    was about instead of inferring it from the status. The request-body size
+    refusal sends ``"body-size"`` the same way."""
+    if isinstance(exc, AudioInputError):
+        return "audio"
+    if isinstance(exc, (VisionInputError, ImageDecodeUnavailable)):
+        return "image"
+    return None
+
+
+def media_refusal_headers(exc: BaseException) -> Optional[dict]:
+    kind = media_refusal_kind(exc)
+    return {MEDIA_REFUSAL_HEADER: kind} if kind else None
+
+
 async def _count_streamed_tokens(engine, streamed: str) -> int:
     """Token count of text already delivered to the client, for the usage block.
 
@@ -6833,7 +6860,8 @@ async def _complete(
             # before generation starts), but it does carry the same reason and
             # marks finish_reason="error" - so both paths tell the caller what went
             # wrong, which is the property that was actually broken.
-            raise HTTPException(backend_error_status(e), str(e)) from e
+            raise HTTPException(backend_error_status(e), str(e),
+                                headers=media_refusal_headers(e)) from e
         except RuntimeError as e:
             # A generation FAILURE (not enough free VRAM for this prompt, a
             # conversation that outgrew n_ctx_max, a native decode error) is raised

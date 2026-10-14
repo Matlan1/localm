@@ -473,7 +473,8 @@ export function enhanceSystemPrompt(media, family, label) {
 /** The enhanced prompt text from a chat reply: reasoning blocks and wrapping
  *  quotes or code fences removed. */
 export function cleanEnhancedPrompt(raw) {
-  let text = String(raw || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  let text = String(raw || "").replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/i, "").trim();
   const fence = text.match(/^```[a-z]*\n([\s\S]*?)\n?```$/i);
   if (fence) text = fence[1].trim();
   for (const [open, close] of [['"', '"'], ["'", "'"], ["“", "”"]]) {
@@ -505,6 +506,7 @@ export async function requestEnhancedPrompt({ media, prompt, family = "", family
       max_tokens: 512,
       temperature: 0.7,
       stream: false,
+      chat_template_kwargs: { enable_thinking: false },
     }),
   });
   let data = null;
@@ -516,7 +518,10 @@ export async function requestEnhancedPrompt({ media, prompt, family = "", family
   }
   const choice = data && data.choices && data.choices[0];
   const text = cleanEnhancedPrompt(choice && choice.message && choice.message.content);
-  if (!text) throw new Error(t("enhance.empty", { model }));
+  if (!text) {
+    throw new Error(t(choice && choice.finish_reason === "length" ? "enhance.truncated"
+      : "enhance.empty", { model }));
+  }
   return text;
 }
 

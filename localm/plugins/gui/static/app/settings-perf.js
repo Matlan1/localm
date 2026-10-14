@@ -2550,6 +2550,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       const err = new Error(`${r.status}: ${data.detail || r.statusText}`);
       err.status = r.status;   // so the catch can recover an image-reject 400
       err.detail = data.detail || "";
+      err.refusal = r.headers?.get("X-Localm-Refusal") || "";
       throw err;
     }
     return r;
@@ -2635,6 +2636,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       const err = new Error(`${streamErr.status}: ${streamErr.detail || ""}`);
       err.status = streamErr.status;
       err.detail = streamErr.detail || "";
+      err.refusal = streamErr.refusal || "";
       throw err;
     }
   }
@@ -2670,14 +2672,15 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       readOk = true;
     } else if (e.name === "AbortError") {
       aborted = true;
-    } else if (sentAudio && (e.status === 400 || e.status === 413) && !full.trim()) {
+    } else if (sentAudio && (e.refusal === "audio" || e.refusal === "body-size") &&
+               !full.trim()) {
       audioRejected = true;
       const n = stripUserAudio(conv);
       saveConversations(conv);
       toast(n
         ? t("chat.audio.rejected", { detail: e.detail || e.message })
         : "Chat request failed: " + e.message, true);
-    } else if (sentImage && e.status === 400 && !full.trim()) {
+    } else if (sentImage && e.status === 400 && e.refusal === "image" && !full.trim()) {
       // VIS-1: a text-only model rejected the image. Drop it from history so the
       // next turn is text-only and the chat stays usable, instead of re-sending
       // the image every turn (which 400s forever -> all-blank assistant replies).

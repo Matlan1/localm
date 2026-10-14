@@ -202,6 +202,7 @@ export const I18N_EN = {
     "Chat runs in privacy mode: conversations are not saved (here or on disk) and vanish on reload. Export still works.",
   "chat.random": "random",
   "chat.repeatPenalty": "Repeat penalty",
+  "chat.routed.cap.audio_input": "hearing audio",
   "chat.routed.cap.context_length": "a longer conversation",
   "chat.routed.cap.reasoning": "reasoning",
   "chat.routed.cap.tool_use": "tool calls",
@@ -1380,6 +1381,7 @@ export const I18N_EN = {
   "models.unload.confirmLabel": "Unload anyway",
   "models.unload.confirmTitle": "Model in use",
   "models.unload.failed": "Unload failed",
+  "models.unload.inUse": "'{name}' is still in use and stays loaded. Try again when it is idle.",
   "models.unload.title":
     "Release this model from GPU/CPU memory (it reloads automatically on the next chat request)",
   "models.unload.toast": "Unloaded '{name}'",
@@ -2436,6 +2438,7 @@ export const I18N_EN = {
   "enhance.failed": "Could not enhance the prompt: {message}",
   "enhance.noModel": "No chat model is loaded. Load one in the sidebar, then try again.",
   "enhance.title": "Ask the loaded chat model to expand this prompt for the selected model",
+  "enhance.truncated": "{model} used all of its reply space on reasoning before it wrote the prompt. Try a model without reasoning.",
   "enhance.undo": "Undo",
   "enhance.working": "Enhancing...",
   "images.advancedHint": "size, seed, guidance, denoise, CFG, LoRA strength",

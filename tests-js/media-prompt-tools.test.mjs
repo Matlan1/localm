@@ -22,7 +22,7 @@ function previewFor(model) {
   return null;
 }
 
-function makeApp({ active = "qwen3", reply, chatStatus = 200, importResult, importStatus = 200 } = {}) {
+function makeApp({ active = "qwen3", reply, finish, chatStatus = 200, importResult, importStatus = 200 } = {}) {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
     const u = String(url);
@@ -31,7 +31,8 @@ function makeApp({ active = "qwen3", reply, chatStatus = 200, importResult, impo
     if (u.startsWith("/api/models")) return ok({ models: active ? [{ name: active }] : [], active });
     if (u.includes("/v1/chat/completions")) {
       if (chatStatus !== 200) return ok({ detail: "model is busy" }, chatStatus);
-      return ok({ choices: [{ message: { content: reply ?? "an enhanced prompt" } }] });
+      return ok({ choices: [{ message: { content: reply ?? "an enhanced prompt" },
+                              finish_reason: finish ?? "stop" }] });
     }
     if (u.includes("/api/imagine/import-params")) return ok(importResult || {}, importStatus);
     if (u.includes("/api/music/native-models")) {
@@ -102,6 +103,24 @@ test("a chat error and an empty reply are reported and leave the prompt alone", 
   assert.match(empty.$("toast").textContent, /empty reply/);
 });
 
+test("Enhance asks the chat model not to think", async () => {
+  const { win, calls, $ } = makeApp();
+  $("img-prompt").value = "a fox";
+  await click(win, enhanceBtn($, "img-prompt"));
+  const sent = JSON.parse(chatCalls(calls)[0].opts.body);
+  assert.deepEqual(sent.chat_template_kwargs, { enable_thinking: false });
+});
+
+test("a reasoning reply cut at the token cap is reported, not pasted into the prompt", async () => {
+  for (const reply of ["", "<think>The user wants a fox, so first I should consider the"]) {
+    const { win, $ } = makeApp({ reply, finish: "length" });
+    $("img-prompt").value = "a fox";
+    await click(win, enhanceBtn($, "img-prompt"));
+    assert.equal($("img-prompt").value, "a fox", "the prompt is left alone");
+    assert.match($("toast").textContent, /reasoning/);
+  }
+});
+
 test("an empty prompt is refused before any model call", async () => {
   const { win, calls, $ } = makeApp();
   $("img-prompt").value = "   ";
@@ -162,8 +181,9 @@ test("cleanEnhancedPrompt strips reasoning, fences and quotes only", async () =>
     cleanEnhancedPrompt("\\u201cfoo bar\\u201d"),
     cleanEnhancedPrompt("it's a \\"quoted\\" word"),
     cleanEnhancedPrompt(null),
+    cleanEnhancedPrompt("<think>never closed, and so"),
   ];`);
-  assert.deepEqual([...win.__c], ["foo, bar", "foo bar", "foo bar", "it's a \"quoted\" word", ""]);
+  assert.deepEqual([...win.__c], ["foo, bar", "foo bar", "foo bar", "it's a \"quoted\" word", "", ""]);
 });
 
 async function importWith(result, { picker = true } = {}) {

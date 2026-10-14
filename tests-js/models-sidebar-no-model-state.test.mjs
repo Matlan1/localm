@@ -221,3 +221,27 @@ test("a busy engine (confirm_required) unloads once confirmed, via a forced retr
   const toastText = win.document.getElementById("toast").textContent;
   assert.match(toastText, /^Unloaded/, "confirming and forcing through reports the real success");
 });
+
+test("an in_use reply is NOT reported as unloaded, and the model stays selected", async () => {
+  const models = [{ name: "model-a", size_bytes: 1000 }];
+  const inner = makeConfirmRequiredFetch(models, [], {});
+  const fetchImpl = async (url, opts = {}) => {
+    if (String(url).startsWith("/api/models/unload")) {
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ status: "in_use", model: "model-a", vram_freed: 0 }) };
+    }
+    return inner(url, opts);
+  };
+  const { window: win } = loadApp({ fetchImpl });
+  await render(win);
+
+  const select = win.document.getElementById("model-select");
+  const btn = win.document.getElementById("sidebar-unload-btn");
+  btn.click();
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+
+  const toast = win.document.getElementById("toast");
+  assert.match(toast.textContent, /still in use/);
+  assert.doesNotMatch(toast.textContent, /^Unloaded/);
+  assert.equal(select.value, "model-a", "the model is still loaded and selected");
+});

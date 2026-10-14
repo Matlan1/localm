@@ -205,7 +205,7 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | `gpu` | AMD RDNA2 ROCm 7.13 stack: torch, transformers, rocm-sdk (Windows, Python 3.12) |
 | `hf` | HuggingFace Transformers stack (`transformers`, `tokenizers`, `accelerate`, and helpers) without the AMD ROCm torch pin; install a torch build for your GPU first |
 | `audio` | Audio multimodal input (`soundfile`) |
-| `rag` | PDF parsing for Knowledge (`pypdf`); other formats are stdlib |
+| `rag` | Kept for existing installs (`pypdf` is part of the core install) |
 | `voice` | Whisper speech-to-text for the GUI mic (`faster-whisper` and `av`, CPU, no torch) |
 | `monitor` | Live hardware monitor in the GUI status bar (`psutil`) |
 | `grammar` | Grammar-constrained decoding for HuggingFace models (`xgrammar`, layers on `[gpu]`) |
@@ -372,7 +372,7 @@ localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
 localm plugin setup             # pick a starter set interactively
 ```
 
-The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[rag]"` alongside `localm plugin install rag`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
+The store names are `coder`, `browser`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[voice]"` alongside `localm plugin install voice`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
 
 **Third-party plugins** are folders containing a `plugin.toml` manifest and Python files. Install a third-party plugin from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](docs/plugins.md) for the full authoring contract.
 

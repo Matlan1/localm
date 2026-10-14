@@ -193,6 +193,10 @@ function activityLabel(op) {
   return (op && (op.label || op.kind)) || "operation";
 }
 
+function activityState(op) {
+  return op.status === "running" && op.phase === "queued" ? "queued" : op.status;
+}
+
 // A compact "12m" / "3m ago" string, or "" when age cannot be computed (no
 // server clock yet, or a malformed created_at). No "running " prefix for a
 // running op - the adjacent .job-state pill already says "running"; verified
@@ -247,7 +251,8 @@ export function renderActivityPill(ops) {
   if (running.length === 1) {
     const op = running[0];
     const pct = typeof op.pct === "number" ? ` ${Math.round(op.pct)}%` : "";
-    pill.textContent = activityLabel(op) + pct;
+    pill.textContent = activityLabel(op) +
+      (activityState(op) === "queued" ? " - queued" : pct);
   } else {
     pill.textContent = `${running.length} running`;
   }
@@ -275,7 +280,7 @@ function _buildActivityBody(body) {
     const row = el("div", "job-row");
     const head = el("div", "job-head");
     head.appendChild(el("span", "job-name", activityLabel(op)));
-    head.appendChild(el("span", "job-state st-" + op.status, op.status));
+    head.appendChild(el("span", "job-state st-" + op.status, activityState(op)));
     const age = activityAge(op);
     if (age) head.appendChild(el("span", "sub", age));
     row.appendChild(head);
@@ -1194,6 +1199,11 @@ if (sidebarUnloadBtn) {
         }
         setStatus("busy", t("sidebar.status.unloading", { model }));
         data = await _postUnload(model, true);
+      }
+      if (data.status === "in_use") {
+        setStatus("ok", model);
+        toast(t("models.unload.inUse", { name: model }), true);
+        return;
       }
       toast(`Unloaded '${model}'`);
       // Publish immediately, same reasoning as switchModel's own comment

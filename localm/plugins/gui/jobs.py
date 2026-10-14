@@ -330,7 +330,8 @@ class Job:
         attach to it. Does not carry argv or the owner id.
 
         pct/phase come from the last progress event. Both are absent, not zero,
-        when the job has not reported progress."""
+        when the job has not reported progress; phase is also absent once the
+        job is no longer running."""
         with self._sub_lock:
             progress = self._last_progress
         out = {
@@ -347,7 +348,7 @@ class Job:
             if isinstance(pct, (int, float)):
                 out["pct"] = pct
             phase = progress.get("phase")
-            if phase:
+            if phase and self.status == "running":
                 out["phase"] = phase
         return out
 

@@ -333,3 +333,34 @@ test("model-unload: Unload-all's force-retry offer, once confirmed, unloads the 
   assert.match(toastText, /Unloaded 1 model/,
     `confirming and forcing through should report the real success (got: ${toastText})`);
 });
+
+test("model-unload: an in_use reply from a resident embedder is not reported as unloaded", async () => {
+  const models = [
+    { name: "embed-a", active: false, loaded: true, model_type: "llm", size_bytes: 1000 },
+  ];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.startsWith("/api/models/unload")) {
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ status: "in_use", model: "embed-a", vram_freed: 0 }) };
+    }
+    if (u === "/api/models" || u.startsWith("/api/models?")) {
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ models, active: null }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadAppWithPages({ fetchImpl });
+  await window.refreshModelsPage();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const row = window.document.querySelector("#models-table tbody tr");
+  const unloadBtn = [...row.querySelectorAll("button")].find((b) => b.textContent === "unload");
+  unloadBtn.click();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const toast = window.document.getElementById("toast");
+  assert.match(toast.textContent, /still in use/);
+  assert.doesNotMatch(toast.textContent, /^Unloaded/);
+  assert.ok(toast.className.includes("error"), "shown as an error");
+});

@@ -1458,7 +1458,8 @@ def _print_activity(scheme: str, port, instance_token=None,
         id_s = f"  [dim]{escape(str(op_id))}[/dim]" if op_id else ""
         if op.get("cancellable") and op_id:
             cancellable = True
-        status_s = escape(str(status))
+        status_s = escape("queued" if status == "running" and op.get("phase") == "queued"
+                          else str(status))
         console.print(f"  [{colour}]{status_s:<9}[/{colour}] {escape(str(label))}{pct_s}{age_s}{id_s}")
     if cancellable:
         console.print("[dim]Cancel one with[/dim] localm cancel <id>")

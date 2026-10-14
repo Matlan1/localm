@@ -144,3 +144,13 @@ def test_chat_extract_offloads_extraction_off_the_event_loop(monkeypatch):
     result = asyncio.run(scenario())
     assert result["text"] == "extracted text"
     assert len([t for t in ticks if t < 0.25]) >= 3, ticks
+
+
+def test_pypdf_is_a_core_dependency_so_pdf_attachments_work_on_a_default_install():
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    core = [spec.split(">")[0].split("=")[0].strip().lower()
+            for spec in data["project"]["dependencies"]]
+    assert "pypdf" in core, core

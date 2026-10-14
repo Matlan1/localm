@@ -14,14 +14,15 @@ const WAV_B64 = Buffer.from(WAV_BYTES).toString("base64");
 
 function setup({ rejectWith = null } = {}) {
   const fetchCalls = [];
-  const ctl = { rejectWith };
+  const ctl = { rejectWith, refusal: "audio" };
   const impl = async (url, opts = {}) => {
     const u = String(url);
     let body;
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
     fetchCalls.push({ url: u, opts, body });
     if (u === "/v1/chat/completions" && ctl.rejectWith) {
-      return { ok: false, status: ctl.rejectStatus || 400, headers: { get: () => null },
+      return { ok: false, status: ctl.rejectStatus || 400,
+        headers: { get: (k) => (k === "X-Localm-Refusal" ? ctl.refusal || null : null) },
         json: async () => ({ detail: ctl.rejectWith }), text: async () => "" };
     }
     if (u === "/v1/chat/completions") {
@@ -339,12 +340,47 @@ test("a refused message with an image and a clip keeps the image and the text", 
 test("a 413 from a too-large request drops the clips like a 400", async () => {
   const { window, ctl } = setup({ rejectWith: "Request body too large" });
   ctl.rejectStatus = 413;
+  ctl.refusal = "body-size";
   const conv = { id: "c1", title: "t", messages: [audioMsg("hi", [], "BBBB")] };
   activate(window, conv);
   await window.runCompletion(conv);
   assert.equal(typeof conv.messages[0].content, "string");
   assert.match(conv.messages[0].content, /\[Audio removed/);
   assert.ok(toastText(window).includes("Request body too large"));
+});
+
+test("a 413 context overflow keeps the clips from earlier turns", async () => {
+  const { window, ctl } = setup({ rejectWith: "The conversation is too long for this model." });
+  ctl.rejectStatus = 413;
+  ctl.refusal = null;
+  const conv = { id: "c1", title: "t", messages: [audioMsg("hi", [], "CCCC")] };
+  activate(window, conv);
+  await window.runCompletion(conv);
+  assert.ok(Array.isArray(conv.messages[0].content), "the message keeps its parts");
+  assert.equal(conv.messages[0].content.some((p) => p.type === "input_audio"), true,
+    "the clip is still in the conversation");
+  assert.doesNotMatch(JSON.stringify(conv.messages[0].content), /Audio removed/);
+  assert.ok(toastText(window).includes("The conversation is too long"));
+  assert.doesNotMatch(toastText(window), /audio clip was not accepted/i);
+});
+
+test("an image refusal keeps the clips from earlier turns", async () => {
+  const detail = "This model cannot accept image input.";
+  const { window, ctl } = setup({ rejectWith: detail });
+  ctl.refusal = "image";
+  const conv = { id: "c1", title: "t", messages: [
+    audioMsg("transcribe", [], "DDDD"),
+    { role: "assistant", content: "a transcript" },
+    { role: "user", content: [
+      { type: "text", text: "and this picture?" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+    ] },
+  ] };
+  activate(window, conv);
+  await window.runCompletion(conv);
+  assert.equal(conv.messages[0].content.some((p) => p.type === "input_audio"), true,
+    "the earlier clip survives");
+  assert.equal(window.msgImages(conv.messages[2]).length, 0, "the refused image is dropped");
 });
 
 test("ten clips in one transcript each keep a live player and are not rebuilt on re-render", async () => {
