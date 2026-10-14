@@ -174,6 +174,22 @@ test("an engine change seen by the model poll repoints unpinned local sessions",
   assert.deepEqual(posts(calls).map((c) => c.body.model), ["Q"]);
 });
 
+test("a model change that passes through no model loaded repoints unpinned local sessions", async () => {
+  const engine = { active: "A" };
+  const { window, calls } = setup([local("a")], { engine });
+  await flush();
+  await window.refreshModels();
+  engine.active = "";
+  await window.refreshModels();
+  await flush();
+  assert.equal(posts(calls).length, 0, "an unload alone repoints nothing");
+  engine.active = "B";
+  await window.refreshModels();
+  await flush();
+  assert.deepEqual(posts(calls).map((c) => c.body.model), ["B"]);
+  assert.equal(posts(calls)[0].body.pin, false);
+});
+
 test("the first model poll does not repoint a session", async () => {
   const engine = { active: "Q" };
   const { window, calls } = setup([local("a")], { engine });

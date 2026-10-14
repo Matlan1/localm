@@ -908,7 +908,7 @@ export async function refreshModels() {
     // change after that (including through "") must refresh.
     if (_modelsEverRefreshed && modelCache.active !== previousActive) {
       refreshPerfEstimate();
-      if (previousActive && modelCache.active) {
+      if (modelCache.active) {
         window.dispatchEvent(new CustomEvent("localm:model-switched",
           { detail: { model: modelCache.active } }));
       }
