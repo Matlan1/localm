@@ -288,7 +288,9 @@ stats): its chunks stay searchable and the flag clears by itself if the file
 returns, so a moved file or an unplugged drive cannot silently destroy part of
 an index. Pass `--prune-missing` to actually remove those entries. A folder that
 is not reachable at run time is reported and skipped whole - nothing under it is
-indexed, flagged, or pruned. Scheduled re-syncs run under the same indexing
+indexed, flagged, or pruned. A document whose source lies under a credential
+folder (for example one indexed before that folder was refused) is removed from
+the index on the next re-sync. Scheduled re-syncs run under the same indexing
 policy as an interactive add. Full details in
 [docs/jobs.md](jobs.md#keeping-an-indexed-folder-current).
 

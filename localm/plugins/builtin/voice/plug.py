@@ -58,8 +58,7 @@ async def voice_status(request: Request):
         if network_mode() != "off" or downloads_allowed_when_off():
             import localm.inference.http_server as _hs
             from localm import scopes
-            held = _hs.caller_scopes(request)
-            can_download = held is None or scopes.grants(held, scopes.CONFIG_WRITE)
+            can_download = _hs.caller_grants(request, scopes.CONFIG_WRITE)
     return {"available": ok, "reason": reason,
             "model_cached": cached, "model": model_name,
             "can_download": can_download}
@@ -81,8 +80,7 @@ async def voice_model_download(request: Request):
     downloads specifically."""
     import localm.inference.http_server as _hs
     from localm import scopes
-    held = _hs.caller_scopes(request)
-    if held is not None and not scopes.grants(held, scopes.CONFIG_WRITE):
+    if not _hs.caller_grants(request, scopes.CONFIG_WRITE):
         raise HTTPException(
             403, "Downloading the speech model needs the config:write scope "
                  "(the same permission that governs the network policy).")

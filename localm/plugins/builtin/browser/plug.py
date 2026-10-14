@@ -44,7 +44,7 @@ from pydantic import BaseModel, Field
 from localm import scopes
 from localm.browser import discovery, provision
 from localm.browser import session as bsession
-from localm.inference.http_server import caller_scopes, principal_id
+from localm.inference.http_server import caller_grants, principal_id
 from localm.plugins.gui.jobs import FRAME_EVENT
 
 _router = APIRouter()
@@ -435,8 +435,7 @@ def _engine_status(can_write: bool) -> dict:
 
 
 def _can_write_config(request: Request) -> bool:
-    held = caller_scopes(request)
-    return held is None or scopes.grants(held, scopes.CONFIG_WRITE)
+    return caller_grants(request, scopes.CONFIG_WRITE)
 
 
 @_router.get("/api/browser/engine")

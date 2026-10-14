@@ -612,6 +612,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **A re-sync removes documents indexed from credential folders.** A collection that already
+  held files from a folder such as `~/.ssh` kept serving them; `localm rag resync` and the
+  scheduled re-sync now drop those entries from the index.
 - **`localm rag add` no longer indexes credential folders.** Adding a folder such as `~/.ssh` or
   `~/.aws` from the terminal, or a folder that contains one, used to index its files even though
   the API refuses them. The command now refuses a credential folder, UNC or device path, and (when
