@@ -613,6 +613,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **A config lock that cannot be read on release is reported.** The lock file left behind is named in a warning instead of lingering silently until it is reclaimed.
+- **A malformed key store or credentials file is no longer overwritten.** Creating or revoking an API key, or saving a Hugging Face or CivitAI credential, now refuses and leaves the file untouched when `auth.json` is not a list or `model_source_credentials.json` is not an object, instead of replacing it with just the new entry.
+- **Self-calls to a look-alike loopback URL keep certificate verification.** An HTTPS URL containing a backslash or control character is no longer treated as loopback, so the coder agent does not disable verification for it when the local CA file is missing.
 - **Ollama-compatible routes.** A non-streamed `/api/chat` or `/api/generate` reply now carries the
   `X-Localm-*` response headers, as the streamed one does. `POST /api/embed` with an empty `input`
   refuses `dimensions` and answers 404 for an unknown model instead of returning an empty result.
@@ -673,7 +675,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
   cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
   dropped. A model worker that does not exit when stopped is killed.
-- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes.
+- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes. Its entry in the activity list shows the phase "queued" while it waits.
 - **Two command-line hints no longer mislead.** `localm memory list` on an empty store says that
   `localm memory add` does not work in privacy mode, and `localm mcp --help` now names the `rerank`
   tool and each plugin tool.

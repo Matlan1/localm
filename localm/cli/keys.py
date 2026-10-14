@@ -381,6 +381,7 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     """
     from localm import auth
     from localm import scopes as S
+    from localm.config import ConfigUnreadable
     from rich.markup import escape
 
     expires = time.time() + expires_in if expires_in is not None else None
@@ -389,7 +390,7 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
                               fs_access=fs_access,
                               rag_roots=list(rag_roots) or None,
                               expires=expires)
-    except (ValueError, PermissionError) as e:
+    except (ValueError, PermissionError, ConfigUnreadable) as e:
         # escape(): a ValueError for an unknown scope embeds the caller's raw
         # --scope text verbatim ("Unknown scope(s): {bad}") - that text failed
         # validation, so it is not restricted to any safe character class.
@@ -440,6 +441,7 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
 def key_rm(key_id, yes):
     """Revoke a named key by ID (see 'localm key list')."""
     from localm import auth
+    from localm.config import ConfigUnreadable
     from rich.markup import escape
 
     # click.confirm() goes through Click's own prompt, not Rich, so key_id is NOT
@@ -450,7 +452,12 @@ def key_rm(key_id, yes):
         return
     # key_id is an unvalidated CLI argument, only ever compared by equality
     # against stored records - escape it for both console.print() sites below.
-    if auth.revoke_key(key_id):
+    try:
+        revoked = auth.revoke_key(key_id)
+    except ConfigUnreadable as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        sys.exit(1)
+    if revoked:
         console.print(f"[green]✓[/green] Revoked {escape(key_id)}.")
     else:
         console.print(f"[red]No such key:[/red] {escape(key_id)}")

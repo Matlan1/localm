@@ -480,3 +480,20 @@ def test_companion_addresses_vpn_only_leaves_lan_empty(monkeypatch):
     monkeypatch.setattr(tls, "_vpn_adapter_ips", lambda: {"10.66.0.7"})
     addrs = tls.companion_addresses()
     assert addrs["lan"] == ""
+
+
+def test_requests_verify_parser_differential_url_keeps_public_verification():
+    # urlsplit reads the host as 127.0.0.1 while requests dials evil.example.
+    from localm.config import home_dir
+    assert not tls.ca_cert_path(home_dir()).is_file()
+    assert tls.requests_verify("https://evil.example\\@127.0.0.1/") is True
+    assert tls.requests_verify("https://127.0.0.1\\@evil.example/") is True
+    assert tls.requests_verify("https://127.0.0.1/\x00") is True
+
+
+def test_requests_verify_loopback_without_ca_is_false():
+    from localm.config import home_dir
+    assert not tls.ca_cert_path(home_dir()).is_file()
+    assert tls.requests_verify("https://127.0.0.1:9000/v1") is False
+    assert tls.requests_verify("https://localhost:9000/v1") is False
+    assert tls.requests_verify("https://[::1]:9000/v1") is False
