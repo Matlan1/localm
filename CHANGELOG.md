@@ -637,6 +637,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   or a launcher warning. `--yes` no longer stops at the plugin picker or the CUDA download
   question, and the hints for provisioning later name the backends your machine has,
   including `metal`.
+- **setup.bat lists only the backends your machine has.** The backend menu and the
+  provision-later hint no longer offer `amd-rocm` or `sycl` on Windows ARM64, where they have
+  no build; the menu numbers stay the same and a number that is not listed returns to the
+  recommended backend with a message.
 - **A re-sync removes documents indexed from credential folders.** A collection that already
   held files from a folder such as `~/.ssh` kept serving them; `localm rag resync` and the
   scheduled re-sync now drop those entries from the index.
