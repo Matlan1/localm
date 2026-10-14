@@ -18,7 +18,7 @@ def register(app: FastAPI, ctx) -> None:
     caller_scopes = _hs.caller_scopes
 
     @app.get("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
-    async def list_keys_ep(caller: Optional[set] = Depends(caller_scopes)):
+    async def list_keys_ep(request: Request, caller: Optional[set] = Depends(caller_scopes)):
         from localm.auth import list_keys, owner_key_downgrade_warning
         from localm.config import load_config
         # is_owner lets the GUI hide owner-only (privileged) scope choices from a
@@ -31,8 +31,11 @@ def register(app: FastAPI, ctx) -> None:
         # a scoped keystore, a non-owner keys:admin caller can also reach this
         # field - the same exposure list_keys() already gives that caller class
         # on this same route, unconditionally.
+        warning = owner_key_downgrade_warning()
+        if warning is not None:
+            warning = _hs.path_formatter(request)(warning)
         return {"keys": list_keys(), "is_owner": is_owner, "presets": presets,
-                "owner_key_warning": owner_key_downgrade_warning()}
+                "owner_key_warning": warning}
 
     @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def create_key_ep(request: Request, response: Response, body: dict,

@@ -852,9 +852,9 @@ present on a headless `localm serve` with no plugins installed, not only under
 | `GET /api/issues` | `config:read` | List the project's issues through the bug-report proxy. Takes `?state=` (default `all`). |
 | `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. |
 | `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. |
-| `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. |
-| `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. |
-| `POST /api/update/rollback` | `admin` | Restore the previous build from the last update's local backup and restart into it. No signature check and no network request - it restores files, not a download. Requires `admin` specifically (not merely `config:write`), and restores files only, not a deps-class update's package installs. |
+| `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. The `backup` path and any `error` text carry the full path for the owner and open mode, and a scrubbed one (data dir as `<data>`, file name kept) for a scoped key. |
+| `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. Returns `available`, `backup`, `version` and `current`; `backup` is the full path for the owner and open mode, and a scrubbed one for a scoped key. |
+| `POST /api/update/rollback` | `admin` | Restore the previous build from the last update's local backup and restart into it. No signature check and no network request - it restores files, not a download. Requires `admin` specifically (not merely `config:write`), and restores files only, not a deps-class update's package installs. Only open mode or an owner key reaches it, so its `backup` path and error texts are never scrubbed. |
 | `POST /api/bug-report` | `config:write` | Generate and save a bug report for review. |
 | `POST /api/bug-report/send` | `config:write` | File a saved, reviewed bug report. |
 
@@ -1024,7 +1024,7 @@ Scope: `keys:admin`.
 
 | Route | Purpose |
 |---|---|
-| `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key) plus whether the caller is the owner and the configured key presets. |
+| `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key) plus whether the caller is the owner, the configured key presets, and `owner_key_warning` (the notice that an empty owner key file left the server in open mode, or null). `owner_key_warning` names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
 | `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns the plaintext key exactly once. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. |
 | `DELETE /v1/keys/{key_id}` | Revoke a key. 404 if no such key exists. |
 
