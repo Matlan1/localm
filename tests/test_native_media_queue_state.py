@@ -13,6 +13,7 @@ import pytest
 from localm.media.sdcpp import shared
 from localm.plugins.builtin.image.backends import native as image_native
 from tests.test_image_native_backend import (  # noqa: F401  (fixtures)
+    _no_live_vram_budget,
     _wait_job as _wait_image_job,
     fake_native,
     native_app,
@@ -297,3 +298,8 @@ def test_an_upscale_job_row_is_queued_only_while_it_waits(qol_app, tmp_path, can
         _wait_image_job(app, job.id)
     assert job.summary().get("phase") == ("cancelled" if cancel else "running")
     assert _phases(job)[0] == "queued"
+
+
+@pytest.fixture(autouse=True)
+def _no_live_vram_reading(monkeypatch):
+    monkeypatch.setattr("localm.vram._vram_free_reading", lambda: (None, False, None))

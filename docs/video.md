@@ -42,6 +42,9 @@ including loading the model and decoding the frames. The Vulkan runtime on the s
 took about 165 s per step at that size (small clips such as 480x272 run at a few seconds
 per step), so prefer the ROCm or CUDA runtime for video where one is available; **Native
 runtime** `auto` already picks it.
+On Windows a native video load gets the same free-VRAM budget as a native image load
+(see [Native image](native-image.md)), so VRAM other programs hold no longer slows it down
+silently.
 
 Frame counts are snapped to 4k+1 like the ComfyUI path; the native backend makes at most
 241 frames per clip and refuses a longer request with a reason. Width and height must

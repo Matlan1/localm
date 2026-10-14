@@ -1379,3 +1379,9 @@ def test_a_generation_through_the_route_embeds_and_imports_back(native_app, monk
     assert back.json()["params"]["prompt"] == "a harbour at dusk"
     assert back.json()["params"]["seed"] == 77
     assert (back.json()["params"]["width"], back.json()["params"]["height"]) == (128, 96)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_vram_budget(monkeypatch):
+    from localm.media.sdcpp import budget as sd_budget
+    monkeypatch.setattr(sd_budget, "vram_budget", lambda backend: None)

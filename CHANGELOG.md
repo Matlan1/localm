@@ -641,6 +641,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   provision-later hint no longer offer `amd-rocm` or `sycl` on Windows ARM64, where they have
   no build; the menu numbers stay the same and a number that is not listed returns to the
   recommended backend with a message.
+- **Native image and video no longer crawl when other programs use VRAM.** On Windows the ROCm
+  and Vulkan runtimes could not see VRAM held by other programs (the desktop, a browser, a game
+  or a loaded chat model), so a large model such as FLUX.1 dev Q8 was loaded as if the card
+  were empty and Windows quietly moved part of it to system memory: generation became many times
+  slower on ROCm and failed outright on Vulkan. localm now measures the VRAM actually free on
+  the card before loading and gives the runtime that budget, so weights that do not fit are
+  streamed from RAM at a fraction of the cost. The job log shows the free VRAM at each load.
+- **Faster native images on ROCm.** Native images on the ROCm runtime use flash attention, so
+  FLUX steps run about a quarter faster and need less VRAM.
 - **A re-sync removes documents indexed from credential folders.** A collection that already
   held files from a folder such as `~/.ssh` kept serving them; `localm rag resync` and the
   scheduled re-sync now drop those entries from the index.
