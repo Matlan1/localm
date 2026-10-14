@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """confined_name's contract: it confines a name to *base* (rejecting path
-separators, ``..``, and absolute/drive-relative names), and rejects reserved
-characters and Windows reserved device names (con, nul.txt, com1, ...) on every
-platform.
+separators, ``..``, and absolute/drive-relative names), rejects reserved
+characters, and on Windows rejects reserved device names (con, nul.txt, com1, ...).
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ import os
 import pytest
 from fastapi import HTTPException
 
+from localm import pathsafe
 from localm.pathsafe import confined_name
 
 
@@ -19,7 +19,8 @@ from localm.pathsafe import confined_name
     "con", "nul", "NUL", "com1", "lpt9", "aux.txt", "nul.tar.gz", "prn ", "conin$",
     "conout$.log", "com¹", "Lpt³.bin",
 ])
-def test_device_names_are_rejected_before_any_write(tmp_path, name):
+def test_device_names_are_rejected_before_any_write(tmp_path, name, monkeypatch):
+    monkeypatch.setattr(pathsafe, "_refuses_device_names", lambda: True)
     with pytest.raises(HTTPException) as ei:
         confined_name(tmp_path, name)
     assert ei.value.status_code == 400
@@ -28,10 +29,22 @@ def test_device_names_are_rejected_before_any_write(tmp_path, name):
 
 @pytest.mark.parametrize("name", ["console.txt", "nully", "com10", "lpt0", "my-nul.txt",
                                   "auxiliary.bin", "conin"])
-def test_names_that_only_look_like_devices_are_accepted(tmp_path, name):
+def test_names_that_only_look_like_devices_are_accepted(tmp_path, name, monkeypatch):
+    monkeypatch.setattr(pathsafe, "_refuses_device_names", lambda: True)
     resolved = confined_name(tmp_path, name)
     assert resolved.parent == tmp_path.resolve()
     assert resolved.name == name
+
+
+def test_device_names_are_refused_exactly_on_windows():
+    assert pathsafe._refuses_device_names() is (os.name == "nt")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a device name is an ordinary file name off Windows")
+@pytest.mark.parametrize("name", ["aux.png", "con.json", "nul.mp3"])
+def test_an_existing_device_named_file_stays_reachable_off_windows(tmp_path, name):
+    (tmp_path / name).write_bytes(b"x")
+    assert pathsafe.confined_file(tmp_path, name, "file").read_bytes() == b"x"
 
 
 @pytest.mark.parametrize("bad", ["..", ".", "", "a/b"])

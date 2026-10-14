@@ -606,8 +606,9 @@ def _name_is_safe(safe: str) -> bool:
     call - the shape share.py's write path needs, since it folds *safe* into an
     already-unique, UUID-prefixed name rather than resolving it directly. Windows
     reserved DEVICE names (con, nul, com1 ...) are NOT rejected here, unlike
-    pathsafe.confined_name; the upload write path stays non-clobbering via
-    _unique_upload_target's exists() check, which renames such a name. A caller that
+    pathsafe.confined_name on Windows; the upload write path stays
+    non-clobbering via _unique_upload_target's exists() check, which on Windows
+    renames such a name. A caller that
     resolves *safe* against a real directory (confinement, directory-escape,
     OS-level alias substitution) needs the FULL check - see _confined_upload_path,
     which uses pathsafe.confined_name for that.

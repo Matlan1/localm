@@ -47,6 +47,13 @@ def is_windows_device_name(name: str) -> bool:
     return name.split(".", 1)[0].rstrip(" ").upper() in _WINDOWS_DEVICE_STEMS
 
 
+def _refuses_device_names() -> bool:
+    """Whether :func:`confined_name` refuses Windows device names: on Windows
+    only, where a file of that name cannot exist and a write goes to the
+    device."""
+    return os.name == "nt"
+
+
 def confined_name(base: Path, name: str) -> Path:
     """Resolve *name* and guarantee it stays directly inside *base*, without
     requiring it to exist (rename targets, new files).
@@ -66,12 +73,14 @@ def confined_name(base: Path, name: str) -> Path:
     LEXICALLY, before any filesystem call - ':' is the one with a live
     consequence (NTFS Alternate Data Streams; see that constant's docstring).
 
-    A Windows reserved device name (:func:`is_windows_device_name`: ``con``,
-    ``nul.txt``, ``com1`` ...) is rejected lexically too, on every platform:
-    on Windows a write to one goes to the device and its data is discarded."""
+    On Windows (:func:`_refuses_device_names`), a reserved device name
+    (:func:`is_windows_device_name`: ``con``, ``nul.txt``, ``com1`` ...) is
+    rejected lexically too: a write to one goes to the device and its data is
+    discarded. Elsewhere such a name is an ordinary file name."""
     if name != Path(name).name or name in ("", ".", ".."):
         raise HTTPException(400, "Invalid file name")
-    if set(name) & WINDOWS_RESERVED_NAME_CHARS or is_windows_device_name(name):
+    if set(name) & WINDOWS_RESERVED_NAME_CHARS or (
+            _refuses_device_names() and is_windows_device_name(name)):
         raise HTTPException(400, "Invalid file name")
     try:
         resolved = (base / name).resolve()
