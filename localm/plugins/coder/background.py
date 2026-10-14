@@ -412,6 +412,8 @@ class ShellJob(BackgroundJob):
         self.stdout = RingBuffer(max_chars)
         self.stderr = RingBuffer(max_chars)
 
+        from localm.config import user_command_env
+        env = user_command_env(env)
         kwargs: dict = {
             "cwd": str(cwd),
             "stdout": subprocess.PIPE,

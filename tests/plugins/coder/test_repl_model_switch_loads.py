@@ -29,6 +29,8 @@ class _State:
         self.load_calls = []
         self.config_calls = 0
         self.report_model = True
+        self.report_key = None
+        self.report_display = None
         self.load_refusal = None
 
 
@@ -50,7 +52,9 @@ def _make_server(state):
                 state.config_calls += 1
                 body = {"effective_ctx_max": _CTX[state.loaded]}
                 if state.report_model:
-                    body["effective_ctx_model"] = state.loaded
+                    body["effective_ctx_model"] = state.report_display or state.loaded
+                if state.report_key:
+                    body["effective_ctx_model_key"] = state.report_key
                 self._send(200, body)
             else:
                 self._send(404, {"detail": "no"})
@@ -227,3 +231,63 @@ def test_repl_model_command_does_not_claim_a_load_on_a_backend_without_one(
     assert "cannot confirm" in out
     assert agent.backend.model_id == "typo"
     assert state.load_calls == []
+
+
+def test_unpinned_placeholder_model_caches_the_servers_ceiling(server):
+    state, base = server
+    backend = _backend(base, model="localm")
+    assert backend.context_capacity() == 32768
+    calls = state.config_calls
+    assert backend.context_capacity() == 32768
+    assert state.config_calls == calls
+
+
+def test_a_model_named_by_its_request_key_caches_the_servers_ceiling(server):
+    state, base = server
+    state.report_display = "Display Name"
+    state.report_key = "org/model-a-ref"
+    backend = _backend(base, model="org/model-a-ref")
+    assert backend.context_capacity() == 32768
+    calls = state.config_calls
+    assert backend.context_capacity() == 32768
+    assert state.config_calls == calls
+
+
+def test_a_different_display_name_and_key_still_defers_the_cache(server):
+    state, base = server
+    state.report_display = "Other Display"
+    state.report_key = "model-b"
+    backend = _backend(base, model="model-a")
+    assert backend.context_capacity() is None
+    assert backend.context_capacity() is None
+    assert state.config_calls == 2
+
+
+def test_config_route_names_the_request_key_of_the_active_model(tmp_path, monkeypatch):
+    import types
+
+    from fastapi.testclient import TestClient
+
+    import localm.config as cfg
+    from localm.inference import http_server as hs
+    from localm.inference.http_server import create_app
+
+    home = tmp_path / ".localm"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-for-test")
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    auth = {"Authorization": "Bearer owner-key-for-test"}
+    with TestClient(create_app(None)) as c:
+        monkeypatch.setattr(hs, "_engine", types.SimpleNamespace(
+            effective_ctx_max=8192, display_name="Display Name"))
+        monkeypatch.setattr(hs, "_active_model_name", "org/ref")
+        body = c.get("/v1/config", headers=auth).json()
+        assert body["effective_ctx_model"] == "Display Name"
+        assert body["effective_ctx_model_key"] == "org/ref"
+        assert c.patch("/v1/config", json=body, headers=auth).status_code == 200
+        monkeypatch.setattr(hs, "_engine", None)
+        assert c.get("/v1/config", headers=auth).json()["effective_ctx_model_key"] is None

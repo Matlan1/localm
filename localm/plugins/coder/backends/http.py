@@ -317,8 +317,11 @@ class HTTPBackend(BaseLLMBackend):
         (``effective_ctx_model``). When it names a model other than this
         backend's current one, nothing is cached and None is returned: the
         ceiling is the previous model's, and the answer is fetched again on
-        the next call. A server that does not report the model is cached as
-        before."""
+        the next call. The model is this backend's when the server names it by
+        its display name or by the name a request can use (``effective_ctx_model_key``),
+        or when this backend names no model of its own (the ``localm``
+        placeholder, which the server resolves to its active model). A server
+        that does not report the model is cached as before."""
         if self._ctx_capacity_cached:
             return self._ctx_capacity
         latch = True
@@ -337,7 +340,10 @@ class HTTPBackend(BaseLLMBackend):
                 body = resp.json()
                 v = body.get("effective_ctx_max")
                 reported = body.get("effective_ctx_model", self._model)
-                if reported != self._model:
+                key = body.get("effective_ctx_model_key")
+                mine = (reported == self._model or key == self._model
+                        or self._model in ("", "localm"))
+                if not mine:
                     latch = False
                 elif isinstance(v, int) and v > 0:
                     self._ctx_capacity = v

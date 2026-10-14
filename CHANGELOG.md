@@ -624,6 +624,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **The coder knows a model's context size before its first reply.** A coder session whose
+  model is an unpinned scheduled job or a Hugging Face reference now budgets its first prompt
+  against the server's real context ceiling instead of the 4096 default.
+- **Commands the coder runs see your own caches and Hugging Face login.** `run_shell`,
+  background shells, tests and git no longer inherit the cache folders localm pins for itself,
+  so a Hugging Face script run through the coder finds the models you already downloaded
+  instead of downloading them again into localm's data folder.
+- **Knowledge relevance works for a known embedding model registered under another name.**
+  The measured relevance thresholds are matched by the model file, so bge-small or nomic
+  registered under your own name no longer loses its semantic matches in Knowledge chat.
+- **Repairing a Knowledge collection from the GUI skips a source that may no longer be
+  indexed.** One document under a credential folder, or on a network drive you have since
+  disallowed, no longer makes the whole repair fail; the others are rebuilt, as `localm rag
+  repair` already did.
+- **A Knowledge collection with a damaged chunk file opens.** A byte that is not valid UTF-8
+  in `chunks.jsonl` costs the chunk it sits in, flags the collection as corrupt and offers
+  repair, instead of failing every request that opens it.
+- **A restricted coder edit of many files checks the project once.** A scoped-key coder
+  session no longer scans the whole project tree again for every file of a multi-file edit.
 - **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
   several seconds, and while it did, every other request and stream waited. The close now runs
   in the background pool like the browser's other actions.

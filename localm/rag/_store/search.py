@@ -36,6 +36,23 @@ RELEVANCE_FLOORS: dict[str, tuple[float, float, float]] = {
 }
 
 
+def calibrated_floors(model: str) -> Optional[tuple[float, float, float]]:
+    """The ``RELEVANCE_FLOORS`` entry for the embedding model recorded as
+    *model*: by that name, else by the sha256 of the file it is registered as,
+    so a known model registered under another name keeps its floors. None for a
+    model that has no measured floors."""
+    floors = RELEVANCE_FLOORS.get(model)
+    if floors is not None or not model:
+        return floors
+    from localm.config import load_registry
+    from localm.inference.embedder import known_embedding_model_for_sha256
+    entry = load_registry().get(model)
+    if not isinstance(entry, dict):
+        return None
+    known = known_embedding_model_for_sha256(str(entry.get("sha256") or ""))
+    return RELEVANCE_FLOORS.get(known) if known else None
+
+
 #: Phrasings that point back at the conversation rather than at a topic
 #: ("why did that search fail", "your previous answer", "the second one").
 #: Every alternative is a fixed sequence of words, so matching stays linear.
@@ -213,7 +230,7 @@ class _CollectionSearch:
             return []
         floors = None
         if cosines is not None and not self.embedding_model_mixed():
-            floors = RELEVANCE_FLOORS.get(self.embedding_model() or "")
+            floors = calibrated_floors(self.embedding_model() or "")
         vectors = self._vectors or []
         coverage = index.coverage(text, order)
         matched = index.matched_terms(text, order)
