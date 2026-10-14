@@ -401,6 +401,23 @@ def _refuse_fp8_too_big(model_path: str, plan, torch, device: str,
         raise RuntimeError(_hf_fp8.too_big_message(model_path, plan, budget))
 
 
+def _refuse_compressed_too_big(model_path: str, torch, dtype, device: str,
+                               device_map_kwargs: dict) -> None:
+    """Raise RuntimeError when the weights of the compressed-tensors checkpoint
+    at *model_path*, expanded to *dtype*, exceed the memory the load can use
+    (``_hf_fp8.memory_budget``). Returns when either figure cannot be read."""
+    from localm.inference.backends import _hf_fp8
+    value_bytes = int(torch.empty((), dtype=dtype).element_size())
+    needed = _hf_fp8.compressed_expanded_bytes(model_path, value_bytes)
+    if not needed:
+        return
+    budget = _hf_fp8.memory_budget(torch, device, device_map_kwargs)
+    logger.debug("hf load: compressed-tensors expanded=%s budget=%s", needed, budget)
+    if budget is not None and needed > budget:
+        label = f"{str(dtype).removeprefix('torch.')} (about {value_bytes} bytes per parameter)"
+        raise RuntimeError(_hf_fp8.compressed_too_big_message(model_path, needed, budget, label))
+
+
 def _require_transformers():
     try:
         import transformers
@@ -1396,6 +1413,9 @@ class HFWorker:
         if fp8 is not None and not fp8.native:
             dtype = torch.bfloat16
             _refuse_fp8_too_big(self.model_path, fp8, torch, device, device_map_kwargs)
+        if fp8 is None and _is_compressed_tensors(self.model_path):
+            _refuse_compressed_too_big(self.model_path, torch, dtype, device,
+                                       device_map_kwargs)
         self.fp8_plan = fp8
         self.load_notes = []
         if fp8 is not None:
