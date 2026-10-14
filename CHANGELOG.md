@@ -2185,6 +2185,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A damaged native image runtime says so instead of failing obscurely.** A runtime folder that
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
+- **Revoking an admin-scoped key says when its browser sessions could not be dropped.** If
+  removing the revoked key's sessions failed with an error, the server log said nothing at the
+  default level although an admin session cookie for that key could stay usable. It now logs a
+  warning naming the key.
 ### Security
 - **Update and key-listing replies no longer hand a scoped key your file paths.** The backup
   path from `GET /api/update/rollback` and `POST /api/update/apply`, the text of a failed apply,
