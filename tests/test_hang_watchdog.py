@@ -522,9 +522,9 @@ def test_debug_stacks_renders_cold_start_as_json_null_not_zero(app, monkeypatch)
 
 def test_debug_stacks_renders_a_real_reading_as_before(app, monkeypatch):
     from localm.inference import http_server as hs
-    monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())
     app.state.bind_host = "127.0.0.1"
     with TestClient(app) as c:
+        monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())
         r = c.get("/debug/stacks",
                   headers={"Authorization": f"Bearer {app.state.shell_token}"})
     assert r.status_code == 200, r.text
