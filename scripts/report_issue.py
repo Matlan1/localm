@@ -195,22 +195,69 @@ def _email_replacement(m: re.Match) -> str:
     return lead + "<redacted-email>" + trail
 
 
-# Machine names. Byte-identical to _UNC_HOST_RE and _LAN_HOST_RE in
-# localm/bugreport/scrub.py, where the rules are described.
+# Machine names. _UNC_HOST_RE is byte-identical to localm/bugreport/scrub.py and
+# the local-network functions are the same code; the rules are described there.
 _UNC_HOST_RE = re.compile(
     r"(?:(?<![^\s\x22\x27(\[{=,;|\x60<*])|(?<=[A-Za-z0-9_]{2}:))"
     r"(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)"
     r"(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._$-]))"
     r"[A-Za-z0-9][A-Za-z0-9._$-]*",
     re.IGNORECASE)
-_LAN_HOST_RE = re.compile(
-    r"(?<![A-Za-z0-9._-])"
-    r"(?!(?:localm\.local|(?:host|gateway|kubernetes)\.docker\.internal)"
-    r"(?![A-Za-z0-9-]|\.[A-Za-z0-9]))"
-    r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
-    r"\.(local|lan|home\.arpa|internal|localdomain)"
-    r"(?![A-Za-z0-9(-]|\.[A-Za-z0-9])",
-    re.IGNORECASE)
+_LAN_SUFFIXES = (("home", "arpa"), ("local",), ("lan",), ("internal",), ("localdomain",))
+_LAN_KEEP = ("localm.local", "host.docker.internal", "gateway.docker.internal",
+             "kubernetes.docker.internal")
+_LAN_TOKEN_RE = re.compile(r"[A-Za-z0-9.-]+")
+
+
+def _lan_boundary(rest: str) -> bool:
+    """Whether *rest* (the first two characters after a candidate name inside
+    its token) ends the name: empty, or a dot not followed by a letter or
+    digit."""
+    return not rest or (rest[0] == "." and not rest[1:2].isalnum())
+
+
+def _lan_token(token: str, after: str) -> str:
+    """*token*, a maximal run of letters, digits, dots and hyphens, with a host
+    name under a local-network suffix at its start replaced by ``<host>`` (the
+    suffix kept). *after* is the character following the token. The longest
+    such name wins; a name followed inside the token by a dot and a letter or
+    digit, or followed by ``(`` at the token's end, is not one, and a token
+    starting with one of ``_LAN_KEEP`` is kept whole."""
+    lowered = token.lower()
+    for keep in _LAN_KEEP:
+        if lowered.startswith(keep) and _lan_boundary(token[len(keep):len(keep) + 2]):
+            return token
+    parts = token.split(".")
+    labels = parts.index("") if "" in parts else len(parts)
+    ends = []
+    pos = -1
+    for part in parts[:labels]:
+        pos += len(part) + 1
+        ends.append(pos)
+    for k in range(labels, 1, -1):
+        end = ends[k - 1]
+        if end < len(token):
+            if not _lan_boundary(token[end:end + 2]):
+                continue
+        elif after == "(":
+            continue
+        tail = (parts[k - 2].lower(), parts[k - 1].lower())
+        for suffix in _LAN_SUFFIXES:
+            if k > len(suffix) and tail[-len(suffix):] == suffix:
+                return "<host>." + ".".join(parts[k - len(suffix):k]) + token[end:]
+    return token
+
+
+def _scrub_lan_hosts(text: str) -> str:
+    """Every host name under a local-network suffix replaced by ``<host>``
+    (``_lan_token``). A token right after an underscore is part of a longer
+    identifier and is kept."""
+    def replace(match):
+        start, end = match.start(), match.end()
+        if start and text[start - 1] == "_":
+            return match.group(0)
+        return _lan_token(match.group(0), text[end:end + 1])
+    return _LAN_TOKEN_RE.sub(replace, text)
 
 
 _OWN_NAME_SKIP = frozenset({"archlinux", "debian", "fedora", "host", "kali", "localhost",
@@ -240,7 +287,7 @@ def _scrub_hosts(text: str) -> str:
     """UNC machine names, local-network host names and this machine's own
     names replaced with ``<host>``. Mirrors localm/bugreport/scrub.py."""
     text = _UNC_HOST_RE.sub(r"\1<host>", text)
-    text = _LAN_HOST_RE.sub(r"<host>.\1", text)
+    text = _scrub_lan_hosts(text)
     names = _own_host_names()
     if names:
         own = re.compile(r"(?<![A-Za-z0-9_./\\-])(?:"

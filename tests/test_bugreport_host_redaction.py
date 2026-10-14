@@ -108,6 +108,15 @@ def test_python_reporters_skip_the_same_names():
     assert ri._OWN_NAME_SKIP == br_scrub._OWN_NAME_SKIP
 
 
+def test_python_reporters_share_the_local_network_scanner():
+    import inspect
+    for name in ("_lan_boundary", "_lan_token", "_scrub_lan_hosts"):
+        assert inspect.getsource(getattr(ri, name)) == inspect.getsource(getattr(br_scrub, name)), name
+    for name in ("_LAN_SUFFIXES", "_LAN_KEEP"):
+        assert getattr(ri, name) == getattr(br_scrub, name), name
+    assert ri._LAN_TOKEN_RE.pattern == br_scrub._LAN_TOKEN_RE.pattern
+
+
 @pytest.mark.parametrize("scrub", _SCRUBBERS)
 def test_short_or_loopback_own_names_are_not_used(scrub, monkeypatch):
     monkeypatch.setattr(socket, "gethostname", lambda: "pc")
@@ -223,6 +232,10 @@ _HOSTILE = [
     pytest.param(lambda n: "a-" * n + ".x", id="one-long-label"),
     pytest.param(lambda n: "a.local." * n + "a", id="suffix-then-label"),
     pytest.param(lambda n: (BS * 2 + "?" + BS) * n, id="device-prefixes"),
+    pytest.param(lambda n: "-" * n, id="hyphen-run"),
+    pytest.param(lambda n: "-" + ".-" * n, id="dot-hyphen-run"),
+    pytest.param(lambda n: "-." * n, id="hyphen-dot-run"),
+    pytest.param(lambda n: "a." * n + "local(", id="labels-then-call"),
 ]
 
 

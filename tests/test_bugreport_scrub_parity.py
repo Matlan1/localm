@@ -112,7 +112,7 @@ def test_python_standalone_patterns_are_byte_identical_to_in_app():
     assert ri._USER_ROOT_PATTERN == pathscrub._USER_ROOT_PATTERN
     for name in ("_QUERY_SECRET_RE", "_HEADER_SECRET_RE", "_JSON_SECRET_RE",
                  "_BEARER_RE", "_APIKEY_RE", "_EMAIL_RE",
-                 "_UNC_HOST_RE", "_LAN_HOST_RE"):
+                 "_UNC_HOST_RE"):
         assert getattr(ri, name).pattern == getattr(br_scrub, name).pattern, name
 
 
