@@ -258,6 +258,7 @@ def _is_sentence_transformers_folder(path: Path) -> bool:
 _MEDIA_KIND_TYPES = {
     "diffusion": "diffusion-unet", "checkpoint": "diffusion-unet", "vae": "vae",
     "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
+    "clip_h": "text-encoder",
     "t5xxl": "text-encoder", "umt5": "text-encoder", "byt5": "text-encoder",
     "clip_vision": "text-encoder",
 }

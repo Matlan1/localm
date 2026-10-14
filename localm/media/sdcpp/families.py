@@ -6,7 +6,8 @@ companion files a diffusion model needs.
 ``.safetensors`` file (never tensor data) and returns a ``FileInfo``:
 
 * ``kind``: ``checkpoint`` (a full model with its own text encoder and VAE),
-  ``diffusion`` (a UNet/DiT alone), ``clip_l``, ``clip_g``, ``t5xxl``,
+  ``diffusion`` (a UNet/DiT alone), ``clip_l``, ``clip_g``, ``clip_h``
+  (OpenCLIP-H, the SD 2.x text encoder), ``t5xxl``,
   ``umt5``, ``llm``, ``vae``, ``clip_vision``, ``lora`` or ``unknown``.
 * ``family``: the model family a diffusion model, checkpoint, VAE or LoRA
   belongs to (``flux``, ``chroma``, ``sd3``, ``sd1``, ``sd2``, ``sdxl``,
@@ -82,7 +83,7 @@ FAMILY_LABELS = {
 # stable-diffusion.cpp docs for each family.
 _FAMILY_SLOTS: dict[str, tuple[str, ...]] = {
     "sd1": ("clip_l", "vae"),
-    "sd2": ("vae",),
+    "sd2": ("clip_l", "vae"),
     "sdxl": ("clip_l", "clip_g", "vae"),
     "sd3": ("clip_l", "clip_g", "t5xxl", "vae"),
     "flux": ("clip_l", "t5xxl", "vae"),
@@ -185,7 +186,7 @@ def accepts(slot: str, family: Optional[str], cand: FileInfo,
     """Whether classified file *cand* fits *slot* of a *family* model.
     *variant* is the wan2.2 size (``"5b"`` needs the Wan2.2 VAE)."""
     if slot == "clip_l":
-        return cand.kind == "clip_l"
+        return cand.kind == ("clip_h" if family == "sd2" else "clip_l")
     if slot == "clip_g":
         return cand.kind == "clip_g"
     if slot == "clip_vision":
@@ -327,10 +328,10 @@ def _diffusion_view(tensors: dict) -> dict:
     return out
 
 
-def _diffusion_family(t: dict, gguf: bool = False) -> Optional[tuple[str, dict]]:
+def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
     """``(family, detail)`` of the diffusion model in *t* (names already under
-    ``model.diffusion_model.``), or None. A diffusers-layout SDXL UNet is
-    recognised only from a safetensors file (*gguf* False)."""
+    ``model.diffusion_model.``), or None. Diffusers-layout SD 1.x, SD 2.x and
+    SDXL UNets are recognised in safetensors and GGUF files alike."""
     p = DIFFUSION_PREFIX
     names = t.keys()
     if _has(names, p + "joint_blocks."):
@@ -366,14 +367,31 @@ def _diffusion_family(t: dict, gguf: bool = False) -> Optional[tuple[str, dict]]
         if in_ch == 36 and not i2v:
             return "wan2.2", {"variant": "i2v-a14b"}
         return "wan2.1", {"i2v": i2v}
-    if not gguf and _has(names, p + "down_blocks.") and _has(names, p + "add_embedding."):
+    if _has(names, p + "down_blocks.") and _has(names, p + "add_embedding."):
         return "sdxl", {}
+    if _has(names, p + "down_blocks."):
+        ctx = _diffusers_cross_attention_dim(t, p)
+        if ctx in (768, 1024):
+            return ("sd2" if ctx == 1024 else "sd1"), {}
     if _has(names, p + "input_blocks."):
         if _has(names, p + "label_emb."):
             return "sdxl", {}
         k = t.get(p + "input_blocks.1.1.transformer_blocks.0.attn2.to_k.weight") or ()
         ctx = k[1] if len(k) >= 2 else None
         return ("sd2" if ctx == 1024 else "sd1"), {}
+    return None
+
+
+_DIFFUSERS_CROSS_ATTN_K = re.compile(
+    r"down_blocks\.\d+\.attentions\.0\.transformer_blocks\.0\.attn2\.to_k\.weight$")
+
+
+def _diffusers_cross_attention_dim(t: dict, prefix: str) -> Optional[int]:
+    """The text-embedding width a diffusers-layout UNet's first cross-attention
+    layer reads (768 for SD 1.x, 1024 for SD 2.x), or None when it has none."""
+    for name, shape in t.items():
+        if name.startswith(prefix) and _DIFFUSERS_CROSS_ATTN_K.search(name) and len(shape) >= 2:
+            return shape[1]
     return None
 
 
@@ -487,6 +505,8 @@ def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:
                 return FileInfo("clip_l")
             if dim == 1280:
                 return FileInfo("clip_g")
+            if dim == 1024:
+                return FileInfo("clip_h")
             return FileInfo("unknown", detail={"clip_dim": dim})
     if _has(names, "vision_model.encoder.layers.", "visual.transformer.resblocks."):
         return FileInfo("clip_vision")
@@ -520,7 +540,7 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
     vae = _vae_info(tensors)
     if vae is not None:
         return vae
-    found = _diffusion_family(_diffusion_view(tensors), gguf=arch is not None)
+    found = _diffusion_family(_diffusion_view(tensors))
     if found is not None:
         return FileInfo("diffusion", found[0], found[1])
     if arch in _GGUF_DIFFUSION_ARCH:
