@@ -64,9 +64,12 @@ data folder, or one on a network drive, which the Windows web view does not
 support), the window runs private and keeps nothing after it closes, and a
 warning is logged. pywebview's macOS backend has no way to be pointed at a
 folder, so on macOS the window still keeps its data in macOS's own WebKit storage,
-outside the data folder, and deleting the data folder does not remove it. Earlier versions kept this data in a folder shared with other pywebview
-apps (`%APPDATA%\pywebview` on Windows, `~/.pywebview` on Linux); that folder is
-left alone, and the uninstaller names it when it exists.
+outside the data folder, and deleting the data folder does not remove it.
+localm never touches the profile folder pywebview shares with other pywebview
+apps (`%APPDATA%\pywebview` or `%USERPROFILE%\pywebview` on Windows,
+`~/.pywebview` on Linux); when it exists, pywebview is installed and the
+data folder is being deleted, the uninstaller lists it so you can delete it by
+hand.
 
 This is a separate control surface from the tray/status window described below:
 with the `desktop` extra installed, both can be visible at once - a tray icon or

@@ -10,7 +10,9 @@
 
 A job runs a chat prompt, a coder task, a memory-synthesis pass, or a knowledge
 collection re-sync on a
-repeating schedule: a fixed interval or a 5-field cron expression. An in-app
+repeating schedule: a fixed interval or a 5-field cron expression. A chat job can
+search the web and fetch pages (up to 4 search or fetch rounds per run) unless
+`net_mode` is `off`; there is no per-run approval prompt. An in-app
 scheduler wakes periodically while a `localm gui` or `localm serve` process
 is up, runs every enabled job that is due, and records each run's result so
 you can read it later. Typical uses: a nightly "summarise today's changes"
@@ -68,16 +70,16 @@ localm job remove <job_id>      # delete the job and its stored results
 
 | Option | Meaning |
 |---|---|
-| `--prompt` | The prompt to run on schedule (required for chat/coder jobs; omit for `--memory`). |
-| `--memory` | Synthesise durable facts from recent sessions into the assistant memory; needs no `--prompt`. |
+| `--prompt` | The prompt to run on schedule (required for chat/coder jobs; omit for `--memory` and `--rag`). |
+| `--memory` | Synthesise durable facts from recent sessions into the assistant memory; needs no `--prompt`. `--coder`, `--memory` and `--rag` are mutually exclusive. |
 | `--rag --collection NAME` | Re-sync a knowledge collection against the folders it was indexed from; needs no `--prompt`. See [Keeping an indexed folder current](#keeping-an-indexed-folder-current). |
-| `--cron "M H Dom Month Dow"` | A 5-field cron schedule: minute, hour, day-of-month, month, day-of-week (0 = Sunday). Mutually exclusive with `--every`. |
-| `--every SECONDS` | Interval schedule in seconds. Defaults to hourly if neither schedule flag is given. |
+| `--cron "M H Dom Month Dow"` | A 5-field cron schedule: minute, hour, day-of-month, month, day-of-week (0 = Sunday; 7 is also accepted as Sunday). Mutually exclusive with `--every`. |
+| `--every SECONDS` | Interval schedule in seconds (1 or more). Defaults to hourly if neither schedule flag is given. |
 | `--coder` | Run a coder agent task instead of a chat prompt. |
 | `--cwd DIR` | Working directory for a coder job. |
 | `--scope GLOB` | File-access glob for a coder job. Confines the file tools only: `run_shell`/`run_tests` execute a process and cannot be bounded by a path check, so leave `--allow-shell` off (the default) if you need the scope to be a hard boundary. |
-| `--allow-shell` | Coder jobs only: allow full shell execution. Off by default; a scheduled coder job runs restricted (read plus confined edits, no shell, no network, no sub-agents, no MCP servers, no writes inside `.localcoder`) unless you pass this. |
-| `--model M` | Model to run the job with. Without one, the active model runs it unless it needs something that model lacks (a coder job always needs structured tool calls; a chat job needs them only when web access is on), in which case an installed model that has them answers instead. |
+| `--allow-shell` | Coder jobs only: allow full shell execution. Off by default; a scheduled coder job runs restricted (read plus confined edits, no shell, no network, no sub-agents, no MCP servers, no writes inside `.localcoder` or `.git`) unless you pass this. |
+| `--model M` | Registered model to run the job with (a name from `localm list`, not a path; an unregistered name is refused when the job is created). Without one, the active model runs it unless it needs something that model lacks (a coder job always needs structured tool calls; a chat job needs them only when web access is on, or when its prompt needs a longer window than the model supports), in which case an installed model that has them answers instead. |
 | `--disabled` | Create the job disabled; it will not run until you enable it. |
 
 ## From the GUI
@@ -105,12 +107,12 @@ even exists.
 
 | Method + path | Purpose |
 |---|---|
-| `GET /api/jobs` | List the caller's own jobs. |
+| `GET /api/jobs` | List the caller's own jobs: `{"jobs": [...], "scheduler_warning": ...}`, where `scheduler_warning` is null while the scheduler's ticks are healthy. |
 | `POST /api/jobs` | Create a job. |
 | `GET /api/jobs/{id}` | Job detail. |
 | `PUT /api/jobs/{id}` | Update a job. |
 | `DELETE /api/jobs/{id}` | Delete a job and its results. |
-| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress - jobs never stack model loads. |
+| `POST /api/jobs/{id}/run` | Run the job now and record the result. `409` if another run (this job or another) is already in progress in the server - jobs never stack model loads. |
 | `GET /api/jobs/{id}/results` | Past run results, newest first. Paginated with `?limit=` (default 100, max 1000) and `?offset=`. |
 
 A create/update body carries: `name`, `task_kind` (`chat`, `coder`, `memory`, or
@@ -120,8 +122,12 @@ need no `prompt`), `prompt`, `schedule_kind` (`interval` or `cron`), `schedule`
 `cwd`, `scope`, `collection`, `allow_shell`, and `enabled` fields.
 `allow_shell` (coder jobs only) is privileged: setting it requires the owner key
 or a `coder:full` key, so a plain `jobs`-scoped client cannot schedule a
-shell-capable job. `collection` is required for a `rag` job and refused at
-creation if it is not a valid collection name.
+shell-capable job; editing or running an already shell-enabled job needs the same.
+A caller without the owner key or a `coder:full` key cannot choose a coder job's
+`cwd`: the job is stored with the instance's project root instead, and the
+response shows the `cwd` that will be used. `model` must be a registered model
+name, and a UNC or device-path `cwd` is refused. `collection` is required for a
+`rag` job and refused at creation if it is not a valid collection name.
 
 ## Two things live under `/api/jobs`
 
@@ -154,7 +160,7 @@ things. `localm status` and the MCP activity tool read this same route; on a
 server with no API key configured they authenticate with that instance's local
 attach token, which is why a bare `curl` with no credentials is refused there.
 
-A model pull, a runtime install, and a ComfyUI setup are also mirrored to disk
+Every operation's lifecycle (not its output or progress) is also mirrored to disk
 under `<data dir>/activity/`, so a restart or a crash does not lose track of
 what was happening: on the next start, any row still marked `running` is
 reported as **`interrupted`** rather than `failed`, since whether the work
@@ -171,9 +177,10 @@ never dropped, at any age.
 Cancelling always answers `{"status": "cancelling"}`, whatever state the
 operation was in. It terminates the subprocess behind a model pull, a model
 removal or a ComfyUI setup; for the in-process operations it is only a request
-the work has to notice, and image, video and music generation are the ones that
-notice it, while a knowledge index, upload, re-embed or embedding setup keeps
-running to completion after being marked `cancelled`. On a server with API keys
+the work has to notice, and image, video, music and text-to-speech generation
+(and a browser live view) are the ones that notice it, while a knowledge index,
+upload, re-embed or embedding setup keeps running to completion after being
+marked `cancelled`. On a server with API keys
 configured, you see and can touch only the operations your own key started (an
 owner or `admin` key sees all); with no key configured there are no owners, so
 any authenticated local caller sees everything, which is the intended behaviour
@@ -248,10 +255,16 @@ semantic search.
 A schedule is either an **interval** (seconds between runs) or a **cron**
 expression (see the `--every` / `--cron` rows above). The 5-field cron matcher
 supports ranges (`1-5`), lists (`1,3,5`), `*`, and step values (`*/15`,
-`1-30/5`, `5/15`).
+`1-30/5`, `5/15`). When both day-of-month and day-of-week are restricted, the
+job fires when either matches; otherwise both must match. An expression is
+limited to 512 characters.
 
 The scheduler polls about every 30 seconds, so a job fires at the first tick at
-or after its due time, not to the exact second.
+or after its due time, not to the exact second. An interval job that has never
+run is due on the first tick after it is created; a new cron job waits for its
+first matching minute. Due jobs run one after another within a tick, and a tick
+that finds a run already in progress (a scheduled run or a run-now) skips its due
+jobs until the next tick.
 
 ## Troubleshooting
 

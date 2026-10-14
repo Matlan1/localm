@@ -42,6 +42,8 @@ localm run mymodel --prompt "Explain RDNA2" # Offline terminal chat or single pr
 localm serve mymodel                        # OpenAI-compatible API server
 ```
 
+The one-click install puts `localm` in `~/localm`, not on your PATH: run `~/localm/localm.sh <args>` (on Windows, `localm.bat <args>` from the clone), or answer `y` to "Make 'localm' runnable from any terminal?" in an interactive setup.
+
 Full install options (graphical installer, `pip install`, manual) are in [Install](#install) below.
 
 ## Contents
@@ -88,7 +90,7 @@ Full install options (graphical installer, `pip install`, manual) are in [Instal
 
 - **Python 3.12** (the project pins `requires-python = >=3.12,<3.13`). The self-contained installers below build their own 3.12 venv regardless of your system Python; a plain `pip install localm` does not - it installs into whatever interpreter runs it, so that interpreter must already be 3.12.x. The `[gpu]` ROCm torch wheels are cp312-only either way.
 
-- **For GGUF GPU inference:** a compiled `llama.dll` + GPU runtime DLLs. `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup)). The installer detects your hardware and chooses the backend automatically.
+- **For GGUF GPU inference:** the native llama.cpp library (`llama.dll` on Windows, `libllama.so` on Linux, `libllama.dylib` on macOS) plus GPU runtime libraries. `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup)). The installer detects your hardware and chooses the backend automatically.
 
 - **NVIDIA CUDA (peak performance):** on **both Windows and Linux** the installer recommends **CUDA** for NVIDIA - it fetches a self-contained CUDA runtime (no Toolkit needed on either OS), and an old driver simply falls back to Vulkan. Prefer the universal driver-only build? Choose **Vulkan** in the setup menu (or `localm setup-llama --backend vulkan`). Details in [GPU setup](#gpu-setup).
 
@@ -102,23 +104,23 @@ If localm ever fails to start (or setup itself fails), you can still file a bug 
 
 > **Stable release:** to install a specific tagged version instead of the latest
 > `master`, clone that tag, for example:
-> `git clone --depth 1 --branch v0.1.0 https://github.com/Matlan1/localm.git`
+> `git clone --depth 1 --branch v0.2.0 https://github.com/Matlan1/localm.git`
 > then follow the setup below inside the clone.
 
 ### Prefer a window? Use the graphical installer
 
-Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS) and the whole install happens in a window, over four pages you can step back through: your inference runtime (your hardware's recommendation is preselected); where models and data live and whether the Python tooling stays inside the folder; which optional features to install, with the recommended ones already ticked; and whether the GUI opens as an app window, whether you want a desktop shortcut, and whether `localm` should run from any terminal. Then it installs, with a progress bar and a live log, says so if an optional step did not finish, and offers to start LocaLM when it is done.
+Double-click **`setup-gui.bat`** (Windows) or run **`./setup-gui.sh`** (Linux/macOS; on Linux it needs a graphical display, `DISPLAY` or `WAYLAND_DISPLAY`) and the whole install happens in a window, over four pages you can step back through: your inference runtime (your hardware's recommendation is preselected); where models and data live and whether the Python tooling stays inside the folder; which optional features to install, with the recommended ones already ticked; and whether the GUI opens as an app window, whether you want a desktop shortcut, and whether `localm` should run from any terminal. Then it installs, with a progress bar and a live log, says so if an optional step did not finish, and offers to start LocaLM when it is done.
 
-It performs exactly the same install as the console setup below, asking the same questions in the same order. Everything after this section describes the console path; if you used the window, you are already finished.
+It performs the same install as the console setup below and covers the same choices, grouped into those pages (so not in the console's order). Everything after this section describes the console path; if you used the window, you are already finished.
 
 ### Recommended (Windows): self-contained setup
 
-Clone anywhere and double-click `setup.bat`. It installs `uv` (the Python package manager it builds on) for you if you do not already have it, creates a private `.venv` inside the clone (always Python 3.12), installs localm into it, detects your GPU and provisions the matching llama.cpp backend (see [GPU setup](#gpu-setup)), and asks where data should live:
+Clone anywhere and double-click `setup.bat`. It asks whether uv (the Python package manager it builds on), its Python and its download cache stay inside the clone (Portable, the default) or use uv's normal per-user locations (Shared), offers to install its own copy of `uv` into the clone (Portable) or uses the one on your PATH if present (Shared), creates a private `.venv` inside the clone (always Python 3.12), and asks where data should live:
 
 - **inside the clone** (`.\home`) - fully portable and self-contained; multiple clones on one machine are completely independent (this is the default), or
 - **a custom path** (recorded in `localm-home.cfg`) - e.g. a shared models drive.
 
-There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then builds a native `LocaLM.exe` launcher (so the running server shows as `LocaLM.exe` in Task Manager, not `python.exe`, and carries the LocaLM icon - see [native app](docs/native-app.md)), offers an optional desktop shortcut and global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). Along the way it also asks whether `localm gui` should open as its own app window or a browser tab (default: browser tab; see [native app](docs/native-app.md)). Nothing is installed globally, and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
+There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then asks whether `localm gui` should open as its own app window or a browser tab (default: browser tab; see [native app](docs/native-app.md)), installs localm into the venv (extras `coder`, `voice` and `monitor`, plus `desktop` for the app window), installs the PyTorch stack for HuggingFace models when the backend you pick maps to one, detects your GPU and provisions the matching llama.cpp backend (see [GPU setup](#gpu-setup)), builds a native `LocaLM.exe` launcher (so the running server shows as `LocaLM.exe` in Task Manager, not `python.exe`, and carries the LocaLM icon - see [native app](docs/native-app.md)), offers an optional desktop shortcut and global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). With the default Portable choice nothing is installed outside the clone (apart from a desktop shortcut or global command if you choose them), and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
 
 ### Recommended (Linux/macOS): self-contained setup
 
@@ -128,7 +130,7 @@ The same self-contained install, one command:
 curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | bash
 ```
 
-This clones localm to `~/localm`, creates a private `.venv`, detects your GPU, and provisions the matching backend non-interactively. For the interactive version (`bash setup.sh` from a clone, same prompts as `setup.bat` above), GPU-backend details, and macOS's experimental status, see [docs/linux-setup.md](docs/linux-setup.md).
+This needs `git` and `curl`. It clones localm to `~/localm` (or updates the clone already there), runs `bash setup.sh --yes` to create a private `.venv` with uv and Python kept inside the clone, detects your GPU, and provisions the matching backend, taking the default at every question. Piped from `curl`, it skips the plugin picker; run `localm plugin setup` afterwards. `localm` is not put on your PATH (see the Quick start note). For the interactive version (`bash setup.sh` from a clone; the same prompts as `setup.bat` above, with an application-menu entry in place of the desktop shortcut), GPU-backend details, and macOS's experimental status, see [docs/linux-setup.md](docs/linux-setup.md).
 
 ### `pip install localm` (no clone needed)
 
@@ -148,11 +150,11 @@ setx LOCALM_HOME %USERPROFILE%\localm-data     # Windows (new shells only)
 
 Extras install the normal pip way, e.g. `pip install "localm[coder,rag]"` - see the extras table below for what each one adds. `localm doctor` reports what is installed and what is missing at any point.
 
-The pip package covers the CLI, the server, and every plugin. It does not include the desktop shortcut, the native `LocaLM.exe` app window, or the interactive plugin-picking wizard the self-contained installers above provide; use one of those instead if you want them.
+The pip package covers the CLI, the server, and every plugin. It does not create the desktop shortcut or application-menu entry or the branded `LocaLM.exe` launcher; the self-contained installers above create them, or run `localm make-launcher` after a pip install for the launcher. `localm plugin setup` runs the same interactive plugin picker, and `pip install "localm[desktop]"` lets `localm gui` open in an app window instead of a browser tab.
 
 ### Docker (API server)
 
-Release images are published to `ghcr.io/matlan1/localm` (CPU, Vulkan, and NVIDIA CUDA in two lines: `cuda` for CUDA 12, every architecture before Blackwell, and `cuda13` for Blackwell; see the package page for the tags that exist), and `docker build --platform linux/amd64 -f docker/Dockerfile -t localm .` builds one from a clone. The container runs `localm serve`, keeps its data in the `/data` volume, and refuses to start without an API key:
+Release images are published to `ghcr.io/matlan1/localm` (CPU - the `latest` tag - Vulkan, and NVIDIA CUDA in two lines: `cuda` for CUDA 12, every architecture before Blackwell, and `cuda13` for Blackwell; see the package page for the tags that exist), and `docker build --platform linux/amd64 -f docker/Dockerfile -t localm .` builds one from a clone. The container runs `localm serve`, keeps its data in the `/data` volume, and refuses to start without an API key:
 
 ```bash
 docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key generate    # prints a key once
@@ -179,11 +181,11 @@ Windows, or download it from https://github.com/astral-sh/uv/releases).
 UV_PYTHON_INSTALL_DIR="$PWD/.python" UV_CACHE_DIR="$PWD/.cache" \
   uv venv --python 3.12 --python-preference only-managed .venv
 uv pip install -p .venv -e ".[coder,voice,monitor]"       # base: NVIDIA / Intel / CPU (GGUF chat needs no torch)
-uv pip install -p .venv -e ".[coder,voice,monitor,gpu,audio]"   # AMD RDNA2 ROCm ONLY - do NOT use on NVIDIA/Intel
-localm setup-llama                                 # provision the native llama.cpp backend (Vulkan/CUDA/CPU)
+uv pip install -p .venv -e ".[coder,voice,monitor,gpu,audio]"   # AMD RDNA2 (RX 6000) on Windows ONLY - do NOT use on NVIDIA/Intel or Linux
+.venv/bin/localm setup-llama                       # provision the native llama.cpp backend (auto-detects your GPU)
 ```
 
-(`voice` adds the GUI mic's Whisper speech-to-text; drop it if you do not want it.)
+(`voice` adds the GUI mic's Whisper speech-to-text; drop it if you do not want it. The block is POSIX shell syntax: on Windows set the two `UV_*` variables with `set` / `$env:` first and use `.venv\Scripts\localm` for `.venv/bin/localm`.)
 
 To instead reuse a Python + package cache already on your system (faster, one
 download shared across every uv project on the machine, but no longer
@@ -191,14 +193,14 @@ self-contained - the same tradeoff `setup.bat`/`setup.sh`'s "Shared" choice
 describes), just drop the `UV_PYTHON_INSTALL_DIR`/`UV_CACHE_DIR`/
 `--python-preference` and run the plain `uv venv --python 3.12 .venv`.
 
-The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` is required after a manual install to fetch the native backend (`setup.bat` does this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately - the index depends on GPU generation (Blackwell and newer need a different one than older cards), so ask localm's own detector rather than guessing: `uv pip install -p .venv $(.venv/bin/python -m localm.hwdetect torch-args cuda)` (see [docs/gpu-setup.md](docs/gpu-setup.md#huggingface-transformers-pytorch) for the full table and Windows form), then `uv pip install -p .venv -e ".[hf]"` adds the Transformers stack on top of it (the installers run `.[hf,audio]`).
+The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` (run as `.venv/bin/localm`, or `localm` once the venv is activated) is required after a manual install to fetch the native backend (`setup.bat` and `setup.sh` do this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately - the index depends on GPU generation (Blackwell and newer need a different one than older cards), so ask localm's own detector rather than guessing: `uv pip install -p .venv $(.venv/bin/python -m localm.hwdetect torch-args cuda)` (see [docs/gpu-setup.md](docs/gpu-setup.md#huggingface-transformers-pytorch) for the full table and Windows form), then `uv pip install -p .venv -e ".[hf]"` adds the Transformers stack on top of it (the installers run `.[hf,audio]`).
 
 A pip extra and a plugin install are two separate steps. The extra installs a plugin's heavy Python dependencies into the venv; `localm plugin install <name>` activates the plugin itself. The defined extras are:
 
 | Extra | What it adds |
 |---|---|
 | `coder` | The AI coding agent (opt-in marker; deps are already core) |
-| `browser` | The browser plugin: an automated web browser the coder can drive (`playwright`) |
+| `browser` | The browser plugin: an automated web browser the coder can drive (`playwright`; run `localm setup-browser` to download the Chromium build it drives) |
 | `desktop` | Native OS app window for `localm gui` instead of a browser tab (`pywebview`; see [native app](docs/native-app.md)) |
 | `gpu` | AMD RDNA2 ROCm 7.13 stack: torch, transformers, rocm-sdk (Windows, Python 3.12) |
 | `hf` | HuggingFace Transformers stack (`transformers`, `tokenizers`, `accelerate`, and helpers) without the AMD ROCm torch pin; install a torch build for your GPU first |

@@ -36,6 +36,32 @@ Ollama.
 The Ollama HTTP API (`/api/chat`, `/api/generate`, `/api/tags`, ...) is served
 on the same port; see [ollama-api.md](ollama-api.md).
 
+Open mode does not open the management routes. With no key configured, every
+state-changing request and every `GET` under `/api/` or `/v1/` outside the
+inference routes and the routes above that carry their own credential still
+needs the GUI shell token or this instance's attach token as the bearer, from a
+same-origin or Origin-less caller (or one in the `cors_origins` allowlist). The
+config, keys, plugin, update and activity routes are among the gated ones. A
+missing or wrong token is a 403 `Open-mode management requires the localm GUI
+shell on this machine, or an API key`; a cross-origin state-changing request is
+refused earlier with a 403 `Cross-origin request refused ...`. The exempt reads are every `GET` under `/v1/models`, `GET /api/tags`,
+`GET /api/ps`, `GET /api/version` and `GET /api/session`. See
+[SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md).
+
+## Errors
+
+A failed request answers `{"detail": "<message>"}`: `401` for a missing or
+invalid key, `403` for a key without the route's scope (`Key lacks required
+scope: <scope>`), a cookie-authenticated change without its CSRF token, or a
+cross-origin browser request to a route that does not accept one, and the
+statuses listed with each route below. A defect in the server is a `500` with
+`{"detail": "Internal server error"}`; its cause goes to the server log. A body
+that fails validation is a `422` with `{"detail": "<one sentence per field>",
+"errors": [...]}`, where `errors` is the structured list. Three groups answer in
+their own shape, and a body that fails validation is a `400` there:
+the Ollama routes (`{"error": "..."}`), `POST /v1/messages` (Anthropic's error
+object) and `POST /v1/responses` (OpenAI's error object).
+
 ## OpenAI-compatible endpoints
 
 ### `POST /v1/chat/completions`
@@ -190,7 +216,7 @@ the CPU, or the draft model did not fit in VRAM beside it). The field is `null` 
 | `n` | Only `1` (one choice per request); any other value is a 400. |
 | `logprobs`, `top_logprobs` | Returned for a GGUF model: see [Log probabilities](#log-probabilities). `top_logprobs` is 0 to 20 and needs `logprobs: true` when above 0; anything else is a 400. |
 | `logit_bias` | Not served (a non-empty map is a 400): token ids differ between models. |
-| `functions`, `function_call` | The deprecated function-calling fields are a 400; send `tools` and `tool_choice`. |
+| `functions`, `function_call` | The deprecated function-calling fields are a 400 (`function_call: "none"` is accepted); send `tools` and `tool_choice`. |
 | `audio`, `modalities` other than `["text"]`, `web_search_options` | A 400. |
 | `user`, `metadata`, `store`, `service_tier`, `prediction`, `verbosity`, `prompt_cache_key`, `safety_identifier` | Accepted; no effect. |
 
@@ -306,7 +332,7 @@ failure happens, not on which endpoint you called:
 
 | Failure | Reported as |
 |---|---|
-| The request is refused before generation starts (unsupported input, an undecodable image, a grammar this model cannot apply, a malformed grammar or trigger pattern, malformed `tools`) | An HTTP error status with the reason in `detail`: `400`, `501` when the server lacks an image decoder, `413` when an embedding batch is too large, `503` when the trigger-pattern validator was too busy to check your pattern |
+| The request is refused before generation starts (unsupported input, an undecodable image, a grammar this model cannot apply, a malformed grammar or trigger pattern, malformed `tools`) | An HTTP error status with the reason in `detail`: `400`; `413` when the images of a request exceed the size or count limits, when the prompt does not fit the context window, or when an embedding batch is too large; `501` when the server lacks an image decoder, or an audio decoder for the clip's format; `503` when the trigger-pattern validator was too busy to check your pattern |
 | Generation started and then failed (not enough free VRAM for this prompt, a conversation that outgrew the context window, a native decode error) | `200` whose text is `\n[inference error: <reason>]` (a leading newline, then the bracketed reason) and whose `finish_reason` is `"error"` |
 
 The second row is a `200` on purpose. A streaming response has already sent its
@@ -315,6 +341,20 @@ it; the non-streaming responses match their own streaming twin rather than
 diverge from it. **`finish_reason` is the machine-readable signal - check it
 rather than the status code to detect a failed generation.** A successful
 generation never reports `"error"`.
+
+A streamed chat request whose preparation (loading the model, running the
+chat plugins' inlet hooks, checking the request) takes more than a fraction of
+a second opens its stream before preparing ends, so that it can send the
+`status` chunks above. A refusal after that point cannot be an HTTP status. It
+arrives as the reply text with `finish_reason: "error"`, and the reply chunk
+carries `localm_error: {"status": <the HTTP status the refusal would have
+had>, "detail": "<reason>"}` (a refusal while preparing puts it on the final
+chunk too). A generation that fails before any text, with a status in the
+table above, carries `localm_error` on its error chunk the same way. The
+response headers of an early-opened stream (`X-Localm-Memory`,
+`X-Localm-Model-Routing`, `X-Localm-Context-Compacted`) cannot be set once it is
+open; they arrive in one chunk with an empty `delta` and a `localm_headers`
+object, sent before the reply.
 
 A `503` is the only status here that a retry can clear on its own; the rest
 describe something about the request or the build that will fail identically
@@ -426,9 +466,9 @@ GUI offers it when you pick that model in the sidebar.
 
 | Route | Scope | Purpose |
 |---|---|---|
-| `GET /v1/models/{model}/peer-offer` | `models:read` | Whether a live instance has this model loaded. `{"available": bool, "peer": {"instance_id", "host", "port", "scheme", "model", "requires_key"}}`. `model` is that instance's own name for it; `requires_key` is false for an instance with no API key. |
-| `POST /v1/models/{model}/peer-route` | `models:write` | Accept an offer. Body `{"instance_id": "...", "api_key": "..."}`, with `api_key` empty for an instance that has no key. The key is checked against that instance first: a refused key is a 403 and nothing is stored. |
-| `DELETE /v1/models/{model}/peer-route` | `models:write` | Stop forwarding. |
+| `GET /v1/models/{model}/peer-offer` | `models:read` | Whether a live instance has this model loaded. `{"available": bool, "peer": {"instance_id", "host", "port", "scheme", "model", "requires_key"}}`, with `peer` null when `available` is false. `model` is that instance's own name for it; `requires_key` is false for an instance with no API key. A lookup that takes too long is a 504. |
+| `POST /v1/models/{model}/peer-route` | `models:write` | Accept an offer. Body `{"instance_id": "...", "api_key": "..."}`, with `api_key` empty for an instance that has no key. The key is checked against that instance first: a refused key is a 403 and nothing is stored. Returns `{"status": "routed", "model", "peer": {"instance_id", "host", "port", "scheme", "model", "peer_model"}}`. An empty `instance_id` or no model to route is a 400 (an absent `instance_id` field is a 422); an instance that is no longer live, no longer has the model loaded or is not reachable over loopback is a 409, as is a route that would have this instance record the chat in a persisting session mode; a check that takes too long is a 504. |
+| `DELETE /v1/models/{model}/peer-route` | `models:write` | Stop forwarding. Returns `{"status": "unrouted", "model", "was_routed": bool}`; clearing a model with no route is a success. |
 
 A model is matched by its file (the same path, the same sha256, or the same
 file name and size), so a different model that merely shares a name is never
@@ -505,9 +545,12 @@ compaction, tool calling and the response headers work the same way.
 `stop_reason` is `end_turn`, `max_tokens`, `stop_sequence` (with `stop_sequence` naming the match;
 otherwise `stop_sequence` is `null`) or `tool_use`. Consecutive turns of the same role are joined,
 and a turn's text blocks stay separate blocks, as the Messages API treats them. A thinking block carries an empty `signature`. Errors use Anthropic's shape,
-`{"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}`, with
-`authentication_error` for a missing or wrong key, `not_found_error`, `request_too_large` and
-`overloaded_error` mapped from the matching status.
+`{"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}`. The
+`type` follows the status: `authentication_error` (401, a missing or wrong key),
+`permission_error` (403), `not_found_error` (404), `request_too_large` (413),
+`rate_limit_error` (429), `overloaded_error` (503, 529), `invalid_request_error` for
+every other 4xx (a body that fails validation is a 400), and `api_error` for any other
+status.
 
 ### `POST /v1/messages/count_tokens`
 
@@ -546,8 +589,11 @@ tool calling, structured output and the response headers work the same way.
 
 Only `POST /v1/responses` is served: a stored response cannot be fetched, listed, cancelled or
 deleted through the API. Errors use OpenAI's shape, `{"error": {"message": "...", "type":
-"invalid_request_error", "param": ..., "code": null}}`, with `authentication_error` for a missing
-or wrong key and `not_found_error` for an unknown `previous_response_id`.
+"invalid_request_error", "param": ..., "code": null}}`. The `type` follows the status:
+`authentication_error` (401, a missing or wrong key), `permission_error` (403),
+`not_found_error` (404, including an unknown `previous_response_id`, which sets `param`
+to that field), `invalid_request_error` for every other 4xx (a body that fails
+validation is a 400), and `server_error` for any other status.
 
 ### `POST /v1/embeddings`
 
@@ -557,10 +603,18 @@ Scope: any valid key (no specific scope required once auth is enabled).
 {"model": "mymodel", "input": ["text one", "text two"]}
 ```
 
-Returns OpenAI-format embedding vectors. 422 when the loaded model cannot
-embed. Against a HuggingFace-format model, 413 when the request exceeds the
-configured text-count or character-count cap (`hf_embed_max_texts`,
-`hf_embed_max_chars`).
+Returns `{"object": "list", "data": [{"object": "embedding", "index": 0,
+"embedding": [...]}], "model": "...", "usage": {"prompt_tokens": N,
+"total_tokens": N}}`. `encoding_format` is `float` (default) or `base64` (each
+vector as little-endian float32 bytes, base64-encoded); anything else is a 400.
+A model registered as an embedding model (or the configured `embedding_model`)
+is served by the dedicated embedder, whose `usage` counts are 0.
+
+Errors: 400 when `model` is empty and there is no active or startup chat model, or (dedicated embedder) for an input the tokenizer refuses; 422 when the loaded model cannot
+embed, when the embedding model is unavailable (`localm setup-embeddings`), or
+when `model` names a reranker; 503 when the embedder worker fails. Against a
+HuggingFace-format model, 413 when the request exceeds the configured
+text-count or character-count cap (`hf_embed_max_texts`, `hf_embed_max_chars`).
 
 ### `POST /v1/rerank`
 
@@ -586,7 +640,7 @@ shape:
 `index` is the document's position in the request; a higher `relevance_score` is
 more relevant, on a scale that belongs to the model (bge returns an unbounded score,
 Qwen3-Reranker the probability of "yes"). `top_n` keeps the best N and
-`return_documents` adds each document's text. A classifier head with several outputs
+`return_documents` adds `"document": {"text": "..."}` to each result. A classifier head with several outputs
 also reports them as `label_scores`, and the first is the relevance score. A document
 longer than the model's window is cut to fit and its result carries `"truncated": true`.
 
@@ -594,9 +648,10 @@ longer than the model's window is cut to fit and its result carries `"truncated"
 registered; a path is never accepted. One reranker is resident at a time and a
 request for another replaces it. Errors: 400 for an empty query, a query too long
 for the model's window, or several rerankers with no `model`; 404 for an unregistered
-model or no reranker at all; 422 for an invalid body, a model that is not a reranker
-(an embedding or chat model), or a file without a classifier head; 503 when the
-model cannot be loaded or its worker fails.
+model or no reranker at all; 422 for an invalid body (including a `top_n` below 1 or
+an empty `documents` list), a model that is not a reranker (an embedding or chat
+model), a registered reranker whose file is missing, or a file without a classifier
+head; 503 when the model cannot be loaded or its worker fails.
 
 ### `POST /v1/audio/transcriptions`
 
@@ -645,9 +700,12 @@ audio is not recorded in the audit log or the transcript.
 `stream`, `include[]`, `chunking_strategy` and `known_speaker_*` change the output and
 are not implemented, so sending them is a `400`; other unknown fields are ignored. A
 recording with no speech is a `200` with empty text. Failures: `400` an unreadable
-file or bad field, `413` too large, `415` not multipart, `501` the speech package is
-not installed and no installed model hears audio, `409` the first-use model download is blocked by the network policy,
-`504` the speech engine hung and was restarted.
+file or bad field, `403` a cross-origin browser request from an origin that is not
+this server, a local page or a `cors_origins` entry, `413` too large, `415` not
+multipart, `501` the speech package is not installed and no installed model hears
+audio, `409` the first-use model download is blocked by the network policy, `503`
+the speech engine could not start or load its model, `504` the speech engine hung and
+was restarted, `500` the audio decoder failed, `502` any other engine failure.
 
 ### `POST /v1/images/generations`
 
@@ -680,6 +738,14 @@ route cannot be fetched by an API client, so `b64_json` is the default and askin
 private directory, returned as `b64_json` (the default there; asking for `url` is a
 `400`), and the directory is deleted before the response is sent.
 
+Failures: `400` an empty or over-long prompt, a bad `size`, an `output_format` other
+than `png`, a bad `response_format`, or `url` where none can be served (above);
+`422` an `n` outside 1 to 4 or a body that does not validate; `409` the job was
+cancelled (for example through the job's cancel route); `502` the generation failed (the
+reason is in `detail`); `503` the server has no background job registry or could
+not determine its own address; `500` in privacy mode, the generated image could
+not be deleted, so it was not returned.
+
 ### `POST /v1/audio/speech`
 
 Scope: `tts`. Served by the tts plugin. Speaks text with a registered text-to-speech
@@ -705,13 +771,14 @@ to disk, in any session mode. The seed used is in the `X-Localm-Seed` response h
 | `model` | A registered model of type `tts`. Omitted, `localm`, `tts-1`, `tts-1-hd` and `gpt-4o-mini-tts` name the only one; with several registered, name one. |
 | `voice` | `default` (the model's own voice), or the name of a WAV recording saved as `<name>.wav` in the `voices` folder of the data directory. Any other name is a `400` listing the voices. |
 | `voice_file` | Multipart only: a WAV recording (PCM or float, at most 30 s and 16 MB) whose voice to imitate. Not together with a named `voice`. |
-| `response_format` | `wav` (default; 16-bit mono at 24 kHz) or `pcm` (the same samples, raw little-endian, no header). |
+| `response_format` | `wav` (default; 16-bit mono at 24 kHz) or `pcm` (the same samples, raw little-endian, no header; a model that speaks at another rate than 24 kHz gets a `400` for it). |
 | `language` | Optional code such as `en` or name such as `english`; the model's default when omitted. |
 | `seed` | Optional, 0 to 4294967294, for a reproducible result. Random when omitted. |
 | `speed`, `instructions`, `stream_format` | Only `1.0`, empty and `audio`: other values change the output and are not implemented, so they are a `400`. |
 
 `mp3`, `opus`, `aac` and `flac` are a `400`; other unknown fields are ignored. Failures:
-`400` a bad field, text or recording, `404` no such model, `422` a model that is not a
+`400` a bad field, text or recording, `403` a cross-origin browser request from an origin
+that is not this server, a local page or a `cors_origins` entry, `404` no such model, `422` a model that is not a
 text-to-speech model or lacks its mmproj, `413` too large, `501` the llama.cpp runtime
 or the model cannot synthesize speech (run `localm setup-llama` for the pinned runtime),
 `503` the model failed to load, `504` the speech worker hung and was stopped, `502` the
@@ -721,15 +788,22 @@ generation failed or did not end within its frame budget, `409` cancelled.
 
 Scope: `models:read`.
 
-Lists every registered model with its `loaded`/`active` state. `GET
-/v1/models/{id}` (same scope) returns registry detail for any registered
-model: path (basename only), source, size, SHA256, aliases, and whether it is
-active and loaded.
+Lists every registered model (and the startup model when it is not
+registered) as `{"object": "list", "data": [{"id", "object": "model",
+"created", "owned_by", "loaded", "active"}]}`. `GET /v1/models/{id}` (same
+scope) returns registry detail for any registered model: `id`, `object`,
+`owned_by`, `path` (basename only), `source`, `sha256`, `size_bytes`, `aliases`,
+`active`, `loaded`, `model_type`, plus `model_type_recorded: false` when the
+registry entry records no type, `vision` and `audio_input` when the model's files
+could be inspected, `adapters` when LoRA adapters are applied to the loaded
+model, and `peer_route` when an accepted route forwards it to another instance.
+An unregistered `{id}` is a 404.
 
 ### `GET /health`
 
-Public - no authentication, even when a key is configured. 200 with model
-name and load state; 503 when no engine is initialised.
+Public - no authentication, even when a key is configured. 200 with
+`{"status": "ok", "model": "...", "loaded": true|false}`; 503 when no engine is
+initialised.
 
 ## Model lifecycle
 
@@ -749,15 +823,23 @@ before returning.
  "gpu_layers_offloaded": 24, "gpu_layers_total": 32, "degraded": true}
 ```
 
-`status` is `"already_loaded"` when the model was resident already. The
+`status` is `"already_loaded"` when the model was resident already, or
+`"peer_routed"` (with `model` and `peer`, and no load) when an accepted route
+forwards the model to another instance. The
 `gpu_layers_offloaded`/`gpu_layers_total`/`degraded` fields appear only when
 the backend can report per-layer placement (GGUF models, once the load has
-completed). A model too large to fully fit VRAM still loads deliberately,
+completed), with `moe_cpu_layers` when a Mixture-of-Experts load kept the routed
+experts of that many layers in system RAM (which also makes `degraded` true). A model too large to fully fit VRAM still loads deliberately,
 offloading as many layers as fit and running the rest on CPU rather than
 refusing outright; `degraded` is true whenever fewer than the full layer
 count landed on the GPU, so a caller can tell that apart from a full GPU
 load. `parallel_slots` appears when the loaded model answers more than one
-request at once, and says how many.
+request at once, and says how many. A load that reports its memory-mapping also
+carries `use_mmap`, `mmap`, `mmap_from_disk` and `mmap_cpu_from_disk`, with
+`mmap_note` and `mmap_ram_short` when there is something to say, and `adapters`
+lists the LoRA adapters applied. Without `model` and with nothing active,
+loaded or configured to fall back to, the load is a 503; an unregistered name is a
+404.
 
 `POST /v1/models/unload` with no `model` returns `status` (`"unloaded"`,
 `"in_use"` when every loaded model was mid-request and none could be freed, or
@@ -771,7 +853,7 @@ because it was still in use after a short grace period; this route has no
 `{"status": "confirm_required", "model": ..., "detail": ...}` when the model
 was still in use after the grace period and was left loaded. Treat anything
 other than `"unloaded"` or `"already_unloaded"` as "the model is still
-resident". The unload routes (not the load route) add `vram_freed`,
+resident. An unregistered `model` is a 404. The unload routes (not the load route) add `vram_freed`,
 `vram_before_bytes`, and `vram_after_bytes` when a GPU free-memory reading is
 available, plus `vram_reading_uncertain` and a `vram_note` when that reading
 cannot be trusted (a stale probe, a driver that reports only this process's own
@@ -781,7 +863,11 @@ unloaded model reloads it automatically.
 `POST /v1/models/rename?model=<name>&new_name=<name>` renames a registered
 model in place: re-keys the registry entry and, if the model is currently
 loaded, its in-memory engine, so it keeps serving under the new name with no
-reload. Unlike an alias, the old name stops resolving. This is what `localm
+reload. Unlike an alias, the old name stops resolving. It returns
+`{"status": "renamed", "model": "<old name>", "new_name": "<new name as
+sanitised>", "notes": [...]}`, where `notes` reports the references to the old
+name it migrated or could not (a per-project coder config, for example); an unregistered `model` is a 404, a taken name a
+409, and a failed rename a 400. This is what `localm
 rename` calls; it exists on the always-present `/v1` surface (not only under
 `localm gui`) because a headless `localm serve` has no GUI routes to do it
 from instead.
@@ -806,9 +892,11 @@ first.
 ### `GET /v1/config` / `PATCH /v1/config`
 
 Scope: `config:read` for `GET` (also covers `GET /v1/config/schema`,
-`GET /v1/media/config`, and `GET /v1/comfy/status`); `config:write` for
-`PATCH` (also covers `POST /v1/media/config/{name}`, `POST /v1/comfy/stop`,
-and `POST /v1/comfy/restart`).
+`GET /v1/media/config`, `GET /v1/tts/config`, `GET /v1/plugins/settings` and
+`GET /v1/comfy/status`); `config:write` for `PATCH` (also covers
+`POST /v1/media/config/{name}`, `POST /v1/tts/config`,
+`POST /v1/plugins/{name}/settings`, `POST /v1/comfy/stop`, and
+`POST /v1/comfy/restart`).
 
 Read and update `<data dir>/config.json`. PATCH accepts only known keys and
 persists immediately; engine values (context sizes, GPU layers) apply on the
@@ -826,6 +914,33 @@ requires `plugins:admin`). PATCH therefore refuses both to a non-owner
 general route cannot be used to bypass a specific one. Their values stay
 readable.
 
+`GET /v1/config` returns the whole config plus seven read-only extras:
+`effective_mode`, `effective_chat_mode`, `effective_coder_mode`,
+`effective_ctx_max`, `effective_ctx_model`, `instance_id` and `instance_port`.
+PATCH ignores those seven, so a client can send back what it read, and returns
+the full merged config; a non-owner caller gets neither the owner-only keys nor
+their values. `hf_token` and `civitai_api_key` are kept in a separate owner-only
+file, not in `config.json`, and are written last, so an error leaves them
+unchanged. A change to `embedding_model` that would leave an existing
+collection's vectors unusable is not applied by the first request: it answers 200
+`{"needs_confirm": true, "model", "collections", "note"}`, and the same body with
+`"confirm": true` applies it. PATCH errors: 400 for an unknown key, an invalid
+value, or `require_auth: true` while no API key exists; 403 for an owner-only
+key or plugin state from a non-owner key; 409 when `config.json` or the
+credentials file exists but cannot be read; 504 when the save times out; 500
+when the credentials file cannot be written.
+
+`GET /v1/config/schema` returns `{"fields": [...]}`. `GET /v1/media/config`
+returns `{"plugins": [{"plugin", "label", "fields"}]}` for image, music and
+video; `POST /v1/media/config/{name}` merges one plugin's block (a blank field
+clears its override) and returns `{"plugin", "fields"}`, with 404 for an unknown
+plugin, 403 for an owner-only field from a non-owner key, 400 for an invalid
+value, 409 for an unreadable config and 504 on a timeout. `GET` and
+`POST /v1/tts/config` return `{"plugin", "active", "fields"}` and fail the same
+way (no 404). `GET /v1/comfy/status` returns `{"alive", "launched_by_localm"}`;
+`POST /v1/comfy/stop` and `POST /v1/comfy/restart` return `{"ok", "message"}`;
+all three answer 504 when they time out.
+
 ### `GET /v1/plugins/settings` / `POST /v1/plugins/{name}/settings`
 
 Scope: `config:read` for `GET`, `config:write` for `POST`.
@@ -837,7 +952,10 @@ see [plugin-interop.md](plugin-interop.md)). `GET` returns every ACTIVE
 plugin's declared fields with their resolved values; an inactive or unknown
 plugin simply has no entry. `POST` merges a plugin's block key by key (a
 blank field clears that override back to its declared default) and 404s for
-a plugin with no active `add_settings()` fields. A field marked owner-only in
+a plugin with no active `add_settings()` fields. `GET` returns
+`{"plugins": [{"plugin", "label", "fields"}]}` and `POST` returns
+`{"plugin", "fields"}`; `POST` also answers 400 for an invalid value, 409 for an
+unreadable config and 504 on a timeout. A field marked owner-only in
 the plugin's own declaration is hidden from, and refused for, a non-owner
 `config:write` key, the same rule `/v1/config` applies to its own `admin_only`
 keys.
@@ -851,12 +969,12 @@ present on a headless `localm serve` with no plugins installed, not only under
 
 | Route | Scope | Purpose |
 |---|---|---|
-| `GET /api/issues` | `config:read` | List the project's issues through the bug-report proxy. Takes `?state=` (default `all`). |
-| `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. |
-| `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. |
-| `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. The `backup` path and any `error` text carry the full path for the owner and open mode, and a scrubbed one (data dir as `<data>`, file name kept) for a scoped key. |
-| `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. Returns `available`, `backup`, `version` and `current`; `backup` is the full path for the owner and open mode, and a scrubbed one for a scoped key. |
-| `POST /api/update/rollback` | `admin` | Restore the previous build from the last update's local backup and restart into it. No signature check and no network request - it restores files, not a download. Requires `admin` specifically (not merely `config:write`), and restores files only, not a deps-class update's package installs. Only open mode or an owner key reaches it, so its `backup` path and error texts are never scrubbed. |
+| `GET /api/issues` | `config:read` | List the project's issues through the bug-report proxy. Takes `?state=` (`open`, `closed` or `all`; default and fallback `all`). Returns `{"available": bool, "issues": [...]}`, with `available` false when no tracker is configured, and an `error` string when the proxy fails. |
+| `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. Returns `{"available": true, "current", "latest", "newer", "comparable", "notes", "published_at", "asset", "signature"}`; `{"available": false}` when no updater is configured; `{"available": true, "error": "..."}` when the check fails. |
+| `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. Returns `{"available": true, "version", "markdown"}` with the released history and without the `[Unreleased]` section, or `{"available": false}` when the file is absent from this build. |
+| `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. Returns `{"applied": false, "reason": "already up to date", "current"}` when there is nothing newer, `{"applied": false, "error": "..."}` when the apply failed and was rolled back, and otherwise `{"applied": true, "version", "klass", "backup", "restart_needed", "available": true}` plus `"restarting": true` for every class except a setup-class update. 400 when the updater is not configured or the release has no downloadable build; 502 when the check for the latest release fails. The `backup` path and any `error` text carry the full path for the owner and open mode, and a scrubbed one (data dir as `<data>`, file name kept) for a scoped key. |
+| `GET /api/update/rollback` | `config:read` | Whether a rollback is possible, and which build it would restore. Read-only; never rolls anything back. Returns `{"available", "backup", "version", "current"}`, with `version` null when the backup does not record one. `backup` is the full path for the owner and open mode, and a scrubbed one for a scoped key. |
+| `POST /api/update/rollback` | `admin` | Restore the previous build from the last update's local backup and restart into it. No signature check and no network request - it restores files, not a download. Requires `admin` specifically (not merely `config:write`), and restores files only, not a deps-class update's package installs. Returns `{"rolled_back": true, "backup", "version", "restarting": true}`; 403 for a key without `admin`, 409 when there is no backup or an update or rollback is already running, 500 when the restore failed partway (the backup is kept). Only open mode or an owner key reaches it, so its `backup` path and error texts are never scrubbed. |
 | `POST /api/bug-report` | `config:write` | Generate and save a bug report for review. |
 | `POST /api/bug-report/send` | `config:write` | File a saved, reviewed bug report. |
 
@@ -866,8 +984,11 @@ cannot be reached, rather than a 5xx. Check for `error` rather than branching on
 the status code alone. They are not blanket "always 200" routes though: the
 scope dependency still rejects an unauthorised caller before the handler runs.
 
-**Only the update check honours `net_mode: off`.** `GET /api/issues` reaches the
-network regardless, and `GET /api/changelog` makes no network call at all.
+**`net_mode: off` stops `GET /api/issues` and `GET /api/update/check`.** Each
+answers 200 with an `error` naming the setting (the update check still runs when
+the owner-only `update_ignore_net_policy` is on), and `POST /api/update/apply`
+fails with its 502 for the same reason. `GET /api/changelog` makes no network
+call at all.
 
 ### `GET /metrics`
 
@@ -933,9 +1054,10 @@ report and never files it anywhere.
   goes through `POST /api/bug-report/send` with a report the user has seen.
 - An absent or non-object body is a FastAPI validation `422`, not the `400`.
 - A report that cannot be written to disk returns `500`. A failed save is never
-  reported as success.
+  reported as success. A save that takes too long returns `504`.
 
-On success the response carries `saved`, `filename`, `path`, `maintainer`, and,
+On success the response carries `saved` (true), `filename`, `path` (scrubbed of
+machine paths for a caller other than the local operator), `maintainer`, and,
 when the saved file can be read back, `report_markdown` (its full text, for
 review and download) and `report_sha256` (the hex SHA-256 of that text).
 
@@ -954,7 +1076,8 @@ issue title is the report's own heading.
   (`bug-<stamp>.md`), returns `400`. A file that cannot be read returns `404`.
   A file whose text no longer matches the digest returns `409`, and nothing is
   sent.
-- A failed upload returns `200` with `uploaded: false` plus `upload_stage`,
+- Past those checks the response is a `200` carrying `filename` and `maintainer`.
+  A failed upload (including one that times out) has `uploaded: false` plus `upload_stage`,
   `upload_message` and `upload_error`; the file stays saved. A rate-limited
   upload additionally sets `rate_limited: true` and `retry_after` in seconds. A
   successful upload sets `uploaded: true` and, when the proxy returned one,
@@ -972,7 +1095,8 @@ a trust boundary and are owner-only; see the note under
 These endpoints are present under `localm serve` too, not just `localm gui`.
 They are scope-gated: `GET /api/plugins` requires `PLUGINS_READ`, and the
 mutations require `PLUGINS_ADMIN` - except the install-deps event stream
-below, which is a `GET` that also requires `PLUGINS_ADMIN`.
+below, which is a `GET` that also requires `PLUGINS_ADMIN`. A `{name}` that is
+not a legal plugin id is a 404 on every `{name}` route.
 
 ### `GET /api/plugins`
 
@@ -988,37 +1112,51 @@ Each plugin entry carries the state flags `installed`, `enabled`, `active`,
 Move a plugin between the available catalog and the installed set. Install
 copies the plugin from the store into `<data dir>/plugins/` and enables it;
 uninstall removes the installed directory and accepts `?delete_data=` to
-also drop the plugin's stored data. Uninstalling a protected plugin (chat)
-returns 409; an unknown plugin returns 404.
+also drop the plugin's stored data. They return `{"status": "installed" |
+"uninstalled", "name"}`. Uninstalling a protected plugin (chat) returns 409; an
+unknown plugin returns 404; a failed install or uninstall returns 400; an
+uninstall that disabled and unloaded the plugin but could not remove everything
+it owns from disk returns 500.
 
 ### `POST /api/plugins/refresh` / `POST /api/plugins/{name}/refresh`
 
 Refresh plugin state from disk without a server restart. The bare route
-refreshes every installed plugin and returns `{"status": "ok", "refreshed":
-...}`; the `{name}` route refreshes just that plugin and returns
-`{"status": "refreshed"|"up-to-date", "name": name}`. An unknown or
-non-builtin plugin returns 404; any other refresh failure returns 400.
+refreshes every installed plugin and returns `{"status": "ok" | "partial",
+"refreshed": [...], "failed": {name: error}}`, with `partial` and the failed
+plugins named in `failed` when some could not be refreshed; the `{name}` route
+refreshes just that plugin and returns `{"status": "refreshed"|"up-to-date",
+"name": name}`. An unknown, uninstalled or non-builtin plugin returns 404; any
+other refresh failure of the `{name}` route returns 500.
 
 ### `POST /api/plugins/{name}/enable` / `POST /api/plugins/{name}/disable`
 
 Toggle an installed plugin active or inactive in config. Disabling a
 protected plugin (chat) returns 409; enabling a plugin that is not installed
-returns 409; an unknown plugin returns 404 from `enable`. `disable` does not
-check whether the name is a real plugin - an unknown name returns 200 the
-same as a real one.
+returns 409; an unknown plugin returns 404 from `enable`; any other failure
+to enable returns 400. They return `{"status": "enabled" | "disabled", "name"}`.
+`disable` does not check whether a well-formed name is a real plugin - an
+unknown name returns 200 the same as a real one.
 
 ### `POST /api/plugins/install-external`
 
 `PLUGINS_ADMIN` scope, same as the routes above. Installs a third-party
 plugin from a local directory (`{"source": "/path/to/plugin"}`, which must
-contain a `plugin.toml`) - the HTTP sibling of `localm plugin install
-<dir>`. The plugin loads on the next server start.
+contain a `plugin.toml`; `force` replaces an installed copy) - the HTTP sibling
+of `localm plugin install <dir>`. The plugin loads on the next server start.
+Returns `{"status": "installed", "name", "version"}`; a missing `source`, a
+directory without a `plugin.toml`, or a rejected plugin is a 400.
 
 ### `POST /api/plugins/{name}/install-deps` / `GET /api/plugins/{name}/install-deps/events`
 
 `PLUGINS_ADMIN` scope. Installs a plugin's pip extras on this host (the HTTP
-sibling of `localm plugin install-deps NAME`) and streams progress via the
-events route, the same job-events pattern used elsewhere in this API.
+sibling of `localm plugin install-deps NAME`). The POST starts the install in the
+background and returns `{"status": "running"|"done"|"error", "name", "missing",
+"lines"}`; an unknown plugin is a 404. Both routes are a 403 on a server bound
+beyond loopback, because a remote client may never trigger a server-side pip.
+The events route replays the whole log and then follows it as server-sent events:
+`data: {"type": "log", "line": "..."}` per line, then `data: {"type": "end", "ok",
+"installed", "failed", "error"}`, with `: keepalive` comments between; it is a 404
+when no install was ever started for that plugin.
 
 ## API key endpoints
 
@@ -1026,14 +1164,15 @@ Scope: `keys:admin`.
 
 | Route | Purpose |
 |---|---|
-| `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key) plus whether the caller is the owner, the configured key presets, and `owner_key_warning` (the notice that an empty owner key file left the server in open mode, or null). `owner_key_warning` names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
-| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns the plaintext key exactly once. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. |
-| `DELETE /v1/keys/{key_id}` | Revoke a key. 404 if no such key exists. |
+| `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key). Returns `{"keys": [{"id", "name", "scopes", "created", "expires", "last_used", "fs_access", "rag_roots"}], "is_owner", "presets", "owner_key_warning"}`: whether the caller is the owner, the configured key presets, and `owner_key_warning`, a notice (or null) that the owner key file exists but holds no key, so the server runs keyless; it names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
+| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. |
+| `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists. |
 
 `POST /api/auth/key/clear` (scope `config:write`; CSRF-protected for
 cookie-authenticated callers) deletes the server-side owner key and signs out
 every session - the HTTP sibling of `localm key clear` and the GUI's clear
-button. It does two things that can fail independently, and reports on both:
+button (403 when a cookie-authenticated caller sends no valid CSRF token). It
+does two things that can fail independently, and reports on both:
 removing the stored credential, and revoking every browser session. Either one
 surviving still grants access, so `{"cleared": true, "warnings": []}` is
 returned ONLY when both completed. If either could not be finished, the
@@ -1056,11 +1195,24 @@ the environment overrides the stored key, or on an unexplained write/read-back
 mismatch, either surfaced in `warnings`). Existing browser sessions are NOT
 revoked by a roll (sessions are decoupled from the key's value); the
 compromise-recovery path that does revoke them is `localm key recover`, run
-locally.
+locally. A body that is not a JSON object, a `key` that is not a string, or a key
+the store refuses (too short, or with characters an `Authorization` header cannot
+carry) is a 400, and the previous key stays.
 
 `POST /api/session/logout` reports the same way: it always clears the calling
-browser's own cookie, and carries a `warnings` entry when the server-side
-session record could not be dropped.
+browser's own cookie, and answers `{"authed": false, "warnings": [...]}` with a
+`warnings` entry when the server-side session record could not be dropped (403
+for a cookie-authenticated call without a valid CSRF token).
+
+The two other session routes stay public. `POST /api/session` exchanges a key,
+sent as `{"key": "..."}` or as a bearer token, for the HttpOnly `localm_session`
+cookie and answers `{"authed": true, "scopes": [...], "csrf": "..."}`, where
+`csrf` is the token to send as `X-CSRF-Token` on later changes; it is a 401 for
+a key that does not verify and, once past the open-mode gate above, a 400 in open
+mode, where there is nothing to log into. `GET /api/session` answers `{"authed", "scopes", "required", "csrf",
+"session_mode"}`: `required` is true when a key is configured (or `require_auth`
+is on), `csrf` is empty unless the caller holds a cookie session, and
+`session_mode` is the mode a chat from this caller is recorded under.
 
 ## Knowledge (RAG) endpoints (rag plugin)
 
@@ -1068,42 +1220,55 @@ These routes exist only when the `rag` plugin is installed and enabled;
 otherwise they `404`. Scope: `rag`. See [rag.md](rag.md) for the retrieval
 design, indexing confinement, and CLI equivalents.
 
+Across the collection routes: a `name` that is not a legal collection name is a
+`400`, and an unknown collection a `404` (create excepted). The routes that read
+or change an existing collection's content (detail, delete, query, reembed,
+repair, remove-doc) answer `403` when the key's `rag_roots` confine it to
+folders and the collection holds documents indexed from outside them; the
+listing leaves such collections out. Create, delete and remove-doc answer `409`
+while another process is writing the collection.
+A collection's stats are `name`, `created`, `n_docs`, `n_missing`, `n_roots`,
+`n_chunks`, `has_vectors`, `corrupt`, `chunks_bad_lines`, `vector_degrade_reason`
+and `vector_dim`.
+
 | Route | Purpose |
 |---|---|
-| `GET /api/rag/collections` | List every collection with its stats (chunk/doc counts, `has_vectors`, `dim_mismatch` against whatever embedder is currently loaded). |
-| `POST /api/rag/collections` | Create an empty collection. `{"name": ...}`; 409 if it already exists. |
-| `GET /api/rag/collections/{name}` | One collection's stats plus its document list. 404 for an unknown name. |
-| `DELETE /api/rag/collections/{name}` | Delete a collection and its on-disk index. 404 if it does not exist. |
-| `POST /api/rag/collections/{name}/add` | Index paths into a collection. Always starts a background job and returns `{"job_id": ...}` immediately, on `localm gui` and a headless `localm serve` alike. Follow progress with `GET /api/jobs/{id}/events`. |
-| `POST /api/rag/collections/{name}/upload` | Same, for uploaded files; same `{"job_id": ...}` response. |
-| `POST /api/rag/collections/{name}/query` | Semantic/lexical search against one collection; returns up to `k` (max 20) hits; with `"relevant_only": true` it drops hits below the collection's relevance floor, so an unrelated query returns none; `"context"` (the user's previous message, cut to 600 characters) is searched together with a `relevant_only` query that refers back to the conversation, and the response's `context_used` says whether it was. Chunk text is defanged of control/frame tokens before it comes back, since it is untrusted content headed for a chat prompt. |
-| `POST /api/rag/collections/{name}/reembed` | Recompute the collection's vectors with the currently-loaded embedding model, from the stored chunk text (no re-read of the source files). Job-backed. |
-| `POST /api/rag/collections/{name}/repair` | Re-index every rebuildable document (mirrors `localm rag repair`). Upload-only documents cannot be rebuilt (the uploaded bytes are never retained) and are reported, not silently dropped. Returns `{"needs_confirm": true, ...}` instead of starting a job when repairing without embeddings would remove existing vectors; re-POST with `confirm: true` to proceed. |
-| `POST /api/rag/collections/{name}/remove-doc` | Remove one indexed document (`{"path": ...}`) from a collection. 404 if it is not indexed there. |
-| `POST /api/rag/extract` | Extract plain text from an uploaded chat attachment, entirely in memory (30 MB cap). Not used by collection indexing. The GUI's Chat and Coder attachments use `POST /api/chat/extract` instead: the same request and answer, served by the built-in chat plugin (`chat` scope), so it works without this plugin. |
-| `GET /api/rag/embedding` | Current embedding-model config and availability (`installed`, `dim`, `can_download`, any load error). Never loads a model. A non-owner caller gets a withheld/generic answer for a model that is not one of localm's known internal ones or a registered model. |
-| `POST /api/rag/embedding/download` | One-time download of the currently-configured embedding model, when the network policy would otherwise not fetch it automatically (`net_mode: ask`). Needs `config:write` - the same scope that governs `net_mode` itself. Writes nothing to config; `net_mode: off` always refuses it. Job-backed. See [network.md](network.md). |
-| `POST /api/rag/embedding` | Select the embedding model (and install it, if it is one of localm's known internal models and not yet on disk). Two-step by `confirm`: without it, this is a dry run - no job starts, and the response is `{"needs_confirm": true, "model", "collections", "note"}` describing what switching would affect. Re-POST with `confirm: true` to actually switch; that starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key. |
+| `GET /api/rag/collections` | List every collection with its stats (chunk/doc counts, `has_vectors`, `dim_mismatch` against whatever embedder is currently loaded). Returns `{"collections": [...]}`; `dim_mismatch` is null when it cannot be told. |
+| `POST /api/rag/collections` | Create an empty collection. `{"name": ...}`; returns its stats; 409 if it already exists. |
+| `GET /api/rag/collections/{name}` | One collection's stats plus `docs` (each `{"path", ...}`) and `dim_mismatch`. 404 for an unknown name. |
+| `DELETE /api/rag/collections/{name}` | Delete a collection and its on-disk index. Returns `{"status": "deleted", "name"}`; 404 if it does not exist. |
+| `POST /api/rag/collections/{name}/add` | Index paths into a collection. Always starts a background job and returns `{"job_id": ...}` immediately, on `localm gui` and a headless `localm serve` alike. Follow progress with `GET /api/jobs/{id}/events` (see [jobs.md](jobs.md#two-things-live-under-apijobs)). Body: `paths` (1 to 50), `embed` (default true; degrades to lexical-only when no embedder is available), `reindex` (default false; re-index unchanged files). 400 for no paths, more than 50, a path the indexing policy denies outright, or one that does not exist; for a path outside the allowed folders the owner gets a 409 `{"needs_consent": true, "reason": "outside_allowed", "addable": [...], "detail"}` and any other key a 403; 503 when the server has no job registry. |
+| `POST /api/rag/collections/{name}/upload` | Same, for uploaded files; same `{"job_id": ...}` response. Body: `files` (1 to 50 of `{"filename", "content_b64"}`), `embed`, `reindex`. 400 for no files, more than 50, or invalid base64; 413 for a file over 30 MB or a request over 100 MB. |
+| `POST /api/rag/collections/{name}/query` | Semantic/lexical search against one collection; body `query` (empty is a 400), `k` (default 4, clamped to 1 to 20), `relevant_only`, `rerank` (null follows the `rag_rerank` setting), `context`; returns up to `k` hits; with `"relevant_only": true` it drops hits below the collection's relevance floor, so an unrelated query returns none; `"context"` (the user's previous message, cut to 600 characters) is searched together with a `relevant_only` query that refers back to the conversation, and the response's `context_used` says whether it was. The response is `{"collection", "query", "hits", "relevant_only", "reranked", "rerank_model", "rerank_note", "context_used"}`. Chunk text is defanged of control/frame tokens before it comes back, since it is untrusted content headed for a chat prompt. |
+| `POST /api/rag/collections/{name}/reembed` | Recompute the collection's vectors with the currently-loaded embedding model, from the stored chunk text (no re-read of the source files). Job-backed (`{"job_id": ...}`); 400 when no embedding model is available. |
+| `POST /api/rag/collections/{name}/repair` | Re-index every rebuildable document (mirrors `localm rag repair`). Upload-only documents cannot be rebuilt (the uploaded bytes are never retained) and are reported, not silently dropped. Returns `{"needs_confirm": true, ...}` instead of starting a job when repairing without embeddings would remove existing vectors; re-POST with `confirm: true` to proceed. Body: `embed` (default true), `confirm`. Returns `{"job_id": ...}` otherwise; 400 when the collection has no documents or every document was uploaded. |
+| `POST /api/rag/collections/{name}/remove-doc` | Remove one indexed document (`{"path": ...}`) from a collection. Returns `{"status": "removed", "path"}`; 404 if it is not indexed there. |
+| `POST /api/rag/extract` | Extract plain text from an uploaded chat attachment, entirely in memory (30 MB cap). Body: `filename`, `content_b64`, `max_chars` (omit for the whole text; otherwise clamped to 500 to 200000). Returns `{"filename", "text", "chars", "truncated"}`; 400 for invalid base64, 413 over 30 MB, 422 when no text can be extracted. Not used by collection indexing. The GUI's Chat and Coder attachments use `POST /api/chat/extract` instead: the same request and answer, served by the built-in chat plugin (`chat` scope), so it works without this plugin. |
+| `GET /api/rag/rerank` | Whether Knowledge results are reranked. Returns `{"enabled", "installed", "model", "candidates", "note"}`: the `rag_rerank` setting, the registered reranker names, the reranker a query would use (null when none), how many hits it would see, and why a wanted rerank cannot run. Never loads a model. |
+| `GET /api/rag/embedding` | Current embedding-model config and availability: `{"model", "default", "internal", "installed", "dim", "error", "gpu_fallback_reason", "status", "can_download"}`, with `status` one of `ready`, `not_installed` and `unknown`. Never loads a model; 504 if the embedder state cannot be read. A non-owner caller gets a withheld/generic answer for a model that is not one of localm's known internal ones or a registered model. |
+| `POST /api/rag/embedding/download` | One-time download of the currently-configured embedding model, when the network policy would otherwise not fetch it automatically (`net_mode: ask`). Needs `config:write` - the same scope that governs `net_mode` itself. Writes nothing to config; `net_mode: off` refuses it with a 409 unless `net_allow_model_downloads` is on. Returns `{"job_id", "model"}`, or `{"status": "already_installed", "model"}` when the model is on disk; 403 without `config:write`, 409 when the configured model is not one of the internal downloadable ones. See [network.md](network.md). |
+| `POST /api/rag/embedding` | Select the embedding model (and install it, if it is one of localm's known internal models and not yet on disk). Two-step by `confirm`: without it, this is a dry run - no job starts, and the response is `{"needs_confirm": true, "model", "collections", "note"}` describing what switching would affect. Re-POST with `confirm: true` to actually switch; that starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key (403 otherwise, for the dry run too); an empty `model` is a 400, and a second setup while one is running is a 409. |
 
 ## Memory endpoints (memory plugin)
 
 These routes exist only when the `memory` plugin is installed and enabled;
 otherwise they `404`. Scope: `memory`. Memory is owner-scoped and off in
 privacy mode: every write returns `403` in privacy mode (no new traces). See
-[memory.md](memory.md).
+[memory.md](memory.md). A write also answers `409` while another process holds the
+namespace.
 
 | Route | Purpose |
 |---|---|
-| `GET /api/memory` | The current facts (text + per-item metadata), pending correction proposals (see below), and whether writes are allowed. |
-| `PUT /api/memory` | Bulk edit. A line matching an existing fact keeps that record; new lines are added; omitted lines are deleted. `413` past the 256-record or 64k-char cap. |
-| `POST /api/memory/append` | Add one fact. |
-| `PATCH /api/memory/{id}` | Edit one record's text or importance. |
-| `DELETE /api/memory/{id}` | Delete one record. |
-| `POST /api/memory/corrections/{id}/accept` | Apply a proposed correction (the auto-synthesis job spotted a new fact that contradicts a saved one): replaces or deletes the target record, archiving its old value. |
-| `POST /api/memory/corrections/{id}/reject` | Discard a proposed correction, leaving the target record untouched. |
-| `POST /api/memory/consolidate` | Distil durable facts from recent sessions now; `503` until a model is loaded. |
-| `GET /api/memory/forgotten` | Archived (forgotten) records available for recovery - read-only, available even in privacy mode. |
-| `POST /api/memory/forgotten/{id}/restore` | Recover one archived record back into the live store; `404` if no matching archive entry exists. |
+| `GET /api/memory` | The current facts (text + per-item metadata), pending correction proposals (see below), and whether writes are allowed. Returns `{"text", "writable", "items": [{"id", "text", "importance", "source", "kind", "uses", "updated"}], "corrections": [{"id", "action", "proposed_text", "target_id", "target_text", "confidence", "created", "target_updated"}], "path", "can_download_embedder", "embedder_model"}`; `corrections` is empty when writes are not allowed. |
+| `PUT /api/memory` | Bulk edit. A line matching an existing fact keeps that record; new lines are added; omitted lines are deleted. Body `{"text": ...}`; returns `{"status": "saved", "count"}`. `413` past the 256-record or 64k-char cap. |
+| `POST /api/memory/append` | Add one fact. Body `{"text": ...}`; returns `{"status": "appended", "id"}`; `400` for empty text, `413` at the record cap. |
+| `PATCH /api/memory/{id}` | Edit one record's text or importance. Returns `{"status": "saved", "item"}`; `404` for an unknown id. |
+| `DELETE /api/memory/{id}` | Delete one record. Returns `{"status", "id"}` with `status` `deleted` or `absent`; an unknown id is a `200` with `absent`. |
+| `POST /api/memory/corrections/{id}/accept` | Apply a proposed correction (the auto-synthesis job spotted a new fact that contradicts a saved one): replaces or deletes the target record, archiving its old value. Returns `{"status", "id", "target_id", "action"}` with `status` `updated`, `deleted` or `target_gone`; `404` for an unknown correction, `500` when the old value could not be archived (nothing is applied). |
+| `POST /api/memory/corrections/{id}/reject` | Discard a proposed correction, leaving the target record untouched. Returns the same object with `status` `rejected` or `target_gone`, and fails like accept. |
+| `POST /api/memory/consolidate` | Distil durable facts from recent sessions now; `503` until a model is loaded. Returns `{"status", "added", "updated", "deleted", "proposed", "pending", "episodic", "pruned", "facts"}`, or `{"status": "skipped", "reason": "no_sessions", "added": 0}` when there is no session to read. |
+| `GET /api/memory/forgotten` | Archived (forgotten) records available for recovery - read-only, available even in privacy mode. Returns `{"items": [{"id", "text", "importance", "source", "kind", "forgotten_at"}]}`. |
+| `POST /api/memory/forgotten/{id}/restore` | Recover one archived record back into the live store; `404` if no matching archive entry exists. Returns `{"status": "restored", "item"}`. |
 
 When the memory plugin recalls facts for a chat turn, `POST /v1/chat/completions`
 returns an `X-Localm-Memory` response header: a compact JSON blob with the count
