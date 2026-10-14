@@ -610,7 +610,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Fixed
 - **A malformed key store or credentials file is no longer overwritten.** Creating or revoking an API key, or saving a Hugging Face or CivitAI credential, now refuses and leaves the file untouched when `auth.json` is not a list or `model_source_credentials.json` is not an object, instead of replacing it with just the new entry.
 - **Self-calls to a look-alike loopback URL keep certificate verification.** An HTTPS URL containing a backslash or control character is no longer treated as loopback, so the coder agent does not disable verification for it when the local CA file is missing.
-- **A config lock that cannot be read on release is reported.** The lock file left behind is named in a warning instead of lingering silently until it is reclaimed.
 - **A chat answered by another localm instance keeps this instance's session persistence.** With a
   route to another instance's loaded model, a scheduled chat job on a routed model, or
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a

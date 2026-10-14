@@ -1848,30 +1848,6 @@ def _unlink_lock_file(lockpath: Path) -> None:
                    "old and reclaimed", lockpath.name, last, _CROSS_LOCK_STALE_AGE)
 
 
-def _read_lock_for_release(lockpath: Path) -> Optional[bytes]:
-    """The lock file's bytes, or None when the file is gone or could not be read.
-    A transient sharing violation is retried with _replace_atomic's bounded
-    backoff; a file that still cannot be read is reported at WARNING, naming the
-    file, because the release then leaves it in place for stale-age reclaim."""
-    last: Optional[OSError] = None
-    for attempt in range(_REPLACE_RETRIES):
-        try:
-            return lockpath.read_bytes()
-        except FileNotFoundError:
-            return None
-        except OSError as e:
-            last = e
-            if attempt == _REPLACE_RETRIES - 1 or not _is_transient_permission_error(e):
-                break
-            _transient_backoff(attempt)
-    from localm.debuglog import logger
-    logger.warning("could not read lock file %s on release (%s); leaving it in "
-                   "place, so config/registry writes in every localm process "
-                   "fail on it until it is %.0fs old and reclaimed",
-                   lockpath.name, last, _CROSS_LOCK_STALE_AGE)
-    return None
-
-
 def _reclaim_stale_lock(lockpath: Path, judged: bytes, judged_mtime: float) -> bool:
     """Remove a lock file judged stale, and report whether it was removed.
 
@@ -2029,7 +2005,10 @@ def _cross_process_lock(target: Path, *, timeout: Optional[float] = None):
         # (a write that outlasted _CROSS_LOCK_STALE_AGE) - deleting THEIR live
         # lock here would let a third writer in while they still believe they
         # hold exclusive access, so we leave it alone instead.
-        current = _read_lock_for_release(lockpath)
+        try:
+            current = lockpath.read_bytes()
+        except OSError:
+            current = None
         if current == token:
             _unlink_lock_file(lockpath)
         elif current is not None:
