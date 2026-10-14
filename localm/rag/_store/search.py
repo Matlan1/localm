@@ -23,6 +23,7 @@ from .vectors import _cosine, _maxnorm, _vectors_finite
 DEFAULT_RERANK_CANDIDATES = 20
 
 _WARNED_RERANK_DEGRADES: set = set()
+_WARNED_UNCALIBRATED: set = set()
 
 
 #: Absolute relevance floors applied by ``Collection.query(relevant_only=True)``
@@ -231,6 +232,13 @@ class _CollectionSearch:
         floors = None
         if cosines is not None and not self.embedding_model_mixed():
             floors = calibrated_floors(self.embedding_model() or "")
+            if floors is None:
+                key = (str(self.dir), self.embedding_model())
+                if key not in _WARNED_UNCALIBRATED:
+                    _WARNED_UNCALIBRATED.add(key)
+                    _log.info("RAG collection %r: no measured relevance floors for "
+                              "embedding model %r; relevance-only queries match on "
+                              "keywords", self.name, self.embedding_model())
         vectors = self._vectors or []
         coverage = index.coverage(text, order)
         matched = index.matched_terms(text, order)

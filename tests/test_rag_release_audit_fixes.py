@@ -172,3 +172,34 @@ class TestUndecodableChunksFile:
         again = Collection("kb", base=tmp_path / "rag")
         assert again.stats()["corrupt"] is False
         assert [c["text"] for c in again._chunks] == [text]
+
+
+class TestUncalibratedModelIsSaid:
+    def test_the_missing_floors_are_noted_once_per_collection(
+            self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        from localm.rag._store import search
+        monkeypatch.setattr("localm.config.load_registry", lambda: {})
+        monkeypatch.setattr(search, "_WARNED_UNCALIBRATED", set())
+        queries = _strong_query()
+        coll = _collection(tmp_path, "unregistered", queries)
+        with caplog.at_level(logging.INFO, logger="localm"):
+            for _ in range(3):
+                coll.query(QUERY, k=4, embed_fn=_embedder(queries), relevant_only=True)
+        notes = [r.getMessage() for r in caplog.records
+                 if "no measured relevance floors" in r.getMessage()]
+        assert len(notes) == 1 and "unregistered" in notes[0]
+
+    def test_a_calibrated_model_is_not_noted(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        from localm.rag._store import search
+        monkeypatch.setattr("localm.config.load_registry", lambda: {})
+        monkeypatch.setattr(search, "_WARNED_UNCALIBRATED", set())
+        queries = _strong_query()
+        coll = _collection(tmp_path, BGE, queries)
+        with caplog.at_level(logging.INFO, logger="localm"):
+            coll.query(QUERY, k=4, embed_fn=_embedder(queries), relevant_only=True)
+        assert not [r for r in caplog.records
+                    if "no measured relevance floors" in r.getMessage()]
