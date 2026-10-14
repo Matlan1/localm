@@ -162,6 +162,43 @@ class TestImageGalleryOwnership:
                        c.get("/api/imagine/history", headers=_h(b)).json()["images"])
             assert c.get(f"/api/imagine/file/{name}", headers=_h(a)).status_code == 200
 
+    def test_the_openai_route_returns_the_stamp_warning(self, tmp_path, monkeypatch):
+        app = _gallery_app(tmp_path, monkeypatch, "image")
+        a, b = _mk_keys(["image"], ["image"])
+        with TestClient(app) as c:
+            self._generate(c, monkeypatch, a)
+            from localm.media import gallery
+            index = gallery._index_path("image")
+            real_read_text = Path.read_text
+
+            def locked_read_text(self_, *args, **kw):
+                if Path(self_) == index:
+                    raise PermissionError(32, "being used by another process")
+                return real_read_text(self_, *args, **kw)
+            monkeypatch.setattr(Path, "read_text", locked_read_text)
+
+            r = c.post("/v1/images/generations", headers=_h(a),
+                       json={"prompt": "a third fox"})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            name = body["data"][0]["url"].rsplit("/", 1)[-1]
+            assert any(name in w and "owner" in w for w in body.get("warnings", [])), body
+
+            monkeypatch.setattr(Path, "read_text", real_read_text)
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(b)).status_code == 404
+            assert c.get(f"/api/imagine/file/{name}", headers=_h(a)).status_code == 200
+
+    def test_the_openai_route_carries_no_warnings_when_the_stamp_lands(
+            self, tmp_path, monkeypatch):
+        app = _gallery_app(tmp_path, monkeypatch, "image")
+        (a,) = _mk_keys(["image"])
+        with TestClient(app) as c:
+            self._generate(c, monkeypatch, a)
+            r = c.post("/v1/images/generations", headers=_h(a),
+                       json={"prompt": "a third fox"})
+            assert r.status_code == 200, r.text
+            assert "warnings" not in r.json()
+
     def test_owner_admin_sees_every_image(self, tmp_path, monkeypatch):
         app = _gallery_app(tmp_path, monkeypatch, "image")
         (a,) = _mk_keys(["image"])

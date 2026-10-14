@@ -255,11 +255,11 @@ def test_corrections_blocked_in_privacy_over_http(client, home, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_summarize_session_guard_and_sentence():
-    from localm.memory import summarize_session
+    from localm.memory import ConsolidationModelError, summarize_session
     assert summarize_session(lambda p: "{}", "a session") == ""        # degenerate
     assert summarize_session(lambda p: "", "a session") == ""
-    assert summarize_session(lambda p: (_ for _ in ()).throw(RuntimeError()),
-                             "x") == ""                                # never raises
+    with pytest.raises(ConsolidationModelError):                       # model call raised
+        summarize_session(lambda p: (_ for _ in ()).throw(RuntimeError()), "x")
     assert summarize_session(lambda p: "Discussed the database migration plan.",
                              "x") == "Discussed the database migration plan."
 

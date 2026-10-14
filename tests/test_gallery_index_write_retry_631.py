@@ -317,3 +317,57 @@ def test_held_stamps_do_not_leak_into_another_home(home, monkeypatch, tmp_path):
 
     assert gallery.owner_of("image", "new.png") is None
 
+
+
+def test_a_rename_whose_write_never_lands_keeps_the_owner(home, monkeypatch):
+    from localm.media import gallery
+    gallery.stamp_owner("image", "a.png", "ownerX")
+    _flaky_replace(monkeypatch, fail_times=10_000)
+
+    warning = gallery.rename_owner("image", "a.png", "b.png")
+
+    assert warning and "b.png" in warning
+    assert gallery.owner_of("image", "b.png") == "ownerX"
+    assert gallery.owner_of("image", "a.png") is None
+
+
+def test_a_rename_against_an_unreadable_index_survives_the_repair(home, monkeypatch):
+    from localm.media import gallery
+    idx_path = gallery._index_path("image")
+    gallery.stamp_owner("image", "a.png", "ownerX")
+    good = idx_path.read_text(encoding="utf-8")
+    idx_path.write_text("{ not valid json", encoding="utf-8")
+
+    warning = gallery.rename_owner("image", "a.png", "b.png")
+
+    assert warning and "b.png" in warning
+    assert idx_path.read_text(encoding="utf-8") == "{ not valid json"
+    idx_path.write_text(good, encoding="utf-8")
+    assert gallery.owner_of("image", "b.png") == "ownerX"
+    assert gallery.owner_of("image", "a.png") is None
+    assert gallery.stamp_owner("image", "c.png", "ownerY") is None
+    assert json.loads(idx_path.read_text(encoding="utf-8")) == {
+        "b.png": "ownerX", "c.png": "ownerY"}
+
+
+def test_a_forget_whose_write_never_lands_does_not_raise_and_is_held(home, monkeypatch):
+    from localm.media import gallery
+    idx_path = gallery._index_path("image")
+    gallery.stamp_owner("image", "a.png", "ownerX")
+    _flaky_replace(monkeypatch, fail_times=10_000)
+
+    gallery.forget_owner("image", "a.png")
+
+    assert gallery.owner_of("image", "a.png") is None
+    assert json.loads(idx_path.read_text(encoding="utf-8")) == {"a.png": "ownerX"}
+
+
+def test_the_stamp_warning_names_no_server_path(home, monkeypatch):
+    from localm.media import gallery
+    _flaky_replace(monkeypatch, fail_times=10_000)
+
+    warning = gallery.stamp_owner("image", "new.png", "ownerX")
+
+    assert warning and str(home) not in warning and "gallery_index" not in warning
+    assert gallery.held_stamp_warning("image", "new.png") == warning
+    assert gallery.held_stamp_warning("image", "other.png") is None

@@ -164,8 +164,8 @@ def _balanced_spans(text: str, limit: int = 16) -> list[str]:
 
 class ConsolidationModelError(RuntimeError):
     """The model call behind a consolidation step raised (engine error, eviction,
-    decode failure, context overflow). Raised in place of an empty result, which
-    would be indistinguishable from a model that found nothing."""
+    decode failure, context overflow). Raised in place of the step's empty
+    result."""
 
 
 def _call_model(complete: Complete, prompt: str) -> str:

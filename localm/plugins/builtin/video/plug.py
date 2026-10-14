@@ -358,8 +358,9 @@ async def video_rename(name: str, req: RenameFileRequest):
     sidecar = path.with_suffix(path.suffix + ".json")
     if sidecar.is_file():
         sidecar.rename(target.with_suffix(target.suffix + ".json"))
-    gallery.rename_owner("video", name, target.name)
-    return {"status": "renamed", "name": target.name}
+    warning = gallery.rename_owner("video", name, target.name)
+    return {"status": "renamed", "name": target.name,
+            **({"warning": warning} if warning else {})}
 
 
 @_router.get("/api/video/history")

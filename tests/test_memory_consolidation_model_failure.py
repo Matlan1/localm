@@ -155,6 +155,53 @@ def test_a_failed_episode_summary_is_reported_and_retried_next_run(memhome):
     assert stored == 1, "the failed session was marked processed and never retried"
 
 
+def _add_session(home, stem, mtime, topic):
+    rows = [{"type": "user", "data": {"content":
+                                      f"let us work through {topic} in detail and "
+                                      "decide the next steps for it"}},
+            {"type": "llm", "data": {"content": f"Here is a plan for {topic}."}}]
+    p = home / "sessions" / f"{stem}.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    os.utime(p, (mtime, mtime))
+
+
+def _poisoned(prompt):
+    if "Postgres migration" in prompt:
+        raise RuntimeError("decode failure on this session")
+    return "Worked through the release checklist"
+
+
+def test_a_session_that_keeps_failing_is_skipped_after_the_attempt_cap(memhome):
+    _add_session(memhome, "s2", _SETTLED + 1, "the release checklist")
+    store = plug._chat_store()
+
+    for _ in range(plug.EPISODIC_MAX_ATTEMPTS - 1):
+        errors: list = []
+        assert plug._store_episodes(store, _poisoned, embed_fn=None, errors=errors,
+                                    model_answered=True) == 0
+        assert errors
+
+    errors = []
+    assert plug._store_episodes(store, _poisoned, embed_fn=None, errors=errors,
+                                model_answered=True) == 1
+    assert errors
+    assert [r.text for r in store.all() if r.kind == "episodic"] == [
+        "Worked through the release checklist"]
+
+
+def test_a_session_is_never_skipped_while_no_model_call_succeeds(memhome):
+    _add_session(memhome, "s2", _SETTLED + 1, "the release checklist")
+    store = plug._chat_store()
+
+    for _ in range(plug.EPISODIC_MAX_ATTEMPTS + 2):
+        assert plug._store_episodes(store, _boom, embed_fn=None, errors=[],
+                                    model_answered=False) == 0
+
+    assert plug._store_episodes(
+        store, lambda p: "Planned the billing service Postgres migration",
+        embed_fn=None) == 2
+
+
 def test_synthesize_memory_reports_a_failed_model_call(memhome):
     res = plug.synthesize_memory(_boom)
     assert res["status"] == "error"

@@ -30,10 +30,21 @@ _LOCK = threading.Lock()
 _READ_ATTEMPTS = 5
 _READ_RETRY_DELAY = 0.02
 
-# Owner stamps not yet written to the on-disk index, keyed by the index file's
-# path, then by artifact name. Guarded by _LOCK. Applied on every read and
-# written out by the next successful index write.
-_PENDING: dict[str, dict[str, str]] = {}
+# Ownership changes not yet written to the on-disk index, keyed by the index
+# file's path, then by artifact name. Each value is an owner, a _RenamedFrom, or
+# _FORGOTTEN. Guarded by _LOCK. Applied on top of every read and written out by
+# the next successful index write.
+_PENDING: dict[str, dict[str, object]] = {}
+
+
+class _RenamedFrom:
+    """A held rename: the artifact takes the on-disk owner of *old*."""
+
+    def __init__(self, old: str) -> None:
+        self.old = old
+
+
+_FORGOTTEN = object()
 
 
 class GalleryIndexUnreadable(Exception):
@@ -93,24 +104,57 @@ def _read_text_retrying(p: Path) -> str:
 
 
 def _pending(media_kind: str) -> dict:
-    """The not-yet-written owner stamps for *media_kind* (the live dict).
-    Caller must hold _LOCK."""
+    """The held ownership changes for *media_kind* (the live dict). Caller must
+    hold _LOCK."""
     return _PENDING.setdefault(str(_index_path(media_kind)), {})
 
 
+def _apply_pending(idx: dict, pending: dict) -> dict:
+    """A copy of the on-disk map *idx* with the held changes in *pending*
+    applied: an owner sets the entry, a _RenamedFrom moves the old name's
+    on-disk owner to the new name, _FORGOTTEN removes the entry."""
+    out = dict(idx)
+    for name, change in pending.items():
+        if change is _FORGOTTEN:
+            out.pop(name, None)
+        elif isinstance(change, _RenamedFrom):
+            owner = idx.get(change.old)
+            out.pop(change.old, None)
+            if owner is not None:
+                out[name] = owner
+        else:
+            out[name] = change
+    return out
+
+
 def _read_effective(media_kind: str) -> dict:
-    """The on-disk owner map with the pending stamps applied on top. Caller
-    must hold _LOCK. Raises GalleryIndexUnreadable like _read_index."""
-    return {**_read_index(media_kind), **_pending(media_kind)}
+    """The on-disk owner map with the held changes applied. Caller must hold
+    _LOCK. Raises GalleryIndexUnreadable like _read_index."""
+    return _apply_pending(_read_index(media_kind), _pending(media_kind))
 
 
 def _write_with_pending(media_kind: str, idx: dict) -> None:
-    """Write *idx* with the pending stamps applied, then clear them. Caller
-    must hold _LOCK. Raises what _write_index raises, keeping the pending
-    stamps."""
+    """Write *idx* with the held changes applied, then clear them. Caller must
+    hold _LOCK. Raises what _write_index raises, keeping the held changes."""
     pending = _pending(media_kind)
-    _write_index(media_kind, {**idx, **pending})
+    _write_index(media_kind, _apply_pending(idx, pending))
     pending.clear()
+
+
+def _unwritten_warning(name: str) -> str:
+    """The user-facing warning for an artifact whose owner is held in memory
+    only."""
+    return (f"WARNING: the owner of {name} could not be recorded on disk. It stays "
+            "private to your key while localm runs and is recorded with the next "
+            "gallery change; if localm restarts first, every key can see it.")
+
+
+def _log_held(media_kind: str, what: str, name: str, err: Exception) -> None:
+    from localm.debuglog import logger
+    logger.warning(
+        "gallery: the %s of %s %s could not be written to the ownership index "
+        "(%s); it is applied in memory and written with the next gallery change, "
+        "and a restart before then loses it", what, media_kind, name, err)
 
 
 def _write_index(media_kind: str, data: dict) -> None:
@@ -145,32 +189,27 @@ def stamp_owner(media_kind: str, name: str, owner: Optional[str]) -> Optional[st
     if owner is None:
         return None
     with _LOCK:
+        pending = _pending(media_kind)
+        pending.pop(name, None)
         try:
             idx = _read_index(media_kind)
-        except GalleryIndexUnreadable as e:
-            return _hold_pending(media_kind, name, owner, e)
-        idx[name] = owner
-        try:
+            idx[name] = owner
             _write_with_pending(media_kind, idx)
-        except OSError as e:
-            return _hold_pending(media_kind, name, owner, e)
+        except (GalleryIndexUnreadable, OSError) as e:
+            pending[name] = owner
+            _log_held(media_kind, "owner", name, e)
+            return _unwritten_warning(name)
         return None
 
 
-def _hold_pending(media_kind: str, name: str, owner: str, err: Exception) -> str:
-    """Hold *owner* for *name* in memory after a failed stamp, log it, and
-    return the warning stamp_owner hands back. Caller must hold _LOCK."""
-    _pending(media_kind)[name] = owner
-    from localm.debuglog import logger
-    logger.warning(
-        "gallery: the owner of %s %s could not be written to the ownership index "
-        "(%s); it is enforced in memory and written with the next gallery change, "
-        "and a restart before then leaves the file with no recorded owner",
-        media_kind, name, err)
-    return (f"WARNING: {name} was saved, but its owner could not be recorded on "
-            f"disk ({err}). It stays private to your key while localm runs and is "
-            "recorded with the next gallery change; if localm restarts first, "
-            "every key can see it.")
+def held_stamp_warning(media_kind: str, name: str) -> Optional[str]:
+    """The `stamp_owner` warning for *name* while its owner is held in memory
+    only, else None."""
+    with _LOCK:
+        change = _pending(media_kind).get(name)
+    if change is None or change is _FORGOTTEN:
+        return None
+    return _unwritten_warning(name)
 
 
 def push_stamp_warning(job, warning: Optional[str]) -> None:
@@ -185,7 +224,7 @@ def owner_of(media_kind: str, name: str) -> Optional[str]:
     file that never went through `stamp_owner` - a legacy/manually-placed file).
     None is UNRESTRICTED, mirroring jobs' "no recorded owner" semantics. Reads
     under `_LOCK` so it never observes a concurrent writer's half-updated map.
-    Includes stamps held in memory after a failed index write (see
+    Includes changes held in memory after a failed index write (see
     `stamp_owner`); never writes. Raises GalleryIndexUnreadable when the index
     exists but cannot be read - `require_owner` turns that into a deny (fail
     closed)."""
@@ -193,38 +232,61 @@ def owner_of(media_kind: str, name: str) -> Optional[str]:
         return _read_effective(media_kind).get(name)
 
 
-def rename_owner(media_kind: str, old_name: str, new_name: str) -> None:
+def rename_owner(media_kind: str, old_name: str, new_name: str) -> Optional[str]:
     """Carry an owner entry across a rename; a no-op when *old_name* was
-    untracked (nothing to carry). Carries a stamp held in memory too, and
-    writes every held stamp out with the change."""
+    untracked (nothing to carry). Writes every held change out with it.
+
+    Returns None when the index reflects the rename. When the index cannot be
+    read or written, the rename is held in memory (applied by every ownership
+    check, written with the next successful index write; a corrupt index is
+    never overwritten) and the return value is the user-facing warning to show
+    with the result. Never raises for an index read or write failure."""
     with _LOCK:
         pending = _pending(media_kind)
         if old_name in pending:
             pending[new_name] = pending.pop(old_name)
+        else:
+            pending.pop(new_name, None)
         try:
             idx = _read_index(media_kind)
-        except GalleryIndexUnreadable:
-            return          # do not clobber a corrupt index (warned in _read_index)
+        except GalleryIndexUnreadable as e:
+            if new_name not in pending:
+                pending[new_name] = _RenamedFrom(old_name)
+            _log_held(media_kind, "rename to", new_name, e)
+            return _unwritten_warning(new_name)
         owner = idx.pop(old_name, None)
         if owner is not None:
             idx[new_name] = owner
-        if owner is not None or pending:
+        if owner is None and not pending:
+            return None
+        try:
             _write_with_pending(media_kind, idx)
+        except OSError as e:
+            if owner is not None:
+                pending[new_name] = owner
+                pending[old_name] = _FORGOTTEN
+            _log_held(media_kind, "rename to", new_name, e)
+            return _unwritten_warning(new_name) if new_name in pending else None
+        return None
 
 
 def forget_owner(media_kind: str, name: str) -> None:
     """Drop the owner entry for *name* (delete, or move OUT of the gallery),
-    including a stamp held in memory, and write every other held stamp out
-    with the change."""
+    including a change held in memory, and write every other held change out
+    with it. When the index cannot be read or written, the removal is held in
+    memory instead (a corrupt index is never overwritten). Never raises for an
+    index read or write failure."""
     with _LOCK:
         pending = _pending(media_kind)
         pending.pop(name, None)
         try:
             idx = _read_index(media_kind)
-        except GalleryIndexUnreadable:
-            return          # do not clobber a corrupt index (warned in _read_index)
-        if idx.pop(name, None) is not None or pending:
+            if idx.pop(name, None) is None and not pending:
+                return
             _write_with_pending(media_kind, idx)
+        except (GalleryIndexUnreadable, OSError) as e:
+            pending[name] = _FORGOTTEN
+            _log_held(media_kind, "removal", name, e)
 
 
 def _privileged(request: Request) -> bool:

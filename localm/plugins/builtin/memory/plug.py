@@ -631,11 +631,10 @@ async def memory_consolidate(request: Request = None):
 
 def _model_failed_detail(res: dict) -> str:
     """The user-facing message for a synthesize_memory result whose model call
-    failed, naming what was still saved before the failure."""
-    saved = res.get("added", 0) + res.get("updated", 0) + res.get("episodic", 0)
-    tail = f" {saved} change(s) were saved before it failed." if saved else \
-        " Nothing was changed."
-    return f"The model call failed ({res.get('error')}).{tail}"
+    failed, naming the new facts saved before the failure."""
+    added = res.get("added", 0)
+    saved = f" {added} new fact(s) were saved before it failed." if added else ""
+    return f"The model call failed ({res.get('error')}), so this run did not finish.{saved}"
 
 
 # ------------------------------------------------------------------ #
@@ -746,7 +745,8 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     model_errors: list[str] = []
     if res.get("status") == "error":
         model_errors.append(res.get("error") or "the model call failed")
-    episodic = _store_episodes(store, complete, embed_fn=embed_fn, errors=model_errors)
+    episodic = _store_episodes(store, complete, embed_fn=embed_fn, errors=model_errors,
+                               model_answered=res.get("status") != "error")
     pruned = _prune_trivial_episodes(store, complete)
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on retroactively. Bounded per pass; a large store fills
@@ -802,12 +802,28 @@ def _read_episodic_stems(store) -> set:
         return set()
 
 
-def _write_episodic_watermark(store, mtime: float, stems=()) -> None:
+def _read_episodic_failures(store) -> dict:
+    """``{session stem: failed attempts}`` from the watermark sidecar; empty when
+    absent, old or unreadable."""
+    try:
+        data = json.loads(_episodic_watermark_path(store).read_text(encoding="utf-8"))
+        failures = data.get("failures", {})
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        return {}
+    if not isinstance(failures, dict):
+        return {}
+    return {k: v for k, v in failures.items()
+            if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)}
+
+
+def _write_episodic_watermark(store, mtime: float, stems=(), failures=None) -> None:
     p = _episodic_watermark_path(store)
     try:
         tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text(json.dumps({"last_mtime": float(mtime),
-                                   "stems": sorted(stems)}), encoding="utf-8")
+        record = {"last_mtime": float(mtime), "stems": sorted(stems)}
+        if failures:
+            record["failures"] = failures
+        tmp.write_text(json.dumps(record), encoding="utf-8")
         tmp.replace(p)
     except OSError as e:
         from localm.debuglog import logger
@@ -888,6 +904,9 @@ EPISODIC_MAX_PER_RUN = 5
 # Only a SETTLED session (untouched for at least this long) is summarised. Matches
 # the auto-consolidate debounce cadence (MEMORY_AUTO_MIN_INTERVAL).
 EPISODIC_SETTLE_SECONDS = 900.0
+# Runs in which a session's summary call may raise, while the model answered
+# another call in the same run, before that session is skipped.
+EPISODIC_MAX_ATTEMPTS = 3
 
 
 # Cap on model judgements per pass over already-stored episodes.
@@ -922,7 +941,8 @@ def _prune_trivial_episodes(store, complete) -> int:
         return 0
 
 
-def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None) -> int:
+def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
+                    model_answered=False) -> int:
     """Store one EPISODIC summary PER NEW session file (past the watermark), so N
     sessions become N episodes instead of collapsing into <=1 blob summary. Each
     episode is tagged with its source session id + mtime. Deduped against existing
@@ -950,7 +970,11 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None) -> 
 
     A model call that raises stops the run at that session without advancing the
     watermark past it, so the session is summarised by a later run. *errors*: when
-    a list, that failure's message is appended to it."""
+    a list, that failure's message is appended to it. When the model answered
+    another call in the same run (*model_answered*, or an earlier summary in this
+    pass), the failure is counted against the session in the watermark sidecar,
+    and after EPISODIC_MAX_ATTEMPTS counted failures the session is skipped with
+    a warning and the pass continues."""
     ef = _embed_fn() if embed_fn is _UNSET else embed_fn
     try:
         import time as _time
@@ -963,6 +987,8 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None) -> 
         now = _time.time() if now is None else now
         watermark = _read_episodic_watermark(store)
         wm_stems = _read_episodic_stems(store)     # stems already done AT watermark (tie-safe)
+        failures = _read_episodic_failures(store)
+        answered = model_answered
         # A file is unprocessed if it is strictly newer than the watermark, or ties the
         # watermark mtime but its stem was not yet summarised. Sorted by (mtime, stem)
         # for a total, stable oldest-first order even when mtimes tie.
@@ -1022,12 +1048,24 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None) -> 
             try:
                 summ = summarize_session(complete, text)
             except ConsolidationModelError as e:
+                if errors is not None:
+                    errors.append(str(e))
+                if answered:
+                    failures[f.stem] = failures.get(f.stem, 0) + 1
+                if failures.get(f.stem, 0) >= EPISODIC_MAX_ATTEMPTS:
+                    logger.warning("memory consolidation: the model call failed while "
+                                   "summarizing session %s in %d runs (%s); the session "
+                                   "is skipped", f.stem, failures[f.stem], e)
+                    failures.pop(f.stem, None)
+                    gens += 1
+                    _advance(mt, f.stem)
+                    continue
                 logger.warning("memory consolidation: the model call failed while "
                                "summarizing session %s (%s); it is retried next run",
                                f.stem, e)
-                if errors is not None:
-                    errors.append(str(e))
                 break
+            answered = True
+            failures.pop(f.stem, None)
             gens += 1
             _advance(mt, f.stem)                    # a real attempt was made -> advance past it
             if not summ:
@@ -1071,7 +1109,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None) -> 
                                          "judged": True}),
                       embed_fn=ef)
             stored += 1
-        _write_episodic_watermark(store, newest, newest_stems)
+        _write_episodic_watermark(store, newest, newest_stems, failures)
         if stored > 0:
             logger.info("memory consolidation: stored %d episodic summary record(s)", stored)
         return stored
