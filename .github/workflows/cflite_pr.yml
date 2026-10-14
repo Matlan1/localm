@@ -1,0 +1,42 @@
+name: ClusterFuzzLite
+
+# Coverage-guided fuzzing (atheris) of the GGUF header readers on pull requests
+# that touch them or the fuzz setup. The property-based suite in tests/fuzz/
+# and its nightly run (fuzz.yml) are separate.
+on:
+  pull_request:
+    paths:
+      - ".clusterfuzzlite/**"
+      - ".github/workflows/cflite_pr.yml"
+      - "localm/model_manager/gguf.py"
+      - "localm/model_manager/unsupported.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cflite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz (address)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Build the fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@82652fb49e77bc29c35da1167bb286e93c6bcc05  # v1
+        with:
+          language: python
+          sanitizer: address
+          bad-build-check: false
+
+      - name: Run the fuzzers
+        uses: google/clusterfuzzlite/actions/run_fuzzers@82652fb49e77bc29c35da1167bb286e93c6bcc05  # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 120
+          mode: code-change
+          sanitizer: address
+          report-unreproducible-crashes: false

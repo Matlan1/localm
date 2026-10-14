@@ -276,15 +276,17 @@ def register(app: FastAPI, ctx) -> None:
     async def _load_or_unload(request: Request, name: str, unload: bool,
                               kind: str) -> JSONResponse:
         resolved = _canonical(name)
+        peer_routed = peer_routing.get_route(resolved) is not None
         if unload:
             _require_unload_allowed(request)
-            if resolved not in _registry_names():
-                raise P.OllamaError(404, f"model '{name}' not found")
-            result = await _hs.unload_one_model(resolved)
-            if isinstance(result, dict) and result.get("status") == "confirm_required":
-                raise P.OllamaError(
-                    409, f"model '{name}' is in use; retry when its requests finish")
-        elif peer_routing.get_route(resolved) is None:
+            if not peer_routed:
+                if resolved not in _registry_names():
+                    raise P.OllamaError(404, f"model '{name}' not found")
+                result = await _hs.unload_one_model(resolved)
+                if isinstance(result, dict) and result.get("status") == "confirm_required":
+                    raise P.OllamaError(
+                        409, f"model '{name}' is in use; retry when its requests finish")
+        elif not peer_routed:
             try:
                 await _hs.get_engine(resolved)
             except HTTPException as exc:
@@ -327,8 +329,11 @@ def register(app: FastAPI, ctx) -> None:
             raise P.OllamaError(
                 502, "the model route returned a reply that is not JSON") from None
         total_ns = int((time.perf_counter() - started) * 1_000_000_000)
+        headers = {k: v for k, v in inner.headers.items()
+                   if k.lower().startswith("x-localm-")}
         return JSONResponse(P.completion_to_reply(
-            kind, data, name, want_thinking=plan.want_thinking, total_ns=total_ns))
+            kind, data, name, want_thinking=plan.want_thinking, total_ns=total_ns),
+            headers=headers)
 
     async def _error_text(inner: Response) -> str:
         body_iterator = getattr(inner, "body_iterator", None)
@@ -382,6 +387,13 @@ def register(app: FastAPI, ctx) -> None:
         tokens = int((result.get("usage") or {}).get("prompt_tokens") or 0)
         return vectors, tokens, int((time.perf_counter() - started) * 1_000_000_000)
 
+    def _embed_model_known(name: str) -> bool:
+        from localm.config import load_config
+        resolved = _canonical(name)
+        if resolved in _registry_names() or peer_routing.get_route(resolved) is not None:
+            return True
+        return resolved == str(load_config().get("embedding_model") or "").strip()
+
     @route("/api/embed", methods=["POST"], dependencies=[Depends(_require_auth)])
     async def ollama_embed(req: P.OllamaEmbedRequest, request: Request):
         if req.input is None:
@@ -389,6 +401,10 @@ def register(app: FastAPI, ctx) -> None:
         texts = [req.input] if isinstance(req.input, str) else list(req.input)
         name = P.request_model_name(req)
         if not texts:
+            if req.dimensions is not None:
+                raise P.OllamaError(400, "dimensions is not supported")
+            if not _embed_model_known(name):
+                raise P.OllamaError(404, f"model '{name}' not found")
             return {"model": name, "embeddings": []}
         vectors, tokens, total_ns = await _embed(request, req, texts)
         out = {"model": name, "embeddings": vectors, "total_duration": total_ns}
