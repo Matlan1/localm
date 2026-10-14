@@ -254,7 +254,10 @@ def _macos_listener_owners() -> Optional[list]:
 
 def _windows_pid_is_current_user(pid: int) -> bool:
     """True when process *pid* runs as the same Windows account as this
-    process (its token's user SID). False when it cannot be opened or read."""
+    process (its token's user SID). False when it cannot be opened or read,
+    and on any other platform."""
+    if sys.platform != "win32":
+        return False
     import ctypes
     from ctypes import wintypes
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
