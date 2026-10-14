@@ -32,10 +32,12 @@ def _isolated_state(tmp_path, monkeypatch):
     sharing the same process. Yields a throwaway directory the tests pass to
     _write_peer as a namespace. Runs in full session mode, where a forward
     needs no session-mode confirmation from the peer (that is
-    tests/test_peer_routing_session_mode.py)."""
+    tests/test_peer_routing_session_mode.py). The fake peers' ports count as
+    held by this OS user, like the faked detection."""
     d = tmp_path / "gpu"
     _PEERS.clear()
     monkeypatch.setenv("LOCALM_MODE", "full")
+    monkeypatch.setattr(peer_routing, "peer_listener_is_ours", lambda host, port: True)
 
     def _live(*, exclude_self_id=None, timeout=0.7):
         return [dict(p) for p in _PEERS

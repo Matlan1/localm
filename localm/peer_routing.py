@@ -168,6 +168,23 @@ def is_routable_peer_endpoint(host: Optional[str], scheme: Optional[str]) -> boo
     return scheme in _ROUTABLE_SCHEMES and is_routable_peer_host(host)
 
 
+def peer_listener_is_ours(host: Optional[str], port: object) -> bool:
+    """Whether the socket listening on *port* (dialled at :func:`dial_host` of
+    *host*) belongs to the OS user running this instance
+    (:func:`localm.listeners.port_owned_by_current_user`). False for a port that
+    is not an int in range, and whenever the owner cannot be read."""
+    if isinstance(port, bool) or not isinstance(port, (int, str)):
+        return False
+    try:
+        port = int(port)
+    except ValueError:
+        return False
+    if not 0 < port < 65536:
+        return False
+    from localm.listeners import port_owned_by_current_user
+    return port_owned_by_current_user(port, dial_host(host))
+
+
 def local_identity(registry: dict, model_name: str) -> dict:
     """*model_name*'s file identity in this instance's *registry*:
     ``{"path", "size", "sha256"}``, each None when unknown. Same shape the
@@ -245,7 +262,8 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
     is never a match. With *instance_id*, only that peer is considered.
 
     A peer whose registered ``host``/``scheme`` fails
-    :func:`is_routable_peer_endpoint` is skipped and logged at WARNING,
+    :func:`is_routable_peer_endpoint`, or whose port is not held by this OS
+    user (:func:`peer_listener_is_ours`), is skipped and logged at WARNING,
     however well it matches.
 
     Best-effort: any failure reading the registry is logged and yields None,
@@ -283,6 +301,13 @@ def find_offer(canonical_name: str, aliases, *, exclude_self_id: Optional[str] =
                 "address over http or https has had its occupant "
                 "identity-verified",
                 peer.get("instance_id"), model, peer.get("scheme"), peer.get("host"))
+            continue
+        if not peer_listener_is_ours(peer.get("host"), peer.get("port")):
+            logger.warning(
+                "peer_routing: peer %r advertises %r on port %r, but the process "
+                "listening there is not run by this OS user (or its owner cannot be "
+                "read); not offering it", peer.get("instance_id"), model,
+                peer.get("port"))
             continue
         return {**peer, "matched_model": matched}
     return None
@@ -357,12 +382,17 @@ def verify_peer_credential(peer: dict, api_key: Optional[str], *,
     Raises :class:`PeerCredentialError` when the key is refused, and
     ``requests.RequestException`` when the peer cannot be reached. Refuses,
     without sending anything, a peer whose endpoint fails
-    :func:`is_routable_peer_endpoint`."""
+    :func:`is_routable_peer_endpoint` or whose port is not held by this OS user
+    (:func:`peer_listener_is_ours`)."""
     scheme = peer.get("scheme") or "http"
     if not is_routable_peer_endpoint(peer.get("host"), scheme):
         raise PeerCredentialError(
             f"peer endpoint {scheme!r}://{peer.get('host')!r} is not a "
             "verified loopback address")
+    if not peer_listener_is_ours(peer.get("host"), peer.get("port")):
+        raise PeerCredentialError(
+            f"the process listening on port {peer.get('port')} is not run by "
+            "this computer's user account running localm")
     probe = PeerRoute(model="", instance_id=str(peer.get("instance_id") or ""),
                       host=peer.get("host"), port=int(peer.get("port")),
                       scheme=scheme, api_key=api_key or "")
@@ -462,10 +492,16 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
 def ensure_peer_keeps_mode(peer: dict, api_key: Optional[str], mode) -> None:
     """Return when *peer* will record a conversation forwarded with *api_key*
     no more than *mode* allows; raise :class:`PeerWouldRecord` otherwise, or
-    :class:`PeerUnreachable` when the peer does not answer or refuses the
-    credential. Full mode needs no check and sends nothing."""
+    :class:`PeerUnreachable` when the peer does not answer, refuses the
+    credential, or its port is not held by this OS user
+    (:func:`peer_listener_is_ours`, checked in every mode, sending nothing).
+    Otherwise full mode needs no check and sends nothing."""
     from localm.audit import SessionMode, mode_at_least_as_private
     mode = SessionMode(mode)
+    if not peer_listener_is_ours(peer.get("host"), peer.get("port")):
+        raise PeerUnreachable(
+            f"the process listening on port {peer.get('port')} is not run by "
+            "this computer's user account running localm")
     if mode == SessionMode.FULL:
         return
     where = f"the localm instance at {peer.get('host')}:{peer.get('port')}"

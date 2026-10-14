@@ -62,6 +62,23 @@ scrub() {
     my $home = $ENV{HOME} // '';
     my $maint = $ENV{RI_EMAIL} // '';
     my $E = '\x00-\x20\x7f-\xa0\x22<>()\[\],;:/\\\\\x60=?&*';
+    use Sys::Hostname;
+    my @hn;
+    { my $h = eval { hostname() }; push @hn, $h if defined $h; }
+    push @hn, $ENV{COMPUTERNAME} if defined $ENV{COMPUTERNAME};
+    my %names;
+    my %skip = map { $_ => 1 } qw(archlinux debian fedora host kali localhost localm raspberrypi redacted ubuntu user);
+    for my $n (@hn) {
+      $n =~ s/^\s+|\s+\z//g;
+      $n =~ s/\.+\z//;
+      next if $n eq '';
+      $names{$n} = 1;
+      (my $first = $n) =~ s/\..*//s;
+      $names{$first} = 1;
+    }
+    my @keep = sort { length($b) <=> length($a) || $a cmp $b }
+               grep { length($_) >= 3 && !$skip{lc $_} } keys %names;
+    my $own = join('|', map { quotemeta } @keep);
     sub email_repl {
       my $tok = shift;
       (my $core = $tok) =~ s/^'+//;
@@ -87,6 +104,9 @@ scrub() {
       $t =~ s{(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}}{$1<redacted>}g;
       $t =~ s{(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}}{<redacted>}g;
       $t =~ s{(?<![^$E])[^$E]*?[^\@$E](?:\@|%40)[^\@.%+$E]+(?:\.[^\@.%+$E]+)*\.[^\x00-\x40\x5b-\x60\x7b-\xa0]{2,}[^$E]*}{email_repl($&)}ge;
+      $t =~ s~(?:(?<![^\s\x22\x27(\[{=,;|\x60<*])|(?<=[A-Za-z0-9_]{2}:))(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._\$-]))[A-Za-z0-9][A-Za-z0-9._\$-]*~$1<host>~gi;
+      $t =~ s~(?<![A-Za-z0-9._-])(?!(?:localm\.local|(?:host|gateway|kubernetes)\.docker\.internal)(?![A-Za-z0-9-]|\.[A-Za-z0-9]))[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(local|lan|home\.arpa|internal|localdomain)(?![A-Za-z0-9(-]|\.[A-Za-z0-9])~<host>.$1~gi;
+      $t =~ s~(?<![A-Za-z0-9_./\\-])(?:$own)(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])~<host>~gi if $own ne '';
       print $t . $nl;
     }
 PERL

@@ -10,6 +10,7 @@ endpoint separately verifies VRAM was reclaimed before the media model loads
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import threading
 import time
@@ -321,36 +322,101 @@ def _cancel_abandoned_eviction(fut, task, loop) -> None:
                      "cancelled (%s)", e)
 
 
+_EMBEDDER_EVICTORS: list = []
+_EMBEDDER_EVICTORS_LOCK = threading.Lock()
+_NO_EVICTOR_WARNED = False
+
+# Worst first: the status evict_chat_for_embedder reports when owners disagree.
+_EVICT_STATUS_ORDER = ("error", "in_use", "pinned", "skipped", "unloaded",
+                       "already_unloaded")
+
+
+def register_embedder_evictor(evictor: Callable[[float], str]) -> Callable[[], None]:
+    """Register *evictor* as an in-process owner of chat engines that
+    ``evict_chat_for_embedder`` asks to free VRAM before the shared embedder
+    loads. Returns a callable that unregisters it (idempotent).
+
+    *evictor* is called as ``evictor(timeout_s)`` and returns one of
+    "unloaded", "in_use", "pinned", "already_unloaded" or "error"; a raise or a
+    non-string return counts as "error". It is called with neither
+    ``embedder._LOCK`` nor ``engine._LOAD_LOCK`` held, and must not wait
+    unboundedly."""
+    with _EMBEDDER_EVICTORS_LOCK:
+        _EMBEDDER_EVICTORS.append(evictor)
+
+    def _unregister() -> None:
+        with _EMBEDDER_EVICTORS_LOCK:
+            try:
+                _EMBEDDER_EVICTORS.remove(evictor)
+            except ValueError:
+                pass
+    return _unregister
+
+
+def _worst_evict_status(statuses: list) -> str:
+    """The first of *statuses* in ``_EVICT_STATUS_ORDER``; an unknown status
+    counts as "error"."""
+    known = [s if s in _EVICT_STATUS_ORDER else "error" for s in statuses]
+    return min(known, key=_EVICT_STATUS_ORDER.index)
+
+
 def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
-    """Free every loaded chat engine so the shared embedder's own load has VRAM
-    room, through the SAME guarded path the server's "Unload all" button uses
-    (``http_server.unload_all_models``).
+    """Free every loaded chat engine in this process so the shared embedder's
+    own load has VRAM room.
 
-    The embedder loads in-process (not as a background job with a self_url), so
-    unlike ``unload_chat_for_media`` this does not round-trip over HTTP: it
-    mirrors ``jobs/runner.py``'s ``_evict_shared_engine_for_media`` instead,
-    submitting the coroutine onto the server's captured event loop
-    (``http_server._server_loop``) via ``asyncio.run_coroutine_threadsafe`` and
-    blocking THIS (caller's) thread on the result. That is required:
-    ``unload_all_models`` honors the in-flight-request pin and serializes with
-    ``get_engine`` only when it runs ON the loop, and a raw off-loop unload would
-    race a concurrent request.
+    Two kinds of owner are asked, within one *timeout_s* budget:
 
-    Returns the unload status ("unloaded" / "in_use" / "already_unloaded"), or
-    "skipped" when the server loop is unreachable (no live server - e.g. a bare
-    CLI embed) / "error" on a failure to complete - in which case the embedder
-    loads alongside whatever chat model is resident, degraded and logged, never a
-    crash."""
-    import asyncio
+    - the HTTP server, when its event loop (``http_server._server_loop``) is
+      running: ``http_server.unload_all_models`` is submitted onto that loop via
+      ``asyncio.run_coroutine_threadsafe`` and THIS thread blocks on the result.
+      It runs ON the loop, where it honors the in-flight-request pin and
+      serializes with ``get_engine``;
+    - every evictor registered with ``register_embedder_evictor`` (the MCP
+      server's ``EngineCache``).
+
+    Returns the worst status any owner reported ("error", "in_use", "pinned",
+    "skipped", "unloaded", "already_unloaded", in that order). With no owner
+    reachable it logs a WARNING (once per process) and returns "skipped". On any
+    status but "unloaded"/"already_unloaded" the embedder loads alongside
+    whatever chat model is resident; this function never raises."""
     from localm.debuglog import logger
     from localm.inference import http_server as _hs
 
+    global _NO_EVICTOR_WARNED
+    deadline = time.monotonic() + timeout_s
+    with _EMBEDDER_EVICTORS_LOCK:
+        evictors = list(_EMBEDDER_EVICTORS)
+    statuses = []
     loop = getattr(_hs, "_server_loop", None)
-    if loop is None or not loop.is_running():
-        logger.debug("embedder: cannot reach the server loop to evict the chat "
-                     "model safely; loading the embedder alongside it (may be "
-                     "tight on VRAM)")
+    if loop is not None and loop.is_running():
+        statuses.append(_evict_via_server_loop(_hs, loop, timeout_s))
+    for evictor in evictors:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            status = evictor(remaining)
+        except Exception as e:
+            logger.warning("embedder: freeing VRAM for the embedding model "
+                           "failed (%s: %s)", type(e).__name__, e)
+            status = "error"
+        statuses.append(status if isinstance(status, str) else "error")
+    if not statuses:
+        if not _NO_EVICTOR_WARNED:
+            _NO_EVICTOR_WARNED = True
+            logger.warning("embedder: no chat model owner in this process can "
+                           "free VRAM for the embedding model; it loads "
+                           "alongside whatever else holds the GPU")
         return "skipped"
+    return _worst_evict_status(statuses)
+
+
+def _evict_via_server_loop(_hs, loop, timeout_s: float) -> str:
+    """``evict_chat_for_embedder``'s HTTP-server half: run
+    ``_hs.unload_all_models()`` on the running server *loop* and return its
+    status, "skipped" when called on that loop's own thread, or "error" when it
+    did not complete within *timeout_s*."""
+    import asyncio
+    from localm.debuglog import logger
+
     # Running on the server loop's own thread would deadlock on the
     # run_coroutine_threadsafe(...).result() below, so skip the guarded eviction
     # and load the embedder alongside the resident chat model.
@@ -872,6 +938,48 @@ def media_handover_job(fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
     return wrapper
 
 
+def _drop_deferred_reload_if_last() -> None:
+    """Forget a chat reload (and the backends to free before it) that an earlier
+    job left behind, when no other job is in flight."""
+    global _handover_deferred
+    with _handover_cv:
+        if _handover_jobs <= 1:
+            _handover_deferred = None
+            _handover_deferred_backends.clear()
+
+
+@contextlib.contextmanager
+def restore_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
+                             media_label: str, instance_token: Optional[str] = None,
+                             *, swapped: bool = True):
+    """Wrap the part of a media job body that runs after the chat model may have
+    been unloaded. On leaving the block, whether it finished, failed or was
+    cancelled, run ``reload_chat_after_media`` once when *swapped*.
+
+    When the block raised, the reload is best effort: its own failure is logged to
+    *job* and the block's exception propagates. After a clean exit a failing reload
+    raises, so the job's ``mark_outcome`` decides the reported status. When not
+    *swapped* and the job's reload-after setting is off, a reload an earlier job
+    left to it is dropped (see ``reload_chat_after_media``)."""
+    try:
+        yield
+    except BaseException:
+        if swapped:
+            try:
+                reload_chat_after_media(job, self_url, s, backend, media_label,
+                                        instance_token)
+            except Exception as e:
+                job.push({"type": "line", "text":
+                          f"Reload deferred to the next message ({e})."})
+        raise
+    else:
+        if swapped:
+            reload_chat_after_media(job, self_url, s, backend, media_label,
+                                    instance_token)
+        elif not s["reload_after"]:
+            _drop_deferred_reload_if_last()
+
+
 def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
                             media_label: str,
                             instance_token: Optional[str] = None) -> None:
@@ -884,8 +992,10 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     Inside a ``media_handover_job`` with another media job still in flight, nothing
     is freed or reloaded here: the reload, and the freeing of this job's backend, is
     left to the last job to finish. While the reload runs, jobs that start wait for
-    it."""
+    it. The last job's reload-after setting governs: when it is off, a reload an
+    earlier job left to it is dropped and those backends stay loaded."""
     if not s["reload_after"]:
+        _drop_deferred_reload_if_last()
         job.push({"type": "line", "text":
                   f"Keeping the {media_label} backend loaded (reload is off) - "
                   "the chat model reloads on the next message."})

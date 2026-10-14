@@ -158,6 +158,20 @@ class Host(Protocol):
     # NotImplementedError.
     def has_scope(self, scope: str) -> bool: ...
     def require_scope(self, scope: str) -> None: ...
+    def caller_is_owner(self, request: Any) -> bool:
+        """True when the caller of *request* (a route's ``Request``) is the
+        owner: open mode, or an ADMIN/owner key or session."""
+        ...
+    def caller_principal(self, request: Any) -> Optional[str]:
+        """An opaque, stable identity for the key behind *request*, or None in
+        open mode or with no valid key. Store it with a resource the caller
+        creates and pass it to :meth:`caller_owns` later."""
+        ...
+    def caller_owns(self, request: Any, owner: Optional[str]) -> bool:
+        """Whether the caller of *request* may act on a resource created by
+        *owner*: True for a None *owner*, for the owner, and for the same
+        principal."""
+        ...
     def engine(self) -> Any: ...                          # inference engine handle
     def audit(self, event: str, data: dict) -> None: ...
     def browse_dirs(self, path: str) -> dict: ...         # server-side folder picker

@@ -180,11 +180,12 @@ def _config() -> dict:
 
     check_url reads the config itself, once, up front, and refuses outright on
     a read failure, so it never reaches this fallback. The remaining callers
-    are _resolve_pinned (net_allow_private) and the search provider
+    are _resolve_pinned (net_allow_private), _session_for (net_search_url, for
+    the search provider's private-address exemption) and the search provider
     selection (net_search_url);
-    neither reads net_deny/net_allow, so an unreadable config here only means
+    none reads net_deny/net_allow, so an unreadable config here only means
     those two settings fall back to their defaults (False / unset) for this
-    call."""
+    call, which also withdraws the exemption."""
     try:
         from localm.config import load_config
         return load_config()
@@ -239,7 +240,112 @@ def check_url_shape(url: str) -> str:
     return _canonical_host(host)
 
 
-def check_url(url: str, *, allow_when_off: bool = False) -> None:
+def _origin(url: str) -> Optional[tuple]:
+    """``(scheme, host, port)`` of an http(s) *url*, the host in
+    :func:`_canonical_host` form (lowercase, no trailing dot, IDNA A-label) and
+    the port filled in from the scheme. None for any other URL, one without a
+    host, one whose host has no A-label form, or one whose port does not
+    parse."""
+    try:
+        parsed = urllib.parse.urlparse(str(url).strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    try:
+        host = _canonical_host(parsed.hostname or "")
+    except NetworkPolicyError:
+        return None
+    if scheme not in ("http", "https") or not host:
+        return None
+    return scheme, host, port or (443 if scheme == "https" else 80)
+
+
+_LOCAL_NAME_SUFFIXES = (".local", ".lan", ".internal", ".home.arpa", ".localdomain",
+                        ".localhost")
+
+
+def _is_local_name_or_literal(host: str) -> bool:
+    """True when *host* names this machine or the local network by its form:
+    an IP literal (any numeric spelling), ``localhost``, a name without a dot,
+    or a name under a local-network suffix (``_LOCAL_NAME_SUFFIXES``)."""
+    if _literal_ipv4(host) is not None:
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    return host == "localhost" or "." not in host or host.endswith(_LOCAL_NAME_SUFFIXES)
+
+
+def is_search_backend_origin(url: str, cfg: dict) -> bool:
+    """True when *url* has the same scheme, host and port as the SearXNG
+    instance configured in *cfg*'s ``net_search_url``, and that configured host
+    is local by its form (:func:`_is_local_name_or_literal`). False when none
+    is configured, and for a public host name."""
+    configured = cfg.get("net_search_url") if isinstance(cfg, dict) else None
+    if not configured:
+        return False
+    mine = _origin(configured)
+    return (mine is not None and _is_local_name_or_literal(mine[1])
+            and _origin(url) == mine)
+
+
+_SEARCH_BACKEND_REFUSED_V6 = (ipaddress.ip_network("fd00:ec2::/32"),)
+
+
+def _search_backend_address_ok(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether the search backend may connect to *ip*: a public address
+    (``_is_blocked_ip`` False), an IPv4 loopback or private address that is
+    not link-local or unspecified (an IPv4-mapped IPv6 address is judged by its
+    IPv4 address), ``::1``, or an IPv6 unique-local address outside the cloud
+    metadata range fd00:ec2::/32. Every other address, including link-local in
+    NAT64, IPv4-compatible and 6to4 form, is refused."""
+    if not _is_blocked_ip(ip):
+        return True
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if ip.version == 4:
+        return bool((ip.is_loopback or ip.is_private)
+                    and not ip.is_link_local and not ip.is_unspecified)
+    if ip == ipaddress.IPv6Address("::1"):
+        return True
+    return (ip in ipaddress.ip_network("fc00::/7")
+            and not any(ip in net for net in _SEARCH_BACKEND_REFUSED_V6))
+
+
+def _check_search_backend_address(host: str) -> None:
+    """:func:`_check_public_address` for the search backend: *host* (or every
+    address it resolves to) must pass :func:`_search_backend_address_ok`.
+    Unresolvable hosts pass, as there."""
+    literal = _literal_ipv4(host)
+    if literal is not None:
+        ips = [literal]
+    else:
+        try:
+            ips = [ipaddress.ip_address(host)]
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(host, None)
+            except (socket.gaierror, ValueError):
+                return
+            ips = []
+            for info in infos:
+                try:
+                    ips.append(ipaddress.ip_address(info[4][0]))
+                except ValueError:
+                    continue
+    for ip in ips:
+        if not _search_backend_address_ok(ip):
+            raise NetworkPolicyError(
+                f"'{host}' is or resolves to {ip}, which the search backend set in "
+                "net_search_url cannot use (link-local or cloud-metadata address).")
+
+
+def check_url(url: str, *, allow_when_off: bool = False,
+              search_backend: bool = False) -> None:
     """
     Validate one URL against the policy. Raises NetworkPolicyError with an
     actionable message when refused; returns silently when allowed.
@@ -258,6 +364,14 @@ def check_url(url: str, *, allow_when_off: bool = False) -> None:
     net_allow_model_downloads can exempt it from the off floor. Never pass True
     for a model-initiated request (coder fetch_url/web_search, the GUI chat web
     toggle, the jobs webtool) - those stay governed by net_mode alone.
+
+    *search_backend*, default False: pass True only from the SearXNG search
+    provider. When *url* is then on the configured ``net_search_url`` origin and
+    that host is local by its form (:func:`is_search_backend_origin`), a
+    loopback or private address is permitted without ``net_allow_private``
+    (:func:`_search_backend_address_ok`); link-local and cloud-metadata
+    addresses, in any embedded form, are still refused. Every other URL, and
+    every other caller, gets the full address check.
     """
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     unreadable = NetworkPolicyError(
@@ -303,7 +417,10 @@ def check_url(url: str, *, allow_when_off: bool = False) -> None:
             f"\"{', '.join(allow + [host])}\"")
 
     if not cfg.get("net_allow_private", False):
-        _check_public_address(host)
+        if search_backend and is_search_backend_origin(url, cfg):
+            _check_search_backend_address(host)
+        else:
+            _check_public_address(host)
 
 
 # Special-use ranges that the stdlib marks is_global=True (so neither
@@ -445,7 +562,7 @@ def _interleave_families(ips: list) -> list:
     return out
 
 
-def _resolve_pinned_all(host: str) -> list[str]:
+def _resolve_pinned_all(host: str, *, search_backend: bool = False) -> list[str]:
     """Resolve *host* ONCE to the addresses a connection may be pinned to, in
     dial order, closing the check-and-connect DNS-rebinding TOCTOU.
     ``check_url`` resolves and validates the host, but ``requests``
@@ -461,11 +578,23 @@ def _resolve_pinned_all(host: str) -> list[str]:
     fails the SSRF class check is never returned, and a host whose every
     address fails it raises ``NetworkPolicyError``, on the exact IPs to be
     dialled, which catches a rebind that slipped past check_url's separate
-    lookup."""
+    lookup.
+
+    *search_backend* True (the caller has established that the request is the
+    search provider's, to the configured ``net_search_url`` origin) returns only
+    addresses :func:`_search_backend_address_ok` accepts, without
+    net_allow_private."""
     allow_private = bool(_config().get("net_allow_private", False))
 
+    def _refused(ip_obj) -> bool:
+        if allow_private:
+            return False
+        if search_backend:
+            return not _search_backend_address_ok(ip_obj)
+        return _is_blocked_ip(ip_obj)
+
     def _guard(ip_obj) -> None:
-        if not allow_private and _is_blocked_ip(ip_obj):
+        if _refused(ip_obj):
             raise NetworkPolicyError(
                 f"'{host}' resolves to the non-public address {ip_obj}. "
                 "Requests to local/private networks are blocked "
@@ -493,7 +622,7 @@ def _resolve_pinned_all(host: str) -> list[str]:
             ip_obj = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
-        if not allow_private and _is_blocked_ip(ip_obj):
+        if _refused(ip_obj):
             blocked = ip_obj
             continue
         if ip_obj not in usable:
@@ -534,7 +663,7 @@ class UnresolvableHost(NetworkPolicyError):
     no connection was opened."""
 
 
-def _session_for(url: str):
+def _session_for(url: str, *, search_backend: bool = False):
     """A ``requests.Session`` whose socket is pinned to *url*'s pre-validated
     IPs (``_resolve_pinned_all``: the next one is dialled only when the TCP
     connect to the previous one fails). ``check_url`` MUST already have
@@ -547,10 +676,15 @@ def _session_for(url: str):
     is no fallback to a re-resolving session. A host that is NXDOMAIN at
     validation time (check_url lets unresolvable hosts through) but flips to a
     private A record at connect time (TTL-0 DNS rebinding) would otherwise
-    reach an internal service unvalidated."""
+    reach an internal service unvalidated.
+
+    *search_backend*: see :func:`check_url`. It permits a private address only
+    when *url* is on the configured ``net_search_url`` origin."""
     from localm import netpin
     parsed = urllib.parse.urlparse(url)
-    ips = _resolve_pinned_all(_canonical_host(parsed.hostname or ""))
+    exempt = search_backend and is_search_backend_origin(url, _config())
+    host = _canonical_host(parsed.hostname or "")
+    ips = _resolve_pinned_all(host, search_backend=True) if exempt else _resolve_pinned_all(host)
     if not ips:
         raise UnresolvableHost(
             f"Could not resolve '{parsed.hostname}' to an address; refusing the "
@@ -563,7 +697,7 @@ class ResponseTooLarge(Exception):
 
 
 def pinned_request(method: str, url: str, *, max_bytes: Optional[int] = None,
-                   **kwargs):
+                   search_backend: bool = False, **kwargs):
     """A single policy-pinned HTTP request for callers that manage their own
     response (streamed downloads, HEAD probes) instead of going through
     safe_fetch_bytes. ``check_url`` MUST already have passed on *url*.
@@ -580,8 +714,11 @@ def pinned_request(method: str, url: str, *, max_bytes: Optional[int] = None,
     response is returned: ``.content``, ``.text`` and ``.json()`` then read the
     loaded body, and the connection and session are closed. The request
     advertises only ``PER_READ_ACCEPT_ENCODING``. Raises ``ResponseTooLarge``
-    when the decoded body is longer than *max_bytes*."""
-    session = _session_for(url)
+    when the decoded body is longer than *max_bytes*.
+
+    *search_backend* is passed to :func:`_session_for` (see :func:`check_url`)."""
+    session = (_session_for(url, search_backend=True) if search_backend
+               else _session_for(url))
     headers = {**(kwargs.pop("headers", None) or {}),
                "Host": _host_header(urllib.parse.urlparse(url))}
     if max_bytes is not None:
@@ -754,8 +891,9 @@ def safe_fetch_bytes(
     pair below, which always win on a key collision - a caller-supplied dict
     can add a header (e.g. an optional Authorization bearer token) but can
     never override the pinned Host or User-Agent. Stripped entirely on any
-    hop whose host differs from the ORIGINAL request's host, so a redirect
-    can never carry a caller's credential to a different host.
+    hop whose scheme, host or port differs from the ORIGINAL request's
+    (:func:`_origin`), so a redirect can never carry a caller's credential to
+    a different host, to another port, or from https to plain http.
 
     *timeout* bounds each connect attempt and each wait for data; a host
     with several addresses may use up to ``netpin._CONNECT_BUDGET_FACTOR``
@@ -778,11 +916,12 @@ def safe_fetch_bytes(
     deadline = (time.monotonic() + total_timeout
                 if total_timeout is not None else None)
     current = url
-    original_host = urllib.parse.urlparse(url).hostname
+    original_origin = _origin(url)
     for _ in range(_MAX_REDIRECTS + 1):
         check_url(current, allow_when_off=allow_when_off)
         parsed = urllib.parse.urlparse(current)
-        hop_headers = extra_headers if parsed.hostname == original_host else None
+        hop_headers = (extra_headers if original_origin is not None
+                       and _origin(current) == original_origin else None)
         hop_timeout = timeout
         fixed_headers = {"User-Agent": _USER_AGENT, "Host": _host_header(parsed)}
         if deadline is not None:

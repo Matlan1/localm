@@ -317,6 +317,11 @@ def register(app: FastAPI, ctx) -> None:
         except LocalmError as e:
             raise HTTPException(502, format_localm_error(e)) from e
         if not info.get("newer"):
+            if info.get("comparable", True) is False:
+                return {"applied": False,
+                        "reason": "could not tell whether the latest release is newer "
+                                  "(unrecognized version format)",
+                        "current": info.get("current"), "latest": info.get("latest")}
             return {"applied": False, "reason": "already up to date",
                     "current": info.get("current")}
         asset = info.get("asset") or {}

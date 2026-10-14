@@ -491,6 +491,8 @@ def _round_trip(tmp_path, monkeypatch, peer_mode, local_mode):
         monkeypatch.setattr("requests.post", bridge.post)
         monkeypatch.setattr(peer_routing, "_local_request_mode",
                             lambda request: SessionMode(local_mode))
+        # The bridge stands in for the peer's port, so that port counts as ours.
+        monkeypatch.setattr(peer_routing, "peer_listener_is_ours", lambda host, port: True)
         route = peer_routing.PeerRoute(model="m", instance_id="real-peer",
                                        host="127.0.0.1", port=1, scheme="http",
                                        api_key="")

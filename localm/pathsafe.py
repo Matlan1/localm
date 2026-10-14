@@ -33,6 +33,26 @@ from fastapi import HTTPException
 # themselves, per platform.
 WINDOWS_RESERVED_NAME_CHARS = frozenset('<>:"|?*') | frozenset(chr(c) for c in range(32))
 
+_WINDOWS_DEVICE_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"{dev}{n}" for dev in ("COM", "LPT") for n in "123456789¹²³"})
+
+
+def is_windows_device_name(name: str) -> bool:
+    """True when *name* is a Windows reserved device name: the part before its
+    first ``.``, with trailing spaces removed and compared case-insensitively,
+    is ``CON``, ``PRN``, ``AUX``, ``NUL``, ``CONIN$``, ``CONOUT$``, ``COM1``-``COM9``
+    or ``LPT1``-``LPT9`` (the digit may also be a superscript 1, 2 or 3). So
+    ``nul``, ``NUL.txt`` and ``com1.tar.gz`` are device names."""
+    return name.split(".", 1)[0].rstrip(" ").upper() in _WINDOWS_DEVICE_STEMS
+
+
+def _refuses_device_names() -> bool:
+    """Whether :func:`confined_name` refuses Windows device names: on Windows
+    only, where a file of that name cannot exist and a write goes to the
+    device."""
+    return os.name == "nt"
+
 
 def confined_name(base: Path, name: str) -> Path:
     """Resolve *name* and guarantee it stays directly inside *base*, without
@@ -53,12 +73,14 @@ def confined_name(base: Path, name: str) -> Path:
     LEXICALLY, before any filesystem call - ':' is the one with a live
     consequence (NTFS Alternate Data Streams; see that constant's docstring).
 
-    Windows reserved device names (``con``, ``nul``, ``com1`` ...) are NOT
-    specially rejected: they pass as ordinary basenames and resolve directly
-    inside *base*, so confinement still holds for them."""
+    On Windows (:func:`_refuses_device_names`), a reserved device name
+    (:func:`is_windows_device_name`: ``con``, ``nul.txt``, ``com1`` ...) is
+    rejected lexically too: a write to one goes to the device and its data is
+    discarded. Elsewhere such a name is an ordinary file name."""
     if name != Path(name).name or name in ("", ".", ".."):
         raise HTTPException(400, "Invalid file name")
-    if set(name) & WINDOWS_RESERVED_NAME_CHARS:
+    if set(name) & WINDOWS_RESERVED_NAME_CHARS or (
+            _refuses_device_names() and is_windows_device_name(name)):
         raise HTTPException(400, "Invalid file name")
     try:
         resolved = (base / name).resolve()

@@ -147,10 +147,10 @@ class TestInstallFromDirectoryMarkupEscaping:
         _write_plugin(ext.parent, "thirdparty",
                        requires_extras=[f"extra{BRACKET_STYLE}"])
         r = runner.invoke(cli_env.main, ["plugin", "install", str(ext)])
-        assert r.exit_code == 0, r.output
+        assert r.exit_code != 0, r.output
         assert f"extra{BRACKET_STYLE}" in r.output, (
-            f"the 'declares extra dependencies' note must name the real "
-            f"extra verbatim: {r.output!r}")
+            f"the refusal of an entry that is not an extra name must name it "
+            f"verbatim: {r.output!r}")
 
 
 class TestWarnMissingRequiresMarkupEscaping:
