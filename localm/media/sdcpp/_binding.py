@@ -118,11 +118,14 @@ class sd_ctx_params_t(Structure):
         ("rpc_servers", c_char_p),
         ("model_args", c_char_p),
         ("disable_segmented_compute", c_bool),
+        ("batched_cfg", c_bool),
         ("linear_scale", c_float),
         ("attn_scale", c_float),
         ("tokenizer", c_char_p),
         ("sage_attn", c_bool),
         ("conditioning_cache_size", c_int),
+        ("flash_attn_mode", c_char_p),
+        ("conv_direct_mode", c_char_p),
     ]
 
 
@@ -576,9 +579,12 @@ def check_layouts(lib) -> list[str]:
         bad.append(f"ctx.vae_format={cp.vae_format}")
     if not cp.auto_fit:
         bad.append("ctx.auto_fit")
+    if not cp.batched_cfg:
+        bad.append("ctx.batched_cfg")
     if cp.n_threads <= 0:
         bad.append(f"ctx.n_threads={cp.n_threads}")
-    if _raw_ptr(cp, "model_path") or _raw_ptr(cp, "tokenizer"):
+    if any(_raw_ptr(cp, f) for f in ("model_path", "tokenizer", "flash_attn_mode",
+                                       "conv_direct_mode")):
         bad.append("ctx string pointers not null")
 
     ip = _init_struct(lib, "sd_img_gen_params_init", sd_img_gen_params_t)
