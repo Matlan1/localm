@@ -1526,6 +1526,21 @@ def _replace_atomic(src: Path, dst: Path) -> None:
             _transient_backoff(attempt)
 
 
+def _holds_unparseable_json(path: Path) -> bool:
+    """True when *path* can be opened but its content is not valid JSON (corrupt,
+    truncated, not UTF-8, too deep). False when it parses, and False when it
+    cannot be opened at all (locked or denied), which says nothing about its
+    content."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            json.load(f)
+    except (ValueError, RecursionError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _atomic_write_json(path: Path, data) -> None:
     """Write *data* as JSON to *path* atomically (temp file + os.replace).
 
@@ -1553,8 +1568,18 @@ def _atomic_write_json(path: Path, data) -> None:
             f.flush()
             os.fsync(f.fileno())
         if path.exists():
+            bak = path.with_name(path.name + ".bak")
             try:
-                _replace_atomic(path, path.with_name(path.name + ".bak"))
+                if _holds_unparseable_json(path):
+                    # Never rotate an unreadable file over the .bak it may have been
+                    # recovered from: keep it under its own name instead.
+                    kept = path.with_name(
+                        f"{path.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}")
+                    _replace_atomic(path, kept)
+                    print(f"[localm] {path.name} could not be read; kept it as "
+                          f"{kept.name} and left {bak.name} unchanged.", file=sys.stderr)
+                else:
+                    _replace_atomic(path, bak)
             except OSError as e:
                 # The .bak snapshot is best-effort: a failed one does NOT fail the
                 # primary write (which still proceeds below). _replace_atomic already

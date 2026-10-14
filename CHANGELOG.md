@@ -660,6 +660,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localm gui` with `--debug` stopped at startup with "Permission denied" when the data folder's
   `logs` folder could not be created or written. They now start, say the log file could not be
   created, and show the debug output in the console.
+- **A damaged settings file no longer replaces its good backup.** When `config.json` (or the
+  model registry) could not be read and localm worked from its `.bak` copy, the next save moved the
+  damaged file over that backup, leaving the newer settings only in a file nothing could read. The
+  damaged file is now kept as `config.json.unreadable-<time>` and the backup stays as it was.
 - **A request body that is not JSON gets a clear error, not a server error.** Sending a file or
   other binary data where an API route expects JSON now returns the usual 422 explaining the
   problem, instead of a 500 "Internal server error".
