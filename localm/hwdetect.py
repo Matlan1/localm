@@ -91,21 +91,20 @@ def machine_arch() -> str:
     release asset names spell it: ``"x64"``, ``"arm64"``, ``"s390x"``, ``"x86"``
     or ``"arm"`` for a 32-bit interpreter, else the lowercased machine name.
 
-    On Windows this reads the interpreter's own build
-    (``sysconfig.get_platform()``): an x64 Python emulated on an ARM64 machine
-    is ``"x64"``. Elsewhere it reads
-    ``platform.machine()``, which reports the emulated architecture under
-    Rosetta 2 and the kernel's architecture on Linux, corrected to the 32-bit
-    name when the interpreter itself is 32-bit."""
-    if sys.platform == "win32":
-        plat = sysconfig.get_platform().lower()
-        machine = {"win-amd64": "amd64", "win-arm64": "arm64", "win32": "x86"}.get(
-            plat, plat.removeprefix("win-"))
-    else:
+    Reads the machine part of the interpreter's own build tag
+    (``sysconfig.get_platform()``, e.g. ``win-amd64``, ``linux-aarch64``,
+    ``macosx-11.0-arm64``), so an x64 Python emulated on an ARM64 Windows
+    machine is ``"x64"``. A universal macOS build reads ``platform.machine()``
+    instead, which reports the emulated architecture under Rosetta 2. A 32-bit
+    interpreter maps to its 32-bit name."""
+    plat = sysconfig.get_platform().lower()
+    machine = "x86" if plat == "win32" else plat.rsplit("-", 1)[-1]
+    if machine in ("universal2", "universal", "intel", "fat", "fat3", "fat64"):
         machine = platform.machine().lower()
     arch = {"x86_64": "x64", "amd64": "x64", "x64": "x64",
             "aarch64": "arm64", "arm64": "arm64",
-            "i386": "x86", "i686": "x86"}.get(machine, machine)
+            "i386": "x86", "i686": "x86",
+            "armv7l": "arm", "armv8l": "arm", "armv6l": "arm"}.get(machine, machine)
     if sys.maxsize <= 2**32:
         arch = {"x64": "x86", "arm64": "arm"}.get(arch, arch)
     return arch

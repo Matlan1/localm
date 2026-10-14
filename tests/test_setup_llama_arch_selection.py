@@ -251,6 +251,8 @@ def test_asset_arch_ok(name, arch, ok):
     ("linux", "linux-riscv64", "riscv64", 2**63 - 1, "riscv64"),
     ("linux", "linux-armv7l", "aarch64", 2**31 - 1, "arm"),
     ("linux", "linux-i686", "x86_64", 2**31 - 1, "x86"),
+    ("win32", "linux-x86_64", "x86_64", 2**63 - 1, "x64"),
+    ("linux", "win-amd64", "AMD64", 2**63 - 1, "x64"),
 ])
 def test_machine_arch_names_the_process_architecture(
         monkeypatch, plat, sysconfig_plat, machine_name, maxsize, expected):
