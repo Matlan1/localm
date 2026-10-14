@@ -485,6 +485,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 - **The bundled koboldcpp runtime (native music generation) moved from v1.122.1 to v1.123.** An existing install picks it up the next time music generation starts.
+- **HF models decode about 3.5x faster on AMD GPUs.** On ROCm, loading an HF model now tunes the
+  matrix kernels its one-token decoding uses (PyTorch TunableOp, rocBLAS kernels): gemma-3-4b in
+  bf16 on an RX 6900 XT goes from 4.3 to 15 tokens per second with identical output. The first load
+  of a model on a card takes a few seconds longer; the results are cached and reused.
 - **Speculative drafting measures the verification cost of 4, 8 and 16 tokens.** On several MoE and
   hybrid models a batch of 5, 9 or 17 tokens costs much more than one token fewer, and the load-time
   measurement used to see only the larger size, so it priced 4- and 8-token drafts too high and drafted
