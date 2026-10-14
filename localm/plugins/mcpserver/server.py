@@ -445,20 +445,27 @@ class EngineCache:
         return engine
 
     def _peer_still_answers(self, name: str) -> bool:
-        """True while the instance behind the cached copy of *name* answers and
-        accepts the credential that copy was verified with. A failed check is
-        logged."""
+        """True while the instance behind the cached copy of *name* answers,
+        accepts the credential that copy was verified with, and confirms it
+        records a chat no more than ``peer_routing.chat_route_mode()`` allows.
+        A failed check is logged."""
         target, token = self._peer_targets.get(name, (None, None))
         if target is None:
             _log(f"not using the cached copy of {name}: no endpoint is recorded for it")
             return False
         from localm import peer_routing
+        mode = peer_routing.chat_route_mode()
         try:
             peer_routing.verify_peer_credential(target, token)
+            peer_routing.ensure_peer_keeps_mode(target, token, mode)
         except Exception as e:
             _log(f"not using {name} loaded by the localm instance on port "
                  f"{target.get('port')} any more: {e}")
             return False
+        eng = self._peers.get(name)
+        if eng is not None:
+            # Later requests through the cached copy name the mode checked now.
+            eng._session_mode = mode.value
         return True
 
     def _discard(self, name: str, engine) -> None:
@@ -481,7 +488,10 @@ class EngineCache:
         install's own instance file and authenticated with this install's
         credential; an entry claiming such an instance at any other port is
         not used. Any other instance is used only when it needs no credential
-        (open mode). Best-effort: a failed lookup is logged and answers None."""
+        (open mode). Either is used only when it confirms it records a chat no
+        more than ``peer_routing.chat_route_mode()`` allows, and every request
+        to it names that mode. Best-effort: a failed lookup is logged and
+        answers None."""
         try:
             from localm import instances, peer_routing
             from localm.auth import resolve_bearer_token
@@ -511,8 +521,10 @@ class EngineCache:
                           "port": same_install.get("port"),
                           "scheme": same_install.get("scheme") or "http"}
                 token = resolve_bearer_token(same_install.get("token"))
+            mode = peer_routing.chat_route_mode()
             try:
                 peer_routing.verify_peer_credential(target, token)
+                peer_routing.ensure_peer_keeps_mode(target, token, mode)
             except Exception as e:
                 _log(f"not using {name} loaded by the localm instance on port "
                      f"{target.get('port')}: {e}")
@@ -524,7 +536,8 @@ class EngineCache:
             base = peer_routing._peer_url(route, "/v1")
             eng = HttpEngine(base, token=token,
                              model=peer.get("matched_model") or name,
-                             display_name=name, pin_model=True)
+                             display_name=name, pin_model=True,
+                             session_mode=mode.value)
             eng.active_requests = 0
             eng.unloading = False
             self._peers[name] = eng

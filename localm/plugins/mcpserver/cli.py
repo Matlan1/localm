@@ -27,7 +27,8 @@ import click
               help="Answer chat with a model another localm instance on this "
                    "machine already has loaded, instead of loading a second copy "
                    "into VRAM. Another install's instance is used only when it "
-                   "needs no API key.")
+                   "needs no API key, and any instance only while it records "
+                   "chat no more than this machine's chat persistence allows.")
 @click.option("--print-config", is_flag=True,
               help="Print the mcpServers JSON block for your MCP client and exit.")
 def main(model, no_images, no_coder, no_memory, memory_write, share_loaded,
