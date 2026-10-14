@@ -115,6 +115,26 @@ class TestConfigState:
         assert hf_reranker_state(folder) is False
         assert _detect_local_model_type(folder, is_gguf=False, is_hf=True)[0] == "unknown"
 
+    def test_a_reward_model_stored_as_a_reranker_is_classified_again(
+            self, tmp_path, isolated_home):
+        import localm.model_manager as mm
+        folder = _config(tmp_path / "rm", architectures=["LlamaForSequenceClassification"],
+                         id2label={"0": "LABEL_0"})
+        (folder / "chat_template.jinja").write_text("{{ messages }}", encoding="utf-8")
+        entry = {"model_type": "embedding", "reranker": True, "path": str(folder)}
+        mm.update_registry(lambda reg: reg.__setitem__("rm", dict(entry)))
+        assert entry_is_reranker("rm", entry) is False
+        assert load_registry()["rm"]["reranker"] is False
+
+    def test_a_stored_gguf_reranker_flag_is_read_without_touching_the_file(
+            self, tmp_path, monkeypatch):
+        import localm.model_manager.registry as registry
+        monkeypatch.setattr(registry, "hf_reranker_state",
+                            lambda folder: pytest.fail("the GGUF was classified again"))
+        entry = {"model_type": "embedding", "reranker": True,
+                 "path": str(tmp_path / "missing.gguf")}
+        assert entry_is_reranker("r", entry) is True
+
     @pytest.mark.parametrize("tok_cfg", [
         {}, {"chat_template": None}, {"chat_template": ""}, "not json"])
     def test_a_tokenizer_config_without_a_template_keeps_the_reranker(self, tmp_path, tok_cfg):

@@ -2120,6 +2120,15 @@ def _register(
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
 
 
+def _local_hf_folder(path: str) -> bool:
+    """Whether *path* is a local directory: not a ``.gguf`` file name and not a
+    UNC or device path, so no network share is touched."""
+    from localm.pathsafe import is_unc_or_device_path
+    if path.lower().endswith(".gguf") or is_unc_or_device_path(path):
+        return False
+    return Path(path).is_dir()
+
+
 def entry_is_reranker(name: str, entry: dict) -> bool:
     """True when the registered model *name* is a reranker or classifier: an
     ``embedding``-type model whose GGUF header marks it so (see
@@ -2128,18 +2137,22 @@ def entry_is_reranker(name: str, entry: dict) -> bool:
 
     Reads the stored ``reranker`` flag. An entry registered before the flag
     existed has none, so the GGUF is classified once here and the answer is
-    written back to the registry. A file that cannot be read, or whose tensor
-    list cannot be read in full, answers False and stores nothing, so the next
-    call tries again."""
+    written back to the registry. A Hugging Face folder stored as a reranker is
+    classified again on every call, and a False answer is written back. A file
+    that cannot be read, or whose tensor list cannot be read in full, answers
+    False and stores nothing, so the next call tries again."""
     if entry.get("model_type") != "embedding":
         return False
     flag = entry.get("reranker")
-    if isinstance(flag, bool):
-        return flag
     path = _entry_path(entry)
-    if path is None:
+    if isinstance(flag, bool):
+        if not (flag and path is not None and _local_hf_folder(path)
+                and hf_reranker_state(Path(path)) is False):
+            return flag
+        flag = False
+    elif path is None:
         return False
-    if Path(path).is_dir():
+    elif Path(path).is_dir():
         flag = hf_reranker_state(Path(path))
     elif Path(path).is_file():
         flag = gguf_reranker_state(Path(path))
