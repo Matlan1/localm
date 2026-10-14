@@ -1185,7 +1185,8 @@ class TestCliCredentialFloor:
         import localm.rag._store.confine as confine_mod
         home, _ = home_env
         c, good, bad = self._collection_with_refused_doc(home, tmp_path, "cred6")
-        monkeypatch.setattr(confine_mod, "_network_drives_allowed_fresh",
+        import localm.rag._store.resync as resync_mod
+        monkeypatch.setattr(resync_mod, "_network_drives_allowed_fresh",
                             lambda: False)
         monkeypatch.setattr(confine_mod, "is_mapped_network_drive",
                             lambda path: Path(path).name == "good.txt")
