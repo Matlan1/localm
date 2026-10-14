@@ -178,3 +178,101 @@ class TestParentRelay:
         assert "ValueError: tokenizer exploded mid-stream" in msg
         assert "No native fault trace" not in msg
         assert not proc.alive and r._proc is None
+
+
+_PAIR_TEMPLATE = (
+    "{% for m in messages %}{{ m['role'] }}:"
+    "{% for c in m['content'] %}{% if c['type']=='image' %}<image>"
+    "{% else %}{{ c['text'] }}{% endif %}{% endfor %}\n{% endfor %}"
+    "{% if add_generation_prompt %}assistant:{% endif %}")
+_TEXT_ONLY_TEMPLATE = (
+    "{% for m in messages %}{{ m['role'] }}:"
+    "{% for c in m['content'] %}{% if c['type']=='text' %}{{ c['text'] }}"
+    "{% endif %}{% endfor %}\n{% endfor %}assistant:")
+
+
+class _Reached(Exception):
+    pass
+
+
+class _ModelAfterProcessing:
+    """Stands in for the loaded model: reading ``device`` (the first use of the
+    model after the processor has run) stops the stream."""
+
+    @property
+    def device(self):
+        raise _Reached
+
+
+def _image_url() -> str:
+    import base64
+    import io
+
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32), (200, 30, 30)).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _vision_worker(processor_template, tokenizer_template):
+    """An HFWorker holding a real SmolVLM processor whose own chat template is
+    *processor_template* and whose tokenizer's is *tokenizer_template*."""
+    pytest.importorskip("transformers")
+    pytest.importorskip("num2words")
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast
+    from transformers.models.smolvlm.image_processing_smolvlm import SmolVLMImageProcessor
+    from transformers.models.smolvlm.processing_smolvlm import SmolVLMProcessor
+    from transformers.models.smolvlm.video_processing_smolvlm import SmolVLMVideoProcessor
+
+    tok = Tokenizer(models.WordLevel({"<unk>": 0, "hi": 1}, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    fast = PreTrainedTokenizerFast(tokenizer_object=tok, unk_token="<unk>")
+    fast.add_special_tokens({"additional_special_tokens": [
+        "<image>", "<end_of_utterance>", "<fake_token_around_image>", "<global-img>"]})
+    processor = SmolVLMProcessor(SmolVLMImageProcessor(), fast, SmolVLMVideoProcessor(),
+                                 chat_template=processor_template)
+    processor.tokenizer.chat_template = tokenizer_template
+    worker = object.__new__(_hf_worker.HFWorker)
+    worker._processor = processor
+    worker._tokenizer = processor.tokenizer
+    worker._model = _ModelAfterProcessing()
+    worker._supports_image = True
+    worker._supports_audio = False
+    worker.processor_error = None
+    return worker
+
+
+def _image_turn():
+    return [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": _image_url()}},
+        {"type": "text", "text": "hi"}]}]
+
+
+class TestImageTurnWithATokenizerOnlyTemplate:
+    def test_the_tokenizer_template_renders_the_image_prompt(self):
+        worker = _vision_worker(None, _PAIR_TEMPLATE)
+        with pytest.raises(_Reached):
+            next(worker.chat_stream(_image_turn(), max_tokens=4))
+
+    def test_a_tokenizer_template_that_drops_the_image_is_a_clean_refusal(self):
+        from localm.inference.backends.base import UnsupportedInputError
+        worker = _vision_worker(None, _TEXT_ONLY_TEMPLATE)
+        with pytest.raises(UnsupportedInputError) as ei:
+            next(worker.chat_stream(_image_turn(), max_tokens=4))
+        assert "processor has no chat template of its own" in str(ei.value)
+
+    def test_neither_template_is_a_missing_template_error(self):
+        worker = _vision_worker(None, None)
+        with pytest.raises(ChatTemplateMissingError):
+            next(worker.chat_stream(_image_turn(), max_tokens=4))
+
+    def test_the_processor_template_wins_over_the_tokenizer_template(self):
+        worker = _vision_worker(_PAIR_TEMPLATE, _TEXT_ONLY_TEMPLATE)
+        with pytest.raises(_Reached):
+            next(worker.chat_stream(_image_turn(), max_tokens=4))
+
+    def test_the_default_of_a_named_tokenizer_template_dict_is_used(self):
+        worker = _vision_worker(None, {"default": _PAIR_TEMPLATE, "tool_use": "x"})
+        with pytest.raises(_Reached):
+            next(worker.chat_stream(_image_turn(), max_tokens=4))
