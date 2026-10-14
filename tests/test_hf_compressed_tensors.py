@@ -192,3 +192,154 @@ class TestRealCheckpoint:
         worker, _, _ = loaded
         assert any("compressed-tensors weights expanded to float32" in n
                    for n in worker.load_notes), worker.load_notes
+
+
+def _build_quantized(folder, *, num_bits, fmt):
+    """A 2-layer llama whose Linear layers are channel-quantized to *num_bits*
+    ints and saved in the compressed-tensors *fmt*; also saves the same model
+    unquantized beside it and returns that folder."""
+    import torch
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    _define_missing_distributed_work(torch)
+    from compressed_tensors.compressors import ModelCompressor
+    from compressed_tensors.quantization import QuantizationConfig, apply_quantization_config
+
+    torch.manual_seed(0)
+    cfg = LlamaConfig(vocab_size=64, hidden_size=64, intermediate_size=128,
+                      num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+                      max_position_embeddings=128, bos_token_id=1, eos_token_id=2,
+                      pad_token_id=0)
+    model = LlamaForCausalLM(cfg).eval()
+    plain = folder.parent / (folder.name + "-plain")
+    model.save_pretrained(plain)
+    qcfg = QuantizationConfig.model_validate({
+        "config_groups": {"group_0": {"targets": ["Linear"], "weights": {
+            "num_bits": num_bits, "type": "int", "symmetric": True, "strategy": "channel",
+            "dynamic": False}}},
+        "ignore": ["lm_head"], "quant_method": "compressed-tensors", "format": fmt})
+    apply_quantization_config(model, qcfg)
+    top = float(2 ** (num_bits - 1) - 1)
+    for module in model.modules():
+        scheme = getattr(module, "quantization_scheme", None)
+        if scheme is None or scheme.weights is None:
+            continue
+        scale = (module.weight.data.abs().amax(dim=1, keepdim=True) / top).clamp_min(1e-8)
+        module.weight_scale = torch.nn.Parameter(scale, requires_grad=False)
+        module.weight_zero_point = torch.nn.Parameter(
+            torch.zeros_like(scale, dtype=torch.int8), requires_grad=False)
+    compressor = ModelCompressor.from_pretrained_model(model, quantization_format=fmt)
+    compressor.compress_model(model)
+    folder.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(folder)
+    compressor.update_config(str(folder))
+    return plain
+
+
+@needs_stack
+class TestExpandedSize:
+    @pytest.mark.parametrize("num_bits,fmt", [(4, "pack-quantized"), (8, "int-quantized")])
+    @pytest.mark.parametrize("value_bytes", [2, 4])
+    def test_the_estimate_is_the_unquantized_model_at_the_load_dtype(
+            self, tmp_path, num_bits, fmt, value_bytes):
+        from localm.inference.backends import _hf_fp8
+        folder = tmp_path / "q"
+        plain = _build_quantized(folder, num_bits=num_bits, fmt=fmt)
+        on_disk = sum(f.stat().st_size for f in _hf_fp8.weight_files(str(folder)))
+        expected = _hf_fp8.expanded_bf16_bytes(str(plain)) // 2 * value_bytes
+        assert _hf_fp8.compressed_expanded_bytes(str(folder), value_bytes) == expected
+        assert expected > on_disk
+
+    def test_a_packed_checkpoint_that_does_not_fit_is_refused_before_its_weights_load(
+            self, tmp_path, monkeypatch):
+        from localm.inference.backends import _hf_fp8, _hf_worker
+        from localm.inference.backends._hf_worker import HFWorker
+        folder = tmp_path / "q"
+        _build_quantized(folder, num_bits=4, fmt="pack-quantized")
+        needed = _hf_fp8.compressed_expanded_bytes(str(folder), 4)
+        monkeypatch.setattr(_hf_fp8, "memory_budget", lambda *a: needed - 1)
+        monkeypatch.setattr(_hf_worker, "_build_load_kwargs", lambda *a, **k: pytest.fail(
+            "the weights started loading"))
+        worker = HFWorker(str(folder), device="cpu")
+        with pytest.raises(RuntimeError) as ei:
+            worker.load()
+        msg = str(ei.value)
+        assert "compressed-tensors checkpoint" in msg and "float32" in msg, msg
+
+    def test_a_packed_checkpoint_that_fits_loads(self, tmp_path, monkeypatch):
+        from localm.inference.backends import _hf_fp8
+        from localm.inference.backends._hf_worker import HFWorker
+        folder = tmp_path / "q"
+        _build_quantized(folder, num_bits=4, fmt="pack-quantized")
+        needed = _hf_fp8.compressed_expanded_bytes(str(folder), 4)
+        monkeypatch.setattr(_hf_fp8, "memory_budget", lambda *a: needed)
+        _write_tokenizer(folder)
+        worker = HFWorker(str(folder), device="cpu")
+        worker.load()
+        try:
+            assert worker._model is not None
+        finally:
+            worker.unload()
+
+
+def _write_tokenizer(folder):
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast
+    tok = Tokenizer(models.WordLevel({f"t{i}": i for i in range(64)}, unk_token="t0"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    PreTrainedTokenizerFast(tokenizer_object=tok, unk_token="t0", bos_token="t1",
+                            eos_token="t2", pad_token="t0").save_pretrained(folder)
+
+
+def _write_safetensors(path, tensors):
+    import struct
+    header, blob = {}, b""
+    for name, (dtype, shape, raw) in tensors.items():
+        header[name] = {"dtype": dtype, "shape": shape,
+                        "data_offsets": [len(blob), len(blob) + len(raw)]}
+        blob += raw
+    encoded = json.dumps(header).encode()
+    path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + blob)
+
+
+class TestExpandedSizeParsing:
+    def _folder(self, tmp_path, tensors, groups=None):
+        folder = tmp_path / "m"
+        folder.mkdir()
+        qc = {"quant_method": "compressed-tensors"}
+        if groups is not None:
+            qc["config_groups"] = groups
+        (folder / "config.json").write_text(json.dumps({"quantization_config": qc}),
+                                            encoding="utf-8")
+        _write_safetensors(folder / "model.safetensors", tensors)
+        return str(folder)
+
+    def test_a_packed_weight_without_its_shape_uses_the_declared_bit_width(self, tmp_path):
+        from localm.inference.backends._hf_fp8 import compressed_expanded_bytes
+        path = self._folder(tmp_path, {
+            "l.weight_packed": ("U8", [8, 4], b"\0" * 32),
+            "l.weight_scale": ("BF16", [8, 1], b"\0" * 16),
+            "norm.weight": ("BF16", [8], b"\0" * 16)},
+            groups={"g": {"weights": {"num_bits": 4}}})
+        assert compressed_expanded_bytes(path, 2) == (8 * 8 + 8) * 2
+
+    def test_the_shape_tensor_wins_over_the_packed_size(self, tmp_path):
+        import struct
+        from localm.inference.backends._hf_fp8 import compressed_expanded_bytes
+        path = self._folder(tmp_path, {
+            "l.weight_packed": ("I32", [6, 1], b"\0" * 24),
+            "l.weight_shape": ("I64", [2], struct.pack("<2q", 6, 7))})
+        assert compressed_expanded_bytes(path, 2) == 6 * 7 * 2
+
+    def test_mixed_bit_widths_without_a_shape_cannot_be_sized(self, tmp_path):
+        from localm.inference.backends._hf_fp8 import compressed_expanded_bytes
+        path = self._folder(tmp_path, {"l.weight_packed": ("U8", [8, 4], b"\0" * 32)},
+                            groups={"a": {"weights": {"num_bits": 4}},
+                                    "b": {"weights": {"num_bits": 8}}})
+        assert compressed_expanded_bytes(path, 2) is None
+
+    def test_no_weight_files_cannot_be_sized(self, tmp_path):
+        from localm.inference.backends._hf_fp8 import compressed_expanded_bytes
+        folder = tmp_path / "m"
+        folder.mkdir()
+        assert compressed_expanded_bytes(str(folder), 2) is None
