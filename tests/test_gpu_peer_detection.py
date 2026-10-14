@@ -207,6 +207,29 @@ class TestCandidateEndpoints:
         assert ports == [inside.port]
         assert outside_port in widened
 
+    def test_the_ollama_port_outside_the_range_is_a_candidate(self, monkeypatch):
+        with peer_server(localm_whoami("a1")) as srv:
+            monkeypatch.setenv("LOCALM_PEER_DETECTION", "on")
+            monkeypatch.setattr("localm.config.PORT_RANGE", (8642, 8642))
+            assert srv.port != 8642
+            monkeypatch.setattr(gpu_registry, "EXTRA_PEER_PORTS", (srv.port,))
+            assert gpu_registry.candidate_endpoints() == [("127.0.0.1", srv.port)]
+            peers = gpu_registry.list_gpu_peers(timeout=_FIND_TIMEOUT)
+        assert [p["instance_id"] for p in peers] == ["a1"]
+        assert peers[0]["port"] == srv.port
+
+    def test_the_ollama_port_is_probed_when_the_socket_table_is_unreadable(
+            self, monkeypatch):
+        with peer_server(localm_whoami("a1")) as srv:
+            monkeypatch.setenv("LOCALM_PEER_DETECTION", "on")
+            monkeypatch.setattr("localm.config.PORT_RANGE", (8642, 8642))
+            monkeypatch.setattr(gpu_registry, "EXTRA_PEER_PORTS", (srv.port,))
+            monkeypatch.setattr(listeners, "listening_endpoints", lambda: None)
+            assert gpu_registry.candidate_endpoints() == [("127.0.0.1", srv.port)]
+
+    def test_the_default_extra_port_is_ollamas(self):
+        assert 11434 in gpu_registry.EXTRA_PEER_PORTS
+
     def test_a_wildcard_listener_is_dialled_on_loopback(self, monkeypatch):
         monkeypatch.setenv("LOCALM_PEER_DETECTION", "on")
         monkeypatch.setattr("localm.config.PORT_RANGE", (8642, 8642))
