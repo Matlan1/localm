@@ -267,8 +267,9 @@ def _resumable_download_to_tmp_and_move(
     proven gone (live, unknown, or no sidecar) is never read, renamed or
     deleted. A resume always transfers over HTTP with a Range request; Xet is
     used only for a transfer that starts from byte 0. On a failed transfer the
-    temp file and its sidecar are kept for the next attempt; a failed size
-    check deletes them. See test_xet_partial_is_resumed_over_http_range.
+    temp file and its sidecar are kept for the next attempt, and a failure
+    before the temp file exists removes the sidecar; a failed size check
+    deletes both. See test_xet_partial_is_resumed_over_http_range.
     """
     import huggingface_hub.file_download as fd
     import uuid
@@ -281,10 +282,10 @@ def _resumable_download_to_tmp_and_move(
     tmp_path = incomplete_path.with_name(
         f"{incomplete_path.stem}.{uuid.uuid4().hex[:8]}.incomplete")
 
-    _write_partial_owner(tmp_path)
     with _INFLIGHT_LOCK:
         _INFLIGHT_PARTIALS.add(str(tmp_path))
     try:
+        _write_partial_owner(tmp_path)
         resume_size = _adopt_partial(incomplete_path, tmp_path, expected_size,
                                      adopt=not force_download)
         _reap_stale_etag_partials(incomplete_path)
@@ -333,6 +334,8 @@ def _resumable_download_to_tmp_and_move(
         fd._chmod_and_move(tmp_path, destination_path)
         _unlink_quiet(_partial_owner_path(tmp_path))
     finally:
+        if not os.path.lexists(tmp_path):
+            _unlink_quiet(_partial_owner_path(tmp_path))
         with _INFLIGHT_LOCK:
             _INFLIGHT_PARTIALS.discard(str(tmp_path))
 
@@ -1701,18 +1704,20 @@ def _pull_gguf_file(
         total_size = 0
 
     # Same-repo vision projector this pull would auto-attach (mirrors
-    # _mmproj_for_registration's own gating): HEAD it too and fold its size
-    # into the preflight total.
+    # _mmproj_for_registration's own gating) and that is not already in
+    # base_dir: HEAD it too and charge its size to the disk-space preflight
+    # only. It is fetched after the model, outside the model's progress.
+    projector_size = 0
     if (register and mmproj_spec is None and dest_dir is None
             and model_type not in ("mmproj", "embedding")
             and "mmproj" not in filename.lower()):
         try:
             mmproj_name = _mm._hf_repo_mmproj_filename(
                 repo_id, filename, base_dir, speech=model_type == "tts")
-            if mmproj_name:
+            if mmproj_name and not (base_dir / mmproj_name).exists():
                 mmproj_head = _policy_head(
                     hf_hub_url(repo_id, mmproj_name, endpoint=_HF_ENDPOINT))
-                total_size += int(mmproj_head.headers.get("content-length", 0))
+                projector_size = int(mmproj_head.headers.get("content-length", 0))
         except UnresolvableHost:
             pass
         except NetworkPolicyError as e:
@@ -1734,7 +1739,8 @@ def _pull_gguf_file(
             continue
         already_have += _reusable_partial_bytes(inc, part_sizes.get(part))
 
-    if not _mm._check_disk_space(base_dir, max(0, total_size - already_have)):
+    if not _mm._check_disk_space(
+            base_dir, max(0, total_size + projector_size - already_have)):
         return False
 
     # TAG-INJECTION site: repo_id/filename sit directly inside OPEN
