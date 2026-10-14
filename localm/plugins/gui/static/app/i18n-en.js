@@ -1481,7 +1481,7 @@ export const I18N_EN = {
   "settings.field.nGpuLayersAuto.label": "Auto-size GPU layers from VRAM",
   "settings.field.nGpuLayersAuto.help": "When GPU layers is left at 99 (all), fit as many as free VRAM allows at load: an oversized model runs some layers on CPU and still loads instead of being refused. An explicit value is kept.",
   "settings.field.mtpEnabled.label": "Multi-Token Prediction (MTP)",
-  "settings.field.mtpEnabled.help": "Speculative drafting on MTP/next-n-head models. Off by default: speeds some models up, slows others, depending on model and machine. Run `localm bench-mtp <model>` to check yours.",
+  "settings.field.mtpEnabled.help": "Speculative drafting on MTP/next-n-head models. Applies only while Speculative drafting is Inherit. Off by default: speeds some models up, slows others. Run `localm bench-mtp <model>` to check yours.",
   "settings.field.mtpDraftTokens.label": "MTP draft tokens",
   "settings.field.mtpDraftTokens.help": "Tokens MTP proposes per step when it is on. More pays off when most drafts are accepted; `localm bench-mtp <model> --draft-tokens N` measures it.",
   "settings.field.specSource.label": "Speculative drafting",

@@ -442,16 +442,23 @@ def _stop_at_exit() -> None:
 atexit.register(_stop_at_exit)
 
 
-def stop() -> bool:
-    """Stop the music server if one is running. True when one was stopped."""
+def stop(cancel_check: Optional[CancelCheck] = None) -> bool:
+    """Stop the music server if one is running. True when one was stopped. While
+    waiting for a running job, ``cancel_check`` is polled; when it turns true the
+    server is left running and False is returned."""
     global _server
-    with _lock:
+    while not _lock.acquire(timeout=_POLL):
+        if cancel_check is not None and cancel_check():
+            return False
+    try:
         _cancel_idle_timer()
         if _server is None:
             return False
         _server.stop()
         _server = None
         return True
+    finally:
+        _lock.release()
 
 
 def running_pid() -> Optional[int]:

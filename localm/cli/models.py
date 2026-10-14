@@ -206,6 +206,15 @@ _SPEC_PROBE_KINDS = ("prose", "code", "explanation", "rewrite")
 _SPEC_LABELS = {"mtp": "MTP", "ngram": "N-gram drafting", "draft": "Draft model"}
 
 
+def _spec_source_overriding(source):
+    """The Speculative drafting setting when it names a source other than
+    *source* (an explicit source takes precedence over the MTP toggle), else
+    None."""
+    from ..inference.backends.llamacpp._drafting import SPEC_SOURCES
+    value = str(load_config().get("spec_source") or "").strip().lower()
+    return value if value in SPEC_SOURCES and value != source else None
+
+
 def _spec_probe_arm(model_path, display, source, gen_tokens, ctx, gpu_layers,
                     draft_tokens=None, draft_model=None):
     """Load *model_path* with draft source *source* ("off", "mtp", "ngram" or
@@ -407,7 +416,13 @@ def _run_spec_bench(model, label, arm, rounds, kinds=None):
     # 3% either way is inside the run-to-run spread seen on an idle machine, so
     # a smaller difference is reported as no difference rather than a winner.
     if ratio >= 1.03:
-        if label == "MTP":
+        overriding = _spec_source_overriding("mtp") if label == "MTP" else None
+        if overriding:
+            how = (f"Speculative drafting is set to [cyan]{overriding}[/cyan], which "
+                   "takes precedence over the MTP toggle. Set it to mtp (or Inherit) "
+                   "in Settings > Engine > Speculative drafting, or set "
+                   "[cyan]spec_source[/cyan].")
+        elif label == "MTP":
             how = ("Turn it on in Settings > Engine > Multi-Token Prediction, or "
                    "set [cyan]mtp_enabled[/cyan] to true.")
         else:

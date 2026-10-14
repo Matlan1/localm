@@ -209,7 +209,8 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             job.push({"type": "line", "text":
                       "Per-component GPU placement applies to ComfyUI only; the native "
                       "backend loads each model on one GPU."})
-        release_other_native_media(job, s, "image")
+        if release_other_native_media(job, s, "image").cancelled:
+            return False
         swap = decide_media_swap(s)
         # The gate above reads COMBINED free VRAM across a configured GPU split,
         # but each media model component loads WHOLE onto ONE card (localm ORDERS the
@@ -455,6 +456,24 @@ def parse_image_size(size: str | None) -> tuple[int, int] | None:
     return w, h
 
 
+def _private_temp_root() -> Path | None:
+    """The folder private generation directories are made in: localm's temp
+    folder, created when missing, or None (the system temp folder) when it cannot
+    be created, after a warning."""
+    from localm.config import temp_dir
+    root = temp_dir()
+    if root is None:
+        return None
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("cannot create the temp folder %s (%s); private images use "
+                       "the system temp folder", root, e)
+        return None
+    return root
+
+
 def _is_private_session() -> bool:
     from localm.audit import SessionMode, effective_mode
     return effective_mode("server") == SessionMode.PRIVACY
@@ -603,8 +622,7 @@ async def create_image(req: ImageGenerationRequest, request: Request):
     warnings = []
     try:
         if private:
-            from localm.config import temp_dir
-            private_dir = Path(tempfile.mkdtemp(prefix="localm-img-", dir=temp_dir()))
+            private_dir = Path(tempfile.mkdtemp(prefix="localm-img-", dir=_private_temp_root()))
             out_dir = private_dir
         else:
             out_dir = _images_dir()
@@ -743,7 +761,8 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
         from localm.vram import (decide_media_swap, media_single_device_shortfall,
                                  note_other_vram_holders, release_other_native_media,
                                  unload_chat_for_media)
-        release_other_native_media(job, s, "image")
+        if release_other_native_media(job, s, "image").cancelled:
+            return False
         swap = decide_media_swap(s) or bool(media_single_device_shortfall(s))
         with restore_chat_after_media(job, self_url, s, _backend, "image", instance_token,
                                       swapped=swap):

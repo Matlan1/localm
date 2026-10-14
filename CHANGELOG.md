@@ -631,9 +631,47 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The routed-model tooltip names the audio need.** Sending an audio clip to a model that cannot hear it no longer shows a raw `chat.routed.cap.audio_input` in the tooltip.
 - **Unload no longer says "Unloaded" for a model that is still in use.** Unloading an embedding, reranker or speech model that is serving a request now shows that it stays loaded.
 - **The activity list shows a waiting image or video job as queued.** The pill, the list and `localm activity` now show the phase the job reported.
+- **Backing out of the "Replace this .venv?" question no longer deletes it on the next run.**
+  Pressing Ctrl+C at that question in `setup.sh` or `setup.bat` made the next run treat the
+  environment as half-built and recreate it, wiping a `.venv` that was yours (or a finished
+  localm one, with a multi-gigabyte reinstall). Setup now only recreates an environment it
+  was in the middle of creating, and `setup.sh` remembers every step that was cut short, not
+  only the last one, so a half-downloaded runtime is still redone after a second interruption.
+- **`setup.bat` keeps its scratch files in its own folder.** The uv installer was downloaded to
+  the system temp folder, which broke the "nothing outside this folder" promise of a portable
+  install and left a file behind if setup was stopped mid-download.
+- **A private image no longer fails when the temp folder does not exist yet.** After changing
+  the temporary-files location (or setting `LOCALM_TMPDIR` to a new folder), the next image
+  generated in privacy mode returned an error until localm restarted. The folder is now
+  created, and if it cannot be, localm uses the system temp folder and logs why.
+- **A failed AMD CPU-backend download no longer shows "runtime update available" forever.**
+  On an AMD GPU install where the optional SIMD CPU backend could not be installed, the
+  Setup page offered an update on every visit and `setup-llama` announced an upgrade that
+  re-installed the same build. The install is now reported as current until a newer CPU
+  backend is released; `setup-llama --backend amd-rocm --force` still retries it.
+- **Adding an Ollama store with copy or move handles models that share a vision projector.**
+  Two tags of one vision model (for example two quantizations) now both register; the second
+  used to fail with "already exists" and leave its model file in the models folder unregistered.
+  A failure while bringing in the projector now names the model file it left behind.
+- **Importing the Hugging Face cache skips files that are not models.** An importance matrix or
+  a GGUF of an unsupported version is reported and skipped, as with any other folder, instead of
+  being registered as a model.
+- **Benchmark advice for Multi-Token Prediction names an overriding setting.** When Speculative
+  drafting is set to a source other than mtp, `localm bench-mtp` says that setting takes
+  precedence over the MTP toggle, and the toggle's help says it applies only while Speculative
+  drafting is Inherit.
+- **The ACE-Step music model is no longer offered as an image or video model.**
 - **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
   several seconds, and while it did, every other request and stream waited. The close now runs
   in the background pool like the browser's other actions.
+- **Cancelling a native media job that is waiting for another one now ends the wait.** An image,
+  video or music job that did not fit in VRAM waited for the other kind of native job to finish
+  before stopping it, and kept going after you cancelled it: once the wait ended it stopped that
+  runtime and unloaded the chat model for a job that was already cancelled. It now stops waiting at
+  once, leaves the other runtime and the chat model alone, and the job ends as cancelled.
+- **Text-to-speech in Safari older than 26 without WebGPU loads the runtime build transformers.js
+  selects for it.** localm shipped only the asyncify onnxruntime build, which every browser got,
+  including that one. The plain build is now bundled too and used there.
 - **Server errors show up as 500 in `/metrics`.** A request whose handler crashed was counted as a
   499 (client left), so an alert on 5xx never fired; it is now counted as the 500 the client received.
 - **Unloading a model that another localm instance serves says so.** An Ollama client sending

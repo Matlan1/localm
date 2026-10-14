@@ -49,6 +49,14 @@ const PINNED_MJS_HASH = "CWa2EFzZNnREmKpg33oiy9R68zdNvGSpq1YcCKceNhE=";   // CRL
 const PINNED_WASM_HASH = "SYcfWkQJUZeX4SdECGim0ZIzOdkYWQfzAaWyodkK8II="; // raw bytes
 const EXPECTED_WASM_BYTES = 26861777;
 
+// The plain build (no asyncify): the pair transformers.js 4 selects for Safari
+// below 26 without WebGPU. It is the same npm package as the asyncify pair.
+const PLAIN_MJS = "ort-wasm-simd-threaded.mjs";
+const PLAIN_WASM = "ort-wasm-simd-threaded.wasm";
+const PINNED_PLAIN_MJS_HASH = "xXylYyiHc1OldeUbvKbxhFACfWyb8jB6LLLEE2O03p8=";   // CRLF-normalised
+const PINNED_PLAIN_WASM_HASH = "BroFd1PaOEfkwk8C2RqxM0VbCBfGmkSZOppTohRt+eM="; // raw bytes
+const EXPECTED_PLAIN_WASM_BYTES = 14264838;
+
 function readRuntime(name) {
   return fs.readFileSync(new URL(name, RUNTIME));
 }
@@ -106,6 +114,23 @@ test("the glue loads its wasm from beside itself, by the vendored name", () => {
   assert.ok(src.includes("import.meta.url"),
     `${MJS} no longer resolves against import.meta.url, so its pthread workers `
     + "would not come from this directory");
+});
+
+test("the vendored plain runtime is the recorded upstream artefact", () => {
+  assert.equal(normalisedHash(readRuntime(PLAIN_MJS)), PINNED_PLAIN_MJS_HASH,
+    `${PLAIN_MJS} does not match the pinned onnxruntime-web ${VENDORED_ORT} artefact`);
+  const buf = readRuntime(PLAIN_WASM);
+  assert.equal(buf.length, EXPECTED_PLAIN_WASM_BYTES);
+  assert.equal(rawHash(buf), PINNED_PLAIN_WASM_HASH,
+    `${PLAIN_WASM} does not match the pinned upstream binary.`);
+  assert.ok(WebAssembly.validate(buf), "WebAssembly.validate rejected the plain runtime");
+});
+
+test("the plain glue loads its wasm from beside itself, by the vendored name", () => {
+  const src = readRuntime(PLAIN_MJS).toString("utf8");
+  assert.ok(src.includes(`"${PLAIN_WASM}"`),
+    `${PLAIN_MJS} does not name ${PLAIN_WASM}; the pair has drifted apart`);
+  assert.ok(src.includes("import.meta.url"));
 });
 
 test("the vendored runtime matches the transformers.js and onnxruntime-web compiled into the bundle", () => {
