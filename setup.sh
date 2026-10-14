@@ -326,7 +326,7 @@ fi
 # interrupted, whatever the cause: Ctrl+C, a closed window, a kill, a crash.
 JOURNAL=".localm-setup-journal"
 JOURNAL_WARNED=0
-RESUMING=0; OPEN_STEP=""
+RESUMING=0; OPEN_STEP=""; OPEN_STEPS=""
 jr_failed() {
   if [ "$JOURNAL_WARNED" != 1 ]; then
     JOURNAL_WARNED=1
@@ -351,13 +351,18 @@ step_done() {
 journal_lines() {  # the journal minus a final line that was cut off mid-write
   if [ -n "$(tail -c 1 "$JOURNAL" 2>/dev/null)" ]; then sed '$d' "$JOURNAL"; else cat "$JOURNAL"; fi
 }
-journal_summary() {  # prints: <complete|incomplete> TAB <last finished step> TAB <step left open>
+journal_summary() {  # prints: <complete|incomplete> TAB <last finished step> TAB <latest step left open> TAB <every step left open, space-separated>
   journal_lines | awk -F'\t' '
     $1 == "begin"    { comp = 0; open[$2] = 1; order[++n] = $2 }
     $1 == "done"     { delete open[$2]; last = $2 }
     $1 == "complete" { comp = 1; for (k in open) delete open[k] }
-    END { o = ""; for (i = 1; i <= n; i++) if (order[i] in open) o = order[i]
-          print (comp ? "complete" : "incomplete") "\t" last "\t" o }'
+    END { o = ""; all = ""
+          for (i = 1; i <= n; i++) if (order[i] in open) { o = order[i]; if (!(o in seen)) { seen[o] = 1; all = all (all == "" ? "" : " ") o } }
+          print (comp ? "complete" : "incomplete") "\t" last "\t" o "\t" all }'
+}
+step_was_open() {  # true when the previous run left step $1 begun and not finished
+  case " $OPEN_STEPS " in *" $1 "*) return 0 ;; esac
+  return 1
 }
 if [ -f "$JOURNAL" ]; then
   jline="$(journal_summary)"
@@ -367,7 +372,9 @@ if [ -f "$JOURNAL" ]; then
   else
     jrest="${jline#*$(printf '\t')}"
     jlast="${jrest%%$(printf '\t')*}"
-    OPEN_STEP="${jrest#*$(printf '\t')}"
+    jopen="${jrest#*$(printf '\t')}"
+    OPEN_STEP="${jopen%%$(printf '\t')*}"
+    OPEN_STEPS="${jopen#*$(printf '\t')}"
     RESUMING=1
     say ""
     if [ -n "$jlast" ]; then
@@ -478,7 +485,7 @@ if [ "$uv_present" != 1 ]; then
   esac
   say "  Installing uv ..."
   if [ "$CONTAINED" = 1 ]; then UVSTEP=uv-portable; else UVSTEP=uv-bootstrap; fi
-  if [ "$RESUMING" = 1 ] && [ "$OPEN_STEP" = uv-portable ] && [ -d ./.uv ]; then
+  if [ "$RESUMING" = 1 ] && step_was_open uv-portable && [ -d ./.uv ]; then
     say "  The previous setup stopped while installing uv here; starting that over."
     rm -rf ./.uv
   fi
@@ -635,8 +642,8 @@ create_venv() {
   done
 }
 
-step_begin venv
-if [ "$RESUMING" = 1 ] && [ "$OPEN_STEP" = venv ] && [ -d .venv ]; then
+if [ "$RESUMING" = 1 ] && step_was_open venv && [ -d .venv ] && ! is_our_venv; then
+  step_begin venv
   say ""
   say "  The previous setup stopped while creating .venv; recreating it."
   create_venv
@@ -651,11 +658,13 @@ elif [ -d .venv ]; then
     say "      Replacing it deletes its current contents."
     rep="$(ask "  Replace this foreign .venv? [y/N]: " N)"
   fi
+  step_begin venv
   case "$rep" in
     [Yy]*) create_venv ;;
     *)     say "  Keeping the existing .venv and continuing setup." ;;
   esac
 else
+  step_begin venv
   create_venv
 fi
 step_done venv
@@ -842,7 +851,7 @@ step_done install-localm
 # ---- native llama.cpp runtime wheel (loader imports it) ---------------------
 step_begin native-runtime
 SL_FORCE=""
-if [ "$RESUMING" = 1 ] && [ "$OPEN_STEP" = native-runtime ]; then
+if [ "$RESUMING" = 1 ] && step_was_open native-runtime; then
   SL_FORCE="--force"   # a cut-short download may have left a partial runtime
 fi
 # (The PyTorch/transformers stack is installed further down, AFTER the backend

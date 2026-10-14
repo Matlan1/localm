@@ -686,7 +686,8 @@ def _assert_kept_the_amd_rocm_cpu_backend(world, r, why):
     assert not (world.lib / "ggml-cpu.dll.amd-rocm").exists()
     assert not (world.lib / ".localm-cpu-overlay").is_file()
     assert world.marker() == f"amd-rocm {ROCM}\n"
-    assert sl.check_runtime_update()["newer"] is True
+    assert sl.cpu_overlay_failed(world.lib)
+    assert sl.check_runtime_update()["newer"] is False
 
 
 def test_amd_rocm_cpu_overlay_copies_the_legacy_openmp_runtime_name(world):

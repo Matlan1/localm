@@ -63,7 +63,8 @@ def chat(monkeypatch):
 def _fake_vram(monkeypatch, *, swap=True):
     monkeypatch.setattr("localm.vram.decide_media_swap", lambda s: swap)
     monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda s: None)
-    monkeypatch.setattr("localm.vram.release_other_native_media", lambda job, s, label: None)
+    monkeypatch.setattr("localm.vram.release_other_native_media",
+                        lambda job, s, label: vram.ReleaseResult())
     monkeypatch.setattr("localm.vram.note_other_vram_holders", lambda job, s, label: None)
     monkeypatch.setattr("localm.vram.unload_chat_for_media",
                         lambda job, url, label, instance_token=None: True)

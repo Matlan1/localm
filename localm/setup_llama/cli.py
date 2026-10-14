@@ -269,7 +269,8 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
             # A marker written before tag recording existed still reads back
             # None, and that case keeps its original wording.
             have_build = _sl._provisioned_build(target)
-            if want == "amd-rocm" and have_build and have_build != _ROCM_BUILD:
+            if (want == "amd-rocm" and have_build and have_build != _ROCM_BUILD
+                    and not _sl.rocm_build_is_current(target, have_build)):
                 console.print(f"[yellow]Upgrading the {have} build: "
                               f"{have_build} -> {_ROCM_BUILD}.[/yellow]")
             elif have_build:
