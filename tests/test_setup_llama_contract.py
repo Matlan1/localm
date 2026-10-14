@@ -1506,6 +1506,7 @@ def test_offline_resolution_reads_the_pinned_asset_table(world, plat, backend, l
 ])
 def test_unresolvable_backends_are_refused_with_a_reason(world, plat, backend, message):
     world.platform(plat)
+    world.arch = "arm64" if plat == "darwin" else "x64"
     with pytest.raises(click.ClickException) as ei:
         sl._resolve_backend_asset(backend)
     assert ei.value.message == message
