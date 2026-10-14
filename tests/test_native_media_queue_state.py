@@ -129,16 +129,20 @@ def test_held_clears_queued_when_the_cancel_check_itself_raises():
 #  backends                                                                   #
 # --------------------------------------------------------------------------- #
 
-def _queued_then(call, release):
-    """Run *call(on_queue_state)* in a thread while this thread holds the lock;
-    *release()* is invoked once it has queued. Returns (states, result)."""
+def _queued_then(call, act=None, until=None):
+    """Run *call(on_queue_state)* in a thread while this thread holds the lock.
+    Once it has queued, call *act()* and keep holding the lock until *until()*
+    is true. Returns (states, result)."""
     states = []
     result = []
     worker = threading.Thread(target=lambda: result.append(call(states.append)))
     with shared.lock:
         worker.start()
         _wait_for(lambda: states == ["queued"], "the queued state")
-        release()
+        if act is not None:
+            act()
+        if until is not None:
+            _wait_for(lambda: until(states), "the state change")
     worker.join(10.0)
     assert not worker.is_alive()
     return states, result
@@ -151,8 +155,7 @@ def test_an_upscale_reports_queued_then_running(qol, tmp_path):  # noqa: F811
     _register("up4x", up, "upscaler")
     src = _png(tmp_path / "src.png")
     states, result = _queued_then(
-        lambda cb: image_native.upscale(s, src, "up4x", tmp_path / "o.png", on_queue_state=cb),
-        lambda: None)
+        lambda cb: image_native.upscale(s, src, "up4x", tmp_path / "o.png", on_queue_state=cb))
     assert states == ["queued", "running"]
     assert result[0][0] is True
 
@@ -167,7 +170,7 @@ def test_an_upscale_cancelled_while_queued_clears_queued(qol, tmp_path):  # noqa
     states, result = _queued_then(
         lambda cb: image_native.upscale(s, src, "up4x", tmp_path / "o.png",
                                         cancel_check=cancel.is_set, on_queue_state=cb),
-        cancel.set)
+        cancel.set, lambda states: states == ["queued", "cancelled"])
     assert states == ["queued", "cancelled"]
     assert result == [(False, "Cancelled.")]
 
@@ -198,6 +201,7 @@ def test_an_image_job_row_is_queued_only_while_it_waits(native_app, cancel):  # 
         assert job.summary()["status"] == "running"
         if cancel:
             job.cancel()
+            _wait_for(lambda: job.summary().get("phase") == "cancelled", "the cancelled row")
     try:
         _wait_image_job(app, job.id)
     finally:
@@ -217,6 +221,7 @@ def test_a_video_job_row_is_queued_only_while_it_waits(video_app, cancel):  # no
         assert job.summary()["status"] == "running"
         if cancel:
             job.cancel()
+            _wait_for(lambda: job.summary().get("phase") == "cancelled", "the cancelled row")
     try:
         _wait_video_job(app, job.id)
     finally:
