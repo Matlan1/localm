@@ -377,6 +377,15 @@ class TestFailedRestart:
             hf.rerank([("q", "d")])
         assert hf._backend.lock_held_at_load == [True]
 
+    def test_a_released_reranker_is_not_loaded_again_by_a_waiting_request(self, tmp_path):
+        hf = self._resident(tmp_path)
+        reranker._RERANKER = None
+        reranker._RERANKER_KEY = None
+        with pytest.raises(reranker.RerankerUnavailableError) as ei:
+            hf.rerank([("q", "d")])
+        assert "was released" in str(ei.value)
+        assert hf._backend.loads == 0
+
     def test_a_failed_restart_releases_the_reranker_and_latches_its_folder(
             self, tmp_path, monkeypatch):
         hf = self._resident(tmp_path)

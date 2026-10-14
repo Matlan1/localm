@@ -250,12 +250,19 @@ class HFReranker:
 
     def _restart(self) -> None:
         """Load the worker again under the engine's load lock when it is not
-        running."""
+        running. Raises :class:`RerankerUnavailableError` without loading when
+        this reranker is no longer the resident one."""
         from localm.inference.engine import _LOAD_LOCK
         with _LOAD_LOCK:
+            if self._backend.loaded:
+                return
             with self._call_lock:
                 if self._backend.loaded:
                     return
+                if not self._is_resident():
+                    raise RerankerUnavailableError(
+                        f"{Path(self.model_path).name} was released while this "
+                        "request waited for it; retry the request")
                 logger.warning("reranker worker is not running; reloading %s",
                                self.model_path)
                 try:
@@ -269,6 +276,11 @@ class HFReranker:
                     _release_failed(self, reason)
                     raise RerankerUnavailableError(reason) from e
                 self._runner = self._backend._runner
+
+    def _is_resident(self) -> bool:
+        """Whether this reranker is still the module's resident one."""
+        with _LOCK:
+            return _RERANKER is self
 
     def close(self) -> None:
         self._backend.unload()

@@ -421,6 +421,73 @@ class TestDeadWorkerRestartWaitsForAModelLoad:
         assert reloads == [True]
 
 
+class TestRespawnRetries:
+    class _Runner:
+        def __init__(self, alive):
+            self.alive = alive
+
+        def is_alive(self):
+            return self.alive
+
+        def embed(self, texts):
+            if not self.alive:
+                raise RuntimeError("The embedding worker process crashed")
+            return [[2.0] for _ in texts]
+
+        def shutdown(self, grace=5.0):
+            self.alive = False
+
+    def _embedder(self):
+        e = IsolatedEmbedder.__new__(IsolatedEmbedder)
+        e.model_path = "x.gguf"
+        e.active_requests = 0
+        e._rpc_lock = threading.RLock()
+        e._runner = None
+        e.n_gpu_layers = 0
+        e.gpu_fallback_reason = None
+        e.effective_pooling = None
+        return e
+
+    def test_a_worker_dead_again_after_its_respawn_is_respawned_again(self, monkeypatch):
+        spawned = [self._Runner(False), self._Runner(True)]
+
+        def fake_reload(self):
+            self._runner = spawned.pop(0)
+
+        monkeypatch.setattr(IsolatedEmbedder, "_reload", fake_reload)
+        e = self._embedder()
+        assert e._call_worker(lambda r: r.embed(["a"])) == [[2.0]]
+        assert spawned == []
+
+    def test_a_live_worker_is_not_waited_on_under_the_load_lock(self, monkeypatch):
+        from localm.inference.engine import _LOAD_LOCK
+        monkeypatch.setattr(IsolatedEmbedder, "_reload",
+                            lambda self: pytest.fail("a live worker was reloaded"))
+        e = self._embedder()
+        e._runner = self._Runner(True)
+        busy, release = threading.Event(), threading.Event()
+
+        def _long_rpc():
+            with e._rpc_lock:
+                busy.set()
+                release.wait(30)
+
+        rpc = threading.Thread(target=_long_rpc, daemon=True)
+        rpc.start()
+        assert busy.wait(10)
+        try:
+            respawn = threading.Thread(target=e._respawn_dead_worker, daemon=True)
+            respawn.start()
+            respawn.join(2)
+            assert not respawn.is_alive(), (
+                "the respawn held the load lock while it waited for a call on a live worker")
+            assert _LOAD_LOCK.acquire(timeout=2)
+            _LOAD_LOCK.release()
+        finally:
+            release.set()
+            rpc.join(10)
+
+
 class TestCleanLoadErrorReapsTheWorker:
     """spawn_and_load's clean ("error", msg) branch shuts the worker down
     before raising. Compare TestCleanEmbedErrorKeepsTheWorker above, which
