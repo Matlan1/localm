@@ -727,6 +727,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   while it was still starting used to report that no browser was open and leave it to finish
   starting; it now cancels the start, the browser is closed as soon as it is up, and the calls
   waiting for it get an error.
+- **A worker process starts even when the debug log it inherits cannot be opened.** In debug
+  mode, a model, embedding, speech or image worker whose debug log folder was missing or not
+  writable exited before answering, and the load was reported as a crash with no reason; it
+  now logs one warning to the console and carries on.
 - **The coder no longer crashes on a project config whose `mcp` key is not a table.** A
   `.localcoder/config.toml` with, for example, `mcp = "x"` stopped MCP setup with an error; it now
   means no MCP servers are configured.

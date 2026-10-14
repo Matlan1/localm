@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests import _tk_root
-from tests._tk_root import ATTEMPTS, build_tk_root
+from tests._tk_root import ATTEMPTS, build_tk_root, collect_tk_garbage  # noqa: F401
 
 tkinter = pytest.importorskip("tkinter")
 
@@ -159,3 +159,73 @@ def test_no_test_skips_on_a_caught_tcl_error():
         "a Tcl library read failure would read as a missing display here; "
         "build the window with tests._tk_root.build_tk_root: "
         f"{offenders}")
+
+
+def _imports_from_tk_root(tree) -> set[str]:
+    return {alias.name for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "tests._tk_root"
+            for alias in node.names}
+
+
+_TK_BUILDERS = {"Tk", "Toplevel", "Launcher", "build_tk_root"}
+
+
+def _builds_tk_windows(tree) -> bool:
+    """True when the module calls Tk, Toplevel, Launcher or build_tk_root."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in _TK_BUILDERS:
+                return True
+    return False
+
+
+def test_every_module_that_builds_tk_windows_collects_its_garbage():
+    missing = []
+    for path in sorted(_TESTS.rglob("*.py")):
+        if path.name == "_tk_root.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        if _builds_tk_windows(tree) and "collect_tk_garbage" not in _imports_from_tk_root(tree):
+            missing.append(path.relative_to(_TESTS).as_posix())
+    assert missing == [], (
+        "import collect_tk_garbage from tests._tk_root next to build_tk_root, so the "
+        f"Tk objects these tests leave in cycles are freed on the main thread: {missing}")
+
+
+_OFF_THREAD_FREE = """
+import gc, sys, threading, tkinter
+if sys.platform == "win32":
+    import ctypes
+    ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002)
+class Holder: pass
+def build():
+    root = tkinter.Tk(); root.withdraw()
+    var = tkinter.StringVar(root, value="x")
+    h = Holder(); h.self = h; h.root = root; h.var = var
+    root.destroy()
+gc.disable()
+build()
+if sys.argv[1] == "main-thread-collect":
+    gc.collect()
+t = threading.Thread(target=gc.collect); t.start(); t.join()
+print("SURVIVED", flush=True)
+"""
+
+
+def test_a_destroyed_root_freed_on_another_thread_aborts_unless_collected_first(tmp_path):
+    import subprocess
+    import sys
+    script = tmp_path / "off_thread_free.py"
+    script.write_text(_OFF_THREAD_FREE, encoding="utf-8")
+    runs = {mode: subprocess.run([sys.executable, "-I", str(script), mode],
+                                 capture_output=True, text=True, timeout=60)
+            for mode in ("off-thread-only", "main-thread-collect")}
+    if any("display" in r.stderr.lower() for r in runs.values()):
+        pytest.skip("no display")
+    aborted, collected = runs["off-thread-only"], runs["main-thread-collect"]
+    assert "SURVIVED" not in aborted.stdout and aborted.returncode != 0, aborted.stderr
+    assert "Tcl_AsyncDelete" in aborted.stderr, aborted.stderr
+    assert collected.returncode == 0 and "SURVIVED" in collected.stdout, collected.stderr

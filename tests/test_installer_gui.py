@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._tk_root import build_tk_root
+from tests._tk_root import build_tk_root, collect_tk_garbage  # noqa: F401
 
 _GUI_PATH = Path(__file__).resolve().parents[1] / "installer" / "gui.py"
 _REPO_ROOT = _GUI_PATH.parents[1]

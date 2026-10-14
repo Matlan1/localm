@@ -42,7 +42,7 @@ def pristine_logging(monkeypatch):
     saved_handlers = list(debuglog.logger.handlers)
     saved_root_level = root.level
 
-    monkeypatch.delenv("LOCALM_DEBUG", raising=False)   # else enable_debug() no-ops
+    monkeypatch.setenv("LOCALM_DEBUG", "")   # debug off, so enable_debug() opens a new log
     debuglog.logger.handlers = []
     debuglog.logger.setLevel(logging.NOTSET)            # setLevel() clears the cache
     root.setLevel(logging.WARNING)                      # the real default at import

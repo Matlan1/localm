@@ -546,30 +546,49 @@ def _install_thread_hook() -> None:
     threading.excepthook = _hook
 
 
+_unopenable_child_logs: set[str] = set()
+
+
 def attach_child_logging() -> None:
     """
     In a child process that inherited LOCALM_DEBUG: attach the file handler
     so this process's logger writes to the shared log file too.
+
+    Never raises OSError: when the log file cannot be opened (its folder is
+    gone, or it is not writable), the console mirror and the ring buffer are
+    still installed and one WARNING per path per process names the path and
+    the error; a later call for the same path does nothing. See
+    test_a_debug_log_the_worker_cannot_open_does_not_crash_it.
     """
     path = log_file_path()
-    if path is None or any(
+    if path is None or str(path) in _unopenable_child_logs or any(
         isinstance(h, logging.FileHandler)
         and getattr(h, "baseFilename", "") == str(path)
         for h in logger.handlers
     ):
         return
-    # buffering=1 = line-buffered: same guarantee as enable_debug() above.
-    # delay=True + manual stream avoids opening the file twice.
-    handler = logging.FileHandler(path, mode="a", encoding="utf-8", delay=True)
-    handler.stream = open(path, "a", buffering=1, encoding="utf-8",
-                         errors="backslashreplace")
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
-    logger.addHandler(handler)
+    open_error = None
+    try:
+        # buffering=1 = line-buffered: same guarantee as enable_debug() above.
+        stream = open(path, "a", buffering=1, encoding="utf-8",
+                      errors="backslashreplace")
+    except OSError as exc:
+        stream, open_error = None, exc
+    if stream is not None:
+        # delay=True + manual stream avoids opening the file twice.
+        handler = logging.FileHandler(path, mode="a", encoding="utf-8", delay=True)
+        handler.stream = stream
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+        logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     _add_console_handler()   # a managed/child server is verbose too
     install_ring_buffer()    # buffer breadcrumbs for a bug report in this child too
     _install_thread_hook()
+    if open_error is not None:
+        _unopenable_child_logs.add(str(path))
+        logger.warning("debug log %s could not be opened in this process (%s); "
+                       "logging to the console only", path, open_error)
 
 
 def native_stderr_target() -> Optional[int]:

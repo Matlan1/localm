@@ -8,6 +8,7 @@ missing display.
 
 from __future__ import annotations
 
+import gc
 import time
 
 import pytest
@@ -18,6 +19,20 @@ RETRY_DELAY = 0.05
 
 def is_no_display(error) -> bool:
     return "display" in str(error).lower()
+
+
+@pytest.fixture(autouse=True)
+def collect_tk_garbage():
+    """After the test, run a full garbage collection on the test's own thread.
+
+    Frees the Tk objects the test left in reference cycles while the thread
+    that built them is the one freeing them: Tcl aborts the process when a Tk
+    interpreter is freed on any other thread. Import it into every module that
+    imports build_tk_root. See
+    test_every_module_that_builds_tk_windows_collects_its_garbage.
+    """
+    yield
+    gc.collect()
 
 
 def build_tk_root(factory, *, attempts=ATTEMPTS, delay=RETRY_DELAY,

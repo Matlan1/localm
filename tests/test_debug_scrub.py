@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for internal-marker scrubbing and the debug log module."""
 
+import ast
 import logging
 import os
+from pathlib import Path
 
 import pytest
 
@@ -122,7 +124,7 @@ class TestMarkerScrub:
 class TestDebugLog:
     @pytest.fixture(autouse=True)
     def _clean(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("LOCALM_DEBUG", raising=False)
+        monkeypatch.setenv("LOCALM_DEBUG", "")   # debug off; teardown restores the old value
         monkeypatch.setattr(debuglog, "logs_dir", lambda: tmp_path / "logs")
         saved = list(debuglog.logger.handlers)
         yield
@@ -147,6 +149,34 @@ class TestDebugLog:
             if isinstance(h, logging.FileHandler):
                 h.flush()
         assert "hello from test" in path.read_text(encoding="utf-8")
+
+    def test_attach_child_logging_survives_a_log_it_cannot_open(
+            self, monkeypatch, tmp_path):
+        missing = tmp_path / "gone" / "localm.log"
+        monkeypatch.setenv("LOCALM_DEBUG", str(missing))
+        seen = []
+        recorder = logging.Handler()
+        recorder.emit = seen.append
+        saved_level = debuglog.logger.level
+        monkeypatch.setattr(debuglog.logger, "handlers", [recorder])
+        monkeypatch.setattr(debuglog, "_ring_handler", None)
+        try:
+            debuglog.attach_child_logging()
+            debuglog.attach_child_logging()
+            handlers = list(debuglog.logger.handlers)
+            level = debuglog.logger.level
+        finally:
+            for h in debuglog.logger.handlers:
+                if h is not recorder:
+                    h.close()
+            debuglog.logger.setLevel(saved_level)
+        assert not any(isinstance(h, logging.FileHandler) for h in handlers)
+        assert any(type(h) is logging.StreamHandler for h in handlers), handlers
+        assert debuglog._ring_handler is not None and debuglog._ring_handler in handlers
+        assert level == logging.DEBUG
+        warnings = [r for r in seen if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert str(missing) in warnings[0].getMessage()
 
     def test_enable_is_idempotent(self):
         first = debuglog.enable_debug()
@@ -243,3 +273,41 @@ class TestHarmonyStopStrings:
 
     def test_end_still_stops_a_reply_by_default(self):
         assert "".join(_filtered_stream(iter(["Hi.<|end|>more"]))) == "Hi."
+
+
+def _call_name(call) -> str:
+    func = call.func
+    return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+
+
+def _clears_localm_debug_with_delenv(tree) -> list[int]:
+    """Lines of ``delenv("LOCALM_DEBUG", ...)`` calls in a module that turns debug mode on."""
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    if not any(_call_name(c) in ("enable_debug", "honor_env_debug") for c in calls):
+        return []
+    return [c.lineno for c in calls
+            if _call_name(c) == "delenv" and c.args
+            and isinstance(c.args[0], ast.Constant) and c.args[0].value == "LOCALM_DEBUG"]
+
+
+def test_the_delenv_sentinel_flags_a_module_that_enables_debug():
+    leaky = ("def t(monkeypatch):\n"
+             "    monkeypatch.delenv('LOCALM_DEBUG', raising=False)\n"
+             "    debuglog.enable_debug()\n")
+    scoped = leaky.replace("delenv('LOCALM_DEBUG', raising=False)", "setenv('LOCALM_DEBUG', '')")
+    assert _clears_localm_debug_with_delenv(ast.parse(leaky)) == [2]
+    assert _clears_localm_debug_with_delenv(ast.parse(scoped)) == []
+
+
+def test_no_module_that_enables_debug_clears_localm_debug_with_delenv():
+    """monkeypatch.delenv on an absent variable records nothing, so the value
+    enable_debug() writes into os.environ outlives the test. A module that turns
+    debug mode on sets LOCALM_DEBUG with monkeypatch.setenv instead."""
+    tests_dir = Path(__file__).parent
+    offenders = []
+    for path in sorted(tests_dir.rglob("*.py")):
+        for line in _clears_localm_debug_with_delenv(ast.parse(path.read_text(encoding="utf-8"))):
+            offenders.append(f"{path.relative_to(tests_dir).as_posix()}:{line}")
+    assert offenders == [], (
+        "use monkeypatch.setenv(\"LOCALM_DEBUG\", \"\") so teardown restores it: "
+        f"{offenders}")

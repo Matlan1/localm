@@ -7,7 +7,7 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 
-from tests._tk_root import build_tk_root
+from tests._tk_root import build_tk_root, collect_tk_garbage  # noqa: F401
 
 _LAUNCHER = Path(__file__).resolve().parents[1] / "launcher.pyw"
 _LONG = ("Could not check the models folder: AttributeError: 'NoneType' object "
