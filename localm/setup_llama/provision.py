@@ -105,7 +105,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         if sha256:
             console.print("[yellow]Note:[/yellow] --sha256 pins the CUDA build only; "
                           "the runtime bundle is verified by its release digest instead.")
-        cudart_url, cudart_sha = _sl._resolve_linux_cudart_asset(tag, cuda_line)
+        cudart_url, cudart_sha = _sl._resolve_linux_cudart_asset(tag or _tag_for("cuda"), cuda_line)
         console.print("[dim]CUDA runtime:[/dim] " + cudart_url.rsplit("/", 1)[-1]
                       + " - no Toolkit install needed")
         _sl._fetch_and_place(cudart_url, target, cudart_sha)
