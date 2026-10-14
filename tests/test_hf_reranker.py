@@ -147,8 +147,10 @@ class TestConfigState:
 
     @staticmethod
     def _cross_encoder(folder):
-        return _config(folder, architectures=["XLMRobertaForSequenceClassification"],
-                       id2label={"0": "LABEL_0"})
+        _config(folder, architectures=["XLMRobertaForSequenceClassification"],
+                id2label={"0": "LABEL_0"})
+        (folder / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+        return folder
 
     def test_a_qwen3_seq_cls_reranker_with_a_chat_template_is_a_reranker(self, tmp_path):
         folder = self._qwen3_seq_cls_reranker(tmp_path / "q")
