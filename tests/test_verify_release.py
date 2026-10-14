@@ -266,3 +266,16 @@ def test_verify_ed25519_accepts_an_embedded_key_set_without_saving(monkeypatch, 
     assert not (tmp_path / "home").exists()
     ok, _msg = vr.verify_ed25519(data, envelope(data, [new_release]))
     assert not ok
+
+
+def test_main_corrupt_saved_trust_is_could_not_check_exit_2(tmp_path, monkeypatch, capsys):
+    priv = _pin(monkeypatch)
+    trust = tmp_path / "home" / "updates" / "trust.json"
+    trust.parent.mkdir(parents=True)
+    trust.write_text("{broken", encoding="utf-8")
+    data = b"build"
+    zpath = _write(tmp_path, "z.zip", data)
+    sig_path = _write(tmp_path, "z.zip.sig", _sig(priv, data).encode())
+    assert vr.main([str(zpath), "--sig", str(sig_path)]) == 2
+    err = capsys.readouterr().err
+    assert "COULD NOT CHECK" in err and str(trust) in err

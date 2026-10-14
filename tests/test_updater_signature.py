@@ -168,7 +168,7 @@ def test_malformed_envelope_is_refused(trust, mutate, needle):
 
 def test_nan_in_envelope_is_refused(trust):
     text = envelope(DATA, [trust.r])[:-1] + ', "keyset": NaN}'
-    assert "is not a localm-update-sig/2" in _refused(DATA, text).reason
+    assert "NaN is not allowed" in _refused(DATA, text).reason
 
 
 # --------------------------- key set replacement ---------------------------
@@ -302,6 +302,19 @@ def test_unreadable_saved_keyset_is_refused_and_named(trust, home):
     f.mkdir(parents=True)                     # a directory where the file belongs
     e = _refused(DATA, envelope(DATA, [trust.r]))
     assert "could not be read" in e.summary and str(f) in e.reason
+
+
+def test_saved_keyset_with_pinned_seq_but_other_keys_is_refused(trust, home):
+    a, b, _c = trust.recovery
+    f = _trust_file(home)
+    f.parent.mkdir(parents=True)
+    other = keyset(1, [Ed25519PrivateKey.generate()], trust.recovery, signers=[a, b])
+    f.write_text(json.dumps(other), encoding="utf-8")
+    e = _refused(DATA, envelope(DATA, [trust.r]))
+    assert "conflict with the built-in" in e.summary and str(f) in e.reason
+    f.write_text(json.dumps(keyset(1, [trust.r], trust.recovery, signers=[a, b])),
+                 encoding="utf-8")
+    assert updater.verify_signature(DATA, envelope(DATA, [trust.r])) is None
 
 
 def test_saved_keyset_older_than_pinned_is_ignored(trust, home, monkeypatch):

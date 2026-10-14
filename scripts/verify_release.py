@@ -95,18 +95,27 @@ def parse_sha256_arg(value: str) -> str:
     return token.lower()
 
 
+class TrustUnavailable(Exception):
+    """The keys to verify against could not be loaded."""
+
+
 def verify_ed25519(data: bytes, sig_text: str) -> tuple[bool, str]:
     """Verify *sig_text* (the release's signature envelope) over *data* with
     localm.updater.verify_signature - the same check and the same keys the
     auto-updater uses, reused rather than reimplemented. Returns (ok, message).
     Raises ImportError if localm.updater or one of its own dependencies
-    (cryptography, rich) is not installed."""
+    (cryptography, rich) is not installed, and TrustUnavailable when the keys
+    this install trusts cannot be loaded."""
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
     from localm import updater
     from localm.bugreport import LocalmError
     try:
-        updater.verify_signature(data, sig_text)
+        trusted = updater._load_trusted()
+    except LocalmError as e:
+        raise TrustUnavailable(f"{e.summary} ({e.reason})" if e.reason else e.summary) from None
+    try:
+        updater.verify_signature(data, sig_text, trusted=trusted)
     except LocalmError as e:
         detail = f"{e.summary} ({e.reason})" if e.reason else e.summary
         return False, detail
@@ -163,6 +172,8 @@ def main(argv=None) -> int:
                 ok, msg = verify_ed25519(zip_path.read_bytes(), sig_text)
             except ImportError as e:
                 could_not.append(("signature", _import_error_message(e)))
+            except TrustUnavailable as e:
+                could_not.append(("signature", str(e)))
             else:
                 checks_run.append(("signature", ok, msg))
 

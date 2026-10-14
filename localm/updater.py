@@ -207,10 +207,11 @@ def _trust_path() -> Path:
 
 
 def _load_trusted() -> dict:
-    """The trusted key set: the one saved in the data dir when its seq is at least
-    the pinned one's, else the pinned one. A saved file that cannot be read or does
-    not validate raises :class:`~localm.bugreport.LocalmError` naming the file; it
-    is never replaced by the pinned set."""
+    """The trusted key set: the one saved in the data dir when its seq is higher
+    than the pinned one's, else the pinned one. A saved file that cannot be read,
+    does not validate, or has the pinned seq with different keys raises
+    :class:`~localm.bugreport.LocalmError` naming the file; it is never replaced by
+    the pinned set."""
     from localm.bugreport import LocalmError
     pinned = _parse_keyset(_PINNED_KEYSET, signed=False)
     path = _trust_path()
@@ -227,7 +228,13 @@ def _load_trusted() -> dict:
         raise LocalmError(
             "the saved update signing keys are corrupt",
             reason=f"{path}: {e}. Restore that file, or reinstall localm") from None
-    return saved if saved["seq"] >= pinned["seq"] else pinned
+    if saved["seq"] == pinned["seq"] and (
+            canonical_keyset_bytes(saved) != canonical_keyset_bytes(pinned)):
+        raise LocalmError(
+            "the saved update signing keys conflict with the built-in ones",
+            reason=f"{path}: key set {saved['seq']} differs from the built-in key set "
+                   f"{pinned['seq']}. Restore that file, or reinstall localm")
+    return saved if saved["seq"] > pinned["seq"] else pinned
 
 
 def _save_keyset(keyset: dict) -> None:
@@ -283,6 +290,8 @@ def verify_signature(data: bytes, signature, *, trusted: Optional[dict] = None):
     try:
         try:
             env = _strict_json(signature)
+        except _BadSignature:
+            raise
         except (ValueError, RecursionError):
             raise _BadSignature(
                 f"it is not a {_SIG_FORMAT} signature; a release signed for localm "
@@ -748,7 +757,8 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     closed - we never install an unverified build). A replacement key set the
     envelope carries is saved (:func:`_save_keyset`) only after every check has
     passed and before the swap, so a refused update leaves the trusted keys
-    unchanged; a failure to save it refuses the update.
+    unchanged; a failure to save it refuses the update. A swap or post-swap step
+    that fails after that point rolls the files back but keeps the saved key set.
 
     Single-flight (:func:`_apply_lock`): a second concurrent call is refused
     immediately rather than racing the first. Each call also downloads, extracts,
