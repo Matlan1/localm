@@ -68,6 +68,11 @@ SERVER_VERSION = _LOCALM_VERSION
 BUSY_WAIT_SECONDS = 30.0
 BUSY_POLL_SECONDS = 1.0
 
+# Longest wait evict_for_embedder makes for the cache lock. Stays below
+# BUSY_WAIT_SECONDS, so an evictor whose thread pins an engine gives up before a
+# load waiting on that pin does. See test_evict_lock_wait_is_below_busy_wait.
+EVICT_LOCK_WAIT_SECONDS = 10.0
+
 # Longest run_coder_task budget a client may ask for; the budget covers the
 # model load and the agent's construction as well as the run.
 MAX_CODER_TIMEOUT_SECONDS = 3600.0
@@ -76,6 +81,11 @@ MAX_CODER_TIMEOUT_SECONDS = 3600.0
 class ModelBusyError(RuntimeError):
     """A load was refused because every evictable resident is still serving a
     request past BUSY_WAIT_SECONDS."""
+
+
+class ModelEvictedError(RuntimeError):
+    """An engine fetched from the cache was evicted before a request pinned
+    it. Fetching it again from the cache returns a resident engine."""
 
 
 class ModelLoadSkipped(RuntimeError):
@@ -177,9 +187,12 @@ class EngineCache:
         # Held by every method that reads or changes the engines and peers to
         # pick or load one, on the protocol thread and on a coder run's worker
         # thread alike. Never acquired while holding a generation lock
-        # (generation_lock), Engine's load lock or the residency pin lock.
-        # evict_for_embedder takes it, with a timeout, from the embedder's
-        # pre-load swap, which holds neither embedder._LOCK nor the load lock.
+        # (generation_lock), Engine's load lock or the residency pin lock,
+        # except by evict_for_embedder: the embedder's pre-load swap calls it
+        # holding neither embedder._LOCK nor the load lock, but possibly a
+        # generation lock (the embed tool), so it waits at most
+        # EVICT_LOCK_WAIT_SECONDS. Nothing holding this lock acquires a
+        # generation lock.
         self._lock = threading.RLock()
         # Created on first use by routing_latch().
         self._latch = None
@@ -212,9 +225,17 @@ class EngineCache:
     @staticmethod
     def pin(engine) -> None:
         """Count one in-flight request on *engine*. A pinned engine
-        (``active_requests > 0``) is never chosen as an eviction victim."""
-        from localm.inference.residency import pin_engine
-        pin_engine(engine)
+        (``active_requests > 0``) is never chosen as an eviction victim.
+
+        Raises ModelEvictedError, with nothing pinned, when *engine* was
+        evicted (``unloading``) before the pin landed; the check and the pin
+        are one operation against ``begin_unload``."""
+        from localm.inference.residency import try_pin_engine
+        if not try_pin_engine(engine):
+            name = getattr(engine, "display_name", None) or "the model"
+            raise ModelEvictedError(
+                f"{name} was unloaded to free VRAM before this request "
+                "started; retry the request")
 
     @staticmethod
     def unpin(engine) -> None:
@@ -840,15 +861,17 @@ class EngineCache:
         "in_use" when a loaded resident is serving a request, "pinned" when a
         loaded resident is pinned by configuration, "already_unloaded" when no
         loaded engine is resident, and "error" when this cache's lock was not
-        acquired within *timeout_s* seconds.
+        acquired within the smaller of *timeout_s* and
+        ``EVICT_LOCK_WAIT_SECONDS``.
 
         Registered with ``vram.register_embedder_evictor`` by ``serve_stdio``.
         Caller must hold neither ``embedder._LOCK`` nor Engine's load lock."""
         from localm.config import load_config
         from localm.inference import residency
-        if not self._lock.acquire(timeout=max(0.0, timeout_s)):
+        wait = max(0.0, min(timeout_s, EVICT_LOCK_WAIT_SECONDS))
+        if not self._lock.acquire(timeout=wait):
             _log("warning: could not free VRAM for the embedding model: the "
-                 f"model cache stayed busy for {timeout_s:.0f}s")
+                 f"model cache stayed busy for {wait:.0f}s")
             return "error"
         try:
             pinned = residency.pinned_model_names(load_config())

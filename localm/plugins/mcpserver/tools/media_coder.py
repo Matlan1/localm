@@ -18,7 +18,8 @@ from localm import pathsafe
 from localm.pathsafe import is_unc_or_device_path
 
 from .. import server as _srv
-from ..server import EngineCache, ModelLoadSkipped, _quiet_stdout, _text_result
+from ..server import (EngineCache, ModelEvictedError, ModelLoadSkipped, _quiet_stdout,
+                      _text_result)
 from ._common import MODEL_PARAM
 
 
@@ -388,7 +389,10 @@ def build(engines: EngineCache) -> dict[str, dict]:
 
         # Pinned for the whole run; released on the worker thread when the run
         # ends, even after a timeout has abandoned it.
-        engines.pin(engine)
+        try:
+            engines.pin(engine)
+        except ModelEvictedError as e:
+            return _text_result(f"coder task failed to start: {e}", is_error=True)
         try:
             with _quiet_stdout():
                 agent = coder_runner.build_agent(

@@ -6,6 +6,7 @@ embedder.py acts on the returned status."""
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -15,11 +16,14 @@ import pytest
 import localm.inference.http_server as hs
 import localm.vram as vram
 from localm.inference import embedder as emb
-from localm.plugins.mcpserver.server import EngineCache
+import localm.plugins.mcpserver.server as server
+from localm.plugins.mcpserver.server import EngineCache, ModelEvictedError
 
 
 class _FakeEngine:
-    """The Engine surface EngineCache's eviction path reads."""
+    """The Engine surface EngineCache's eviction path and the chat and embed
+    tools read. ``chat_stream`` and ``embed`` count calls made while the
+    engine is unloaded, which a real Engine would answer by reloading."""
 
     def __init__(self, name, *, active_requests=0):
         self.display_name = name
@@ -27,10 +31,21 @@ class _FakeEngine:
         self.unloading = False
         self.loaded = True
         self.unloaded = 0
+        self.served_unloaded = 0
 
     def unload(self):
         self.loaded = False
         self.unloaded += 1
+
+    def chat_stream(self, messages, **kw):
+        if not self.loaded:
+            self.served_unloaded += 1
+        yield f"reply-from-{self.display_name}-{id(self)}"
+
+    def embed(self, texts):
+        if not self.loaded:
+            self.served_unloaded += 1
+        return [[float(id(self) % 1000)] for _ in texts]
 
 
 @pytest.fixture(autouse=True)
@@ -326,3 +341,227 @@ def test_evictor_runs_holding_neither_embedder_lock_nor_load_lock(monkeypatch, t
     assert result is not None
     assert probe == {"load_lock_free": True, "embedder_lock_free": True}
     assert cache.resident == []
+
+
+# --------------------------------------------------------------------------- #
+#  The remaining statuses, the finally path and the HTTP loop together        #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("status,phrase", [
+    ("pinned", "pinned to stay loaded"),
+    ("error", "did not complete"),
+])
+def test_other_degraded_statuses_are_warned(monkeypatch, tmp_path, caplog, status, phrase):
+    _cfg(monkeypatch)
+    monkeypatch.setattr(vram, "decide_embedder_swap", lambda *a, **k: True)
+    unregister = vram.register_embedder_evictor(lambda t: status)
+    try:
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            got = emb._maybe_swap_for_embedder(str(_gguf(tmp_path)), 99)
+    finally:
+        unregister()
+
+    assert got == status
+    assert any(phrase in r.getMessage() for r in caplog.records
+               if r.levelno == logging.WARNING)
+
+
+def test_skipped_is_warned_once_not_twice(monkeypatch, tmp_path, caplog):
+    _cfg(monkeypatch)
+    monkeypatch.setattr(vram, "decide_embedder_swap", lambda *a, **k: True)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        got = emb._maybe_swap_for_embedder(str(_gguf(tmp_path)), 99)
+
+    assert got == "skipped"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "no chat model owner" in warnings[0].getMessage()
+
+
+def test_serve_stdio_unregisters_when_the_run_raises(monkeypatch):
+    def _run(self, stdin=None, stdout=None):
+        assert len(vram._EMBEDDER_EVICTORS) == 1
+        raise RuntimeError("protocol stream broke")
+
+    monkeypatch.setattr(server.MCPStdioServer, "run_stdio", _run)
+    monkeypatch.setattr(server, "_redirect_consoles_to_stderr", lambda: None)
+    monkeypatch.setattr(server, "build_tools", lambda *a, **k: {})
+    with pytest.raises(RuntimeError, match="protocol stream broke"):
+        server.serve_stdio(model="chat-a")
+
+    assert vram._EMBEDDER_EVICTORS == []
+
+
+def test_server_loop_and_registered_evictor_are_both_asked(monkeypatch):
+    """A live HTTP server loop with nothing loaded answers already_unloaded; a
+    registered evictor in the same process answers in_use; the worse wins and
+    both were asked."""
+    import asyncio
+
+    for attr in ("_engines", "_engines_lru", "_inference_sems"):
+        getattr(hs, attr).clear()
+    monkeypatch.setattr(hs, "_active_model_name", None)
+    monkeypatch.setattr(hs, "_engine", None)
+    monkeypatch.setattr(hs, "_inference_sem", None)
+    monkeypatch.setattr("localm.discover.vram_capacity", lambda *a, **k: {"free": None})
+    asked = []
+
+    def _evictor(timeout_s):
+        asked.append(timeout_s)
+        return "in_use"
+
+    async def _drive():
+        hs._server_loop = asyncio.get_running_loop()
+        return await asyncio.get_running_loop().run_in_executor(
+            None, vram.evict_chat_for_embedder)
+
+    unregister = vram.register_embedder_evictor(_evictor)
+    try:
+        status = asyncio.run(_drive())
+    finally:
+        unregister()
+
+    assert status == "in_use"
+    assert len(asked) == 1 and 0 < asked[0] <= 300.0
+
+
+# --------------------------------------------------------------------------- #
+#  A fetched engine evicted before its pin is never served                    #
+# --------------------------------------------------------------------------- #
+
+def test_pin_refuses_an_evicted_engine(monkeypatch):
+    _cfg(monkeypatch)
+    a = _FakeEngine("chat-a")
+    cache = _cache_with(a)
+    assert cache.evict_for_embedder(5.0) == "unloaded"
+
+    with pytest.raises(ModelEvictedError, match="chat-a was unloaded"):
+        cache.pin(a)
+    assert a.active_requests == 0
+    with pytest.raises(ModelEvictedError):
+        with cache.serving(a):
+            pass
+    assert a.active_requests == 0
+
+
+def test_chat_tool_refetches_an_engine_evicted_before_its_pin(monkeypatch):
+    """The evictor runs on another thread between the chat tool's fetch and
+    its pin; the tool answers from a fresh resident and never serves (and so
+    never reloads) the evicted engine."""
+    _cfg(monkeypatch)
+    monkeypatch.setattr(EngineCache, "_model_required_bytes", lambda self, n: None)
+    old = _FakeEngine("chat-a")
+    cache = EngineCache(default_model="chat-a",
+                        engine_factory=lambda name: _FakeEngine(name))
+    cache._engines["chat-a"] = old
+    cache._touch("chat-a")
+    real_get_loaded_chat = cache.get_loaded_chat
+    calls = []
+
+    def _get_loaded_chat(name, **kw):
+        engine = real_get_loaded_chat(name, **kw)
+        calls.append(engine)
+        if len(calls) == 1:
+            t = threading.Thread(target=cache.evict_for_embedder, args=(5.0,))
+            t.start()
+            t.join(10)
+        return engine
+
+    monkeypatch.setattr(cache, "get_loaded_chat", _get_loaded_chat)
+    tool = server.build_tools(cache, enable_images=False, enable_coder=False,
+                              enable_memory=False)["chat"]["handler"]
+    result = tool({"prompt": "hi"})
+
+    assert result["isError"] is False, result
+    assert old.unloaded == 1 and old.served_unloaded == 0
+    fresh = cache._engines["chat-a"]
+    assert fresh is not old and calls == [old, fresh]
+    assert result["content"][0]["text"] == f"reply-from-chat-a-{id(fresh)}"
+    assert fresh.active_requests == 0
+
+
+def test_embed_tool_refetches_an_engine_evicted_before_its_pin(monkeypatch):
+    _cfg(monkeypatch)
+    monkeypatch.setattr(EngineCache, "_model_required_bytes", lambda self, n: None)
+    old = _FakeEngine("chat-a")
+    cache = EngineCache(default_model="chat-a",
+                        engine_factory=lambda name: _FakeEngine(name))
+    cache._engines["chat-a"] = old
+    cache._touch("chat-a")
+    real_get = cache.get
+    calls = []
+
+    def _get(requested):
+        engine = real_get(requested)
+        calls.append(engine)
+        if len(calls) == 1:
+            t = threading.Thread(target=cache.evict_for_embedder, args=(5.0,))
+            t.start()
+            t.join(10)
+        return engine
+
+    monkeypatch.setattr(cache, "get", _get)
+    monkeypatch.setattr(server, "_backend_can_embed", lambda engines: True)
+    tool = server.build_tools(cache, enable_images=False, enable_coder=False,
+                              enable_memory=False)["embed"]["handler"]
+    result = tool({"texts": ["a", "b"]})
+
+    assert result["isError"] is False, result
+    assert old.served_unloaded == 0
+    fresh = cache._engines["chat-a"]
+    assert fresh is not old and calls == [old, fresh]
+    assert json.loads(result["content"][0]["text"]) == [[float(id(fresh) % 1000)]] * 2
+
+
+# --------------------------------------------------------------------------- #
+#  The evictor's cache-lock wait, and the evictor under a generation lock     #
+# --------------------------------------------------------------------------- #
+
+def test_evict_lock_wait_is_below_busy_wait():
+    assert server.EVICT_LOCK_WAIT_SECONDS * 2 <= server.BUSY_WAIT_SECONDS
+
+
+def test_evict_lock_wait_is_capped_whatever_the_budget(monkeypatch):
+    _cfg(monkeypatch)
+    monkeypatch.setattr(server, "EVICT_LOCK_WAIT_SECONDS", 0.3)
+    cache = _cache_with(_FakeEngine("chat-a"))
+    held, release = threading.Event(), threading.Event()
+
+    def _hold():
+        with cache._lock:
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    try:
+        assert held.wait(5)
+        started = time.monotonic()
+        status = cache.evict_for_embedder(300.0)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        t.join(5)
+
+    assert status == "error"
+    assert elapsed < 5.0
+
+
+def test_evictor_under_a_generation_lock_evicts_the_others(monkeypatch):
+    """The embed tool reaches the evictor inside serving(X): X is pinned and
+    kept, the idle Y is unloaded, and nothing waits on X's generation lock."""
+    _cfg(monkeypatch)
+    x, y = _FakeEngine("chat-x"), _FakeEngine("chat-y")
+    cache = _cache_with(y, x)
+    done = {}
+
+    def _embed_like():
+        with cache.serving(x):
+            done["status"] = cache.evict_for_embedder(5.0)
+
+    t = threading.Thread(target=_embed_like)
+    t.start()
+    t.join(10)
+
+    assert done.get("status") == "unloaded"
+    assert y.unloaded == 1 and x.unloaded == 0
+    assert cache.resident == ["chat-x"] and x.active_requests == 0

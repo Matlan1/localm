@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 from .. import server as _srv
-from ..server import EngineCache, ModelLoadSkipped, _quiet_stdout, _text_result
+from ..server import (EngineCache, ModelEvictedError, ModelLoadSkipped, _quiet_stdout,
+                      _text_result)
 from ._common import MODEL_PARAM
 
 # Largest image file the chat tool reads from disk.
@@ -92,6 +93,10 @@ def answer_with(engines: EngineCache, decision, run):
                     name, skip_if_latched=name != decision.current)
             try:
                 result = run(engine, name)
+            except ModelEvictedError:
+                with _quiet_stdout():
+                    engine = engines.get_loaded_chat(name)
+                result = run(engine, name)
             except RuntimeError as e:
                 if not engines.is_peer(engine):
                     raise
@@ -170,13 +175,19 @@ def build(engines: EngineCache) -> dict[str, dict]:
         if not texts:
             return _text_result("'texts' is required (string or list)", is_error=True)
         # A fresh embedder load can print to stdout too, like chat() above.
-        with _quiet_stdout():
-            engine = engines.get(args.get("model"))
-        try:
-            with engines.serving(engine):
-                vecs = engine.embed(texts)
-        except NotImplementedError as e:
-            return _text_result(str(e), is_error=True)
+        # An engine evicted between the fetch and the pin is fetched once more.
+        for attempt in (0, 1):
+            with _quiet_stdout():
+                engine = engines.get(args.get("model"))
+            try:
+                with engines.serving(engine):
+                    vecs = engine.embed(texts)
+                break
+            except ModelEvictedError:
+                if attempt:
+                    raise
+            except NotImplementedError as e:
+                return _text_result(str(e), is_error=True)
         return _text_result(json.dumps(vecs))
 
     def rerank(args: dict) -> dict:
