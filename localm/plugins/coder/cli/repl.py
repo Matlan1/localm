@@ -217,11 +217,18 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             new_model = arg.strip()
             try:
                 load_model = getattr(agent.backend, "load_model", None)
-                if load_model is not None:
+                unverified = not getattr(agent.backend, "can_load_models", True)
+                if load_model is not None and not unverified:
                     print_info(f"Loading {new_model}...")
                     load_model(new_model)
                 agent.set_model(new_model)
-                print_success(f"Model switched to {new_model}.")
+                if unverified:
+                    print_warning(
+                        f"Model set to {new_model}, but this backend cannot "
+                        "confirm the name exists; a wrong name fails on the "
+                        "next request.")
+                else:
+                    print_success(f"Model switched to {new_model}.")
             except Exception as e:
                 print_error(f"Failed to switch model: {e}")
 

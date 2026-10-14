@@ -872,3 +872,61 @@ class TestStateNamesTheBrowser:
 
         assert body["open"] is True
         assert body["browser"] == "Microsoft Edge"
+
+
+class _BlockingStop:
+    """A browser whose stop() holds its caller until the test lets it go."""
+
+    def __init__(self, sid):
+        self.session_id = sid
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def stop(self):
+        self.entered.set()
+        self.release.wait(10)
+
+
+class TestStoppingDoesNotBlockTheServer:
+    def test_the_event_loop_keeps_serving_while_a_stop_is_in_progress(self, app):
+        import asyncio
+
+        import httpx
+
+        from localm.browser import session as bsession
+
+        slow = _BlockingStop("gui-owner")
+        bsession.register(slow)
+        loop_served = threading.Event()
+        holder = {}
+
+        def release_after_probing_the_loop():
+            if not slow.entered.wait(5):
+                slow.release.set()
+                return
+            holder["loop"].call_soon_threadsafe(loop_served.set)
+            loop_served.wait(2)
+            holder["served_during_stop"] = loop_served.is_set()
+            slow.release.set()
+
+        async def scenario():
+            holder["loop"] = asyncio.get_running_loop()
+            helper = threading.Thread(target=release_after_probing_the_loop)
+            helper.start()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://testserver") as c:
+                resp = await c.post("/api/browser/stop")
+            helper.join(5)
+            return resp
+
+        try:
+            resp = asyncio.run(scenario())
+        finally:
+            slow.release.set()
+            bsession.close_all()
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"closed": True}
+        assert holder.get("served_during_stop") is True, (
+            "the event loop was blocked while the browser was being stopped")

@@ -2092,6 +2092,10 @@ function _followSidebarModel(s, model, attempt = 0) {
     s.pendingModel = null;
     return Promise.resolve();
   }
+  if (modelCache.active && modelCache.active !== model) {
+    s.pendingModel = null;
+    return Promise.resolve();
+  }
   if (s.info.model === model) {
     s.pendingModel = null;
     return Promise.resolve();

@@ -404,6 +404,87 @@ def test_a_request_that_sends_no_response_is_counted_as_499():
     assert 'status="500"' not in text
 
 
+def _run_middleware(inner):
+    async def drive():
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            pass
+
+        try:
+            await assembly.MetricsMiddleware(inner)(
+                {"type": "http", "method": "GET", "path": "/x"}, receive, send)
+        except Exception as exc:
+            return exc
+
+    return asyncio.run(drive())
+
+
+def test_a_handler_that_raises_before_responding_is_counted_as_500():
+    metrics.configure(True)
+
+    async def broken_app(scope, receive, send):
+        raise RuntimeError("handler bug")
+
+    raised = _run_middleware(broken_app)
+    text = metrics.render()
+    assert isinstance(raised, RuntimeError)
+    assert 'status="500"' in text
+    assert 'status="499"' not in text
+
+
+def test_a_handler_that_raises_after_responding_keeps_its_sent_status():
+    metrics.configure(True)
+
+    async def late_failure(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        raise RuntimeError("stream broke")
+
+    raised = _run_middleware(late_failure)
+    text = metrics.render()
+    assert isinstance(raised, RuntimeError)
+    assert 'status="200"' in text
+    assert 'status="500"' not in text
+
+
+def test_a_cancelled_request_is_still_counted_as_499():
+    metrics.configure(True)
+
+    async def cancelled_app(scope, receive, send):
+        raise asyncio.CancelledError()
+
+    async def drive():
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            pass
+
+        with pytest.raises(asyncio.CancelledError):
+            await assembly.MetricsMiddleware(cancelled_app)(
+                {"type": "http", "method": "GET", "path": "/x"}, receive, send)
+
+    asyncio.run(drive())
+    text = metrics.render()
+    assert 'status="499"' in text
+    assert 'status="500"' not in text
+
+
+def test_an_unhandled_route_exception_is_a_500_in_the_real_app(enabled):
+    app, _ = _client()
+
+    @app.get("/boom-for-metrics")
+    async def _boom():
+        raise RuntimeError("route bug")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/boom-for-metrics").status_code == 500
+    text = _scrape(app, client).text
+    assert re.search(r'localm_http_requests_total\{[^}]*status="500"[^}]*\} 1', text)
+    assert 'status="499"' not in text
+
+
 def test_missing_semaphore_waiters_warn_once(monkeypatch, caplog):
     class Opaque:
         pass

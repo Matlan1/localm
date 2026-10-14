@@ -346,6 +346,13 @@ class HTTPBackend(BaseLLMBackend):
         self._ctx_capacity_cached = latch
         return self._ctx_capacity
 
+    @property
+    def can_load_models(self) -> bool:
+        """True when this backend's server is localm's own, so ``load_model``
+        loads and validates the name; False when it has no load endpoint and
+        ``load_model`` does nothing."""
+        return self._is_local_server
+
     def load_model(self, model: str) -> dict:
         """Ask this backend's localm server to load *model* now (POST
         /v1/models/load) and return the server's JSON answer, whose ``status``
@@ -371,6 +378,14 @@ class HTTPBackend(BaseLLMBackend):
                                  timeout=self._timeout, verify=self._verify,
                                  allow_redirects=False)
         _raise_on_redirect(resp, url)
+        if resp.status_code == 403:
+            detail = _response_detail(resp)
+            raise CoderAuthError(
+                f"The server refused to load {model} (HTTP 403"
+                f"{': ' + detail if detail else ''}). The API key was accepted "
+                "but may not load models: switching models needs the models:write "
+                "scope. Use the owner key (`localm key show --reveal`) or a key "
+                "minted with models:write.")
         _raise_for_status(resp)
         from localm.jsonreply import response_json
         body = response_json(resp)
