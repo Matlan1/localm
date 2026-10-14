@@ -335,7 +335,7 @@ def register(app: FastAPI, ctx) -> None:
                     if (configured and token) else None)
             held = prin[0] if prin else None
             csrf = (_hs.csrf_token_for(request, token)
-                    if (held is not None and source == "cookie") else "")
+                    if (held is not None and source == "cookie" and token) else "")
             return {"authed": held is not None,
                     "scopes": sorted(held) if held else [],
                     "required": configured or require_auth_enabled(),

@@ -3700,14 +3700,6 @@
                     "endColumn": 33,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 44,
-                    "endColumn": 49,
-                    "lineCount": 1
-                }
             }
         ],
         "./localm/inference/routing_latch.py": [
