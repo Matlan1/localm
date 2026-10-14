@@ -348,7 +348,9 @@ class VramSizingMixin:
         Windows plus an AMD ROCm/HIP build and are blind to every other process,
         so the free reading is corrected to a device-global figure where the raw
         one is known blind (see _device_global_free_bytes); on every other
-        platform it is returned unchanged."""
+        platform it is returned unchanged. A known-blind reading taken from
+        discover.load_device_memory_isolated() that cannot be corrected
+        answers None."""
         # One debug line per read, stating raw/source/corrected.
         from localm.debuglog import logger as _dbg
         free_raw, total = cls._free_total_vram_bytes()
@@ -370,6 +372,12 @@ class VramSizingMixin:
         corrected = cls._device_global_free_bytes(total)
         _dbg.debug("free-vram read: raw=%d total=%s source=%s "
                    "device-global-corrected=%s", free_raw, total, src, corrected)
+        if (corrected is None and src == "isolated-probe-device"
+                and cls._free_reading_may_be_blind()):
+            _dbg.debug("free-vram read: unmeasurable (the per-device reading "
+                       "counts only the probe's own process and could not be "
+                       "corrected)")
+            return None
         return corrected if corrected is not None else free_raw
 
     @staticmethod

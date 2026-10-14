@@ -105,9 +105,9 @@ def test_a_gpu_the_runtime_does_not_list_gets_no_assignment():
     assert (got.free, got.total) == (22 * GIB, 24 * GIB)
 
 
-def test_one_gpu_beside_a_runtime_with_two_devices_is_keyed_by_name():
+def test_one_gpu_is_a_plain_value_whatever_devices_the_runtime_recorded():
     got = _rocm([_named(0, DGPU, free=22 * GIB)], [["ROCm0", IGPU], ["ROCm1", DGPU]])
-    assert got.setting == "ROCm1=21.50"
+    assert got.setting == "21.50"
 
 
 def test_identical_cards_each_get_the_smaller_free_reading():

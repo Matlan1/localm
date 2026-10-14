@@ -667,10 +667,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Native image and video budgets name the right GPU.** On Windows with ROCm and two GPUs, the
   VRAM budget was assigned by localm's GPU number, which need not be the runtime's; it is now
   matched to each runtime device by name, so a card beside integrated graphics gets its own
-  budget and a GPU the runtime does not list gets none.
-- **Unloading a reranker, speech or embedding model no longer pauses other requests.** The
-  free-VRAM reading taken before an unload ran on the server's main thread and could hold every
-  other request and stream for up to 15 seconds; it now runs in the background pool.
+  budget.
+- **Unloading a model no longer pauses other requests.** The free-VRAM reading taken before an
+  unload (a chat, embedding, reranker or speech model, or Unload all) ran on the server's main
+  thread and could hold every other request and stream for up to 15 seconds; it now runs in the
+  background pool.
 - **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
   several seconds, and while it did, every other request and stream waited. The close now runs
   in the background pool like the browser's other actions.

@@ -26,6 +26,7 @@ class _Engine:
         self.active_requests = 0
         self.unloading = False
         self.unloading_at_read = None
+        self.gate_held_at_read = None
 
     def unload(self):
         self.loaded = False
@@ -41,6 +42,8 @@ def reading(monkeypatch):
     def _reading():
         calls.append(threading.get_ident())
         engine.unloading_at_read = engine.unloading
+        gate = hs._inference_sems.get("target")
+        engine.gate_held_at_read = gate is not None and gate._exclusive
         return None, True, None
 
     monkeypatch.setattr("localm.vram._vram_free_reading", _reading)
@@ -93,8 +96,9 @@ def test_unload_one_chat_engine_reads_off_the_loop_with_the_engine_flagged(readi
     result, loop_thread = _run(lambda: hs.unload_one_model("target"))
     assert result["status"] == "unloaded"
     _assert_off_loop(calls, loop_thread)
-    assert engine.unloading_at_read is True, (
-        "a request could pin the engine during the reading's await")
+    assert engine.unloading_at_read is True
+    assert engine.gate_held_at_read is True, (
+        "a request could take the model's gate during the reading's await")
     assert engine.unloading is False and engine.loaded is False
 
 

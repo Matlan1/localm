@@ -107,10 +107,10 @@ def vram_budget(backend: str, *, gpus: Optional[list] = None, status: Optional[s
     several GPUs on ROCm cannot be matched to the runtime's devices.
 
     Each GPU's budget is its device-global free VRAM less ``MARGIN_BYTES``, at
-    least ``MIN_BUDGET_BYTES``. One GPU, on a runtime with at most one GPU
-    device or on Vulkan, gives a plain GiB value. Otherwise on ROCm each
-    runtime device gets ``<device name>=<GiB>`` (``ROCm0=...``), matched to a
-    GPU by name (:func:`_per_device_setting`); *devices* is the runtime's
+    least ``MIN_BUDGET_BYTES``. One GPU gives a plain GiB value. Several ROCm
+    GPUs give each runtime device ``<device name>=<GiB>`` (``ROCm0=...``),
+    matched to a GPU by name (:func:`_per_device_setting`); *devices* is the
+    runtime's
     ``[name, description]`` device list (``Runtime.devices``). *gpus* and
     *status* replace the live ``discover.list_gpus`` reading and *platform*
     replaces ``sys.platform``. Never raises."""
@@ -133,13 +133,11 @@ def vram_budget(backend: str, *, gpus: Optional[list] = None, status: Optional[s
         return Budget(None, reason="a GPU's reading covers only this process or is incomplete")
     if len(usable) > 1 and backend != "rocm":
         return Budget(None, reason="several GPUs on the Vulkan runtime")
-    runtime_gpus = _runtime_gpus(devices)
-    if len(usable) == 1 and (backend != "rocm" or runtime_gpus is None
-                             or len(runtime_gpus) <= 1):
+    if len(usable) == 1:
         g = usable[0]
         return Budget(setting=_gib(g["free"] - MARGIN_BYTES), free=g["free"],
                       total=g["total"])
-    setting, matched, reason = _per_device_setting(usable, runtime_gpus)
+    setting, matched, reason = _per_device_setting(usable, _runtime_gpus(devices))
     if setting is None:
         return Budget(None, reason=reason)
     return Budget(setting=setting, free=sum(g["free"] for g in matched),

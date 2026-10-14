@@ -635,10 +635,9 @@ class TestBrokenIsolationIsNotRespawnedEveryRound:
 
 
 class TestHalfImportedTorchOffWindowsIsInconclusive:
-    """Off Windows a failed isolated probe degrades to the in-process read, which
-    declines while another thread is still importing torch. That round asked
-    nobody, so an empty reading is inconclusive and never replaces the last good
-    one."""
+    """Off Windows, a failed isolated probe while another thread is still
+    importing torch gives an inconclusive empty reading, which leaves the last
+    good reading in place."""
 
     _GOOD = [{"index": 0, "name": "AMD Radeon RX 6900 XT", "total": 16 * 1024 ** 3,
               "free": 8 * 1024 ** 3}]

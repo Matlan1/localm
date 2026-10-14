@@ -3383,9 +3383,8 @@ class TestFreeScope:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
 
     def test_a_blind_reading_inside_its_own_probe_is_tagged_process(self, monkeypatch):
-        """The correction runs inside the probe it corrects, so a probe is always
-        in flight here. A ROCm torch build's uncorrectable reading is still
-        process-blind and must be tagged so."""
+        """During its own probe, a ROCm torch build's uncorrected reading is
+        tagged process-scoped."""
         from localm.inference.backends.llamacpp import _loader
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.delitem(sys.modules, "torch", raising=False)
@@ -3919,11 +3918,8 @@ class TestGpuUsageSourceRobustness:
     @pytest.mark.parametrize("hip", [True, False])
     def test_raw_reading_answers_from_the_build_flag_while_a_probe_is_inflight(
             self, monkeypatch, hip):
-        """A GPU probe in flight does not stop the answer: the build flag comes
-        from torch's version.py without an import, so it neither races the
-        probe's own torch nor falls back to the resident-HIP signal, which is
-        False in the server and would tag a process-blind reading as
-        device-global."""
+        """With a GPU probe in flight the answer is the torch build flag, read
+        without importing torch."""
         import localm.gpu_usage as gu
         import localm.discover as _discover
         import sys as _sys

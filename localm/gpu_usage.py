@@ -725,9 +725,8 @@ def raw_reading_is_process_scoped() -> bool:
     known-doomed native-runtime DLL conflict
     (``discover._torch_gpu_probe_known_doomed``), or in a process that has
     loaded the native llama.cpp runtime (``_loader.native_lib_loaded``), the
-    resident-HIP-runtime signal answers. A GPU probe in flight changes nothing:
-    :func:`torch_build_is_hip` reads a file and takes no import lock. Never
-    raises."""
+    resident-HIP-runtime signal answers. The answer is the same while a GPU
+    probe is in flight. Never raises."""
     import sys
     if sys.platform != "win32":
         return False

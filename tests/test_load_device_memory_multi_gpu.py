@@ -110,6 +110,20 @@ def test_an_opaque_index_space_answers_none(windows_two_gpus, monkeypatch):
     assert discover.load_device_memory_isolated() is None
 
 
+def test_a_blind_reading_is_returned_corrected(windows_two_gpus, monkeypatch):
+    monkeypatch.setattr(gpu_usage, "raw_reading_is_process_scoped", lambda: True)
+    monkeypatch.setattr(gpu_usage, "device_global_used_bytes",
+                        lambda gpus: {g["index"]: 15 * GIB for g in gpus})
+    assert VramSizingMixin._free_vram_bytes() == 9 * GIB
+
+
+def test_a_blind_reading_that_cannot_be_corrected_is_unmeasurable(
+        windows_two_gpus, monkeypatch):
+    monkeypatch.setattr(gpu_usage, "raw_reading_is_process_scoped", lambda: True)
+    monkeypatch.setattr(gpu_usage, "device_global_used_bytes", lambda gpus: {})
+    assert VramSizingMixin._free_vram_bytes() is None
+
+
 def test_a_single_gpu_runtime_still_uses_the_isolated_probe(windows_two_gpus, monkeypatch):
     monkeypatch.setattr(_loader, "gpu_memory_isolated", lambda: (5 * GIB, 8 * GIB))
     monkeypatch.setattr(discover, "load_device_memory_isolated",
