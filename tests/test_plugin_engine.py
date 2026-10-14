@@ -875,6 +875,33 @@ def test_parse_spec_rejects_bad_manifest(tmp_path):
         parse_spec(d)
 
 
+@pytest.mark.parametrize("extra", [
+    "x]@https://example.invalid/pkg.whl#",
+    "voice; python_version>'0'",
+    "--index-url=https://example.invalid",
+    "",
+    "a..b",
+])
+def test_parse_spec_rejects_a_requires_extra_that_is_not_an_extra_name(tmp_path, extra):
+    import json
+    from localm.plugins.engine import parse_spec
+    d = tmp_path / "hostile"; d.mkdir()
+    (d / "plugin.toml").write_text(
+        '[plugin]\nname = "hostile"\nrequires_extras = [' + json.dumps(extra) + ']\n',
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="requires_extras"):
+        parse_spec(d)
+
+
+@pytest.mark.parametrize("extra", ["voice", "rag", "gpu-amd", "a_b", "x.y2"])
+def test_parse_spec_accepts_extra_names(tmp_path, extra):
+    from localm.plugins.engine import parse_spec
+    d = tmp_path / "ok"; d.mkdir()
+    (d / "plugin.toml").write_text(
+        '[plugin]\nname = "ok"\nrequires_extras = ["' + extra + '"]\n', encoding="utf-8")
+    assert parse_spec(d).requires_extras == [extra]
+
+
 def test_attach_engine_http_install_lifecycle(env, monkeypatch):
     """The /api/plugins/* management surface over the real shipped builtins:
     nothing installed by default; install -> enable/disable -> uninstall."""
