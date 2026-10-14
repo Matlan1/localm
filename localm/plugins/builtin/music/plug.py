@@ -166,7 +166,8 @@ async def music(req: MusicRequest, request: Request):
             job.push({"type": "line", "text":
                       "Per-component GPU placement applies to ComfyUI only; the native "
                       "backend loads each model on one GPU."})
-        release_other_native_media(job, s, "music")
+        if release_other_native_media(job, s, "music").cancelled:
+            return False
         swap = decide_media_swap(s)
         # The gate reads COMBINED free VRAM across a configured GPU split, but
         # each media model component loads WHOLE onto ONE card (localm ORDERS the cards

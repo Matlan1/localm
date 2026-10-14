@@ -34,16 +34,20 @@ required.
 
     onnxruntime/ort-wasm-simd-threaded.asyncify.mjs      53057 B
     onnxruntime/ort-wasm-simd-threaded.asyncify.wasm  26861777 B
+    onnxruntime/ort-wasm-simd-threaded.mjs               24381 B
+    onnxruntime/ort-wasm-simd-threaded.wasm           14264838 B
 
 Byte-exact copies of `dist/` from `onnxruntime-web@1.31.0-dev.20260914-8d85527a0`,
 the runtime build that `@huggingface/transformers@4.3.1` pins and compiles into
 `kokoro.min.js` (the bundle carries that version string and builds its runtime URL
 from it). The transformers.js package does not ship these files in its own `dist/`.
 
-Those two filenames are the ONLY runtime artefacts the bundle names, confirmed by
-reading it rather than assumed. The `.mjs` is emscripten glue that loads the `.wasm`
-beside it and spawns its own pthread workers from its own module URL, so the two
-must stay in one directory together.
+The `.asyncify` pair is the only runtime the bundle names by file name, and
+transformers.js 4 loads it in every browser except Safari below 26 without WebGPU,
+where it loads the plain `ort-wasm-simd-threaded.mjs` / `.wasm` pair instead. Both
+pairs are vendored, and `tts.js` picks the pair the same way. The `.mjs` is
+emscripten glue that loads the `.wasm` beside it and spawns its own pthread workers
+from its own module URL, so each pair must stay in one directory together.
 
 Until 2026-08-18 these were NOT vendored: the bundle defaulted `wasmPaths` to
 `https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/`, so neural

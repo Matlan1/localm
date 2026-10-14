@@ -639,6 +639,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
   several seconds, and while it did, every other request and stream waited. The close now runs
   in the background pool like the browser's other actions.
+- **Cancelling a native media job that is waiting for another one now ends the wait.** An image,
+  video or music job that did not fit in VRAM waited for the other kind of native job to finish
+  before stopping it, and kept going after you cancelled it: once the wait ended it stopped that
+  runtime and unloaded the chat model for a job that was already cancelled. It now stops waiting at
+  once, leaves the other runtime and the chat model alone, and the job ends as cancelled.
+- **Text-to-speech in Safari older than 26 without WebGPU loads the runtime build transformers.js
+  selects for it.** localm shipped only the asyncify onnxruntime build, which every browser got,
+  including that one. The plain build is now bundled too and used there.
 - **Server errors show up as 500 in `/metrics`.** A request whose handler crashed was counted as a
   499 (client left), so an alert on 5xx never fired; it is now counted as the 500 the client received.
 - **Unloading a model that another localm instance serves says so.** An Ollama client sending

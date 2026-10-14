@@ -695,15 +695,18 @@ def _native_runtime_loaded(key: str) -> bool:
     return server.running_pid() is not None
 
 
-def _native_runtime_free(key: str) -> bool:
+def _native_runtime_free(key: str,
+                         cancel_check: Optional[Callable[[], bool]] = None) -> bool:
     """Stop the native runtime *key* (the same call its backend's ``free_vram``
-    makes). True once it is no longer running."""
+    makes), waiting for the job it is running unless *cancel_check* turns true
+    first. True once it is no longer running; False when the wait was cancelled
+    or the runtime kept running."""
     if key == "sdcpp":
         from localm.media.sdcpp import shared
-        return shared.free()
+        return shared.free(cancel_check)
     from localm.media.koboldcpp import server
-    server.stop()
-    return True
+    server.stop(cancel_check)
+    return server.running_pid() is None
 
 
 def loaded_native_media_runtimes() -> list:
@@ -727,15 +730,23 @@ def _short_of(free: Optional[int], need: int) -> Optional[bool]:
     return free < need + _DEFAULT_HEADROOM
 
 
+class ReleaseResult(list):
+    """The runtimes ``release_other_native_media`` stopped. ``cancelled`` is True
+    when the job was cancelled while the helper was stopping runtimes; the caller
+    must end the job without unloading the chat model."""
+    cancelled = False
+
+
 def release_other_native_media(
     job: Any, settings: dict, media_label: str, *,
     read_reading: Optional[Callable[[], tuple]] = None,
     read_free: Optional[Callable[[], Optional[int]]] = None,
-) -> list:
+) -> ReleaseResult:
     """Before a native *media_label* job ("image" / "music" / "video"): stop this
     process's OTHER loaded native media runtimes when the job's
     ``vram_estimate_bytes`` plus headroom exceeds live free VRAM, one job-log line
-    per runtime stopped. Returns the list of runtimes stopped (empty when none).
+    per runtime stopped. Returns the runtimes stopped (empty when none) as a
+    :class:`ReleaseResult`.
 
     Does nothing for a ComfyUI job, a job with no estimate, or when free VRAM
     covers the job. A reading that is stale, unmeasurable or process-scoped cannot
@@ -743,13 +754,15 @@ def release_other_native_media(
     loaded - the same "unknown means act" rule the chat swap follows.
 
     Stopping a runtime waits for the job it is running to finish; it never kills
-    one. After a stop, waits for free VRAM to rise so the next load does not race
+    one. When *job* is cancelled during that wait (or before it) the remaining
+    runtimes are left alone and the call returns at once; the caller must check
+    ``job.cancel_requested``. After a stop, waits for free VRAM to rise so the next load does not race
     the driver's release. *read_reading* / *read_free* are injectable for tests."""
     if settings.get("backend") != "native":
-        return []
+        return ReleaseResult()
     need = settings.get("vram_estimate_bytes")
     if not isinstance(need, int) or isinstance(need, bool) or need <= 0:
-        return []
+        return ReleaseResult()
     own = _NATIVE_RUNTIME_OF.get(media_label)
     others = []
     for key in _NATIVE_RUNTIME_NAME:
@@ -763,7 +776,7 @@ def release_other_native_media(
             logger.debug("media: could not tell whether the %s is loaded (%s)",
                          _NATIVE_RUNTIME_NAME[key], e)
     if not others:
-        return []
+        return ReleaseResult()
     from localm.discover import FREE_SCOPE_DEVICE
     try:
         free, fresh, scope = (read_reading or _vram_free_reading)()
@@ -773,12 +786,14 @@ def release_other_native_media(
         free, fresh, scope = None, False, None
     measured = free if (fresh and scope == FREE_SCOPE_DEVICE) else None
     if _short_of(measured, need) is False:
-        return []
+        return ReleaseResult()
     if read_free is None:
         read_free = _live_free_vram_bytes
-    released = []
+    released = ReleaseResult()
     for key in others:
         name = _NATIVE_RUNTIME_NAME[key]
+        if job.cancel_requested:
+            break
         if measured is None:
             why = "free VRAM could not be read"
         else:
@@ -787,12 +802,16 @@ def release_other_native_media(
         job.push({"type": "line", "text":
                   f"Freeing VRAM: stopping the {name} ({why})."})
         try:
-            stopped = _native_runtime_free(key)
+            stopped = _native_runtime_free(key, lambda: job.cancel_requested)
         except Exception as e:
             job.push({"type": "line", "text":
                       f"Could not stop the {name} ({e}) - the {media_label} "
                       "backend may run low on VRAM."})
             continue
+        if job.cancel_requested:
+            if stopped:
+                released.append(key)
+            break
         if not stopped:
             job.push({"type": "line", "text":
                       f"The {name} kept its models in VRAM - the {media_label} "
@@ -800,6 +819,9 @@ def release_other_native_media(
             continue
         released.append(key)
         wait_for_vram_release(read_free, before_bytes=measured)
+    if job.cancel_requested:
+        job.push({"type": "line", "outcome": True, "text": "Cancelled."})
+        released.cancelled = True
     return released
 
 
