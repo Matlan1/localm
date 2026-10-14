@@ -2808,7 +2808,11 @@ export async function savePluginSettings(name) {
   const updates = {};
   for (const c of ctrls) {
     const cur = c.read();
-    if (_mediaChanged(cur, c.orig)) updates[c.field.key] = cur === undefined ? "" : cur;
+    if (c.field.widget === "secret") {
+      if (cur !== undefined) updates[c.field.key] = cur;
+    } else if (_mediaChanged(cur, c.orig)) {
+      updates[c.field.key] = cur === undefined ? "" : cur;
+    }
   }
   if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
   const r = await fetch("/v1/plugins/" + encodeURIComponent(name) + "/settings", {

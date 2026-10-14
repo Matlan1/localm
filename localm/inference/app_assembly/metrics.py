@@ -7,6 +7,7 @@ on at startup; with it off the route is not registered and nothing is collected.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from typing import Optional
@@ -39,8 +40,9 @@ def metrics_enabled() -> bool:
 
 class MetricsMiddleware:
     """Pure-ASGI request counter and timer. Records the route TEMPLATE the
-    router matched, never the requested path, and status 499 for a request
-    that ended before any response was sent."""
+    router matched, never the requested path, status 499 for a request that
+    ended before any response was sent, and status 500 for one whose handler
+    raised before any response was sent."""
 
     def __init__(self, app) -> None:
         self.app = app
@@ -50,17 +52,25 @@ class MetricsMiddleware:
             await self.app(scope, receive, send)
             return
         status = 499
+        responded = False
         started = time.perf_counter()
 
         async def _send(message):
-            nonlocal status
+            nonlocal status, responded
             if message["type"] == "http.response.start":
                 status = message["status"]
+                responded = True
             await send(message)
 
         metrics.request_started()
         try:
             await self.app(scope, receive, _send)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            if not responded:
+                status = 500
+            raise
         finally:
             route = scope.get("route")
             metrics.request_finished(

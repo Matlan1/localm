@@ -131,6 +131,43 @@ test("a configured secret field shows the configured tag and a Clear button", as
   assert.ok(clearBtn, "Clear button is rendered for a configured plugin secret");
 });
 
+async function secretSave(win, mutate) {
+  const sec = section(win, "myplug");
+  mutate(ctrl(sec, "api_key"));
+  sec.querySelector(".settings-section-save").click();
+  for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+test("Clear then Save on a configured plugin secret POSTs an empty string", async () => {
+  const payload = pluginsPayload({ plugins: [
+    { plugin: "myplug", label: "My Plugin", fields: [
+      pluginField("api_key", { widget: "secret", is_set: true, is_override: true }),
+    ] },
+  ] });
+  const posts = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch({ plugins: payload, posts }) });
+  await render(win);
+  await secretSave(win, (wrap) => wrap.querySelector(".secret-clear-btn").click());
+  assert.deepEqual(posts, [{ name: "myplug", body: { api_key: "" } }]);
+});
+
+test("typing a new plugin secret POSTs it, and an untouched secret is not sent", async () => {
+  const payload = pluginsPayload({ plugins: [
+    { plugin: "myplug", label: "My Plugin", fields: [
+      pluginField("api_key", { widget: "secret", is_set: true, is_override: true }),
+    ] },
+  ] });
+  const posts = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch({ plugins: payload, posts }) });
+  await render(win);
+  await secretSave(win, () => {});
+  assert.equal(posts.length, 0, "an untouched secret must not be sent");
+  await secretSave(win, (wrap) => { wrap.querySelector("input").value = "sk-new"; });
+  assert.deepEqual(posts, [{ name: "myplug", body: { api_key: "sk-new" } }]);
+});
+
 test("a failed fetch SHOWS the failure instead of silently dropping the section", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch({ plugsFail: true }) });
   await render(win);

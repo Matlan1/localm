@@ -279,13 +279,16 @@ def register(app: FastAPI, ctx) -> None:
         peer_routed = peer_routing.get_route(resolved) is not None
         if unload:
             _require_unload_allowed(request)
-            if not peer_routed:
-                if resolved not in _registry_names():
-                    raise P.OllamaError(404, f"model '{name}' not found")
-                result = await _hs.unload_one_model(resolved)
-                if isinstance(result, dict) and result.get("status") == "confirm_required":
-                    raise P.OllamaError(
-                        409, f"model '{name}' is in use; retry when its requests finish")
+            if peer_routed:
+                raise P.OllamaError(
+                    409, f"model '{name}' is served by another localm instance; "
+                         "unload it there")
+            if resolved not in _registry_names():
+                raise P.OllamaError(404, f"model '{name}' not found")
+            result = await _hs.unload_one_model(resolved)
+            if isinstance(result, dict) and result.get("status") == "confirm_required":
+                raise P.OllamaError(
+                    409, f"model '{name}' is in use; retry when its requests finish")
         elif not peer_routed:
             try:
                 await _hs.get_engine(resolved)

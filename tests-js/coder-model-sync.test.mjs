@@ -8,7 +8,7 @@ import { loadApp, runScript } from "./harness.mjs";
 
 const MODEL_URL = /^\/api\/coder\/sessions\/([^/]+)\/model$/;
 
-function setup(sessions, { busyOnce = new Set() } = {}) {
+function setup(sessions, { busyOnce = new Set(), engine = null } = {}) {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
     const u = String(url);
@@ -23,8 +23,13 @@ function setup(sessions, { busyOnce = new Set() } = {}) {
                  json: async () => ({ detail: "Session is busy; cannot switch models mid-task" }) };
       }
       const info = sessions.find((s) => s.info.id === m[1]).info;
+      if (engine) engine.active = body.model;
       return { ok: true, status: 200,
                json: async () => ({ ...info, model: body.model, model_pinned: body.pin }) };
+    }
+    if (engine && u.startsWith("/api/models")) {
+      return { ok: true, status: 200,
+               json: async () => ({ models: [], active: engine.active }) };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   };
@@ -140,4 +145,65 @@ test("switching a url-backend session's model does not refresh the model sidebar
   await flush();
   assert.equal(posts(calls).length, 1);
   assert.equal(refreshes(calls).length, before, "no sidebar refresh");
+});
+
+test("a pinned switch from one session repoints the other unpinned local sessions", async () => {
+  const engine = { active: "X" };
+  const a = local("a");
+  const b = local("b");
+  const { window, calls } = setup([a, b], { engine });
+  await flush();
+  await window.refreshModels();
+  await window.switchActiveSessionModel("C");
+  await flush();
+  const toB = posts(calls).filter((c) => c.url.endsWith("/b/model"));
+  assert.equal(toB.length, 1, "B follows the engine A moved");
+  assert.equal(toB[0].body.model, "C");
+  assert.equal(toB[0].body.pin, false);
+  assert.equal(window.__sessions[1].info.model, "C");
+});
+
+test("an engine change seen by the model poll repoints unpinned local sessions", async () => {
+  const engine = { active: "X" };
+  const { window, calls } = setup([local("a")], { engine });
+  await flush();
+  await window.refreshModels();
+  engine.active = "Q";
+  await window.refreshModels();
+  await flush();
+  assert.deepEqual(posts(calls).map((c) => c.body.model), ["Q"]);
+});
+
+test("the first model poll does not repoint a session", async () => {
+  const engine = { active: "Q" };
+  const { window, calls } = setup([local("a")], { engine });
+  await flush();
+  await window.refreshModels();
+  await flush();
+  assert.equal(posts(calls).length, 0);
+});
+
+test("a follow for a model that is no longer the loaded one is dropped", async () => {
+  const engine = { active: "C" };
+  const { window, calls } = setup([local("a")], { engine });
+  await flush();
+  await window.refreshModels();
+  emit(window, "B");
+  await flush();
+  assert.equal(posts(calls).length, 0);
+});
+
+test("a deferred follow replays the model that is loaded when the task ends", async () => {
+  const engine = { active: "B" };
+  const b = local("b", { busy: true });
+  const { window, calls } = setup([b], { engine });
+  await flush();
+  await window.refreshModels();
+  emit(window, "B");
+  engine.active = "C";
+  await window.refreshModels();
+  runScript(window, `handleCoderEvent(coder.sessions.get("b"),
+    { type: "final", ok: true, turns: 1, total_tokens: 1, changed_files: [] });`);
+  await flush();
+  assert.deepEqual(posts(calls).map((c) => c.body.model), ["C"]);
 });
