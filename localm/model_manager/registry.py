@@ -3892,12 +3892,13 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
             new_parts[i] = landed
         elif gguf.exists():
             try:
-                new_parts[i] = _store_standalone_projector(gguf, store)
+                placed = _store_standalone_projector(gguf, store)
             except RuntimeError as e:
                 console.print(f"[red]{escape(str(e))}[/red]")
                 return None
-            if gguf_is_mmproj(new_parts[i]):
-                recordable.setdefault(gguf.resolve(), new_parts[i])
+            new_parts[i] = placed
+            if gguf_is_mmproj(placed):
+                recordable.setdefault(gguf.resolve(), placed)
         else:
             new_parts[i] = gguf
 
