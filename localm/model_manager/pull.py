@@ -2289,18 +2289,17 @@ def _policy_head(url: str):
     allow_off = netpolicy.downloads_allowed_when_off()
     history: list = []
     current = url
-    for _ in range(6):
+    while True:
         netpolicy.check_url(current, allow_when_off=allow_off)
         resp = netpolicy.pinned_request(
             "HEAD", current, allow_redirects=False, timeout=10)
         location = (resp.headers.get("Location")
                     if resp.status_code in (301, 302, 303, 307, 308) else None)
-        if not location:
-            break
+        if not location or len(history) == 5:
+            resp.history = history
+            return resp
         history.append(resp)
         current = urllib.parse.urljoin(current, location)
-    resp.history = history
-    return resp
 
 
 class PullInFlight(Exception):

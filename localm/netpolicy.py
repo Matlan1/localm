@@ -584,14 +584,23 @@ def pinned_request(method: str, url: str, *, max_bytes: Optional[int] = None,
     session = _session_for(url)
     headers = {**(kwargs.pop("headers", None) or {}),
                "Host": _host_header(urllib.parse.urlparse(url))}
-    if max_bytes is None:
-        resp = session.request(method, url, headers=headers, **kwargs)
-        resp._localm_pin_session = session   # tie the session lifetime to the response
-        return resp
-    headers["Accept-Encoding"] = PER_READ_ACCEPT_ENCODING
-    kwargs["stream"] = True
+    if max_bytes is not None:
+        return _capped_request(session, method, url, headers, max_bytes, kwargs)
+    resp = session.request(method, url, headers=headers, **kwargs)
+    resp._localm_pin_session = session   # tie the session lifetime to the response
+    return resp
+
+
+def _capped_request(session, method: str, url: str, headers: dict,
+                    max_bytes: int, kwargs: dict):
+    """``pinned_request``'s *max_bytes* path: send on *session*, read and
+    decode the body one network read at a time, store it as the response's
+    content, close the response and *session*. Raises ``ResponseTooLarge``
+    when the decoded body is longer than *max_bytes*."""
+    headers = {**headers, "Accept-Encoding": PER_READ_ACCEPT_ENCODING}
     try:
-        resp = session.request(method, url, headers=headers, **kwargs)
+        resp = session.request(method, url, headers=headers,
+                               **{**kwargs, "stream": True})
         try:
             chunks, size = [], 0
             for chunk in _body_chunks(resp, True, max_bytes + 1):
