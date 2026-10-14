@@ -33,7 +33,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
     monkeypatch.setenv("LOCALM_API_KEY", OWNER_KEY)
-    with TestClient(create_app(None)) as c:
+    app = create_app(None)
+    from localm.plugins.engine import PluginManager
+    PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
+    with TestClient(app) as c:
         yield c, home
 
 
