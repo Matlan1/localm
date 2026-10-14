@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute
 
 from localm import scopes
 from localm.inference import anthropic_protocol, ollama_protocol, responses_protocol
@@ -102,7 +103,7 @@ def test_ollama_api_auth_table_names_only_mounted_paths_and_every_constant_path(
     documented = {p.rstrip("/") for p in re.findall(r"`(?:\w+ )?(/api/[A-Za-z/{}]+)`", table)}
     for token in re.findall(r"`(?:POST|GET|DELETE)? ?(/api/[A-Za-z]+)`", table):
         documented.add(token)
-    routes = {r.path for r in app.routes}
+    routes = {r.path for r in app.routes if isinstance(r, APIRoute)}
     documented = {"/api/blobs/{digest}" if p.startswith("/api/blobs") else p
                   for p in documented}
     assert documented <= routes, sorted(documented - routes)
