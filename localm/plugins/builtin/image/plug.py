@@ -248,7 +248,8 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
         def _on_saved(path):
             saved_names.append(path.name)
             if in_gallery:
-                gallery.stamp_owner("image", path.name, owner)
+                gallery.push_stamp_warning(
+                    job, gallery.stamp_owner("image", path.name, owner))
             if len(saved_names) == 1:
                 job.result = path.name
             job.push({"type": "image", "name": path.name})
@@ -289,7 +290,8 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
         if ok and not saved_names:
             job.result = out_path.name
             if in_gallery:
-                gallery.stamp_owner("image", out_path.name, owner)
+                gallery.push_stamp_warning(
+                    job, gallery.stamp_owner("image", out_path.name, owner))
         # Mark the outcome BEFORE the VRAM handover below, which is best-effort
         # cleanup that can itself raise (e.g. a non-comfy backend's free_vram())
         # and must never turn a successful generation into a reported failure.
@@ -749,7 +751,8 @@ def _make_upscale(*, source, upscaler, out_path, owner, self_url, instance_token
             s, source, upscaler, out_path, extra_meta=extra_meta,
             write_sidecar=not is_privacy, cancel_check=lambda: job.cancel_requested,
             on_progress=say,
-            on_saved=lambda p: gallery.stamp_owner("image", p.name, owner),
+            on_saved=lambda p: gallery.push_stamp_warning(
+                job, gallery.stamp_owner("image", p.name, owner)),
             on_queue_state=lambda state: job.progress(phase=state))
         job.push({"type": "line", "outcome": True, "text": message})
         if ok:

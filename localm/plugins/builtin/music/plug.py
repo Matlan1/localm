@@ -235,7 +235,8 @@ async def music(req: MusicRequest, request: Request):
         job.push({"type": "line", "text": message})
         if ok:
             job.result = track_path.name
-            gallery.stamp_owner("music", track_path.name, owner)
+            gallery.push_stamp_warning(
+                job, gallery.stamp_owner("music", track_path.name, owner))
         # The real deliverable is decided right here - mark it before the VRAM
         # handover below, which is best-effort cleanup that can itself raise
         # (e.g. a non-comfy backend's free_vram()) and must never be able to

@@ -420,7 +420,8 @@ def _run_memory(job: Job, *, engine=None) -> str:
     """Distil durable user facts from recent sessions into the assistant memory
     file, using the model. The privacy gate lives inside synthesize_memory (it
     skips with a clear status in privacy mode, never a silent success). Returns a
-    human-readable summary saved as the job result."""
+    human-readable summary saved as the job result. Raises RuntimeError when a
+    model call failed during synthesis, so the job is recorded as an error."""
     # Import the memory plugin's synthesizer directly, which resolves the
     # bundled-store source even when the memory plugin is not installed or enabled;
     # the privacy and write gates inside synthesize_memory still apply. Valid only
@@ -459,6 +460,9 @@ def _run_memory(job: Job, *, engine=None) -> str:
         result = synthesize_memory(complete)
     if result.get("status") == "skipped":
         return f"memory synthesis skipped ({result.get('reason')})"
+    if result.get("status") == "error":
+        from localm.plugins.builtin.memory.plug import _model_failed_detail
+        raise RuntimeError("memory synthesis failed: " + _model_failed_detail(result))
     # A contradiction to a saved (user-typed) fact waits as a suggested correction to
     # review in the memory panel, never silently applied or dropped. Reports the TOTAL
     # pending, not just this run's new ones.

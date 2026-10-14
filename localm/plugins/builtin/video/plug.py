@@ -241,7 +241,8 @@ async def video(req: VideoRequest, request: Request):
         job.push({"type": "line", "text": message})
         if ok:
             job.result = out_path.name
-            gallery.stamp_owner("video", out_path.name, owner)
+            gallery.push_stamp_warning(
+                job, gallery.stamp_owner("video", out_path.name, owner))
         # Mark the outcome BEFORE the VRAM handover below: that handover is
         # best-effort cleanup that can itself raise (e.g. a non-comfy backend's
         # free_vram()) and must never turn a successful generation into a

@@ -621,9 +621,21 @@ async def memory_consolidate(request: Request = None):
         # model in a gap between candidates.
         from localm.inference.http_server import driving_engine
         with driving_engine(eng):
-            return synthesize_memory(complete, principal=principal)
+            res = synthesize_memory(complete, principal=principal)
+        if res.get("status") == "error":
+            raise HTTPException(500, _model_failed_detail(res))
+        return res
 
     return await _off_loop(_do_consolidate)
+
+
+def _model_failed_detail(res: dict) -> str:
+    """The user-facing message for a synthesize_memory result whose model call
+    failed, naming what was still saved before the failure."""
+    saved = res.get("added", 0) + res.get("updated", 0) + res.get("episodic", 0)
+    tail = f" {saved} change(s) were saved before it failed." if saved else \
+        " Nothing was changed."
+    return f"The model call failed ({res.get('error')}).{tail}"
 
 
 # ------------------------------------------------------------------ #
@@ -700,7 +712,9 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     Privacy: gated on _persist_enabled(); in privacy mode returns
     ``{"status": "skipped", "reason": "privacy", "added": 0}`` and NEVER calls the
     model. Returns ``{status, added, updated, deleted, facts}``, the shape the jobs
-    "memory" runner consumes."""
+    "memory" runner consumes. When a model call raised in the fact pass or the
+    episodic pass, ``status`` is ``"error"`` with ``reason: "model_failed"`` and the
+    failure in ``error``; the counts then describe only what was written before it."""
     from localm.debuglog import logger
     if not _persist_enabled():
         logger.debug("memory synthesis skipped: privacy mode active")
@@ -729,7 +743,10 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     new_facts = [r.text for r in store.all() if r.id not in before]
     # Episodic capture is per-session and watermarked: one episode per NEW session,
     # not one blob summary over all of them.
-    episodic = _store_episodes(store, complete, embed_fn=embed_fn)
+    model_errors: list[str] = []
+    if res.get("status") == "error":
+        model_errors.append(res.get("error") or "the model call failed")
+    episodic = _store_episodes(store, complete, embed_fn=embed_fn, errors=model_errors)
     pruned = _prune_trivial_episodes(store, complete)
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on retroactively. Bounded per pass; a large store fills
@@ -742,13 +759,16 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
         except Exception as e:
             from localm.debuglog import logger
             logger.debug("memory vector backfill skipped: %s", e)
-    return {"status": res.get("status", "ok"), "added": res.get("added", 0),
-            "updated": res.get("updated", 0), "deleted": res.get("deleted", 0),
-            "proposed": res.get("proposed", 0),
-            # TOTAL pending corrections awaiting review, not just this run's new ones,
-            # so outstanding earlier suggestions are still reported.
-            "pending": len(store.corrections()),
-            "episodic": episodic, "pruned": pruned, "facts": new_facts}
+    out = {"status": res.get("status", "ok"), "added": res.get("added", 0),
+           "updated": res.get("updated", 0), "deleted": res.get("deleted", 0),
+           "proposed": res.get("proposed", 0),
+           # TOTAL pending corrections awaiting review, not just this run's new ones,
+           # so outstanding earlier suggestions are still reported.
+           "pending": len(store.corrections()),
+           "episodic": episodic, "pruned": pruned, "facts": new_facts}
+    if model_errors:
+        out.update(status="error", reason="model_failed", error=model_errors[0])
+    return out
 
 
 def _episodic_watermark_path(store) -> Path:
@@ -902,7 +922,7 @@ def _prune_trivial_episodes(store, complete) -> int:
         return 0
 
 
-def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
+def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None) -> int:
     """Store one EPISODIC summary PER NEW session file (past the watermark), so N
     sessions become N episodes instead of collapsing into <=1 blob summary. Each
     episode is tagged with its source session id + mtime. Deduped against existing
@@ -926,13 +946,17 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
     right after run_consolidation, in the same round, and passes its own
     embed_fn). Omit to resolve get_embedder() independently.
 
-    *now*: injected wall-clock for the settle check (defaults to time.time())."""
+    *now*: injected wall-clock for the settle check (defaults to time.time()).
+
+    A model call that raises stops the run at that session without advancing the
+    watermark past it, so the session is summarised by a later run. *errors*: when
+    a list, that failure's message is appended to it."""
     ef = _embed_fn() if embed_fn is _UNSET else embed_fn
     try:
         import time as _time
         from difflib import SequenceMatcher
 
-        from localm.memory import MemoryRecord, summarize_session
+        from localm.memory import ConsolidationModelError, MemoryRecord, summarize_session
         sdir = _home() / "sessions"
         if not sdir.is_dir():
             return 0
@@ -995,7 +1019,15 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
             if gens >= EPISODIC_MAX_PER_RUN:
                 break
             logger.info("memory consolidation: summarizing session %s (%d chars)...", f.stem, len(text))
-            summ = summarize_session(complete, text)
+            try:
+                summ = summarize_session(complete, text)
+            except ConsolidationModelError as e:
+                logger.warning("memory consolidation: the model call failed while "
+                               "summarizing session %s (%s); it is retried next run",
+                               f.stem, e)
+                if errors is not None:
+                    errors.append(str(e))
+                break
             gens += 1
             _advance(mt, f.stem)                    # a real attempt was made -> advance past it
             if not summ:
@@ -1119,9 +1151,11 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         proposed = res.get("proposed", 0)
         episodic = res.get("episodic", 0)
         status = res.get("status", "ok")
-        logger.info(
-            "memory auto-consolidate: pass complete (status=%s, added=%d, updated=%d, deleted=%d, proposed=%d, episodic=%d)",
+        log = logger.warning if status == "error" else logger.info
+        log(
+            "memory auto-consolidate: pass complete (status=%s, added=%d, updated=%d, deleted=%d, proposed=%d, episodic=%d%s)",
             status, added, updated, deleted, proposed, episodic,
+            f", error={res.get('error')}" if status == "error" else "",
         )
     except Exception as e:
         logger.warning("memory auto-consolidate failed: %s", e)
