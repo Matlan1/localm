@@ -177,7 +177,7 @@ def fake_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(mm, "gguf_registry_metadata", lambda p: {})
     monkeypatch.setattr(mm, "gguf_is_mmproj", lambda p: False)
     monkeypatch.setattr(mm, "gguf_embedding_signal", lambda p: False)
-    monkeypatch.setattr("requests.head", lambda *a, **k: MagicMock(
+    monkeypatch.setattr("localm.model_manager.pull._policy_head", lambda *a, **k: MagicMock(
         headers={"content-length": "4"}))
     return store, models_dir
 

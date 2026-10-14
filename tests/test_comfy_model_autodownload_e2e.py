@@ -92,7 +92,7 @@ def test_missing_model_detected_downloaded_and_preflight_now_passes(
         h.headers = {"content-length": str(len(fake_bytes))}
         return h
 
-    monkeypatch.setattr("requests.head", _fake_head)
+    monkeypatch.setattr("localm.model_manager.pull._policy_head", _fake_head)
 
     ok = mm.pull_model(source.spec, model_type=source.model_type,
                        dest_dir=dest_dir, register=False)
@@ -140,7 +140,7 @@ def test_managed_destination_variant_of_the_same_round_trip(home, monkeypatch):
 
     import huggingface_hub
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
-    monkeypatch.setattr("requests.head",
+    monkeypatch.setattr("localm.model_manager.pull._policy_head",
                         lambda *a, **k: MagicMock(headers={"content-length": "1"}))
 
     ok = mm.pull_model(source.spec, model_type=source.model_type,

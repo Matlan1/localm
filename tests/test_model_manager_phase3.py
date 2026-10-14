@@ -99,7 +99,7 @@ def _wire_http(monkeypatch, body: bytes):
     def fake_get(url, headers=None, stream=None, timeout=None):
         return _fake_resp(body)
 
-    monkeypatch.setattr("requests.head", fake_head)
+    monkeypatch.setattr("localm.model_manager.pull._policy_head", fake_head)
     monkeypatch.setattr("requests.get", fake_get)
 
 

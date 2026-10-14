@@ -55,7 +55,7 @@ def hub(tmp_path, monkeypatch):
     import huggingface_hub
     monkeypatch.setattr(mm, "_hf_file_sha256", fake_sha)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
-    monkeypatch.setattr("requests.head", fake_head)
+    monkeypatch.setattr("localm.model_manager.pull._policy_head", fake_head)
     return state
 
 

@@ -1460,7 +1460,7 @@
   "settings.field.coderRememberProjects.label": "Projekte merken, in denen Sie gecodet haben",
   "settings.field.coderReview.help": "Bevor der Coder eine Aufgabe als erledigt erklärt, liest ein Reviewer-Modell den Diff und gibt blockierende Probleme für einen weiteren Korrekturdurchlauf zurück. Fügt einen zusätzlichen Modell-Durchlauf pro Aufgabe hinzu, die Dateien geändert hat. Standardmäßig aus.",
   "settings.field.coderReview.label": "Änderungen vor dem Abschluss überprüfen",
-  "settings.field.coderReviewer.help": "Sendet Ihren Diff außerhalb dieses Rechners, außer bei leer oder 'local'. Werte: leer = das eigene Modell des Agenten; local = ein kleines CPU-Modell; openai; anthropic; oder eine http(s)-URL.",
+  "settings.field.coderReviewer.help": "Sendet Ihren Diff außerhalb dieses Rechners (die Netzwerkrichtlinie gilt), außer bei leer oder 'local'. Werte: leer = das eigene Modell des Agenten; local = ein kleines CPU-Modell; openai; anthropic; oder eine http(s)-URL.",
   "settings.field.coderReviewer.label": "Ziel-Modell für Review",
   "settings.field.coderReviewerModel.help": "Modellname für einen Cloud-/URL-Reviewer. Leer verwendet einen sinnvollen Anbieter-Standard oder den Modellnamen des Agenten selbst.",
   "settings.field.coderReviewerModel.label": "Reviewer-Modellname",
