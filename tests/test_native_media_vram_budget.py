@@ -77,12 +77,65 @@ def test_no_gpu_gives_no_budget():
                                       platform="win32"), "no GPU")
 
 
-def test_several_rocm_gpus_get_one_assignment_each():
-    gpus = [_gpu(1, free=4 * GIB, total=8 * GIB), _gpu(0, free=12 * GIB)]
-    got = sd_budget.vram_budget("rocm", gpus=gpus, status=discover.GPU_PROBE_OK,
-                                platform="win32")
-    assert got.setting == "rocm0=11.50,rocm1=3.50"
-    assert (got.free, got.total) == (16 * GIB, 24 * GIB)
+IGPU = "AMD Radeon(TM) Graphics"
+DGPU = "AMD Radeon RX 7900 XTX"
+
+
+def _named(index, name, free, total=24 * GIB):
+    return dict(_gpu(index, free=free, total=total), name=name)
+
+
+def _rocm(gpus, devices):
+    return sd_budget.vram_budget("rocm", gpus=gpus, status=discover.GPU_PROBE_OK,
+                                 platform="win32", devices=devices)
+
+
+def test_several_rocm_gpus_are_keyed_by_the_runtimes_own_device_names():
+    gpus = [_named(0, IGPU, free=1 * GIB, total=2 * GIB), _named(1, DGPU, free=22 * GIB)]
+    devices = [["ROCm0", DGPU], ["ROCm1", IGPU], ["CPU", "AMD Ryzen 9 7950X"]]
+    got = _rocm(gpus, devices)
+    assert got.setting == "ROCm0=21.50,ROCm1=0.50"
+    assert (got.free, got.total) == (23 * GIB, 26 * GIB)
+
+
+def test_a_gpu_the_runtime_does_not_list_gets_no_assignment():
+    gpus = [_named(0, IGPU, free=1 * GIB, total=2 * GIB), _named(1, DGPU, free=22 * GIB)]
+    got = _rocm(gpus, [["ROCm0", DGPU]])
+    assert got.setting == "ROCm0=21.50"
+    assert (got.free, got.total) == (22 * GIB, 24 * GIB)
+
+
+def test_one_gpu_beside_a_runtime_with_two_devices_is_keyed_by_name():
+    got = _rocm([_named(0, DGPU, free=22 * GIB)], [["ROCm0", IGPU], ["ROCm1", DGPU]])
+    assert got.setting == "ROCm1=21.50"
+
+
+def test_identical_cards_each_get_the_smaller_free_reading():
+    gpus = [_named(0, DGPU, free=20 * GIB), _named(1, DGPU, free=6 * GIB)]
+    got = _rocm(gpus, [["ROCm0", DGPU], ["ROCm1", DGPU]])
+    assert got.setting == "ROCm0=5.50,ROCm1=5.50"
+    assert (got.free, got.total) == (26 * GIB, 48 * GIB)
+
+
+def test_names_match_regardless_of_case_and_spacing():
+    got = _rocm([_named(0, IGPU, free=1 * GIB), _named(1, DGPU, free=22 * GIB)],
+                [["ROCm0", "  amd radeon  rx 7900 xtx "]])
+    assert got.setting == "ROCm0=21.50"
+
+
+def test_no_runtime_device_matching_a_gpu_gives_no_budget():
+    gpus = [_named(0, IGPU, free=1 * GIB), _named(1, DGPU, free=22 * GIB)]
+    _unmeasured(_rocm(gpus, [["ROCm0", "Some Other GPU"]]), "matches a GPU")
+
+
+def test_several_rocm_gpus_without_the_runtimes_devices_give_no_budget():
+    gpus = [_named(0, IGPU, free=1 * GIB), _named(1, DGPU, free=22 * GIB)]
+    _unmeasured(_rocm(gpus, None), "device list is not known")
+
+
+def test_one_gpu_on_a_one_device_runtime_stays_a_plain_value():
+    got = _rocm([_named(0, DGPU, free=22 * GIB)], [["ROCm0", "different name"]])
+    assert got.setting == "21.50"
 
 
 def test_several_vulkan_gpus_give_no_budget():
@@ -376,6 +429,28 @@ def test_a_first_load_does_not_wait_for_a_release(image_env, tmp_path, monkeypat
                                     width=64, height=64)
     assert ok, msg
     assert waited == [] and len(probes) == 1
+
+
+def test_an_image_load_keys_the_budget_by_the_installed_runtimes_devices(
+        tmp_path, monkeypatch):
+    runner = _Runner()
+    monkeypatch.setattr(shared, "runner", runner)
+    monkeypatch.setattr(shared, "arm_idle_timer", lambda seconds=None: None)
+    monkeypatch.setattr(sd_runtime, "resolve", lambda choice="auto": sd_runtime.Runtime(
+        backend="rocm", path=tmp_path / "rt",
+        devices=[["ROCm0", DGPU], ["ROCm1", IGPU], ["CPU", "cpu"]]))
+    monkeypatch.setattr(sd_budget, "_platform", lambda: "win32")
+    monkeypatch.setattr(discover, "list_gpus", lambda **kw: (
+        [_named(0, IGPU, free=1 * GIB, total=2 * GIB), _named(1, DGPU, free=22 * GIB)],
+        discover.GPU_PROBE_OK))
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"weights")
+    s = {"backend": "native", "native": {"model": str(model)}}
+    ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
+                                    width=64, height=64)
+    assert ok, msg
+    (_key, ctx), = runner.loads
+    assert ctx["max_vram"] == "ROCm0=21.50,ROCm1=0.50"
 
 
 # --------------------------------------------------------------------------- #
