@@ -612,6 +612,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **The chat model comes back after a failed image, video or music job.** When a generation
+  crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
+  until your next message. It now reloads on every way a job can end, and a job that finishes
+  last follows its own "reload the chat model afterwards" setting instead of replaying an
+  earlier job's reload.
 - **`localm rag add` no longer indexes credential folders.** Adding a folder such as `~/.ssh` or
   `~/.aws` from the terminal, or a folder that contains one, used to index its files even though
   the API refuses them. The command now refuses a credential folder, UNC or device path, and (when
