@@ -666,3 +666,21 @@ class TestTheRuntimeCatchIsNotWidened:
         assert r.status_code == 200
         assert r.json()["choices"][0]["text"] == "ok"
         assert r.json()["choices"][0]["finish_reason"] == "stop"
+
+
+class TestEmbedCapabilityDefault:
+    def test_base_backend_declares_it_cannot_embed(self):
+        assert _MinimalBackend().can_embed is False
+
+    def test_undeclared_backend_embeds_through_the_dedicated_embedder(self, monkeypatch):
+        import localm.inference.embedder as embedder
+        calls = []
+
+        def fake_embed_texts(texts):
+            calls.append(list(texts))
+            return [[0.25, 0.5]]
+
+        monkeypatch.setattr(embedder, "embed_texts", fake_embed_texts)
+        engine = _EngineWithBackend(_MinimalBackend())
+        assert engine.embed(["hello"]) == [[0.25, 0.5]]
+        assert calls == [["hello"]]

@@ -668,6 +668,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `--online` and `--anthropic` already did. The warning names the host your prompts and files go to,
   and says when the address came from `LOCALCODER_URL`. These privacy warnings now go to stderr, so
   `--output-format json` output stays clean.
+- **On Windows, a file can no longer be renamed to a device name.** Renaming a generated
+  image, track or clip, or a file in the folder browser, to a name such as `nul`, `con.png` or
+  `com1.txt` is refused there, because a write to such a name goes to the device and its data
+  is lost. On Linux and macOS these stay ordinary file names.
+- **The coder agent's image tool uses the image plugin's own ComfyUI address.** With a
+  ComfyUI URL set for the Images plugin, the coder's image tool sent its jobs to the shared
+  default address instead, a different instance from the one the Images page, the chat REPL
+  and the MCP server use.
 - **Gemma 4 GGUF models are prompted in their own chat format.** Every chat with a Gemma 4
   GGUF used to be sent as a generic ChatML prompt, with a warning that the template was not
   recognised, because llama.cpp's built-in template matcher has no Gemma 4 entry. localm now
