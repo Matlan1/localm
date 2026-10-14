@@ -108,7 +108,8 @@ def rag_add(collection, paths, force, embed, url):
                           or DEFAULT_EMBEDDING_MODEL).strip()
     with _refuse_if_locked(console):
         coll.create()             # a write too: takes the same lock
-        result = coll.add_paths(
+        result = run_or_die(
+            coll.add_paths,
             list(paths), force=force, embed_fn=embed_fn, model_name=model_name,
             on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
@@ -223,7 +224,8 @@ def rag_repair(collection, embed, url, yes):
         model_name = str(load_config().get("embedding_model")
                           or DEFAULT_EMBEDDING_MODEL).strip()
     with _refuse_if_locked(console):
-        result = coll.add_paths(
+        result = run_or_die(
+            coll.add_paths,
             paths, force=True, embed_fn=embed_fn, model_name=model_name,
             on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]repaired: {result['updated']} re-indexed, "
@@ -296,7 +298,8 @@ def rag_resync(collection, embed, url, prune_missing):
     # confine_index_path). The SCHEDULED job path passes indexing_policy()
     # instead.
     with _refuse_if_locked(console):
-        result = coll.resync(
+        result = run_or_die(
+            coll.resync,
             embed_fn=embed_fn, policy=None, prune_missing=prune_missing,
             model_name=model_name,
             on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))

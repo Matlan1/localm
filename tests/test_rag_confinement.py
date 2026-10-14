@@ -1144,6 +1144,20 @@ class TestCliCredentialFloor:
         assert [b["root"] for b in blocked] == [str(ssh)]
         assert c._resyncable_files([], None, notes.append) == []
 
+    def test_cli_add_reports_a_credential_folder_as_a_plain_refusal(self, home_env):
+        from click.testing import CliRunner
+
+        from localm.cli import rag as ragcli
+        home, _ = home_env
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        (ssh / "config").write_text("Host secret-host", encoding="utf-8")
+        res = CliRunner().invoke(ragcli.rag_group, ["add", "cli1", str(ssh)])
+        assert isinstance(res.exception, SystemExit), res.exception
+        assert res.exit_code == 1
+        assert "credential directory" in res.output
+        assert Collection("cli1").docs() == []
+
 
 class TestRagAddRouteSecretFile:
     def test_owner_explicit_secret_file_hard_blocked(self, rag_route_app):
