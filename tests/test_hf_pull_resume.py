@@ -241,15 +241,56 @@ class TestPartialOwnership:
         assert captured["resume_size"] == 0
         assert dest.read_bytes() == b"FRESH"
 
+    @pytest.mark.parametrize("local", [True, False])
+    def test_a_dead_owners_partial_from_before_a_host_rename(
+            self, cache, tmp_path, monkeypatch, dead_pid, local):
+        """A record written before the host was renamed carries another pid
+        space id but this machine's host id: its dead owner's partial is
+        adopted when the cache folder is on a local disk, and left alone
+        otherwise."""
+        import platform
+
+        from localm import instances
+        host = instances.host_id()
+        if host is None:
+            pytest.skip("no machine identifier is readable here")
+        with monkeypatch.context() as m:
+            m.setattr(platform, "node", lambda: "renamed-host-before")
+            m.setattr(instances, "_PID_SPACE", None)
+            old_space = instances.pid_space_id()
+        assert old_space != this_pid_space(), "the injected rename took no effect"
+        if not local:
+            monkeypatch.setattr(instances, "path_is_local", lambda p: False)
+        inc_path = cache / "file.etag.incomplete"
+        orphan = cache / "file.etag.dddd4444.incomplete"
+        orphan.write_bytes(b"HELLO")
+        _partial_owner_path(orphan).write_text(json.dumps(
+            {"pid": dead_pid[0], "space": old_space, "host": host,
+             "start": dead_pid[1]}), encoding="utf-8")
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b" WORLD" if local else b"FRESH")
+
+        _call(inc_path, dest, expected_size=11 if local else 5)
+
+        if local:
+            assert captured["resume_size"] == 5
+            assert dest.read_bytes() == b"HELLO WORLD"
+            assert not orphan.exists() and not _partial_owner_path(orphan).exists()
+        else:
+            assert captured["resume_size"] == 0
+            assert orphan.read_bytes() == b"HELLO"
+            assert _partial_owner_path(orphan).exists()
+
     def test_the_owner_record_names_this_process_its_pid_space_and_start(
             self, cache):
-        from localm.instances import process_start_identity
+        from localm.instances import host_id, process_start_identity
         from localm.model_manager.pull import _pid_space_id, _write_partial_owner
         p = cache / "file.etag.cccc3333.incomplete"
         p.write_bytes(b"")
         _write_partial_owner(p)
         rec = json.loads(_partial_owner_path(p).read_text(encoding="utf-8"))
         assert rec == {"pid": os.getpid(), "space": _pid_space_id(),
+                       "host": host_id(),
                        "start": process_start_identity(os.getpid())}
 
     def test_partial_without_owner_record_is_neither_adopted_nor_deleted(

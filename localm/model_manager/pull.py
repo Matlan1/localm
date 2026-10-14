@@ -61,24 +61,32 @@ def _pid_space_id() -> str:
     return instances.pid_space_id()
 
 
-def _same_pid_space(rec: dict) -> bool:
-    """True when owner record *rec* was written in this process's pid space:
-    its id is this one (see :func:`_pid_space_id`), or it is the id an earlier
-    localm wrote on this host (see
-    :func:`localm.instances.legacy_pid_space_id` and
-    :func:`localm.instances.legacy_record_is_this_host`). A record naming no
-    pid space is not judged here."""
+def _same_pid_space(rec: dict, where: Path) -> bool:
+    """True when owner record *rec*, stored in directory *where*, was written
+    in this process's pid space: its id is this one (see
+    :func:`_pid_space_id`); or it is the id an earlier localm wrote on this
+    host (see :func:`localm.instances.legacy_pid_space_id` and
+    :func:`localm.instances.legacy_record_is_this_host`); or its host id
+    equals this one (see :func:`localm.instances.host_id`, which does not
+    depend on the host name) and *where* is on a disk attached to this machine
+    (see :func:`localm.instances.path_is_local`). A record naming no pid space
+    is not judged here."""
     space = rec.get("space")
     if space == _pid_space_id():
         return True
-    return (space is not None and space == instances.legacy_pid_space_id()
-            and instances.legacy_record_is_this_host(rec))
+    if (space is not None and space == instances.legacy_pid_space_id()
+            and instances.legacy_record_is_this_host(rec)):
+        return True
+    host = rec.get("host")
+    return (space is not None and isinstance(host, str)
+            and host == instances.host_id() and instances.path_is_local(where))
 
 
 def _write_partial_owner(partial: Path) -> None:
     """Record this process (pid, pid space and start identity) as the owner of
     *partial*."""
     rec = {"pid": os.getpid(), "space": _pid_space_id(),
+           "host": instances.host_id(),
            "start": instances.process_start_identity(os.getpid())}
     _partial_owner_path(partial).write_text(json.dumps(rec), encoding="utf-8")
 
@@ -110,7 +118,7 @@ def _partial_owner_is_gone(partial: Path) -> bool:
     """True only when the recorded owner of *partial* is PROVEN dead.
 
     Returns False for a missing or unreadable sidecar, an unparsable pid, a
-    record written in another pid space (see :func:`_pid_space_id`), a live
+    record written in another pid space (see :func:`_same_pid_space`), a live
     pid whose start identity matches the record or cannot be compared with it
     (see :func:`localm.instances.start_identity_differs`), a live pid in a
     record that names no pid space, and any probe failure. A pid that is this
@@ -127,7 +135,7 @@ def _partial_owner_is_gone(partial: Path) -> bool:
     if pid <= 0:
         return False
     space = rec.get("space")
-    if space is not None and not _same_pid_space(rec):
+    if space is not None and not _same_pid_space(rec, partial.parent):
         return False
     if pid == os.getpid():
         return not _partial_in_flight(partial)
@@ -2338,9 +2346,9 @@ def _part_lock_owner(d: Path):
     return _read_lock_record(d)
 
 
-def _record_holder_is_gone(rec) -> bool:
+def _record_holder_is_gone(rec, where: Path) -> bool:
     """:func:`_part_lock_holder_is_gone` for the owner record *rec*, which
-    may be None."""
+    may be None, stored in directory *where*."""
     if rec is None:
         return False
     try:
@@ -2348,7 +2356,7 @@ def _record_holder_is_gone(rec) -> bool:
     except (TypeError, ValueError):
         return False
     space = rec.get("space")
-    if space is not None and not _same_pid_space(rec):
+    if space is not None and not _same_pid_space(rec, where):
         return False
     if pid == os.getpid():
         return False
@@ -2360,7 +2368,7 @@ def _record_holder_is_gone(rec) -> bool:
 
 def _part_lock_holder_is_gone(d: Path) -> bool:
     """True only when the recorded holder is PROVEN gone: its pid is dead, or
-    the record names this pid space (see :func:`_pid_space_id`) and the live
+    the record names this pid space (see :func:`_same_pid_space`) and the live
     pid's start identity differs from the one the holder recorded (see
     :func:`localm.instances.process_start_identity`). A record from another
     pid space is never gone; one that names no pid space is judged by pid
@@ -2379,7 +2387,7 @@ def _part_lock_holder_is_gone(d: Path) -> bool:
     True when it genuinely cannot tell - so this composes rather than
     re-deciding.
     """
-    return _record_holder_is_gone(_part_lock_owner(d))
+    return _record_holder_is_gone(_part_lock_owner(d), d.parent)
 
 
 def _is_empty_dir(d: Path) -> bool:
@@ -2470,7 +2478,7 @@ def _sweep_lock_leftovers(locks: Path) -> None:
                     os.rmdir(p)
                 except OSError as e:
                     logger.debug("left %s in place: %s", p, e)
-            elif _record_holder_is_gone(rec):
+            elif _record_holder_is_gone(rec, locks):
                 shutil.rmtree(p, ignore_errors=True)
 
 
@@ -2577,6 +2585,7 @@ def _stage_lock_record(locks: Path, filename: str, token: str) -> Path:
     # inspecting the lock.
     payload = json.dumps({"pid": os.getpid(), "filename": filename,
                           "space": _pid_space_id(),
+                          "host": instances.host_id(),
                           "start": instances.process_start_identity(os.getpid()),
                           "token": token, "started": time.time()})
     for _ in range(_LOCK_ATTEMPTS):
