@@ -717,6 +717,21 @@ def _render_processor_prompt(processor, template_messages, *,
         tokenize=False, add_generation_prompt=add_generation_prompt, **extra)
 
 
+def _require_media_placeholders(processor, text: str, n_images: int,
+                                n_audios: int) -> None:
+    """Raise :class:`UnsupportedInputError` when the rendered prompt *text*
+    holds fewer of *processor*'s ``image_token`` (``audio_token``) placeholders
+    than *n_images* (*n_audios*). A processor that names no such token is not
+    checked."""
+    from .base import UnsupportedInputError
+    for attr, count in (("image_token", n_images), ("audio_token", n_audios)):
+        token = getattr(processor, attr, None)
+        if count and isinstance(token, str) and token and text.count(token) < count:
+            raise UnsupportedInputError(TOKENIZER_TEMPLATE_MEDIA_MESSAGE.format(
+                f"the prompt has {text.count(token)} {token} placeholder(s) "
+                f"for {count} attached item(s)"))
+
+
 TOKENIZER_TEMPLATE_MEDIA_MESSAGE = (
     "This model's processor has no chat template of its own, and the chat "
     "template its tokenizer carries could not lay out the attached media: {}")
@@ -1685,7 +1700,10 @@ class HFWorker:
                         template_messages.append(msg)
 
                 if self._processor and self._is_multimodal:
-                    text = _render_processor_prompt(self._processor, template_messages)
+                    text = _render_processor_prompt(
+                        self._processor, template_messages,
+                        chat_template=_processor_fallback_template(
+                            self._processor, self._tokenizer))
                 else:
                     text = self._tokenizer.apply_chat_template(
                         template_messages, tokenize=False, add_generation_prompt=True
@@ -1721,7 +1739,8 @@ class HFWorker:
         *device*. Text-only outputs are left out."""
         text = _render_processor_prompt(
             self._processor, [{"role": "user", "content": [{"type": "image"}]}],
-            add_generation_prompt=False)
+            add_generation_prompt=False,
+            chat_template=_processor_fallback_template(self._processor, self._tokenizer))
         out: dict[str, Mapping] = {}
         for key in wanted:
             image = images[keys.index(key)]
@@ -2047,6 +2066,8 @@ class HFWorker:
                     raise
                 raise UnsupportedInputError(
                     TOKENIZER_TEMPLATE_MEDIA_MESSAGE.format(f"{type(e).__name__}: {e}")) from e
+            if fallback_template is not None:
+                _require_media_placeholders(self._processor, text, len(images), len(audios))
             # add_special_tokens=False: the template already emitted the model's
             # BOS, so re-tokenizing with the default would prepend a SECOND one
             # (see the text-path note below). Standard processors forward this to

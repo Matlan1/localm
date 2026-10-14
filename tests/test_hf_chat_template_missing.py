@@ -276,3 +276,61 @@ class TestImageTurnWithATokenizerOnlyTemplate:
         worker = _vision_worker(None, {"default": _PAIR_TEMPLATE, "tool_use": "x"})
         with pytest.raises(_Reached):
             next(worker.chat_stream(_image_turn(), max_tokens=4))
+
+
+def _llava_worker(tokenizer_template):
+    """An HFWorker holding a real LlavaProcessor with no chat template of its own,
+    whose tokenizer's template is *tokenizer_template*. LlavaProcessor accepts a
+    prompt with no ``<image>`` placeholder without complaint."""
+    pytest.importorskip("transformers")
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import CLIPImageProcessor, LlavaProcessor, PreTrainedTokenizerFast
+
+    tok = Tokenizer(models.WordLevel({"<unk>": 0, "hi": 1}, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    fast = PreTrainedTokenizerFast(tokenizer_object=tok, unk_token="<unk>")
+    fast.add_special_tokens({"additional_special_tokens": ["<image>"]})
+    fast.chat_template = tokenizer_template
+    processor = LlavaProcessor(image_processor=CLIPImageProcessor(), tokenizer=fast,
+                               patch_size=14, vision_feature_select_strategy="default")
+    worker = object.__new__(_hf_worker.HFWorker)
+    worker._processor = processor
+    worker._tokenizer = processor.tokenizer
+    worker._model = _ModelAfterProcessing()
+    worker._supports_image = True
+    worker._supports_audio = False
+    worker.processor_error = None
+    return worker
+
+
+class TestProcessorThatDoesNotCountPlaceholders:
+    def test_a_tokenizer_template_that_drops_the_image_is_refused_before_generation(self):
+        from localm.inference.backends.base import UnsupportedInputError
+        worker = _llava_worker(_TEXT_ONLY_TEMPLATE)
+        with pytest.raises(UnsupportedInputError) as ei:
+            next(worker.chat_stream(_image_turn(), max_tokens=4))
+        assert "0 <image> placeholder(s) for 1 attached item(s)" in str(ei.value)
+
+    def test_a_tokenizer_template_that_places_the_image_proceeds(self):
+        worker = _llava_worker(_PAIR_TEMPLATE)
+        with pytest.raises(_Reached):
+            next(worker.chat_stream(_image_turn(), max_tokens=4))
+
+
+class TestOtherProcessorRenders:
+    def test_the_message_count_uses_the_tokenizer_template(self):
+        worker = _vision_worker(None, _PAIR_TEMPLATE)
+        worker._is_multimodal = True
+        messages = [{"role": "user", "content": "hi"}]
+        rendered = _hf_worker._render_processor_prompt(
+            worker._processor, messages, chat_template=_PAIR_TEMPLATE.replace(
+                "{% for c in m['content'] %}", "{% for c in [{'type': 'text', 'text': m['content']}] %}"))
+        assert worker.count_messages_tokens(messages) == len(
+            worker._tokenizer.encode(rendered, add_special_tokens=False))
+
+    def test_single_image_inputs_render_with_the_tokenizer_template(self):
+        from localm.inference.media import decode_image_url
+        worker = _vision_worker(None, _PAIR_TEMPLATE)
+        image = decode_image_url(_image_url())
+        out = worker._single_image_inputs([image], ["k"], ["k"], "cpu")
+        assert "pixel_values" in out["k"]
