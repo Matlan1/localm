@@ -151,3 +151,34 @@ def test_create_key_still_works_on_a_valid_list_keystore(auth):
     path.write_text("[]", encoding="utf-8")
     auth.create_key("alpha", [])
     assert {r["name"] for r in auth.list_keys()} == {"alpha"}
+
+
+def test_wrong_shape_keystore_is_a_409_on_the_key_routes_and_exit_1_on_the_cli(
+        auth, monkeypatch):
+    """create/revoke over a wrong-shape auth.json report the refusal cleanly on
+    every surface, with the file untouched."""
+    from click.testing import CliRunner
+    from fastapi.testclient import TestClient
+
+    from localm.cli import main
+    from localm.inference.http_server import create_app
+
+    owner = "owner-admin-key-keystore-shape-abc123"
+    monkeypatch.setenv("LOCALM_API_KEY", owner)
+    path = Path(auth.keystore_file())
+    path.write_text('{"keys": []}', encoding="utf-8")
+    before = path.read_bytes()
+    headers = {"Authorization": f"Bearer {owner}"}
+
+    with TestClient(create_app(None)) as c:
+        created = c.post("/v1/keys", json={"name": "gamma", "scopes": []}, headers=headers)
+        revoked = c.delete("/v1/keys/any-id", headers=headers)
+    cli_create = CliRunner().invoke(main, ["key", "create", "gamma", "--scope", "chat"])
+    cli_rm = CliRunner().invoke(main, ["key", "rm", "any-id", "--yes"])
+
+    assert path.read_bytes() == before, "the wrong-shape keystore was overwritten"
+    assert (created.status_code, revoked.status_code) == (409, 409), (
+        created.text, revoked.text)
+    assert (cli_create.exit_code, cli_rm.exit_code) == (1, 1), (
+        cli_create.output, cli_rm.output)
+    assert "auth.json" in cli_create.output and "auth.json" in cli_rm.output

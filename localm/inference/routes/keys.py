@@ -39,6 +39,7 @@ def register(app: FastAPI, ctx) -> None:
                             caller: Optional[set] = Depends(caller_scopes)):
         from localm import auth
         from localm.auth import create_key
+        from localm.config import ConfigUnreadable
         # Capture BEFORE minting: True only when this is the very first key on an
         # otherwise-keyless install (the open -> protected transition).
         was_open = not auth.any_key_configured()
@@ -94,6 +95,8 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(403, str(e)) from e
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        except ConfigUnreadable as e:
+            raise HTTPException(409, str(e)) from e
         # Catch at grant: warn (do not block) when a granted scope unlocks a
         # plugin the host cannot serve yet (not installed / missing pip extras).
         mgr = getattr(app.state, "plugin_manager", None)
@@ -138,6 +141,11 @@ def register(app: FastAPI, ctx) -> None:
     @app.delete("/v1/keys/{key_id}", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def revoke_key_ep(key_id: str):
         from localm.auth import revoke_key
-        if not revoke_key(key_id):
+        from localm.config import ConfigUnreadable
+        try:
+            revoked = revoke_key(key_id)
+        except ConfigUnreadable as e:
+            raise HTTPException(409, str(e)) from e
+        if not revoked:
             raise HTTPException(404, f"No such key: {key_id}")
         return {"status": "revoked", "id": key_id}
