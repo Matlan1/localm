@@ -100,6 +100,30 @@ class TestConfigState:
                          id2label={"0": "a", "1": "b"})
         assert _detect_local_model_type(folder, is_gguf=False, is_hf=True)[0] == "unknown"
 
+    @pytest.mark.parametrize("where", ["tokenizer_config", "jinja", "json"])
+    def test_a_single_score_head_with_a_chat_template_is_a_reward_model(self, tmp_path, where):
+        folder = _config(tmp_path / "m", architectures=["LlamaForSequenceClassification"],
+                         id2label={"0": "LABEL_0"})
+        if where == "tokenizer_config":
+            (folder / "tokenizer_config.json").write_text(
+                json.dumps({"chat_template": "{{ messages }}"}), encoding="utf-8")
+        elif where == "jinja":
+            (folder / "chat_template.jinja").write_text("{{ messages }}", encoding="utf-8")
+        else:
+            (folder / "chat_template.json").write_text(
+                json.dumps({"chat_template": "{{ messages }}"}), encoding="utf-8")
+        assert hf_reranker_state(folder) is False
+        assert _detect_local_model_type(folder, is_gguf=False, is_hf=True)[0] == "unknown"
+
+    @pytest.mark.parametrize("tok_cfg", [
+        {}, {"chat_template": None}, {"chat_template": ""}, "not json"])
+    def test_a_tokenizer_config_without_a_template_keeps_the_reranker(self, tmp_path, tok_cfg):
+        folder = _config(tmp_path / "m", architectures=["XLMRobertaForSequenceClassification"],
+                         id2label={"0": "LABEL_0"})
+        (folder / "tokenizer_config.json").write_text(
+            tok_cfg if isinstance(tok_cfg, str) else json.dumps(tok_cfg), encoding="utf-8")
+        assert hf_reranker_state(folder) is True
+
 
 class TestHeadCheck:
     @staticmethod
@@ -275,6 +299,43 @@ class TestRealCrossEncoder:
 
 
 @needs_stack
+def _build_reward_model(folder):
+    """A tiny random LlamaForSequenceClassification (one output) whose tokenizer
+    carries a chat template, as a reward model ships."""
+    import torch
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import LlamaConfig, LlamaForSequenceClassification, PreTrainedTokenizerFast
+
+    torch.manual_seed(0)
+    cfg = LlamaConfig(vocab_size=64, hidden_size=32, intermediate_size=64,
+                      num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=4,
+                      max_position_embeddings=64, num_labels=1, pad_token_id=0)
+    LlamaForSequenceClassification(cfg).save_pretrained(folder)
+    tok = Tokenizer(models.WordLevel({"<pad>": 0, "<unk>": 1}, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    fast = PreTrainedTokenizerFast(tokenizer_object=tok, unk_token="<unk>", pad_token="<pad>")
+    fast.chat_template = "{% for m in messages %}{{ m['content'] }}{% endfor %}"
+    fast.save_pretrained(folder)
+
+
+@needs_stack
+class TestRewardModelBesideAReranker:
+    def test_adding_a_reward_model_keeps_automatic_reranking(
+            self, cross_encoder, isolated_home, tmp_path):
+        from localm.config import update_config
+        from localm.rag.rerank import rerank_plan
+        reward = tmp_path / "rm"
+        _build_reward_model(reward)
+        assert add_local(str(cross_encoder), name="ce") is True
+        assert add_local(str(reward), name="rm") is True
+        assert load_registry()["rm"]["model_type"] != "embedding"
+        assert reranker.registered_rerankers() == ["ce"]
+        update_config(lambda c: c.update({"rag_rerank": True, "rag_rerank_model": ""}))
+        plan = rerank_plan()
+        assert plan.note is None, plan.note
+        assert plan.model == "ce" and plan.fn is not None
+
+
 class TestMultiLabelHead:
     def test_the_label_names_come_back_with_every_output(self, tmp_path):
         folder = tmp_path / "ce3"
