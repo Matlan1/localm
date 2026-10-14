@@ -25,6 +25,14 @@ SLOT_LABELS = {
     "clip_vision": "CLIP vision encoder",
 }
 
+
+def slot_label(slot: str, family: Optional[str]) -> str:
+    """The user-facing name of *slot* for a *family* model (SD 2.x's
+    ``clip_l`` slot takes an OpenCLIP-H text encoder)."""
+    if slot == "clip_l" and family == "sd2":
+        return "OpenCLIP-H text encoder"
+    return SLOT_LABELS.get(slot, slot)
+
 # Registry types whose entries can fill a native slot or be a native model.
 CANDIDATE_TYPES = ("diffusion-unet", "text-encoder", "vae", "lora", "llm", "unknown",
                    "embedding")
@@ -76,6 +84,10 @@ class Download:
 _CLIP_L = Download("comfyanonymous/flux_text_encoders", "clip_l.safetensors", 246_144_152,
                    "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd",
                    "text-encoder")
+_CLIP_H = Download("sd2-community/stable-diffusion-2-1-base",
+                   "text_encoder/model.fp16.safetensors", 680_821_096,
+                   "681c555376658c81dc273f2d737a2aeb23ddb6d1d8e5b3a7064636d359a22668",
+                   "text-encoder", name="openclip_h")
 _CLIP_G = Download("Comfy-Org/stable-diffusion-3.5-fp8", "text_encoders/clip_g.safetensors",
                    1_389_382_176,
                    "ec310df2af79c318e24d20511b601a591ca8cd4f1fce1d8dff822a356bcdb1f4",
@@ -126,7 +138,7 @@ _SD_VAE = Download("stabilityai/sd-vae-ft-mse-original",
 # (slot, family) -> the download offered when no registered file fits.
 _DOWNLOADS: dict[tuple[str, str], Download] = {
     ("clip_l", "flux"): _CLIP_L, ("clip_l", "sd3"): _CLIP_L, ("clip_l", "sdxl"): _CLIP_L,
-    ("clip_l", "sd1"): _CLIP_L,
+    ("clip_l", "sd1"): _CLIP_L, ("clip_l", "sd2"): _CLIP_H,
     ("clip_g", "sd3"): _CLIP_G, ("clip_g", "sdxl"): _CLIP_G,
     ("t5xxl", "flux"): _T5XXL, ("t5xxl", "sd3"): _T5XXL, ("t5xxl", "chroma"): _T5XXL,
     ("t5xxl", "wan2.1"): _UMT5, ("t5xxl", "wan2.2"): _UMT5,
@@ -143,6 +155,7 @@ _DOWNLOADS: dict[tuple[str, str], Download] = {
 # Substrings that make a registered file the preferred fit, per (slot, family).
 _NAME_HINTS: dict[tuple[str, Optional[str]], tuple[str, ...]] = {
     ("clip_l", None): ("clip_l", "clip-l", "clipl"),
+    ("clip_l", "sd2"): ("openclip_h", "clip_h", "clip-h", "openclip", "open_clip"),
     ("clip_g", None): ("clip_g", "clip-g", "clipg"),
     ("t5xxl", None): ("t5xxl", "t5-xxl", "t5"),
     ("t5xxl", "wan2.1"): ("umt5",), ("t5xxl", "wan2.2"): ("umt5",),
@@ -269,14 +282,14 @@ def pair_components(info: FileInfo, explicit: dict, cands: list[Candidate]) -> P
         if families.known_family(family) and slot not in need:
             mismatched.append(
                 f"{families.FAMILY_LABELS.get(family or '', family)} models do not use a "
-                f"{SLOT_LABELS.get(slot, slot)}; '{name}' is left out.")
+                f"{slot_label(slot, family)}; '{name}' is left out.")
             continue
         chosen[slot] = {"name": name, "path": str(path), "auto": False}
         if slot in need:
             got = families.inspect_file(path)
             if got.kind != "unknown" and not families.accepts(slot, family, got, variant):
                 mismatched.append(
-                    f"The {SLOT_LABELS.get(slot, slot)} '{name}' does not look like one "
+                    f"The {slot_label(slot, family)} '{name}' does not look like one "
                     f"{families.FAMILY_LABELS.get(family or '', family)} models use "
                     f"(it reads as {got.kind}"
                     + (f", {got.family}" if got.family else "") + ").")
@@ -291,7 +304,7 @@ def pair_components(info: FileInfo, explicit: dict, cands: list[Candidate]) -> P
             dl = suggested_download(req.slot, family)
             if family == "wan2.2" and req.slot == "vae" and variant == "5b":
                 dl = _WAN22_VAE
-            missing.append({"slot": req.slot, "label": SLOT_LABELS.get(req.slot, req.slot),
+            missing.append({"slot": req.slot, "label": slot_label(req.slot, family),
                             "download": dl.as_dict() if dl else None})
     return Pairing(chosen, missing, mismatched)
 
@@ -300,6 +313,7 @@ CTX_FIELDS = {"clip_l": "clip_l_path", "clip_g": "clip_g_path", "t5xxl": "t5xxl_
               "llm": "llm_path", "vae": "vae_path", "clip_vision": "clip_vision_path"}
 
 KIND_WORDS = {"clip_l": "a CLIP-L text encoder", "clip_g": "a CLIP-G text encoder",
+              "clip_h": "an OpenCLIP-H text encoder",
               "t5xxl": "a T5 text encoder", "umt5": "a UMT5 text encoder",
               "byt5": "a ByT5 text encoder", "llm": "an LLM text encoder", "vae": "a VAE",
               "clip_vision": "a CLIP vision encoder", "lora": "a LoRA"}
@@ -351,12 +365,13 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
                 ctx[CTX_FIELDS[slot]] = c["path"]
                 components[slot] = {"name": c["name"], "auto": c["auto"]}
         notes = pairing.mismatched
-        if info.family == "sdxl":
+        if info.family in versionhint.HINT_FAMILIES:
+            fam_label = families.FAMILY_LABELS[info.family]
             try:
-                ctx["model_path"] = str(versionhint.sdxl_hint_path())
+                ctx["model_path"] = str(versionhint.hint_path(info.family))
             except OSError as e:
-                raise ModelFileError(f"'{label}' is an SDXL UNet and needs a small helper file "
-                                     f"that could not be written: {e}") from e
+                raise ModelFileError(f"'{label}' is a {fam_label} UNet and needs a small helper "
+                                     f"file that could not be written: {e}") from e
     else:
         for slot, (name, path) in explicit.items():
             if slot in CTX_FIELDS:
