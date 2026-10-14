@@ -608,6 +608,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Revoking an admin-scoped key says when its browser sessions could not be dropped.** If
+  removing the revoked key's sessions failed with an error, the server log said nothing at the
+  default level although an admin session cookie for that key could stay usable. It now logs a
+  warning naming the key.
 - **A chat answered by another localm instance keeps this instance's session persistence.** With a
   route to another instance's loaded model, a scheduled chat job on a routed model, or
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a
