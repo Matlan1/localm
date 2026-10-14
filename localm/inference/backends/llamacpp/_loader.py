@@ -921,8 +921,8 @@ def _resolve_gpu_memory():
         except Exception:
             continue
     # Exactly one GPU is an unambiguous device to budget against. Zero GPUs (a
-    # cpu build) or two or more answer None; the caller reads a 2+ GPU box's
-    # load device through discover.load_device_memory_isolated.
+    # cpu build) or two or more answer None; the caller reads the device of a
+    # load that runs on one of them through discover.load_device_memory_isolated.
     if len(gpus) != 1:
         return None
     return (gpus[0], mem_fn)

@@ -881,7 +881,8 @@ class TestFreeVramCrossProcessCorrection:
     def test_none_when_nothing_is_measurable(self):
         with patch.object(GgufBackend, "_free_total_vram_bytes", return_value=(None, None)), \
              patch("localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
-                   return_value=None):
+                   return_value=None), \
+             patch("localm.discover.load_device_memory_isolated", return_value=None):
             assert GgufBackend._free_vram_bytes() is None
 
     def test_corrector_returns_none_off_known_blind_platform(self):

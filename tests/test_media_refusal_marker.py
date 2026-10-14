@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from localm.inference.backends.base import (
-    AudioInputError, ContextCapacityExceededError, ImageDecodeUnavailable,
+    AudioDecodeUnavailable, AudioInputError, ContextCapacityExceededError, ImageDecodeUnavailable,
     ImageLimitError, InvalidGrammarError, UnsupportedInputError, VisionInputError)
 from localm.inference.http_server import (
     MEDIA_REFUSAL_HEADER, create_app, media_refusal_kind)
@@ -59,6 +59,7 @@ _AUDIO = [{"type": "text", "text": "transcribe"},
 
 @pytest.mark.parametrize("exc,kind", [
     (AudioInputError("x"), "audio"),
+    (AudioDecodeUnavailable("x"), None),
     (VisionInputError("x"), "image"),
     (ImageLimitError("x"), "image"),
     (ImageDecodeUnavailable("x"), "image"),
@@ -92,6 +93,13 @@ def test_a_backend_media_refusal_on_the_plain_path_is_marked(exc, status, kind):
     r = _post(_engine(images=True, audio=True, stream_exc=exc), _IMAGE)
     assert r.status_code == status, r.text
     assert r.headers.get(MEDIA_REFUSAL_HEADER) == kind
+
+
+def test_a_missing_audio_decoder_is_a_501_with_no_audio_marker():
+    exc = AudioDecodeUnavailable("Reading this audio format needs the voice extra")
+    r = _post(_engine(images=True, audio=True, stream_exc=exc), _AUDIO)
+    assert r.status_code == 501, r.text
+    assert MEDIA_REFUSAL_HEADER not in r.headers
 
 
 @pytest.mark.parametrize("exc,status", [

@@ -364,6 +364,27 @@ test("a 413 context overflow keeps the clips from earlier turns", async () => {
   assert.doesNotMatch(toastText(window), /audio clip was not accepted/i);
 });
 
+test("a 501 for a missing audio decoder keeps every clip, earlier turns included", async () => {
+  const detail = "Reading this audio format needs the voice extra.";
+  const { window, ctl } = setup({ rejectWith: detail });
+  ctl.rejectStatus = 501;
+  ctl.refusal = "audio";
+  const conv = { id: "c1", title: "t", messages: [
+    audioMsg("transcribe", [], "EEEE"),
+    { role: "assistant", content: "a transcript" },
+    audioMsg("and this mp3", [], "FFFF"),
+  ] };
+  activate(window, conv);
+  await window.runCompletion(conv);
+  for (const m of [conv.messages[0], conv.messages[2]]) {
+    assert.ok(Array.isArray(m.content), "the message keeps its parts");
+    assert.equal(m.content.some((p) => p.type === "input_audio"), true, "the clip is kept");
+  }
+  assert.doesNotMatch(JSON.stringify(conv.messages), /Audio removed/);
+  assert.ok(toastText(window).includes(detail), "the server's message reaches the user");
+  assert.equal(window.document.getElementById("toast").className.includes("error"), true);
+});
+
 test("an image refusal keeps the clips from earlier turns", async () => {
   const detail = "This model cannot accept image input.";
   const { window, ctl } = setup({ rejectWith: detail });

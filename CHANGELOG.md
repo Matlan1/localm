@@ -639,6 +639,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Audio clips survive a server without an audio decoder.** Sending an MP3 or another non-WAV
+  clip to an install without the voice extra no longer deletes every clip in the chat, earlier
+  working ones included; the message explaining the missing extra is shown and the clips stay.
+- **Coder sessions follow a model loaded after an unload.** When the loaded model is unloaded
+  (by hand or by idle unload) and another model is then loaded from elsewhere, unpinned coder
+  sessions now switch to it instead of reloading the old one over it.
 - **The coder knows a model's context size before its first reply.** A coder session whose
   model is an unpinned scheduled job or a Hugging Face reference now budgets its first prompt
   against the server's real context ceiling instead of the 4096 default.
@@ -697,8 +703,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The ACE-Step music model is no longer offered as an image or video model.**
 - **GGUF sizing measures free VRAM again on Windows with two or more GPUs.** With torch
   installed, a box whose llama.cpp runtime sees two GPUs (two cards, or a card beside integrated
-  graphics) skipped the VRAM fit check and sized context and layers blind. The load now reads the
-  free VRAM of the GPU it loads on.
+  graphics) skipped the VRAM fit check and sized context and layers blind. A load that runs on
+  one GPU (a one-GPU split, or one card beside integrated graphics) now reads that GPU's free
+  VRAM.
 - **Free VRAM on Windows AMD counts other programs while a GPU check runs.** A model load that
   started while the GUI was refreshing its GPU readings used a figure that missed VRAM held by
   other programs, and the GUI could show such a figure as exact.

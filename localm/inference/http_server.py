@@ -6753,7 +6753,10 @@ def media_refusal_kind(exc: BaseException) -> Optional[str]:
     else ``None``. Sent to clients (response header, or the ``refusal`` field of
     a streamed ``localm_error``) so a client can tell which attachment a refusal
     was about instead of inferring it from the status. The request-body size
-    refusal sends ``"body-size"`` the same way."""
+    refusal sends ``"body-size"`` the same way. A missing audio decoder
+    (``AudioDecodeUnavailable``, a server-side gap) carries no marker."""
+    if isinstance(exc, AudioDecodeUnavailable):
+        return None
     if isinstance(exc, AudioInputError):
         return "audio"
     if isinstance(exc, (VisionInputError, ImageDecodeUnavailable)):
