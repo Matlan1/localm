@@ -618,6 +618,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   network drives are turned off in Settings) a mapped network drive, skips any file under a
   credential folder while walking a folder, and a re-sync or repair skips a refused source
   instead of failing.
+- **A malformed key store or credentials file is no longer overwritten.** Creating or revoking an API key, or saving a Hugging Face or CivitAI credential, now refuses and leaves the file untouched when `auth.json` is not a list or `model_source_credentials.json` is not an object, instead of replacing it with just the new entry.
+- **Self-calls to a look-alike loopback URL keep certificate verification.** An HTTPS URL containing a backslash or control character is no longer treated as loopback, so the coder agent does not disable verification for it when the local CA file is missing.
+- **Ollama-compatible routes.** A non-streamed `/api/chat` or `/api/generate` reply now carries the
+  `X-Localm-*` response headers, as the streamed one does. `POST /api/embed` with an empty `input`
+  refuses `dimensions` and answers 404 for an unknown model instead of returning an empty result.
+  The `keep_alive: 0` unload idiom no longer unloads a local copy of a model that another instance serves.
 - **A chat answered by another localm instance keeps this instance's session persistence.** With a
   route to another instance's loaded model, a scheduled chat job on a routed model, or
   `localm mcp --share-loaded-models`, that instance used to record the chat in its own mode, so a
@@ -674,7 +680,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
   cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
   dropped. A model worker that does not exit when stopped is killed.
-- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes.
+- **A native image, upscale or video job waiting for the one running no longer looks like it is running.** It now logs that it is waiting for the image or video job already in progress, and cancelling it ends it at once instead of after the other job finishes. Its entry in the activity list shows the phase "queued" while it waits.
 - **Two command-line hints no longer mislead.** `localm memory list` on an empty store says that
   `localm memory add` does not work in privacy mode, and `localm mcp --help` now names the `rerank`
   tool and each plugin tool.
@@ -2150,6 +2156,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **Update and key-listing replies no longer hand a scoped key your file paths.** The backup
+  path from `GET /api/update/rollback` and `POST /api/update/apply`, the text of a failed apply,
+  and the owner-key-file notice on `GET /v1/keys` named the full location under your data
+  directory. A caller other than the owner now gets the scrubbed form (data directory as
+  `<data>`, file name kept); the owner and open mode still see the full path.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model

@@ -305,15 +305,21 @@ def requests_verify(url: str):
     agent, media-job model reloads, RAG self-embedding) must trust that CA.
     Returns the CA bundle path for a loopback HTTPS URL - or False when the CA
     file is somehow absent, which is safe because the connection never leaves
-    127.0.0.1. Returns True (normal public verification) for plain HTTP and for
-    any non-loopback HTTPS URL, e.g. the OpenAI / Anthropic APIs - so this never
+    127.0.0.1. Returns True (normal public verification) for plain HTTP, for
+    any non-loopback HTTPS URL, e.g. the OpenAI / Anthropic APIs, and for a URL
+    whose shape ``netpolicy.check_url_shape`` refuses (a backslash or control
+    character the HTTP client may read as a different host) - so this never
     weakens verification of a real external endpoint."""
     low = (url or "").lower()
     if not low.startswith("https:"):
         return True
-    from urllib.parse import urlsplit
-    host = (urlsplit(url).hostname or "").lower()
-    if host not in ("127.0.0.1", "::1", "localhost"):
+    from localm.bindhost import is_loopback_host
+    from localm.netpolicy import NetworkPolicyError, check_url_shape
+    try:
+        host = check_url_shape(url)
+    except NetworkPolicyError:
+        return True
+    if not is_loopback_host(host):
         return True
     from localm.config import home_dir
     ca = ca_cert_path(home_dir())

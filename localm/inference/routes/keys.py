@@ -18,7 +18,7 @@ def register(app: FastAPI, ctx) -> None:
     caller_scopes = _hs.caller_scopes
 
     @app.get("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
-    async def list_keys_ep(caller: Optional[set] = Depends(caller_scopes)):
+    async def list_keys_ep(request: Request, caller: Optional[set] = Depends(caller_scopes)):
         from localm.auth import list_keys, owner_key_downgrade_warning
         from localm.config import load_config
         # is_owner lets the GUI hide owner-only (privileged) scope choices from a
@@ -31,14 +31,18 @@ def register(app: FastAPI, ctx) -> None:
         # a scoped keystore, a non-owner keys:admin caller can also reach this
         # field - the same exposure list_keys() already gives that caller class
         # on this same route, unconditionally.
+        warning = owner_key_downgrade_warning()
+        if warning is not None:
+            warning = _hs.path_formatter(request)(warning)
         return {"keys": list_keys(), "is_owner": is_owner, "presets": presets,
-                "owner_key_warning": owner_key_downgrade_warning()}
+                "owner_key_warning": warning}
 
     @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def create_key_ep(request: Request, response: Response, body: dict,
                             caller: Optional[set] = Depends(caller_scopes)):
         from localm import auth
         from localm.auth import create_key
+        from localm.config import ConfigUnreadable
         # Capture BEFORE minting: True only when this is the very first key on an
         # otherwise-keyless install (the open -> protected transition).
         was_open = not auth.any_key_configured()
@@ -94,6 +98,8 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(403, str(e)) from e
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        except ConfigUnreadable as e:
+            raise HTTPException(409, str(e)) from e
         # Catch at grant: warn (do not block) when a granted scope unlocks a
         # plugin the host cannot serve yet (not installed / missing pip extras).
         mgr = getattr(app.state, "plugin_manager", None)
@@ -138,6 +144,11 @@ def register(app: FastAPI, ctx) -> None:
     @app.delete("/v1/keys/{key_id}", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def revoke_key_ep(key_id: str):
         from localm.auth import revoke_key
-        if not revoke_key(key_id):
+        from localm.config import ConfigUnreadable
+        try:
+            revoked = revoke_key(key_id)
+        except ConfigUnreadable as e:
+            raise HTTPException(409, str(e)) from e
+        if not revoked:
             raise HTTPException(404, f"No such key: {key_id}")
         return {"status": "revoked", "id": key_id}

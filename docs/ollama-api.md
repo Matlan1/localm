@@ -70,7 +70,7 @@ defaults to true, as in Ollama); send `"stream": false` for one JSON document.
 | `format` | `"json"` constrains the reply to a JSON object. A JSON schema constrains it to that schema: `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `prefixItems`, `minItems`, `maxItems`, `minLength`, `maxLength`, integer `minimum` and `maximum`, `format` (`date`, `time`, `date-time`, `uuid`), `anyOf`, `oneOf`, `allOf` and local `$ref` (recursive schemas included). Properties come out in the order the schema lists them, and an object with listed properties has no others unless `additionalProperties` allows it. A keyword the grammar cannot enforce (`pattern`, `multipleOf`, `not`, number bounds, ...) is a 400 naming it. |
 | `tools` | `/api/chat` only. Function tools, as Ollama sends them. The model's calls come back in `message.tool_calls` (`function.name`, `function.arguments` as an object, `id`, `function.index`); a streamed call is its own line before the `done` line, and `done_reason` is `stop`. An earlier turn's `assistant` message with `tool_calls` and the `tool` messages after it are given back to the model; they are matched to the calls by order, so `tool_name` is accepted and not needed. The rules in [Tool calling](server-api.md#tool-calling) apply, with `tool_choice` always `auto`. |
 | `think` | `true` (or a level string) returns the model's reasoning in `message.thinking` (`thinking` on generate); `false` turns reasoning off. |
-| `keep_alive` | On a request with no messages or prompt: `0` unloads the model, anything else loads it (a model served by another instance is left to that instance). Unloading needs `models:write`; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`. Ignored on a normal request; localm manages residency itself (`idle_unload_seconds`). |
+| `keep_alive` | On a request with no messages or prompt: `0` unloads the model, anything else loads it (a model served by another instance is left to that instance, for a load and for an unload). Unloading needs `models:write`; with no API key configured it needs the GUI shell token, like `POST /v1/models/unload`. Ignored on a normal request; localm manages residency itself (`idle_unload_seconds`). |
 | other `options` keys, unknown request keys | Accepted and ignored (named in the debug log). |
 
 Refused with a 400, rather than silently dropped: `raw`, `suffix`, a
@@ -85,13 +85,22 @@ decode time implied by the measured tokens per second; a field with no
 measurement behind it is left out. `load_duration` is never sent. A reply cut by
 a stop sequence reports `total_duration` only.
 
+The `X-Localm-*` response headers of the underlying chat route (for example
+`X-Localm-Model-Routing`) are forwarded as HTTP headers on both streamed and
+non-streamed replies. When a request spends a long time being prepared, the
+stream opens before those headers are known and they are not sent: NDJSON has
+no place to carry them.
+
 ## Embeddings
 
 `POST /api/embed` takes `input` (a string or a list) and returns `embeddings`.
 `POST /api/embeddings` takes `prompt` and returns `embedding`. The vectors are
 whatever the embedding model produces; they are not renormalised.
 `prompt_eval_count` is sent only when the backend counted the input tokens. `dimensions`
-is refused with a 400, and `truncate` is accepted and ignored.
+is refused with a 400, and `truncate` is accepted and ignored. An empty `input` list
+returns `"embeddings": []` without loading the model, but it still refuses `dimensions`
+and answers 404 for a model that is not registered (a model served by another instance
+counts as registered).
 
 ## Listings
 
