@@ -398,6 +398,50 @@ def _resolve_edit(text: str, old: str):
     return None
 
 
+_EOL_RE = re.compile(r"\r\n|\r|\n")
+
+
+def _read_raw(p: Path) -> str:
+    """*p* decoded as UTF-8 (undecodable bytes replaced) with its line endings
+    left as they are."""
+    with open(p, encoding="utf-8", errors="replace", newline="") as f:
+        return f.read()
+
+
+def _split_keep_eol(text: str) -> list[tuple[str, str]]:
+    """*text* as ``(line, ending)`` pairs; ending is ``"\\r\\n"``, ``"\\r"``,
+    ``"\\n"`` or ``""`` for a last line without one."""
+    out: list[tuple[str, str]] = []
+    pos = 0
+    for m in _EOL_RE.finditer(text):
+        out.append((text[pos:m.start()], m.group()))
+        pos = m.end()
+    if pos < len(text):
+        out.append((text[pos:], ""))
+    return out
+
+
+def _write_keeping_eol(p: Path, before_raw: str, new_text: str) -> None:
+    """Write *new_text* (LF line endings, as read_text gives) to *p* so that
+    every line unchanged from *before_raw* keeps its original line ending and a
+    changed or added line takes the file's most common ending."""
+    old = _split_keep_eol(before_raw)
+    new = _split_keep_eol(new_text)
+    crlf = sum(1 for _, e in old if e == "\r\n")
+    lf = sum(1 for _, e in old if e == "\n")
+    dominant = "\r\n" if crlf > lf else "\n"
+    sm = difflib.SequenceMatcher(
+        None, [(line, bool(e)) for line, e in old],
+        [(line, bool(e)) for line, e in new], autojunk=False)
+    parts: list[str] = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            parts.extend(line + end for line, end in old[i1:i2])
+        else:
+            parts.extend(line + (dominant if end else "") for line, end in new[j1:j2])
+    p.write_text("".join(parts), encoding="utf-8", newline="")
+
+
 def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
     """Replace the first occurrence of `old` with `new` in `path`."""
     try:
@@ -407,9 +451,10 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
     if not p.exists():
         return ToolResult.error(f"File not found: {p}")
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        raw = _read_raw(p)
     except Exception as e:
         return ToolResult.error(str(e))
+    text = _EOL_RE.sub("\n", raw)
 
     # Reject an empty old: the empty string is contained in every string.
     if not old:
@@ -425,7 +470,7 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
     start, end, count, tolerant = located
     new_text = text[:start] + new + text[end:]
     try:
-        p.write_text(new_text, encoding="utf-8")
+        _write_keeping_eol(p, raw, new_text)
     except Exception as e:
         return ToolResult.error(str(e))
 
@@ -566,7 +611,7 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
     written: list[Path] = []
     for p in targets:
         try:
-            p.write_text(current[p], encoding="utf-8")
+            _write_keeping_eol(p, snapshots[p].decode("utf-8", "replace"), current[p])
             written.append(p)
         except Exception as e:
             # The failing file is restored too: write_text truncates before writing, so
@@ -637,9 +682,10 @@ def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
         return ToolResult.error(f"Not a file: {p}")
 
     try:
-        original = p.read_text(encoding="utf-8", errors="replace")
+        raw = _read_raw(p)
     except Exception as e:
         return ToolResult.error(str(e))
+    original = _EOL_RE.sub("\n", raw)
 
     try:
         patched = apply_diff(original, diff)
@@ -649,7 +695,7 @@ def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
         return ToolResult.error(f"Unexpected patch error: {e}")
 
     try:
-        p.write_text(patched, encoding="utf-8")
+        _write_keeping_eol(p, raw, patched)
     except Exception as e:
         return ToolResult.error(str(e))
 
@@ -1265,12 +1311,10 @@ def tool_search_replace(
                 continue
             # Two reads that must stay separate. old_bytes (read_bytes, no
             # translation) is the pre-change snapshot for the changed-files/undo
-            # tracker; text (read_text, universal-newline translation on) is what the
-            # regex substitution runs against. read_text normalises CR LF to LF on the
-            # way in and write_text re-normalises on the way out, so a CRLF file stays
-            # CRLF; decoding old_bytes here instead leaves CR LF in text and doubles
-            # the CR on write. diffutil.compute_search_replace_diff normalises
-            # old_bytes for the same reason.
+            # tracker and the line endings the write keeps; text (read_text,
+            # universal-newline translation on) is what the regex substitution runs
+            # against. diffutil.compute_search_replace_diff normalises old_bytes the
+            # same way.
             old_bytes = fp.read_bytes()
             text = fp.read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -1354,7 +1398,7 @@ def tool_search_replace(
     applied: list[tuple[str, bytes, str]] = []  # files actually written, for changes=
     for fp, rel, new_text, _, old_bytes in changes:
         try:
-            fp.write_text(new_text, encoding="utf-8")
+            _write_keeping_eol(fp, old_bytes.decode("utf-8", "replace"), new_text)
         except Exception as e:
             # Earlier files in this batch are already modified on disk; report what
             # was and was not applied. changes carries only the files that succeeded, so

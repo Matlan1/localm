@@ -672,6 +672,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   effect only for a different model or after a server restart: unloading a model and loading it again
   kept the old values. A reload now uses the current settings; values given on the command line still
   win.
+- **Coder edits keep each file's line endings.** An edit, patch or search-and-replace by the coder
+  rewrote the line ending of every line in the file: on Windows a file with LF endings came back with
+  CRLF, turning a one-line change into a whole-file diff. Untouched lines now keep their bytes, and a
+  changed line takes the ending the file mostly uses.
 - **A request body that is not JSON gets a clear error, not a server error.** Sending a file or
   other binary data where an API route expects JSON now returns the usual 422 explaining the
   problem, instead of a 500 "Internal server error".
