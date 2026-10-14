@@ -2148,6 +2148,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **Update and key-listing replies no longer hand a scoped key your file paths.** The backup
+  path from `GET /api/update/rollback` and `POST /api/update/apply`, the text of a failed apply,
+  and the owner-key-file notice on `GET /v1/keys` named the full location under your data
+  directory. A caller other than the owner now gets the scrubbed form (data directory as
+  `<data>`, file name kept); the owner and open mode still see the full path.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model
