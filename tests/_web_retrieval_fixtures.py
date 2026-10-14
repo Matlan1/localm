@@ -15,7 +15,7 @@ import urllib.parse
 from typing import Callable, Optional
 
 import requests
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"

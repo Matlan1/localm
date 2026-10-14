@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 from localm.audit import SessionMode
 from localm.plugins.coder.agent.constants import _BROWSER_TOOLS
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 class _Stub:

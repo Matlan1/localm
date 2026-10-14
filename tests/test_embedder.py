@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from localm.inference import embedder as emb
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)

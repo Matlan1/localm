@@ -28,7 +28,7 @@ import pytest
 
 from localm import voice
 from tests._voice_stack import voice_stack  # noqa: F401
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)

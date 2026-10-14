@@ -14,7 +14,7 @@ import huggingface_hub
 import pytest
 
 from localm import voice
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 BODY = b"whisper-model-bytes" * 100
 REPO = "Systran/faster-whisper-base"

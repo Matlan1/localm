@@ -30,7 +30,7 @@ import pytest
 
 from localm import netpolicy
 from localm.netpolicy import NetworkPolicyError, check_url
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 class _FakeSession:

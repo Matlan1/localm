@@ -16,7 +16,7 @@ import pytest
 
 from localm.plugins.builtin.jobs import webtool
 from tests._web_retrieval_fixtures import html_page, stub_retrieval
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 # --------------------------------------------------------------------------- #

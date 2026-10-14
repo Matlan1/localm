@@ -1572,13 +1572,10 @@ def _read_json_checked(path: Path, default):
     state in which the returned *default* is indistinguishable from a genuinely
     absent file.
 
-    Read-only consumers whose default is the safe answer take that fallback
-    and keep calling _read_json (the key verify path, netname and updater). A
-    consumer whose default is looser than a setting the user may have stored
-    (netpolicy, require_auth_enabled) calls load_config_checked and fails
-    safe on ``read_ok`` False. A read-modify-write must not take the
-    fallback: writing the default back replaces every setting the user had,
-    so update_config / update_registry refuse on ``read_ok`` False.
+    Read-only consumers take that fallback and keep calling _read_json (auth,
+    netpolicy, netname and updater all rely on it). A read-modify-write must
+    not: writing the default back replaces every setting the user had, so
+    update_config / update_registry refuse on ``read_ok`` False.
 
     Note the asymmetry: a file that PARSES but holds the wrong shape (a JSON
     string, a list) is read_ok True and keeps its documented fall-back-to-

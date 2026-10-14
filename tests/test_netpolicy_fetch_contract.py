@@ -14,7 +14,7 @@ import requests
 import localm.netpolicy as netpolicy
 from localm.netpin import _CONNECT_BUDGET_FACTOR, ReadBudgetExceeded
 from localm.netpolicy import NetworkPolicyError, safe_fetch, safe_fetch_bytes
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)

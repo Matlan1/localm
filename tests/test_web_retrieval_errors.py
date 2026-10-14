@@ -30,7 +30,7 @@ from localm.web_retrieval.providers import SearXNGProvider
 from localm.web_retrieval.retrieve import retrieve
 
 from tests._web_retrieval_fixtures import no_sleep
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 class RawServer:

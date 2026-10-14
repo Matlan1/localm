@@ -27,7 +27,7 @@ from tests._web_retrieval_fixtures import (
     ddg_no_results,
     searx_json,
 )
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)

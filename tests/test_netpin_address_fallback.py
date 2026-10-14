@@ -17,7 +17,7 @@ import urllib3.connection
 
 from localm import netpin, netpolicy
 from localm.netpolicy import NetworkPolicyError
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 @pytest.fixture(autouse=True)

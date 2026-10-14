@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _version, updater
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 def _opener(payload, status=200):

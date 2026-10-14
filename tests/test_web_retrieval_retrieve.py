@@ -33,7 +33,7 @@ from tests._web_retrieval_fixtures import (
     nav_heavy_page,
     searx_json,
 )
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 _LONG = " ".join(f"Sentence number {i} about the visit." for i in range(15))
 

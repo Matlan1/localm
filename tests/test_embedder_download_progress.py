@@ -9,7 +9,7 @@ import logging
 import pytest
 
 from localm.inference import embedder
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 MB = 1024 * 1024
 

@@ -41,7 +41,7 @@ from fastapi.testclient import TestClient
 import huggingface_hub
 
 from localm import voice
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 OWNER_KEY = "owner-admin-key-f1-net-override"
 

@@ -6,7 +6,7 @@ pull URL and its redirects.
 """
 
 import pytest
-from tests.conftest import set_config
+from tests._net_config import set_config
 
 
 def test_pull_model_refused_when_net_mode_off(monkeypatch):
