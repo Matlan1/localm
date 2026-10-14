@@ -391,7 +391,7 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
     if loop is not None and loop.is_running():
         statuses.append(_evict_via_server_loop(_hs, loop, timeout_s))
     for evictor in evictors:
-        remaining = max(0.0, deadline - time.monotonic())
+        remaining = min(timeout_s, max(0.0, deadline - time.monotonic()))
         try:
             status = evictor(remaining)
         except Exception as e:
