@@ -150,6 +150,7 @@ class TestXetDownloads:
             reconstruction_desc="model.gguf", total=4 * MB, log_level=logging.INFO,
             name="huggingface_hub.xet_get", tqdm_class=cls)
         report = SimpleNamespace(
+            total_bytes=4 * MB, total_transfer_bytes=4 * MB,
             total_bytes_completed=2 * MB, total_bytes_completion_rate=1.0 * MB,
             total_transfer_bytes_completed=1 * MB,
             total_transfer_bytes_completion_rate=0.5 * MB)
