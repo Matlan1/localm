@@ -350,11 +350,24 @@ def _own_calls(fn):
 
 
 def _job_bodies_that_reload(tree):
-    """Every function that itself calls ``reload_chat_after_media``."""
+    """Every function that itself opens a ``restore_chat_after_media`` block."""
     return [fn for fn in ast.walk(tree)
             if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and any(getattr(c.func, "id", getattr(c.func, "attr", None))
-                    == "reload_chat_after_media" for c in _own_calls(fn))]
+            and any(isinstance(n, ast.With)
+                    and any(isinstance(i.context_expr, ast.Call)
+                            and getattr(i.context_expr.func, "id", None)
+                            == "restore_chat_after_media" for i in n.items)
+                    for n in _own_nodes(fn))]
+
+
+def _own_nodes(fn):
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
 
 
 def test_every_media_job_body_runs_inside_the_handover_wrapper():
@@ -372,3 +385,112 @@ def test_every_media_job_body_runs_inside_the_handover_wrapper():
             assert decorated or fn.name in wrapped_by_call, (kind, fn.name)
             seen += 1
     assert seen >= 4, "expected the image generate, image upscale, video and music job bodies"
+
+
+def test_a_last_job_with_reload_off_does_not_replay_an_earlier_jobs_reload(
+        timeline, chat_load):
+    music, image = FakeBackend(timeline, "music"), FakeBackend(timeline, "image")
+    a, b = FakeJob("A"), FakeJob("B")
+    b_entered = threading.Event()
+    a_deferred = threading.Event()
+
+    @vram.media_handover_job
+    def job_a(job):
+        assert b_entered.wait(WAIT)
+        _reload(job, music)
+        a_deferred.set()
+        return True
+
+    @vram.media_handover_job
+    def job_b(job):
+        b_entered.set()
+        assert a_deferred.wait(WAIT)
+        vram.reload_chat_after_media(job, "http://127.0.0.1:1", {"reload_after": False},
+                                     image, "image", None)
+        return True
+
+    ta, _ = _run(job_a, a)
+    _wait_for(lambda: vram._handover_jobs >= 1)
+    tb, ob = _run(job_b, b)
+    ta.join(WAIT)
+    tb.join(WAIT)
+
+    assert ob["rv"] is True
+    assert chat_load.calls == 0
+    assert music.free_calls == 0 and image.free_calls == 0
+    assert any("Keeping the image backend loaded" in (t or "") for t in b.lines)
+
+
+def test_a_reload_off_job_that_is_not_last_leaves_the_deferred_reload_to_the_last(
+        timeline, chat_load):
+    backend = FakeBackend(timeline)
+    a, b, c = FakeJob("A"), FakeJob("B"), FakeJob("C")
+    b_entered, c_entered = threading.Event(), threading.Event()
+    a_deferred, b_done = threading.Event(), threading.Event()
+
+    @vram.media_handover_job
+    def job_a(job):
+        assert b_entered.wait(WAIT)
+        _reload(job, backend)
+        a_deferred.set()
+        return True
+
+    @vram.media_handover_job
+    def job_b(job):
+        b_entered.set()
+        assert a_deferred.wait(WAIT)
+        assert c_entered.wait(WAIT)
+        vram.reload_chat_after_media(job, "http://127.0.0.1:1", {"reload_after": False},
+                                     FakeBackend(timeline, "other"), "image", None)
+        b_done.set()
+        return True
+
+    @vram.media_handover_job
+    def job_c(job):
+        c_entered.set()
+        assert b_done.wait(WAIT)
+        return True
+
+    ta, _ = _run(job_a, a)
+    _wait_for(lambda: vram._handover_jobs >= 1)
+    tb, _ = _run(job_b, b)
+    _wait_for(lambda: vram._handover_jobs >= 2)
+    tc, _ = _run(job_c, c)
+    for t in (ta, tb, tc):
+        t.join(WAIT)
+
+    assert chat_load.calls == 1
+
+
+def test_a_last_job_that_did_not_swap_with_reload_off_drops_the_deferred_reload(
+        timeline, chat_load):
+    backend = FakeBackend(timeline)
+    a, b = FakeJob("A"), FakeJob("B")
+    b_entered = threading.Event()
+    a_deferred = threading.Event()
+
+    @vram.media_handover_job
+    def job_a(job):
+        assert b_entered.wait(WAIT)
+        _reload(job, backend)
+        a_deferred.set()
+        return True
+
+    @vram.media_handover_job
+    def job_b(job):
+        b_entered.set()
+        assert a_deferred.wait(WAIT)
+        with vram.restore_chat_after_media(job, "http://127.0.0.1:1",
+                                           {"reload_after": False}, backend, "image",
+                                           None, swapped=False):
+            pass
+        return True
+
+    ta, _ = _run(job_a, a)
+    _wait_for(lambda: vram._handover_jobs >= 1)
+    tb, ob = _run(job_b, b)
+    ta.join(WAIT)
+    tb.join(WAIT)
+
+    assert ob["rv"] is True
+    assert chat_load.calls == 0 and backend.free_calls == 0

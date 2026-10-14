@@ -40,7 +40,7 @@ from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.plugins.gui.jobs import frame_event
 from localm.selfclient import resolve_self_url
-from localm.vram import media_handover_job
+from localm.vram import media_handover_job, restore_chat_after_media
 from . import backend as _backend
 
 _router = APIRouter()
@@ -192,67 +192,60 @@ async def video(req: VideoRequest, request: Request):
                       f"{shortfall['free'] / 1024 ** 3:.1f} GB free, but this job "
                       f"needs {shortfall['needed'] / 1024 ** 3:.1f} GB on a single "
                       "card - unloading the chat model first."})
-        gen_swap = False
-        if swap:
-            if not unload_chat_for_media(job, self_url, "video", instance_token):
-                gen_swap = True
-        else:
-            job.push({"type": "line", "text":
-                      "Both models fit in VRAM - keeping the chat model loaded "
-                      "(no swap)."})
-        note_other_vram_holders(job, s, "video")
-        if s.get("backend") == "comfy":
-            job.push({"type": "line", "text":
-                      f"Submitting Wan workflow to the video backend "
-                      f"({req.seconds:.0f}s clip - video is slow, be patient)..."})
-        kwargs = {}
-        for field in ("negative_prompt", "seconds", "fps", "width",
-                      "height", "seed", "steps", "cfg"):
-            value = getattr(req, field)
-            if value is not None:
-                kwargs[field] = value
-        if req.model_overrides:
-            kwargs["model_overrides"] = req.model_overrides
-        if native_loras:
-            kwargs["loras"] = native_loras
-        kwargs.update(native_extras)
-        if s.get("backend") == "native":
-            kwargs["on_preview"] = lambda p: job.push(frame_event(p))
-            kwargs["on_queue_state"] = lambda state: job.progress(phase=state)
-        is_privacy = effective_mode("server") == SessionMode.PRIVACY
-        # privacy mode forces deletion of ComfyUI's own output copy: no traces
-        # left anywhere, regardless of the configured delete_outputs preference.
-        delete_outputs = bool(s.get("delete_outputs")) or is_privacy
-        ok, message = _backend.generate(
-            s, req.prompt, out_path,
-            self_url=self_url,
-            instance_token=instance_token,
-            # privacy mode: no sidecar (the clip's own metadata is stripped
-            # in every mode)
-            write_sidecar=not is_privacy,
-            on_progress=lambda t: job.push({"type": "line", "text": t}),
-            input_image=input_image,
-            swap=gen_swap,
-            delete_outputs=delete_outputs,
-            cancel_check=lambda: job.cancel_requested,
-            placement=placement,
-            **kwargs,
-        )
-        job.push({"type": "line", "text": message})
-        if ok:
-            job.result = out_path.name
-            gallery.stamp_owner("video", out_path.name, owner)
-        # Mark the outcome BEFORE the VRAM handover below: that handover is
-        # best-effort cleanup that can itself raise (e.g. a non-comfy backend's
-        # free_vram()) and must never turn a successful generation into a
-        # reported failure.
-        job.mark_outcome("done" if ok else "failed")
-        # Restore VRAM on EVERY exit path once the chat model has been unloaded -
-        # success, failure, OR cancel. reload_chat_after_media frees the
-        # backend's VRAM first, then reloads the chat model.
-        if swap:
-            from localm.vram import reload_chat_after_media
-            reload_chat_after_media(job, self_url, s, _backend, "video", instance_token)
+        with restore_chat_after_media(job, self_url, s, _backend, "video", instance_token,
+                                      swapped=swap):
+            gen_swap = False
+            if swap:
+                if not unload_chat_for_media(job, self_url, "video", instance_token):
+                    gen_swap = True
+            else:
+                job.push({"type": "line", "text":
+                          "Both models fit in VRAM - keeping the chat model loaded "
+                          "(no swap)."})
+            note_other_vram_holders(job, s, "video")
+            if s.get("backend") == "comfy":
+                job.push({"type": "line", "text":
+                          f"Submitting Wan workflow to the video backend "
+                          f"({req.seconds:.0f}s clip - video is slow, be patient)..."})
+            kwargs = {}
+            for field in ("negative_prompt", "seconds", "fps", "width",
+                          "height", "seed", "steps", "cfg"):
+                value = getattr(req, field)
+                if value is not None:
+                    kwargs[field] = value
+            if req.model_overrides:
+                kwargs["model_overrides"] = req.model_overrides
+            if native_loras:
+                kwargs["loras"] = native_loras
+            kwargs.update(native_extras)
+            if s.get("backend") == "native":
+                kwargs["on_preview"] = lambda p: job.push(frame_event(p))
+                kwargs["on_queue_state"] = lambda state: job.progress(phase=state)
+            is_privacy = effective_mode("server") == SessionMode.PRIVACY
+            # privacy mode forces deletion of ComfyUI's own output copy: no traces
+            # left anywhere, regardless of the configured delete_outputs preference.
+            delete_outputs = bool(s.get("delete_outputs")) or is_privacy
+            ok, message = _backend.generate(
+                s, req.prompt, out_path,
+                self_url=self_url,
+                instance_token=instance_token,
+                # privacy mode: no sidecar (the clip's own metadata is stripped
+                # in every mode)
+                write_sidecar=not is_privacy,
+                on_progress=lambda t: job.push({"type": "line", "text": t}),
+                input_image=input_image,
+                swap=gen_swap,
+                delete_outputs=delete_outputs,
+                cancel_check=lambda: job.cancel_requested,
+                placement=placement,
+                **kwargs,
+            )
+            job.push({"type": "line", "text": message})
+            if ok:
+                job.result = out_path.name
+                gallery.stamp_owner("video", out_path.name, owner)
+            # Recorded before the chat model reload that runs on leaving the block.
+            job.mark_outcome("done" if ok else "failed")
         return ok
 
     job = jobs.start_fn("video", _generate, result_path=out_path.name,

@@ -10,6 +10,7 @@ endpoint separately verifies VRAM was reclaimed before the media model loads
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import threading
 import time
@@ -872,6 +873,48 @@ def media_handover_job(fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
     return wrapper
 
 
+def _drop_deferred_reload_if_last() -> None:
+    """Forget a chat reload (and the backends to free before it) that an earlier
+    job left behind, when no other job is in flight."""
+    global _handover_deferred
+    with _handover_cv:
+        if _handover_jobs <= 1:
+            _handover_deferred = None
+            _handover_deferred_backends.clear()
+
+
+@contextlib.contextmanager
+def restore_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
+                             media_label: str, instance_token: Optional[str] = None,
+                             *, swapped: bool = True):
+    """Wrap the part of a media job body that runs after the chat model may have
+    been unloaded. On leaving the block, whether it finished, failed or was
+    cancelled, run ``reload_chat_after_media`` once when *swapped*.
+
+    When the block raised, the reload is best effort: its own failure is logged to
+    *job* and the block's exception propagates. After a clean exit a failing reload
+    raises, so the job's ``mark_outcome`` decides the reported status. When not
+    *swapped* and the job's reload-after setting is off, a reload an earlier job
+    left to it is dropped (see ``reload_chat_after_media``)."""
+    try:
+        yield
+    except BaseException:
+        if swapped:
+            try:
+                reload_chat_after_media(job, self_url, s, backend, media_label,
+                                        instance_token)
+            except Exception as e:
+                job.push({"type": "line", "text":
+                          f"Reload deferred to the next message ({e})."})
+        raise
+    else:
+        if swapped:
+            reload_chat_after_media(job, self_url, s, backend, media_label,
+                                    instance_token)
+        elif not s["reload_after"]:
+            _drop_deferred_reload_if_last()
+
+
 def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
                             media_label: str,
                             instance_token: Optional[str] = None) -> None:
@@ -884,8 +927,10 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     Inside a ``media_handover_job`` with another media job still in flight, nothing
     is freed or reloaded here: the reload, and the freeing of this job's backend, is
     left to the last job to finish. While the reload runs, jobs that start wait for
-    it."""
+    it. The last job's reload-after setting governs: when it is off, a reload an
+    earlier job left to it is dropped and those backends stay loaded."""
     if not s["reload_after"]:
+        _drop_deferred_reload_if_last()
         job.push({"type": "line", "text":
                   f"Keeping the {media_label} backend loaded (reload is off) - "
                   "the chat model reloads on the next message."})
