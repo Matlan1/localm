@@ -319,17 +319,27 @@ def test_a_release_that_never_shows_logs_and_still_loads(image_env, tmp_path, mo
     assert any("did not rise" in w for w in warned)
 
 
-@pytest.mark.parametrize("when", ["before the stop", "after the stop"])
+@pytest.mark.parametrize("when", ["before the stop", "during the release wait"])
 def test_a_cancel_during_a_switch_loads_nothing(image_env, tmp_path, monkeypatch, when):
-    runner, s, _order = _switch_env(image_env, monkeypatch, release_after=10 ** 6)
+    runner, s, order = _switch_env(image_env, monkeypatch, release_after=10 ** 6)
     monkeypatch.setattr(sd_budget, "RELEASE_TIMEOUT_S", 30.0)
 
     def cancel_check():
-        return True if when == "before the stop" else not runner.alive
+        if when == "before the stop":
+            return True
+        return any(alive is False for alive in order)
     ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
                                     width=64, height=64, cancel_check=cancel_check)
     assert (ok, msg) == (False, "Cancelled.")
     assert runner.loads == []
+
+
+def test_a_cancel_on_a_first_load_loads_nothing(image_env, tmp_path):
+    runner, s, _backend, probes = image_env
+    ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
+                                    width=64, height=64, cancel_check=lambda: True)
+    assert (ok, msg) == (False, "Cancelled.")
+    assert runner.loads == [] and probes == []
 
 
 def test_a_failed_final_reading_falls_back_to_the_last_good_one(image_env, tmp_path,
