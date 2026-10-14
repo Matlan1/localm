@@ -323,7 +323,8 @@ def _drive_plug(monkeypatch, plug, route_name, request_obj):
 
     monkeypatch.setattr(plug._backend, "generate", fake_generate)
     monkeypatch.setattr("localm.vram.release_other_native_media",
-                        lambda job, s, label: order.append(("release", label)))
+                        lambda job, s, label: (order.append(("release", label)),
+                                               vram.ReleaseResult())[1])
     monkeypatch.setattr("localm.vram.decide_media_swap",
                         lambda s: order.append("decide") or False)
     monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda s: None)

@@ -176,8 +176,7 @@ async def video(req: VideoRequest, request: Request):
             placement, notice = resolve_media_placement(_cfg, s["api_url"])
             if notice:
                 job.push({"type": "line", "text": notice})
-        release_other_native_media(job, s, "video")
-        if job.cancel_requested:
+        if release_other_native_media(job, s, "video").cancelled:
             return False
         swap = decide_media_swap(s)
         # The gate reads COMBINED free VRAM across a configured GPU split, but

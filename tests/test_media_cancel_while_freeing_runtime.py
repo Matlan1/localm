@@ -121,7 +121,7 @@ def test_a_job_cancelled_while_music_is_generating_does_not_stop_the_music_runti
     finally:
         release.set()
         t.join(5)
-    assert out == []
+    assert out == [] and out.cancelled is True
     srv.stop.assert_not_called()
     assert job.lines[-1] == "Cancelled."
     assert not any("kept its models" in x for x in job.lines)
@@ -142,7 +142,7 @@ def test_a_job_cancelled_while_an_image_is_generating_does_not_stop_the_sd_worke
     finally:
         release.set()
         t.join(5)
-    assert out == []
+    assert out == [] and out.cancelled is True
     shutdown.assert_not_called()
     assert job.lines[-1] == "Cancelled."
 
@@ -156,8 +156,15 @@ def test_a_job_cancelled_before_the_stop_starts_stops_nothing(monkeypatch):
     job.cancel_requested = True
     out = vram.release_other_native_media(
         job, _settings(), "image", read_reading=_short_reading, read_free=lambda: 64 * GB)
-    assert out == []
+    assert out == [] and out.cancelled is True
     srv.stop.assert_not_called()
+
+
+def test_a_cancelled_comfy_job_that_never_waited_is_not_reported_cancelled_by_the_helper():
+    job = _Job()
+    job.cancel_requested = True
+    out = vram.release_other_native_media(job, {"backend": "comfy"}, "image")
+    assert out == [] and out.cancelled is False
 
 
 @pytest.mark.parametrize("body", sorted(_BODIES))
@@ -168,7 +175,9 @@ def test_a_cancelled_job_does_not_go_on_to_unload_the_chat_model(monkeypatch, bo
 
     def release_then_cancel(job, s, label):
         job.cancel_requested = True
-        return []
+        result = vram.ReleaseResult()
+        result.cancelled = True
+        return result
 
     monkeypatch.setattr("localm.vram.release_other_native_media", release_then_cancel)
     monkeypatch.setattr("localm.vram.unload_chat_for_media",
