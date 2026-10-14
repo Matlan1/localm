@@ -115,11 +115,30 @@ class TestFluxImageTool(unittest.TestCase):
         with a hardcoded loopback fallback. default_api_url is mocked to a
         distinct URL and that value is asserted to reach generate_image()."""
         mock_gen.return_value = (True, "Image saved to x")
-        with patch("localm.media.comfy_client.default_api_url",
+        with patch("localm.image_gen.comfy.default_api_url",
                    return_value="http://127.0.0.1:8189"):
             tool_generate_image(self.cwd, "p", self.output_path)
         _, kwargs = mock_gen.call_args
         self.assertEqual(kwargs.get("api_url"), "http://127.0.0.1:8189")
+
+    @patch("localm.image_gen.comfy.generate_image")
+    def test_uses_the_image_plugins_own_comfy_url(self, mock_gen):
+        """A ComfyUI URL set on the image plugin itself (plugins.image.comfy.api_url)
+        is the target, the same one the GUI and MCP image paths use, not the
+        shared default."""
+        from localm.config import update_config
+
+        def _set(c):
+            c["comfy_target"] = "user"
+            c.setdefault("plugins", {}).setdefault("image", {})["comfy"] = {
+                "api_url": "http://127.0.0.1:8190"}
+        update_config(_set)
+        mock_gen.return_value = (True, "Image saved to x")
+        with patch("localm.image_gen.comfy.default_api_url",
+                   return_value="http://127.0.0.1:8189"):
+            tool_generate_image(self.cwd, "p", self.output_path)
+        _, kwargs = mock_gen.call_args
+        self.assertEqual(kwargs.get("api_url"), "http://127.0.0.1:8190")
 
     @patch("localm.image_gen.comfy.generate_image")
     def test_default_mode_keeps_sidecar(self, mock_gen):

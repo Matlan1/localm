@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""confined_name's contract, and that its docstring states it without
-overclaiming. It confines a name to *base* (rejecting path separators, ``..``,
-and absolute/drive-relative names) but does NOT specially reject Windows
-reserved device names (con, nul, ...): those pass as ordinary basenames, and
-confinement still holds because they resolve directly inside *base*.
+"""confined_name's contract: it confines a name to *base* (rejecting path
+separators, ``..``, and absolute/drive-relative names), rejects reserved
+characters, and on Windows rejects reserved device names (con, nul.txt, com1, ...).
 """
 
 from __future__ import annotations
@@ -13,26 +11,40 @@ import os
 import pytest
 from fastapi import HTTPException
 
+from localm import pathsafe
 from localm.pathsafe import confined_name
 
 
-def test_docstring_does_not_claim_device_name_rejection():
-    # Normalise whitespace so wrapped phrases match regardless of line breaks.
-    doc = " ".join((confined_name.__doc__ or "").lower().split())
-    # The docstring's rejection list must not mention con/device names: device
-    # names are not rejected.
-    assert "/device names" not in doc
-    # ...and it positively documents the real behavior.
-    assert "not specially rejected" in doc
+@pytest.mark.parametrize("name", [
+    "con", "nul", "NUL", "com1", "lpt9", "aux.txt", "nul.tar.gz", "prn ", "conin$",
+    "conout$.log", "com¹", "Lpt³.bin",
+])
+def test_device_names_are_rejected_before_any_write(tmp_path, name, monkeypatch):
+    monkeypatch.setattr(pathsafe, "_refuses_device_names", lambda: True)
+    with pytest.raises(HTTPException) as ei:
+        confined_name(tmp_path, name)
+    assert ei.value.status_code == 400
+    assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("name", ["con", "nul", "com1", "lpt1"])
-def test_device_names_are_accepted_and_confined(tmp_path, name):
-    # A device-like name is a legal basename, resolved directly inside base,
-    # never escaping it.
+@pytest.mark.parametrize("name", ["console.txt", "nully", "com10", "lpt0", "my-nul.txt",
+                                  "auxiliary.bin", "conin"])
+def test_names_that_only_look_like_devices_are_accepted(tmp_path, name, monkeypatch):
+    monkeypatch.setattr(pathsafe, "_refuses_device_names", lambda: True)
     resolved = confined_name(tmp_path, name)
     assert resolved.parent == tmp_path.resolve()
     assert resolved.name == name
+
+
+def test_device_names_are_refused_exactly_on_windows():
+    assert pathsafe._refuses_device_names() is (os.name == "nt")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a device name is an ordinary file name off Windows")
+@pytest.mark.parametrize("name", ["aux.png", "con.json", "nul.mp3"])
+def test_an_existing_device_named_file_stays_reachable_off_windows(tmp_path, name):
+    (tmp_path / name).write_bytes(b"x")
+    assert pathsafe.confined_file(tmp_path, name, "file").read_bytes() == b"x"
 
 
 @pytest.mark.parametrize("bad", ["..", ".", "", "a/b"])

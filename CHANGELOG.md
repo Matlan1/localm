@@ -680,6 +680,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `--online` and `--anthropic` already did. The warning names the host your prompts and files go to,
   and says when the address came from `LOCALCODER_URL`. These privacy warnings now go to stderr, so
   `--output-format json` output stays clean.
+- **On Windows, a file can no longer be renamed to a device name.** Renaming a generated
+  image, track or clip, or a file in the folder browser, to a name such as `nul`, `con.png` or
+  `com1.txt` is refused there, because a write to such a name goes to the device and its data
+  is lost. On Linux and macOS these stay ordinary file names.
+- **The coder agent's image tool uses the image plugin's own ComfyUI address.** With a
+  ComfyUI URL set for the Images plugin, the coder's image tool sent its jobs to the shared
+  default address instead, a different instance from the one the Images page, the chat REPL
+  and the MCP server use.
 - **Gemma 4 GGUF models are prompted in their own chat format.** Every chat with a Gemma 4
   GGUF used to be sent as a generic ChatML prompt, with a warning that the template was not
   recognised, because llama.cpp's built-in template matcher has no Gemma 4 entry. localm now
@@ -2197,6 +2205,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A damaged native image runtime says so instead of failing obscurely.** A runtime folder that
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
+- **Revoking an admin-scoped key says when its browser sessions could not be dropped.** If
+  removing the revoked key's sessions failed with an error, the server log said nothing at the
+  default level although an admin session cookie for that key could stay usable. It now logs a
+  warning naming the key.
 ### Security
 - **Update and key-listing replies no longer hand a scoped key your file paths.** The backup
   path from `GET /api/update/rollback` and `POST /api/update/apply`, the text of a failed apply,
@@ -2219,6 +2231,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A plugin's `requires_extras` can only name pip extras.** An entry that is not an extra name
   (for example one carrying a URL or an environment marker) used to reach the dependency
   installer as part of a requirement string; such a plugin is now refused when it is read.
+- **A rejected grammar no longer lands in the debug log in privacy mode.** When a GGUF model's
+  grammar check failed, llama.cpp's error message and the whole grammar went to the debug log
+  even when privacy mode keeps chat content out of it; it now reaches the log only when chat
+  content may.
 - **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
   value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
   password in it, or an API key under an ordinary name, reached the model as is (an online model
