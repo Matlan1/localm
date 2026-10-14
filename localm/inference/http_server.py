@@ -5079,6 +5079,45 @@ def _tokens_per_sec(completion_tokens: int, decode_elapsed: Optional[float]) -> 
     return round(completion_tokens / decode_elapsed, 2)
 
 
+def _build_usage(prompt_tokens: Optional[int], completion_tokens: int = 0, *,
+                 context_capacity: Optional[int] = None,
+                 gen_start: Optional[float] = None,
+                 first_token_at: Optional[float] = None,
+                 gen_end: Optional[float] = None,
+                 engine=None, outcome: Optional[dict] = None) -> UsageInfo:
+    """The chat-completion ``usage`` object, shared by the streamed and
+    non-streamed paths.
+
+    A *prompt_tokens* of None counts as 0. ``ttft_ms`` and ``tokens_per_sec``
+    are set when *gen_start* and *gen_end* are given; the decode rate covers
+    the first token to *gen_end* only.
+    ``mtp`` and ``speculation`` come from *outcome* (a snapshot of the finished
+    reply), falling back to *engine* for a key the snapshot lacks, and stay
+    None when no *engine* is given.
+    """
+    ttft = (_ttft_ms(gen_start, first_token_at)
+            if gen_start is not None else None)
+    tps = (_tokens_per_sec(completion_tokens,
+                           _decode_elapsed(first_token_at, gen_end))
+           if gen_end is not None else None)
+    prompt_tokens = prompt_tokens or 0
+    mtp = speculation = None
+    if engine is not None:
+        box = outcome if outcome is not None else {}
+        mtp = _outcome(box, "mtp", engine)
+        speculation = _outcome(box, "speculation", engine)
+    return UsageInfo(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        ttft_ms=ttft,
+        tokens_per_sec=tps,
+        context_capacity=context_capacity,
+        mtp=mtp,
+        speculation=speculation,
+    )
+
+
 def _last_user_text(messages: list) -> str:
     """Text of the most recent user message (for the audit trail). A row the
     client marked with an ``origin`` (a GUI web tool event sent as user-role
@@ -5591,9 +5630,8 @@ async def _stream_sse_body(
             err_chunk["localm_error"] = {"status": refusal_status, "detail": refusal}
             yield f"data: {json.dumps(err_chunk, ensure_ascii=False, separators=(',', ':'))}\n\n"
             for data in _final_chunks(model_id, chunk_id, ts, "error",
-                                      UsageInfo(prompt_tokens=prompt_tokens or 0,
-                                                total_tokens=prompt_tokens or 0,
-                                                context_capacity=capacity),
+                                      _build_usage(prompt_tokens,
+                                                   context_capacity=capacity),
                                       include_usage):
                 yield data
             return
@@ -5819,17 +5857,11 @@ async def _stream_sse_body(
     # Count tokens on the streamed text - what the client actually received
     completion_tokens = await _count_streamed_tokens(engine, streamed)
 
-    usage = UsageInfo(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        ttft_ms=_ttft_ms(gen_start, first_token_at),
-        tokens_per_sec=_tokens_per_sec(
-            completion_tokens, _decode_elapsed(first_token_at, gen_end)),
+    usage = _build_usage(
+        prompt_tokens, completion_tokens,
         context_capacity=engine.context_capacity(),
-        mtp=_outcome(call_outcome, "mtp", engine),
-        speculation=_outcome(call_outcome, "speculation", engine),
-    )
+        gen_start=gen_start, first_token_at=first_token_at, gen_end=gen_end,
+        engine=engine, outcome=call_outcome)
     meter.record(usage.prompt_tokens, usage.completion_tokens,
                  usage.ttft_ms, usage.tokens_per_sec)
     for data in _final_chunks(model_id, chunk_id, ts, finish_reason, usage, include_usage,
@@ -6868,20 +6900,10 @@ async def _complete(
                                    tool_names=tool_names, gen_kwargs=gen_kwargs)
 
     completion_tokens = await _count_streamed_tokens(engine, text)
-    usage = UsageInfo(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        # A non-streaming handler still drives chat_stream internally, so the first
-        # token boundary IS observable: report ttft_ms too, and compute tok/s over
-        # the decode window only (never folding the cold-start load into the rate).
-        ttft_ms=_ttft_ms(gen_start, first_token_at),
-        tokens_per_sec=_tokens_per_sec(
-            completion_tokens, _decode_elapsed(first_token_at, gen_end)),
-        context_capacity=capacity,
-        mtp=_outcome(timing.get("outcome", {}), "mtp", engine),
-        speculation=_outcome(timing.get("outcome", {}), "speculation", engine),
-    )
+    usage = _build_usage(
+        prompt_tokens, completion_tokens, context_capacity=capacity,
+        gen_start=gen_start, first_token_at=first_token_at, gen_end=gen_end,
+        engine=engine, outcome=timing.get("outcome", {}))
 
     _record_generation_metrics(usage.prompt_tokens, usage.completion_tokens,
                                usage.ttft_ms, usage.tokens_per_sec)
