@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Draft-model speculative decoding: a second, smaller GGUF drafts tokens on
+"""Draft-model speculative decoding. A second, smaller GGUF drafts tokens on
 its own context for the loaded model to verify.
 
 The draft model must share the target's vocabulary (``draft_vocab_mismatch``).
