@@ -693,6 +693,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   ComfyUI URL set for the Images plugin, the coder's image tool sent its jobs to the shared
   default address instead, a different instance from the one the Images page, the chat REPL
   and the MCP server use.
+- **Two localm processes signing in with the owner key at once keep one owner identity.** Each
+  could record its own, so jobs and sessions stamped by one process stopped counting as the
+  owner's after a restart. Signing in and the GUI's sign-in check also no longer hold up other
+  requests while the key is checked.
 - **Gemma 4 GGUF models are prompted in their own chat format.** Every chat with a Gemma 4
   GGUF used to be sent as a generic ChatML prompt, with a warning that the template was not
   recognised, because llama.cpp's built-in template matcher has no Gemma 4 entry. localm now

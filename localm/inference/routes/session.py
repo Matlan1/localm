@@ -57,20 +57,26 @@ def register(app: FastAPI, ctx) -> None:
         # the session stays valid across a key roll.
         from localm import scopes as S, sessions
         from localm.auth import _hash_key, _is_owner_key, fs_access_for, rag_roots_for
-        fs = "host" if S.ADMIN in held else fs_access_for(presented, "none")
-        # Same "owner is never confined by a per-credential field" shape as fs
-        # above: an ADMIN session snapshots [] (unrestricted), never a stored
-        # per-key list, exactly like effective_rag_roots resolves it live.
-        rag_roots = [] if S.ADMIN in held else rag_roots_for(presented, [])
-        # Record WHETHER THE OWNER KEY minted this session, while that is still
-        # provable. key_hash freezes the key's VALUE, and an owner-key roll leaves
-        # sessions alive, so afterwards the frozen hash matches neither the new
-        # owner key nor any keystore entry - identical to a REVOKED scoped key.
-        # _is_owner_key is a constant-time plaintext compare against the live owner
-        # key: a POSITIVE proof that reads no keystore, so a corrupt auth.json
-        # cannot flip it, and holding ADMIN cannot earn it.
-        key_hash = _hash_key(presented)
-        owner_key_minted = _is_owner_key(presented)
+
+        def _snapshot():
+            fs = "host" if S.ADMIN in held else fs_access_for(presented, "none")
+            # Same "owner is never confined by a per-credential field" shape as
+            # fs: an ADMIN session snapshots [] (unrestricted), never a stored
+            # per-key list, exactly like effective_rag_roots resolves it live.
+            rag_roots = [] if S.ADMIN in held else rag_roots_for(presented, [])
+            # Record WHETHER THE OWNER KEY minted this session, while that is
+            # still provable. key_hash freezes the key's VALUE, and an owner-key
+            # roll leaves sessions alive, so afterwards the frozen hash matches
+            # neither the new owner key nor any keystore entry - identical to a
+            # REVOKED scoped key. _is_owner_key is a constant-time plaintext
+            # compare against the live owner key: a POSITIVE proof that reads no
+            # keystore, so a corrupt auth.json cannot flip it, and holding ADMIN
+            # cannot earn it.
+            return (fs, rag_roots, _hash_key(presented), _is_owner_key(presented))
+
+        # The keystore reads and the owner key's scrypt derivation (which can
+        # write auth.kdf.json under its cross-process lock) run off the event loop.
+        fs, rag_roots, key_hash, owner_key_minted = await run_in_threadpool(_snapshot)
         sid = await run_in_threadpool(
             lambda: sessions.create(scopes=held, key_hash=key_hash,
                                     fs_access=fs, rag_roots=rag_roots,
@@ -321,15 +327,21 @@ def register(app: FastAPI, ctx) -> None:
         headers, is recorded under (another localm instance reads it before
         forwarding a chat here)."""
         from localm.auth import any_key_configured, require_auth_enabled
-        configured = any_key_configured()
-        token, source = _request_token(request)
-        prin = (_hs._principal_from_token(token, source)
-                if (configured and token) else None)
-        held = prin[0] if prin else None
-        csrf = (_hs.csrf_token_for(request, token)
-                if (held is not None and source == "cookie") else "")
-        return {"authed": held is not None,
-                "scopes": sorted(held) if held else [],
-                "required": configured or require_auth_enabled(),
-                "csrf": csrf,
-                "session_mode": _hs.request_session_mode(request).value}
+
+        def _state() -> dict:
+            configured = any_key_configured()
+            token, source = _request_token(request)
+            prin = (_hs._principal_from_token(token, source)
+                    if (configured and token) else None)
+            held = prin[0] if prin else None
+            csrf = (_hs.csrf_token_for(request, token)
+                    if (held is not None and source == "cookie" and token) else "")
+            return {"authed": held is not None,
+                    "scopes": sorted(held) if held else [],
+                    "required": configured or require_auth_enabled(),
+                    "csrf": csrf,
+                    "session_mode": _hs.request_session_mode(request).value}
+
+        # The keystore and session-store reads (and their cross-process locks)
+        # run off the event loop.
+        return await run_in_threadpool(_state)
