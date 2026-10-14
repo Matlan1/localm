@@ -637,6 +637,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   or a launcher warning. `--yes` no longer stops at the plugin picker or the CUDA download
   question, and the hints for provisioning later name the backends your machine has,
   including `metal`.
+- **setup.bat lists only the backends your machine has.** The backend menu and the
+  provision-later hint no longer offer `amd-rocm` or `sycl` on Windows ARM64, where they have
+  no build; the menu numbers stay the same and a number that is not listed returns to the
+  recommended backend with a message.
 - **Native image and video no longer crawl when other programs use VRAM.** On Windows the ROCm
   and Vulkan runtimes could not see VRAM held by other programs (the desktop, a browser, a game
   or a loaded chat model), so a large model such as FLUX.1 dev Q8 was loaded as if the card
@@ -702,6 +706,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   ComfyUI URL set for the Images plugin, the coder's image tool sent its jobs to the shared
   default address instead, a different instance from the one the Images page, the chat REPL
   and the MCP server use.
+- **Two localm processes signing in with the owner key at once keep one owner identity.** Each
+  could record its own, so jobs and sessions stamped by one process stopped counting as the
+  owner's after a restart. Signing in and the GUI's sign-in check also no longer hold up other
+  requests while the key is checked.
 - **Gemma 4 GGUF models are prompted in their own chat format.** Every chat with a Gemma 4
   GGUF used to be sent as a generic ChatML prompt, with a warning that the template was not
   recognised, because llama.cpp's built-in template matcher has no Gemma 4 entry. localm now
