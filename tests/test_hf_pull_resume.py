@@ -219,6 +219,46 @@ class TestPartialOwnership:
         assert captured["resume_size"] == 0
         assert dest.read_bytes() == b"FRESH"
 
+    def test_a_live_partial_of_a_cloned_machine_reaching_the_folder_remotely(
+            self, cache, tmp_path, monkeypatch, live_child):
+        """A cloned machine shares this machine's host id but has another host
+        name. Its record says the cache folder was not on its own disk, so
+        its partial is neither adopted nor deleted although the folder is
+        local here and the pid here names another process."""
+        import platform
+
+        from localm import instances
+        host = instances.host_id()
+        if host is None:
+            pytest.skip("no machine identifier is readable here")
+        if not instances.path_is_local(cache):
+            pytest.skip("the test folder is not on a local disk here")
+        with monkeypatch.context() as m:
+            m.setattr(platform, "node", lambda: "cloned-vm-other-name")
+            m.setattr(instances, "_PID_SPACE", None)
+            clone_space = instances.pid_space_id()
+        assert clone_space != this_pid_space(), "the injected name took no effect"
+        pid, _ = live_child
+        recorded = started_an_hour_earlier(start_identity_of(pid))
+        assert instances.start_identity_differs(
+            recorded, instances.process_start_identity(pid))
+        inc_path = cache / "file.etag.incomplete"
+        other = cache / "file.etag.bbbb2222.incomplete"
+        other.write_bytes(b"CLONE-IN-FLIGHT")
+        _partial_owner_path(other).write_text(json.dumps(
+            {"pid": pid, "space": clone_space, "host": host, "local": False,
+             "start": recorded}), encoding="utf-8")
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b"FRESH")
+
+        _call(inc_path, dest, expected_size=5)
+
+        assert (other.read_bytes() if other.exists() else None) == (
+            b"CLONE-IN-FLIGHT"), "a cloned machine's live partial was touched"
+        assert _partial_owner_path(other).exists()
+        assert captured["resume_size"] == 0
+        assert dest.read_bytes() == b"FRESH"
+
     @pytest.mark.parametrize("whose", ["dead", "this-process"])
     def test_a_partial_from_another_pid_space_is_left_alone_whatever_its_pid(
             self, cache, tmp_path, monkeypatch, dead_pid, whose):
