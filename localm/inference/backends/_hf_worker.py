@@ -1521,6 +1521,12 @@ class HFWorker:
                     f"{e}. Check the Intel GPU driver and that torch was installed from "
                     "the xpu wheel index.") from e
 
+        if device == "cuda":
+            from localm.config import cache_dir
+            from localm.inference.backends._hf_gemm_tuning import (
+                RESULTS_DIR_NAME, tune_decode_gemms)
+            tune_decode_gemms(torch, self._model, cache_dir() / RESULTS_DIR_NAME)
+
         self._loaded = True
         self._vision_cache = (_install_vision_feature_cache(self._model)
                               if self._supports_image else None)

@@ -394,6 +394,13 @@ Linux use the upstream ROCm index. AMD ROCm on Windows is a recent **public
 preview**, so expect rough edges there. GPU is selected automatically; override
 with `--device cuda` / `--device xpu` / `--device cpu`.
 
+On AMD (ROCm), loading an HF model also picks the fastest rocBLAS kernel for each of
+its one-token matrix products (PyTorch TunableOp). The first load of a model on a
+card spends a few seconds on this; the results are kept in
+`<data dir>/cache/rocm-gemm-tuning/` and reused on later loads until torch or ROCm
+changes. Setting `PYTORCH_TUNABLEOP_HIPBLASLT_ENABLED=1` also considers hipBLASLt
+kernels, which some cards (RX 6000) do not have.
+
 ## When something goes wrong
 
 If setup or a run fails, localm tells you what broke and why, and (for an
