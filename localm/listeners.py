@@ -15,6 +15,8 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
+import time
 from typing import Optional
 
 from localm.debuglog import logger
@@ -311,12 +313,38 @@ def _reaches(address: str, dial: str) -> bool:
             or address == "::ffff:" + dial)
 
 
+#: How long a True answer of port_owned_by_current_user is reused for the
+#: same (port, dial), in seconds. A False answer is never reused.
+OWNED_CACHE_TTL_S = 5.0
+_owned_cache: dict = {}
+_owned_cache_lock = threading.Lock()
+
+
 def port_owned_by_current_user(port: int, dial: str = "127.0.0.1") -> bool:
     """True only when at least one socket is listening on *port* where a
     connection to *dial* can reach it, and every such socket belongs to the OS
     user running this process (Windows: the owning process's account; Linux
     and macOS: the socket's uid). False when the platform's table, or any of
-    those owners, cannot be read."""
+    those owners, cannot be read.
+
+    A True answer is reused for :data:`OWNED_CACHE_TTL_S` seconds for the same
+    (port, dial); a False answer is recomputed on every call."""
+    key = (int(port), dial)
+    now = time.monotonic()
+    with _owned_cache_lock:
+        expiry = _owned_cache.get(key)
+        if expiry is not None and expiry > now:
+            return True
+        _owned_cache.pop(key, None)
+    owned = _port_owned_by_current_user(port, dial)
+    if owned:
+        with _owned_cache_lock:
+            _owned_cache[key] = time.monotonic() + OWNED_CACHE_TTL_S
+    return owned
+
+
+def _port_owned_by_current_user(port: int, dial: str) -> bool:
+    """:func:`port_owned_by_current_user` without its cache."""
     try:
         if sys.platform == "win32":
             rows = _windows_listener_owners()

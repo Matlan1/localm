@@ -13,6 +13,36 @@ import pytest
 from localm import listeners, peer_routing
 
 
+@pytest.fixture(autouse=True)
+def _no_cached_owner_answers():
+    listeners._owned_cache.clear()
+    yield
+    listeners._owned_cache.clear()
+
+
+def test_a_true_answer_is_reused_briefly_and_a_false_one_never(monkeypatch):
+    calls = []
+    answer = {"v": True}
+
+    def counted(port, dial):
+        calls.append(port)
+        return answer["v"]
+    monkeypatch.setattr(listeners, "_port_owned_by_current_user", counted)
+    assert listeners.port_owned_by_current_user(9001) is True
+    assert listeners.port_owned_by_current_user(9001) is True
+    assert calls == [9001]
+    answer["v"] = False
+    assert listeners.port_owned_by_current_user(9002) is False
+    assert listeners.port_owned_by_current_user(9002) is False
+    assert calls == [9001, 9002, 9002]
+    monkeypatch.setattr(listeners, "OWNED_CACHE_TTL_S", 0.0)
+    listeners._owned_cache.clear()
+    answer["v"] = True
+    listeners.port_owned_by_current_user(9003)
+    answer["v"] = False
+    assert listeners.port_owned_by_current_user(9003) is False
+
+
 @pytest.fixture
 def own_port():
     s = socket.socket()
