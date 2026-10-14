@@ -22,9 +22,98 @@ if TYPE_CHECKING:
 # bounded.
 _IMAGE_MAX_BYTES = 25_000_000
 
+# Largest image accepted, in pixels, checked from the image header before it is
+# decoded. Above a 50-megapixel camera frame (8160x6120) and 8K UHD (7680x4320);
+# about 143 MiB once decoded to RGB.
+MAX_IMAGE_PIXELS = 50_000_000
+# Most images, and most pixels summed over them, one request may decode. A chat
+# client resends every earlier image each turn, so these count the whole
+# conversation: 64 twelve-megapixel photos (4032x3024) fit in the pixel total.
+MAX_REQUEST_IMAGES = 64
+MAX_REQUEST_IMAGE_PIXELS = 800_000_000
+# Formats decoded. Each one's open reads only the header, so the size check
+# runs before any pixel data is decoded.
+IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "TIFF", "AVIF")
 
-def decode_image_url(url: str):
+
+class ImageBudget:
+    """The images one request has decoded so far, against
+    ``MAX_REQUEST_IMAGES`` and ``MAX_REQUEST_IMAGE_PIXELS``. Pass one instance
+    to every ``decode_image_url`` call of a request. Not thread-safe."""
+
+    def __init__(self) -> None:
+        self.images = 0
+        self.pixels = 0
+
+    def take_image(self) -> None:
+        """Count one more image. Raises ImageLimitError past
+        ``MAX_REQUEST_IMAGES``."""
+        self.images += 1
+        if self.images > MAX_REQUEST_IMAGES:
+            from localm.inference.backends.base import ImageLimitError
+            raise ImageLimitError(
+                f"The request attaches more than {MAX_REQUEST_IMAGES} images; "
+                f"send at most {MAX_REQUEST_IMAGES}.")
+
+    def take_pixels(self, pixels: int) -> None:
+        """Count *pixels* more decoded pixels. Raises ImageLimitError past
+        ``MAX_REQUEST_IMAGE_PIXELS``."""
+        self.pixels += pixels
+        if self.pixels > MAX_REQUEST_IMAGE_PIXELS:
+            from localm.inference.backends.base import ImageLimitError
+            raise ImageLimitError(
+                f"The attached images total more than {MAX_REQUEST_IMAGE_PIXELS} "
+                "pixels; send fewer or smaller images.")
+
+
+def _other_known_format(Image, raw: bytes) -> bool:
+    """True when a Pillow format outside ``IMAGE_FORMATS`` recognises the first
+    bytes of *raw*. Reads only that prefix; opens nothing."""
+    Image.init()
+    prefix = raw[:16]
+    for fmt, (_factory, accept) in Image.OPEN.items():
+        if fmt not in IMAGE_FORMATS and accept is not None and accept(prefix):
+            return True
+    return False
+
+
+def _open_bounded(Image, raw: bytes, budget: ImageBudget | None):
+    """*raw* decoded by the ``PIL.Image`` module *Image* to an RGB image, after
+    its declared size has been checked against ``MAX_IMAGE_PIXELS`` and
+    *budget*. Raises ImageLimitError for an image over either limit or in a
+    format outside ``IMAGE_FORMATS``, before any pixel data is decoded."""
+    from localm.inference.backends.base import ImageLimitError
+    Image.init()
+    available = [f for f in IMAGE_FORMATS if f in Image.OPEN]
+    try:
+        img = Image.open(io.BytesIO(raw), formats=available)
+    except Image.DecompressionBombError as e:
+        raise ImageLimitError(
+            f"The attached image is too large to decode: {e}") from e
+    except Image.UnidentifiedImageError as e:
+        if not _other_known_format(Image, raw):
+            raise
+        raise ImageLimitError(
+            "The attached image is not in a supported format "
+            f"({', '.join(IMAGE_FORMATS)}).") from e
+    width, height = img.size
+    pixels = width * height
+    if pixels > MAX_IMAGE_PIXELS:
+        raise ImageLimitError(
+            f"The attached image is {width}x{height} ({pixels} pixels), over the "
+            f"{MAX_IMAGE_PIXELS}-pixel limit; scale it down and try again.")
+    if budget is not None:
+        budget.take_pixels(pixels)
+    return img.convert("RGB")
+
+
+def decode_image_url(url: str, budget: ImageBudget | None = None):
     """Return a PIL.Image.Image from a data-URI or http(s) URL.
+
+    Raises ImageLimitError for an image over ``MAX_IMAGE_PIXELS`` or in a
+    format outside ``IMAGE_FORMATS``, and, when *budget* is given, for one that
+    takes the request past its image count or pixel limits. All are checked
+    before the image is decoded.
 
     A remote (http/https) URL is fetched through localm.netpolicy so a chat
     'image_url' content part cannot turn the server into an SSRF proxy: the
@@ -50,18 +139,20 @@ def decode_image_url(url: str):
             "environment (uv pip install pillow) and try again."
         ) from e
 
+    if budget is not None:
+        budget.take_image()
     if url.startswith("data:"):
         # data:image/jpeg;base64,<bytes>
         match = re.match(r"data:[^;]+;base64,(.+)", url, re.DOTALL)
         if not match:
             raise ValueError(f"Malformed data URI: {url[:60]}")
         raw = base64.b64decode(match.group(1))
-        return Image.open(io.BytesIO(raw)).convert("RGB")
+        return _open_bounded(Image, raw, budget)
 
     from localm.netpolicy import safe_fetch_bytes
     _final_url, _content_type, raw = safe_fetch_bytes(
         url, max_bytes=_IMAGE_MAX_BYTES)
-    return Image.open(io.BytesIO(raw)).convert("RGB")
+    return _open_bounded(Image, raw, budget)
 
 
 def decode_audio(b64: str, fmt: str) -> tuple[np.ndarray, int]:

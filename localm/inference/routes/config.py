@@ -80,7 +80,8 @@ def register(app: FastAPI, ctx) -> None:
         # to a non-owner config:read caller; the schema hides the control too. The
         # owner (open mode, so caller_scopes None, or an ADMIN key) sees everything.
         held = _hs.caller_scopes(request)
-        if held is not None and scopes.ADMIN not in held:
+        owner = held is None or scopes.ADMIN in held
+        if not owner:
             for k in admin_only_keys():
                 cfg.pop(k, None)
             # The media plugins keep their own copy of launch_cmd / api_url /
@@ -88,11 +89,17 @@ def register(app: FastAPI, ctx) -> None:
             # engine_managed, which gates the WRITE only and is never popped above,
             # so those nested values are scrubbed here as well.
             _scrub_media_admin_only(cfg)
-        # Read-only extras for the frontend (skipped by the settings form).
-        # The server mode is fixed at startup (the audit log is opened then);
-        # the coder default is resolved per new session.
+        # Read-only extras for the frontend (skipped by the settings form): the
+        # server's session mode now, the mode the GUI chat runs under, and the
+        # coder default a new session starts with. A non-owner caller's chat is
+        # recorded under the server's mode, so that is its chat mode.
         cfg["effective_mode"] = ctx.mode.value
+        cfg["effective_chat_mode"] = (effective_mode("chat").value if owner
+                                      else cfg["effective_mode"])
         cfg["effective_coder_mode"] = effective_mode("coder").value
+        # The mode an exchange from this caller, sent with these same headers,
+        # is recorded under (a forwarding instance reads it before a forward).
+        cfg["request_session_mode"] = _hs.request_session_mode(request).value
         # Resolved context ceiling (VRAM-derived when ctx_auto) - the GUI
         # bases its compaction threshold on this, not the static config.
         eff_ctx = getattr(_hs._engine, "effective_ctx_max", None) if _hs._engine else None
@@ -145,8 +152,9 @@ def register(app: FastAPI, ctx) -> None:
         from localm.config import ConfigUnreadable, update_config
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
-        readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
-                    "effective_ctx_model", "instance_id", "instance_port"}
+        readonly = {"effective_mode", "effective_chat_mode", "effective_coder_mode",
+                    "request_session_mode", "effective_ctx_max", "effective_ctx_model", "instance_id",
+                    "instance_port"}
         # `confirm` is this route's own protocol flag, not a config key: stripped
         # here alongside the read-only extras so validate_update never sees it.
         confirm = bool(body.get("confirm"))

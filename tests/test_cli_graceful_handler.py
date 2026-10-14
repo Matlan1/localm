@@ -39,11 +39,24 @@ def _group():
 
 def test_unexpected_exception_is_caught_and_reported(tmp_path, monkeypatch):
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setenv("LOCALM_KEEP_DIAGNOSTICS", "1")
     res = CliRunner().invoke(_group(), ["boom"])
     assert res.exit_code == 1
     assert "Sorry -" in res.output
     assert "unexpected error" in res.output
     assert list((tmp_path / "bug-reports").glob("*.md"))   # a report was written
+
+
+def test_unexpected_exception_in_privacy_mode_writes_no_report(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.config.load_config", lambda *a, **k: {})
+    monkeypatch.setenv("LOCALM_MODE", "privacy")
+    monkeypatch.delenv("LOCALM_KEEP_DIAGNOSTICS", raising=False)
+    res = CliRunner().invoke(_group(), ["boom"])
+    assert res.exit_code == 1
+    assert "Sorry -" in res.output
+    assert "Privacy mode: no bug report was saved." in res.output
+    assert not (tmp_path / "bug-reports").exists()
 
 
 def test_localm_error_uses_summary_and_reason(tmp_path, monkeypatch):

@@ -40,22 +40,18 @@ from localm.debuglog import logger
 _CONNECT_TIMEOUT = 5.0
 _READ_TIMEOUT = 300.0
 
-SESSION_MODE_HEADER = "X-Localm-Session-Mode"
-
-
 def _local_request_mode(request):
     """The session mode this instance records *request* under."""
-    from localm.audit import effective_mode
-    return effective_mode("server")
+    from localm.inference.http_server import request_session_mode
+    return request_session_mode(request)
 
 
 def chat_route_mode():
     """The session mode chat sent through a route must keep when no request
     names one (accepting a route, a scheduled chat job, the MCP server): the
     more private of the server mode and the chat mode."""
-    from localm.audit import effective_mode, mode_at_least_as_private
-    server, chat = effective_mode("server"), effective_mode("chat")
-    return chat if mode_at_least_as_private(chat, server) else server
+    from localm.audit import effective_mode, most_private
+    return most_private(effective_mode("server"), effective_mode("chat"))
 
 
 @dataclass
@@ -412,7 +408,7 @@ def peer_recording_mode(peer: dict, api_key: Optional[str], mode, *,
     with a valid mode (an older localm, a credential without ``config:read``, a
     network error). Sends nothing to an endpoint that fails
     :func:`is_routable_peer_endpoint`."""
-    from localm.audit import SessionMode
+    from localm.audit import SESSION_MODE_HEADER, SessionMode
     scheme = peer.get("scheme") or "http"
     if not is_routable_peer_endpoint(peer.get("host"), scheme):
         return None
@@ -528,6 +524,7 @@ async def forward(route: PeerRoute, request, path: str, *,
     if body is None:
         body = await request.body()
     fwd_headers = _auth_headers(route.api_key)
+    from localm.audit import SESSION_MODE_HEADER
     fwd_headers[SESSION_MODE_HEADER] = mode.value
     content_type = request.headers.get("content-type")
     if content_type:

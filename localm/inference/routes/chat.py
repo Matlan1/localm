@@ -9,9 +9,12 @@ _messages_prompt_text, _protocol_messages_to_dicts).
 
 NOTE on the local ``ctx``: each handler builds its own per-request
 ``ChatHookContext`` named ``ctx`` (the chat-pipeline turn context), so the
-session-scoped audit/transcript are unpacked from the register ``ctx`` into
-module-style locals (``_audit`` / ``_transcript``) once at the top of
-register(), before any handler body shadows ``ctx``.
+session-scoped SessionRecorder is unpacked from the register ``ctx`` into the
+module-style local ``_recorder`` once at the top of register(), before any
+handler body shadows ``ctx``. Each request passes it, capped for that caller
+(``_caller_recorder``), as ``audit`` with ``transcript=None``: _audit_exchange
+resolves the log and transcript of the session mode in force when the exchange
+is recorded.
 """
 
 from __future__ import annotations
@@ -58,8 +61,12 @@ from localm.inference.protocol import (
 def register(app: FastAPI, ctx) -> None:
     # Session-scoped objects, unpacked before the handler bodies (each of which
     # rebinds a local ``ctx`` for its own chat-pipeline turn).
-    _audit = ctx.audit
-    _transcript = ctx.transcript
+    _recorder = ctx.recorder
+
+    def _caller_recorder(request: Request):
+        """The server's recorder capped for this request's caller (see
+        http_server.caller_recorder)."""
+        return _hs.caller_recorder(_recorder, request)
     _require_auth = _hs._require_auth
     _touch_activity = _hs._touch_activity
     _protocol_messages_to_dicts = _hs._protocol_messages_to_dicts
@@ -457,7 +464,8 @@ def register(app: FastAPI, ctx) -> None:
             sem=sem, pipeline=pipeline, ctx=ctx, gen_kwargs=gen_kwargs,
             prompt_tokens=prompt_tokens, compact_in_stream=compact_in_stream,
             compacted_here=compacted_here, route=route,
-            routed_placement=routed_placement, include_usage=include_usage(req))
+            routed_placement=routed_placement, include_usage=include_usage(req),
+            recorder=_caller_recorder(request))
 
     def _prepared_engine(prepared) -> object:
         return prepared.engine
@@ -478,7 +486,7 @@ def register(app: FastAPI, ctx) -> None:
         A *chunk_id* continues a stream whose role chunk was already sent."""
         return _pin_engine(prepared.engine, _stream_sse(
             prepared.engine, prepared.messages, prepared.reported_model,
-            prepared.sem, audit=_audit, transcript=_transcript,
+            prepared.sem, audit=prepared.recorder, transcript=None,
             pipeline=prepared.pipeline, ctx=prepared.ctx,
             prompt_tokens=prepared.prompt_tokens,
             compact=prepared.compact_in_stream,
@@ -499,7 +507,7 @@ def register(app: FastAPI, ctx) -> None:
         compacted_here = prepared.compacted_here
         gen_kwargs = prepared.gen_kwargs
         resp = await _complete(engine, messages, reported_model, sem,
-                               audit=_audit, transcript=_transcript,
+                               audit=prepared.recorder, transcript=None,
                                pipeline=pipeline, ctx=ctx,
                                request=request, prompt_tokens=prompt_tokens, **gen_kwargs)
         for _hk, _hv in _memory_used_header(ctx).items():
@@ -947,7 +955,7 @@ def register(app: FastAPI, ctx) -> None:
                 return StreamingResponse(
                     _pin_engine(engine, _stream_sse_completion(
                         engine, messages, reported_model, sem,
-                        audit=_audit, transcript=_transcript,
+                        audit=_caller_recorder(request), transcript=None,
                         pipeline=pipeline, ctx=ctx, prompt_tokens=prompt_tokens,
                         include_usage=include_usage(req),
                         echo=prompt if req.echo else None, **gen_kwargs)),
@@ -993,7 +1001,8 @@ def register(app: FastAPI, ctx) -> None:
             # record the exchange (audit + transcript), exactly like chat.
             if gen_error is None and pipeline is not None and ctx is not None and pipeline.has("outlet"):
                 text = await pipeline.run_outlet(text, messages, ctx)
-            _audit_exchange(_audit, _transcript, messages, text, outcome=outcome)
+            _audit_exchange(_caller_recorder(request), None, messages, text,
+                            outcome=outcome)
             _hs._log_chat_reply(text, finish_reason="error" if gen_error is not None else "stop")
 
             completion_tokens = await loop.run_in_executor(

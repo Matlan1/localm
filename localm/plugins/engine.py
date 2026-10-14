@@ -528,8 +528,9 @@ class PluginHost:
 
         Wrap this around the actual chat_stream/complete call - never around a
         bare engine()/inference_engine access used only to check .loaded or read
-        a name. See localm.inference.http_server.driving_engine for the
-        mechanism."""
+        a name. Raises HTTPException 503, without running the block, when the
+        engine is being unloaded. See localm.inference.http_server.driving_engine
+        for the mechanism."""
         from localm.inference.http_server import driving_engine as _driving_engine
         return _driving_engine(engine if engine is not None else self.engine())
 

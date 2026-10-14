@@ -30,9 +30,16 @@ Mode resolution (``effective_mode(surface)``)
     chat:    --mode flag > config "chat_mode" > config "mode" > privacy
     server:  --mode flag > config "mode" > privacy
 
+The server records a request to its chat routes under the most private of the
+server mode, the chat or coder mode when the request's ``X-Client-Id`` is
+``chat`` or ``coder``, and the mode in its ``X-Localm-Session-Mode`` header
+(see :class:`CallerRecorder`).
+
 CLI ``--mode`` flags set the ``LOCALM_MODE`` env var so child processes
-inherit the override.  Switching mid-session is not supported (the JSONL
-file is opened at startup).
+inherit the override.  A chat REPL or coder session keeps the mode it started
+with (its JSONL file is opened at startup).  The server follows a change to
+the config at once through :class:`SessionRecorder`: the next recorded
+exchange goes to files opened for the new mode, or to none in privacy mode.
 """
 
 from __future__ import annotations
@@ -85,6 +92,11 @@ _MODE_RANK = {SessionMode.PRIVACY: 0, SessionMode.LOG: 1, SessionMode.FULL: 2}
 def mode_at_least_as_private(candidate: SessionMode, floor: SessionMode) -> bool:
     """True if *candidate* writes no more than *floor* would."""
     return _MODE_RANK[candidate] <= _MODE_RANK[floor]
+
+
+def most_private(*modes: SessionMode) -> SessionMode:
+    """The mode among *modes* that writes the least. Needs at least one."""
+    return min(modes, key=_MODE_RANK.__getitem__)
 
 
 # ---------------------------------------------------------------------------
@@ -477,3 +489,159 @@ def make_transcript(mode: SessionMode, label: str = "chat") -> Optional[Markdown
     if mode == SessionMode.FULL:
         return MarkdownTranscript(label=label)
     return None
+
+
+class SessionRecorder:
+    """The audit log and transcript of a long-running surface (the server),
+    kept in step with the session mode the config names now.
+
+    :meth:`current` resolves ``effective_mode(surface)`` on every call and,
+    when it differs from the mode in force, switches: to privacy, the audit log
+    is closed and nothing is recorded; from privacy, a new audit log is opened;
+    between log and full, the same audit log stays open and only the transcript
+    is added (full) or dropped (log). Nothing is recorded under a mode the user
+    has left.
+
+    If a new audit log cannot be opened (privacy to log or full), privacy stays
+    in force and is reported, the failure is logged once per target mode at
+    WARNING, and the next call tries again.
+
+    After :meth:`close`, :meth:`current` returns a NullAuditLog, no transcript
+    and privacy mode, and logs one WARNING if the config then names log or full.
+    Thread-safe.
+    """
+
+    def __init__(self, surface: str = "server", label: str = "server") -> None:
+        self._surface = surface
+        self._label = label
+        self._lock = threading.Lock()
+        self._closed = False
+        self._warned_closed = False
+        self._failed_mode: Optional[SessionMode] = None
+        self._mode = effective_mode(surface)
+        self._audit: AuditLogT = make_audit_log(self._mode, label=label)
+        self._transcript = make_transcript(self._mode, label=label)
+
+    def current(self) -> tuple[AuditLogT, Optional[MarkdownTranscript], SessionMode]:
+        """``(audit, transcript, mode)`` for the mode in force now. Never raises
+        for a mode switch that fails to open its files (see the class doc)."""
+        old: Optional[AuditLogT] = None
+        with self._lock:
+            wanted = effective_mode(self._surface)
+            if self._closed:
+                if wanted != SessionMode.PRIVACY and not self._warned_closed:
+                    self._warned_closed = True
+                    logger.warning("session recording is closed; the configured "
+                                   "%s mode records nothing in this process",
+                                   wanted.value)
+                return self._audit, None, SessionMode.PRIVACY
+            if wanted == self._mode:
+                return self._audit, self._transcript, self._mode
+            try:
+                if wanted == SessionMode.PRIVACY:
+                    audit: AuditLogT = NullAuditLog()
+                elif self._mode == SessionMode.PRIVACY:
+                    audit = make_audit_log(wanted, label=self._label)
+                else:
+                    audit = self._audit
+                transcript = make_transcript(wanted, label=self._label)
+            except OSError as e:
+                if self._failed_mode != wanted:
+                    self._failed_mode = wanted
+                    logger.warning("session mode %s could not take effect, still "
+                                   "recording as %s: %s", wanted.value,
+                                   self._mode.value, e)
+                return self._audit, self._transcript, self._mode
+            if audit is not self._audit:
+                old = self._audit
+            self._audit, self._transcript, self._mode = audit, transcript, wanted
+            self._failed_mode = None
+            result = (audit, transcript, wanted)
+        if old is not None:
+            old.close()
+        return result
+
+    @property
+    def mode(self) -> SessionMode:
+        """The session mode in force now (see :meth:`current`)."""
+        return self.current()[2]
+
+    def close(self) -> None:
+        """Close the open audit log; later :meth:`current` calls record nothing."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            old = self._audit
+            self._audit, self._transcript = NullAuditLog(), None
+        old.close()
+
+    def for_caller(self, client_id: Optional[str] = None,
+                   caller_mode: Optional[str] = None) -> CallerRecorder:
+        """This recorder as seen by one request; see :class:`CallerRecorder`."""
+        return CallerRecorder(self, client_id, caller_mode)
+
+
+# Request headers a caller of the server's chat routes uses to name its surface
+# and its own resolved session mode.
+CLIENT_ID_HEADER = "X-Client-Id"
+SESSION_MODE_HEADER = "X-Localm-Session-Mode"
+
+# X-Client-Id values that name a surface with its own persistence override.
+_CALLER_SURFACES = ("chat", "coder")
+
+
+def caller_cap(client_id: Optional[str] = None,
+               caller_mode: Optional[str] = None) -> Optional[SessionMode]:
+    """The most private of a caller's surface mode (``effective_mode("chat")`` or
+    ``effective_mode("coder")`` when *client_id* is ``"chat"`` or ``"coder"``) and
+    *caller_mode*, the session mode the caller resolved for itself; None when
+    neither applies. An empty or absent *caller_mode* adds no cap; an unknown one
+    caps at ``privacy``."""
+    caps = []
+    cid = (client_id or "").strip().lower()
+    if cid in _CALLER_SURFACES:
+        caps.append(effective_mode(cid))
+    asserted = (caller_mode or "").strip()
+    if asserted:
+        try:
+            caps.append(parse_mode(asserted))
+        except ValueError:
+            caps.append(SessionMode.PRIVACY)
+    return most_private(*caps) if caps else None
+
+
+class CallerRecorder:
+    """A :class:`SessionRecorder` capped for one caller's traffic.
+
+    :meth:`current` returns the recorder's files, limited to the most private of
+    the server's mode, the caller's surface mode (``effective_mode("chat")`` or
+    ``effective_mode("coder")`` when *client_id* is ``"chat"`` or ``"coder"``)
+    and *caller_mode*, the session mode the caller resolved for itself. All are
+    resolved on every call. A cap of ``log`` drops the transcript; ``privacy``
+    drops both. An empty or absent *caller_mode* adds no cap; an unknown one caps
+    at ``privacy``. The result is never less private than the server's mode.
+    """
+
+    def __init__(self, recorder: SessionRecorder, client_id: Optional[str] = None,
+                 caller_mode: Optional[str] = None) -> None:
+        self._recorder = recorder
+        self._client_id = client_id
+        self._caller_mode = caller_mode
+
+    def cap(self) -> Optional[SessionMode]:
+        """The caller's own limit (see :func:`caller_cap`), or None for none."""
+        return caller_cap(self._client_id, self._caller_mode)
+
+    def current(self) -> tuple[AuditLogT, Optional[MarkdownTranscript], SessionMode]:
+        """``(audit, transcript, mode)`` this caller's exchange is recorded with."""
+        audit, transcript, mode = self._recorder.current()
+        cap = self.cap()
+        if cap is None:
+            return audit, transcript, mode
+        mode = most_private(mode, cap)
+        if mode == SessionMode.PRIVACY:
+            return NullAuditLog(), None, mode
+        if mode == SessionMode.LOG:
+            return audit, None, mode
+        return audit, transcript, mode

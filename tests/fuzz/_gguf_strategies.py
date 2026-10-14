@@ -298,3 +298,41 @@ def gguf_bytes(draw):
 
 
 raw_gguf_like = st.binary(max_size=256).map(lambda b: b"GGUF" + b)
+
+_ARCH_KV = lstr("general.architecture") + struct.pack("<I", T_STRING) + lstr("llama")
+_BIG_COUNTS = [10_000, 100_000, 300_000]
+
+
+@st.composite
+def big_gguf_bytes(draw):
+    """A GGUF-shaped file of up to a few MiB: a flood of KV entries, a vocabulary
+    array, a tensor-info table or one large string, with the declared counts
+    either true or lying. The counts and sizes are what a reader's loop bound
+    and allocation follow, so a reader that walks or allocates in proportion to
+    them costs real time and memory here, which the kilobyte-scale files of
+    :func:`gguf_bytes` never can."""
+    kind = draw(st.sampled_from(["kv_flood", "vocab", "tensor_flood", "string_blob"]))
+    n = draw(st.sampled_from(_BIG_COUNTS))
+    lie = draw(st.sampled_from([None, None, 0, 2 ** 32, 2 ** 64 - 1]))
+    kvs, tensors, tensor_blob = [_ARCH_KV], 0, b""
+    if kind == "kv_flood":
+        entry = lstr("llama.block_count") + struct.pack("<II", T_UINT32, 7)
+        kvs.append(entry * n)
+        kv_count = n + 1
+    elif kind == "vocab":
+        kvs.append(lstr("tokenizer.ggml.tokens") + struct.pack("<IIQ", T_ARRAY, T_STRING, n)
+                   + lstr("a") * n)
+        kv_count = 2
+    elif kind == "tensor_flood":
+        tensor_blob = _tensor_bytes(("blk.0.attn_k.weight", 2, [64, 64], 0, 0)) * n
+        tensors = n
+        kv_count = 1
+    else:
+        size = draw(st.sampled_from([2 ** 20, 2 ** 22]))
+        kvs.append(lstr("tokenizer.chat_template") + struct.pack("<I", T_STRING)
+                   + struct.pack("<Q", size) + b"x" * size)
+        kv_count = 2
+    declared_kv = kv_count if lie is None or kind == "tensor_flood" else lie
+    declared_tensors = tensors if lie is None or kind != "tensor_flood" else lie
+    return (b"GGUF" + struct.pack("<IQQ", 3, declared_tensors, declared_kv)
+            + b"".join(kvs) + tensor_blob + draw(st.binary(max_size=64)))

@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, applyChatBackground, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -149,7 +149,8 @@ export const chat = {
   // by refreshCtxLimit's 30s poll) - a config refresh must not resurrect a
   // grammar THIS backend has already demonstrated it cannot honour.
   toolGrammarUnsupported: false,
-  privacy: false,    // server in privacy mode: conversations not persisted
+  privacy: false,    // chat in privacy mode: conversations not persisted
+  serverPrivacy: false,  // server in privacy mode: non-chat stored keys not persisted
   // True once /v1/config has answered and `privacy` reflects the server's real
   // mode. The two localStorage write funnels (lsSetScoped, saveConversations)
   // queue their writes while this is false - the boot default above is not an
@@ -186,6 +187,8 @@ export const chat = {
   // user's own in-flight or just-landed message, misreporting a real answer
   // as if nothing was said.
   privacyWiped: false,
+  // The same latch for the server-mode wipe of the Coder tab's project field.
+  serverPrivacyWiped: false,
 };
 
 // The human-facing label of a tagged row (kb/doc) or a tool event; used by
@@ -332,7 +335,7 @@ export async function compactConversation(conv, signal = null) {
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders(CHAT_SURFACE_HEADERS),
       body: JSON.stringify({
         model: pinnedModel || modelSelect.value || modelCache.active,
         pin_model: !!pinnedModel,
@@ -554,12 +557,30 @@ export async function refreshCtxLimit() {
 
       // Privacy mode: conversations live in memory only - wipe anything a
       // previous non-privacy session left behind (in-memory AND on disk) and
-      // show the hint.
-      chat.privacy = cfg.effective_mode === "privacy";
+      // show the hint. The server applies a Settings change of the mode at
+      // once, so this also handles a switch while the page is open.
+      const wasPrivacy = chat.modeKnown && chat.privacy;
+      chat.privacy = (cfg.effective_chat_mode ?? cfg.effective_mode) === "privacy";
+      chat.serverPrivacy = cfg.effective_mode === "privacy";
       chat.modeKnown = true;
       settlePendingScopedWrites();
+      for (const key of INSTANCE_SCOPED_KEYS) {
+        if (scopedKeyPrivate(key)) localStorage.removeItem(key);
+      }
+      if (chat.serverPrivacy) {
+        // The Coder tab's "Project directory" input was filled from
+        // "localm.coderCwd" at boot; clear it once per privacy confirmation.
+        if (!chat.serverPrivacyWiped) {
+          chat.serverPrivacyWiped = true;
+          const cwdInputPriv = $("setup-cwd");
+          if (cwdInputPriv) cwdInputPriv.value = "";
+        }
+      } else {
+        chat.serverPrivacyWiped = false;
+      }
       if (chat.privacy) {
-        for (const key of INSTANCE_SCOPED_KEYS) localStorage.removeItem(key);
+        chat.persist = false;
+        document.getElementById("persist-hint")?.remove();
         // GUI-LIVE-WIPE: the destructive in-memory reset below must run only
         // the FIRST time privacy mode is confirmed for this page load, not on
         // every refreshCtxLimit() call - this function is also polled every
@@ -583,13 +604,6 @@ export async function refreshCtxLimit() {
           setWebAskSession(null);                        // R27: forget the session choice
           renderConvList();
           renderChat();
-          // AUD-INSTANCEID/AUD-PRIV-2: same DOM-field gap as the mismatch branch
-          // above - the Coder tab's "Project directory" input was already
-          // populated from "localm.coderCwd" at boot before this could run, and
-          // nothing else re-reads that key into the field, so the wipe above
-          // needs a matching correction here too.
-          const cwdInputPriv = $("setup-cwd");
-          if (cwdInputPriv) cwdInputPriv.value = "";
         }
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
@@ -611,6 +625,13 @@ export async function refreshCtxLimit() {
         // privacy mode would suppress that wipe and leave them on screen for the
         // rest of the tab's life.
         chat.privacyWiped = false;
+        document.getElementById("privacy-hint")?.remove();
+        // Left privacy mode while this page was open: save what is on screen
+        // now and connect to the server's conversation store.
+        if (wasPrivacy) {
+          saveConversations();
+          initServerConversations();
+        }
       }
       hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
@@ -644,19 +665,30 @@ export function settlePendingScopedWrites() {
   const saveConv = _pendingConversationSave;
   _pendingScopedWrites.clear();
   _pendingConversationSave = false;
-  if (chat.privacy) return;
   for (const [key, value] of writes) _writeScoped(key, value);
-  if (saveConv) saveConversations();
+  if (saveConv && !chat.privacy) saveConversations();
+}
+
+// Instance-scoped keys holding chat conversations or chat settings. They follow
+// the chat mode (chat.privacy); every other instance-scoped key follows the
+// server mode (chat.serverPrivacy).
+const CHAT_SCOPED_KEYS = Object.freeze([
+  "localm.conversations", "localm.convCollapsed", "localm.webAccess",
+  "localm.speakAloud",
+]);
+
+/** True when *key* must not be kept in localStorage under the confirmed mode. */
+export function scopedKeyPrivate(key) {
+  return CHAT_SCOPED_KEYS.includes(key) ? chat.privacy : chat.serverPrivacy;
 }
 
 export function lsSetScoped(key, value) {
-  if (chat.privacy) return;
   if (!chat.modeKnown) { _pendingScopedWrites.set(key, value); return; }
   _writeScoped(key, value);
 }
 
 function _writeScoped(key, value) {
-  if (chat.privacy) return;
+  if (scopedKeyPrivate(key)) return;
   if (!INSTANCE_SCOPED_KEYS.includes(key)) {
     // Loud, not silent: a key reaching here that is not in
     // the wipe list is LM-DA-047's exact failure mode. Warn rather than throw
@@ -771,6 +803,7 @@ export function pushConversation(conv) {
   clearTimeout(_convPushTimers.get(conv.id));
   _convPushTimers.set(conv.id, setTimeout(async () => {
     _convPushTimers.delete(conv.id);
+    if (!chat.persist) return;   // the mode switched to privacy while this waited
     try {
       const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
         method: "PUT",

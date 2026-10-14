@@ -230,6 +230,14 @@ import threading as _threading
 # _static_shape_rejection, before any other scan.
 MAX_TRIGGER_PATTERN_BYTES = 4096
 
+# Most trigger patterns one request may carry, checked before any is validated.
+# Equal to tool_calling.MAX_TOOLS, so one trigger per tool always fits.
+MAX_TRIGGER_PATTERNS = 64
+
+# Wall-clock budget for validating one request's whole trigger list, checked
+# before each pattern that needs a probe.
+_TRIGGER_LIST_BUDGET_SECONDS = 10.0
+
 # How many probes may run at once, and how long a caller may wait for its turn.
 # Slots are spawned lazily and handed out LIFO, so a server serving one caller
 # at a time keeps exactly one daemon alive.
@@ -634,6 +642,13 @@ def validate_trigger_patterns(patterns: list[str]) -> None:
     static filter but is genuinely dangerous. Callers on an asyncio route MUST
     run it via loop.run_in_executor, never directly from an async handler.
 
+    A list longer than ``MAX_TRIGGER_PATTERNS`` is rejected before any pattern
+    is looked at. A list whose validation has run past
+    ``_TRIGGER_LIST_BUDGET_SECONDS`` is refused with
+    TriggerValidatorUnavailableError before the next uncached pattern is
+    probed, so one request's total cost is that budget plus one pattern's worst
+    case.
+
     Concurrent callers do not queue behind each other: up to
     _TRIGGER_PROBE_POOL_SIZE probes run at once, a caller that cannot get a slot
     within _TRIGGER_PROBE_SLOT_WAIT is refused outright, and no more than
@@ -649,11 +664,18 @@ def validate_trigger_patterns(patterns: list[str]) -> None:
     itself a safety mechanism: a caller sending a fresh pattern on every request
     bypasses it, and the static filter plus the probe still run on every pattern
     this process has not already validated."""
+    import time
+
     from localm.inference.backends.base import (
         InvalidGrammarError,
         TriggerValidatorUnavailableError,
     )
 
+    if len(patterns) > MAX_TRIGGER_PATTERNS:
+        raise InvalidGrammarError(
+            f"{len(patterns)} grammar trigger patterns, over the limit of "
+            f"{MAX_TRIGGER_PATTERNS}")
+    deadline = time.monotonic() + _TRIGGER_LIST_BUDGET_SECONDS
     for pattern in patterns:
         if pattern in _VALIDATED_TRIGGER_PATTERNS:
             if _VALIDATED_TRIGGER_PATTERNS[pattern] is not None:
@@ -663,6 +685,11 @@ def validate_trigger_patterns(patterns: list[str]) -> None:
         static_reason = _static_shape_rejection(pattern)
         if static_reason is not None:
             verdict, reason = _PROBE_UNSAFE, static_reason
+        elif time.monotonic() > deadline:
+            raise TriggerValidatorUnavailableError(
+                f"validating the grammar trigger patterns took more than "
+                f"{_TRIGGER_LIST_BUDGET_SECONDS:.0f}s; the rest were not checked, so "
+                "they were not accepted")
         else:
             verdict, reason = _probe_pattern_is_safe(pattern)
 

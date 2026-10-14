@@ -46,8 +46,16 @@ function Scrub([string]$t) {
   # reporters apply is applied here too, in the same order: a fallback reporter that
   # scrubs LESS than the in-app one is the shape that leaks.
   $ic = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  # The home folder itself (as given, forward-slash and doubled-backslash forms) becomes ~.
+  $h = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+  if ($h) {
+    foreach ($v in @($h, $h.Replace('\', '/'), $h.Replace('\', '\\'))) {
+      $t = [regex]::Replace($t, [regex]::Escape($v), '~', $ic)
+    }
+  }
   # Home-path username strip (Windows C:\Users\<name>, plus /home/ and /Users/ forms).
-  $t = [regex]::Replace($t, '([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+', '${1}<redacted>', $ic)
+  # The Windows separator is one OR two backslashes, so a repr()'d or JSON-encoded path is matched too.
+  $t = [regex]::Replace($t, '([A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)|/home/|/Users/)[^\\/\r\n]+', '${1}<redacted>', $ic)
   # user:pass@ credentials in any URL-ish value (a comfy/searx/remote-server URL).
   $t = [regex]::Replace($t, '(://)[^/@\s]+@', '${1}<redacted>@')
   # Credential-named assignments (a URL query parameter, a .env line, a shell line)
@@ -56,6 +64,8 @@ function Scrub([string]$t) {
   # in the same order as scripts/report_issue.py, so all three reporters agree.
   $t = [regex]::Replace($t, '(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature|key|auth|sig))=)(?![\"'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])[`\"''\)\]\}]{0,4}(?:[\s&#]|$))(?:\"[^\"\r\n]*\"?|''[^''\r\n]*''?|[^&\s#\"''\)\]\}]*)', '${1}<redacted>')
   $t = [regex]::Replace($t, '(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token|authorization)\s*:\s*)(?:(?:bearer|basic|digest|negotiate|ntlm)\s+)?\S+', '${1}<redacted>')
+  # Credential-named JSON object keys ("api_key": "..."), .NET port of _JSON_SECRET_RE.
+  $t = [regex]::Replace($t, '(?i)(["''](?:(?:[A-Za-z0-9]+[_-])?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|[A-Za-z0-9]+[_-](?:key|auth|sig))["'']\s*:\s*)(?!\s*["'']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])["'']?\s*(?:[,}\]]|$))(?:"[^"\r\n]*"?|''[^''\r\n]*''?|[^,}\]\s]*)', '${1}<redacted>')
   # Bearer tokens and OpenAI-style / localm API keys.
   $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')
   $t = [regex]::Replace($t, '(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}', '<redacted>')

@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from localm import gpu_registry, peer_routing
+from localm.audit import SESSION_MODE_HEADER
 from localm.inference import http_server as hs
 from localm.inference.http_server import create_app
 
@@ -51,7 +52,7 @@ class _Peer:
                 self.wfile.write(data)
 
             def do_GET(self):
-                asked = self.headers.get(peer_routing.SESSION_MODE_HEADER)
+                asked = self.headers.get(SESSION_MODE_HEADER)
                 outer.mode_headers.append(asked)
                 if self.path.startswith("/v1/config"):
                     outer.config_gets += 1
@@ -68,7 +69,7 @@ class _Peer:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n))
                 outer.mode_headers.append(
-                    self.headers.get(peer_routing.SESSION_MODE_HEADER))
+                    self.headers.get(SESSION_MODE_HEADER))
                 outer.bodies.append(body)
                 self._send(200, {"model": body.get("model"), "choices": [
                     {"message": {"role": "assistant", "content": "peer answered"},
@@ -87,6 +88,7 @@ class _Peer:
 def _isolated(tmp_path, monkeypatch):
     _PEERS.clear()
     monkeypatch.delenv("LOCALM_MODE", raising=False)
+    monkeypatch.setattr("localm.audit._SESSIONS_DIR", tmp_path / "sessions")
 
     def _live(*, exclude_self_id=None, timeout=0.7):
         return [dict(p) for p in _PEERS
@@ -265,10 +267,10 @@ def _offer(peer, iid):
 
 
 def _accept(iid):
-    client = TestClient(create_app(None))
-    return client.post("/v1/models/shared-model/peer-route",
-                       headers={"Authorization": f"Bearer {client.app.state.shell_token}"},
-                       json={"instance_id": iid})
+    with TestClient(create_app(None)) as client:
+        return client.post("/v1/models/shared-model/peer-route",
+                           headers={"Authorization": f"Bearer {client.app.state.shell_token}"},
+                           json={"instance_id": iid})
 
 
 def test_accepting_a_route_to_a_logging_peer_in_privacy_mode_is_refused(
@@ -381,3 +383,122 @@ def test_mcp_stops_using_a_peer_that_switched_to_recording(monkeypatch, peers):
     peer.own_mode = "full"
 
     assert cache._peer_still_answers("m") is False
+
+
+# --------------------------------------------------------------------------- #
+#  The peer side: GET /v1/config request_session_mode, and a real round trip   #
+# --------------------------------------------------------------------------- #
+
+def _real_engine():
+    from unittest.mock import MagicMock
+    engine = MagicMock()
+    engine.display_name = "m"
+    type(engine).loaded = property(lambda self: True)
+    engine.chat_stream.side_effect = lambda messages, **kw: (t for t in ["peer", " reply"])
+    engine.count_tokens.side_effect = lambda text: max(1, len(text.split()))
+    return engine
+
+
+def _peer_app(tmp_path, monkeypatch, mode):
+    _mode(monkeypatch, mode=mode)
+    sessions = tmp_path / "peer-sessions"
+    sessions.mkdir()
+    monkeypatch.setattr("localm.audit._SESSIONS_DIR", sessions)
+    return create_app(_real_engine()), sessions
+
+
+def test_config_reports_the_server_mode_without_a_header(tmp_path, monkeypatch):
+    app, _ = _peer_app(tmp_path, monkeypatch, "log")
+    with TestClient(app) as c:
+        r = c.get("/v1/config", headers={"Authorization": f"Bearer {app.state.shell_token}"})
+    assert r.json()["request_session_mode"] == "log"
+
+
+@pytest.mark.parametrize("asked,expected", [("privacy", "privacy"), ("full", "log"),
+                                            ("bogus", "privacy")])
+def test_config_reports_an_owners_narrowing(tmp_path, monkeypatch, asked, expected):
+    app, _ = _peer_app(tmp_path, monkeypatch, "log")
+    with TestClient(app) as c:
+        r = c.get("/v1/config", headers={
+            "Authorization": f"Bearer {app.state.shell_token}",
+            SESSION_MODE_HEADER: asked})
+    assert r.json()["request_session_mode"] == expected
+
+
+def test_config_ignores_a_scoped_keys_narrowing(tmp_path, monkeypatch):
+    from localm import auth
+    app, _ = _peer_app(tmp_path, monkeypatch, "log")
+    auth.set_api_key("owner-key-session-mode-0123456789")
+    scoped = auth.create_key("reader", ["config:read"], allow_privileged=False)
+    with TestClient(app) as c:
+        r = c.get("/v1/config", headers={"Authorization": f"Bearer {scoped['key']}",
+                                         SESSION_MODE_HEADER: "privacy"})
+    assert r.status_code == 200, r.text
+    assert r.json()["request_session_mode"] == "log"
+
+
+class _Bridge:
+    """``requests.get`` / ``requests.post`` for peer_routing, answered by a
+    TestClient of a real localm app (the peer)."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def get(self, url, headers=None, **kw):
+        from urllib.parse import urlsplit
+        return self.client.get(urlsplit(url).path, headers=headers or {})
+
+    def post(self, url, data=None, headers=None, **kw):
+        from urllib.parse import urlsplit
+        resp = self.client.post(urlsplit(url).path, content=data, headers=headers or {})
+
+        class _R:
+            status_code = resp.status_code
+            headers = resp.headers
+
+            def iter_content(self, chunk_size=None):
+                return iter([resp.content])
+
+            def close(self):
+                pass
+
+        return _R()
+
+
+def _round_trip(tmp_path, monkeypatch, peer_mode, local_mode):
+    from localm.audit import SessionMode
+    app, sessions = _peer_app(tmp_path, monkeypatch, peer_mode)
+    with TestClient(app) as peer_client:
+        bridge = _Bridge(peer_client)
+        monkeypatch.setattr("requests.get", bridge.get)
+        monkeypatch.setattr("requests.post", bridge.post)
+        monkeypatch.setattr(peer_routing, "_local_request_mode",
+                            lambda request: SessionMode(local_mode))
+        route = peer_routing.PeerRoute(model="m", instance_id="real-peer",
+                                       host="127.0.0.1", port=1, scheme="http",
+                                       api_key=app.state.shell_token)
+
+        async def go():
+            resp = await peer_routing.forward(route, _Req(), "/v1/chat/completions")
+            return resp, b"".join([c async for c in resp.body_iterator])
+        resp, body = asyncio.run(go())
+    recorded = "".join(p.read_text(encoding="utf-8") for p in sessions.iterdir()
+                       if p.is_file())
+    return resp.status_code, body, recorded
+
+
+def test_a_real_full_mode_peer_records_nothing_for_a_privacy_forward(
+        tmp_path, monkeypatch):
+    status, body, recorded = _round_trip(tmp_path, monkeypatch, "full", "privacy")
+
+    assert status == 200
+    assert b"peer reply" in body
+    assert "peer reply" not in recorded and '"hi"' not in recorded
+
+
+def test_a_real_full_mode_peer_records_a_full_mode_forward(tmp_path, monkeypatch):
+    status, body, recorded = _round_trip(tmp_path, monkeypatch, "full", "full")
+
+    assert status == 200
+    assert b"peer reply" in body
+    assert "peer reply" in recorded and '"hi"' in recorded

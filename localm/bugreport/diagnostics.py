@@ -11,9 +11,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from localm.bugreport.scrub import (
-    _scrub_emails, _scrub_home, _scrub_query_and_header_secrets, _scrub_url_creds,
-)
+import localm.bugreport as _br
 
 
 def _localm_version() -> str:
@@ -275,23 +273,26 @@ def _safe_config_subset() -> dict:
     for key in _SAFE_CONFIG_KEYS:
         if key not in cfg:
             continue
-        val = cfg[key]
-        if isinstance(val, str) and val:
-            # comfy_api_url / net_search_url / coder_reviewer routinely carry a
-            # credential as a query parameter (?api_key=...), not only as
-            # user:pass@ - see _scrub_query_and_header_secrets.
-            val = _scrub_config_text(val)
-        elif isinstance(val, (list, tuple)):
-            val = [_scrub_config_text(v) if isinstance(v, str) else v for v in val]
-        out[key] = val
+        out[key] = _scrub_config_value(cfg[key])
     return out
 
 
-def _scrub_config_text(val: str) -> str:
-    """Home paths, URL credentials, credential-named parameters and email
-    addresses removed from one config string."""
-    return _scrub_emails(
-        _scrub_query_and_header_secrets(_scrub_url_creds(_scrub_home(val))))
+def _scrub_config_value(val):
+    """*val* with every string inside it passed through ``_scrub_secrets``: a
+    ``str`` directly, the values and ``str`` keys of a ``dict`` and the items
+    of a ``list``/``tuple`` recursively (a tuple comes back as a list).
+    ``bool``, ``int``, ``float`` and ``None`` are returned unchanged; any other
+    type is rendered with ``str()`` and scrubbed."""
+    if val is None or isinstance(val, (bool, int, float)):
+        return val
+    if isinstance(val, str):
+        return _br._scrub_secrets(val)
+    if isinstance(val, dict):
+        return {(_br._scrub_secrets(k) if isinstance(k, str) else k): _scrub_config_value(v)
+                for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [_scrub_config_value(v) for v in val]
+    return _br._scrub_secrets(str(val))
 
 
 def _config_unreadable() -> bool:

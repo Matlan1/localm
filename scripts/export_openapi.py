@@ -39,9 +39,9 @@ def build_schema() -> dict:
             schema = http_server.create_app(None).openapi()
             schema["info"]["version"] = localm.__version__
         finally:
-            audit = getattr(http_server, "_audit", None)
-            if audit is not None:
-                audit.close()
+            recorder = getattr(http_server, "_session_recorder", None)
+            if recorder is not None:
+                recorder.close()
     finally:
         if previous is None:
             os.environ.pop("LOCALM_HOME", None)

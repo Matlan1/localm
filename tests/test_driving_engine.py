@@ -114,3 +114,48 @@ def test_idle_unload_can_evict_once_the_pin_releases_and_time_passes():
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_driving_engine_refuses_an_unloading_engine():
+    _reset("m")
+    eng = _FakeEngine("m")
+    eng.unloading = True
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as caught:
+        with hs.driving_engine(eng):
+            raise AssertionError("the body ran on an engine being unloaded")
+    assert caught.value.status_code == 503
+    assert "retry" in caught.value.detail
+    assert eng.active_requests == 0
+    assert "m" not in hs._last_activity_per_model
+
+
+def test_driving_engine_refuses_an_evicted_engine():
+    """An engine detached as an eviction victim is out of ``_engines``; a
+    plugin task still holding it must not pin it and load it again there."""
+    _reset("victim")
+    eng = _FakeEngine("victim")
+    eng.unloading = False
+    hs._engines["victim"] = eng
+    hs._engines_lru.append("victim")
+    hs._switch_detach_victim("victim", eng, activate=False)
+    assert "victim" not in hs._engines
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as caught:
+        with hs.driving_engine(eng):
+            raise AssertionError("the body ran on an evicted engine")
+    assert caught.value.status_code == 503
+    assert eng.active_requests == 0
+
+
+def test_driving_engine_still_pins_an_engine_the_server_does_not_hold():
+    """A peer-routed or headless job engine was never in ``_engines`` and is
+    not unloading: it is pinned as before."""
+    _reset("peer")
+    eng = _FakeEngine("peer")
+    eng.unloading = False
+    with hs.driving_engine(eng):
+        assert eng.active_requests == 1
+    assert eng.active_requests == 0

@@ -632,12 +632,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Settings labels and help translate for every field.** Forty-six settings had no German text and
   showed English in the German interface: the reranker, diffusion, parallel-request and metrics
   settings, every image, music and video generation setting, and the text-to-speech settings.
+- **Signing out every device and disabling a job stick while the server is running.** `localm key
+  recover`, `localm key clear` and `localm job disable` could be undone by the running server saving
+  a browser session or a job result at the same moment, so revoked sessions kept working or a disabled
+  job ran again. Writes to the session and job stores now wait for each other across processes.
+- **Disabling the coder plugin ends its open sessions.** A coder session kept running after the plugin
+  was disabled, with its stop button gone. Disabling or uninstalling the plugin now stops and closes
+  every live coder session, and so does refreshing the plugin to a new version.
+- **A background task no longer reloads a model that is being unloaded.** A scheduled job or a memory
+  consolidation that started on a model just as it was unloaded or evicted could load it again where
+  the Models page and idle unload could not see it. It now fails with a message to retry.
 - **A model that fails to load says why, without blaming a healthy runtime.** A load error now keeps
   its error type, so an empty message no longer produces a blank reason, and an unexpected error inside
   localm is reported as such instead of with advice to repair the llama.cpp runtime.
 - **A transformers model whose grammar constraint fails mid-reply is no longer reported as constrained.**
   The failure is logged and shown, and later grammar requests to that model are refused, as for GGUF
   models.
+- **Grammar-constrained replies from transformers models on a GPU now follow the grammar on Windows.**
+  The constraint used to be dropped on the first token on a machine without a C compiler, such as a
+  typical Windows install with an AMD ROCm GPU. It is now applied without compiling anything.
 - **Ignored GPU and runtime settings are now named.** A device in `gpu_split_indices` whose free memory
   cannot be read, and a `binary_dir` setting that is not a usable path, are logged instead of silently
   dropped. A model worker that does not exit when stopped is killed.
@@ -655,6 +668,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A share inbox that cannot be listed says so.** If the folder holding items shared from a
   phone cannot be read, the 15-minute clean-up now logs that it could not run instead of
   leaving expired items on disk unreported.
+- **Model control markers hidden inside other markers no longer reach the reply.** A model
+  that wrote a header or turn marker with another control marker inside it (for example a
+  Llama 3 role header split by `<|message|>`, or `<start_of_turn>` followed by a marker and
+  then `model`) left half of the header or a bare `model` / `assistant` at the start of the
+  reply. The whole group is now removed, however the reply is streamed. Asking for token
+  probabilities on a reply like that now fails with an alignment error instead of being
+  matched against the wrong text.
 - **Plugin problems that used to vanish are now reported.** A first-run copy of the chat plugin
   that fails, an upgrade refresh that fails, a plugin whose teardown raises, and a damaged bundled
   plugin manifest are now logged and shown in the plugin list's errors instead of disappearing. A
@@ -668,6 +688,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   showed the same process twice and `localm stop <old id>` stopped the running server. The
   entry is now removed on stop and restart, and `localm stop` on an entry a restart left behind
   only removes the entry.
+- **Changing Session persistence in Settings takes effect at once.** The server kept the mode it
+  started with until a restart, so switching to full or log saved the setting but recorded
+  nothing and the chat page still said privacy mode, and switching to privacy kept writing the
+  chat transcript. The next exchange now follows the saved mode, and the chat page updates its
+  hint and starts or stops saving conversations straight away. Switching to privacy also clears
+  the conversation list on the chat page, as a restart into privacy mode does; conversations
+  already saved come back when you leave privacy mode.
+- **The Chat and Coder persistence overrides now apply to what the server records.** Web chat and
+  coder requests went to the server's audit log and transcript under Session persistence alone,
+  so a Chat or Coder override of privacy still recorded that chat, or the files the coder sent to
+  the model, and the chat page followed Session persistence instead of the Chat override. The
+  server now records web chat and coder requests no less privately than their override (and a
+  project's own coder mode), never more than Session persistence allows, and the chat page saves
+  or keeps conversations by the Chat override.
 - **Pulling a file whose name another repository's model already uses no longer calls it
   damaged.** The pull is still refused, since the models folder keeps one file per name, but the
   message now says the name is in use, names the registered model that holds it and how to
@@ -789,6 +823,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   summary written when a long conversation is compacted) now starts a gpt-oss reply in its
   final channel, with no analysis before it. Before, only models that reason in `<think>`
   blocks were affected.
+- **gpt-oss tool calls come back as tool calls.** A gpt-oss GGUF model writes a function call
+  as a harmony message addressed to `functions.NAME`; that call used to end up in the
+  reasoning text with no `tool_calls` in the reply. It is now returned as a `tool_calls` entry
+  on the OpenAI, Responses, Anthropic and Ollama routes, streamed or not, and the coder agent
+  runs it, while the analysis before it stays reasoning.
 - **A llama runtime whose context-parameter layout cannot be told apart is refused.** When
   a provided llama.cpp build's default context parameters fit both the layout with and the
   one without the MoE expert cache field, loading stops with the ABI mismatch message
@@ -2081,12 +2120,63 @@ permanent public record of what shipped and are never rewritten; the in-progress
   still holds its main library but has lost its compute-backend files loaded with no device at
   all; the model load now refuses with the reason and names `localm setup-sdcpp --force`.
 ### Security
+- **The coder's `read_env` tool no longer passes credentials it called redacted.** It redacted a
+  value only when the variable's name looked secret, so a `DATABASE_URL` or `REDIS_URL` with a
+  password in it, or an API key under an ordinary name, reached the model as is (an online model
+  included) while the terminal said "secrets redacted". It now also removes URL passwords,
+  credential query parameters, bearer tokens and common API key and token formats from every value,
+  removes the home directory and the account name (as a path segment, and in the variables that name
+  the account or the machine) from every value, and its summary says how
+  many values it redacted instead of claiming every secret was.
+- **`net_mode = off` now stops the issues list.** Opening the issues list in Settings, or running
+  `localm issues`, contacted the bug-report proxy even with the network switched off. It now says the
+  network is off and sends nothing. The security notes now list everything that still reaches the
+  network under `off`: the two admin-only exemptions, the bug-report upload (sent only when you press
+  Send), requests to your configured ComfyUI, and the native runtime downloads.
+- **A scoped API key no longer receives this machine's absolute paths.** The memory page, the
+  image, music and video galleries (file paths and the saved generation settings, such as the source
+  image of an img2img), a gallery move, the uploads list, the managed ComfyUI status,
+  a saved bug report and the diagnostics report returned full paths, carrying the account name and
+  data directory, to any key that could reach them. A key other than the owner's now gets those paths
+  with the data directory, home and install folders replaced by placeholders such as `<data>`; "Use
+  as input" and "Reuse settings" accept that form, so img2img from the gallery keeps working.
 - **The cross-origin exemptions match exact paths only.** The inference routes that browsers may
   call cross-origin (chat completions, embeddings, rerank, speech, images and the surface and
   instance routes) were matched as path prefixes, so a route added under one of them would have
   skipped the cross-origin refusal and the open-mode shell-token check without anyone listing it.
   Each now matches only its own path. A trailing-slash spelling of one of those paths is no longer
   exempt.
+- **A bug report is sent only after you have seen it.** In Settings > Report a bug, "Send to
+  maintainer" used to file the report as a public GitHub issue in one click, without showing it.
+  It now saves the report and shows its whole text, and nothing is sent until you press "Send this
+  report". What is sent is that saved text, apart from its closing note about editing it;
+  Retry and the automatic retry after a rate limit send that same report again.
+- **Privacy mode no longer saves a bug report on its own.** An unexpected error used to write a
+  report (with the error, settings subset and recent activity) to the data folder in every mode.
+  In privacy mode without "Keep diagnostics for bug reports", nothing is written: a command that
+  fails at a terminal asks whether to save one, and a background error saves nothing.
+- **Bug reports remove more from what they carry.** The standalone reporters now remove your
+  account name from paths written with doubled backslashes (as in a Python or JSON error message)
+  and remove credential values from JSON keys such as `"api_key"`, as the in-app report already
+  did. The report's settings section now removes bearer tokens and API keys, and scrubs values
+  stored as a list or object, not only plain text.
+- **The no-Python bug reporter asks before it sends, and scrubs what it sends.** When
+  `report-issue.sh` has no Python and falls back to curl, it used to send the report when it
+  could not ask (piped or redirected input) and sent your one-line description unchanged. It now
+  sends nothing without an answer typed at a terminal, and removes your home folder, account name,
+  credentials and email addresses from the description first; without `perl` it sends nothing.
+  The PowerShell reporter now also replaces your home folder itself, and an emailed report has its
+  subject and body scrubbed like an uploaded one.
+- **One request can no longer tie up the server with an oversized input.** A scheduled job's cron
+  expression is limited to 512 characters (a longer one used to stop every scheduled job from firing
+  while reporting the scheduler healthy, and the Jobs page now says when the scheduler is stuck); a
+  JSON schema `format` or `response_format` whose grammar would exceed 64 KB is refused while it is
+  being built instead of after hundreds of megabytes of work; a lazy grammar takes at most 64
+  `grammar_triggers` and stops validating them after 10 seconds; and an attached image is refused,
+  before it is decoded, above 50 megapixels, past 64 images or 800 megapixels in one request
+  (earlier images in the conversation included), or when it is not a PNG, JPEG, WebP, GIF, BMP,
+  TIFF or AVIF. These refusals answer 413 with the reason, and the chat page keeps the conversation's
+  images.
 - **Text localm did not write can no longer drive your terminal.** Model output, server replies,
   model and plugin metadata, search results and error messages printed by the CLI and the coder had
   their terminal control characters passed through, so a crafted reply could clear the screen, move

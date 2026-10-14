@@ -737,6 +737,80 @@ def test_background_crashes_are_saved_never_sent(world, capsys):
     assert "How would you like to send it" not in out
 
 
+def test_privacy_mode_background_crashes_write_nothing(world, capsys):
+    world.diagnostics = False
+    pre_log = world.logs / "pre_restart.log"
+    pre_log.write_text("12:00:00 INFO localm: before the restart\n", encoding="utf-8")
+    bugreport._handle_thread_exception(SimpleNamespace(
+        exc_type=ValueError, exc_value=ValueError("worker failed"), exc_traceback=None,
+        thread=SimpleNamespace(name="preload")))
+    bugreport._handle_main_exception(RuntimeError, RuntimeError("main boom"), None)
+
+    class _Loop:
+        handler = None
+
+        def set_exception_handler(self, h):
+            self.handler = h
+
+        def default_exception_handler(self, ctx):
+            raise AssertionError(f"fell back to the default handler: {ctx}")
+
+    loop = _Loop()
+    assert bugreport.install_asyncio_handler(loop) is True
+    loop.handler(loop, {"message": "Task exception was never retrieved",
+                        "exception": KeyError("k")})
+    assert _saved_reports(world) == []
+    assert pre_log.read_text(encoding="utf-8").startswith("12:00:00 INFO")
+    assert world.transport.requests == []
+    out = capsys.readouterr().out
+    assert "Sorry - a background task crashed (thread 'preload')." in out
+    assert out.count("Privacy mode: no bug report was saved.") == 3
+    assert "A bug report was saved" not in out
+
+
+@pytest.mark.parametrize("answer", ["", "n", "no", "maybe"])
+def test_privacy_mode_failed_command_saves_only_on_yes(world, capsys, answer):
+    world.diagnostics = False
+    asked = []
+    path = bugreport.report_failure(
+        summary="setup failed", interactive=True,
+        prompt=lambda q: asked.append(q) or answer, open_browser=lambda u: None)
+    assert path is None
+    assert asked == ["  Save a bug report for this error? [y/N]"]
+    assert _saved_reports(world) == []
+    assert "Privacy mode: no bug report was saved." in capsys.readouterr().out
+
+
+def test_privacy_mode_failed_command_saves_after_yes(world, capsys):
+    world.diagnostics = False
+    answers = iter(["y", ""])
+    asked = []
+    path = bugreport.report_failure(
+        summary="setup failed", interactive=True,
+        prompt=lambda q: asked.append(q) or next(answers), open_browser=lambda u: None)
+    assert path is not None and _saved_reports(world) == [path]
+    assert asked == ["  Save a bug report for this error? [y/N]", "  Pick a number"]
+    assert world.transport.requests == []
+
+
+def test_privacy_mode_save_prompt_that_cannot_be_answered_saves_nothing(world, capsys):
+    world.diagnostics = False
+
+    def _closed(q):
+        raise EOFError
+
+    assert bugreport.report_failure(summary="setup failed", interactive=True,
+                                    prompt=_closed) is None
+    assert _saved_reports(world) == []
+
+
+def test_privacy_mode_explicit_send_flag_still_saves(world, capsys):
+    world.diagnostics = False
+    path = bugreport.report_failure(summary="setup failed", interactive=False,
+                                    auto_send=True)
+    assert path is not None and _saved_reports(world) == [path]
+
+
 def test_global_handlers_install_once(world, monkeypatch):
     monkeypatch.setattr(bugreport, "_handlers_installed", False)
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)

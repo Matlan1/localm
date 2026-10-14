@@ -533,7 +533,7 @@ class EngineCache:
             eng = HttpEngine(base, token=token,
                              model=peer.get("matched_model") or name,
                              display_name=name, pin_model=True,
-                             extra_headers={peer_routing.SESSION_MODE_HEADER: mode.value})
+                             session_mode=mode.value)
             eng.active_requests = 0
             eng.unloading = False
             self._peers[name] = eng

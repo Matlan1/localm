@@ -71,6 +71,22 @@ def test_export_stamps_the_installed_version(tmp_path):
     assert proc.stdout.strip().splitlines()[-1] == "9.8.7"
 
 
+def test_export_in_log_mode_closes_the_server_session_log(tmp_path):
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "import export_openapi; export_openapi.build_schema(); "
+        "from localm.inference import http_server; "
+        "print(http_server._session_recorder.current()[0].__class__.__name__, "
+        "http_server._session_recorder._closed)"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code, str(SCRIPTS)], capture_output=True, text=True,
+        cwd=REPO, env=dict(os.environ, PYTHONPATH=str(REPO), LOCALM_MODE="log",
+                           LOCALM_HOME=str(tmp_path)), timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().splitlines()[-1] == "NullAuditLog True"
+
+
 def test_export_leaves_the_callers_home_untouched(exported):
     _, _, home = exported
     assert list(home.iterdir()) == []

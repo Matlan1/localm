@@ -291,7 +291,7 @@ def _peer_served_engine(route):
     eng = HttpEngine(base, token=route.api_key or None,
                      model=route.peer_model or route.model,
                      display_name=route.model, pin_model=True,
-                     extra_headers={peer_routing.SESSION_MODE_HEADER: mode.value})
+                     session_mode=mode.value)
     eng.active_requests = 0
     eng.unloading = False
     return eng

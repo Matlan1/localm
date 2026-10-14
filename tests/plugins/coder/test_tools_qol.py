@@ -6,6 +6,8 @@ edit_notebook_cell.
 """
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -165,19 +167,76 @@ class TestEditFileClosestMatch:
 # ---------------------------------------------------------------------------
 
 class TestReadEnvRedaction:
-    def test_secret_values_never_appear(self, tmp_path):
+    # (name, value, secret substring that must not appear). Every name here
+    # is free of the secret-name markers, so only value inspection or the
+    # extra name rules can catch it.
+    _UNMARKED = [
+        ("DATABASE_URL", "postgres://admin:S3cretPw@db.example.com:5432/app", "S3cretPw"),
+        ("REDIS_URL", "redis://:hunter2@cache:6379/0", "hunter2"),
+        ("PROVIDER", "sk-proj-" + "A" * 40, "A" * 40),
+        ("GITHUB_PAT", "ghp_" + "B" * 36, "B" * 36),
+        ("GH", "ghp_" + "C" * 36, "C" * 36),
+        ("STRIPE_SK", "sk_live_" + "D" * 24, "D" * 24),
+        ("BILLING", "sk_live_" + "E" * 24, "E" * 24),
+        ("JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJlMTIz", "c2lnbmF0dXJlMTIz"),
+        ("MASTER_PASSPHRASE", "correct horse battery staple", "horse battery"),
+        ("WALLET_MNEMONIC", "abandon abandon ability able", "abandon ability"),
+        ("WALLET_SEED", "zoo zoo zoo wrong", "zoo zoo"),
+        ("RECOVERY_PHRASE", "legal winner thank year", "winner thank"),
+        ("DISCORD_WEBHOOK", "https://discord.com/api/webhooks/12345/AbCdEfGh", "AbCdEfGh"),
+        ("NOTIFY", "https://discord.com/api/webhooks/12345/ZyXwVuTs", "ZyXwVuTs"),
+        ("SEARX", "https://searx.local/search?api_key=QQQsecretQQQ", "QQQsecretQQQ"),
+        ("AWS_ID", "AKIA" + "F" * 16, "F" * 16),
+    ]
+
+    def test_unmarked_names_holding_secrets_are_redacted(self, tmp_path):
+        body = "".join(f"{n}={v}\n" for n, v, _ in self._UNMARKED)
         (tmp_path / ".env").write_text(
-            "API_KEY=sk-supersecret123\n"
-            "DB_PASSWORD=hunter2\n"
-            "PLAIN_SETTING=visible-value\n",
+            body + "API_KEY=sk-supersecret123\nDB_PASSWORD=hunter3\n"
+                   "PLAIN_SETTING=visible-value\nPORT=8080\n",
             encoding="utf-8")
+        r = tool_read_env(tmp_path, path=".env")
+        assert r.ok
+        for name, _value, secret in self._UNMARKED:
+            assert secret not in r.output, name
+            assert f"{name}=" in r.output, name
+        assert "sk-supersecret123" not in r.output
+        assert "hunter3" not in r.output
+        assert "PLAIN_SETTING=visible-value" in r.output
+        assert "PORT=8080" in r.output
+        assert "db.example.com" in r.output     # only the credential goes
+        assert r.summary == f"read_env ({len(self._UNMARKED) + 4} vars, " \
+                            f"{len(self._UNMARKED) + 2} values redacted)"
+
+    def test_process_environment_is_scrubbed(self, tmp_path, monkeypatch):
+        home = str(Path.home())
+        monkeypatch.setenv("ZZ_CONN", "mysql://root:Pw0rdZZ@10.0.0.5/db")
+        monkeypatch.setenv("ZZ_WORKDIR", home + os.sep + "proj")
+        monkeypatch.setenv("USERNAME", "zzaccountname")
+        monkeypatch.setenv("COMPUTERNAME", "zzmachinename")
+        monkeypatch.setenv("HOMEPATH", r"\Users\zzaccountname")
+        monkeypatch.setenv("SUDO_USER", "zzaccountname")
+        monkeypatch.setenv("ZZ_SHARE", r"\\fileserver\zzaccountname\docs")
+        monkeypatch.setenv("ZZ_MAILBOX", "/var/mail/zzaccountname")
+        monkeypatch.setenv("ZZ_NOTE", "zzaccountnamesuffix-not-a-segment")
         r = tool_read_env(tmp_path)
         assert r.ok
-        assert "sk-supersecret123" not in r.output
-        assert "hunter2" not in r.output
-        assert "API_KEY" in r.output            # names stay visible
-        assert "visible-value" in r.output      # non-secrets pass through
-        assert "redacted" in r.summary
+        assert "Pw0rdZZ" not in r.output
+        assert "zzaccountname" not in r.output.replace("zzaccountnamesuffix", "")
+        assert r"ZZ_SHARE=\\fileserver\<user>\docs" in r.output
+        assert "ZZ_MAILBOX=/var/mail/<user>" in r.output
+        assert "ZZ_NOTE=zzaccountnamesuffix-not-a-segment" in r.output
+        assert "zzmachinename" not in r.output
+        assert "ZZ_WORKDIR=" in r.output
+        assert home not in r.output
+        assert f"ZZ_WORKDIR=~{os.sep}proj" in r.output
+
+    def test_summary_reports_zero_when_nothing_was_redacted(self, tmp_path):
+        (tmp_path / "plain.env").write_text("PORT=8080\nMODE=dev\n", encoding="utf-8")
+        r = tool_read_env(tmp_path, path="plain.env")
+        assert r.ok
+        assert r.summary == "read_env (2 vars, 0 values redacted)"
+        assert "PORT=8080" in r.output and "MODE=dev" in r.output
 
     def test_explicit_missing_file_errors(self, tmp_path):
         r = tool_read_env(tmp_path, path="nope.env")

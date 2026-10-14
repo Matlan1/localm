@@ -199,7 +199,7 @@ export const I18N_EN = {
   "chat.pinModel.title": "Always answer this chat with this model, even when a request needs something it lacks (reading an image, tool calls, a longer conversation). Unpinned, such a request can be answered by an installed model that has it (see Model autoswitch in Settings).",
   "chat.privacyHint": "privacy mode - this session only",
   "chat.privacyHint.title":
-    "The server runs in privacy mode: conversations are not saved (here or on disk) and vanish on reload. Export still works.",
+    "Chat runs in privacy mode: conversations are not saved (here or on disk) and vanish on reload. Export still works.",
   "chat.random": "random",
   "chat.repeatPenalty": "Repeat penalty",
   "chat.routed.cap.context_length": "a longer conversation",
@@ -1611,9 +1611,9 @@ export const I18N_EN = {
   "settings.field.mode.label": "Session persistence",
   "settings.field.mode.help": "What localm saves: privacy = nothing written automatically; log = a JSONL audit trail; full = log plus a chat transcript.",
   "settings.field.chatMode.label": "Chat persistence override",
-  "settings.field.chatMode.help": "Overrides Session persistence for chat only. Blank inherits whatever Session persistence is set to.",
+  "settings.field.chatMode.help": "Overrides Session persistence for chat only. What the server records of chat is only ever made more private by it. Blank inherits whatever Session persistence is set to.",
   "settings.field.coderMode.label": "Coder persistence override",
-  "settings.field.coderMode.help": "Overrides Session persistence for the coder only. Blank inherits whatever Session persistence is set to.",
+  "settings.field.coderMode.help": "Overrides Session persistence for the coder only. What the server records of coder requests is only ever made more private by it. Blank inherits whatever Session persistence is set to.",
 
   // Settings > schema fields: Memory
   "settings.field.memoryEnabled.label": "Memory recall",
@@ -2102,7 +2102,7 @@ export const I18N_EN = {
   // ---- Settings > Report a bug ----
   "settings.bug.title": "Report a bug",
   "settings.bug.help":
-    "Describe what went wrong. We save an editable report to your data folder with a safe diagnostic snapshot (OS, GPU, backend, loaded model, settings subset, dependency versions, recent activity, and any browser console errors) - never your API key, config secrets, or chat content. You can review and send it to the maintainer.",
+    "Describe what went wrong. We save an editable report to your data folder with a safe diagnostic snapshot (OS, GPU, backend, loaded model, settings subset, dependency versions, recent activity, and any browser console errors) - never your API key, config secrets, or chat content. Before anything is sent to the maintainer you see the whole report and confirm it.",
   "settings.bug.descPlaceholder": "What were you doing?",
   "settings.bug.expectedPlaceholder": "What did you expect to happen? (optional)",
   "settings.bug.happenedPlaceholder": "What actually happened?",
@@ -2131,6 +2131,14 @@ export const I18N_EN = {
   "settings.bug.fileFailed": "Could not file report: {message}",
   "settings.bug.retryingIn": "Rate limited - retrying in {secs}s...",
   "settings.bug.retrying": "Retrying...",
+  "settings.bug.reviewHelp":
+    "This is the whole report as it will be sent, except the closing note about editing it, which is left out. It becomes a public GitHub issue. Nothing has been sent yet.",
+  "settings.bug.previewLabel": "Bug report to send",
+  "settings.bug.confirmSendButton": "Send this report",
+  "settings.bug.cancelSendButton": "Don't send",
+  "settings.bug.reviewPrompt": "Saved: {where}  -  review it below, then press Send this report.",
+  "settings.bug.reviewUnavailable": "Saved: {where}  -  it could not be loaded for review, so it was not sent.",
+  "settings.bug.notSent": "Not sent. The report is saved: {where}",
 
   // ---- Settings > Changelog ----
   "settings.changelog.title": "Changelog",

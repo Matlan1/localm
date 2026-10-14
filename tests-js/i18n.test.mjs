@@ -335,7 +335,7 @@ test("the privacy hint the app itself paints follows a later language change", a
   runScript(window, 'window.__q = applyLanguage("de");');
   await window.__q;
   assert.equal(hint().textContent, "Privatmodus - nur diese Sitzung");
-  assert.ok(hint().getAttribute("title").startsWith("Der Server l"),
+  assert.ok(hint().getAttribute("title").startsWith("Der Chat l"),
     `the hint's tooltip must follow too, got ${hint().getAttribute("title")}`);
 });
 
