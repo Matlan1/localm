@@ -623,6 +623,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no network for the runtime.
 
 ### Fixed
+- **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
+  several seconds, and while it did, every other request and stream waited. The close now runs
+  in the background pool like the browser's other actions.
 - **The chat model comes back after a failed image, video or music job.** When a generation
   crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
   until your next message. It now reloads on every way a job can end, and a job that finishes
