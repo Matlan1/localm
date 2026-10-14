@@ -3125,8 +3125,9 @@ class LlamaCpp:
         method's _ctx()/dedup_native_stderr usage is re-entered per native call
         - see the comment at that call site before restructuring it.
 
-        The images and audio clips are decoded before the model is taken, so
-        other replies keep running meanwhile; a stop published with
+        While the model and its projector are loaded, the images and audio
+        clips are decoded before the model is taken, so other replies keep
+        running meanwhile; a stop published with
         ``stream_stop_check`` during an audio decode ends the call with no
         output and ``last_finish_reason`` "stop". A model with parallel slots
         then runs the rest inside the slot scheduler's exclusive section: it
@@ -3135,15 +3136,15 @@ class LlamaCpp:
         from localm.inference.backends.base import stream_stop_requested
         from localm.inference.media import AudioDecodeCancelled
         mtmd = getattr(self, "_mtmd", None)
-        if not self._model_ptr or mtmd is None:
-            raise RuntimeError("vision is not available on this model")
-        try:
-            text_messages, images = self._messages_with_markers(
-                messages, mtmd.marker, getattr(mtmd, "audio_sample_rate", 0),
-                should_stop=stream_stop_requested)
-        except AudioDecodeCancelled:
-            self.last_finish_reason = "stop"
-            return
+        decoded = None
+        if self._model_ptr and mtmd is not None:
+            try:
+                decoded = self._messages_with_markers(
+                    messages, mtmd.marker, getattr(mtmd, "audio_sample_rate", 0),
+                    should_stop=stream_stop_requested)
+            except AudioDecodeCancelled:
+                self.last_finish_reason = "stop"
+                return
         if self._slots is not None:
             from localm.inference.backends.base import WAITING_FOR_MODEL_STATUS
             exclusive = self._slots.exclusive(
@@ -3152,8 +3153,10 @@ class LlamaCpp:
         else:
             exclusive = contextlib.nullcontext()
         with exclusive, self._inference_lock:
-            if not self._model_ptr or getattr(self, "_mtmd", None) is None:
+            if (not self._model_ptr or getattr(self, "_mtmd", None) is None
+                    or decoded is None):
                 raise RuntimeError("vision is not available on this model")
+            text_messages, images = decoded
 
             from localm.debuglog import logger
             # A media turn never speculates: this loop has no draft context, and

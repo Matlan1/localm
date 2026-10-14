@@ -366,7 +366,7 @@ class TestFailures:
     def test_other_audio_without_the_voice_extra_is_501(self, client, state, monkeypatch):
         from localm.inference.backends.base import AudioDecodeUnavailable
 
-        def no_av(raw, target, max_seconds):
+        def no_av(raw, target, max_seconds, should_stop=None):
             raise AudioDecodeUnavailable("reading other formats needs the voice extra")
 
         monkeypatch.setattr("localm.inference.media._decode_with_av", no_av)

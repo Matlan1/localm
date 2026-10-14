@@ -469,7 +469,7 @@ def decode_audio_clip(b64: str, fmt: str, target_rate: int,
 
         from localm.inference.backends.base import AudioInputError
         try:
-            samples, rate = _wav_frames(raw, should_stop)
+            samples, rate = _wav_frames(raw, should_stop=should_stop)
         except AudioInputError:
             raise
         except (struct.error, ValueError, IndexError) as e:
@@ -488,7 +488,8 @@ def decode_audio_clip(b64: str, fmt: str, target_rate: int,
                 f"The attached audio could not be resampled from {rate} Hz to "
                 f"{target_rate} Hz ({type(e).__name__}).") from e
     else:
-        samples = _decode_with_av(raw, target_rate, AUDIO_MAX_SECONDS, should_stop)
+        samples = _decode_with_av(raw, target_rate, AUDIO_MAX_SECONDS,
+                                  should_stop=should_stop)
     if len(samples) < AUDIO_MIN_SECONDS * target_rate:
         raise _audio_error(
             f"The attached audio is shorter than {AUDIO_MIN_SECONDS:g} seconds, "

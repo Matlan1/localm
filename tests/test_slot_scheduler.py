@@ -843,10 +843,11 @@ def test_no_new_reply_is_admitted_while_a_reply_waits_for_cells(made):
                                 daemon=True)]
     for t in threads:
         t.start()
-    deadline = time.monotonic() + 30
-    while not any(s.room_wait for s in sched._slots) and time.monotonic() < deadline:
+    deadline = time.monotonic() + 10
+    while (not any(getattr(s, "room_wait", False) for s in sched._slots)
+           and time.monotonic() < deadline):
         time.sleep(0.001)
-    assert any(s.room_wait for s in sched._slots), "the reply never waited for cells"
+    assert any(getattr(s, "room_wait", False) for s in sched._slots),         "the reply never waited for cells"
     late = _collect(sched, PROMPTS[2], 5)
     for t in threads:
         t.join(30)
@@ -875,6 +876,9 @@ def test_two_replies_with_no_budget_at_a_fixed_ceiling_both_end(made):
                for i, p in enumerate((PROMPTS[0], PROMPTS[2]))) >= ceiling - 1
 
 
+PROCESSING = "Processing prompt..."
+
+
 class _SlowPromptContext(_SimContext):
     """A decode carrying more than *threshold* entries takes *slow* seconds."""
 
@@ -892,7 +896,7 @@ class _SlowPromptContext(_SimContext):
 
 
 def test_a_long_prompt_step_keeps_the_running_reply_hearing_progress(made, monkeypatch):
-    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05)
+    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05, raising=False)
     ctx = _SlowPromptContext(slow=0.8, threshold=50)
     ctx.step_delay = 0.005
     sched = made(ctx, 2)
@@ -913,7 +917,7 @@ def test_a_long_prompt_step_keeps_the_running_reply_hearing_progress(made, monke
 
 
 def test_a_reply_cancelled_during_a_long_step_hears_progress_until_it_ends(made, monkeypatch):
-    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05)
+    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05, raising=False)
     ctx = _SlowPromptContext(slow=0.8, threshold=50)
     sched = made(ctx, 2)
     statuses = []
@@ -923,11 +927,11 @@ def test_a_reply_cancelled_during_a_long_step_hears_progress_until_it_ends(made,
     stream.close()
     out, reason = _drain(stream)
     assert reason == "stop"
-    assert _slots.PROCESSING_STATUS in statuses, statuses
+    assert PROCESSING in statuses, statuses
 
 
 def test_a_short_step_sends_no_progress(made, monkeypatch):
-    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05)
+    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05, raising=False)
     ctx = _SimContext()
     ctx.step_delay = 0.15
     sched = made(ctx, 2)
@@ -936,8 +940,8 @@ def test_a_short_step_sends_no_progress(made, monkeypatch):
 
 
 def test_progress_stops_once_a_decode_runs_past_its_limit(made, monkeypatch):
-    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05)
-    monkeypatch.setattr(_slots, "HEAVY_BEAT_LIMIT_S", 0.3)
+    monkeypatch.setattr(_slots, "STEP_BEAT_S", 0.05, raising=False)
+    monkeypatch.setattr(_slots, "HEAVY_BEAT_LIMIT_S", 0.3, raising=False)
     ctx = _SlowPromptContext(slow=1.2, threshold=50)
     sched = made(ctx, 2)
     statuses = []
@@ -949,7 +953,7 @@ def test_progress_stops_once_a_decode_runs_past_its_limit(made, monkeypatch):
     t0 = time.monotonic()
     stream.close()
     _drain(stream)
-    beats = [ts - t0 for s, ts in zip(statuses, stamps, strict=True) if s == _slots.PROCESSING_STATUS]
+    beats = [ts - t0 for s, ts in zip(statuses, stamps, strict=True) if s == PROCESSING]
     assert beats, "no progress was sent"
     assert max(beats) < 0.3 + 0.2, beats
 

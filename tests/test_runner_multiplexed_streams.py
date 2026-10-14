@@ -534,7 +534,7 @@ def _cancel_a_beside_b(r, child):
 
 
 def test_a_cancel_whose_stream_keeps_reporting_progress_does_not_kill_the_worker(monkeypatch):
-    monkeypatch.setattr(runner_mod, "_CANCEL_DRAIN_TIMEOUT", 0.3)
+    monkeypatch.setattr(ModelRunner._cancel_mux_stream_and_drain, "__defaults__", (0.3,))
     r = _mux_runner()
     proc = r._proc
     child = _Child(r)
@@ -555,7 +555,7 @@ def test_a_cancel_whose_stream_keeps_reporting_progress_does_not_kill_the_worker
 
 
 def test_an_unconfirmed_cancel_leaves_the_worker_to_the_other_streams(monkeypatch):
-    monkeypatch.setattr(runner_mod, "_CANCEL_DRAIN_TIMEOUT", 0.3)
+    monkeypatch.setattr(ModelRunner._cancel_mux_stream_and_drain, "__defaults__", (0.3,))
     monkeypatch.setattr(runner_mod, "_STREAM_CHUNK_TIMEOUT", 0.6)
     r = _mux_runner()
     proc = r._proc
@@ -574,7 +574,7 @@ def test_an_unconfirmed_cancel_leaves_the_worker_to_the_other_streams(monkeypatc
 
 
 def test_an_unconfirmed_cancel_of_the_only_stream_kills_the_worker(monkeypatch):
-    monkeypatch.setattr(runner_mod, "_CANCEL_DRAIN_TIMEOUT", 0.3)
+    monkeypatch.setattr(ModelRunner._cancel_mux_stream_and_drain, "__defaults__", (0.3,))
     monkeypatch.setattr(runner_mod, "_STREAM_CHUNK_TIMEOUT", 0.6)
     r = _mux_runner()
     proc = r._proc
@@ -593,7 +593,7 @@ def test_an_unconfirmed_cancel_of_the_only_stream_kills_the_worker(monkeypatch):
 
 
 def test_progress_during_a_cancel_cannot_hold_it_past_the_cap(monkeypatch):
-    monkeypatch.setattr(runner_mod, "_CANCEL_DRAIN_TIMEOUT", 0.3)
+    monkeypatch.setattr(ModelRunner._cancel_mux_stream_and_drain, "__defaults__", (0.3,))
     monkeypatch.setattr(runner_mod, "_STREAM_CHUNK_TIMEOUT", 0.8)
     r = _mux_runner()
     child = _Child(r)
