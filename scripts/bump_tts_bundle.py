@@ -119,6 +119,11 @@ _TEST_RES = {
     "mjs_hash": re.compile(r'^(const PINNED_MJS_HASH = ")([^"]+)(";)', re.M),
     "wasm_hash": re.compile(r'^(const PINNED_WASM_HASH = ")([^"]+)(";)', re.M),
     "wasm_bytes": re.compile(r"^(const EXPECTED_WASM_BYTES = )(\d+)(;)", re.M),
+    "plain_mjs_name": re.compile(r'^(const PLAIN_MJS = ")([^"]+)(";)', re.M),
+    "plain_wasm_name": re.compile(r'^(const PLAIN_WASM = ")([^"]+)(";)', re.M),
+    "plain_mjs_hash": re.compile(r'^(const PINNED_PLAIN_MJS_HASH = ")([^"]+)(";)', re.M),
+    "plain_wasm_hash": re.compile(r'^(const PINNED_PLAIN_WASM_HASH = ")([^"]+)(";)', re.M),
+    "plain_wasm_bytes": re.compile(r"^(const EXPECTED_PLAIN_WASM_BYTES = )(\d+)(;)", re.M),
     "pack": re.compile(r"(npm pack )(\S+@\S+)(  ->)"),
 }
 _WORKER_RE = re.compile(
@@ -488,6 +493,7 @@ def collect_artifacts(workdir: Path, bundle: bytes, pins: Pins, versions: dict, 
                     if m.endswith((".mjs", ".wasm"))})
     if not names:
         raise Refused("the built bundle names no onnxruntime runtime file")
+    names = sorted(set(names) | {n.replace(".asyncify", "") for n in names if ".asyncify" in n})
     runtime = {}
     packages = set()
     for name in names:
@@ -590,15 +596,24 @@ def rewrite_notice(text: str, old: Pins, new: Pins, built: Built, ort_source: tu
     return text
 
 
+def runtime_pairs(runtime: dict) -> tuple:
+    """((asyncify glue, asyncify binary), (plain glue, plain binary)) of a runtime set. The
+    bundle names the asyncify pair and the plain pair is its sibling without ".asyncify"
+    (transformers.js loads it on Safari below 26 without WebGPU); the guard test pins both."""
+    def pick(asyncify: bool, ext: str) -> list:
+        return [n for n in runtime if n.endswith(ext) and (".asyncify." in n) == asyncify]
+
+    pairs = tuple((pick(a, ".mjs"), pick(a, ".wasm")) for a in (True, False))
+    if len(runtime) != 4 or any(len(g) != 1 or len(b) != 1 for g, b in pairs):
+        raise Refused(f"the bundle names the runtime files {sorted(runtime)}, not one asyncify "
+                      f".mjs/.wasm pair and its plain sibling; the guard test pins those two "
+                      f"pairs, so this release {NEEDS_CODE}")
+    return tuple((g[0], b[0]) for g, b in pairs)
+
+
 def runtime_pair(runtime: dict) -> tuple:
-    """(glue name, binary name) of a runtime set, which must be exactly one .mjs and one .wasm
-    because the guard test pins one of each."""
-    glue = [n for n in runtime if n.endswith(".mjs")]
-    binary = [n for n in runtime if n.endswith(".wasm")]
-    if len(glue) != 1 or len(binary) != 1 or len(runtime) != 2:
-        raise Refused(f"the bundle names the runtime files {sorted(runtime)}, not one .mjs and one "
-                      f".wasm; the guard test pins one pair, so this release {NEEDS_CODE}")
-    return glue[0], binary[0]
+    """(glue name, binary name) of the asyncify pair of a runtime set."""
+    return runtime_pairs(runtime)[0]
 
 
 def rewrite_guard_test(text: str, new: Pins, built: Built) -> str:
@@ -610,6 +625,12 @@ def rewrite_guard_test(text: str, new: Pins, built: Built) -> str:
               "wasm_name": wasm_name, "mjs_hash": _sha256_b64(_lf(mjs)),
               "wasm_hash": _sha256_b64(wasm), "wasm_bytes": str(len(wasm)),
               "pack": f"{package}@{new.ort if package == 'onnxruntime-web' else new.transformers}"}
+    plain_mjs_name, plain_wasm_name = runtime_pairs(built.runtime)[1]
+    plain_mjs, plain_wasm = built.runtime[plain_mjs_name], built.runtime[plain_wasm_name]
+    values.update({"plain_mjs_name": plain_mjs_name, "plain_wasm_name": plain_wasm_name,
+                   "plain_mjs_hash": _sha256_b64(_lf(plain_mjs)),
+                   "plain_wasm_hash": _sha256_b64(plain_wasm),
+                   "plain_wasm_bytes": str(len(plain_wasm))})
     for key, value in values.items():
         text = _replace_once(_TEST_RES[key], text, lambda m, v=value: m.group(1) + v + m.group(3),
                              f"{TEST_REL} {key}")
@@ -622,7 +643,7 @@ def build_plan(repo: Path, old: Pins, new: Pins, built: Built, *, license_fetch=
     *license_fetch* is called with the onnxruntime-web version and returns
     (licence bytes, kind, ref); it is only called when that version moved.
     """
-    runtime_pair(built.runtime)
+    runtime_pairs(built.runtime)
     runtime_dir = repo / RUNTIME_REL
     vendored = {p.name for p in runtime_dir.iterdir() if p.is_file()} if runtime_dir.is_dir() else set()
 

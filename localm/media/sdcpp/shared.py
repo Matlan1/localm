@@ -104,13 +104,19 @@ def _idle_unload() -> None:
             lock.release()
 
 
-def free() -> bool:
+def free(cancel_check: Optional[Callable[[], bool]] = None) -> bool:
     """Stop the worker, waiting for a running job to finish first. True once no
-    worker is running."""
-    with lock:
+    worker is running. While waiting, ``cancel_check`` is polled; when it turns
+    true the worker is left running and False is returned."""
+    while not lock.acquire(timeout=WAIT_POLL_SECONDS):
+        if cancel_check is not None and cancel_check():
+            return False
+    try:
         cancel_idle_timer()
         runner.shutdown()
         return not runner.is_alive()
+    finally:
+        lock.release()
 
 
 def worker_pid() -> Optional[int]:
