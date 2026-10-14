@@ -1050,8 +1050,9 @@ localm issues --state open      # open | closed | all (default all)
 
 `bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of this run's debug log when one exists (`--no-log` to leave it out), never chat content. `issues` is read-only and needs the bug-report proxy to be configured.
 
-Updates are signed: localm verifies an Ed25519 signature against a key pinned in
-its own source before applying anything, and refuses a build that is not newer.
+Updates are signed: localm verifies an Ed25519 signature from its release key
+before applying anything, and refuses a build that is not newer. The keys are
+pinned in its own source and can be replaced by a signed update.
 See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the update trust model. The GUI Models page
 has an "Update now" button for the same flow.
 

@@ -4,22 +4,20 @@ distinct from a non-zero exit), the corrupt-manifest fallback, and the
 backend-detection fallback. Everything uses the apply()/download injectables, so
 no test touches the real install or the network."""
 
-import base64
 import io
 import zipfile
 
 import pytest
-from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _version, updater
 from localm.bugreport import LocalmError
+from tests._update_signing import envelope, keyset
 
 # A throwaway signing key so the apply() crash-path tests pass the signature gate
 # and exercise the ROLLBACK logic they are about.
 _PRIV = Ed25519PrivateKey.generate()
-_PUB_HEX = _PRIV.public_key().public_bytes(
-    encoding=_ser.Encoding.Raw, format=_ser.PublicFormat.Raw).hex()
+_RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
 
 
 # --------------------------- read_manifest --------------------------------
@@ -47,8 +45,8 @@ def test_read_manifest_valid(tmp_path):
 # --------------------------- apply(): crash path --------------------------
 
 def _signed_build(version, deps):
-    """A build zip (bytes) + its base64 signature under the test key; returns
-    ``(download_opener, signature_b64)`` so apply()'s signature gate accepts it."""
+    """A build zip (bytes) + its signature envelope under the test key; returns
+    ``(download_opener, signature)`` so apply()'s signature gate accepts it."""
     buf = io.BytesIO()
     pyproject = ('[project]\nname = "localm"\ndependencies = ['
                  + ", ".join(f'"{d}"' for d in deps) + ']\n')
@@ -57,7 +55,7 @@ def _signed_build(version, deps):
         z.writestr("pyproject.toml", pyproject)
         z.writestr("localm/__init__.py", f"# {version}")
     data = buf.getvalue()
-    sig = base64.b64encode(_PRIV.sign(data)).decode("ascii")
+    sig = envelope(data, [_PRIV])
 
     def dl(url, headers, timeout, dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -66,7 +64,7 @@ def _signed_build(version, deps):
 
 
 def _pin_sig_env(monkeypatch):
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (_PUB_HEX,))
+    monkeypatch.setattr(updater, "_PINNED_KEYSET", keyset(1, [_PRIV], _RECOVERY))
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
 
 

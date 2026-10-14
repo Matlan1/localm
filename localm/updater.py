@@ -34,92 +34,297 @@ from localm import _version
 _ORDER = ("reboot", "deps", "runtime", "setup")
 
 # ---------------------------------------------------------------------------
-#  Pinned release-signing public key(s)
+#  Update signing trust
 # ---------------------------------------------------------------------------
-# Each release build.zip is signed with an Ed25519 private key whose public half
-# is pinned here. apply() verifies the signature against these keys BEFORE
-# anything is extracted. The list allows a key to be rotated in before an old one
-# is retired.
+# Each release build.zip is signed by the keys of the trusted RELEASE set. The
+# RECOVERY set never signs a build; its keys only sign a replacement key set.
+# The release's `.sig` asset is a JSON envelope:
 #
-# With a key pinned the updater enforces: a missing, unsigned, malformed or
-# non-matching signature is refused before any swap. An EMPTY tuple fails open
-# (transport trust only).
-_UPDATE_PUBKEYS: tuple = (
-    # Current signing key. Sign new releases with this one.
-    "3fbfccffd49975ef1d70459be2def339da85be20a1c40cea4ec93726e257123b",
-    # Superseded 2026-09-07. Installs in the field pin ONLY this key, so removing it
-    # before a release signed by it has carried the key above to them makes every
-    # such install refuse the next update. Remove it in the release AFTER that one.
-    "3501b23eb1ab6ec245b5e9d9c6a70b522ca89d6250d13060a9642ce1c8868ecf",
-)
+#   {"format": "localm-update-sig/2",
+#    "signatures": [{"key": "<public key hex>", "sig": "<base64 Ed25519 over the zip>"}],
+#    "keyset": {"seq": 2, "release": {"threshold": 1, "keys": [...]},
+#               "recovery": {"threshold": 2, "keys": [...]},
+#               "signatures": [{"key": ..., "sig": <base64 over canonical_keyset_bytes()>}]}}
+#
+# "keyset" is optional. apply() verifies the envelope BEFORE anything is
+# extracted, and saves an accepted key set to <data dir>/updates/trust.json only
+# after the whole update has verified.
+_SIG_FORMAT = "localm-update-sig/2"
+_SIG_MAX_CHARS = 4096
+_TRUST_FILE = "trust.json"
+
+_PINNED_KEYSET: dict = {
+    "seq": 1,
+    "release": {
+        "threshold": 1,
+        "keys": [
+            "4faca1439ff49ca9269580061f17d1847e079c35c82e8372b221bc3abba6db40",
+        ],
+    },
+    "recovery": {
+        "threshold": 2,
+        "keys": [
+            "d5357ae966ce0eecc687f40ca3a68b93c4d8e1c246b9af7006ee03905f5507ee",
+            "090193021f42f8514b60676b38c0365034e3bf312d5f4946e1434e328f4a78e8",
+            "1a9a3fc808a1e2ab207b71fd4b6eeb09860b5ef17281d6f13c73dcf66f73f334",
+        ],
+    },
+}
+
+_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
-def _load_update_pubkeys() -> list:
-    """The pinned Ed25519 public keys as verifier objects; [] when none/invalid.
+class _BadSignature(ValueError):
+    """An envelope or key set that is structurally invalid."""
 
-    A malformed pinned key is WARNED about and skipped, so a second, valid key
-    still works. When NO valid key results, verify_signature below fails closed."""
+
+def _strict_json(text: str):
+    """``json.loads`` that refuses duplicate object fields and NaN/Infinity."""
+    def pairs(items):
+        out = {}
+        for k, v in items:
+            if k in out:
+                raise _BadSignature(f"duplicate field {k!r}")
+            out[k] = v
+        return out
+
+    def constant(name):
+        raise _BadSignature(f"{name} is not allowed")
+
+    return _json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+
+
+def _check_fields(obj, where: str, required: set, optional: frozenset = frozenset()) -> None:
+    if not isinstance(obj, dict):
+        raise _BadSignature(f"{where} is not an object")
+    missing = required - obj.keys()
+    if missing:
+        raise _BadSignature(f"{where} lacks {', '.join(sorted(missing))}")
+    extra = obj.keys() - required - optional
+    if extra:
+        raise _BadSignature(f"{where} has unknown field(s) {', '.join(sorted(map(str, extra)))}")
+
+
+def _is_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _public_key(hexkey):
+    """The Ed25519 public key for a 64-character lowercase hex string."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    from localm.debuglog import logger
-    keys = []
-    for hexkey in _UPDATE_PUBKEYS:
+    if not (isinstance(hexkey, str) and len(hexkey) == 64 and set(hexkey) <= _HEX_DIGITS):
+        raise _BadSignature(f"{str(hexkey)[:20]!r} is not a 64-character lowercase hex key")
+    try:
+        return Ed25519PublicKey.from_public_bytes(bytes.fromhex(hexkey))
+    except ValueError:
+        raise _BadSignature(f"{hexkey[:16]}... is not an Ed25519 public key") from None
+
+
+def _parse_role(obj, where: str, min_threshold: int) -> dict:
+    _check_fields(obj, where, {"threshold", "keys"})
+    threshold, keys = obj["threshold"], obj["keys"]
+    if not _is_int(threshold) or threshold < min_threshold:
+        raise _BadSignature(f"{where} threshold must be an integer of at least {min_threshold}")
+    if not isinstance(keys, list) or not keys:
+        raise _BadSignature(f"{where} keys must be a non-empty list")
+    for k in keys:
+        _public_key(k)
+    if len(set(keys)) != len(keys):
+        raise _BadSignature(f"{where} keys are not distinct")
+    if len(keys) < threshold:
+        raise _BadSignature(f"{where} has fewer keys than its threshold")
+    return {"threshold": threshold, "keys": list(keys)}
+
+
+def _parse_signatures(obj, where: str) -> list:
+    """Validated ``[{"key", "sig"}]`` entries; a "sig" must be base64 of 64 bytes."""
+    import base64
+    if not isinstance(obj, list):
+        raise _BadSignature(f"{where} is not a list")
+    out = []
+    for entry in obj:
+        _check_fields(entry, f"an entry of {where}", {"key", "sig"})
+        if not isinstance(entry["key"], str) or not isinstance(entry["sig"], str):
+            raise _BadSignature(f"an entry of {where} is not a pair of strings")
         try:
-            keys.append(Ed25519PublicKey.from_public_bytes(bytes.fromhex(str(hexkey).strip())))
-        except Exception as e:
-            logger.warning(
-                "pinned update key %.16s... does not parse as an Ed25519 public "
-                "key hex (%s); skipping it", str(hexkey), e)
-            continue
-    return keys
+            raw = base64.b64decode(entry["sig"], validate=True)
+        except ValueError:
+            raise _BadSignature(f"a signature in {where} is not valid base64") from None
+        if len(raw) != 64:
+            raise _BadSignature(f"a signature in {where} is not 64 bytes")
+        out.append({"key": entry["key"], "sig": entry["sig"]})
+    return out
 
 
-def verify_signature(data: bytes, signature_b64) -> None:
-    """Verify *signature_b64* (base64 Ed25519 signature) over *data* against the
-    pinned public key(s), IF signing is configured.
+def _parse_keyset(obj, *, signed: bool) -> dict:
+    """Validate a key set: ``seq`` >= 1, release threshold >= 1, recovery threshold
+    >= 2, keys distinct valid Ed25519 hex, no key in both roles. *signed* requires
+    (and keeps) its "signatures" list. Raises _BadSignature."""
+    _check_fields(obj, "the key set",
+                  {"seq", "release", "recovery"} | ({"signatures"} if signed else set()))
+    if not _is_int(obj["seq"]) or obj["seq"] < 1:
+        raise _BadSignature("the key set seq must be a positive integer")
+    ks = {
+        "seq": obj["seq"],
+        "release": _parse_role(obj["release"], "the release set", 1),
+        "recovery": _parse_role(obj["recovery"], "the recovery set", 2),
+    }
+    if set(ks["release"]["keys"]) & set(ks["recovery"]["keys"]):
+        raise _BadSignature("a key is in both the release and the recovery set")
+    if signed:
+        ks["signatures"] = _parse_signatures(obj["signatures"], "the key set signatures")
+    return ks
 
-    Signature verification is OPTIONAL hardening (see _UPDATE_PUBKEYS): fail-OPEN
-    when unconfigured, enforce when configured.
 
-    - No key pinned (the default): this ALLOWS the update (returns). Authenticity
-      rests on the HTTPS-pinned transport plus the private release channel.
-    - A key pinned but every pin UNPARSEABLE: configured-but-broken, NOT
-      unconfigured -> FAIL CLOSED.
-    - A key pinned and valid: REQUIRE a matching signature; a missing / malformed /
-      non-matching signature refuses before any swap (a downgrade is checked
-      separately, in _refuse_downgrade).
+def canonical_keyset_bytes(keyset: dict) -> bytes:
+    """The bytes recovery keys sign for *keyset*: its seq, release and recovery
+    fields (never its signatures) as compact JSON with sorted keys."""
+    body = {k: keyset[k] for k in ("seq", "release", "recovery")}
+    return _json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
-    Raises :class:`~localm.bugreport.LocalmError` on a refusal."""
+
+def _count_signers(signatures: list, trusted_keys: list, message: bytes) -> int:
+    """How many DISTINCT keys of *trusted_keys* validly signed *message*. Unknown
+    keys, repeats and invalid signatures add nothing."""
     import base64
 
     from cryptography.exceptions import InvalidSignature
-    from localm.bugreport import LocalmError
-    keys = _load_update_pubkeys()
-    if not keys:
-        if _UPDATE_PUBKEYS:
-            # Pins ARE configured but none parses -> fail closed.
-            raise LocalmError(
-                "refusing to apply an update: no pinned signing key is usable",
-                reason=f"{len(_UPDATE_PUBKEYS)} key(s) are pinned in _UPDATE_PUBKEYS "
-                       "but none parses as an Ed25519 public key hex")
-        # No key pinned: allow the update on transport trust alone.
-        return
-    if not signature_b64:
-        raise LocalmError(
-            "refusing to apply an unsigned update",
-            reason="a signing key is pinned but the release included no signature")
-    try:
-        sig = base64.b64decode(str(signature_b64), validate=True)
-    except Exception:
-        raise LocalmError("the update signature is malformed", reason="not valid base64") from None
-    for key in keys:
+    trusted, valid = set(trusted_keys), set()
+    for entry in signatures:
+        key = entry["key"]
+        if key not in trusted or key in valid:
+            continue
         try:
-            key.verify(sig, data)
-            return   # a pinned key validated the build - authentic
+            _public_key(key).verify(base64.b64decode(entry["sig"]), message)
         except InvalidSignature:
             continue
-    raise LocalmError(
-        "the update signature did not match the pinned key",
-        reason="the build may be tampered with, or signed with an unknown key")
+        valid.add(key)
+    return len(valid)
+
+
+def _trust_path() -> Path:
+    return _updates_dir(create=False) / _TRUST_FILE
+
+
+def _load_trusted() -> dict:
+    """The trusted key set: the one saved in the data dir when its seq is higher
+    than the pinned one's, else the pinned one. A saved file that cannot be read,
+    does not validate, or has the pinned seq with different keys raises
+    :class:`~localm.bugreport.LocalmError` naming the file; it is never replaced by
+    the pinned set."""
+    from localm.bugreport import LocalmError
+    pinned = _parse_keyset(_PINNED_KEYSET, signed=False)
+    path = _trust_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return pinned
+    except OSError as e:
+        raise LocalmError("the saved update signing keys could not be read",
+                          reason=f"{path}: {e}") from None
+    try:
+        saved = _parse_keyset(_strict_json(text), signed=True)
+    except (ValueError, RecursionError) as e:
+        raise LocalmError(
+            "the saved update signing keys are corrupt",
+            reason=f"{path}: {e}. Restore that file, or reinstall localm") from None
+    if saved["seq"] == pinned["seq"] and (
+            canonical_keyset_bytes(saved) != canonical_keyset_bytes(pinned)):
+        raise LocalmError(
+            "the saved update signing keys conflict with the built-in ones",
+            reason=f"{path}: key set {saved['seq']} differs from the built-in key set "
+                   f"{pinned['seq']}. Restore that file, or reinstall localm")
+    return saved if saved["seq"] > pinned["seq"] else pinned
+
+
+def _save_keyset(keyset: dict) -> None:
+    """Atomically write the signed *keyset* to the data dir's trust file."""
+    import os
+
+    from localm.bugreport import LocalmError
+    path = _updates_dir() / _TRUST_FILE
+    tmp = path.with_name(f".{_TRUST_FILE}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(_json.dumps(keyset, indent=2, sort_keys=True) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise LocalmError("could not save the update's new signing keys",
+                          reason=f"{path}: {e}") from None
+
+
+def verify_signature(data: bytes, signature, *, trusted: Optional[dict] = None):
+    """Verify the signature envelope *signature* (the release's ``.sig`` text)
+    over the build bytes *data*. Fails closed: every error raises.
+
+    *trusted* is the key set to verify against; ``None`` loads it with
+    :func:`_load_trusted`. An envelope "keyset" with a higher seq replaces it
+    only when signed by at least the trusted recovery threshold of distinct
+    trusted recovery keys; an equal seq must match it exactly; a lower seq is
+    refused. The build then needs valid signatures from at least the release
+    threshold of distinct keys of the (possibly replaced) release set.
+
+    Returns the accepted replacement key set (with its signatures), or None when
+    the envelope does not replace the trusted one. Never writes anything; the
+    caller saves a returned key set with :func:`_save_keyset`.
+
+    Raises :class:`~localm.bugreport.LocalmError` on a refusal, and
+    ``ImportError`` when ``cryptography`` is not installed."""
+    from localm.bugreport import LocalmError
+
+    def refuse(reason):
+        return LocalmError("refusing to apply the update: its signature does not verify",
+                           reason=reason)
+
+    if not isinstance(signature, str) or not signature.strip():
+        raise LocalmError("refusing to apply an unsigned update",
+                          reason="the release includes no signature")
+    if len(signature) > _SIG_MAX_CHARS:
+        raise refuse(f"the signature is longer than {_SIG_MAX_CHARS} characters")
+    trusted = _load_trusted() if trusted is None else _parse_keyset(
+        {k: trusted[k] for k in ("seq", "release", "recovery")}, signed=False)
+    try:
+        try:
+            env = _strict_json(signature)
+        except _BadSignature:
+            raise
+        except (ValueError, RecursionError):
+            raise _BadSignature(
+                f"it is not a {_SIG_FORMAT} signature; a release signed for localm "
+                "0.2.0 or earlier is not accepted") from None
+        _check_fields(env, "the signature", {"format", "signatures"}, frozenset({"keyset"}))
+        if env["format"] != _SIG_FORMAT:
+            raise _BadSignature(f"unsupported signature format {str(env['format'])[:40]!r}")
+        build_sigs = _parse_signatures(env["signatures"], "the build signatures")
+        offered = _parse_keyset(env["keyset"], signed=True) if "keyset" in env else None
+    except _BadSignature as e:
+        raise refuse(str(e)) from None
+
+    effective, accepted = trusted, None
+    if offered is not None:
+        if offered["seq"] < trusted["seq"]:
+            raise refuse(f"it carries key set {offered['seq']}, older than the trusted "
+                         f"key set {trusted['seq']}")
+        if offered["seq"] == trusted["seq"]:
+            if canonical_keyset_bytes(offered) != canonical_keyset_bytes(trusted):
+                raise refuse(f"it carries a different key set {offered['seq']} than the "
+                             "trusted one")
+        else:
+            recovery = trusted["recovery"]
+            if _count_signers(offered["signatures"], recovery["keys"],
+                              canonical_keyset_bytes(offered)) < recovery["threshold"]:
+                raise refuse(f"its new key set is not signed by {recovery['threshold']} "
+                             "trusted recovery keys")
+            effective = accepted = offered
+    release = effective["release"]
+    if _count_signers(build_sigs, release["keys"], data) < release["threshold"]:
+        raise refuse("the build is not signed by a trusted release key; it may be "
+                     "tampered with or signed with an unknown key")
+    return accepted
 
 
 def _refuse_downgrade(new_version: str) -> None:
@@ -263,8 +468,8 @@ def check(*, opener=None) -> dict:
         "notes": (data.get("notes") or "") if isinstance(data, dict) else "",
         "published_at": data.get("published_at") if isinstance(data, dict) else None,
         "asset": data.get("asset") if isinstance(data, dict) else None,
-        # The proxy serves the release's Ed25519 signature (base64) alongside the
-        # asset; apply() verifies the downloaded build against the pinned key.
+        # The proxy serves the release's signature envelope text alongside the
+        # asset; apply() verifies the downloaded build with verify_signature().
         "signature": data.get("signature") if isinstance(data, dict) else None,
     }
 
@@ -545,11 +750,15 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     install, then run the class's deps/runtime step. Returns
     ``{applied, version, klass, backup, restart_needed}``.
 
-    *signature* is the base64 Ed25519 signature from :func:`check` (the proxy serves
-    it with the release). It is verified against the pinned public key(s) BEFORE the
-    build is extracted or any of its code can run; a missing/invalid signature, an
-    unconfigured key, or a downgrade all raise before anything is swapped (fail
-    closed - we never install an unverified build).
+    *signature* is the signature envelope text from :func:`check` (the proxy serves
+    it with the release). :func:`verify_signature` checks it BEFORE the build is
+    extracted or any of its code can run; a missing or invalid signature, a corrupt
+    saved key set, or a downgrade all raise before anything is swapped (fail
+    closed - we never install an unverified build). A replacement key set the
+    envelope carries is saved (:func:`_save_keyset`) only after every check has
+    passed and before the swap, so a refused update leaves the trusted keys
+    unchanged; a failure to save it refuses the update. A swap or post-swap step
+    that fails after that point rolls the files back but keeps the saved key set.
 
     Single-flight (:func:`_apply_lock`): a second concurrent call is refused
     immediately rather than racing the first. Each call also downloads, extracts,
@@ -585,7 +794,7 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             download(asset_id, zip_path, opener=download_opener)
             # SIGNATURE GATE - runs before verify_zip/extract/swap, i.e. before any
             # of the downloaded build's code can be extracted or executed.
-            verify_signature(zip_path.read_bytes(), signature)
+            new_keyset = verify_signature(zip_path.read_bytes(), signature)
             au.verify_zip(zip_path)
             root = au.extract(zip_path, staging)
             vf = root / "VERSION"
@@ -593,6 +802,9 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
             _refuse_downgrade(new_version)
             klass = classify(root, target, read_manifest(root))
+            # The update has verified: save a key set it replaced, before the swap.
+            if new_keyset is not None:
+                _save_keyset(new_keyset)
         except Exception:
             # No backup exists for this run yet, so the scratch dir can go.
             shutil.rmtree(run_dir, ignore_errors=True)

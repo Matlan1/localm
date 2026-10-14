@@ -3,18 +3,17 @@
 classification (reboot/deps/runtime/setup), and the build download. Apply is NOT
 exercised here (it has its own detached-helper tests)."""
 
-import base64
 import json
 import pathlib
 import subprocess
 import sys
 
 import pytest
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _version, updater
 from tests._net_config import set_config
+from tests._update_signing import envelope, keyset
 
 
 def _opener(payload, status=200):
@@ -397,9 +396,7 @@ def test_download_refuses_non_https_endpoint(tmp_path, monkeypatch):
 # exercise the real gate rather than disabling it.
 
 _TEST_PRIV = Ed25519PrivateKey.generate()
-_TEST_PUB_HEX = _TEST_PRIV.public_key().public_bytes(
-    encoding=serialization.Encoding.Raw,
-    format=serialization.PublicFormat.Raw).hex()
+_TEST_RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
 
 
 def _pyproject_str(deps):
@@ -408,8 +405,8 @@ def _pyproject_str(deps):
 
 
 def _signed_build(version, deps):
-    """A deterministic build zip (bytes) + its base64 Ed25519 signature under the
-    test key. Returns ``(download_opener, signature_b64)``; the opener writes the
+    """A deterministic build zip (bytes) + its signature envelope under the test
+    release key. Returns ``(download_opener, signature)``; the opener writes the
     exact bytes that were signed, so the gate verifies them."""
     import io
     import zipfile
@@ -419,7 +416,7 @@ def _signed_build(version, deps):
         z.writestr("pyproject.toml", _pyproject_str(deps))
         z.writestr("localm/__init__.py", f"# {version}")
     data = buf.getvalue()
-    sig = base64.b64encode(_TEST_PRIV.sign(data)).decode("ascii")
+    sig = envelope(data, [_TEST_PRIV])
 
     def opener(url, headers, timeout, dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -431,7 +428,8 @@ def _signed_build(version, deps):
 def sig_env(monkeypatch):
     """Pin the test signing key and an OLDER running version so apply()'s signature
     gate and anti-rollback accept the 0.2.0 fixture builds."""
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (_TEST_PUB_HEX,))
+    monkeypatch.setattr(updater, "_PINNED_KEYSET",
+                        keyset(1, [_TEST_PRIV], _TEST_RECOVERY))
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
 
 
