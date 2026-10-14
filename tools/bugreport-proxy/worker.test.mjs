@@ -231,7 +231,7 @@ test("update: serves the detached .sig signature alongside the .zip asset", asyn
   } finally { restore(); }
 });
 
-test("update: no .sig asset -> signature is null (client decides enforce vs open)", async () => {
+test("update: no .sig asset -> signature is null (the client refuses an unsigned build)", async () => {
   const restore = stubFetch(async (url) => {
     if (url.includes("/releases?")) {
       return new Response(JSON.stringify([{

@@ -111,12 +111,13 @@ Contents:read token and require `SHARED_SECRET`.
 ## Releases (for the updater)
 
 The updater offers a build when the latest **GitHub Release** tag is newer than the
-running `VERSION`, and verifies the shipped `.sig` against the public key pinned in
-`localm/updater.py` before applying. The ONE real release procedure is
+running `VERSION`, and verifies the shipped `.sig` (a signature envelope) against the
+key set pinned in `localm/updater.py`, or a newer one an earlier update installed, before
+applying. The ONE real release procedure is
 [`scripts/make_release.py`](../../scripts/make_release.py) (see
 [`RELEASE.md`](../../RELEASE.md)): it assembles `build.zip` from
 `release-manifest.toml` (never a plain `git archive` of the whole tracked tree),
-signs it with the offline Ed25519 key, and gates `--publish` on a clean/pinned
+signs it with the Ed25519 release key, and gates `--publish` on a clean/pinned
 commit, a live functional-verification record, and a green CI run before creating
 the GitHub Release. There is no other supported way to cut a release; do not hand-
 roll one.

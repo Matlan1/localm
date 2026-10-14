@@ -168,10 +168,10 @@ async function latestRelease(request, env, url) {
   const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
   // Prefer a .zip asset (the build); else the first asset; else none.
   const asset = assets.find((a) => /\.zip$/i.test(a.name)) || assets[0] || null;
-  // Serve the detached Ed25519 signature: it ships as a sibling <build>.zip.sig asset
-  // (small base64 text). The client verifies the downloaded build against its pinned
-  // key. Absent -> null: an enforced client then refuses the unsigned build, a keyless
-  // client applies on transport trust (updater._UPDATE_PUBKEYS / verify_signature).
+  // Serve the signature: the text of the first *.sig asset, verbatim (trimmed). For
+  // localm 0.3.0 and later that is a JSON signature envelope the client verifies
+  // against the key set it trusts (updater.verify_signature). Absent -> null: the
+  // client refuses the unsigned build.
   let signature = null;
   const sigAsset = assets.find((a) => /\.sig$/i.test(a.name));
   if (sigAsset) {
@@ -252,7 +252,7 @@ async function fetchAssetText(env, id) {
   }
   if (!upstream.ok) return null;
   const txt = await upstream.text();
-  return txt.length <= 4096 ? txt : null;   // a base64 Ed25519 sig is ~88 bytes
+  return txt.length <= 4096 ? txt : null;   // the client refuses an envelope over 4096 characters
 }
 
 // ----------------------- update: stream a build -------------------------

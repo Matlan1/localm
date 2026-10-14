@@ -432,10 +432,13 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   up first and rolls back on failure rather than leaving a half-applied tree.
 
 Honest limits: until an install receives an update that replaces a key, a build
-signed with that key is still accepted, so replacing a stolen release key protects
-an install from its next update on. Builds signed for localm 0.2.0 and earlier use
-a single-key format that 0.3.0 and later refuse, and 0.2.0 cannot verify 0.3.0, so
-moving from 0.2.0 to 0.3.0 is a fresh install, once. The GUI "Update now" button's restart (the only
+signed with that key is still accepted. A replacement set of keys is kept in the
+data directory that applied the update, while the install is shared by every data
+directory that runs it (a different `LOCALM_HOME`, or a data directory that was
+reset). Every release that carries a replacement set of keys also pins that same set
+in its own code, so once it is installed, every data directory trusts the new keys,
+whichever one applied the update. Builds signed for localm 0.2.0 and earlier use a
+single-key format that 0.3.0 and later refuse; 0.2.0 updates to 0.3.0 as before. The GUI "Update now" button's restart (the only
 transition that happens with nobody watching) is followed by a detached watchdog
 that polls the relaunched build's `/whoami` for the expected version and
 auto-rolls-back if it does not come up healthy within 90 seconds. `localm update`
@@ -452,7 +455,8 @@ the signing model above does not apply to it. It restores files only, not a
 deps-class update's package installs.
 
 **A first-time (non-updater) install can be verified too.** `scripts/verify_release.py`
-checks a downloaded release Asset (`localm-<version>.zip` plus its `.zip.sig`) against
+checks a downloaded release Asset (`localm-<version>.zip` plus its signature envelope,
+`.zip.envelope` for 0.3.0 and `.zip.sig` otherwise) against
 the same signing keys described above, and/or a plain SHA256 digest - useful if
 you obtained the zip some other way than the recommended `git clone` install. The
 `git clone` path itself is unchanged by this: it never downloads a zip, so it continues
