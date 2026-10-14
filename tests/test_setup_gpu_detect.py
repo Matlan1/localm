@@ -327,6 +327,7 @@ def _run_backend_menu(tmp_path: Path, *, rec: str, is_apple_silicon: bool, bpick
                       is_macos: bool | None = None) -> dict:
     macos = is_apple_silicon if is_macos is None else is_macos
     script = (
+        'set -euo pipefail\n'
         'say() { :; }\n'
         f'ask() {{ echo "{bpick}"; }}\n'
         f'REC="{rec}"\n'
@@ -430,6 +431,7 @@ def _menu_text(tmp_path: Path, *, is_macos: bool, is_apple_silicon: bool,
                rec: str = "cpu") -> tuple[str, str]:
     """(menu stdout, pick prompt) for one platform."""
     script = (
+        'set -euo pipefail\n'
         'say() { printf "%s\\n" "$*"; }\n'
         'ask() { printf "%s" "$1" >&2; echo 1; }\n'
         f'REC="{rec}"\nGPU=irrelevant\n'
@@ -501,6 +503,7 @@ def _menu_with_probe(tmp_path: Path, avail: str, bpick: str, rec: str) -> tuple[
     stub.write_text(f'#!/bin/sh\n[ "$3" = backends ] && echo "{avail}"\n', encoding="utf-8")
     _mark_executable(stub)
     script = (
+        'set -euo pipefail\n'
         'say() { printf "%s\\n" "$*"; }\n'
         f'ask() {{ printf "%s" "$1" >&2; echo {bpick}; }}\n'
         f'REC="{rec}"\nGPU=irrelevant\nIS_APPLE_SILICON=0\nIS_MACOS=0\n'

@@ -29,8 +29,8 @@ def _block(start: str, end: str) -> str:
 
 
 def _run(script: str, cwd: Path, env: dict | None = None) -> subprocess.CompletedProcess:
-    result = subprocess.run([_bash(), "-c", script], capture_output=True, text=True,
-                            cwd=cwd, env=env, timeout=20)
+    result = subprocess.run([_bash(), "-c", "set -euo pipefail\n" + script],
+                            capture_output=True, text=True, cwd=cwd, env=env, timeout=20)
     assert result.returncode == 0, result.stderr
     return result
 

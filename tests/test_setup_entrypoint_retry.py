@@ -256,6 +256,8 @@ def _run_provision_block(tmp_path: Path, *, localm_bin_ok: bool, backend: str,
         'offer_report() { printf "OFFERED_REPORT detail=%s\\n" "$2"; }\n'
         'RUNTIME_OK=1\n'
         'SL_FORCE=""\n'
+        'YES=0\n'
+        'SL_BACKENDS="<vulkan|cuda|hip|sycl|cpu>"\n'
         f'LOCALM_BIN_OK={1 if localm_bin_ok else 0}\n'
         f'BACKEND="{backend}"\n'
         + _handle_failure_function()

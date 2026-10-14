@@ -12,6 +12,7 @@ import click
 
 from localm.debuglog import logger
 from localm.setup_llama._common import console
+from localm.setup_llama.assets import _require_prebuilt
 from localm.setup_llama.pins import _ROCM_BUILD, _ROCM_TAG
 from localm.setup_llama.download import ArtifactError
 from localm.setup_llama.runtime_dir import (_exit_provisioning_busy, _exit_runtime_in_use,
@@ -356,7 +357,7 @@ def _refuse_without_prebuilt(chosen: str) -> None:
     prebuilt build for this platform and CPU architecture; the message names the
     backends that have one. No fallback backend is installed in its place."""
     try:
-        _sl.assets._require_prebuilt(chosen, _sl._platform_key(), _sl._machine_arch())
+        _require_prebuilt(chosen, _sl._platform_key(), _sl._machine_arch())
     except click.ClickException as e:
         console.print(f"[red]{e.message}[/red]")
         sys.exit(1)
