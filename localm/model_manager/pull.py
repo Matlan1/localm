@@ -68,9 +68,11 @@ def _same_pid_space(rec: dict, where: Path) -> bool:
     host (see :func:`localm.instances.legacy_pid_space_id` and
     :func:`localm.instances.legacy_record_is_this_host`); or its host id
     equals this one (see :func:`localm.instances.host_id`, which does not
-    depend on the host name) and *where* is on a disk attached to this machine
-    (see :func:`localm.instances.path_is_local`). A record naming no pid space
-    is not judged here."""
+    depend on the host name), its ``local`` field is True (its writer saw
+    *where* on a disk attached to the writer's machine) and *where* is on a
+    disk attached to this machine (see :func:`localm.instances.path_is_local`).
+    A record whose ``local`` field is missing or not True is never matched by
+    host id. A record naming no pid space is not judged here."""
     space = rec.get("space")
     if space == _pid_space_id():
         return True
@@ -79,14 +81,17 @@ def _same_pid_space(rec: dict, where: Path) -> bool:
         return True
     host = rec.get("host")
     return (space is not None and isinstance(host, str)
-            and host == instances.host_id() and instances.path_is_local(where))
+            and host == instances.host_id() and rec.get("local") is True
+            and instances.path_is_local(where))
 
 
 def _write_partial_owner(partial: Path) -> None:
-    """Record this process (pid, pid space and start identity) as the owner of
-    *partial*."""
+    """Record this process (pid, pid space, host id, start identity, and
+    whether the folder of *partial* is on a disk attached to this machine) as
+    the owner of *partial*."""
     rec = {"pid": os.getpid(), "space": _pid_space_id(),
            "host": instances.host_id(),
+           "local": instances.path_is_local(partial.parent),
            "start": instances.process_start_identity(os.getpid())}
     _partial_owner_path(partial).write_text(json.dumps(rec), encoding="utf-8")
 
@@ -2592,12 +2597,13 @@ def _stage_lock_record(locks: Path, filename: str, token: str) -> Path:
     for *filename*'s lock, carrying *token*. A staging directory removed
     before its record is written is replaced by a new one. Raises
     :class:`PullInFlight` when the record cannot be written."""
-    # `space` and `start` are what _part_lock_holder_is_gone compares and
-    # `token` is what the release checks; `started` is only read by a human
-    # inspecting the lock.
+    # `space`, `host`, `local` and `start` are what _part_lock_holder_is_gone
+    # compares and `token` is what the release checks; `started` is only read
+    # by a human inspecting the lock.
     payload = json.dumps({"pid": os.getpid(), "filename": filename,
                           "space": _pid_space_id(),
                           "host": instances.host_id(),
+                          "local": instances.path_is_local(locks),
                           "start": instances.process_start_identity(os.getpid()),
                           "token": token, "started": time.time()})
     for _ in range(_LOCK_ATTEMPTS):
