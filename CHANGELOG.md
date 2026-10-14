@@ -637,6 +637,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   list left them out.
 - **Bug reports keep the end of a long error.** A long traceback in the recent-activity log was cut
   from the end, dropping the exception line; the exception type and message are now kept.
+- **Changing the embedding model no longer freezes the server while it checks your collections.** The preview of which collections the switch would affect now reads them off the main thread, so chat and the page keep responding while a large collection is read.
+- **Clear now removes a plugin's saved secret setting.** Clicking Clear on a plugin's API key field and saving previously said "Nothing changed" and kept the key; it now removes it.
 - **The chat model comes back after a failed image, video or music job.** When a generation
   crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
   until your next message. It now reloads on every way a job can end, and a job that finishes
