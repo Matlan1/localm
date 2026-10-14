@@ -1014,7 +1014,7 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
                 logger.debug("list_gpus: discarding probe result from retired "
                              "epoch %s (current %s)", my_epoch, _gpu_probe_epoch)
             else:
-                if value is not None:
+                if value is not None and (value or conclusive):
                     _gpu_last_good = value
                 _gpu_probe_inflight = False
                 # Unpublish alongside the in-flight slot: a NEW caller must start a
@@ -1837,6 +1837,8 @@ def _torch_gpus_isolated_once() -> list:
         import sys
         from localm.gpu_usage import torch_fully_imported
         if "torch" in sys.modules and not torch_fully_imported():
+            with _gpu_probe_lock:
+                _isolated_torch_unanswered = True
             return []
         return _torch_gpus_resident()
     return devices
