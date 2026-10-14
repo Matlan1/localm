@@ -1336,9 +1336,10 @@ class IsolatedEmbedder(VramSizingMixin):
         respawning a dead worker first and recovering from a GPU crash as
         described on :meth:`embed`.
 
-        A dead worker is respawned holding the engine's ``_LOAD_LOCK`` (outer)
-        and ``_rpc_lock`` (inner); ``_rpc_lock`` is never held while
-        ``_LOAD_LOCK`` is awaited. The liveness check and the call share one
+        A worker found dead before the call is respawned holding the engine's
+        ``_LOAD_LOCK`` (outer) and ``_rpc_lock`` (inner); ``_rpc_lock`` is never
+        held while ``_LOAD_LOCK`` is awaited. The CPU retry after a GPU crash
+        reloads under ``_rpc_lock`` alone. The liveness check and the call share one
         ``_rpc_lock`` hold; a worker found dead again after a respawn is
         respawned again, up to ``_RESPAWN_ATTEMPTS`` times, and the last attempt
         calls whatever runner is there."""

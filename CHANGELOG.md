@@ -57,7 +57,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   when it loads, the way FP8 checkpoints are, and the load output says so. The `hf` and `gpu`
   extras now include the compressed-tensors package, and a torch built without
   `torch.distributed` (the ROCm build for Windows) can import it. A checkpoint whose expanded
-  weights do not fit the free memory is refused with the size it needs, as an FP8 one is.
+  weights do not fit the free memory is refused with the size it needs, as an FP8 one is, and
+  an NVFP4 or MXFP4 checkpoint loaded on the CPU runs instead of failing on its first reply.
 - **Your own image and video models in the native backend.** The built-in stable-diffusion.cpp
   backend now runs a diffusion model you pick, not only the ones localm downloads for you: a
   FLUX.1, Chroma, SD3, SDXL, Qwen-Image, Z-Image or Wan model file is recognised from its
