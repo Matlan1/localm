@@ -343,7 +343,7 @@ class HTTPBackend(BaseLLMBackend):
                 key = body.get("effective_ctx_model_key")
                 mine = (reported == self._model or key == self._model
                         or self._model in ("", "localm"))
-                if not mine:
+                if not mine or reported is None:
                     latch = False
                 elif isinstance(v, int) and v > 0:
                     self._ctx_capacity = v

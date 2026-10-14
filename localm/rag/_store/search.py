@@ -98,6 +98,7 @@ class _CollectionSearch:
     _chunks: list[dict]
     _vectors: Optional[list]
     _note_vector_degrade: Callable[..., None]
+    embedding_model: Callable[[], Optional[str]]
 
     def query(self, text: str, k: int = 4,
               embed_fn: Optional[EmbedFn] = None, *,

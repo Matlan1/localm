@@ -226,3 +226,19 @@ class TestUserCommandsSeeTheirOwnCaches:
     def test_an_environment_without_pins_is_unchanged(self, base):
         import localm.config as cfg
         assert cfg.user_command_env(dict(base)) == base
+
+
+def test_a_project_mcp_server_is_scrubbed_too(monkeypatch, tmp_path):
+    from localm.plugins.coder.mcp import MCPError, MCPServer
+    _localm_pinned_environ(monkeypatch, tmp_path)
+    out = tmp_path / "env.json"
+    script = ("import json, os, sys; open(sys.argv[1], 'w').write(json.dumps("
+              "{k: os.environ.get(k) for k in ('HF_HOME', 'LOCALM_PINNED_HF_HOME', "
+              "'AMD_COMGR_CACHE_DIR', 'MY_OWN')}))")
+    server = MCPServer("probe", sys.executable, ["-c", script, str(out)],
+                       env={"MY_OWN": "kept"})
+    with pytest.raises(MCPError):
+        server.start()
+    seen = json.loads(out.read_text(encoding="utf-8"))
+    assert seen == {"HF_HOME": None, "LOCALM_PINNED_HF_HOME": None,
+                    "AMD_COMGR_CACHE_DIR": None, "MY_OWN": "kept"}

@@ -30,6 +30,7 @@ class _State:
         self.config_calls = 0
         self.report_model = True
         self.report_key = None
+        self.no_engine = False
         self.report_display = None
         self.load_refusal = None
 
@@ -51,6 +52,11 @@ def _make_server(state):
             if urlparse(self.path).path == "/v1/config":
                 state.config_calls += 1
                 body = {"effective_ctx_max": _CTX[state.loaded]}
+                if state.no_engine:
+                    body = {"effective_ctx_max": None, "effective_ctx_model": None,
+                            "effective_ctx_model_key": None}
+                    self._send(200, body)
+                    return
                 if state.report_model:
                     body["effective_ctx_model"] = state.report_display or state.loaded
                 if state.report_key:
@@ -291,3 +297,15 @@ def test_config_route_names_the_request_key_of_the_active_model(tmp_path, monkey
         assert c.patch("/v1/config", json=body, headers=auth).status_code == 200
         monkeypatch.setattr(hs, "_engine", None)
         assert c.get("/v1/config", headers=auth).json()["effective_ctx_model_key"] is None
+
+
+def test_the_placeholder_model_does_not_cache_a_server_with_no_engine(server):
+    state, base = server
+    state.no_engine = True
+    backend = _backend(base, model="localm")
+    assert backend.context_capacity() is None
+    state.no_engine = False
+    assert backend.context_capacity() == 32768
+    calls = state.config_calls
+    assert backend.context_capacity() == 32768
+    assert state.config_calls == calls

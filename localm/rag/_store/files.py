@@ -137,14 +137,7 @@ class _CollectionFiles:
         chunks_file = self.dir / "chunks.jsonl"
         if chunks_file.is_file():
             bad_lines = 0
-            try:
-                text = chunks_file.read_text(encoding="utf-8", errors="surrogateescape")
-            except OSError as e:
-                self.corrupt = True
-                self.chunks_bad_lines = 1
-                _log.warning("RAG collection %r: chunks.jsonl is unreadable (%s); "
-                             "run 'localm rag repair'", self.name, type(e).__name__)
-                return
+            text = chunks_file.read_text(encoding="utf-8", errors="surrogateescape")
             # A byte that is not UTF-8 survives the read as a lone surrogate and
             # costs the line it is in, not the whole file. split_jsonl, NOT
             # str.splitlines(): JSONL is delimited by LINE FEED and nothing else.

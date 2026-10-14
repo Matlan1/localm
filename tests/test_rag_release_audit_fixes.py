@@ -142,8 +142,10 @@ class TestUndecodableChunksFile:
         assert coll.stats()["corrupt"] is True
         assert coll._chunks == []
 
-    def test_an_unreadable_file_flags_the_collection(self, tmp_path, monkeypatch):
+    def test_an_unreadable_file_raises_and_a_write_never_replaces_it(
+            self, tmp_path, monkeypatch):
         chunks_file = self._collection(tmp_path)
+        before = chunks_file.read_bytes()
         real = Path.read_text
 
         def read_text(self, *args, **kwargs):
@@ -152,10 +154,14 @@ class TestUndecodableChunksFile:
             return real(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "read_text", read_text)
-        coll = Collection("kb", base=tmp_path / "rag")
-        assert coll.stats()["corrupt"] is True
-        assert coll._chunks == []
-        assert chunks_file.exists()
+        with pytest.raises(PermissionError):
+            Collection("kb", base=tmp_path / "rag").add_uploads(
+                [{"filename": "c.md", "data": b"gamma third document"}])
+        assert chunks_file.read_bytes() == before
+        monkeypatch.undo()
+        again = Collection("kb", base=tmp_path / "rag")
+        assert again.stats()["corrupt"] is False
+        assert len(again._chunks) == 2
 
     def test_a_clean_file_with_crlf_lines_and_blank_lines_is_unchanged(self, tmp_path):
         chunks_file = self._collection(tmp_path)
