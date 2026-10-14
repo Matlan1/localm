@@ -627,6 +627,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Closing the agent browser no longer stalls the server.** Shutting a browser down can take
   several seconds, and while it did, every other request and stream waited. The close now runs
   in the background pool like the browser's other actions.
+- **Server errors show up as 500 in `/metrics`.** A request whose handler crashed was counted as a
+  499 (client left), so an alert on 5xx never fired; it is now counted as the 500 the client received.
+- **Unloading a model that another localm instance serves says so.** An Ollama client sending
+  `keep_alive: 0` for such a model now gets a 409 naming the other instance instead of an "unload"
+  reply while nothing was unloaded.
+- **An instance served on Ollama's port 11434 is found by the others.** Instances on `--port 11434`
+  were invisible to peer detection, so siblings could not ask them to release VRAM and the Instances
+  list left them out.
+- **Bug reports keep the end of a long error.** A long traceback in the recent-activity log was cut
+  from the end, dropping the exception line; the exception type and message are now kept.
 - **The chat model comes back after a failed image, video or music job.** When a generation
   crashed after the chat model had been unloaded to make room, the chat model stayed unloaded
   until your next message. It now reloads on every way a job can end, and a job that finishes

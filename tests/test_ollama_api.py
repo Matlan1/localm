@@ -522,12 +522,14 @@ def test_load_idiom_leaves_a_peer_routed_model_to_its_peer(client, engine):
     assert engine.loaded is False
 
 
-def test_unload_idiom_leaves_a_peer_routed_model_to_its_peer(client, engine):
+def test_unload_idiom_on_a_peer_routed_model_is_refused_not_reported_done(client, engine):
     with patch("localm.inference.routes.ollama.peer_routing.get_route",
                return_value=object()):
         r = client.post("/api/chat",
                         json={"model": MODEL, "messages": [], "keep_alive": 0})
-    assert r.status_code == 200 and r.json()["done_reason"] == "unload"
+    assert r.status_code == 409
+    assert "another localm instance" in r.json()["error"]
+    assert "done_reason" not in r.json()
     assert engine.loaded is True
 
 

@@ -66,6 +66,31 @@ def test_native_line_is_truncated_too(fresh_ring):
     assert "(truncated," in entry
 
 
+def test_a_long_traceback_keeps_its_exception_line(fresh_ring):
+    def deep(n):
+        if n == 0:
+            raise ValueError("the actual cause " + "z" * 50)
+        deep(n - 1)
+
+    try:
+        deep(120)
+    except ValueError:
+        logging.getLogger("localm.web").exception("handler failed")
+    entry = debuglog.recent_activity()[-1]
+    assert "(truncated," in entry
+    assert entry.splitlines()[-1].startswith("ValueError: the actual cause")
+
+
+def test_a_clipped_traceback_tail_is_bounded(fresh_ring):
+    try:
+        raise ValueError("m" * 100_000)
+    except ValueError:
+        logging.getLogger("localm.web").exception("x" * 3000)
+    last = debuglog.recent_activity()[-1].splitlines()[-1]
+    assert last.startswith("ValueError: mmm")
+    assert len(last) <= debuglog._RING_MAX_TAIL_CHARS
+
+
 def test_bug_report_activity_section_is_bounded_and_scrubbed_before_it_is_cut(
         fresh_ring, monkeypatch):
     from localm import bugreport
