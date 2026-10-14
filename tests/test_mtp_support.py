@@ -1496,6 +1496,49 @@ def test_bench_mtp_reports_the_measured_verdict(cli_runner, off, on, phrase):
     assert phrase in res.output
 
 
+@pytest.mark.parametrize("spec_source,names_the_setting", [
+    ("off", True),
+    ("ngram", True),
+    ("draft", True),
+    ("mtp", False),
+    ("", False),
+    (None, False),
+    ("bogus", False),
+])
+def test_bench_mtp_advice_names_a_speculative_drafting_setting_that_overrides_the_toggle(
+        cli_runner, spec_source, names_the_setting):
+    from localm.cli import models as models_mod
+    from localm.config import load_config, save_config
+
+    cfg = load_config()
+    cfg["spec_source"] = spec_source
+    save_config(cfg)
+
+    with patch.object(models_mod, "get_operator_model_info",
+                      return_value=("model.gguf", None)),          patch.object(models_mod, "_mtp_probe_arm",
+                      _bench_mtp_result([50.0], [70.0])):
+        res = cli_runner.invoke(models_mod.bench_mtp,
+                                ["model.gguf", "--rounds", "1"])
+
+    assert res.exit_code == 0, res.output
+    out = " ".join(res.output.split())
+    assert "MTP is 1.40x faster" in out
+    if names_the_setting:
+        assert f"Speculative drafting is set to {spec_source}" in out
+        assert "takes precedence over the MTP toggle" in out
+        assert "Turn it on in Settings" not in out
+    else:
+        assert "Turn it on in Settings > Engine > Multi-Token Prediction" in out
+        assert "takes precedence" not in out
+
+
+def test_the_mtp_toggle_help_says_it_applies_only_while_drafting_is_inherit():
+    from localm.settings_schema import CORE_FIELDS
+
+    field = next(f for f in CORE_FIELDS if f.key == "mtp_enabled")
+    assert "only while Speculative drafting is Inherit" in field.help
+
+
 def test_bench_mtp_names_cpu_offload_when_mtp_loses(cli_runner):
     """A partially offloaded model is told why, since that is fixable."""
     from localm.cli import models as models_mod
