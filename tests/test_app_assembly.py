@@ -233,10 +233,11 @@ def test_every_route_group_gets_the_same_frozen_app_context(monkeypatch):
     ctx = received["chat"]
     assert all(c is ctx for c in received.values())
     assert type(ctx) is AppContext
-    assert ctx.audit is hs._audit
+    assert ctx.recorder is hs._session_recorder
+    assert ctx.audit is hs._session_recorder.current()[0]
     assert ctx.mode == effective_mode("server")
     with pytest.raises(dataclasses.FrozenInstanceError):
-        ctx.mode = None
+        ctx.recorder = None
 
 
 # --------------------------------------------------------------------------- #
