@@ -318,8 +318,9 @@ def _is_zombie(pid: int) -> bool:
     liveness rather than elapsed time (the pull .part lock, the updater
     lock, setup_llama's provision lock, the managed-comfy update lock), so
     a zombie holder read as alive wedges that lock for good. Linux answers
-    this in /proc/<pid>/stat; where that is unavailable (macOS, BSD) this
-    returns False and the signal-0 answer stands unchanged.
+    this in /proc/<pid>/stat; elsewhere (macOS, BSD) psutil's process status
+    answers it. Where neither can be read this returns False and the
+    signal-0 answer stands unchanged.
 
     The state is the first field after ``comm``, which is parenthesised and
     may itself contain ``)`` - so split on the LAST ``)``, never the first.
@@ -328,7 +329,18 @@ def _is_zombie(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat", "rb") as fh:
             return fh.read().decode("utf-8", "replace").rpartition(")")[2].split()[0] == "Z"
+    except FileNotFoundError:
+        if sys.platform.startswith("linux"):
+            return False
     except (OSError, IndexError):
+        return False
+    try:
+        import psutil
+    except ImportError:
+        return False
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except (psutil.Error, OSError):
         return False
 
 

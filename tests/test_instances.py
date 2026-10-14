@@ -257,9 +257,17 @@ def test_pid_alive_is_false_for_an_unreaped_child():
     """
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     try:
-        # Block until exited but leave it UNREAPED (WNOWAIT), so the zombie
-        # state is deterministic rather than a timing guess.
-        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        if hasattr(os, "waitid"):
+            # Block until exited but leave it UNREAPED (WNOWAIT), so the zombie
+            # state is deterministic rather than a timing guess.
+            os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+        else:
+            psutil = pytest.importorskip("psutil")
+            deadline = time.monotonic() + 30
+            while (psutil.Process(proc.pid).status() != psutil.STATUS_ZOMBIE
+                   and time.monotonic() < deadline):
+                time.sleep(0.02)
+            assert psutil.Process(proc.pid).status() == psutil.STATUS_ZOMBIE
         assert instances.pid_alive(proc.pid) is False
     finally:
         proc.wait(timeout=10)

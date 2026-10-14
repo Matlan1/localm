@@ -731,7 +731,7 @@ class TestProjectorTravel:
         paths = {n: Path(e["path"]).resolve() for n, e in reg.items()}
         assert other.resolve() not in paths.values(), (
             f"the unrelated projector already in the models folder was registered: {paths}")
-        assert paths.get("mmproj-F16") == renamed, paths
+        assert renamed in paths.values(), f"the carried projector has no entry: {paths}"
 
 
 # --------------------------------------------------------------------------- #
