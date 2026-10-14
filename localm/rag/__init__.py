@@ -13,7 +13,7 @@ localm.rag - chat with your documents, fully offline.
   nothing.
 - Extraction is stdlib wherever possible: txt/md/code directly, .docx via
   zipfile+xml, .html via the netpolicy stripper, .ipynb via json. Only PDF
-  needs a third-party parser (pypdf, the ``[rag]`` extra).
+  needs a third-party parser (pypdf, a core dependency).
 """
 
 from .bm25 import BM25

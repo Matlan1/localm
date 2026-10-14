@@ -490,7 +490,7 @@ collection route - can be confined to specific folders with `localm key
 create NAME --scope rag --rag-root DIR` (repeatable) - see
 [API keys](#api-keys) and [docs/rag.md](rag.md#per-key-folder-scoping).
 
-Enable the rag plugin and install `pip install "localm[rag]"` for PDF parsing. See [docs/rag.md](rag.md) for retrieval design.
+Enable the rag plugin to use Knowledge; PDF parsing is built in. See [docs/rag.md](rag.md) for retrieval design.
 
 ---
 

@@ -755,6 +755,11 @@ export async function refreshModelsPage() {
               if (!confirmed) { refreshModelsPage(); return; }
               data = await post(true);
             }
+            if (data.status === "in_use") {
+              toast(t("models.unload.inUse", { name: m.name }), true);
+              refreshModelsPage();
+              return;
+            }
             toast(t("models.unload.toast", { name: m.name }));
             refreshModelsPage();
             refreshPerfEstimate();

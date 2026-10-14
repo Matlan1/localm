@@ -2,7 +2,7 @@
 
 > Knowledge is provided by the `rag` plugin. The GUI Knowledge page and the
 > `/api/rag` routes appear only when it is enabled; the `localm rag` CLI below
-> remains available for indexing. PDF parsing still needs the `[rag]` pip extra.
+> remains available for indexing. PDF parsing uses `pypdf`, part of the core install.
 
 localm grounds chat replies in your own files - manuals, notes, code, papers -
 fully offline. Two ways in:
@@ -130,7 +130,7 @@ host path to confine. Only the owner key may set `rag_roots` on another key
 - Plain text & code (stdlib): `.txt .md .rst .csv .json .yaml .toml .py .js
   .ts .java .c .cpp .go .rs .sh .sql …`
 - `.html` / `.htm` (tags stripped), `.docx` (stdlib zip+xml), `.ipynb` (cells)
-- `.pdf` - needs the one optional package: `pip install "localm[rag]"`
+- `.pdf` - read with `pypdf`, part of the core install
 - **Archives** `.zip` / `.tar` (and `.gz .bz2 .xz .tgz .tbz .txz`) are unpacked in
   memory and each text member is indexed.
 - **Images** `.png .jpg .jpeg .webp .gif` are indexed by their description: localm
@@ -352,7 +352,7 @@ policy as an interactive add. Full details in
   re-upload those, or remove them with `rag rm-doc`.
 - **Indexing failed.** Indexing is atomic, so a failed index leaves the previous
   snapshot intact. Check the error in the GUI/CLI and `--debug` log; common causes
-  are an unreadable/encrypted file or a missing `[rag]` extra for PDF parsing.
+  are an unreadable or encrypted file.
 - **"Collection X is being written by another localm process".** Something else
   is indexing that collection right now, most often a scheduled re-sync or an add
   from the Knowledge page, and the command you ran waited for it and then stood

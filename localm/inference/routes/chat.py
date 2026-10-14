@@ -250,7 +250,7 @@ def register(app: FastAPI, ctx) -> None:
                         detail += (" An installed model that can read images "
                                    "could not be loaded: "
                                    + "; ".join(route.load_errors))
-                    raise HTTPException(400, detail)
+                    raise HTTPException(400, detail, headers={_hs.MEDIA_REFUSAL_HEADER: "image"})
 
             # Reject audio input on a model without an audio encoder the same way.
             if messages_contain_audio(messages) and getattr(engine, "supports_audio", False) is not True:
@@ -269,7 +269,7 @@ def register(app: FastAPI, ctx) -> None:
                         detail += (" An installed model that can take audio "
                                    "could not be loaded: "
                                    + "; ".join(route.load_errors))
-                    raise HTTPException(400, detail)
+                    raise HTTPException(400, detail, headers={_hs.MEDIA_REFUSAL_HEADER: "audio"})
 
             sampling = _sampling_kwargs(req)
             _check_sampling(engine, sampling)

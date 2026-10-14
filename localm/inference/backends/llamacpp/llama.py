@@ -3031,12 +3031,12 @@ class LlamaCpp:
         Hz. The templated text_messages carry the marker so mtmd_tokenize can
         splice each item in at its place.
 
-        Raises ``UnsupportedInputError`` with the audio-unsupported message for
-        an audio part when *audio_rate* is 0, ``AudioInputError`` for an audio
-        clip that cannot be decoded, and ``VisionInputError`` for an image that
-        cannot be decoded or fetched."""
+        Raises ``AudioInputError`` for an audio part when *audio_rate* is 0 and
+        for a clip that cannot be decoded, ``ImageLimitError`` for an image that
+        cannot be decoded, and ``VisionInputError`` for an image that cannot be fetched."""
         from localm.inference.backends.base import (
-            AUDIO_UNSUPPORTED_MESSAGE, UnsupportedInputError, VisionInputError)
+            AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, ImageLimitError, UnsupportedInputError,
+            VisionInputError)
         from localm.inference.media import (
             ImageBudget, decode_audio_clip, decode_image_url)
         from localm.netpolicy import NetworkPolicyError
@@ -3064,14 +3064,14 @@ class LlamaCpp:
                         raise VisionInputError(
                             f"The attached image could not be fetched: {e}") from e
                     except Exception as e:
-                        raise VisionInputError(
+                        raise ImageLimitError(
                             f"The attached image could not be read "
                             f"({type(e).__name__}).") from e
                     media.append((pil.width, pil.height, pil.tobytes()))
                     parts.append(marker)
                 elif part.get("type") == "input_audio":
                     if not audio_rate:
-                        raise UnsupportedInputError(AUDIO_UNSUPPORTED_MESSAGE)
+                        raise AudioInputError(AUDIO_UNSUPPORTED_MESSAGE)
                     spec = part.get("input_audio") or {}
                     samples = decode_audio_clip(
                         spec.get("data", ""), spec.get("format", "wav"), audio_rate)
@@ -4792,11 +4792,11 @@ class LlamaCpp:
         bos_markers = ("<bos>", "<s>", "﻿")
         add_bos = not any(prompt.startswith(m) for m in bos_markers)
         from localm.inference.backends.base import (
-            AUDIO_UNSUPPORTED_MESSAGE, UnsupportedInputError, messages_contain_audio,
+            AUDIO_UNSUPPORTED_MESSAGE, AudioInputError, messages_contain_audio,
             messages_contain_image)
         has_audio = messages_contain_audio(messages)
         if has_audio and not self.supports_audio:
-            raise UnsupportedInputError(AUDIO_UNSUPPORTED_MESSAGE)
+            raise AudioInputError(AUDIO_UNSUPPORTED_MESSAGE)
         going_to_vision = (getattr(self, "_mtmd", None) is not None
                            and (has_audio or messages_contain_image(messages)))
         if going_to_vision:

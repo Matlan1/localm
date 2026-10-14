@@ -14,7 +14,7 @@ const IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg";
 /** A fetch that answers the FIRST /v1/chat/completions (the image) with
  *  *status* and *detail*, then 200s. */
 function visionRejectFetch(status = 400,
-  detail = "This model has no vision support; remove the image.") {
+  detail = "This model has no vision support; remove the image.", refusal = "image") {
   const calls = [];
   let chatCalls = 0;
   const impl = async (url, opts = {}) => {
@@ -24,7 +24,8 @@ function visionRejectFetch(status = 400,
     if (String(url) === "/v1/chat/completions") {
       chatCalls += 1;
       if (chatCalls === 1) {
-        return { ok: false, status, json: async () => ({}), text: async () => detail };
+        return { ok: false, status, json: async () => ({ detail }), text: async () => detail,
+          headers: { get: (k) => (k === "X-Localm-Refusal" ? refusal : null) } };
       }
       return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
     }
@@ -42,8 +43,8 @@ function imageConv() {
   ] };
 }
 
-async function setup(status, detail) {
-  const { impl, calls } = visionRejectFetch(status, detail);
+async function setup(status, detail, refusal) {
+  const { impl, calls } = visionRejectFetch(status, detail, refusal);
   const { window } = loadApp({ fetchImpl: impl });
   window.maybeCompactConversation = async () => {};
   window.readSSE = async (_r, onData) => {
@@ -92,6 +93,16 @@ test("VIS-1: the chat is recoverable - the next turn sends no image and answers"
 test("a 413 image-limit refusal keeps the conversation's images", async () => {
   const { window } = await setup(413,
     "The request attaches more than 64 images; send at most 64.");
+  const conv = imageConv();
+  await window.runCompletion(conv);
+
+  assert.equal(window.msgImages(conv.messages[0]).length, 1,
+    "the image stays in history");
+  assert.doesNotMatch(JSON.stringify(conv.messages[0].content), /\[Image removed/);
+});
+
+test("a 400 about something other than the image keeps the conversation's images", async () => {
+  const { window } = await setup(400, "Invalid grammar: could not parse the rule.", "");
   const conv = imageConv();
   await window.runCompletion(conv);
 
