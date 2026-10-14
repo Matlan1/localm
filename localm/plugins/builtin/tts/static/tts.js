@@ -14,7 +14,7 @@
  * net_mode=ask requires a one-time confirmation) before it is ever made.
  */
 
-import { NetGateError, classifyLoadError, loadToast, planModelFetch, pickDevice, pickDtype, pinnedRemotePathTemplate, rekeyCachedModel, KOKORO_PINNED_REVISION, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
+import { NetGateError, classifyLoadError, isSafariBelow26, loadToast, runtimePaths, planModelFetch, pickDevice, pickDtype, pinnedRemotePathTemplate, rekeyCachedModel, KOKORO_PINNED_REVISION, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
 import { isNonEnglishVoice, streamNonEnglish } from "./g2p.js";
 
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
@@ -208,8 +208,9 @@ export async function register(ctx) {
     // here rather than trusting the way it was typed.
     if (onnx) {
       const wasmDir = String(cfg.wasm_paths || "vendor/onnxruntime/");
-      onnx.wasm.wasmPaths =
-        new URL(wasmDir.endsWith("/") ? wasmDir : wasmDir + "/", import.meta.url).href;
+      onnx.wasm.wasmPaths = runtimePaths(
+        new URL(wasmDir.endsWith("/") ? wasmDir : wasmDir + "/", import.meta.url).href,
+        { safariBelow26: isSafariBelow26(navigator), webgpu: !!navigator.gpu });
     }
     if (!announced) {
       announced = true;

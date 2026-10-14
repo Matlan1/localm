@@ -49,6 +49,29 @@ export function pickDevice(cfg, hasGPU) {
   if (cfg.device && cfg.device !== "auto") return cfg.device;
   return "wasm";
 }
+/** Whether *nav* is Safari older than 26 (the check transformers.js applies). */
+export function isSafariBelow26(nav) {
+  if (!nav) return false;
+  const ua = nav.userAgent || "";
+  const apple = (nav.vendor || "").indexOf("Apple") > -1
+    && !/CriOS|FxiOS|EdgiOS|OPiOS|mercury|brave/i.test(ua)
+    && !ua.includes("Chrome") && !ua.includes("Android");
+  if (!apple) return false;
+  const m = ua.match(/Version\/(\d+)/);
+  return m ? parseInt(m[1], 10) < 26 : false;
+}
+
+/** The onnxruntime-web glue and binary URLs under *dirHref* (ending in "/").
+ * Safari older than 26 without WebGPU runs the plain build; every other browser
+ * runs the asyncify build. */
+export function runtimePaths(dirHref, { safariBelow26 = false, webgpu = false } = {}) {
+  const suffix = safariBelow26 && !webgpu ? "" : ".asyncify";
+  return {
+    mjs: `${dirHref}ort-wasm-simd-threaded${suffix}.mjs`,
+    wasm: `${dirHref}ort-wasm-simd-threaded${suffix}.wasm`,
+  };
+}
+
 export function pickDtype(cfg, device) {
   if (cfg.dtype && cfg.dtype !== "auto") return cfg.dtype;
   // R06: fp32 on both paths. The WASM path used q8 (audible cracks/pings); fp32

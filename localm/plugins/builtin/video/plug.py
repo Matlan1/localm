@@ -177,6 +177,8 @@ async def video(req: VideoRequest, request: Request):
             if notice:
                 job.push({"type": "line", "text": notice})
         release_other_native_media(job, s, "video")
+        if job.cancel_requested:
+            return False
         swap = decide_media_swap(s)
         # The gate reads COMBINED free VRAM across a configured GPU split, but
         # each media model component loads WHOLE onto ONE card (localm ORDERS the cards

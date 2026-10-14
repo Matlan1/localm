@@ -32,6 +32,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _ROOT / "scripts" / "bump_tts_bundle.py"
 _MJS = "ort-wasm-simd-threaded.asyncify.mjs"
 _WASM = "ort-wasm-simd-threaded.asyncify.wasm"
+_PMJS = "ort-wasm-simd-threaded.mjs"
+_PWASM = "ort-wasm-simd-threaded.wasm"
 _NOTICE = (_ROOT / "localm/plugins/builtin/tts/static/vendor/NOTICE.md").read_text(encoding="utf-8")
 _DEV_ORT = re.search(r"^\| `onnxruntime-web` \| ([^ |]+) \|", _NOTICE, re.M).group(1)
 _DEV_ORT_SHA = _DEV_ORT.rsplit("-", 1)[1]
@@ -78,6 +80,8 @@ def repo(tmp_path, bump):
     runtime.mkdir(parents=True)
     (runtime / _MJS).write_bytes(b"old mjs\n")
     (runtime / _WASM).write_bytes(b"\0asm old wasm")
+    (runtime / _PMJS).write_bytes(b"old plain mjs\n")
+    (runtime / _PWASM).write_bytes(b"\0asm old plain wasm")
     return tmp_path
 
 
@@ -90,7 +94,8 @@ def _built(bump, *, ort=_DEV_ORT, runtime=None, bundle=b"new bundle\n", peer=_PE
     voices = voices if voices is not None else _shipped_voices(bump)
     return bump.Built(
         bundle=bundle,
-        runtime=runtime if runtime is not None else {_MJS: b"new mjs\n", _WASM: b"\0asm new wasm!"},
+        runtime=runtime if runtime is not None else {_MJS: b"new mjs\n", _WASM: b"\0asm new wasm!",
+                                             _PMJS: b"new plain mjs\n", _PWASM: b"\0asm new plain!"},
         licenses={"kokoro-js": b"kokoro licence\n", "transformers": b"transformers licence\n"},
         versions={"onnxruntime-web": ort}, kokoro_peer_range=peer,
         voices=voices, runtime_package=runtime_package)
@@ -166,8 +171,8 @@ def test_every_region_the_script_edits_matches_the_real_files_exactly_once(bump)
 
 def test_rewriting_notice_with_the_pinned_versions_is_a_no_op_once_sizes_match(bump):
     pins = _real_pins(bump)
-    runtime = {n: bump._lf((_ROOT / bump.RUNTIME_REL / n).read_bytes()) if n == _MJS
-               else (_ROOT / bump.RUNTIME_REL / n).read_bytes() for n in (_MJS, _WASM)}
+    runtime = {n: bump._lf((_ROOT / bump.RUNTIME_REL / n).read_bytes()) if n.endswith(".mjs")
+               else (_ROOT / bump.RUNTIME_REL / n).read_bytes() for n in (_MJS, _WASM, _PMJS, _PWASM)}
     notice, _ = bump._read_text(_ROOT / bump.NOTICE_REL)
     built = _built(bump, runtime=runtime)
     assert bump.rewrite_notice(notice, pins, pins, built, None) == notice
@@ -175,7 +180,7 @@ def test_rewriting_notice_with_the_pinned_versions_is_a_no_op_once_sizes_match(b
 
 def test_the_stand_in_runtime_names_are_the_ones_the_tree_ships(bump):
     shipped = sorted(p.name for p in (_ROOT / bump.RUNTIME_REL).iterdir())
-    assert shipped == sorted([_MJS, _WASM])
+    assert shipped == sorted([_MJS, _WASM, _PMJS, _PWASM])
 
 
 def test_the_notice_provenance_names_the_package_the_files_were_copied_from(bump):
@@ -220,15 +225,20 @@ def test_the_guard_test_pins_follow_the_runtime_bytes(bump):
     assert bump._sha256_b64(built.runtime[_WASM]) in out
     assert bump._sha256_b64(built.runtime[_MJS]) in out
     assert f"const EXPECTED_WASM_BYTES = {len(built.runtime[_WASM])};" in out
+    assert bump._sha256_b64(built.runtime[_PWASM]) in out
+    assert bump._sha256_b64(built.runtime[_PMJS]) in out
+    assert f"const EXPECTED_PLAIN_WASM_BYTES = {len(built.runtime[_PWASM])};" in out
 
 
 def test_the_guard_test_follows_the_runtime_names_and_the_package_they_came_from(bump):
     pins = _real_pins(bump)
     pins.ort = _NEW_DEV_ORT
-    built = _built(bump, ort=_NEW_DEV_ORT, runtime={"a.mjs": b"m\n", "b.wasm": b"\0asm"})
+    built = _built(bump, ort=_NEW_DEV_ORT, runtime={"a.asyncify.mjs": b"m\n", "b.asyncify.wasm": b"\0asm",
+                                                              "a.mjs": b"p\n", "b.wasm": b"\0asm2"})
     text, _ = bump._read_text(_ROOT / bump.TEST_REL)
     out = bump.rewrite_guard_test(text, pins, built)
-    assert 'const MJS = "a.mjs";' in out and 'const WASM = "b.wasm";' in out
+    assert 'const MJS = "a.asyncify.mjs";' in out and 'const WASM = "b.asyncify.wasm";' in out
+    assert 'const PLAIN_MJS = "a.mjs";' in out and 'const PLAIN_WASM = "b.wasm";' in out
     assert f'const VENDORED_ORT = "{_NEW_DEV_ORT}";' in out
     assert f"npm pack onnxruntime-web@{_NEW_DEV_ORT}  ->  package/dist/" in out
     via_transformers = _built(bump, runtime=built.runtime, runtime_package="@huggingface/transformers")
@@ -345,6 +355,7 @@ def test_write_replaces_exactly_the_bundle_runtime_licences_notice_and_guard(bum
     changed = sorted(k.replace("\\", "/") for k in after if after[k] != before.get(k))
     assert changed == sorted([
         bump.BUNDLE_REL, f"{bump.RUNTIME_REL}/{_MJS}", f"{bump.RUNTIME_REL}/{_WASM}",
+        f"{bump.RUNTIME_REL}/{_PMJS}", f"{bump.RUNTIME_REL}/{_PWASM}",
         bump.LICENSE_RELS["kokoro-js"], bump.LICENSE_RELS["transformers"],
         bump.NOTICE_REL, bump.TEST_REL])
     assert (repo / bump.BUNDLE_REL).read_bytes() == b"new bundle\n"
@@ -451,7 +462,8 @@ def test_a_renamed_runtime_replaces_the_old_files_and_a_dry_run_only_reports_it(
     assert all(f"remove  {bump.RUNTIME_REL}/{name}" in out for name in old_names)
     assert _snapshot(repo) == before
     assert fakes.run(*argv, "--write") == 0
-    assert sorted(p.name for p in (repo / bump.RUNTIME_REL).iterdir()) == sorted([_MJS, _WASM])
+    assert sorted(p.name for p in (repo / bump.RUNTIME_REL).iterdir()) == sorted(
+        [_MJS, _WASM, _PMJS, _PWASM])
 
 
 def test_a_write_that_fails_after_removing_a_stale_file_brings_it_back(bump, repo, fakes, monkeypatch):
@@ -594,11 +606,12 @@ def test_verify_reads_the_licence_by_the_abbreviated_sha_without_the_github_api(
         f"https://raw.githubusercontent.com/microsoft/onnxruntime/{_DEV_ORT_SHA}/LICENSE"]
 
 
-@pytest.mark.parametrize("victim", ["bundle", "wasm", "mjs", "licence", "ort_licence", "notice", "guard",
+@pytest.mark.parametrize("victim", ["bundle", "wasm", "mjs", "plain_wasm", "plain_mjs", "licence", "ort_licence", "notice", "guard",
                                     "ort_source"])
 def test_verify_reports_not_identical_when_any_one_file_differs(bump, consistent, fakes, capsys, victim):
     path = {"bundle": bump.BUNDLE_REL, "wasm": f"{bump.RUNTIME_REL}/{_WASM}",
-            "mjs": f"{bump.RUNTIME_REL}/{_MJS}", "licence": bump.LICENSE_RELS["kokoro-js"],
+            "mjs": f"{bump.RUNTIME_REL}/{_MJS}", "plain_wasm": f"{bump.RUNTIME_REL}/{_PWASM}",
+            "plain_mjs": f"{bump.RUNTIME_REL}/{_PMJS}", "licence": bump.LICENSE_RELS["kokoro-js"],
             "ort_licence": bump.LICENSE_RELS["onnxruntime-web"], "notice": bump.NOTICE_REL,
             "guard": bump.TEST_REL, "ort_source": bump.NOTICE_REL}[victim]
     target = consistent / path
@@ -747,6 +760,8 @@ def installed(tmp_path, bump):
     (transformers / "dist").mkdir()
     (transformers / "dist" / _MJS).write_bytes(b"mjs bytes\n")
     (transformers / "dist" / _WASM).write_bytes(b"\0asm wasm bytes")
+    (transformers / "dist" / _PMJS).write_bytes(b"plain mjs bytes\n")
+    (transformers / "dist" / _PWASM).write_bytes(b"\0asm plain wasm bytes")
     _package(tmp_path, "phonemizer", pins.phonemizer)
     _package(tmp_path, "esbuild", pins.esbuild)
     _package(tmp_path, "onnxruntime-web", pins.ort)
@@ -793,10 +808,32 @@ def _collect(bump, installed, bundle=_BUNDLE):
 
 def test_the_artifacts_are_the_installed_files_byte_for_byte(bump, installed):
     built = _collect(bump, installed)
-    assert built.runtime == {_MJS: b"mjs bytes\n", _WASM: b"\0asm wasm bytes"}
+    assert built.runtime == {_MJS: b"mjs bytes\n", _WASM: b"\0asm wasm bytes",
+                             _PMJS: b"plain mjs bytes\n", _PWASM: b"\0asm plain wasm bytes"}
     assert built.licenses == {"kokoro-js": b"kokoro-js licence\n",
                               "transformers": b"@huggingface/transformers licence\n"}
     assert built.voices == {"af_heart"} and built.kokoro_peer_range == "^3.5.1" and built.warnings == "warn"
+
+
+def test_the_plain_sibling_of_the_asyncify_pair_is_vendored_with_it(bump, installed):
+    assert {_PMJS, _PWASM} <= set(_collect(bump, installed).runtime)
+
+
+def test_a_missing_plain_sibling_is_refused_as_needing_a_code_update(bump, installed):
+    (installed / "node_modules" / "@huggingface" / "transformers" / "dist" / _PWASM).unlink()
+    with pytest.raises(bump.Refused, match="ships it in dist/; this release needs a code update"):
+        _collect(bump, installed)
+
+
+@pytest.mark.parametrize("runtime", [
+    {_MJS: b"m", _WASM: b"w"},
+    {_MJS: b"m", _WASM: b"w", _PMJS: b"m"},
+    {_MJS: b"m", _WASM: b"w", _PMJS: b"m", _PWASM: b"w", "ort-wasm-simd-threaded.jsep.wasm": b"x"},
+    {_PMJS: b"m", _PWASM: b"w", "x.mjs": b"m", "x.wasm": b"w"},
+])
+def test_a_runtime_set_that_is_not_an_asyncify_pair_and_its_plain_sibling_is_refused(bump, runtime):
+    with pytest.raises(bump.Refused, match="needs a code update"):
+        bump.runtime_pairs(runtime)
 
 
 def test_a_bundle_without_the_transformers_version_string_is_refused(bump, installed):
@@ -819,7 +856,7 @@ def _move_runtime_to_onnxruntime_web(installed):
     transformers = installed / "node_modules" / "@huggingface" / "transformers" / "dist"
     ort = installed / "node_modules" / "onnxruntime-web" / "dist"
     ort.mkdir()
-    for name in (_MJS, _WASM):
+    for name in (_MJS, _WASM, _PMJS, _PWASM):
         (ort / name).write_bytes((transformers / name).read_bytes() + b" from ort")
         (transformers / name).unlink()
     return ort
@@ -828,7 +865,9 @@ def _move_runtime_to_onnxruntime_web(installed):
 def test_runtime_files_the_transformers_package_lacks_come_from_onnxruntime_web(bump, installed):
     _move_runtime_to_onnxruntime_web(installed)
     built = _collect(bump, installed, _BUNDLE + _DEV_ORT.encode())
-    assert built.runtime == {_MJS: b"mjs bytes\n from ort", _WASM: b"\0asm wasm bytes from ort"}
+    assert built.runtime == {_MJS: b"mjs bytes\n from ort", _WASM: b"\0asm wasm bytes from ort",
+                             _PMJS: b"plain mjs bytes\n from ort",
+                             _PWASM: b"\0asm plain wasm bytes from ort"}
     assert built.runtime_package == "onnxruntime-web"
 
 

@@ -52,7 +52,7 @@ class _Runtimes:
         def music_pid():
             return 4242 if self.music_loaded else None
 
-        def music_stop():
+        def music_stop(cancel_check=None):
             self.calls.append("koboldcpp")
             self.music_loaded = False
             return True
@@ -60,7 +60,7 @@ class _Runtimes:
         def sd_pid():
             return 4343 if self.sd_loaded else None
 
-        def sd_free():
+        def sd_free(cancel_check=None):
             self.calls.append("sdcpp")
             if self.free_returns:
                 self.sd_loaded = False
@@ -173,7 +173,7 @@ def test_a_blind_reading_counts_as_short_when_a_peer_runtime_is_loaded(monkeypat
 def test_a_reading_that_raises_counts_as_blind(monkeypatch):
     rt = _Runtimes(monkeypatch, music_loaded=True)
 
-    def boom():
+    def boom(cancel_check=None):
         raise RuntimeError("driver hung")
 
     assert _release(_Job(), "image", _settings(12), boom) == ["koboldcpp"]
@@ -204,7 +204,7 @@ def test_a_runtime_that_kept_its_models_is_reported(monkeypatch):
 def test_a_stop_that_raises_is_reported_and_does_not_abort(monkeypatch):
     _Runtimes(monkeypatch, sd_loaded=True)
 
-    def boom():
+    def boom(cancel_check=None):
         raise OSError("access denied")
 
     monkeypatch.setattr(sd_shared, "free", boom)
