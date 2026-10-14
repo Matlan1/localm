@@ -328,12 +328,12 @@ class TestRewardModelBesideAReranker:
         _build_reward_model(reward)
         assert add_local(str(cross_encoder), name="ce") is True
         assert add_local(str(reward), name="rm") is True
-        assert load_registry()["rm"]["model_type"] != "embedding"
-        assert reranker.registered_rerankers() == ["ce"]
         update_config(lambda c: c.update({"rag_rerank": True, "rag_rerank_model": ""}))
         plan = rerank_plan()
         assert plan.note is None, plan.note
         assert plan.model == "ce" and plan.fn is not None
+        assert reranker.registered_rerankers() == ["ce"]
+        assert load_registry()["rm"]["model_type"] != "embedding"
 
 
 class TestMultiLabelHead:
