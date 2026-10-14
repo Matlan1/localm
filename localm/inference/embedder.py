@@ -1147,7 +1147,8 @@ class IsolatedEmbedder(VramSizingMixin):
         # correlation (one req_q/resp_q pair, one command at a time), so two
         # overlapping RPCs are two threads blocked in the same resp_q.get(),
         # each taking whichever response arrives first, which can hand a caller
-        # vectors belonging to a DIFFERENT text.
+        # vectors belonging to a DIFFERENT text. Lock order: engine._LOAD_LOCK
+        # (outer) -> _rpc_lock (inner).
         self._rpc_lock = threading.RLock()
         # In-flight embed() calls, mirroring Engine.active_requests. Checked by
         # http_server.py's unload/shutdown/restart paths (via active_requests()
@@ -1329,14 +1330,27 @@ class IsolatedEmbedder(VramSizingMixin):
         """Run ``call(runner)`` against the worker: pinned via
         ``active_requests`` for the whole call, serialised on ``_rpc_lock``,
         respawning a dead worker first and recovering from a GPU crash as
-        described on :meth:`embed`."""
+        described on :meth:`embed`.
+
+        A dead worker is respawned holding the engine's ``_LOAD_LOCK`` (outer)
+        and ``_rpc_lock`` (inner); ``_rpc_lock`` is never held while
+        ``_LOAD_LOCK`` is awaited."""
         self.active_requests += 1
         try:
             with self._rpc_lock:
-                if self._runner is None or not self._runner.is_alive():
-                    logger.warning("embedder worker is not running; reloading %s",
-                                   self.model_path)
-                    self._reload()
+                dead = self._runner is None or not self._runner.is_alive()
+            if dead:
+                from localm.inference.engine import _LOAD_LOCK
+                with _LOAD_LOCK, self._rpc_lock:
+                    if self._runner is None or not self._runner.is_alive():
+                        logger.warning("embedder worker is not running; reloading %s",
+                                       self.model_path)
+                        self._reload()
+            with self._rpc_lock:
+                if self._runner is None:
+                    raise RuntimeError(
+                        f"the embedding worker for {Path(self.model_path).name} "
+                        "was released while this call started it")
                 try:
                     return call(self._runner)
                 except RuntimeError:
