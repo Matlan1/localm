@@ -607,6 +607,19 @@ if /i not "%REC%"=="cpu" (
     if /i "!GPUUSE:~0,1!"=="N" set "REC=cpu"
 )
 
+rem ---- the backends setup-llama has a build of for this machine ---------------
+rem  `python -m localm.hwdetect backends` prints the backends with a prebuilt
+rem  build for this OS and CPU architecture - the same list setup.sh builds its
+rem  menu from. The menu and the "provision later" hint list only these. The
+rem  fallback list is used only when the probe does not answer.
+set "AVAIL="
+.venv\Scripts\python -m localm.hwdetect backends > "%STMP%\localm_backends.txt" 2>nul
+if exist "%STMP%\localm_backends.txt" for /f "usebackq delims=" %%a in ("%STMP%\localm_backends.txt") do set "AVAIL=%%a"
+del "%STMP%\localm_backends.txt" 2>nul
+set "AVAILFALL=vulkan cuda amd-rocm sycl cpu"
+if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "AVAILFALL=vulkan cuda cpu"
+if not defined AVAIL set "AVAIL=!AVAILFALL!"
+
 rem ---- choose the llama.cpp backend (recommended pre-selected) ---------------
 echo.
 rem  [1] is a shortcut for whichever backend the policy recommended, so it is
@@ -621,18 +634,29 @@ if /i "%REC%"=="cuda"     set "M3=   (same as [1])"
 if /i "%REC%"=="amd-rocm" set "M4=   (same as [1])"
 if /i "%REC%"=="sycl"     set "M5=   (same as [1])"
 if /i "%REC%"=="cpu"      set "M6=   (same as [1])"
-echo  Native inference runtime (llama.cpp) - press Enter to accept the recommendation:
-echo    [1] %REC%   (recommended for your hardware)
-echo    [2] vulkan     - any GPU (AMD/NVIDIA/Intel), no vendor toolkit%M2%
-echo    [3] cuda       - NVIDIA, peak performance (fetches the CUDA runtime for you)%M3%
-echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained%M4%
-echo    [5] sycl       - Intel GPU (incl. integrated), often faster than Vulkan, self-contained%M5%
-echo    [6] cpu        - no GPU%M6%
-echo    [7] I will build / provide my own (skip the download)
-echo    (your pick is load-tested; a failure offers Vulkan, never a silent swap)
+set "CHK= !AVAIL! "
+set "OFF2=" & set "OFF3=" & set "OFF4=" & set "OFF5=" & set "OFF6="
+if not "!CHK: vulkan =!"=="!CHK!"   set "OFF2=1"
+if not "!CHK: cuda =!"=="!CHK!"     set "OFF3=1"
+if not "!CHK: amd-rocm =!"=="!CHK!" set "OFF4=1"
+if not "!CHK: sycl =!"=="!CHK!"     set "OFF5=1"
+if not "!CHK: cpu =!"=="!CHK!"      set "OFF6=1"
+rem  Numbers stay fixed; an entry is listed only when setup-llama has a build of it.
+set "PICKS=1"
+echo  Native inference runtime ^(llama.cpp^) - press Enter to accept the recommendation:
+echo    [1] %REC%   ^(recommended for your hardware^)
+if defined OFF2 set "PICKS=!PICKS! 2" & echo    [2] vulkan     - any GPU ^(AMD/NVIDIA/Intel^), no vendor toolkit%M2%
+if defined OFF3 set "PICKS=!PICKS! 3" & echo    [3] cuda       - NVIDIA, peak performance ^(fetches the CUDA runtime for you^)%M3%
+if defined OFF4 set "PICKS=!PICKS! 4" & echo    [4] amd-rocm   - AMD RX 6000 ^(gfx103X^), self-contained%M4%
+if defined OFF5 set "PICKS=!PICKS! 5" & echo    [5] sycl       - Intel GPU ^(incl. integrated^), often faster than Vulkan, self-contained%M5%
+if defined OFF6 set "PICKS=!PICKS! 6" & echo    [6] cpu        - no GPU%M6%
+set "PICKS=!PICKS! 7"
+echo    [7] I will build / provide my own ^(skip the download^)
+echo    ^(your pick is load-tested; a failure offers Vulkan, never a silent swap^)
+call :backend_pickrange
 set "BSEL="
 call :flush
-set /p "BSEL=  Pick 1-7 [1]: "
+set /p "BSEL=  Pick !PICKRANGE! [1]: "
 if not defined BSEL set "BSEL=1"
 set "BACKEND=%REC%"
 if "%BSEL%"=="2" set "BACKEND=vulkan"
@@ -641,6 +665,9 @@ if "%BSEL%"=="4" set "BACKEND=amd-rocm"
 if "%BSEL%"=="5" set "BACKEND=sycl"
 if "%BSEL%"=="6" set "BACKEND=cpu"
 if "%BSEL%"=="7" set "BACKEND=own"
+rem  A number the menu did not list on this machine falls back to the recommendation.
+set "PCHK= !PICKS! "
+for %%n in (2 3 4 5 6) do if "%BSEL%"=="%%n" if "!PCHK: %%n =!"=="!PCHK!" call :backend_unoffered %%n
 
 rem ---- PyTorch + transformers for HuggingFace models (FOLLOWS your backend) --
 rem  PyTorch powers the HuggingFace/transformers backend; GGUF chat needs none of
@@ -698,7 +725,8 @@ if /i "%BACKEND%"=="own" (
             exit /b 1
         )
     ) else (
-        echo  Skipped - provision later: .venv\Scripts\localm setup-llama --backend ^<vulkan^|cuda^|amd-rocm^|cpu^>
+        call :backend_hint
+        echo  Skipped - provision later: .venv\Scripts\localm setup-llama --backend ^<!SLB!^>
     )
 ) else (
     .venv\Scripts\localm setup-llama --backend %BACKEND% %SLFORCE%
@@ -1082,6 +1110,51 @@ goto :eof
 .venv\Scripts\python -m localm.install_manifest journal --root . intend command "!CD!\bin\localm.cmd" >nul 2>nul
 call :jr begin global-command
 set "GCSTEP=1"
+goto :eof
+
+rem ===========================================================================
+rem  Backend menu helpers, called with delayed expansion on. :backend_pickrange
+rem  turns PICKS (the listed menu numbers, space-separated) into PICKRANGE: "1-7"
+rem  when every entry is listed, else "1, 2, 6 or 7". :backend_unoffered N reports
+rem  a number the menu did not list and sends BACKEND back to REC. :backend_hint
+rem  turns CHK (the backends setup-llama has a build of, space-padded) into SLB:
+rem  the "a|b|c" list for the provision-later hint.
+rem ===========================================================================
+:backend_pickrange
+set "PICKRANGE=1-7"
+if "!PICKS!"=="1 2 3 4 5 6 7" goto :eof
+set "PICKHEAD="
+set "PICKLAST="
+for %%p in (!PICKS!) do call :backend_pickadd %%p
+set "PICKRANGE=!PICKLAST!"
+if defined PICKHEAD set "PICKRANGE=!PICKHEAD! or !PICKLAST!"
+goto :eof
+
+:backend_pickadd
+if not defined PICKLAST goto :backend_picklast
+if not defined PICKHEAD goto :backend_pickfirst
+set "PICKHEAD=!PICKHEAD!, !PICKLAST!"
+goto :backend_picklast
+:backend_pickfirst
+set "PICKHEAD=!PICKLAST!"
+:backend_picklast
+set "PICKLAST=%1"
+goto :eof
+
+:backend_unoffered
+echo   [%1] is not offered on this machine; using !REC!.
+set "BACKEND=!REC!"
+goto :eof
+
+:backend_hint
+set "SLB="
+for %%b in (vulkan cuda amd-rocm sycl cpu) do if not "!CHK: %%b =!"=="!CHK!" call :backend_hintadd %%b
+if not defined SLB set "SLB=backend"
+goto :eof
+
+:backend_hintadd
+set "SLB=!SLB!|%1"
+if "!SLB:~0,1!"=="|" set "SLB=!SLB:~1!"
 goto :eof
 
 rem ===========================================================================
