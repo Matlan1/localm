@@ -256,6 +256,7 @@ class TestExpandedSize:
         from localm.inference.backends._hf_worker import HFWorker
         folder = tmp_path / "q"
         _build_quantized(folder, num_bits=4, fmt="pack-quantized")
+        _write_tokenizer(folder)
         needed = _hf_fp8.compressed_expanded_bytes(str(folder), 4)
         monkeypatch.setattr(_hf_fp8, "memory_budget", lambda *a: needed - 1)
         monkeypatch.setattr(_hf_worker, "_build_load_kwargs", lambda *a, **k: pytest.fail(
