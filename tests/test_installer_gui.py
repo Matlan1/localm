@@ -680,6 +680,8 @@ class TestBackendMenu:
             assert key in setup_llama.BACKENDS, f"{key} is not a real backend"
 
     def test_metal_is_offered_on_macos_and_nowhere_else(self, gui, monkeypatch):
+        from localm import hwdetect
+        monkeypatch.setattr(hwdetect, "machine_arch", lambda: "arm64")
         monkeypatch.setattr(gui.sys, "platform", "darwin")
         monkeypatch.setattr(gui, "IS_WINDOWS", False)
         assert "metal" in [k for k, _ in gui.backend_choices()]
@@ -687,15 +689,44 @@ class TestBackendMenu:
         monkeypatch.setattr(gui, "IS_WINDOWS", True)
         assert "metal" not in [k for k, _ in gui.backend_choices()]
 
+    @pytest.mark.parametrize("arch, expected", [
+        ("arm64", ["metal", "cpu", "own"]),
+        ("x64", ["cpu", "own"]),
+    ])
+    def test_macos_offers_only_backends_with_a_macos_build(self, gui, monkeypatch,
+                                                           arch, expected):
+        from localm import hwdetect
+        monkeypatch.setattr(hwdetect, "machine_arch", lambda: arch)
+        monkeypatch.setattr(gui.sys, "platform", "darwin")
+        monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        assert [k for k, _ in gui.backend_choices()] == expected
+
+    def test_arm64_linux_offers_only_backends_with_an_arm64_build(self, gui, monkeypatch):
+        from localm import hwdetect
+        monkeypatch.setattr(hwdetect, "machine_arch", lambda: "arm64")
+        monkeypatch.setattr(gui.sys, "platform", "linux")
+        monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        assert [k for k, _ in gui.backend_choices()] == ["vulkan", "cpu", "own"]
+
+    def test_x64_menus_are_unchanged(self, gui, monkeypatch):
+        from localm import hwdetect
+        monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
+        monkeypatch.setattr(gui.sys, "platform", "linux")
+        assert [k for k, _ in gui.backend_choices()] == [
+            "vulkan", "cuda", "hip", "sycl", "cpu", "own"]
+        monkeypatch.setattr(gui.sys, "platform", "win32")
+        assert [k for k, _ in gui.backend_choices()] == [
+            "vulkan", "cuda", "hip", "amd-rocm", "sycl", "cpu", "own"]
+
     def test_hip_is_offered(self, gui):
         """An AMD box with a ROCm toolkit is recommended hip by hwdetect."""
         assert "hip" in [k for k, _ in gui.backend_choices()]
 
-    def test_sycl_is_offered_on_every_platform(self, gui, monkeypatch):
-        # Unlike metal/amd-rocm (real platform gates - no darwin vulkan build,
-        # no non-Windows amd-rocm build), sycl has an upstream asset for both
-        # win32 and linux, so it is never platform-gated - it just is not
-        # auto-RECOMMENDED (see hwdetect.recommended_install_backend).
+    def test_sycl_is_offered_on_x64_windows_and_linux(self, gui, monkeypatch):
+        # sycl has an upstream x64 asset for both win32 and linux, so it is
+        # offered on both; it is not auto-recommended on Linux.
+        from localm import hwdetect
+        monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
         monkeypatch.setattr(gui.sys, "platform", "linux")
         monkeypatch.setattr(gui, "IS_WINDOWS", False)
         assert "sycl" in [k for k, _ in gui.backend_choices()]
@@ -705,16 +736,19 @@ class TestBackendMenu:
 
     def test_the_menu_can_show_whatever_hwdetect_recommends(self, gui, monkeypatch):
         """A recommendation with no matching row leaves the group unselected."""
+        from localm import hwdetect
+        monkeypatch.setattr(hwdetect, "machine_arch", lambda: "arm64")
         monkeypatch.setattr(gui.sys, "platform", "darwin")
         monkeypatch.setattr(gui, "IS_WINDOWS", False)
         mac = {k for k, _ in gui.backend_choices()}
+        monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
         monkeypatch.setattr(gui.sys, "platform", "win32")
         monkeypatch.setattr(gui, "IS_WINDOWS", True)
         win = {k for k, _ in gui.backend_choices()}
-        from localm import hwdetect
         import inspect
         import re
-        src = inspect.getsource(hwdetect.recommended_install_backend)
+        src = (inspect.getsource(hwdetect.recommended_install_backend)
+               + inspect.getsource(hwdetect._hardware_install_backend))
         for rec in set(re.findall(r'return "([a-z-]+)"', src)):
             assert rec in mac or rec in win, f"nothing offers {rec}"
 

@@ -551,15 +551,6 @@ if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "ar
 fi
 IS_MACOS=0
 if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then IS_MACOS=1; fi
-# The backends `setup-llama --backend` can fetch on this OS, for the
-# "provision later" hints. See test_provision_later_hint_names_this_platforms_backends.
-if [ "$IS_APPLE_SILICON" = 1 ]; then
-  SL_BACKENDS="<metal|cpu>"
-elif [ "$IS_MACOS" = 1 ]; then
-  SL_BACKENDS="cpu"
-else
-  SL_BACKENDS="<vulkan|cuda|hip|sycl|cpu>"
-fi
 # NOT presented as "Detected acceleration: $GPU" here on purpose: this crude
 # pre-venv guess and the authoritative "Recommended for your hardware: $REC"
 # line further down (sourced from `python -m localm.hwdetect`, once the venv
@@ -880,9 +871,27 @@ esac
 # this HARDWARE could use, which is a different question from what the user just
 # said they WANT. Without this the next screen recommends a GPU backend and makes
 # it the default, so pressing Enter downloads and load-tests a ~195 MB GPU
-# runtime the user declined one question earlier. The menu still lists every
-# backend, so this changes the DEFAULT, never the available choice.
+# runtime the user declined one question earlier. The menu still lists the
+# same backends, so this changes the DEFAULT, never the available choice.
 if [ "$GPU" = cpu ]; then REC=cpu; fi
+# The backends setup-llama has a build of for this machine's OS and CPU
+# architecture; the menu and the "provision later" hints list only these. The
+# fallback list is used only when the probe does not answer.
+AVAIL="$(.venv/bin/python -m localm.hwdetect backends 2>/dev/null || true)"
+if [ -z "$AVAIL" ]; then
+  if [ "$IS_APPLE_SILICON" = 1 ]; then AVAIL="cpu metal"
+  elif [ "$IS_MACOS" = 1 ]; then AVAIL="cpu"
+  else AVAIL="vulkan cuda hip sycl cpu"; fi
+fi
+offered() { case " $AVAIL " in *" $1 "*) return 0 ;; esac; return 1; }
+SL_BACKENDS=""
+for _b in vulkan cuda hip sycl metal cpu; do
+  if offered "$_b"; then SL_BACKENDS="${SL_BACKENDS:+$SL_BACKENDS|}$_b"; fi
+done
+case "$SL_BACKENDS" in
+  *"|"*) SL_BACKENDS="<$SL_BACKENDS>" ;;
+  "")    SL_BACKENDS="<backend>" ;;
+esac
 # [1] is a shortcut for whichever backend the policy recommended, so it is ALWAYS
 # the same choice as one of the numbered entries below (vulkan on most GPUs, cpu
 # with none, metal on Apple Silicon). Listing it twice with no relation shown
@@ -901,22 +910,36 @@ esac
 say ""
 say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
 say "    [1] $REC  (recommended)"
-# macOS builds exist only for cpu and (Apple Silicon) metal, so [2]-[5] are
-# listed elsewhere only. See test_macos_menu_lists_only_backends_with_a_macos_build.
-if [ "$IS_MACOS" != 1 ]; then
-  say "    [2] vulkan   - any GPU, no vendor toolkit$_m2"
-  say "    [3] cuda     - NVIDIA, peak performance (fetches the CUDA runtime for you)$_m3"
-  say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"
-  say "    [5] sycl     - Intel GPU (incl. integrated), often faster than Vulkan (needs a system oneAPI install)$_m5"
+# Numbers stay fixed; an entry is listed only when offered. See
+# test_macos_menu_lists_only_backends_with_a_macos_build.
+_picks="1"
+if offered vulkan; then
+  say "    [2] vulkan   - any GPU, no vendor toolkit$_m2"; _picks="$_picks 2"
 fi
-say "    [6] cpu      - no GPU$_m6"
-say "    [7] I will build / provide my own (skip the download)"
+if offered cuda; then
+  say "    [3] cuda     - NVIDIA, peak performance (fetches the CUDA runtime for you)$_m3"; _picks="$_picks 3"
+fi
+if offered hip; then
+  say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"; _picks="$_picks 4"
+fi
+if offered sycl; then
+  say "    [5] sycl     - Intel GPU (incl. integrated), often faster than Vulkan (needs a system oneAPI install)$_m5"; _picks="$_picks 5"
+fi
+if offered cpu; then
+  say "    [6] cpu      - no GPU$_m6"; _picks="$_picks 6"
+fi
+say "    [7] I will build / provide my own (skip the download)"; _picks="$_picks 7"
 # See test_menu_shows_metal_line_only_on_apple_silicon.
-if [ "$IS_MACOS" = 1 ]; then _pick_range="1, 6 or 7"; else _pick_range="1-7"; fi
-if [ "$IS_APPLE_SILICON" = 1 ]; then
-  say "    [8] metal    - Apple Silicon, native GPU acceleration$_m8"
-  if [ "$IS_MACOS" = 1 ]; then _pick_range="1, 6, 7 or 8"; else _pick_range="1-8"; fi
+if offered metal; then
+  say "    [8] metal    - Apple Silicon, native GPU acceleration$_m8"; _picks="$_picks 8"
 fi
+case "$_picks" in
+  "1 2 3 4 5 6 7")   _pick_range="1-7" ;;
+  "1 2 3 4 5 6 7 8") _pick_range="1-8" ;;
+  *) _pick_range=""
+     for _p in $_picks; do _pick_range="${_pick_range:+$_pick_range, }$_p"; done
+     _pick_range="$(printf '%s' "$_pick_range" | sed 's/, \([0-9]*\)$/ or \1/')" ;;
+esac
 say "    (your pick is load-tested; on failure you can retry after fixing the"
 say "     cause, or continue setup and provision a runtime later - never a"
 say "     silent swap to a different backend)"
@@ -926,15 +949,13 @@ case "$bpick" in
   6) BACKEND=cpu ;;    7) BACKEND=own ;;  8) BACKEND=metal ;; *) BACKEND="$REC" ;;
 esac
 # A number the menu did not list on this machine falls back to the recommendation.
-_listed=1
-if [ "$IS_MACOS" = 1 ]; then
-  case "$BACKEND" in vulkan|cuda|hip|sycl) _listed=0 ;; esac
-fi
-if [ "$BACKEND" = metal ] && [ "$IS_APPLE_SILICON" != 1 ]; then _listed=0; fi
-if [ "$_listed" = 0 ]; then
-  say "  [$bpick] is not offered on this machine; using $REC."
-  BACKEND="$REC"
-fi
+case "$bpick" in
+  [2-8]) case " $_picks " in
+           *" $bpick "*) ;;
+           *) say "  [$bpick] is not offered on this machine; using $REC."
+              BACKEND="$REC" ;;
+         esac ;;
+esac
 if [ "$LOCALM_BIN_OK" != 1 ]; then
   # .venv/bin/localm never got installed (warned above) - it is what setup-llama
   # runs through, so calling it here would just fail again, less clearly.

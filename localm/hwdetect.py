@@ -584,8 +584,15 @@ def main(argv=None) -> int:
 
     ``python -m localm.hwdetect torch-args <backend>`` -> prints the exact
     ``uv pip install`` arguments for the torch wheel SOURCE on this machine
-    (resolving AMD-on-Windows per gfx family), or "" to skip."""
+    (resolving AMD-on-Windows per gfx family), or "" to skip.
+
+    ``python -m localm.hwdetect backends`` -> prints the backends with a
+    prebuilt build for this machine (``prebuilt_backends``), space-separated,
+    or "none"."""
     args = [] if argv is None else list(argv)
+    if args and args[0] == "backends":
+        print(" ".join(prebuilt_backends()) or "none")
+        return 0
     if args and args[0] == "torch-args":
         backend = args[1] if len(args) > 1 else ""
         print(torch_pip_args(backend))

@@ -314,9 +314,12 @@ def test_probe_failed_fallback_metal_case_precedes_generic_vulkan_fallback_in_so
 
 
 def _backend_menu_block() -> str:
+    """From the offered-backends probe through the unlisted-pick check. Run where
+    no .venv exists, the probe does not answer and the fallback list applies."""
     src = SETUP_SH.read_text(encoding="utf-8")
-    start = src.index('_same="   (same as [1])"')
-    end = src.index("esac\n", src.index('case "$bpick" in')) + len("esac\n")
+    start = src.index("# The backends setup-llama has a build of")
+    tail = src.index("# A number the menu did not list", start)
+    end = src.index("\nesac\n", tail) + len("\nesac\n")
     return src[start:end]
 
 
@@ -487,6 +490,48 @@ def test_an_unlisted_pick_says_what_it_used_instead(tmp_path):
                             text=True, cwd=tmp_path, timeout=15)
     assert result.returncode == 0, result.stderr
     assert "[3] is not offered on this machine; using cpu." in result.stdout
+
+
+def _menu_with_probe(tmp_path: Path, avail: str, bpick: str, rec: str) -> tuple[str, str]:
+    """(stdout, stderr) of the menu when `python -m localm.hwdetect backends`
+    answers *avail*."""
+    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    stub = bin_dir / "python"
+    stub.write_text(f'#!/bin/sh\n[ "$3" = backends ] && echo "{avail}"\n', encoding="utf-8")
+    _mark_executable(stub)
+    script = (
+        'say() { printf "%s\\n" "$*"; }\n'
+        f'ask() {{ printf "%s" "$1" >&2; echo {bpick}; }}\n'
+        f'REC="{rec}"\nGPU=irrelevant\nIS_APPLE_SILICON=0\nIS_MACOS=0\n'
+        + _backend_menu_block()
+        + '\nprintf "BACKEND=%s\\n" "$BACKEND"\n'
+    )
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == 0, result.stderr
+    return result.stdout, result.stderr
+
+
+def test_menu_lists_what_the_probe_offers_on_arm64_linux(tmp_path):
+    out, prompt = _menu_with_probe(tmp_path, "cpu vulkan", "1", "vulkan")
+    assert "[2] vulkan" in out and "[6] cpu" in out and "[7] I will" in out
+    for line in ("[3] cuda", "[4] hip", "[5] sycl", "[8] metal"):
+        assert line not in out
+    assert "Pick 1, 2, 6 or 7" in prompt
+
+
+def test_a_pick_the_probe_does_not_offer_uses_the_recommendation(tmp_path):
+    out, _prompt = _menu_with_probe(tmp_path, "cpu vulkan", "3", "vulkan")
+    assert "[3] is not offered on this machine; using vulkan." in out
+    assert out.strip().endswith("BACKEND=vulkan")
+
+
+def test_the_probe_answer_wins_over_the_fallback_list(tmp_path):
+    out, prompt = _menu_with_probe(tmp_path, "cpu metal", "8", "metal")
+    assert "[8] metal" in out and "[2] vulkan" not in out
+    assert "Pick 1, 6, 7 or 8" in prompt
+    assert out.strip().endswith("BACKEND=metal")
 
 
 def test_menu_cuda_line_says_the_runtime_is_fetched():

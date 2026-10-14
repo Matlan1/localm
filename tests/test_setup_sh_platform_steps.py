@@ -49,32 +49,66 @@ def _recording_localm(root: Path) -> Path:
 
 # --------------------------- provision-later hint -------------------------- #
 
-def _platform_flags_block() -> str:
-    return _block("IS_APPLE_SILICON=0\n", 'SL_BACKENDS="<vulkan|cuda|hip|sycl|cpu>"\nfi\n')
+def _offered_block() -> str:
+    return _block("# The backends setup-llama has a build of", 'SL_BACKENDS="<backend>" ;;\nesac\n')
 
 
-@pytest.mark.parametrize("os_name, arch, expected", [
-    ("Darwin", "arm64", "<metal|cpu>"),
-    ("Darwin", "x86_64", "cpu"),
-    ("Linux", "x86_64", "<vulkan|cuda|hip|sycl|cpu>"),
-    ("Linux", "aarch64", "<vulkan|cuda|hip|sycl|cpu>"),
+def _hint(tmp_path: Path, *, probe: str | None, is_macos: int = 0, is_apple: int = 0) -> str:
+    """$SL_BACKENDS when `python -m localm.hwdetect backends` answers *probe*
+    (None: no .venv, so the probe does not answer)."""
+    if probe is not None:
+        bin_dir = tmp_path / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        stub = bin_dir / "python"
+        stub.write_text(f'#!/bin/sh\n[ "$3" = backends ] && echo "{probe}"\n', encoding="utf-8")
+        _mark_executable(stub)
+    script = (f"IS_MACOS={is_macos}\nIS_APPLE_SILICON={is_apple}\n" + _offered_block()
+              + 'printf "%s\\n" "$SL_BACKENDS"\n')
+    return _run(script, tmp_path).stdout.strip()
+
+
+@pytest.mark.parametrize("probe, expected", [
+    ("cpu metal", "<metal|cpu>"),
+    ("cpu", "cpu"),
+    ("cpu vulkan", "<vulkan|cpu>"),
+    ("cpu vulkan cuda sycl hip", "<vulkan|cuda|hip|sycl|cpu>"),
+    ("none", "<backend>"),
 ])
-def test_provision_later_hint_names_this_platforms_backends(tmp_path, os_name, arch, expected):
+def test_provision_later_hint_names_the_offered_backends(tmp_path, probe, expected):
+    assert _hint(tmp_path, probe=probe) == expected
+
+
+@pytest.mark.parametrize("is_macos, is_apple, expected", [
+    (1, 1, "<metal|cpu>"),
+    (1, 0, "cpu"),
+    (0, 0, "<vulkan|cuda|hip|sycl|cpu>"),
+])
+def test_provision_later_hint_without_the_probe_follows_the_os(tmp_path, is_macos,
+                                                               is_apple, expected):
+    assert _hint(tmp_path, probe=None, is_macos=is_macos, is_apple=is_apple) == expected
+
+
+@pytest.mark.parametrize("os_name, arch, is_macos, is_apple", [
+    ("Darwin", "arm64", "1", "1"),
+    ("Darwin", "x86_64", "1", "0"),
+    ("Linux", "x86_64", "0", "0"),
+    ("Linux", "aarch64", "0", "0"),
+])
+def test_platform_flags_follow_uname(tmp_path, os_name, arch, is_macos, is_apple):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _make_uname_stub(bin_dir, os_name=os_name, arch=arch)
     env = dict(os.environ)
     env["PATH"] = str(bin_dir)
-    out = _run(_platform_flags_block() + 'printf "%s|%s|%s\\n" "$IS_MACOS" "$IS_APPLE_SILICON" '
-               '"$SL_BACKENDS"\n', tmp_path, env).stdout.strip()
-    is_macos, is_apple, backends = out.split("|")
-    assert backends == expected
-    assert is_macos == ("1" if os_name == "Darwin" else "0")
-    assert is_apple == ("1" if (os_name, arch) == ("Darwin", "arm64") else "0")
+    block = _block("IS_APPLE_SILICON=0\n", 'if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; '
+                   'then IS_MACOS=1; fi\n')
+    out = _run(block + 'printf "%s|%s\\n" "$IS_MACOS" "$IS_APPLE_SILICON"\n',
+               tmp_path, env).stdout.strip()
+    assert out == f"{is_macos}|{is_apple}"
 
 
-def test_every_provision_later_hint_uses_the_platform_list():
-    assert SRC.count("<vulkan|cuda|hip|sycl|cpu>") == 1
+def test_every_provision_later_hint_uses_the_offered_list():
+    assert "<vulkan|cuda|hip|sycl|cpu>" not in SRC
     assert SRC.count("setup-llama --backend $SL_BACKENDS") == 3
 
 

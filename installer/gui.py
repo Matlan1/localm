@@ -80,16 +80,13 @@ _BACKEND_CHOICES = [
 
 
 def backend_choices() -> list[tuple]:
-    """The runtime menu for this platform. metal exists only on macOS and
-    amd-rocm only on Windows, matching the console installer's menu."""
-    out = []
-    for key, desc in _BACKEND_CHOICES:
-        if key == "metal" and sys.platform != "darwin":
-            continue
-        if key == "amd-rocm" and not IS_WINDOWS:
-            continue
-        out.append((key, desc))
-    return out
+    """The runtime menu for this machine: every backend setup-llama has a
+    prebuilt build of for this platform and CPU architecture
+    (``hwdetect.has_prebuilt``), then "own"."""
+    sys.path.insert(0, str(ROOT))
+    from localm import hwdetect
+    return [(key, desc) for key, desc in _BACKEND_CHOICES
+            if key == "own" or hwdetect.has_prebuilt(key)]
 
 
 # The plugins the console installer preselects.

@@ -31,7 +31,16 @@ See the table below for what each backend needs and when to pick it.
 
 Binaries come from official [llama.cpp](https://github.com/ggml-org/llama.cpp)
 releases (AMD uses a self-contained build); the loader auto-detects the GPU at
-runtime. **macOS/Metal is experimental and its inference is unverified - treat it as best-effort.**
+runtime.
+
+setup fetches the build for the CPU architecture of localm's own Python:
+an Intel Mac gets the macOS x64 build and Apple Silicon the arm64 one. On ARM64
+Linux only `cpu` and `vulkan` have a build, so an NVIDIA GPU there is set up
+with `vulkan`; on ARM64 Windows `cpu` and `vulkan` do, and `cuda` for
+Blackwell-class and newer GPUs only (upstream builds ARM64 CUDA on the 13.x line
+only). A backend with no build for the machine's architecture is
+refused with the list of backends that have one. Any other architecture (s390x
+has `cpu` only) needs your own build: `localm setup-llama --from <build dir>`. **macOS/Metal is experimental and its inference is unverified - treat it as best-effort.**
 CI on an Apple Silicon runner checks the install, the Metal auto-pick, `localm
 doctor`, a server with no model, and a tiny model loading and generating on the
 CPU (0 GPU layers); it does not run Metal inference. If inference fails or hangs
