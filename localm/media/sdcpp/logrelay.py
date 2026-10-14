@@ -26,8 +26,6 @@ _PRECURSORS = tuple(re.compile(p, re.IGNORECASE) for p in (
 
 _TILE_FAILED = re.compile(r"vae decode compute failed while processing a tile", re.IGNORECASE)
 
-_REDUCING = re.compile(r"reducing vae decode tiles from (\d+)x(\d+) to", re.IGNORECASE)
-
 _VAE_RETRY = re.compile(
     r"vae decode ran out of memory; retrying with (spatial\+temporal|spatial|temporal) tiling",
     re.IGNORECASE)
@@ -54,16 +52,12 @@ def vae_retry_message(mode: str, smaller: bool) -> str:
 
 
 class RecoveredWarnings:
-    """Relays worker log lines to *say*, collapsing recovered sequences.
-    ``full_tile`` is the ``(width, height)`` of the image whose VAE tile covers
-    the whole image, or None: a retry that splits a tile at least that large is
-    reported as the first split, not as a smaller split."""
+    """Relays worker log lines to *say*, collapsing recovered sequences."""
 
     def __init__(self, say: Callable[[str], None]) -> None:
         self._say = say
         self._pending: list[str] = []
         self._no_preview_said = False
-        self.full_tile = None
 
     def _raw(self, text: str) -> None:
         self._say(f"stable-diffusion.cpp: {text}")
@@ -75,11 +69,6 @@ class RecoveredWarnings:
         retry = _VAE_RETRY.search(text)
         if retry:
             smaller = any(_TILE_FAILED.search(p) for p in self._pending)
-            if smaller and self.full_tile is not None:
-                reduced = [m for p in self._pending if (m := _REDUCING.search(p))]
-                if reduced and (int(reduced[-1].group(1)) >= self.full_tile[0]
-                                and int(reduced[-1].group(2)) >= self.full_tile[1]):
-                    smaller = False
             self._pending.clear()
             self._say(vae_retry_message(retry.group(1), smaller))
             return

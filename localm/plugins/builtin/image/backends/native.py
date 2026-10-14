@@ -149,15 +149,6 @@ def resolve_models(s: dict) -> dict:
 
 FLASH_ATTENTION_BACKENDS = ("rocm",)
 
-VAE_TILE_MULTIPLE = 64
-
-
-def vae_tile(width: int, height: int) -> list:
-    """The VAE tile an image of *width* x *height* requests: each side rounded up
-    to ``VAE_TILE_MULTIPLE``, so the tile covers the size the runtime generates."""
-    m = VAE_TILE_MULTIPLE
-    return [-(-width // m) * m, -(-height // m) * m]
-
 
 def load_ctx(ctx: dict, backend: str) -> dict:
     """The context fields a load of model set *ctx* uses on a *backend*
@@ -375,10 +366,6 @@ class _EventRelay:
 
     def flush(self) -> None:
         self._warnings.flush()
-
-    def vae_tile(self, size) -> None:
-        """The VAE tile ``(width, height)`` the next image requests, or None."""
-        self._warnings.full_tile = size
 
     def __call__(self, event) -> None:
         kind = event[0]
@@ -643,9 +630,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
                               for x in lora_files],
                     "hires": hires_payload,
-                    "vae_tile": None if hires else vae_tile(int(width), int(height)),
                 }
-                relay.vae_tile(None if hires else (int(width), int(height)))
                 label = f"image {index + 1}/{batch}, " if batch > 1 else ""
                 say(f"Generating {label}{width}x{height}"
                     + (f", {steps} steps" if steps else "")

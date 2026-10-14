@@ -632,10 +632,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   slower on ROCm and failed outright on Vulkan. localm now measures the VRAM actually free on
   the card before loading and gives the runtime that budget, so weights that do not fit are
   streamed from RAM at a fraction of the cost. The job log shows the free VRAM at each load.
-- **Faster native images on ROCm, faster tiled decoding.** Native images on the ROCm runtime use
-  flash attention (FLUX steps about a quarter faster), and a decode that does not fit in VRAM
-  now halves its tile size instead of dropping straight to small tiles, which is several times
-  faster on Vulkan.
+- **Faster native images on ROCm.** Native images on the ROCm runtime use flash attention, so
+  FLUX steps run about a quarter faster and need less VRAM.
 - **A re-sync removes documents indexed from credential folders.** A collection that already
   held files from a folder such as `~/.ssh` kept serving them; `localm rag resync` and the
   scheduled re-sync now drop those entries from the index.
