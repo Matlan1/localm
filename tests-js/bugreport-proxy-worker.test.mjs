@@ -143,13 +143,16 @@ async function postReport(worker, payload) {
   }
 }
 
-test("a body without the report's sections is refused and nothing is filed", async () => {
+test("a body without the report's sections is still filed, flagged in the note", async () => {
   const worker = await loadWorker();
   for (const payload of [{ title: "%n", body: "%s%s%s" }, { title: "A".repeat(128), body: "name" }]) {
-    const { res, body, upstream } = await postReport(worker, payload);
-    assert.equal(res.status, 400);
-    assert.match(body.error, /not a localm bug report/);
-    assert.equal(upstream.length, 0, "no GitHub request for a refused report");
+    const { res, upstream } = await postReport(worker, payload);
+    assert.equal(res.status, 201, "a report is never refused for its shape");
+    assert.equal(upstream.length, 1);
+    const filed = upstream[0].body.body;
+    assert.ok(filed.startsWith("> Filed through the localm bug reporter on behalf of a user."), filed.slice(0, 120));
+    assert.match(filed, /does not have the sections a report built by localm contains/);
+    assert.ok(filed.endsWith(payload.body));
   }
 });
 
@@ -163,4 +166,5 @@ test("a report built by localm is filed, prefixed with the reporter note", async
   const filed = upstream[0].body.body;
   assert.ok(filed.startsWith("> Filed through the localm bug reporter on behalf of a user."), filed.slice(0, 120));
   assert.ok(filed.endsWith(report), "the report follows the note unchanged");
+  assert.doesNotMatch(filed, /does not have the sections/, "a real report is not flagged");
 });

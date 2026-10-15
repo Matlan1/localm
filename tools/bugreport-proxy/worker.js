@@ -103,10 +103,8 @@ async function fileReport(request, env) {
   const title = (String(payload.title || "").slice(0, 200).trim()) || "localm bug report";
   const report = String(payload.body || "").slice(0, 60000);
   if (!report.trim()) return json({ error: "empty report body" }, 400);
-  if (!looksLikeLocalmReport(report)) {
-    return json({ error: "not a localm bug report: send the report localm generated, with its sections" }, 400);
-  }
-  const issue = { title, body: REPORTER_NOTE + report };
+  const note = looksLikeLocalmReport(report) ? REPORTER_NOTE : REPORTER_NOTE_UNSHAPED;
+  const issue = { title, body: note + report };
   if (env.ISSUE_LABELS) {
     const labels = env.ISSUE_LABELS.split(",").map((s) => s.trim()).filter(Boolean);
     if (labels.length) issue.labels = labels;
@@ -126,6 +124,12 @@ async function fileReport(request, env) {
 const REPORTER_NOTE =
   "> Filed through the localm bug reporter on behalf of a user. " +
   "This text was not written by the repository owner.\n\n";
+
+// Prepended instead of REPORTER_NOTE when the body lacks the REPORT_SECTIONS headings.
+const REPORTER_NOTE_UNSHAPED =
+  "> Filed through the localm bug reporter on behalf of a user. " +
+  "This text was not written by the repository owner.\n" +
+  "> It does not have the sections a report built by localm contains.\n\n";
 
 // Section headings every report built by localm's reporter contains.
 const REPORT_SECTIONS = ["## What happened", "## Environment"];
