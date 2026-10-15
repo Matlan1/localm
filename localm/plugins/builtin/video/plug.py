@@ -164,7 +164,8 @@ async def video(req: VideoRequest, request: Request):
         job.push({"type": "line", "text": msg})
         if not ok:
             return False
-        from localm.vram import (decide_media_swap, media_single_device_shortfall,
+        from localm.vram import (decide_media_swap, media_keep_note,
+                                 media_single_device_shortfall,
                                  note_other_vram_holders,
                                  release_other_native_media, unload_chat_for_media)
         placement = None
@@ -200,9 +201,7 @@ async def video(req: VideoRequest, request: Request):
                 if not unload_chat_for_media(job, self_url, "video", instance_token):
                     gen_swap = True
             else:
-                job.push({"type": "line", "text":
-                          "Both models fit in VRAM - keeping the chat model loaded "
-                          "(no swap)."})
+                job.push({"type": "line", "text": media_keep_note(s)})
             note_other_vram_holders(job, s, "video")
             if s.get("backend") == "comfy":
                 job.push({"type": "line", "text":

@@ -118,6 +118,25 @@ def decide_media_swap(settings: dict, *,
         policy=settings.get("swap_policy", "auto"))
 
 
+def media_keep_note(settings: dict, *,
+                    read_free: Optional[Callable[[], Optional[int]]] = None) -> str:
+    """The job-log line for a media job that does not unload the chat model, naming
+    the reason ``decide_media_swap`` returned False for *settings*."""
+    if settings.get("swap_policy", "auto") == "never":
+        return ("Swap policy is 'never' - a loaded chat model stays loaded; the job "
+                "may run slower if VRAM runs short.")
+    if read_free is None:
+        def read_free() -> Optional[int]:
+            from localm.discover import vram_capacity
+            return vram_capacity().get("free")
+    free = read_free()
+    need = settings.get("vram_estimate_bytes")
+    if free is None or need is None:
+        return "No chat model unload needed for this job."
+    return (f"{free / 1024 ** 3:.1f} GB of VRAM is free and this job needs about "
+            f"{need / 1024 ** 3:.1f} GB - no chat model unload needed.")
+
+
 def media_single_device_shortfall(settings: dict, *,
                                   config: Optional[dict] = None) -> Optional[dict]:
     """``{"index", "needed", "free"}`` when the ONE card ComfyUI will actually use
