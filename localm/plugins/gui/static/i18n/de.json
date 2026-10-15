@@ -172,7 +172,7 @@
   "chat.topP": "Top-p",
   "chat.variant.next": "Nächste Variante",
   "chat.variant.previous": "Vorherige Variante",
-  "chat.vision.rejectedNoModel": "{model} kann keine Bilder lesen und kein installiertes Modell, das es kann, war verfügbar - das Bild wurde entfernt. Sie können weiterchatten (nur Text).",
+  "chat.vision.rejectedNoModel": "{model} kann keine Bilder lesen - das Bild wurde entfernt. Kein anderes Modell hat stattdessen geantwortet (Einstellungen > Modell > Automatischer Modellwechsel legt fest, wann eines antwortet). Sie können weiterchatten (nur Text).",
   "chat.vision.rejectedPinned": "Dieser Chat ist auf {model} festgelegt, das keine Bilder lesen kann - das Bild wurde entfernt. Heben Sie die Festlegung auf, damit ein Modell antwortet, das Bilder lesen kann, oder chatten Sie weiter (nur Text).",
   "chat.voice": "Stimme",
   "chat.voice.hint": "(dieser Browser)",
