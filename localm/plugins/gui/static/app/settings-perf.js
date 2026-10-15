@@ -2340,7 +2340,7 @@ function showMediaOffer(conv, offer) {
   const box = $("chat-messages");
   if (!box) return null;
   const row = el("div", "media-offer");
-  const btn = el("button", "routed-chip routed-suggest");
+  const btn = el("button", "btn-secondary routed-chip routed-suggest");
   btn.appendChild(iconEl("models", "btn-ic"));
   btn.appendChild(document.createTextNode(t("chat.routed.answerWith", { model: offer.suggest })));
   btn.onclick = () => {
