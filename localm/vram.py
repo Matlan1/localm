@@ -125,11 +125,12 @@ def media_keep_note(settings: dict, *,
     if settings.get("swap_policy", "auto") == "never":
         return ("Swap policy is 'never' - a loaded chat model stays loaded; the job "
                 "may run slower if VRAM runs short.")
-    if read_free is None:
-        def read_free() -> Optional[int]:
-            from localm.discover import vram_capacity
-            return vram_capacity().get("free")
-    free = read_free()
+    if read_free is not None:
+        free = read_free()
+    else:
+        from localm.discover import vram_capacity
+        cap = vram_capacity()
+        free = cap.get("free") if isinstance(cap, dict) else None
     need = settings.get("vram_estimate_bytes")
     if free is None or need is None:
         return "No chat model unload needed for this job."
