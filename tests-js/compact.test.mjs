@@ -156,13 +156,13 @@ test("a reasoning-only reply keeps a digest of the removed turns, not a bare not
   }
 });
 
-test("the summarise request asks for no reasoning and a 1024-token budget", async () => {
+test("the summarise request asks for no reasoning and a reply budget sized to the window", async () => {
   const { impl, calls } = summFetch("ok");
   const { window } = loadApp({ fetchImpl: impl });
   runScript(window, "chat.ctxMax = 160;");
   await window.compactConversation(makeConv(20));
   const summReq = calls.find((c) => c.url === "/v1/chat/completions");
-  assert.equal(summReq.body.max_tokens, 1024);
+  assert.equal(summReq.body.max_tokens, 64);
   assert.equal(JSON.stringify(summReq.body.chat_template_kwargs),
     JSON.stringify({ enable_thinking: false }));
 });
@@ -319,4 +319,185 @@ test("a Stopped compaction removes its Compacting status row", async () => {
   assert.equal(ok, false);
   assert.equal(window.document.querySelector("#chat-messages .msg-status-indicator"), null);
   assert.equal(window.document.querySelectorAll("#chat-messages .msg-row").length, 0);
+});
+
+const TOMATO = "my tomato variety is called Purple Cherokee and I bought the seeds in Lisbon";
+
+/** A long conversation: *n* alternating turns of about *chars* characters,
+ *  the second user turn carrying TOMATO. */
+function makeLongConv(n, chars = 600) {
+  const msgs = [];
+  for (let i = 0; i < n; i++) {
+    const head = i === 2 ? `Turn ${i}: ${TOMATO}. ` : `Turn ${i}: `;
+    let text = head;
+    for (let w = 0; text.length < chars; w++) text += `filler${i}x${w} `;
+    msgs.push({ role: i % 2 === 0 ? "user" : "assistant", content: text.trim() });
+  }
+  return { id: "long", title: "t", messages: msgs };
+}
+
+/** A summariser that refuses a request whose prompt plus max_tokens is over
+ *  *ctxMax* (prompt counted at three characters per token), and otherwise
+ *  replies with the facts it can see: TOMATO when the prompt carries it.
+ *  *failOn* (1-based) makes that request answer 500. */
+function windowedSummariser(ctxMax, { failOn = 0, onPass = null } = {}) {
+  const calls = [];
+  const impl = async (url, opts = {}) => {
+    if (String(url) !== "/v1/chat/completions") {
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    }
+    const body = JSON.parse(opts.body);
+    calls.push(body);
+    if (onPass) onPass(calls.length);
+    const content = body.messages[0].content;
+    const prompt = Math.ceil(content.length / 3);
+    if (failOn === calls.length) {
+      return { ok: false, status: 500, json: async () => ({}), text: async () => "boom" };
+    }
+    if (prompt + body.max_tokens > ctxMax) {
+      return { ok: false, status: 413, text: async () => "",
+        json: async () => ({ detail: `Prompt (${prompt} tokens) exceeds the model's maximum context capacity (${ctxMax} tokens)` }) };
+    }
+    const facts = content.includes(TOMATO) ? `Facts: ${TOMATO}.` : "Facts: none.";
+    return { ok: true, status: 200, text: async () => "",
+      json: async () => ({ choices: [{ message: { content: `Pass ${calls.length}. ${facts}` },
+                                        finish_reason: "stop" }] }) };
+  };
+  return { impl, calls };
+}
+
+test("a small window summarises the older turns in rolling passes that each fit the window", async () => {
+  const ctxMax = 2048;
+  const { impl, calls } = windowedSummariser(ctxMax);
+  const { window } = loadApp({ fetchImpl: impl });
+  const toasts = [];
+  window.toast = (msg) => toasts.push(String(msg));
+  runScript(window, `chat.ctxMax = ${ctxMax};`);
+  const conv = makeLongConv(24);
+  const ok = await window.compactConversation(conv);
+  assert.equal(ok, true);
+  assert.ok(calls.length > 1, `more than one pass (${calls.length})`);
+  assert.ok(calls.length <= 8, `at most MAX_SUMMARY_PASSES passes (${calls.length})`);
+  for (const body of calls) {
+    const prompt = Math.ceil(body.messages[0].content.length / 3);
+    assert.ok(prompt + body.max_tokens <= ctxMax - 64,
+      `prompt ${prompt} + max_tokens ${body.max_tokens} fits ${ctxMax} with a template margin`);
+    assert.ok(body.max_tokens <= 512, `a sized reply budget (${body.max_tokens})`);
+    assert.match(body.messages[0].content, /^Summarise the following conversation/);
+    assert.equal(body.messages[0].origin, "client");
+  }
+  const bridge = conv.messages[0].content;
+  assert.match(bridge, /^\[Conversation summary\]\n/, "the bridge is a summary, not the digest");
+  assert.doesNotMatch(bridge, /condensed to fit the context window/);
+  assert.ok(bridge.includes(TOMATO), "the early-turn fact reaches the final summary");
+  assert.ok(bridge.includes(`Pass ${calls.length}. `), "the bridge holds the last pass");
+  assert.ok(toasts.some((t) => /summarised/.test(t)));
+  // Every later pass carries the summary so far.
+  for (const body of calls.slice(1)) {
+    assert.match(body.messages[0].content, /Summary of the earlier part:\nPass \d+\./);
+  }
+});
+
+test("a large window summarises the same older turns in one pass", async () => {
+  const { impl, calls } = windowedSummariser(32768);
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, "chat.ctxMax = 32768;");
+  const conv = makeLongConv(24);
+  await window.compactConversation(conv);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].max_tokens, 512);
+  assert.match(conv.messages[0].content, /^\[Conversation summary\]\nPass 1\./);
+});
+
+test("a very long history at a small window stays within the pass bound and every request fits", async () => {
+  const ctxMax = 2048;
+  const { impl, calls } = windowedSummariser(ctxMax);
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, `chat.ctxMax = ${ctxMax};`);
+  const conv = makeLongConv(240, 1200);
+  await window.compactConversation(conv);
+  assert.ok(calls.length > 1 && calls.length <= 8, `bounded passes (${calls.length})`);
+  for (const body of calls) {
+    assert.ok(Math.ceil(body.messages[0].content.length / 3) + body.max_tokens <= ctxMax - 64);
+  }
+  assert.match(conv.messages[0].content, /^\[Conversation summary\]\n/);
+  assert.ok(calls[0].messages[0].content.includes("USER: Turn 0:"), "the oldest turn is in the first pass");
+  assert.ok(calls[0].messages[0].content.includes("USER: Turn 2: my tomato variety"),
+    "early turns keep the start of their text");
+});
+
+test("a failing rolling pass falls back to the digest and makes no further passes", async () => {
+  const ctxMax = 2048;
+  const { impl, calls } = windowedSummariser(ctxMax, { failOn: 2 });
+  const { window } = loadApp({ fetchImpl: impl });
+  const toasts = [];
+  window.toast = (msg) => toasts.push(String(msg));
+  runScript(window, `chat.ctxMax = ${ctxMax};`);
+  const conv = makeLongConv(24);
+  const ok = await window.compactConversation(conv);
+  assert.equal(ok, true);
+  assert.equal(calls.length, 2, "the passes stop at the failed one");
+  assert.match(conv.messages[0].content, /condensed to fit the context window/);
+  assert.doesNotMatch(conv.messages[0].content, /\[Conversation summary\]|Pass 1\./);
+  assert.ok(toasts.some((t) => /trimmed/.test(t)));
+});
+
+test("aborting between rolling passes leaves the conversation unchanged", async () => {
+  const ctxMax = 2048;
+  const ac = new AbortController();
+  const { impl, calls } = windowedSummariser(ctxMax, {
+    onPass: (n) => { if (n === 1) ac.abort(); } });
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, `chat.ctxMax = ${ctxMax};`);
+  const conv = makeLongConv(24);
+  const before = JSON.stringify(conv.messages);
+  const ok = await window.compactConversation(conv, ac.signal);
+  assert.equal(ok, false);
+  assert.equal(calls.length, 1, "no pass is made after the abort");
+  assert.equal(JSON.stringify(conv.messages), before);
+  assert.equal(window.document.querySelectorAll("#chat-messages .msg-row").length, 0);
+});
+
+test("the summary reply budget is a quarter of a small window, capped at 512", () => {
+  const { window: w } = loadApp();
+  assert.equal(w.summaryReplyTokens(0), 512);
+  assert.equal(w.summaryReplyTokens(2048), 512);
+  assert.equal(w.summaryReplyTokens(1024), 256);
+  assert.equal(w.summaryReplyTokens(160), 64);
+  assert.equal(w.summaryReplyTokens(131072), 512);
+});
+
+test("planSummaryPasses keeps the oldest and newest groups and counts what it leaves out past the pass bound", () => {
+  const { window: w } = loadApp();
+  const entries = [];
+  for (let i = 0; i < 400; i++) entries.push(`USER: entry-${i} ` + "word ".repeat(240));
+  const groups = w.planSummaryPasses(entries, 2048, 512, 84);
+  assert.equal(groups.length, 8);
+  assert.ok(groups[0][0].startsWith("USER: entry-0 "), "the oldest entry opens the first pass");
+  const last = groups[groups.length - 1];
+  assert.ok(last[last.length - 1].startsWith("USER: entry-399 "), "the newest entry closes the last pass");
+  const m = /^\((\d+) message\(s\) omitted\)$/.exec(groups[1][0]);
+  assert.ok(m, `the gap is counted: ${groups[1][0]}`);
+  const kept = groups.reduce((n, g) => n + g.length, 0) - 1;
+  assert.equal(kept + Number(m[1]), 400, "kept plus omitted is every entry");
+  for (const g of groups) {
+    assert.ok(w.budgetTokens(g.join("\n\n")) <= 2048 - 512 - w.templateMargin(2048) - 84 - 512,
+      "each group leaves room for the earlier summary and the reply");
+  }
+});
+
+test("the summariser budget counts each non-ASCII character as a token", () => {
+  const { window: w } = loadApp();
+  assert.equal(w.budgetTokens("é".repeat(30)), 30);
+  assert.equal(w.budgetTokens("番茄".repeat(50) + "x".repeat(9)), 103);
+  const cut = w.fitTokens("番茄 ".repeat(500), 40);
+  assert.ok(w.budgetTokens(cut) <= 40, `cut text fits (${w.budgetTokens(cut)})`);
+  assert.match(cut, /\.\.\.\[truncated\]$/);
+});
+
+test("planSummaryPasses makes one group when the window is unknown or the entries fit", () => {
+  const { window: w } = loadApp();
+  const entries = ["USER: a", "ASSISTANT: b"];
+  assert.equal(w.planSummaryPasses(entries, 0, 512, 84).length, 1);
+  assert.equal(w.planSummaryPasses(entries, 2048, 512, 84).length, 1);
 });

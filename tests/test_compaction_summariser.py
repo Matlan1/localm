@@ -267,6 +267,12 @@ class _RecordingEngine:
         self.calls = []
         self.reply = reply
 
+    def context_capacity(self):
+        return None
+
+    def count_tokens(self, text):
+        return max(1, len(text) // 4)
+
     def chat_stream(self, messages, **kw):
         self.calls.append((messages, kw))
         yield self.reply
@@ -278,8 +284,89 @@ def test_the_summariser_runs_with_thinking_off():
     assert changed is True and gone is False
     (_msgs, kw), = eng.calls
     assert kw["thinking"] is False
-    assert kw["max_tokens"] == 1024
+    assert kw["max_tokens"] == 512
     assert out[0]["content"] == "[Conversation summary]\nWe discussed tidal locking."
+
+
+_TOMATO = ("my tomato variety is called Purple Cherokee and I bought the seeds "
+           "in Lisbon")
+
+
+class _WindowedEngine:
+    """An engine with a *capacity*-token window whose summariser refuses a
+    prompt that, with max_tokens, does not fit it (one token per three
+    characters), and otherwise replies with the facts it can see."""
+    display_name = "windowed-model"
+
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.calls = []
+
+    def context_capacity(self):
+        return self.capacity
+
+    def count_tokens(self, text):
+        return len(text) // 3
+
+    def chat_stream(self, messages, **kw):
+        prompt = messages[0]["content"]
+        self.calls.append((prompt, kw))
+        used = len(prompt) // 3
+        if used + kw["max_tokens"] > self.capacity:
+            raise RuntimeError(f"Prompt ({used} tokens) exceeds the model's maximum "
+                               f"context capacity ({self.capacity} tokens)")
+        facts = _TOMATO if _TOMATO in prompt else "none"
+        yield f"Pass {len(self.calls)}. Facts: {facts}."
+
+
+def _long_thread(n=30, chars=600):
+    msgs = []
+    for i in range(n):
+        text = f"Turn {i}: {_TOMATO}. " if i == 2 else f"Turn {i}: "
+        w = 0
+        while len(text) < chars:
+            text += f"filler{i}x{w} "
+            w += 1
+        msgs.append({"role": "user" if i % 2 == 0 else "assistant", "content": text})
+    return msgs
+
+
+def test_the_server_summariser_fits_the_engine_window_in_rolling_passes():
+    eng = _WindowedEngine(2048)
+    out, changed, gone = asyncio.run(hs._compact_for_capacity(eng, _long_thread()))
+    assert changed is True and gone is False
+    assert len(eng.calls) > 1
+    for prompt, kw in eng.calls:
+        assert len(prompt) // 3 + kw["max_tokens"] <= 2048 - 64
+        assert kw["thinking"] is False
+    bridge = str(out[0]["content"])
+    assert bridge.startswith("[Conversation summary]\n"), bridge[:80]
+    assert _TOMATO in bridge
+
+
+def test_a_refused_count_is_budgeted_with_the_estimate():
+    from localm.inference.backends.base import PretokenizerUnsafeInputError
+
+    class _Refusing(_WindowedEngine):
+        def count_tokens(self, text):
+            raise PretokenizerUnsafeInputError("refused")
+
+    eng = _Refusing(2048)
+    out, changed, _gone = asyncio.run(hs._compact_for_capacity(eng, _long_thread()))
+    assert changed is True
+    assert len(eng.calls) > 1
+    for prompt, kw in eng.calls:
+        assert len(prompt) // 3 + kw["max_tokens"] <= 2048 - 64
+    assert str(out[0]["content"]).startswith("[Conversation summary]\n")
+    assert _TOMATO in str(out[0]["content"])
+
+
+def test_the_server_summariser_makes_one_pass_in_a_large_window():
+    eng = _WindowedEngine(32768)
+    out, changed, _gone = asyncio.run(hs._compact_for_capacity(eng, _long_thread()))
+    assert changed is True
+    assert len(eng.calls) == 1
+    assert eng.calls[0][1]["max_tokens"] == 512
 
 
 class _EndlessEngine:
@@ -291,6 +378,12 @@ class _EndlessEngine:
         self.lock = threading.Lock()
         self.entered = threading.Event()
         self.closed = threading.Event()
+
+    def context_capacity(self):
+        return None
+
+    def count_tokens(self, text):
+        return max(1, len(text) // 4)
 
     def chat_stream(self, messages, **kw):
         def _gen():

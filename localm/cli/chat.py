@@ -1225,6 +1225,8 @@ def _handle_command(
                 generate=lambda m, max_tok: "".join(
                     engine.chat_stream(m, max_tokens=max_tok, temperature=0.3,
                                        thinking=False)),
+                limit_tokens=engine.context_capacity() or 0,
+                count_tokens=engine.count_tokens,
             )
             if changed:
                 messages[:] = new_messages

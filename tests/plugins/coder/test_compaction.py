@@ -506,3 +506,103 @@ class TestCompactionIsAnnounced:
         agent._messages = _messages(4)
         assert agent._compact_history() is False
         assert not [e for e in events if e.get("type") == "info"]
+
+
+_TOMATO = ("my tomato variety is called Purple Cherokee and I bought the seeds "
+           "in Lisbon")
+
+
+def _long_session(n: int = 40) -> list[dict]:
+    """*n* alternating turns of about 600 characters; the second user turn
+    carries _TOMATO."""
+    msgs = []
+    for i in range(n):
+        text = f"Turn {i}: {_TOMATO}. " if i == 2 else f"Turn {i}: "
+        w = 0
+        while len(text) < 600:
+            text += f"filler{i}x{w} "
+            w += 1
+        msgs.append({"role": "user" if i % 2 == 0 else "assistant", "content": text})
+    return msgs
+
+
+class TestSummaryFitsTheWindow:
+    """backend.chat refuses a prompt that, with max_tokens, does not fit the
+    window (one token per three characters), as the server does."""
+
+    def _agent(self, window, use_json, fail_on=0):
+        agent = _make_agent()
+        agent.backend.context_capacity.return_value = window
+        agent.backend.supports_grammar = use_json
+        calls = []
+
+        def chat(messages, **kw):
+            prompt = str(messages[0]["content"])
+            calls.append((prompt, kw))
+            if len(calls) == fail_on:
+                raise RuntimeError("model died")
+            used = len(prompt) // 3
+            if used + kw["max_tokens"] > window:
+                raise RuntimeError(f"Prompt ({used} tokens) exceeds the model's "
+                                   f"maximum context capacity ({window} tokens)")
+            facts = _TOMATO if _TOMATO in prompt else "none"
+            text = f"Pass {len(calls)}. Facts: {facts}."
+            if use_json:
+                import json
+                return json.dumps({"summary": text, "changed_files": [],
+                                   "open_tasks": []})
+            return text
+
+        agent.backend.chat.side_effect = chat
+        agent._messages = _long_session()
+        return agent, calls
+
+    @pytest.mark.parametrize("use_json", [False, True])
+    def test_a_small_window_summarises_in_rolling_passes_that_each_fit(self, use_json):
+        agent, calls = self._agent(4096, use_json)
+        assert agent._compact_history() is True
+        assert 1 < len(calls) <= 8
+        for prompt, kw in calls:
+            assert len(prompt) // 3 + kw["max_tokens"] <= 4096 - 64
+            assert kw["thinking"] is False
+            assert ("grammar" in kw) is use_json
+        for prompt, _kw in calls[1:]:
+            assert "Summary of the earlier part:\nPass " in prompt
+        body = str(agent._messages[0]["content"])
+        assert body.startswith("[Session summary]\n"), body[:80]
+        assert _TOMATO in body
+        assert "condensed to fit the context window" not in body
+
+    def test_a_summary_full_of_control_tokens_still_fits_when_carried_forward(self):
+        from localm.inference.compact import template_margin
+        agent, calls = self._agent(4096, False)
+        window = 4096
+
+        def chat(messages, **kw):
+            prompt = str(messages[0]["content"])
+            calls.append((prompt, kw))
+            used = len(prompt) // 3
+            if used + kw["max_tokens"] > window:
+                raise RuntimeError("over the window")
+            return f"Pass {len(calls)}. " + "<s>" * 1500
+
+        agent.backend.chat.side_effect = chat
+        assert agent._compact_history() is True
+        assert len(calls) > 1
+        for prompt, kw in calls:
+            assert len(prompt) // 3 + kw["max_tokens"] <= window - template_margin(window)
+        assert str(agent._messages[0]["content"]).startswith("[Session summary]\nPass ")
+
+    def test_a_large_window_summarises_in_one_pass(self):
+        agent, calls = self._agent(65536, False)
+        assert agent._compact_history() is True
+        assert len(calls) == 1
+        assert calls[0][1]["max_tokens"] == 1024
+
+    def test_a_failing_pass_keeps_the_digest(self):
+        agent, calls = self._agent(4096, False, fail_on=2)
+        assert agent._compact_history() is True
+        assert len(calls) == 2
+        body = str(agent._messages[0]["content"])
+        assert "condensed to fit the context window" in body
+        assert "Pass 1." not in body

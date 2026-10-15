@@ -533,7 +533,7 @@ def test_a_streamed_overflow_refusal_keeps_its_reason(home, monkeypatch):
     import localm.inference.compact as compact
     served = Served()
     served.engine.count_messages_tokens.side_effect = lambda ms: 9000 if len(ms) > 3 else 5000
-    monkeypatch.setattr(compact, "compact_messages", lambda ms, gen: (ms[-2:], True))
+    monkeypatch.setattr(compact, "compact_messages", lambda ms, gen, **kw: (ms[-2:], True))
     turns = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
              for i in range(7)]
     evs = events(served.post(stream=True, messages=turns))

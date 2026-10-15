@@ -6308,7 +6308,7 @@ async def _compact_for_capacity(engine, messages: list, request=None
     Returns ``(messages, changed, disconnected)``; *disconnected* is True when
     a client disconnect was observed while compacting."""
     from localm.debuglog import logger as _dbg
-    from localm.inference.compact import compact_messages
+    from localm.inference.compact import compact_messages, window_tokens
     _dbg.info("compacting conversation: %d message(s) for %s",
               len(messages), engine.display_name)
     loop = asyncio.get_running_loop()
@@ -6334,7 +6334,19 @@ async def _compact_for_capacity(engine, messages: list, request=None
             raise RuntimeError("summarisation cancelled")
         return "".join(parts)
 
-    fut = loop.run_in_executor(None, compact_messages, messages, _gen_for_compact)
+    def _count_for_budget(text: str) -> int:
+        # A text the pre-tokenizer refuses counts 0, so the budget uses the
+        # compaction meter's own estimate for it. See
+        # test_a_refused_count_is_budgeted_with_the_estimate.
+        try:
+            return engine.count_tokens(text)
+        except PretokenizerUnsafeInputError:
+            return 0
+
+    fut = loop.run_in_executor(None, functools.partial(
+        compact_messages, messages, _gen_for_compact,
+        limit_tokens=window_tokens(engine.context_capacity()),
+        count_tokens=_count_for_budget))
 
     async def _watch() -> None:
         try:

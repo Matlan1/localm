@@ -685,6 +685,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model; it now reads the file the way `localm add` does. A FLUX GGUF and its CLIP, T5 and VAE
   files without an architecture key are recognised by their tensors instead of being registered as
   chat models.
+- **Compacting a long chat writes a real summary on a small context window.** The request
+  that summarises the older turns could be larger than the model's context window, so the chat
+  kept only excerpts of them. Each summary request now fits the window, and a long history is
+  summarised in parts, oldest first, so early details survive.
 - **A request body that is not JSON gets a clear error, not a server error.** Sending a file or
   other binary data where an API route expects JSON now returns the usual 422 explaining the
   problem, instead of a 500 "Internal server error".

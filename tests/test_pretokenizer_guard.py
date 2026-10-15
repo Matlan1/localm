@@ -1021,7 +1021,7 @@ class TestTheGatesRefuseAndTheReportsEstimate:
         # capacity - prompt_tokens (4096 - 3000) < buffer (2048), so it compacts.
         engine.context_capacity.return_value = 4096
         monkeypatch.setattr(compact_mod, "compact_messages",
-                            lambda ms, gen: (list(ms), True))
+                            lambda ms, gen, **kw: (list(ms), True))
 
         thread = [{"role": "user", "content": "a"},
                   {"role": "assistant", "content": "b"},
@@ -1475,7 +1475,7 @@ class TestEveryCountingCallIsClassified:
       correct for every shape but that one.
     """
 
-    EXPECTED_CALLS = 12
+    EXPECTED_CALLS = 13
 
     @staticmethod
     def _server_files():

@@ -289,9 +289,167 @@ export function compactionDigest(older) {
   return [...parts, ...lines].join("\n\n");
 }
 
+// Largest reply asked of the summariser; a small window gets a quarter of the
+// window, at least SUMMARY_MIN_TOKENS.
+export const SUMMARY_MAX_TOKENS = 512;
+const SUMMARY_MIN_TOKENS = 64;
+// Most summariser requests one compaction makes.
+export const MAX_SUMMARY_PASSES = 8;
+// Smallest excerpt room, in tokens, a rolling summary pass is made for.
+const MIN_CHUNK_TOKENS = 48;
+// Smallest share of a rolling pass, in tokens, one excerpt is cut down to.
+const MIN_ENTRY_TOKENS = 24;
+// Tokens a rolling pass keeps free for the earlier summary's labels and an
+// omitted-messages note, on top of the earlier summary itself.
+const ROLLING_RESERVE_EXTRA = 32;
+// Characters per token the summariser budget assumes.
+const BUDGET_CHARS_PER_TOKEN = 3;
+
+const SUMMARY_INSTRUCTION = "Summarise the following conversation in under 200 words. " +
+  "Keep facts, names, decisions, and anything the user asked to " +
+  "remember. Reply with the summary only.";
+const ROLLING_SUMMARY_INSTRUCTION = "Summarise the following conversation in under 200 words. " +
+  "It begins with a summary of its earlier part: keep the facts, names, decisions, " +
+  "and anything the user asked to remember from that summary and from the later " +
+  "turns. Reply with the summary only.";
+
+/** The max_tokens of one summariser request in a window of *ctxMax* tokens:
+ *  SUMMARY_MAX_TOKENS for an unknown window (0), else a quarter of the window
+ *  capped at SUMMARY_MAX_TOKENS and never below SUMMARY_MIN_TOKENS. */
+export function summaryReplyTokens(ctxMax) {
+  if (!(ctxMax > 0)) return SUMMARY_MAX_TOKENS;
+  return Math.max(SUMMARY_MIN_TOKENS, Math.min(SUMMARY_MAX_TOKENS, Math.floor(ctxMax / 4)));
+}
+
+/** Tokens a rolling pass gives the summary so far: four thirds of *reply*,
+ *  the budget count of a reply of that many tokens at four characters per
+ *  token. */
+export function earlierSummaryTokens(reply) {
+  return Math.floor(reply * 4 / 3);
+}
+
+/** Tokens of a window of *ctxMax* kept free for the chat template. */
+export function templateMargin(ctxMax) {
+  return 64 + (ctxMax > 0 ? Math.floor(ctxMax / 64) : 0);
+}
+
+/** Tokens the summariser budget counts for *text*: one per
+ *  BUDGET_CHARS_PER_TOKEN ASCII characters, rounded up, plus one per
+ *  non-ASCII character. */
+export function budgetTokens(text) {
+  const s = String(text || "");
+  const wide = (s.match(/[^\x00-\x7f]/g) || []).length;
+  return wide + Math.ceil((s.length - wide) / BUDGET_CHARS_PER_TOKEN);
+}
+
+/** *text* when it counts at most *tokens* budget tokens, else cut at a word
+ *  boundary with a truncation marker so it does. */
+export function fitTokens(text, tokens) {
+  if (budgetTokens(text) <= tokens) return text;
+  const marker = " ...[truncated]".length;
+  let keep = Math.max(1, tokens * BUDGET_CHARS_PER_TOKEN - marker);
+  let cut = truncateAtWord(text, keep);
+  for (let i = 0; i < 40 && keep > 1 && budgetTokens(cut) > tokens; i++) {
+    keep = Math.max(1, Math.floor(keep * 0.85));
+    cut = truncateAtWord(text, keep);
+  }
+  return cut;
+}
+
+/** The excerpt groups of successive summariser requests for *entries* (one
+ *  excerpt per removed message, oldest first) in a window of *ctxMax*.
+ *  One group holding every entry when the window is unknown (0), when they
+ *  fit one request (excerpt + *overhead* + *reply* + the template margin
+ *  within *ctxMax*), or when the window leaves less than MIN_CHUNK_TOKENS for
+ *  a rolling pass. Otherwise groups that each fit a rolling pass, whose
+ *  prompt also carries an earlier summary of up to earlierSummaryTokens(*reply*)
+ *  tokens; an entry
+ *  larger than a group is cut to fit. With more than MAX_SUMMARY_PASSES
+ *  groups, entries are cut to an equal share (at least MIN_ENTRY_TOKENS) and
+ *  regrouped; groups past the bound are left out from the middle (the first
+ *  group and the newest ones are kept) and the first kept group after the gap
+ *  opens with an "(N message(s) omitted)" line. */
+export function planSummaryPasses(entries, ctxMax, reply, overhead) {
+  if (!entries.length || !(ctxMax > 0)) return [entries.slice()];
+  const sep = budgetTokens("\n\n");
+  const room = ctxMax - reply - templateMargin(ctxMax) - overhead;
+  const sizes = entries.map(budgetTokens);
+  const total = sizes.reduce((a, b) => a + b, 0) + sep * (entries.length - 1);
+  if (total <= room) return [entries.slice()];
+  const chunkRoom = room - earlierSummaryTokens(reply) - ROLLING_RESERVE_EXTRA;
+  if (chunkRoom < MIN_CHUNK_TOKENS) return [entries.slice()];
+  const group = (cap) => {
+    const groups = [];
+    let used = 0;
+    entries.forEach((e, i) => {
+      let entry = e, size = sizes[i];
+      if (size > cap) { entry = fitTokens(entry, cap); size = budgetTokens(entry); }
+      if (groups.length && used + sep + size <= chunkRoom) {
+        groups[groups.length - 1].push(entry);
+        used += sep + size;
+      } else {
+        groups.push([entry]);
+        used = size;
+      }
+    });
+    return groups;
+  };
+  let groups = group(chunkRoom);
+  if (groups.length > MAX_SUMMARY_PASSES) {
+    const share = Math.floor(MAX_SUMMARY_PASSES * chunkRoom / entries.length) - sep;
+    groups = group(Math.max(MIN_ENTRY_TOKENS, Math.min(chunkRoom, share)));
+  }
+  if (groups.length > MAX_SUMMARY_PASSES) {
+    const keepNew = MAX_SUMMARY_PASSES - 1;
+    const dropped = groups.slice(1, groups.length - keepNew);
+    const omitted = dropped.reduce((n, g) => n + g.length, 0);
+    groups = [groups[0], ...groups.slice(groups.length - keepNew)];
+    groups[1] = [`(${omitted} message(s) omitted)`, ...groups[1]];
+  }
+  return groups;
+}
+
+/** One summariser request for *content*: the visible reply text, or "" when
+ *  the request fails, is aborted through *signal*, is refused, or ends with
+ *  a finish reason other than "stop" or "length". Never rejects. */
+async function summaryPass(content, maxTokens, signal, pinnedModel) {
+  try {
+    const r = await fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: authHeaders(CHAT_SURFACE_HEADERS),
+      body: JSON.stringify({
+        model: pinnedModel || modelSelect.value || modelCache.active,
+        pin_model: !!pinnedModel,
+        // origin "client": the server does not recall memories for this
+        // prompt or log it as the user's line.
+        messages: [{ role: "user", origin: "client", content }],
+        max_tokens: maxTokens,
+        temperature: 0.3,
+        stream: false,
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+      ...(signal ? { signal } : {}),
+    });
+    if (!r.ok) return "";
+    const data = await r.json();
+    const choice = data.choices?.[0];
+    // A summary is accepted from a generation that finished with "stop" or
+    // "length"; an "error" choice is treated as summarisation unavailable.
+    if (choice && (choice.finish_reason === "stop" || choice.finish_reason === "length")) {
+      return stripThink(scrubMarkers(choice.message?.content || "")).trim();
+    }
+  } catch { /* summarisation unavailable - the caller falls back to a digest */ }
+  return "";
+}
+
 /** Summarises or condenses the older part of *conv*. The kept tail starts at
- *  a user turn (see compactionCut). An aborted *signal* cancels the summary
- *  request and leaves the conversation unchanged. */
+ *  a user turn (see compactionCut). Each summary request is sized to fit
+ *  chat.ctxMax and older turns that do not fit one request are summarised in
+ *  rolling passes, oldest first; one unsized request carries every older turn
+ *  when the window is unknown or too small for a rolling pass (see
+ *  planSummaryPasses). A failed pass makes the
+ *  bridge a digest of the older turns. An aborted *signal* cancels the
+ *  summary requests and leaves the conversation unchanged. */
 export async function compactConversation(conv, signal = null) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
   // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
@@ -316,16 +474,20 @@ export async function compactConversation(conv, signal = null) {
 
   // R44: feed whole messages truncated at a word boundary, with reasoning blocks
   // stripped, so the summariser never sees half-words or display-only <think>.
-  const excerpt = older.map((m) =>
+  const entries = older.map((m) =>
     `${isToolEvent(m) ? "WEB" : m.role.toUpperCase()}: ` +
-    truncateAtWord(stripThink(msgText(m)), 1200)).join("\n\n");
+    truncateAtWord(stripThink(msgText(m)), 1200));
+  const ctxMax = chat.ctxMax > 0 ? chat.ctxMax : 0;
+  const reply = summaryReplyTokens(ctxMax);
+  const groups = planSummaryPasses(entries, ctxMax, reply,
+    budgetTokens(ROLLING_SUMMARY_INSTRUCTION + "\n\n"));
 
   // The summary is written by the model that answers the conversation: its
   // pinned model, pinned, else the selected model as a preference.
   const pinnedModel = conv.pinnedModel || "";
   let summary = "";
   // A placeholder assistant row shows "Compacting conversation..." until the
-  // summary request settles.
+  // summary requests settle.
   const box = $("chat-messages");
   const pending = box ? addMessageRow(box, "assistant", "") : null;
   if (pending) {
@@ -333,47 +495,24 @@ export async function compactConversation(conv, signal = null) {
     box.scrollTop = box.scrollHeight;
   }
   try {
-    const r = await fetch("/v1/chat/completions", {
-      method: "POST",
-      headers: authHeaders(CHAT_SURFACE_HEADERS),
-      body: JSON.stringify({
-        model: pinnedModel || modelSelect.value || modelCache.active,
-        pin_model: !!pinnedModel,
-        // origin "client": the server does not recall memories for this
-        // prompt or log it as the user's line, since the user did not type it.
-        messages: [{
-          role: "user",
-          origin: "client",
-          content: "Summarise the following conversation in under 200 words. " +
-            "Keep facts, names, decisions, and anything the user asked to " +
-            "remember. Reply with the summary only.\n\n" + excerpt,
-        }],
-        max_tokens: 1024,
-        temperature: 0.3,
-        stream: false,
-        chat_template_kwargs: { enable_thinking: false },
-      }),
-      ...(signal ? { signal } : {}),
-    });
-    if (r.ok) {
-      const data = await r.json();
-      const choice = data.choices?.[0];
-      // A summary is accepted from a generation that finished with "stop" or
-      // "length"; an "error" choice is treated as summarisation unavailable.
-      if (choice && (choice.finish_reason === "stop" || choice.finish_reason === "length")) {
-        summary = (choice.message?.content || "").trim();
-      }
+    // Runs the passes oldest first; an empty reply ends them with no summary.
+    for (const group of groups) {
+      if (signal && signal.aborted) break;
+      const excerpt = group.join("\n\n");
+      const content = summary
+        ? ROLLING_SUMMARY_INSTRUCTION + "\n\nSummary of the earlier part:\n" +
+          fitTokens(summary, earlierSummaryTokens(reply)) + "\n\nLater turns:\n" + excerpt
+        : SUMMARY_INSTRUCTION + "\n\n" + excerpt;
+      summary = await summaryPass(content, reply, signal, pinnedModel);
+      if (!summary) break;
     }
-  } catch { /* summarisation unavailable - fall back to a note below */ }
-  finally {
+  } finally {
     if (pending) {
       removeStatusIndicator(pending.body);
       pending.row.remove();
     }
   }
   if (signal && signal.aborted) return false;
-  // R44: sanitise the summary so leaked <think>/markers never re-enter context.
-  summary = stripThink(scrubMarkers(summary)).trim();
 
   // The removed turns are archived on the bridge message (text only, with an
   // earlier bridge's own archive kept nested) and listed by exportConversation.

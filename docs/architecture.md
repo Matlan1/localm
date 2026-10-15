@@ -334,6 +334,13 @@ and at least the last four messages verbatim. The kept tail starts at a
 message the user wrote where one is available (not a tool event or tool
 result), the latest request is carried verbatim into the summary when it falls
 outside the tail, and roles keep alternating.
+Each summary request, prompt and reply budget together, is sized to fit the
+context window when the window is known and leaves room for one; removed
+turns that do not fit one request are summarised in rolling passes, oldest
+first, each pass carrying the summary so far. Passes are capped at eight:
+past that, turns are excerpted more briefly, and if they still do not fit,
+the oldest and newest passes are kept and the count of turns left out between
+them is noted.
 The summary is written with the model's reasoning channel off; when it still
 comes back empty, the bridge carries a bounded digest of excerpts from the
 removed turns instead, and compaction never raises. Used by `localm run`
