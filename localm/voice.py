@@ -454,8 +454,8 @@ def decode_audio(source, sampling_rate: int = 16000):
     [-1, 1] at *sampling_rate* Hz, using PyAV.
 
     Accepts anything PyAV can read. Raises PyAV's ``FFmpegError`` family for a
-    recording that cannot be decoded and ``ValueError``/``IndexError`` for one
-    with no audio stream. Works with every PyAV version localm allows."""
+    recording that cannot be decoded and ``ValueError`` for one with no audio
+    stream. Works with every PyAV version localm allows."""
     import gc
 
     import av
@@ -465,6 +465,8 @@ def decode_audio(source, sampling_rate: int = 16000):
         format="s16", layout="mono", rate=sampling_rate)
     pieces = []
     with _open_container(source) as container:
+        if not container.streams.audio:
+            raise ValueError("the recording has no audio stream")
         frames = _ignore_invalid_frames(container.decode(audio=0))
         for frame in itertools.chain(frames, [None]):
             for resampled in resampler.resample(frame):
