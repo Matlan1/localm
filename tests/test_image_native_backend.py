@@ -571,6 +571,51 @@ def test_sd_checkpoint_detection(tmp_path):
     assert gguf_sd_checkpoint(not_gguf) is False
 
 
+FLUX_BARE_TENSORS = ["double_blocks.0.img_attn.qkv.weight", "single_blocks.0.linear1.weight",
+                     "img_in.weight", "txt_in.weight", "time_in.in_layer.weight"]
+
+
+def test_a_flux_transformer_without_architecture_or_prefix_is_an_image_model(tmp_path):
+    from localm.model_manager import gguf_sd_checkpoint
+    from localm.model_manager.registry import _detect_local_model_type
+    flux = _write_gguf(tmp_path / "flux1-schnell-Q4_0.gguf", FLUX_BARE_TENSORS)
+    assert gguf_sd_checkpoint(flux) is True
+    assert _detect_local_model_type(flux, is_gguf=True, is_hf=False)[0] == "diffusion-unet"
+    declared = _write_gguf(tmp_path / "decl.gguf", FLUX_BARE_TENSORS, arch="llama")
+    assert gguf_sd_checkpoint(declared) is False
+
+
+def test_a_pulled_flux_gguf_without_architecture_registers_as_an_image_model(
+        tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    import huggingface_hub
+
+    import localm.model_manager as mm
+    from localm.config import load_registry
+    body = _write_gguf(tmp_path / "src.gguf", FLUX_BARE_TENSORS).read_bytes()
+
+    def _fake_download(repo_id, filename, local_dir, **kw):
+        p = Path(local_dir) / filename
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(body)
+        return str(p)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+    monkeypatch.setattr(huggingface_hub, "HfApi", MagicMock())
+    monkeypatch.setattr("localm.model_manager.pull._policy_head",
+                        lambda *a, **k: MagicMock(headers={"content-length": str(len(body))}))
+    monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal", lambda: None)
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: None)
+    monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: True)
+    models = tmp_path / "models"
+    models.mkdir()
+    monkeypatch.setattr(mm, "MODELS_DIR", models)
+    monkeypatch.setattr(mm, "ensure_dirs", lambda: None)
+    assert mm.pull_model("second-state/FLUX.1-schnell-GGUF:flux1-schnell-Q4_0.gguf") is True
+    assert load_registry()["flux1-schnell-Q4_0"]["model_type"] == "diffusion-unet"
+
+
 def test_a_local_sd_checkpoint_registers_as_an_image_model(tmp_path):
     from localm.model_manager.registry import _detect_local_model_type
     sd = _write_gguf(tmp_path / "sd.gguf", ["model.diffusion_model.out.2.weight"])

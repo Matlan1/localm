@@ -44,7 +44,7 @@ from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_non_chat_model_type
-from .gguf import gguf_sd_checkpoint
+from .gguf import MEDIA_KIND_TYPES, gguf_media_component_type
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
@@ -275,13 +275,7 @@ def _is_sentence_transformers_folder(path: Path) -> bool:
     return "Transformer" in kinds and "Pooling" in kinds
 
 
-_MEDIA_KIND_TYPES = {
-    "diffusion": "diffusion-unet", "checkpoint": "diffusion-unet", "vae": "vae",
-    "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
-    "clip_h": "text-encoder",
-    "t5xxl": "text-encoder", "umt5": "text-encoder", "byt5": "text-encoder",
-    "clip_vision": "text-encoder",
-}
+_MEDIA_KIND_TYPES = MEDIA_KIND_TYPES
 _MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora"})
 
 
@@ -346,8 +340,9 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
             non_chat = gguf_non_chat_model_type(gguf_metadata.get("architecture"))
             if non_chat:
                 return non_chat, gguf_metadata
-            if gguf_sd_checkpoint(path, meta=meta):
-                return "diffusion-unet", gguf_metadata
+            media_type = gguf_media_component_type(path, meta=meta)
+            if media_type is not None:
+                return media_type, gguf_metadata
             return "llm", gguf_metadata
         if is_hf:
             if (path / "adapter_config.json").exists():

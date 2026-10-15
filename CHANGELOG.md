@@ -680,6 +680,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   ComfyUI workflow reported that some CLIP/text-encoder weights were not found and the result may not
   have fully applied, because ComfyUI logs a CLIP encoder's text projection as missing although it
   fills it in itself. That line no longer counts as a warning; other missing weights still do.
+- **Pulled image files are typed by what they contain.** `localm pull` of a single image file took
+  its type from the repository's tags, so a LoRA such as SDXL-Lightning's registered as a diffusion
+  model; it now reads the file the way `localm add` does. A FLUX GGUF and its CLIP, T5 and VAE
+  files without an architecture key are recognised by their tensors instead of being registered as
+  chat models.
 - **A request body that is not JSON gets a clear error, not a server error.** Sending a file or
   other binary data where an API route expects JSON now returns the usual 422 explaining the
   problem, instead of a 500 "Internal server error".

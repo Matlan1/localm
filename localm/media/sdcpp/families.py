@@ -8,7 +8,9 @@ companion files a diffusion model needs.
 * ``kind``: ``checkpoint`` (a full model with its own text encoder and VAE),
   ``diffusion`` (a UNet/DiT alone), ``clip_l``, ``clip_g``, ``clip_h``
   (OpenCLIP-H, the SD 2.x text encoder), ``t5xxl``,
-  ``umt5``, ``llm``, ``vae``, ``clip_vision``, ``lora`` or ``unknown``.
+  ``umt5``, ``llm``, ``vae``, ``clip_vision``, ``lora``, ``music`` (a
+  component of an ACE-Step music model, never an image or video file) or
+  ``unknown``.
 * ``family``: the model family a diffusion model, checkpoint, VAE or LoRA
   belongs to (``flux``, ``chroma``, ``sd3``, ``sd1``, ``sd2``, ``sdxl``,
   ``wan2.1``, ``wan2.2``, ``qwen-image``, ``z-image``, ``flux2``, ...), or
@@ -523,6 +525,9 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
     """Classify a file from its tensor names/shapes and GGUF architecture."""
     if not tensors:
         return UNKNOWN
+    from localm.model_manager.gguf import gguf_is_music_architecture
+    if gguf_is_music_architecture(arch):
+        return FileInfo("music", detail={"arch": arch})
     names = tensors.keys()
     if _has(names, "model.diffusion_model.") and _has(
             names, "first_stage_model.", "cond_stage_model.", "conditioner.embedders.",
