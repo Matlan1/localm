@@ -101,9 +101,12 @@ async function fileReport(request, env) {
   let payload;
   try { payload = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
   const title = (String(payload.title || "").slice(0, 200).trim()) || "localm bug report";
-  const body = String(payload.body || "").slice(0, 60000);
-  if (!body.trim()) return json({ error: "empty report body" }, 400);
-  const issue = { title, body };
+  const report = String(payload.body || "").slice(0, 60000);
+  if (!report.trim()) return json({ error: "empty report body" }, 400);
+  if (!looksLikeLocalmReport(report)) {
+    return json({ error: "not a localm bug report: send the report localm generated, with its sections" }, 400);
+  }
+  const issue = { title, body: REPORTER_NOTE + report };
   if (env.ISSUE_LABELS) {
     const labels = env.ISSUE_LABELS.split(",").map((s) => s.trim()).filter(Boolean);
     if (labels.length) issue.labels = labels;
@@ -117,6 +120,20 @@ async function fileReport(request, env) {
   }
   const data = await gh.json();
   return json({ ok: true, url: data.html_url, number: data.number }, 201);
+}
+
+// Prepended to the body of every issue this proxy files.
+const REPORTER_NOTE =
+  "> Filed through the localm bug reporter on behalf of a user. " +
+  "This text was not written by the repository owner.\n\n";
+
+// Section headings every report built by localm's reporter contains.
+const REPORT_SECTIONS = ["## What happened", "## Environment"];
+
+// True when *text* has every heading in REPORT_SECTIONS on a line of its own.
+function looksLikeLocalmReport(text) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim());
+  return REPORT_SECTIONS.every((h) => lines.includes(h));
 }
 
 // ---------------------------- issues ------------------------------------
