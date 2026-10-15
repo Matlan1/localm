@@ -11,6 +11,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+
+- **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
+  containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
+  model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
+
 ## [0.3.0] - 2026-10-14
 
 ### Added
