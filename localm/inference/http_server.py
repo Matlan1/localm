@@ -5563,7 +5563,7 @@ def _prep_error_lines(detail: str, status: int, model_id: str, chunk_id: str,
     if routing:
         try:
             parsed = json.loads(routing)
-        except ValueError:
+        except (ValueError, RecursionError):
             parsed = None
         if isinstance(parsed, dict):
             localm_error["routing"] = parsed
