@@ -133,6 +133,7 @@ export const I18N_EN = {
   "chat.audio.notWav": "{name} is not a valid WAV file.",
   "chat.audio.readError": "Could not read {name}.",
   "chat.audio.rejected": "The audio clip was not accepted ({detail}) and was removed from the chat. You can keep chatting (text only).",
+  "chat.audio.rejectedSuggest": "{model} cannot hear audio - removed the clip. Use the button below to answer with {suggest}, or keep chatting (text only).",
   "chat.audio.unplayable": "This audio clip cannot be played.",
   "chat.audio.tooLarge": "{name} is {size} MB; an audio clip can be at most {max} MB.",
   "chat.audio.tooLong": "{name} is about {minutes} min long; an audio clip can be at most {max} min.",
@@ -213,6 +214,7 @@ export const I18N_EN = {
   "chat.routed.partialMoeTitle": "It was loaded with the routed experts of {moe} of its {total} layers in system RAM, so replies are slower.",
   "chat.routed.partialTitle": "It was loaded with {gpu} of {total} layers on the GPU and the rest on the CPU, so replies are slower. It is reloaded fully once the model in its way is idle; if it stays slow, free GPU memory and load it again.",
   "chat.routed.suggestChip": "{model} suits this better",
+  "chat.routed.answerWith": "Answer with {model}",
   "chat.routed.suggestTitle": "{from} lacks what this request needed ({needs}), so this reply came from it anyway. Click to use {model}, which has it, for your next message.",
   "chat.routed.title": "{from} lacks what this request needed ({needs}), so an installed model that has it answered. Pin the chat in its parameters to always use one model.",
   "chat.seed": "Seed",
@@ -284,6 +286,7 @@ export const I18N_EN = {
   "chat.variant.previous": "Previous variant",
   "chat.vision.rejectedNoModel": "{model} cannot read images - removed the image. No other model answered instead (Settings > Model > Model autoswitch decides when one does). You can keep chatting (text only).",
   "chat.vision.rejectedPinned": "This chat is pinned to {model}, which cannot read images - removed the image. Unpin the chat to let a model that can read images answer, or keep chatting (text only).",
+  "chat.vision.rejectedSuggest": "{model} cannot read images - removed the image. Use the button below to answer with {suggest}, or keep chatting (text only).",
   "chat.voice": "Voice",
   "chat.voice.hint": "(this browser)",
   "chat.voice.title":

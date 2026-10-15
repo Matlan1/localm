@@ -561,3 +561,81 @@ test("a compacted reply cut at its first tool call still marks the conversation 
   assert.equal(first.stopped, undefined, "the cut is not a user Stop");
   assert.equal((first.content.match(/<tool_call>/g) || []).length, 1);
 });
+
+function setupRefusal({ routing, pinned = false }) {
+  const calls = [];
+  let posts = 0;
+  const impl = async (url, opts = {}) => {
+    let body;
+    try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
+    calls.push({ url: String(url), body });
+    if (String(url) === "/v1/chat/completions" && posts++ === 0) {
+      const headers = { get: (k) => (k === "X-Localm-Refusal" ? "image"
+        : (k === "X-Localm-Model-Routing" && routing ? JSON.stringify(routing) : null)) };
+      return { ok: false, status: 400, headers,
+        json: async () => ({ detail: "plain cannot read images" }), text: async () => "" };
+    }
+    return { ok: true, status: 200, headers: { get: () => null },
+      json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl: impl });
+  window.readSSE = async (_r, onData) => {
+    onData(JSON.stringify({ choices: [{ delta: { content: "a red square" } }] }));
+    onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+  };
+  const doc = window.document;
+  for (const id of ["p-speak", "p-memory", "p-web"]) doc.getElementById(id).checked = false;
+  const select = doc.getElementById("model-select");
+  for (const name of ["plain", "seer"]) {
+    const opt = doc.createElement("option");
+    opt.value = name;
+    select.appendChild(opt);
+  }
+  select.value = "plain";
+  runScript(window, 'modelCache.active = "plain"; modelCache.models = [];');
+  const image = { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } };
+  const conv = { id: "c1", title: "t", messages: [{ role: "user",
+    content: [{ type: "text", text: "what colour?" }, image] }] };
+  if (pinned) conv.pinnedModel = "plain";
+  activateConv(window, conv);
+  return { window, doc, calls, conv, select, image };
+}
+
+const ASK_ROUTING = { resolved: "plain", requested: "plain", routed: false, pinned: false,
+  gaps: { vision: "absent" }, unmet: ["vision"], suggested: "seer" };
+
+test("an ask-mode image refusal offers the suggested model; one click restores the image and answers with it", async () => {
+  const { window, doc, calls, conv, select, image } = setupRefusal({ routing: ASK_ROUTING });
+  await window.runCompletion(conv);
+  assert.equal(typeof conv.messages[0].content, "string", "the image is stripped first");
+  assert.match(conv.messages[0].content, /Image removed/);
+  const offer = doc.querySelector(".media-offer .routed-suggest");
+  assert.ok(offer, "the refusal offers the model that can read the image");
+  assert.match(offer.textContent, /seer/);
+  assert.equal(select.value, "plain", "nothing switches until the user clicks");
+  offer.click();
+  assert.equal(select.value, "seer", "the click selects the suggested model");
+  for (let i = 0; i < 50 && chatPosts(calls).length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 50 && conv.messages.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+  const resend = chatPosts(calls)[1];
+  assert.ok(resend, "the conversation is sent again");
+  assert.equal(resend.body.model, "seer");
+  const parts = resend.body.messages.find((m) => m.role === "user").content;
+  assert.ok(Array.isArray(parts) && parts.some((p) => p.type === "image_url"
+    && p.image_url.url === image.image_url.url), "the image is sent again");
+  assert.equal(conv.messages[conv.messages.length - 1].content, "a red square");
+  assert.equal(doc.querySelector(".media-offer"), null);
+});
+
+test("an image refusal with no suggestion offers nothing", async () => {
+  const { window, doc, conv } = setupRefusal({ routing: { ...ASK_ROUTING, suggested: undefined } });
+  await window.runCompletion(conv);
+  assert.match(conv.messages[0].content, /Image removed/);
+  assert.equal(doc.querySelector(".media-offer"), null);
+});
+
+test("a pinned chat's image refusal never offers another model", async () => {
+  const { window, doc, conv } = setupRefusal({ routing: ASK_ROUTING, pinned: true });
+  await window.runCompletion(conv);
+  assert.equal(doc.querySelector(".media-offer"), null);
+});
