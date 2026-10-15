@@ -126,6 +126,18 @@ class TestConsoleWarningsSince:
         assert warnings == [
             "a LoRA patch key did not match the model and was skipped (x3)"]
 
+    def test_a_missing_clip_text_projection_alone_is_not_a_warning(self, spawned):
+        self._fresh_log(spawned)
+        tail = cc.comfy_console_tail_start(spawned)
+        with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
+            f.write("clip missing: ['text_projection.weight']\n")
+            f.write("WARNING:root:clip missing: text_projection.weight\n")
+        assert cc.comfy_console_warnings_since(spawned, tail) == (True, [])
+        with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
+            f.write("clip missing: ['text_model.encoder.layers.0.mlp.fc1.weight']\n")
+        checked, warnings = cc.comfy_console_warnings_since(spawned, tail)
+        assert warnings == ["some CLIP/text-encoder weights were not found in the checkpoint"]
+
     def test_ignores_content_before_the_offset(self, spawned):
         """The exact scenario the offset exists for: a PRIOR generation's own
         warning must not bleed into the NEXT generation's report."""
@@ -515,7 +527,7 @@ class TestVideoConsoleWarningWiring:
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_bytes(b"")
         fake = _fake_video_urlopen(
-            log, extra_on_prompt="WARNING:root:clip missing: text_projection.weight\n" * 2)
+            log, extra_on_prompt="WARNING:root:clip missing: text_model.final_layer_norm.weight\n" * 2)
 
         comfy_out = tmp_path / "comfy_out"
         with patch.object(video_comfy, "ensure_comfy", return_value=(True, "up")), \
