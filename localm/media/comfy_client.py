@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -1512,6 +1513,12 @@ _COMFY_SILENT_PARTIAL_APPLY_PATTERNS = (
 )
 
 
+# A CLIP text encoder loaded without its text_projection weight: ComfyUI fills
+# it in itself and logs the key as missing.
+_BENIGN_PARTIAL_APPLY_LINE = re.compile(
+    r"clip missing:\s*\[?\s*'?text_projection\.weight'?\s*\]?\s*$")
+
+
 def comfy_launch_log_path(api_url: str) -> Path:
     """Where ensure_comfy redirects a self-launched ComfyUI's stdout+stderr
     (see the launch block below), scoped to *api_url*.
@@ -1614,7 +1621,8 @@ def comfy_console_warnings_since(api_url: str,
             new_bytes = f.read()
     except OSError:
         return False, []
-    lines = new_bytes.decode("utf-8", errors="replace").splitlines()
+    lines = [line for line in new_bytes.decode("utf-8", errors="replace").splitlines()
+             if not _BENIGN_PARTIAL_APPLY_LINE.search(line)]
     matches = []
     for substring, label in _COMFY_SILENT_PARTIAL_APPLY_PATTERNS:
         # Per-line, not a whole-buffer substring count: a pattern must occur
