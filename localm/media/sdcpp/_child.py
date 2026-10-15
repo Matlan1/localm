@@ -110,6 +110,17 @@ def _prepare_environment(runtime_dir: Path) -> None:
         os.environ.pop(_HOST_VIS_VAR, None)
 
 
+def _use_c_ctype_locale() -> None:
+    """On Windows, set this process's C runtime LC_CTYPE to "C", so the byte-wise
+    tolower in stable-diffusion.cpp's CLIP tokenizer leaves UTF-8 prompt bytes
+    unchanged. Other platforms are left as they are.
+    See test_the_worker_keeps_utf8_prompt_bytes_through_tolower."""
+    if sys.platform != "win32":
+        return
+    import locale
+    locale.setlocale(locale.LC_CTYPE, "C")
+
+
 def _set_rocblas_tensile(extra_dirs) -> None:
     if os.environ.get("ROCBLAS_TENSILE_LIBPATH"):
         return
@@ -648,6 +659,7 @@ def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
     install_parent_death_watchdog()
     ignore_interrupt_signals()
     suppress_native_error_dialogs()
+    _use_c_ctype_locale()
 
     log_cb, progress_cb, _State.preview_cb = _make_callbacks(resp_q)
     callbacks_set = False
