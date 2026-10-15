@@ -92,6 +92,25 @@ def test_decoder_fault_tag_is_500_and_not_blamed_on_audio(monkeypatch):
 
 
 @pytest.mark.usefixtures("voice_stack")
+def test_a_recording_without_an_audio_stream_is_a_decode_error():
+    import av
+    import numpy as np
+    buf = io.BytesIO()
+    with av.open(buf, "w", format="mp4") as container:
+        stream = container.add_stream("mpeg4", rate=1)
+        stream.width, stream.height, stream.pix_fmt = 16, 16, "yuv420p"
+        frame = av.VideoFrame.from_ndarray(np.zeros((16, 16, 3), dtype=np.uint8),
+                                           format="rgb24")
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    audio, err = voice._decode_or_error(buf.getvalue(), voice.decode_audio)
+    assert audio is None
+    assert err is not None and err[0] == "decode", err
+
+
+@pytest.mark.usefixtures("voice_stack")
 def test_installed_pyav_decodes_a_wav_with_localms_decoder():
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
