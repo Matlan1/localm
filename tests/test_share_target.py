@@ -3,6 +3,8 @@
 sheet; it lands server-side and the app ingests it. Parsed with
 localm.multipartform (localm stays self-contained, no python-multipart)."""
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -483,14 +485,14 @@ def test_sweep_that_cannot_list_the_inbox_says_so(share_client, tmp_path, monkey
     old = next(inbox.glob("*__old.png"))
     _age(old, 16)
 
-    real_glob = Path.glob
+    real_scandir = os.scandir
 
-    def glob(self, pattern, *a, **k):
-        if self == inbox:
+    def scandir(path=".", *a, **k):
+        if Path(path) == inbox:
             raise PermissionError("inbox locked")
-        return real_glob(self, pattern, *a, **k)
+        return real_scandir(path, *a, **k)
 
-    monkeypatch.setattr(Path, "glob", glob)
+    monkeypatch.setattr(share_routes.os, "scandir", scandir)
     with caplog.at_level(logging.WARNING, logger="localm"):
         share_routes._sweep_expired(share_client.app, inbox)
 
@@ -498,6 +500,33 @@ def test_sweep_that_cannot_list_the_inbox_says_so(share_client, tmp_path, monkey
     assert any("could not list the inbox" in r.getMessage()
                and "inbox locked" in r.getMessage() for r in caplog.records), \
         f"the failed sweep was not logged: {[r.getMessage() for r in caplog.records]}"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the folder listing is denied with a Windows ACL")
+def test_an_inbox_denied_by_its_acl_is_reported_not_read_as_empty(share_client, tmp_path, caplog):
+    import getpass
+    import logging
+    import subprocess
+
+    from localm.plugins.gui.routes import share as share_routes
+    inbox = tmp_path / ".localm" / "share_inbox"
+    share_client.post("/share-target", files={"files": ("old.png", _PNG, "image/png")})
+    old = next(inbox.glob("*__old.png"))
+    _age(old, 16)
+    user = getpass.getuser()
+    subprocess.run(["icacls", str(inbox), "/deny", f"{user}:(RD)"], check=True,
+                   capture_output=True)
+    try:
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            share_routes._sweep_expired(share_client.app, inbox)
+            pending = share_client.get("/api/share/pending")
+    finally:
+        subprocess.run(["icacls", str(inbox), "/remove:d", user], check=True,
+                       capture_output=True)
+    assert old.exists()
+    assert pending.status_code == 200
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("could not list the inbox" in m for m in messages) >= 2, messages
 
 
 def test_memory_entry_older_than_the_ttl_is_dropped_on_access(privacy_client):
