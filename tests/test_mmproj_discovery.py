@@ -544,6 +544,19 @@ class TestPickMmprojCandidate:
             "Phi-2-Q4_K_M.gguf", ["mmproj-F16.gguf"],
             others=["gemma-3-4b-it-Q4_K_M.gguf"], fit=fits.__getitem__) is None
 
+    @pytest.mark.parametrize("model, proj, owner", [
+        ("Qwen3-0.6B-Q8_0.gguf", "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", "Qwen3-ASR-0.6B-Q8_0.gguf"),
+        ("Qwen3-30B-A3B-Q4_K_M.gguf", "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf",
+         "Qwen3-ASR-0.6B-Q8_0.gguf"),
+        ("gemma-4-E4B-it-Q4_K_M.gguf", "mmproj-gemma-3-4b-it-f16.gguf",
+         "gemma-3-4b-it-Q4_K_M.gguf"),
+    ])
+    def test_a_family_token_match_named_for_another_model_in_the_folder_returns_none(
+            self, model, proj, owner):
+        from localm.model_manager.registry import _pick_mmproj_candidate
+        assert _pick_mmproj_candidate(model, [proj], others=[owner]) is None
+        assert _pick_mmproj_candidate(owner, [proj], others=[model]) == proj
+
     def test_a_projector_never_gets_a_projector(self):
         from localm.model_manager.registry import _pick_mmproj_candidate
         assert _pick_mmproj_candidate("mmproj-model-f16", ["mmproj-F16.gguf"]) is None

@@ -29,6 +29,8 @@ _CALLER_HANDLES = {
         "only called inside a try that catches Exception",
     "inference/backends/_hf_fp8.py::_safetensors_header":
         "only called by expanded_bf16_bytes, which catches RecursionError",
+    "updater.py::_strict_json":
+        "only called by _load_trusted and verify_signature, which both catch RecursionError",
 }
 _NOT_HOSTILE = {
     "plugins/gui/routes/models/acquisition.py::_build_check_workflow":

@@ -2425,6 +2425,35 @@ class TestRunCoderTaskInProcess:
         assert resp["result"]["isError"] is False, resp
         assert 3.0 < seen["timeout"] < 4.7, seen
 
+    def test_a_timeout_during_a_running_shell_command_returns_and_kills_it(
+            self, coder_env, tmp_path):
+        """A run_shell command still running when timeout_seconds expires: the
+        call answers timed out promptly, and the command's process is gone."""
+        import time
+        project = _project(tmp_path)
+        beat = project / "beat.txt"
+        (project / "sleeper.py").write_text(
+            "import time\n"
+            "for _ in range(1200):\n"
+            "    with open('beat.txt', 'a') as f:\n"
+            "        f.write('.')\n"
+            "    time.sleep(0.05)\n", encoding="utf-8")
+        call = _tool_call("run_shell", command=f'"{sys.executable}" sleeper.py',
+                          timeout=120)
+        server, _ = _coder_server(_scripted_engine_factory([call, "Done."]))
+        started = time.monotonic()
+        resp = _run_task(server, project, yes=True, timeout_seconds=3)
+        elapsed = time.monotonic() - started
+        result = resp["result"]
+        assert result["isError"] is True, result
+        assert "timed out after" in result["content"][0]["text"]
+        assert beat.is_file(), "the shell command never started"
+        assert elapsed < 13.0, f"the call returned {elapsed:.1f}s after a 3s budget"
+        time.sleep(0.5)
+        size = beat.stat().st_size
+        time.sleep(1.0)
+        assert beat.stat().st_size == size, "the shell command outlived the timeout"
+
     def test_a_timeout_above_the_cap_is_refused_before_anything_is_pinned(
             self, coder_env, tmp_path):
         import localm.plugins.mcpserver.server as srv

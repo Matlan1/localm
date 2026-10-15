@@ -18,6 +18,8 @@ stay in ``web.py`` and are imported by name.
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import time
 from pathlib import Path
 
@@ -59,6 +61,16 @@ def _memory_inbox_bytes(store: dict) -> int:
     return sum(len(data) for data, _exp in store.values())
 
 
+def _inbox_entries(inbox: Path) -> list[Path]:
+    """The ``<id>__<name>`` entries in *inbox*; empty when the inbox does not
+    exist. Raises OSError when it exists but cannot be listed."""
+    try:
+        with os.scandir(inbox) as it:
+            return [Path(e.path) for e in it if fnmatch.fnmatch(e.name, "*__*")]
+    except FileNotFoundError:
+        return []
+
+
 def _sweep_expired(app, inbox: Path, *, startup: bool = False) -> None:
     """Drop memory entries past their expiry and unlink disk entries older than
     the TTL. Never raises: an inbox that cannot be listed, or a disk entry that
@@ -69,7 +81,7 @@ def _sweep_expired(app, inbox: Path, *, startup: bool = False) -> None:
         store.pop(name, None)
     cutoff = now - _SHARE_TTL_SECONDS
     try:
-        stale = [p for p in inbox.glob("*__*")
+        stale = [p for p in _inbox_entries(inbox)
                  if p.is_file() and p.stat().st_mtime <= cutoff]
     except OSError as e:
         logger.warning("share-inbox: could not list the inbox to remove expired "
@@ -187,7 +199,12 @@ def register(app: FastAPI, ctx) -> None:
             if not job_owner_ok(request, owner):
                 continue
             _add(fid, name, data)
-        for p in sorted(inbox.glob("*__*")):
+        try:
+            on_disk = sorted(_inbox_entries(inbox))
+        except OSError as e:
+            logger.warning("share-inbox: could not list the inbox: %s", e)
+            on_disk = []
+        for p in on_disk:
             if not p.is_file():
                 continue
             fid, owner, name = _web._parse_share_entry(p)
@@ -219,7 +236,13 @@ def register(app: FastAPI, ctx) -> None:
             if not req.ids or fid in keep:
                 store.pop(entry, None)
                 removed += 1
-        for p in inbox.glob("*__*"):
+        try:
+            on_disk = _inbox_entries(inbox)
+        except OSError as e:
+            logger.warning("share-inbox: could not list the inbox to clear it: %s", e)
+            on_disk = []
+            failed += 1
+        for p in on_disk:
             fid, owner, _name = _web._parse_share_entry(p)
             if not job_owner_ok(request, owner):
                 continue

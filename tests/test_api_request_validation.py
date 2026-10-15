@@ -219,6 +219,18 @@ def test_a_shallow_but_wide_body_is_unaffected():
     assert "elided" not in r.text, "a flat body was wrongly pruned by the depth cap"
 
 
+def test_a_binary_non_json_body_is_422_not_500():
+    """A body that is not JSON reaches validation as raw bytes, and pydantic
+    records those bytes under `input`. Bytes that are not valid UTF-8 (a zip, a
+    PDF) must still produce the 422, with the input shown as bounded text."""
+    blob = b"PK\x03\x04\xad\xff\xfe" + bytes(range(256)) * 8
+    r = _raw_client().post("/v1/chat/completions", content=blob,
+                           headers={"Content-Type": "application/octet-stream"})
+    assert r.status_code == 422, r.text[:300]
+    shown = [e.get("input") for e in r.json()["errors"]]
+    assert shown and all(isinstance(s, str) and len(s) <= 300 for s in shown), shown
+
+
 def test_an_ordinary_validation_error_is_still_readable():
     """No overcorrection: the handler's real job is unchanged."""
     r = _chat(_client(), max_tokens=0)

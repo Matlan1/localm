@@ -424,6 +424,29 @@ def test_server_loop_and_registered_evictor_are_both_asked(monkeypatch):
     assert len(asked) == 1 and 0 < asked[0] <= 300.0
 
 
+def test_an_evictor_is_never_offered_more_than_the_budget(monkeypatch):
+    """With the clock unchanged between the deadline and the evictor call, the
+    float sum ``(now + 300) - now`` can round above 300; the evictor still gets
+    at most the budget."""
+    now = 1839.5459839032153
+    assert (now + 300.0) - now > 300.0
+    monkeypatch.setattr(vram.time, "monotonic", lambda: now)
+    monkeypatch.setattr(hs, "_server_loop", None)
+    asked = []
+
+    def _evictor(timeout_s):
+        asked.append(timeout_s)
+        return "unloaded"
+
+    unregister = vram.register_embedder_evictor(_evictor)
+    try:
+        vram.evict_chat_for_embedder(timeout_s=300.0)
+    finally:
+        unregister()
+
+    assert asked == [300.0]
+
+
 # --------------------------------------------------------------------------- #
 #  A fetched engine evicted before its pin is never served                    #
 # --------------------------------------------------------------------------- #

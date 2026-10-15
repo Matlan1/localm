@@ -589,6 +589,84 @@ def test_an_llm_encoder_of_the_wrong_size_does_not_fit(tmp_path):
     assert [c.name for c in pairing.fitting("llm", "z-image", cands, auto=True)] == ["q4b"]
 
 
+ACESTEP_DIT = {"decoder.condition_embedder.weight": (2048, 2048),
+               "decoder.layers.0.self_attn.q_proj.weight": (2048, 2048),
+               "decoder.layers.0.cross_attn.k_proj.weight": (1024, 2048),
+               "decoder.layers.0.mlp.gate_proj.weight": (6144, 2048)}
+ACESTEP_TEXT_ENC = {"embed_tokens.weight": (151669, 1024),
+                    "layers.0.self_attn.q_proj.weight": (2048, 1024),
+                    "layers.0.mlp.gate_proj.weight": (3072, 1024)}
+QWEN3_4B_GGUF = {"token_embd.weight": (151936, 2560), "blk.0.attn_q.weight": (4096, 2560)}
+
+
+@pytest.mark.parametrize("shapes,arch", [(ACESTEP_DIT, "acestep-dit"),
+                                         (ACESTEP_TEXT_ENC, "acestep-text-enc")])
+def test_an_acestep_music_component_never_reads_as_an_image_component(tmp_path, shapes, arch):
+    info = families.inspect_file(write_gguf(tmp_path / f"{arch}.gguf", shapes, arch))
+    assert info.kind == "music"
+    assert not any(families.accepts(slot, fam, info)
+                   for slot in families.SLOTS for fam in ("z-image", "flux2", "qwen-image"))
+
+
+@pytest.fixture
+def z_image_with_music(tmp_path):
+    """A Z-Image model and its VAE next to the ACE-Step music DiT that
+    ``localm setup-music`` registers."""
+    d = tmp_path / "zimg"
+    d.mkdir()
+    _register("z", write_safetensors(d / "z_image.safetensors", Z_IMAGE), "diffusion-unet")
+    _register("ae", write_safetensors(d / "ae.safetensors", FLUX_AE), "vae")
+    _register("acestep-v15-turbo-Q4_K_M",
+              write_gguf(d / "acestep-v15-turbo-Q4_K_M.gguf", ACESTEP_DIT, "acestep-dit"),
+              "diffusion-unet", architecture="acestep-dit")
+    return d
+
+
+def test_z_image_pairs_the_text_encoder_and_not_the_music_dit(z_image_with_music):
+    te = write_gguf(z_image_with_music / "z_te.gguf", QWEN3_4B_GGUF, "qwen3")
+    _register("z-te", te, "text-encoder", architecture="qwen3")
+    m = image_native.resolve_models({"native": {"model": "z"}})
+    assert m["ctx"]["llm_path"] == str(te)
+    assert m["components"]["llm"] == {"name": "z-te", "auto": True}
+
+
+def test_z_image_with_only_the_music_dit_reports_the_missing_text_encoder(z_image_with_music):
+    with pytest.raises(pairing.MissingComponents) as ei:
+        image_native.resolve_models({"native": {"model": "z"}})
+    assert [m["slot"] for m in ei.value.missing] == ["llm"]
+    assert ei.value.missing[0]["label"] == "LLM text encoder"
+    assert ei.value.missing[0]["download"]["filename"] == "qwen_3_4b.safetensors"
+    assert "LLM text encoder" in str(ei.value)
+    out = pairing.preview("image", "z")
+    assert [m["slot"] for m in out["missing"]] == ["llm"]
+    assert "llm" not in out["components"]
+
+
+def test_the_music_dit_chosen_as_the_image_model_is_refused(z_image_with_music):
+    with pytest.raises(ModelFileError, match="is a music generation model, not an image model"):
+        image_native.resolve_models({"native": {"model": "acestep-v15-turbo-Q4_K_M"}})
+
+
+@pytest.mark.parametrize("shapes,want", [
+    (FLUX_SCHNELL, "diffusion-unet"),
+    (CLIP_L, "text-encoder"),
+    (T5XXL, "text-encoder"),
+    (FLUX_AE, "vae"),
+    ({"blk.0.attn_q.weight": (2048, 2048), "token_embd.weight": (32000, 2048)}, "llm"),
+])
+def test_a_gguf_without_architecture_is_typed_by_its_tensors(tmp_path, shapes, want):
+    from localm.model_manager.registry import _detect_local_model_type
+    f = write_gguf(tmp_path / "file.gguf", shapes)
+    assert _detect_local_model_type(f, is_gguf=True, is_hf=False)[0] == want
+    from localm.model_manager import gguf_media_component_type
+    assert gguf_media_component_type(f) == (None if want == "llm" else want)
+
+
+def test_a_gguf_that_declares_an_architecture_is_not_retyped_by_its_tensors(tmp_path):
+    from localm.model_manager import gguf_media_component_type
+    assert gguf_media_component_type(write_gguf(tmp_path / "c.gguf", CLIP_L, "llama")) is None
+
+
 def test_a_page_choice_of_another_model_drops_the_settings_components():
     from localm.media.native_models import apply_choice
     s = {"native": {"model": "flux", "t5xxl": "t5", "vae": "ae", "steps": 20}}

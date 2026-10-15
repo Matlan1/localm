@@ -495,6 +495,11 @@ def _download_progress_class(label: str, on_progress, every: float = 2.0):
             Xet download through this one bar."""
             return None
 
+        def set_transfer_postfix_str(self, postfix="", refresh=False):
+            """The transfer-speed postfix huggingface_hub sets alongside
+            update_transfer; not reported."""
+            return None
+
     return _Reporter
 
 

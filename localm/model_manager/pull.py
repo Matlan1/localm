@@ -34,7 +34,7 @@ from .gguf import _safe_models_filename
 from .gguf import first_split_part
 from .gguf import gguf_n_embd
 from .gguf import split_gguf_parts
-from .registry import _detect_local_model_type, _sanitize_name
+from .registry import _detect_local_model_type, _media_component_type, _sanitize_name
 from .registry import alias_model
 from .registry import find_aliases_by_path
 
@@ -1416,6 +1416,23 @@ def _non_chat_detection_note(architecture) -> str:
     return f"[yellow]{escape(_mm.gguf_chat_refusal(architecture) or '')}[/yellow]"
 
 
+_MEDIA_TYPE_WORDS = {"lora": "a LoRA", "diffusion-unet": "an image or video diffusion model",
+                     "vae": "a VAE", "text-encoder": "a text encoder"}
+
+
+def _content_media_type(path: Path, reg_type: Optional[str]) -> Optional[str]:
+    """The registry type for the downloaded non-GGUF file *path*: the
+    diffusion model, text encoder, VAE or LoRA its own tensor layout says it is
+    (as ``localm add`` types it), else *reg_type*. Prints a note when the
+    file's layout changes the type."""
+    media_type = _media_component_type(path, None)
+    if media_type is None or media_type == reg_type:
+        return reg_type
+    console.print(f"[dim]Detected as {_MEDIA_TYPE_WORDS[media_type]} (tensor names in "
+                  "the file).[/dim]")
+    return media_type
+
+
 def _mmproj_for_registration(
     reg_type: str,
     repo_id: str,
@@ -1649,10 +1666,12 @@ def _pull_gguf_file(
                 elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
                     console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
                     reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
-                elif _mm.gguf_sd_checkpoint(dest):
-                    console.print("[dim]Detected as an image generation model (Stable "
-                                  "Diffusion tensors in the GGUF).[/dim]")
-                    reg_type = "diffusion-unet"
+                elif (media_type := _mm.gguf_media_component_type(dest)) is not None:
+                    reg_type = media_type
+                    console.print(f"[dim]Detected as {_MEDIA_TYPE_WORDS[reg_type]} (tensor names "
+                                  "in the GGUF).[/dim]")
+            if type_is_auto and not filename.lower().endswith(".gguf"):
+                reg_type = _content_media_type(dest, reg_type)
             mmproj_path = _mmproj_for_registration(
                 reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
@@ -1848,10 +1867,12 @@ def _pull_gguf_file(
             elif _mm.gguf_non_chat_model_type(gguf_meta.get("architecture")):
                 console.print(_non_chat_detection_note(gguf_meta.get("architecture")))
                 reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
-            elif _mm.gguf_sd_checkpoint(base_dir / filename):
-                console.print("[dim]Detected as an image generation model (Stable "
-                              "Diffusion tensors in the GGUF).[/dim]")
-                reg_type = "diffusion-unet"
+            elif (media_type := _mm.gguf_media_component_type(base_dir / filename)) is not None:
+                reg_type = media_type
+                console.print(f"[dim]Detected as {_MEDIA_TYPE_WORDS[reg_type]} (tensor names "
+                              "in the GGUF).[/dim]")
+        if type_is_auto and not filename.lower().endswith(".gguf"):
+            reg_type = _content_media_type(base_dir / filename, reg_type)
         mmproj_path = _mmproj_for_registration(
             reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
         _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",

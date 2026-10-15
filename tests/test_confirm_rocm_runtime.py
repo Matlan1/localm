@@ -375,8 +375,13 @@ def test_the_counter_is_unavailable_off_windows(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the GPU Process Memory counter set is Windows-only")
-def test_the_real_counter_reports_no_gpu_memory_for_this_process():
-    assert confirm.dedicated_gpu_bytes(os.getpid()) in (None, 0)
+def test_the_real_counter_reports_no_gpu_memory_for_a_process_that_never_used_the_gpu():
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert confirm.dedicated_gpu_bytes(child.pid) in (None, 0)
+    finally:
+        child.kill()
+        child.wait()
 
 
 def test_cpu_backend_needs_the_pinned_overlay_and_a_simd_capable_cpu(tmp_path):

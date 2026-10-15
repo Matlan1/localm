@@ -520,14 +520,17 @@ def _apply_diagnostics(console, *, debug: bool, keep_diagnostics: bool) -> None:
 
     if debug:
         from localm.debuglog import enable_debug
-        console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
+        log_path = enable_debug()
+        console.print(f"[yellow]debug log:[/yellow] "
+                      f"{log_path or 'console only (the log file could not be created)'}")
         return
     try:
         from localm.config import keep_diagnostics_enabled
         if keep_diagnostics_enabled():
             from localm.debuglog import enable_debug
+            log_path = enable_debug()
             console.print(f"[yellow]debug log (keep_diagnostics):[/yellow] "
-                          f"{enable_debug()}")
+                          f"{log_path or 'console only (the log file could not be created)'}")
     except Exception as e:
         console.print(
             f"[yellow]could not enable the keep_diagnostics debug log:[/yellow] "

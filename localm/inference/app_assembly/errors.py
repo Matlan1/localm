@@ -85,6 +85,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         from fastapi.encoders import jsonable_encoder
 
         _MAX_ERR_DEPTH = 20     # far past anything a real API request nests
+        _MAX_INPUT_BYTES = 200
         _ELIDED = "...[nested value elided]"
 
         def _depth_capped(v, depth: int = 0):
@@ -95,6 +96,9 @@ def register_exception_handlers(app: FastAPI) -> None:
             limit downstream of it got the chance to apply."""
             if depth >= _MAX_ERR_DEPTH:
                 return _ELIDED
+            if isinstance(v, (bytes, bytearray)):
+                # Raw (non-JSON) body bytes: shown as bounded text, never decoded strictly.
+                return bytes(v[:_MAX_INPUT_BYTES]).decode("utf-8", "replace")
             if isinstance(v, dict):
                 return {k: _depth_capped(x, depth + 1) for k, x in v.items()}
             if isinstance(v, (list, tuple)):

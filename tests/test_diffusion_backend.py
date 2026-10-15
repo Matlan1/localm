@@ -150,6 +150,10 @@ def _bare_llama(monkeypatch, *, capacity=256, steps=8, max_tokens=None, arch="dr
         @staticmethod
         def is_eog(t):
             return t == 2
+
+        @staticmethod
+        def token_to_piece_bytes(t):
+            return b"<|role_end|>" if t == 50 else b"x"
     llm = make_bare_llama(
         _model_ptr=1, _ctx_ptr=1, _seed=0, _verbose=True, _tokenizer=_Tok(),
         is_diffusion=True, architecture=arch, _diffusion_mask=99,
@@ -182,6 +186,16 @@ class TestGenerateDiffusion:
         assert all(s.startswith("Denoising reply (") for s in statuses)
         assert len(statuses) == len(set(statuses)) <= 11
         assert _FakeCanvas.instances[0].closed is True
+
+    def test_a_turn_end_marker_the_vocab_does_not_flag_ends_the_reply(self, monkeypatch):
+        llm, _ = _bare_llama(monkeypatch, arch="llada")
+        _FakeCanvas.reply = [11, 50, 13, 14]
+        try:
+            out = _run(llm, [5, 6, 7])
+        finally:
+            _FakeCanvas.reply = [11, 12, 2, 13]
+        assert out == [11]
+        assert llm.last_finish_reason == "stop"
 
     def test_request_max_tokens_cuts_a_block_rounded_reply(self, monkeypatch):
         llm, _ = _bare_llama(monkeypatch, arch="llada")

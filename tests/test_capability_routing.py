@@ -13,6 +13,7 @@ mocked capability oracle: the capability values here are the same keys
 registration writes.
 """
 
+import asyncio
 import json
 import unittest
 
@@ -998,7 +999,7 @@ class TestServerCompactionHeader:
         monkeypatch.setattr(FakeEngine, "count_messages_tokens",
                             lambda self, ms: 7000 if len(ms) > 3 else 100)
         monkeypatch.setattr(compact, "compact_messages",
-                            lambda ms, gen: (ms[-2:], True) if changed else (ms, False))
+                            lambda ms, gen, **kw: (ms[-2:], True) if changed else (ms, False))
 
     def test_a_compacted_reply_carries_the_header(self, server, monkeypatch):
         client, _engines = server
@@ -1234,3 +1235,69 @@ class TestAutoswitchOverHTTP:
         monkeypatch.setattr(cr, "configured_mode", lambda: "eager")
         _ask(client, required_capabilities=["tool_use"])
         assert _answering_model(engines) == ["tooly"]
+
+
+class TestAskOffersTheModelThatCanReadTheAttachment:
+    def test_an_image_refusal_under_ask_names_the_model_that_can_read_it(
+            self, vision_server, monkeypatch):
+        client, engines, _ = vision_server
+        monkeypatch.setattr(cr, "configured_mode", lambda: "ask")
+        r = client.post("/v1/chat/completions",
+                        json={"messages": _IMAGE_MSG, "stream": False})
+        assert r.status_code == 400
+        assert r.headers["X-Localm-Refusal"] == "image"
+        blob = json.loads(r.headers["X-Localm-Model-Routing"])
+        assert blob["suggested"] == "seer"
+        assert blob["routed"] is False
+        assert blob["resolved"] == "plain"
+        assert _answering_model(engines) == []
+        assert "seer" not in engines
+
+    def test_a_streamed_image_refusal_under_ask_carries_the_suggestion(
+            self, vision_server, monkeypatch):
+        client, engines, _ = vision_server
+        monkeypatch.setattr(cr, "configured_mode", lambda: "ask")
+        real = hs.get_engine
+
+        async def slow(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(hs, "PREP_STATUS_GRACE_S", 0.05)
+        monkeypatch.setattr(hs, "get_engine", slow)
+        r = client.post("/v1/chat/completions",
+                        json={"messages": _IMAGE_MSG, "stream": True})
+        assert r.status_code == 200
+        errors = [json.loads(line[len("data: "):]).get("localm_error")
+                  for line in r.text.splitlines() if line.startswith("data: {")]
+        errors = [e for e in errors if e]
+        assert errors, r.text
+        assert {e["refusal"] for e in errors} == {"image"}
+        assert {e["routing"]["suggested"] for e in errors} == {"seer"}
+        assert _answering_model(engines) == []
+
+    def test_an_image_refusal_under_off_suggests_nothing(
+            self, vision_server, monkeypatch):
+        client, _, _ = vision_server
+        monkeypatch.setattr(cr, "configured_mode", lambda: "off")
+        r = client.post("/v1/chat/completions",
+                        json={"messages": _IMAGE_MSG, "stream": False})
+        assert r.status_code == 400
+        blob = json.loads(r.headers.get("X-Localm-Model-Routing", "{}"))
+        assert "suggested" not in blob
+
+    def test_prep_error_lines_carry_the_routing_object(self):
+        routing = json.dumps({"resolved": "plain", "suggested": "seer"})
+        lines = hs._prep_error_lines("no", 400, "plain", "id", 1,
+                                     refusal="image", routing=routing)
+        chunks = [json.loads(line[len("data: "):]) for line in lines
+                  if line.startswith("data: {")]
+        assert [c["localm_error"]["routing"]["suggested"] for c in chunks] == [
+            "seer", "seer"]
+
+    def test_prep_error_lines_omit_an_unparseable_routing_value(self):
+        lines = hs._prep_error_lines("no", 400, "plain", "id", 1,
+                                     refusal="image", routing="{not json")
+        chunks = [json.loads(line[len("data: "):]) for line in lines
+                  if line.startswith("data: {")]
+        assert all("routing" not in c["localm_error"] for c in chunks)

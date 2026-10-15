@@ -2274,24 +2274,57 @@ def gguf_classifier_head_tensors(path: Path) -> Optional[frozenset]:
 _GGUF_SD_TENSOR_PREFIXES = ("model.diffusion_model.", "first_stage_model.")
 
 
-def gguf_sd_checkpoint(path: Path, meta: Optional[dict] = None) -> bool:
-    """True when the GGUF at *path* declares no ``general.architecture`` and
-    carries Stable Diffusion-family image tensors (a UNet/DiT under
-    ``model.diffusion_model.`` or a VAE under ``first_stage_model.``), the
-    layout stable-diffusion.cpp's converter writes. False when it declares an
-    architecture, is one part of a split GGUF, or its tensor list cannot be read.
+# families.FileInfo kind -> the registry type an image/video model file of that
+# kind registers as.
+MEDIA_KIND_TYPES = {
+    "diffusion": "diffusion-unet", "checkpoint": "diffusion-unet", "vae": "vae",
+    "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
+    "clip_h": "text-encoder", "t5xxl": "text-encoder", "umt5": "text-encoder",
+    "byt5": "text-encoder", "clip_vision": "text-encoder",
+}
+
+
+def gguf_media_component_type(path: Path, meta: Optional[dict] = None) -> Optional[str]:
+    """The registry type of the GGUF at *path* when it declares no
+    ``general.architecture`` and its tensors are an image or video model file:
+    ``diffusion-unet`` for a UNet/DiT or full checkpoint (tensors under
+    ``model.diffusion_model.``, a VAE under ``first_stage_model.``, or a
+    diffusion transformer ``localm.media.sdcpp.families`` recognises by its
+    bare tensor names, such as a FLUX.1 transformer's ``double_blocks.``),
+    ``text-encoder`` for a CLIP/T5 text encoder, ``vae`` for a VAE and ``lora``
+    for an image-model LoRA. None when it declares an architecture, is one
+    part of a split GGUF, its tensors cannot be read, or they are none of
+    these (an LLM's tensors included).
 
     *meta* is an already-computed ``_gguf_metadata_probe(path)`` result."""
     if meta is None:
         meta = _gguf_metadata_probe(path)
     if not meta or meta.get("architecture"):
-        return False
+        return None
     if _SPLIT_GGUF_RE.match(Path(path).name):
-        return False
+        return None
     parsed = _gguf_tensor_offset_entries(Path(path))
     if parsed is None:
-        return False
-    return any(name.startswith(_GGUF_SD_TENSOR_PREFIXES) for name, _offset in parsed[0])
+        return None
+    if any(name.startswith(_GGUF_SD_TENSOR_PREFIXES) for name, _offset in parsed[0]):
+        return "diffusion-unet"
+    from localm.media.sdcpp.families import classify_tensors, read_tensors
+    read = read_tensors(Path(path))
+    if read is None:
+        return None
+    info = classify_tensors(read[0], read[1])
+    if info.kind == "lora" and info.family == "llm":
+        return None
+    return MEDIA_KIND_TYPES.get(info.kind)
+
+
+def gguf_sd_checkpoint(path: Path, meta: Optional[dict] = None) -> bool:
+    """True when :func:`gguf_media_component_type` types the GGUF at *path* as
+    ``diffusion-unet``: it declares no ``general.architecture`` and carries
+    image or video diffusion model tensors.
+
+    *meta* is an already-computed ``_gguf_metadata_probe(path)`` result."""
+    return gguf_media_component_type(path, meta) == "diffusion-unet"
 
 
 def gguf_reranker_state(path: Path, meta: Optional[dict] = None) -> Optional[bool]:

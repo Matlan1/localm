@@ -138,6 +138,25 @@ class TestXetDownloads:
             name="huggingface_hub.xet_get", tqdm_class=cls)
         assert reporter.transfer_bar is reporter.reconstruction_bar
 
+    def test_a_xet_progress_update_with_transfer_bytes_reports_and_does_not_raise(self):
+        from types import SimpleNamespace
+
+        from huggingface_hub.utils._xet_progress_reporting import (
+            XetDownloadProgressReporter,
+        )
+        lines = []
+        cls = embedder._download_progress_class("m", lines.append, every=0.0)
+        reporter = XetDownloadProgressReporter(
+            reconstruction_desc="model.gguf", total=4 * MB, log_level=logging.INFO,
+            name="huggingface_hub.xet_get", tqdm_class=cls)
+        report = SimpleNamespace(
+            total_bytes=4 * MB, total_transfer_bytes=4 * MB,
+            total_bytes_completed=2 * MB, total_bytes_completion_rate=1.0 * MB,
+            total_transfer_bytes_completed=1 * MB,
+            total_transfer_bytes_completion_rate=0.5 * MB)
+        reporter.update_progress(report, {})
+        assert lines and "2 of 4 MB" in lines[-1], lines
+
 
 class TestGetEmbedderForwardsProgress:
     def test_a_first_use_download_reports_to_the_caller(self, monkeypatch):

@@ -5518,7 +5518,8 @@ async def stream_after_prep(
             detail = e.detail if isinstance(e.detail, str) else json.dumps(e.detail)
             for line in _prep_error_lines(
                     detail, e.status_code, model_id, chunk_id, ts,
-                    refusal=(e.headers or {}).get(MEDIA_REFUSAL_HEADER)):
+                    refusal=(e.headers or {}).get(MEDIA_REFUSAL_HEADER),
+                    routing=(e.headers or {}).get("X-Localm-Model-Routing")):
                 yield line
             return
         except Exception as e:
@@ -5549,13 +5550,23 @@ async def stream_after_prep(
 
 
 def _prep_error_lines(detail: str, status: int, model_id: str, chunk_id: str,
-                      ts: int, refusal: Optional[str] = None) -> list:
+                      ts: int, refusal: Optional[str] = None,
+                      routing: Optional[str] = None) -> list:
     """The error reply and terminal lines that end an early-opened stream. Both
     the error text chunk and the terminal chunk carry ``localm_error``, so a
-    client that knows it can raise before showing the text as a reply."""
+    client that knows it can raise before showing the text as a reply.
+    *routing* is the request's ``X-Localm-Model-Routing`` header value; when it
+    parses as a JSON object it is carried as ``localm_error["routing"]``."""
     localm_error = {"status": status, "detail": detail}
     if refusal:
         localm_error["refusal"] = refusal
+    if routing:
+        try:
+            parsed = json.loads(routing)
+        except (ValueError, RecursionError):
+            parsed = None
+        if isinstance(parsed, dict):
+            localm_error["routing"] = parsed
     err = ChatChunk.token(detail, model_id, chunk_id, ts).model_dump()
     err["localm_error"] = localm_error
     done = ChatChunk.done(model_id, chunk_id, ts, finish_reason="error").model_dump()
@@ -6297,7 +6308,7 @@ async def _compact_for_capacity(engine, messages: list, request=None
     Returns ``(messages, changed, disconnected)``; *disconnected* is True when
     a client disconnect was observed while compacting."""
     from localm.debuglog import logger as _dbg
-    from localm.inference.compact import compact_messages
+    from localm.inference.compact import compact_messages, window_tokens
     _dbg.info("compacting conversation: %d message(s) for %s",
               len(messages), engine.display_name)
     loop = asyncio.get_running_loop()
@@ -6323,7 +6334,19 @@ async def _compact_for_capacity(engine, messages: list, request=None
             raise RuntimeError("summarisation cancelled")
         return "".join(parts)
 
-    fut = loop.run_in_executor(None, compact_messages, messages, _gen_for_compact)
+    def _count_for_budget(text: str) -> int:
+        # A text the pre-tokenizer refuses counts 0, so the budget uses the
+        # compaction meter's own estimate for it. See
+        # test_a_refused_count_is_budgeted_with_the_estimate.
+        try:
+            return engine.count_tokens(text)
+        except PretokenizerUnsafeInputError:
+            return 0
+
+    fut = loop.run_in_executor(None, functools.partial(
+        compact_messages, messages, _gen_for_compact,
+        limit_tokens=window_tokens(engine.context_capacity()),
+        count_tokens=_count_for_budget))
 
     async def _watch() -> None:
         try:

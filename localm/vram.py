@@ -118,6 +118,26 @@ def decide_media_swap(settings: dict, *,
         policy=settings.get("swap_policy", "auto"))
 
 
+def media_keep_note(settings: dict, *,
+                    read_free: Optional[Callable[[], Optional[int]]] = None) -> str:
+    """The job-log line for a media job that does not unload the chat model, naming
+    the reason ``decide_media_swap`` returned False for *settings*."""
+    if settings.get("swap_policy", "auto") == "never":
+        return ("Swap policy is 'never' - a loaded chat model stays loaded; the job "
+                "may run slower if VRAM runs short.")
+    if read_free is not None:
+        free = read_free()
+    else:
+        from localm.discover import vram_capacity
+        cap = vram_capacity()
+        free = cap.get("free") if isinstance(cap, dict) else None
+    need = settings.get("vram_estimate_bytes")
+    if free is None or need is None:
+        return "No chat model unload needed for this job."
+    return (f"{free / 1024 ** 3:.1f} GB of VRAM is free and this job needs about "
+            f"{need / 1024 ** 3:.1f} GB - no chat model unload needed.")
+
+
 def media_single_device_shortfall(settings: dict, *,
                                   config: Optional[dict] = None) -> Optional[dict]:
     """``{"index", "needed", "free"}`` when the ONE card ComfyUI will actually use
@@ -391,7 +411,7 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
     if loop is not None and loop.is_running():
         statuses.append(_evict_via_server_loop(_hs, loop, timeout_s))
     for evictor in evictors:
-        remaining = max(0.0, deadline - time.monotonic())
+        remaining = min(timeout_s, max(0.0, deadline - time.monotonic()))
         try:
             status = evictor(remaining)
         except Exception as e:

@@ -302,7 +302,9 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
 
     if debug:
         from ..debuglog import enable_debug
-        console.print(f"[yellow]debug log:[/yellow] {escape(str(enable_debug()))}")
+        log_path = enable_debug()
+        console.print(f"[yellow]debug log:[/yellow] "
+                      f"{escape(str(log_path)) if log_path else 'console only (the log file could not be created)'}")
 
     from ..audit import MODE_ENV_VAR, SessionMode, effective_mode
     if mode:
@@ -1223,6 +1225,8 @@ def _handle_command(
                 generate=lambda m, max_tok: "".join(
                     engine.chat_stream(m, max_tokens=max_tok, temperature=0.3,
                                        thinking=False)),
+                limit_tokens=engine.context_capacity() or 0,
+                count_tokens=engine.count_tokens,
             )
             if changed:
                 messages[:] = new_messages

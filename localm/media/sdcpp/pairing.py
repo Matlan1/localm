@@ -178,7 +178,8 @@ def suggested_download(slot: str, family: Optional[str]) -> Optional[Download]:
 def registry_candidates(reg: Optional[dict] = None) -> list[Candidate]:
     """Every registered single-file model of a type a native slot can use,
     classified from its header. Entries whose file is missing, unreadable, a
-    directory, or a network/device path are left out."""
+    directory, or a network/device path, and music model components, are left
+    out."""
     from localm.model_manager import is_gguf_adapter_entry, load_registry
     from localm.model_manager.registry import _entry_path
     from localm.pathsafe import is_unc_or_device_path
@@ -210,7 +211,7 @@ def registry_candidates(reg: Optional[dict] = None) -> list[Candidate]:
             out.append(Candidate(str(name), p, FileInfo("llm", detail={"arch": arch}), mtype))
             continue
         info = families.inspect_file(p)
-        if info.kind == "unknown":
+        if info.kind in ("unknown", "music"):
             continue
         out.append(Candidate(str(name), p, info, mtype))
     return out
@@ -341,15 +342,19 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
     ``model_path`` with only the explicit slots; a file the header does not
     identify keeps the earlier rule (``diffusion_model_path`` when any text
     encoder is set). Raises ``MissingComponents`` when a needed slot has no
-    file, and ``ModelFileError`` when *main* is a component, not a model.
+    file, and ``ModelFileError`` when *main* is a component or a music model
+    file, not an image or video model.
     *media* (``"image"``/``"video"``) and *where* (the settings page) word the
     messages."""
     info = families.inspect_file(main)
     ctx: dict = {}
     components: dict = {}
     notes: list = []
+    art = "an" if media[:1] in "aeiou" else "a"
+    if info.kind == "music":
+        raise ModelFileError(f"'{label}' is a music generation model, not {art} {media} "
+                             f"model. Choose {art} {media} model in {where}.")
     if info.kind in KIND_WORDS:
-        art = "an" if media[:1] in "aeiou" else "a"
         raise ModelFileError(f"'{label}' is {KIND_WORDS[info.kind]}, not {art} {media} model. "
                              f"Choose it as a component in {where}, and {art} {media} model "
                              "as the model.")

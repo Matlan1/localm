@@ -373,6 +373,18 @@ class TestChooseEmbedderGpuLayers:
             read_free=lambda: 64 * GB)
         assert (ngl, reason) == (0, None)
 
+    @pytest.mark.parametrize("typed", ["0", 0, 0.0])
+    def test_cpu_choice_saved_through_settings_wins(self, tmp_path, typed):
+        """The value Settings and `localm config` store is what the chooser reads."""
+        from localm.inference.embedder import _choose_embedder_gpu_layers
+        from localm.settings_schema import validate_update
+        stored = validate_update({"embedding_gpu_layers": typed})
+        assert stored == {"embedding_gpu_layers": 0}
+        assert type(stored["embedding_gpu_layers"]) is int
+        ngl, reason = _choose_embedder_gpu_layers(
+            self._gguf(tmp_path), stored, read_free=lambda: 64 * GB)
+        assert (ngl, reason) == (0, None)
+
     def test_explicit_embedding_gpu_layers_gpu_wins_even_when_tight(self, tmp_path):
         from localm.inference.embedder import _choose_embedder_gpu_layers
         ngl, reason = _choose_embedder_gpu_layers(

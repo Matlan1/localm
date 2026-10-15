@@ -2317,7 +2317,57 @@ export function parseRoutingHeader(resp) {
     const raw = resp && resp.headers && resp.headers.get
       ? resp.headers.get("X-Localm-Model-Routing") : null;
     if (!raw) return null;
-    const data = JSON.parse(raw);
+    return parseRoutingData(JSON.parse(raw));
+  } catch { return null; }
+}
+
+/** The content of every user message in *conv*, keyed by the message object,
+ *  for restoring attachments that a refusal stripped. */
+function userContentSnapshot(conv) {
+  const snap = new Map();
+  for (const m of conv.messages) {
+    if (m.role === "user" && Array.isArray(m.content)) snap.set(m, m.content.slice());
+  }
+  return snap;
+}
+
+/** After a refusal under model autoswitch "ask": a button under the chat that
+ *  puts the stripped attachments back (offer.before), selects offer.suggest and
+ *  sends the conversation again. Returns the row, or null when there is no
+ *  chat to show it in. The row is not saved with the chat; a later re-render
+ *  or another send removes it. */
+function showMediaOffer(conv, offer) {
+  const box = $("chat-messages");
+  if (!box) return null;
+  const row = el("div", "media-offer");
+  const btn = el("button", "btn-secondary routed-chip routed-suggest");
+  btn.appendChild(iconEl("models", "btn-ic"));
+  btn.appendChild(document.createTextNode(t("chat.routed.answerWith", { model: offer.suggest })));
+  btn.onclick = () => {
+    row.remove();
+    if (currentConv() !== conv || chat.busy) return;
+    for (const [m, content] of offer.before) {
+      if (conv.messages.includes(m)) m.content = content;
+    }
+    if ([...modelSelect.options].some((o) => o.value === offer.suggest)) {
+      modelSelect.value = offer.suggest;
+      modelSelect.dispatchEvent(new Event("change"));
+    }
+    saveConversations(conv);
+    renderChat();
+    runCompletion(conv);
+  };
+  row.appendChild(btn);
+  box.appendChild(row);
+  box.scrollTop = box.scrollHeight;
+  return row;
+}
+
+/** parseRoutingHeader for an already-parsed routing object (the `routing`
+ *  field of a stream's `localm_error`). Returns null for anything that is not
+ *  an object. */
+export function parseRoutingData(data) {
+  try {
     if (!data || typeof data !== "object") return null;
     const unmet = Array.isArray(data.unmet) ? data.unmet : [];
     return {
@@ -2513,6 +2563,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let aborted = false;
   let visionRejected = false;
   let audioRejected = false;
+  let mediaOffer = null;
   let requestFailed = false;   // a generic (non-vision, non-abort) send failure
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
   let routing = null;   // which model answered, when not the one asked for
@@ -2551,6 +2602,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       err.status = r.status;   // so the catch can recover an image-reject 400
       err.detail = data.detail || "";
       err.refusal = r.headers?.get("X-Localm-Refusal") || "";
+      err.routing = parseRoutingHeader(r);
       throw err;
     }
     return r;
@@ -2637,6 +2689,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       err.status = streamErr.status;
       err.detail = streamErr.detail || "";
       err.refusal = streamErr.refusal || "";
+      err.routing = parseRoutingData(streamErr.routing);
       throw err;
     }
   }
@@ -2675,22 +2728,36 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     } else if (sentAudio && (e.status === 400 || e.status === 413) &&
                (e.refusal === "audio" || e.refusal === "body-size") && !full.trim()) {
       audioRejected = true;
+      const suggest = !pinnedModel && e.refusal === "audio" && e.routing && e.routing.suggested;
+      const before = suggest ? userContentSnapshot(conv) : null;
       const n = stripUserAudio(conv);
       saveConversations(conv);
-      toast(n
-        ? t("chat.audio.rejected", { detail: e.detail || e.message })
-        : "Chat request failed: " + e.message, true);
+      if (suggest && n) {
+        mediaOffer = { before, suggest };
+        toast(t("chat.audio.rejectedSuggest", { model: modelName, suggest }), true);
+      } else {
+        toast(n
+          ? t("chat.audio.rejected", { detail: e.detail || e.message })
+          : "Chat request failed: " + e.message, true);
+      }
     } else if (sentImage && e.status === 400 && e.refusal === "image" && !full.trim()) {
       // VIS-1: a text-only model rejected the image. Drop it from history so the
       // next turn is text-only and the chat stays usable, instead of re-sending
       // the image every turn (which 400s forever -> all-blank assistant replies).
       visionRejected = true;
+      const suggest = !pinnedModel && e.routing && e.routing.suggested;
+      const before = suggest ? userContentSnapshot(conv) : null;
       const n = stripUserImages(conv);
       saveConversations(conv);
-      toast(n
-        ? t(pinnedModel ? "chat.vision.rejectedPinned" : "chat.vision.rejectedNoModel",
-            { model: modelName })
-        : "Chat request failed: " + e.message, true);
+      if (suggest && n) {
+        mediaOffer = { before, suggest };
+        toast(t("chat.vision.rejectedSuggest", { model: modelName, suggest }), true);
+      } else {
+        toast(n
+          ? t(pinnedModel ? "chat.vision.rejectedPinned" : "chat.vision.rejectedNoModel",
+              { model: modelName })
+          : "Chat request failed: " + e.message, true);
+      }
     } else {
       requestFailed = true;
       renderMarkdown(liveBody, full + "\n\n*[error: " + e.message + "]*");
@@ -2762,6 +2829,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // here so the chat recovers.
   if (visionRejected || audioRejected) {
     renderChat();
+    if (mediaOffer) outcome.liveRow = showMediaOffer(conv, mediaOffer);
     return outcome;
   }
   if (!full.trim() && !reasoning.trim()) {

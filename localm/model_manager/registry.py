@@ -44,7 +44,7 @@ from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_non_chat_model_type
-from .gguf import gguf_sd_checkpoint
+from .gguf import MEDIA_KIND_TYPES, gguf_media_component_type
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
@@ -275,13 +275,7 @@ def _is_sentence_transformers_folder(path: Path) -> bool:
     return "Transformer" in kinds and "Pooling" in kinds
 
 
-_MEDIA_KIND_TYPES = {
-    "diffusion": "diffusion-unet", "checkpoint": "diffusion-unet", "vae": "vae",
-    "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
-    "clip_h": "text-encoder",
-    "t5xxl": "text-encoder", "umt5": "text-encoder", "byt5": "text-encoder",
-    "clip_vision": "text-encoder",
-}
+_MEDIA_KIND_TYPES = MEDIA_KIND_TYPES
 _MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora"})
 
 
@@ -346,8 +340,9 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
             non_chat = gguf_non_chat_model_type(gguf_metadata.get("architecture"))
             if non_chat:
                 return non_chat, gguf_metadata
-            if gguf_sd_checkpoint(path, meta=meta):
-                return "diffusion-unet", gguf_metadata
+            media_type = gguf_media_component_type(path, meta=meta)
+            if media_type is not None:
+                return media_type, gguf_metadata
             return "llm", gguf_metadata
         if is_hf:
             if (path / "adapter_config.json").exists():
@@ -667,6 +662,20 @@ def _name_identity(name: str) -> str:
     return ""
 
 
+def _model_key(name: str) -> str:
+    """The GGUF file name *name* reduced to what names its model: lower-cased,
+    without ``mmproj``, its ``.gguf`` suffix, its split-part suffix, its
+    quantisation and precision tags (``_QUANT_TAG_RE``) and its separators:
+    ``"qwen3asr06b"`` for both ``mmproj-Qwen3-ASR-0.6B-Q8_0.gguf`` and
+    ``Qwen3-ASR-0.6B-Q8_0.gguf``, ``"gemma4e4bit"`` for
+    ``gemma-4-E4B-it-Q4_K_M.gguf``."""
+    text = name.lower()
+    if text.endswith(".gguf"):
+        text = text[:-5]
+    text = _SPLIT_SUFFIX_RE.sub("", text.replace("mmproj", " "))
+    return _squashed(_QUANT_TAG_RE.sub(" ", text))
+
+
 def _squashed(name: str) -> str:
     """*name* lower-cased, keeping only the characters a-z and 0-9."""
     return re.sub(r"[^a-z0-9]", "", name.lower())
@@ -757,7 +766,14 @@ def _pick_mmproj_candidate(model_name: str, names: list[str], *,
         return None
     matches = [n for n in names if token in n.lower()]
     if matches:
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) != 1:
+            return None
+        key = _model_key(matches[0])
+        # A projector named exactly for another model in the folder is that model's.
+        if key and key != _model_key(model_name) and any(
+                _model_key(other) == key for other in others):
+            return None
+        return matches[0]
     if len(names) != 1:
         return None
     lone = names[0]

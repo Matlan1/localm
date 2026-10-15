@@ -1512,6 +1512,31 @@ _COMFY_SILENT_PARTIAL_APPLY_PATTERNS = (
 )
 
 
+# A CLIP text encoder loaded without its text_projection weight: ComfyUI fills
+# it in itself and logs the key as missing.
+_BENIGN_PARTIAL_APPLY_MARKER = "clip missing:"
+
+
+def _is_benign_partial_apply_line(line: str) -> bool:
+    """True when *line* reports only ``text_projection.weight`` as a missing CLIP
+    key, with or without list brackets and quotes. A plain scan, linear in the
+    line's length."""
+    i = line.find(_BENIGN_PARTIAL_APPLY_MARKER)
+    if i < 0:
+        return False
+    rest = line[i + len(_BENIGN_PARTIAL_APPLY_MARKER):].strip()
+    if rest.startswith("["):
+        rest = rest[1:]
+    if rest.endswith("]"):
+        rest = rest[:-1]
+    rest = rest.strip()
+    if rest.startswith("'"):
+        rest = rest[1:]
+    if rest.endswith("'"):
+        rest = rest[:-1]
+    return rest == "text_projection.weight"
+
+
 def comfy_launch_log_path(api_url: str) -> Path:
     """Where ensure_comfy redirects a self-launched ComfyUI's stdout+stderr
     (see the launch block below), scoped to *api_url*.
@@ -1614,7 +1639,8 @@ def comfy_console_warnings_since(api_url: str,
             new_bytes = f.read()
     except OSError:
         return False, []
-    lines = new_bytes.decode("utf-8", errors="replace").splitlines()
+    lines = [line for line in new_bytes.decode("utf-8", errors="replace").splitlines()
+             if not _is_benign_partial_apply_line(line)]
     matches = []
     for substring, label in _COMFY_SILENT_PARTIAL_APPLY_PATTERNS:
         # Per-line, not a whole-buffer substring count: a pattern must occur

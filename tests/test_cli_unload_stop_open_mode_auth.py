@@ -58,6 +58,21 @@ def _resp(status_code, body=None):
 
 
 # --------------------------------------------------------------------------- #
+#  unload: what the server answered (mocked requests.post)                    #
+# --------------------------------------------------------------------------- #
+
+def test_an_unload_the_server_refused_as_in_use_is_not_reported_as_done(monkeypatch):
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(instances, "find_attachable", lambda *a, **k: _entry(token="t"))
+    reply = {"status": "in_use", "model": "qwen3-reranker", "vram_freed": 0}
+    with patch("requests.post", return_value=_resp(200, reply)), \
+         patch("localm.tls.requests_verify", return_value=True):
+        res = CliRunner().invoke(main, ["unload", "qwen3-reranker"])
+    assert res.exit_code == 1, res.output
+    assert "in use" in res.output and "unloaded:" not in res.output.lower(), res.output
+
+
+# --------------------------------------------------------------------------- #
 #  unload: credential selection (mocked requests.post)                        #
 # --------------------------------------------------------------------------- #
 

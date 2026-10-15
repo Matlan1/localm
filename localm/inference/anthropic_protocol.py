@@ -194,17 +194,26 @@ def _blocks(content: Any, where: str) -> list[dict[str, Any]]:
 def messages_to_openai(system: Any, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The Messages conversation as OpenAI chat messages: ``tool_result`` blocks
     become ``tool`` messages (before the rest of their user turn), ``tool_use``
-    blocks become the assistant's ``tool_calls``, and thinking blocks from
-    earlier turns are dropped."""
+    blocks become the assistant's ``tool_calls``, thinking blocks from earlier
+    turns are dropped, and the text of a ``system`` entry inside *messages* is
+    appended, in order, to the leading system prompt (only text blocks are
+    accepted there)."""
     out: list[dict[str, Any]] = []
-    sys_text = _system_text(system)
+    sys_parts = [_system_text(system)]
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "system":
+            sys_parts.append(_system_text(_blocks(msg.get("content"), f"messages[{i}]")))
+    sys_text = "\n\n".join(p for p in sys_parts if p)
     if sys_text:
         out.append({"role": "system", "content": sys_text})
     for i, msg in enumerate(messages):
         where = f"messages[{i}]"
         role = msg.get("role")
+        if role == "system":
+            continue
         if role not in ("user", "assistant"):
-            raise AnthropicError(400, f"{where}.role must be 'user' or 'assistant'")
+            raise AnthropicError(
+                400, f"{where}.role must be 'user', 'assistant' or 'system'")
         parts: list[dict[str, Any]] = []
         calls: list[dict[str, Any]] = []
         for j, block in enumerate(_blocks(msg.get("content"), where)):
