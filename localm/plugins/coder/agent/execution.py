@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING, Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    console, print_progress_tool_call, print_tool_call, print_tool_error,
+    ActivitySpinner, console, consume_confirm_always, consume_reject_reason,
+    print_info, print_progress_tool_call, print_tool_call, print_tool_error,
     print_tool_result, tool_call_text,
 )
 from ..diffutil import (
@@ -584,6 +585,9 @@ class _ExecutionMixin:
                                           agent=self._confirm_agent_label())
             elif interactive:
                 approved = self._confirm_tool(call)
+                if approved and consume_confirm_always():
+                    self.auto_approve = True
+                    print_info("  ✓ Auto-approve enabled for the rest of this session.")
             else:
                 # Fail CLOSED: this tool requires confirmation and there is no way
                 # to obtain it (non-interactive run, no approval handler), so deny
@@ -615,11 +619,16 @@ class _ExecutionMixin:
                            summary="denied: confirmation required, none available")
                 return result
             if not approved:
-                result = ToolResult.error("Rejected by user.")
+                reject_reason = consume_reject_reason() if interactive else ""
+                err_msg = (
+                    f"Rejected by user: {reject_reason}"
+                    if reject_reason else "Rejected by user."
+                )
+                result = ToolResult.error(err_msg)
                 if interactive:
                     print_tool_result(call.name, result, verbose=False)
                 self._emit("tool_result", tool=call.name, ok=False,
-                           summary="rejected by user")
+                           summary=err_msg.lower())
                 return result
 
         # Snapshot file content before undoable writes so /undo can restore it and
@@ -695,7 +704,11 @@ class _ExecutionMixin:
         # how long the tool took - the number the GUI shows next to the card.
         t_start = time.monotonic()
         try:
-            result = tool_def.fn(self.cwd, **args)
+            if interactive and call.name not in _PARENT_AGENT_TOOLS:
+                with ActivitySpinner(f"Running {call.name}..."):
+                    result = tool_def.fn(self.cwd, **args)
+            else:
+                result = tool_def.fn(self.cwd, **args)
         except TypeError as e:
             result = ToolResult.error(f"Bad arguments for {call.name}: {e}")
         except Exception as e:
@@ -712,7 +725,10 @@ class _ExecutionMixin:
 
         self._audit.tool_result(call.name, result.ok, result.summary)
         if interactive:
-            print_tool_result(call.name, result, verbose=self.verbose)
+            print_tool_result(
+                call.name, result, verbose=self.verbose,
+                elapsed=duration_s, args=call.args,
+            )
         self._emit("tool_result", tool=call.name, ok=result.ok,
                    summary=result.summary, output=result.output[:4000],
                    duration_s=duration_s)

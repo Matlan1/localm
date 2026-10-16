@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    console, print_assistant_response, print_info, print_success,
-    print_tool_call, print_tool_error, print_tool_result, print_turn_divider,
-    safe_markup,
+    ActivitySpinner, console, print_assistant_response, print_info,
+    print_success, print_task_footer, print_tool_call, print_tool_error,
+    print_tool_result, print_turn_divider, safe_markup,
 )
 from ..parser import looks_like_tool_attempt, split_response, strip_orphan_closers
 from ..tools import ToolResult
@@ -387,13 +387,9 @@ class _LoopMixin:
                              verify_retries=0, verify_settled=False,
                              verify_checked_at=self._write_total(),
                              partial_notice_count=0, partial_notice_cap_announced=False,
-                             # Zero-tool-call escalation: how many rungs of the
-                             # ladder this task has used, and whether the model
-                             # has produced any call yet.
                              nocall_escalation=0, nocall_declined=False, tool_calls_made=0,
                              writes_at_start=self._write_total(),
-                             # The one-shot re-prompt for code that is not in
-                             # the file the reply names (unfounded_code).
+                             start_turns=start_turns,
                              unfounded_checked=False)
 
         try:
@@ -548,9 +544,9 @@ class _LoopMixin:
                 # the model can produce a CALL at all, not whether it succeeded.
                 st.tool_calls_made += len(calls)
 
-                # Show the non-tool-call text parts first
+                # Show the non-tool-call text parts when not already streamed
                 segments = split_response(response, calls)
-                if interactive:
+                if interactive and not getattr(self, "_streamed_to_terminal", False):
                     for seg in segments:
                         if isinstance(seg, str) and seg.strip():
                             console.print(safe_markup(seg.strip()))
@@ -880,7 +876,22 @@ class _LoopMixin:
         footer = self._grounding_footer()
         sensitive = self._sensitive_changes_notice()
         final_text = response + enforcement + unverified + (footer or "") + sensitive
-        if not interactive and self.on_event is None:
+        if interactive and self.on_event is None:
+            print_warning = _agent.print_warning
+            if enforcement.strip():
+                print_warning(enforcement.strip())
+            if unverified.strip():
+                print_warning(unverified.strip())
+            if sensitive.strip():
+                print_warning(sensitive.strip())
+            if st.tool_calls_made > 0:
+                print_task_footer(
+                    turns_used=max(1, self._turns - getattr(st, "start_turns", self._turns - 1)),
+                    files_changed=[c["path"] for c in self.changed_files()],
+                    verify_status=self._last_verify_state,
+                    ctx_ratio=self._fill_ratio(),
+                )
+        elif not interactive and self.on_event is None:
             print_assistant_response(final_text, name=self.name)
         self._add_assistant(response)
         return (True, final_text)
@@ -1083,7 +1094,11 @@ class _LoopMixin:
         except Exception as e:
             from localm.debuglog import logger
             logger.debug("sensitive-changes reviewer note skipped: %r", e)   # See test_classify_sensitive_changes_tolerates_malformed_entries.
-        result = self._reviewer.review(diff, self._review_task, sensitive_note=sensitive_note)
+        if getattr(self, "_interactive", False):
+            with ActivitySpinner("Running pre-done code review..."):
+                result = self._reviewer.review(diff, self._review_task, sensitive_note=sensitive_note)
+        else:
+            result = self._reviewer.review(diff, self._review_task, sensitive_note=sensitive_note)
         warning = self._reviewer.failure_warning(result)
         if warning:
             print_warning(warning)
@@ -1134,7 +1149,10 @@ class _LoopMixin:
         self._emit("info", text=f"verification: running `{label}`")
         if interactive:
             print_info(f"(verification: running `{label}`)")
-        outcome = _verify.run_verify(cmd, self.cwd)
+            with ActivitySpinner(f"Verifying with `{label}`..."):
+                outcome = _verify.run_verify(cmd, self.cwd)
+        else:
+            outcome = _verify.run_verify(cmd, self.cwd)
         code, output = outcome
         # Whether the command STARTED is carried on the outcome, never inferred
         # from the exit code.
@@ -1351,6 +1369,11 @@ class _LoopMixin:
                     pool.submit(self._execute_tool, call, False): (i, call)
                     for i, call in enumerate(group)
                 }
+                batch_spinner = ActivitySpinner(
+                    f"Running {len(group)} tools in parallel..."
+                )
+                if interactive:
+                    batch_spinner.start()
                 try:
                     for fut in as_completed(futures,
                                             timeout=self._PARALLEL_BATCH_TIMEOUT_S):
@@ -1359,12 +1382,19 @@ class _LoopMixin:
                             result = fut.result()
                         except Exception as exc:
                             result = ToolResult.error(f"Parallel execution error: {exc}")
-                        # Print results in original order when interactive
                         ordered[i] = self._result_block(call, result)
                         if interactive:
+                            batch_spinner.stop()
                             print_tool_call(call.name, call.args)
-                            print_tool_result(call.name, result, verbose=self.verbose)
+                            print_tool_result(
+                                call.name, result, verbose=self.verbose, args=call.args
+                            )
+                            rem = len(group) - len(ordered)
+                            if rem > 0:
+                                batch_spinner.start(f"Running {rem} remaining tool(s)...")
                 except TimeoutError:
+                    if interactive:
+                        batch_spinner.stop()
                     for fut, (i, call) in futures.items():
                         if i not in ordered:
                             fut.cancel()
@@ -1382,6 +1412,8 @@ class _LoopMixin:
                             if interactive:
                                 print_tool_error(call.name, result.output)
                 finally:
+                    if interactive:
+                        batch_spinner.stop()
                     pool.shutdown(wait=False)
                 for i in range(len(group)):
                     result_blocks.append(ordered[i])
