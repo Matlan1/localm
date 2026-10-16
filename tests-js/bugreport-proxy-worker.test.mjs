@@ -118,3 +118,53 @@ test("non-error routing is untouched", async () => {
     new Request("https://proxy.example/update", { method: "GET" }), SECRET_ENV);
   assert.equal(unauth.status, 401, "a wrong/absent secret still 401s first");
 });
+
+const FIXTURE = join(dirname(fileURLToPath(import.meta.url)),
+  "..", "tests", "fixtures", "bugreport_contract", "automatic_report.md");
+const REPORT_ENV = { GITHUB_TOKEN: "g", TARGET_REPO: "a/b" };
+
+// POST a report to the Worker with GitHub stubbed; returns the response, its JSON
+// body, and every request the Worker sent upstream.
+async function postReport(worker, payload) {
+  const realFetch = globalThis.fetch;
+  const upstream = [];
+  globalThis.fetch = async (u, init) => {
+    upstream.push({ url: String(u), body: init && init.body ? JSON.parse(init.body) : null });
+    return new Response(JSON.stringify({ html_url: "https://github.com/a/b/issues/1", number: 1 }),
+      { status: 201, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const res = await worker.fetch(new Request("https://proxy.example/", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload) }), REPORT_ENV);
+    return { res, body: await res.json(), upstream };
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+test("a body without the report's sections is still filed, flagged in the note", async () => {
+  const worker = await loadWorker();
+  for (const payload of [{ title: "%n", body: "%s%s%s" }, { title: "A".repeat(128), body: "name" }]) {
+    const { res, upstream } = await postReport(worker, payload);
+    assert.equal(res.status, 201, "a report is never refused for its shape");
+    assert.equal(upstream.length, 1);
+    const filed = upstream[0].body.body;
+    assert.ok(filed.startsWith("> Filed through the localm bug reporter on behalf of a user."), filed.slice(0, 120));
+    assert.match(filed, /does not have the sections a report built by localm contains/);
+    assert.ok(filed.endsWith(payload.body));
+  }
+});
+
+test("a report built by localm is filed, prefixed with the reporter note", async () => {
+  const worker = await loadWorker();
+  const report = readFileSync(FIXTURE, "utf8");
+  const { res, body, upstream } = await postReport(worker, { title: "localm bug report", body: report });
+  assert.equal(res.status, 201);
+  assert.equal(body.number, 1);
+  assert.equal(upstream.length, 1);
+  const filed = upstream[0].body.body;
+  assert.ok(filed.startsWith("> Filed through the localm bug reporter on behalf of a user."), filed.slice(0, 120));
+  assert.ok(filed.endsWith(report), "the report follows the note unchanged");
+  assert.doesNotMatch(filed, /does not have the sections/, "a real report is not flagged");
+});
