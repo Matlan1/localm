@@ -6,18 +6,25 @@ and message assembly. Mixed into Agent."""
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    print_assistant_label, print_info, print_reasoning_token, print_status,
-    print_streaming_done, print_streaming_token, print_thinking,
+    ActivitySpinner, console, print_assistant_label, print_info,
+    print_reasoning_token, print_status, print_streaming_done,
+    print_streaming_token, print_thinking,
 )
 from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body
 from .constants import _COMPACT_AUTO_RATIO, _COMPACT_WARN_RATIO, _DEFAULT_CTX_TOKENS
 from localm.textguard import compose, slice_guarded
 
 _JSON_WS = " \t\r\n"
+
+_TOOL_NAME_PROGRESS_RE = re.compile(r'"name"\s*:\s*"([A-Za-z0-9_]+)"')
+_TOOL_TARGET_PROGRESS_RE = re.compile(
+    r'"(?:path|command|pattern|url|task)"\s*:\s*"([^"\\]{1,48})'
+)
 
 
 class _TerminalReply:
@@ -30,25 +37,59 @@ class _TerminalReply:
         self._name = name
         self._labelled = False
         self._last_status = None
+        self._in_reasoning = False
+        self._reasoning_ended_nl = False
+        self._at_line_start = True
+        self.printed_tokens = False
+        self._spinner = ActivitySpinner("Thinking...")
+        self._spinner.start()
 
     def _label(self) -> None:
         if not self._labelled:
+            self._spinner.stop()
             self._labelled = True
             print_assistant_label(self._name)
+            self._at_line_start = False
 
     def status(self, text: str, code=None) -> None:
         if self._labelled or not text or text == self._last_status:
             return
         self._last_status = text
+        self._spinner.stop()
         print_status(text)
+        self._spinner.start(text)
 
     def token(self, piece: str) -> None:
+        self._spinner.stop()
+        if self._in_reasoning:
+            self._in_reasoning = False
+            if not self._reasoning_ended_nl and not piece.startswith("\n"):
+                console.print()
         self._label()
+        self.printed_tokens = True
         print_streaming_token(piece)
+        if piece:
+            self._at_line_start = piece.endswith("\n")
 
     def reasoning(self, piece: str) -> None:
+        self._spinner.stop()
         self._label()
+        self._in_reasoning = True
+        if piece:
+            self._reasoning_ended_nl = piece.endswith("\n")
+            self._at_line_start = self._reasoning_ended_nl
         print_reasoning_token(piece)
+
+    def tool_progress(self, label: str, detail: str = "") -> None:
+        if not self._at_line_start:
+            console.print()
+            self._at_line_start = True
+        if self._spinner._thread is None or not self._spinner._thread.is_alive():
+            self._spinner.start(label)
+        self._spinner.update(label, detail)
+
+    def finish(self) -> None:
+        self._spinner.stop()
 
 
 class _ProgressLines:
@@ -515,8 +556,13 @@ ws     ::= [ \t\n\r]*
             except Exception:
                 return raw
 
-        summary, failure = summarise_in_passes(
-            groups, _pass, reply_tokens=reply_tokens, measure=measure)
+        if getattr(self, "on_event", None) is None and getattr(self, "progress_sink", None) is None:
+            with ActivitySpinner("Compacting session history..."):
+                summary, failure = summarise_in_passes(
+                    groups, _pass, reply_tokens=reply_tokens, measure=measure)
+        else:
+            summary, failure = summarise_in_passes(
+                groups, _pass, reply_tokens=reply_tokens, measure=measure)
         if summary:
             body = compose("[Session summary]\n", summary)
         else:
@@ -944,7 +990,8 @@ ws     ::= [ \t\n\r]*
         return kw
 
     def _stream_and_record(self, messages: list[dict], *, on_token, on_reasoning,
-                           on_interrupt=None, on_status=None) -> str:
+                           on_interrupt=None, on_status=None,
+                           on_tool_progress=None) -> str:
         """
         Consume backend.chat_stream, hiding tool-call blocks from *on_token*,
         routing reasoning deltas to *on_reasoning*, honouring a mid-stream stop
@@ -973,13 +1020,37 @@ ws     ::= [ \t\n\r]*
         # hider hides are exactly the set parse_tool_calls will later execute.
         tool_names = set(_agent.TOOL_REGISTRY) - self.disabled_tools
 
+        raw_stream = self.backend.chat_stream(
+            messages, on_reasoning=_capture_reasoning, **status_kw,
+            **self._llm_kwargs())
+
+        def _tapped_stream():
+            raw_seen = ""
+            for chunk in raw_stream:
+                raw_seen += chunk
+                yield chunk
+                if on_tool_progress is not None and len(raw_seen) - len(full) >= 12:
+                    pending = raw_seen[len(full):]
+                    if any(m in pending for m in ("<tool_call", "<|tool_call", "```")):
+                        m_name = _TOOL_NAME_PROGRESS_RE.search(pending)
+                        t_name = m_name.group(1) if m_name else ""
+                        if not t_name or t_name in tool_names:
+                            m_tgt = _TOOL_TARGET_PROGRESS_RE.search(pending)
+                            tgt = m_tgt.group(1) if m_tgt else ""
+                            lines = pending.count("\\n") + pending.count("\n")
+                            lbl = f"Preparing {t_name}" if t_name else "Preparing tool call"
+                            details = []
+                            if tgt:
+                                details.append(tgt)
+                            if lines >= 2:
+                                details.append(f"{lines} lines")
+                            on_tool_progress(lbl, " · ".join(details))
+
         try:
             # _llm_kwargs, not raw gen_kwargs: every dispatch branch gets the lazy
             # tool-call grammar through this shared helper.
             for piece, hidden in self._stream_hiding_tool_calls(
-                self.backend.chat_stream(
-                    messages, on_reasoning=_capture_reasoning, **status_kw,
-                    **self._llm_kwargs()),
+                _tapped_stream(),
                 tool_names=tool_names,
             ):
                 full += piece
@@ -1004,6 +1075,7 @@ ws     ::= [ \t\n\r]*
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
         from ..backends.http import CoderAuthError, CoderServerError
         first_attempt = True
+        self._streamed_to_terminal = False
         while True:
             try:
                 if self.on_event is not None:
@@ -1028,16 +1100,22 @@ ws     ::= [ \t\n\r]*
                     def _on_interrupt() -> None:
                         nonlocal interrupted
                         interrupted = True
+                        terminal.finish()
                         print_streaming_done()
                         print_info("(interrupted)")
 
-                    full = self._stream_and_record(
-                        messages,
-                        on_token=terminal.token,
-                        on_reasoning=terminal.reasoning,
-                        on_interrupt=_on_interrupt,
-                        on_status=terminal.status,
-                    )
+                    try:
+                        full = self._stream_and_record(
+                            messages,
+                            on_token=terminal.token,
+                            on_reasoning=terminal.reasoning,
+                            on_interrupt=_on_interrupt,
+                            on_status=terminal.status,
+                            on_tool_progress=terminal.tool_progress,
+                        )
+                    finally:
+                        terminal.finish()
+                        self._streamed_to_terminal = terminal.printed_tokens
                     if not interrupted:
                         print_streaming_done()
                     return full

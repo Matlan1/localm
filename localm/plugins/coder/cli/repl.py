@@ -24,12 +24,34 @@ from ..display import (
 from ..review_guard import classify_sensitive_changes, render_warning
 from .goal import _run_goal_loop
 
+import re
+import sys
+
+_AT_MENTION_RE = re.compile(
+    r"(?:^|(?<=\s))@([A-Za-z0-9_./\\-]+(?::\d+(?:-\d+)?)?)(?=\s|$|[.,;!?])"
+)
+_MAX_AT_FILE_CHARS = 24_000
+
+
+def _stdin_has_buffered_data() -> bool:
+    """Return True when interactive stdin already has buffered pasted bytes waiting."""
+    try:
+        if not getattr(sys.stdin, "isatty", lambda: False)():
+            return False
+        if os.name == "nt":
+            import msvcrt
+            return bool(msvcrt.kbhit())
+        import select
+        ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+        return bool(ready)
+    except Exception:
+        return False
+
+
 def _read_multiline() -> str:
     """
-    Read one user message, supporting backslash line continuation.
-
-    End a line with \\ to keep typing on the next line.  The backslash is
-    stripped and the lines are joined with a newline before being sent.
+    Read one user message, supporting backslash line continuation and
+    coalescing multi-line terminal pastes into a single message.
     """
     lines: list[str] = []
     first = True
@@ -44,8 +66,76 @@ def _read_multiline() -> str:
             first = False
         else:
             lines.append(line)
+            pasted = 0
+            while _stdin_has_buffered_data():
+                extra = sys.stdin.readline()
+                if not extra:
+                    break
+                lines.append(extra.rstrip("\r\n"))
+                pasted += 1
+            if pasted >= 2:
+                print_info(f"  (pasted {pasted + 1} lines)")
             break
     return "\n".join(lines)
+
+
+def _expand_at_mentions(user_input: str, cwd: Path) -> str:
+    """Attach contents of existing workspace files referenced as @path[:start-end]."""
+    if "@" not in user_input:
+        return user_input
+    from ..tools.files import _confine
+
+    attachments: list[str] = []
+    seen: set[str] = set()
+    for match in _AT_MENTION_RE.finditer(user_input):
+        spec = match.group(1)
+        if spec in seen:
+            continue
+        seen.add(spec)
+        path_part = spec
+        line_range: tuple[int, int] | None = None
+        if ":" in spec:
+            base, rng = spec.rsplit(":", 1)
+            if re.fullmatch(r"\d+(?:-\d+)?", rng):
+                path_part = base
+                if "-" in rng:
+                    s_str, e_str = rng.split("-", 1)
+                    line_range = (max(1, int(s_str)), max(1, int(e_str)))
+                else:
+                    ln = max(1, int(rng))
+                    line_range = (ln, ln)
+        try:
+            resolved = _confine(cwd, path_part)
+        except PermissionError:
+            continue
+        if not resolved.is_file():
+            continue
+        try:
+            raw = resolved.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        rel = resolved.relative_to(cwd) if resolved.is_relative_to(cwd) else resolved
+        all_lines = raw.splitlines()
+        if line_range is not None:
+            start_ln, end_ln = line_range
+            sliced = all_lines[start_ln - 1:end_ln]
+            body = "\n".join(sliced)
+            label = f"{rel}:{start_ln}-{end_ln}"
+            n_lines = len(sliced)
+        else:
+            body = raw
+            label = str(rel)
+            n_lines = len(all_lines)
+        trunc_note = ""
+        if len(body) > _MAX_AT_FILE_CHARS:
+            body = body[:_MAX_AT_FILE_CHARS] + "\n... [truncated]"
+            trunc_note = " (truncated)"
+        print_info(f"  📎 Attached {label} ({n_lines} lines{trunc_note})")
+        attachments.append(f'<attached_file path="{label}">\n{body}\n</attached_file>')
+
+    if not attachments:
+        return user_input
+    return user_input + "\n\n" + "\n\n".join(attachments)
 
 
 # Every REPL slash command, for tab completion and /help
@@ -85,16 +175,19 @@ def _setup_readline(agent: Agent) -> None:
             except Exception:
                 options = []
         else:
-            # Complete the current token as a path relative to the project
+            # Complete the current token as a path relative to the project (with or without @ prefix)
             import glob as _g
+            at_prefix = "@" if text.startswith("@") else ""
+            lookup = text[1:] if at_prefix else text
             try:
-                matches = _g.glob(str(agent.cwd / (text + "*")))
+                matches = _g.glob(str(agent.cwd / (lookup + "*")))
             except Exception:
                 matches = []
             options = []
             for m in matches[:50]:
                 rel = os.path.relpath(m, agent.cwd)
-                options.append(rel + os.sep if os.path.isdir(m) else rel)
+                suffix = os.sep if os.path.isdir(m) else ""
+                options.append(at_prefix + rel + suffix)
         try:
             return options[state]
         except IndexError:
@@ -135,7 +228,7 @@ def _warn_goal_run_sensitive_changes(agent: Agent, before: dict) -> None:
     See test_goal_run_warning_is_scoped_to_that_run_not_the_whole_session."""
     try:
         touched = [f for f in agent.changed_files()
-                  if f["writes"] > before.get(f["path"], 0)]
+                   if f["writes"] > before.get(f["path"], 0)]
         message = render_warning(classify_sensitive_changes(touched))
         if message:
             print_warning(message)
@@ -166,6 +259,8 @@ def _repl(agent: Agent) -> None:
                 break
             continue
 
+        expanded_input = _expand_at_mentions(user_input, agent.cwd)
+
         try:
             # The saved checkpoint is not cleared before the turn; the turn
             # itself clears or rewrites it. See
@@ -173,12 +268,12 @@ def _repl(agent: Agent) -> None:
             if agent.goal_cmd is not None:
                 before = {f["path"]: f["writes"] for f in agent.changed_files()}
                 try:
-                    _run_goal_loop(agent, user_input, agent.goal_cmd,
+                    _run_goal_loop(agent, expanded_input, agent.goal_cmd,
                                    agent.goal_max_iters, agent.cwd)
                 finally:
                     _warn_goal_run_sensitive_changes(agent, before)
             else:
-                agent.chat(user_input)
+                agent.chat(expanded_input)
         except KeyboardInterrupt:
             # _loop has already dealt with the checkpoint; swallow the
             # interrupt here.
