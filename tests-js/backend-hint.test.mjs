@@ -186,7 +186,7 @@ test("backendChoiceNotes: the chosen backend and an override are both named", ()
     runScript(window, `window.__r = backendChoiceNotes(${JSON.stringify(data)});`);
     return window.__r;
   };
-  assert.deepEqual(run({ installed: "vulkan", in_use: "vulkan", in_use_source: "provisioned" }), []);
+  assert.equal(run({ installed: "vulkan", in_use: "vulkan", in_use_source: "provisioned" }).length, 0);
   const choice = run({ installed: "vulkan", requested: "cuda", requested_reason: "no GPU device.",
                        in_use: "vulkan", in_use_source: "provisioned" });
   assert.equal(choice.length, 1);
