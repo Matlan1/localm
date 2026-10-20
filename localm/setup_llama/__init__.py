@@ -109,6 +109,9 @@ from localm.setup_llama.library_files import (
 from localm.setup_llama.runtime_dir import (
     _platform_key, _machine_arch, _lib_name, _BACKEND_MARKER, _record_provisioned_backend,
     _read_marker, _provisioned_backend, _provisioned_build, installed_backend,
+    _CHOICE_MARKER, _record_backend_choice, _read_backend_choice, backend_choice,
+    runtime_in_use, _backend_from_files,
+    _KEPT_ON_CLEAR,
     installed_build, installed_runtime_identity, _repo_runtime_lib, _runtime_pkg_dir,
     _install_runtime_wheel, _PRESERVED_TARGET_FILES, RuntimeInUseError, _clearable_files, _files_in_use,
     _clear_target, _clear_target_or_refuse, _exit_runtime_in_use, _PROVISION_LOCK_OWNER,
@@ -159,6 +162,9 @@ from localm.setup_llama.cli import (
 
 __all__ = [
     "_ABI_REJECT_PREFIX", "_AMD_ROCM_ASSET_TAG", "_apply_version_request",
+    "_CHOICE_MARKER", "_record_backend_choice", "_read_backend_choice", "backend_choice",
+    "runtime_in_use", "_backend_from_files",
+    "_KEPT_ON_CLEAR",
     "ArtifactError", "_ASSET_MATCH", "_auto_backend", "_BACKEND_MARKER", "BACKENDS",
     "_BLACKWELL_MIN_CAP", "_BLAS_DIRS_REQUIRING_KERNELS", "blas_kernel_problems",
     "_BLAS_LIBRARY_DIRS", "_bundle_missing_native_deps", "check_runtime_update",

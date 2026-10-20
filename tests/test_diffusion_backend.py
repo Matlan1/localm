@@ -197,6 +197,18 @@ class TestGenerateDiffusion:
         assert out == [11]
         assert llm.last_finish_reason == "stop"
 
+    def test_a_turn_end_marker_matched_by_token_id_ends_the_reply(self, monkeypatch):
+        llm, _ = _bare_llama(monkeypatch, arch="llada")
+        llm._stop_token_ids = frozenset({50})
+        llm._stop_strings = frozenset()
+        _FakeCanvas.reply = [11, 50, 13, 14]
+        try:
+            out = _run(llm, [5, 6, 7])
+        finally:
+            _FakeCanvas.reply = [11, 12, 2, 13]
+        assert out == [11]
+        assert llm.last_finish_reason == "stop"
+
     def test_request_max_tokens_cuts_a_block_rounded_reply(self, monkeypatch):
         llm, _ = _bare_llama(monkeypatch, arch="llada")
         _FakeCanvas.reply = [11, 12, 13, 14, 2]

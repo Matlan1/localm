@@ -249,6 +249,24 @@ def test_an_ordinary_relative_target_is_allowed_when_the_cwd_is_the_root(command
         refusal.message() if refusal else "")
 
 
+@pytest.mark.parametrize("command,rule", [
+    ("ls\nrm -rf /", "fs-root-wipe"),
+    ("echo ok\r\nrm -rf ~", "fs-root-wipe"),
+    ("git status\ngit reset --hard", "git-hard-reset"),
+    ("true\n\ngit push --force origin main", "git-force-push"),
+])
+def test_a_newline_separates_commands(command, rule):
+    refusal = shell_guard.classify(command, _CWD)
+    assert refusal is not None, "a command after a line break was not checked"
+    assert refusal.rule == rule
+
+
+def test_a_newline_inside_quotes_is_not_a_separator():
+    segs = shell_guard._lex("git commit -m 'line one\nrm -rf /'")
+    assert len(segs) == 1
+    assert shell_guard.classify("git commit -m 'one\nrm -rf /'", _CWD) is None
+
+
 def test_a_genuine_root_wipe_is_still_refused_when_the_cwd_is_the_root():
     assert shell_guard.classify("rm -rf *", "/") is not None
     assert shell_guard.classify("rm -rf /", "/") is not None

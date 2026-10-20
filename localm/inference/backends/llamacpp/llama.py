@@ -484,6 +484,36 @@ def model_stop_strings(tokenizer) -> frozenset:
     return _STOP_STRINGS - {"<|end|>"}
 
 
+def split_stop_strings(tokenizer, stops: frozenset,
+                       template: Optional[str]) -> tuple[frozenset, frozenset]:
+    """``(stop_token_ids, text_stops)`` for a model: each entry of *stops*
+    that tokenises (control tokens parsed) to exactly one token is matched as
+    that token id; one that does not stays a text stop only when *template*
+    (the model's chat template) contains it, or when *template* is None.
+    Never raises; a tokenizer error keeps every entry of *stops* as text.
+    See test_a_marker_written_as_prose_does_not_end_the_reply."""
+    ids: set = set()
+    text: set = set()
+    try:
+        for s in stops:
+            enc = tokenizer.encode(s, add_bos=False)
+            if len(enc) == 1:
+                ids.add(enc[0])
+            elif template is None or s in template:
+                text.add(s)
+    except Exception:
+        return frozenset(), frozenset(stops)
+    return frozenset(ids), frozenset(text)
+
+
+def _until_stop_token(tokens: Iterator[int], stop_ids: frozenset) -> Iterator[int]:
+    """*tokens* up to, not including, the first id in *stop_ids*."""
+    for t in tokens:
+        if t in stop_ids:
+            return
+        yield t
+
+
 def _extract_text(content) -> str:
     """Return the plain-text portion of a message content field; "" for None."""
     if content is None:
@@ -1768,7 +1798,9 @@ class LlamaCpp:
             self._set_up_spec_source(spec_draft_model, n_threads, verbose, spec_draft_gpu)
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
-        self._stop_strings = model_stop_strings(self._tokenizer)
+        self._stop_token_ids, self._stop_strings = split_stop_strings(
+            self._tokenizer, model_stop_strings(self._tokenizer),
+            api.llama_model_chat_template(self._model_ptr))
         if self.n_parallel > 1:
             from ._slots import LlamaSlotOps, SlotScheduler
             self._draft_source()
@@ -3015,9 +3047,10 @@ class LlamaCpp:
                 self.last_finish_reason = "error" if self._stop.is_set() else "stop"
                 return
             stops = getattr(self, "_stop_strings", _STOP_STRINGS)
+            stop_ids = getattr(self, "_stop_token_ids", frozenset())
 
             def _ends_reply(token: int) -> bool:
-                if tokenizer.is_eog(token):
+                if tokenizer.is_eog(token) or token in stop_ids:
                     return True
                 piece = tokenizer.token_to_piece_bytes(token)
                 return piece.decode("utf-8", "replace") in stops
@@ -5023,6 +5056,9 @@ class LlamaCpp:
         from localm.debuglog import debug_content_enabled, logger
         # Decode token BYTES through one UTF-8-safe stream so a character split
         # across a token boundary is reassembled, not turned into U+FFFD.
+        stop_ids = getattr(self, "_stop_token_ids", frozenset())
+        if stop_ids:
+            gen = _until_stop_token(gen, stop_ids)
         raw = _utf8_pieces(self._tokenizer.token_to_piece_bytes(t) for t in gen)
         stops = getattr(self, "_stop_strings", _STOP_STRINGS)
         if debug_content_enabled():

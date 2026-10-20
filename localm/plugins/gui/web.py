@@ -387,6 +387,13 @@ class PullRequest(BaseModel):
     model_type: str | None = None
 
 
+class PullDiscardRequest(BaseModel):
+    """Body for POST /api/models/pull/discard: the spec (and optional --name) of
+    a download whose partial data should be deleted."""
+    spec: str
+    name: str | None = None
+
+
 class PullTokenRedeemRequest(BaseModel):
     spec: str
     token: str
@@ -530,6 +537,12 @@ class FsMkdirRequest(BaseModel):
 class FsRenameRequest(BaseModel):
     path: str = ""
     new_name: str = ""
+
+
+class FsSaveTextRequest(BaseModel):
+    path: str = ""
+    name: str = ""
+    content: str = ""
 
 
 # Image types accepted from a phone share-sheet into the chat composer.

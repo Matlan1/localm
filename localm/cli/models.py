@@ -722,9 +722,15 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
 
     Models are stored in <data dir>/models/ and registered automatically.
     """
-    if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
-                       mmproj_spec=mmproj, model_type=type, store=store,
-                       dest_dir=comfy_dest_dir, register=register):
+    try:
+        ok = pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
+                        mmproj_spec=mmproj, model_type=type, store=store,
+                        dest_dir=comfy_dest_dir, register=register)
+    except KeyboardInterrupt:
+        click.echo("\nDownload stopped. What has been downloaded is kept; run the same "
+                   "command again to continue from there.", err=True)
+        sys.exit(130)
+    if not ok:
         sys.exit(1)
 
 

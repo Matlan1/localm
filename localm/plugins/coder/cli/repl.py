@@ -54,7 +54,7 @@ _SLASH_COMMANDS = (
     "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
     "/sessions", "/compact", "/memory", "/remember", "/forget", "/save",
     "/export", "/scope", "/changes", "/diff", "/bg", "/verify", "/goal",
-    "/review",
+    "/review", "/doctor",
 )
 
 
@@ -548,6 +548,17 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
             print_success(f"Session exported → {md_path}")
         except Exception as e:
             print_error(f"Export failed: {e}")
+
+    elif cmd == "doctor":
+        from rich.text import Text
+        from ..doctor import format_text, run_doctor
+        print_info("Checking the model server, context, git, verify command "
+                   "and MCP servers...")
+        checks = run_doctor(
+            agent.cwd, agent.backend, verify_cmd=agent.verify_cmd,
+            verify_off=agent.verify_cmd is None,
+            project_map=agent._project_map)
+        console.print(Text(format_text(checks)), soft_wrap=True)
 
     elif cmd == "verify":
         from ..verify import command_text, detect_verify_command

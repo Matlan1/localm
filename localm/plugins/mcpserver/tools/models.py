@@ -144,12 +144,15 @@ def build(engines: EngineCache) -> dict[str, dict]:
         spec = f"{repo}:{args['file']}" if args.get("file") else repo
 
         from localm.model_manager.pull import pull_model as _pull
+        from localm.model_manager.pull import progress_listener
+
+        from ..server import report_progress
 
         # pull_model()'s progress bars/messages print via a rich Console (a
         # module-level singleton in model_manager/_shared.py, imported by value
         # into pull.py at load time). redirect_stdout catches it regardless of
         # which Console instance is in play.
-        with _quiet_stdout():
+        with _quiet_stdout(), progress_listener(report_progress):
             try:
                 ok = _pull(spec, name=name)
             except Exception as e:
