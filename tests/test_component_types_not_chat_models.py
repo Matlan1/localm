@@ -16,7 +16,7 @@ from localm.plugins.gui.web import attach_gui
 from tests.conftest import probe_double
 from tests.test_projector_not_a_model import FakeEngine
 
-COMPONENT_TYPES = sorted(NON_CHAT_TYPES - {"mmproj"})
+COMPONENT_TYPES = ["diffusion-unet", "lora", "text-encoder", "tts", "upscaler", "vae"]
 WORDS = {
     "diffusion-unet": "an image or video checkpoint",
     "text-encoder": "a text encoder",
@@ -147,6 +147,10 @@ def test_v1_models_lists_what_v1_accepts_by_name(served):
     client, _ = served
     ids = {m["id"] for m in client.get("/v1/models").json()["data"]}
     assert ids == {"aaa-working", "emb", "unk", _name("tts")}
+
+
+def test_the_refused_and_unlisted_type_sets():
+    assert NON_CHAT_TYPES == {"mmproj", *COMPONENT_TYPES}
     assert UNLISTED_TYPES == NON_CHAT_TYPES - {"tts"}
 
 
