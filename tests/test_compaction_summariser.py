@@ -561,7 +561,8 @@ def _sse_deltas(text: str) -> list:
     return out
 
 
-def test_stream_reports_compacting_before_the_reply():
+def test_stream_reports_compacting_before_the_reply(monkeypatch):
+    monkeypatch.setattr(hs, "PREP_STATUS_GRACE_S", 30.0)
     engine = _engine("We discussed tidal locking.")
     r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": True})
     deltas = _sse_deltas(r.text)
