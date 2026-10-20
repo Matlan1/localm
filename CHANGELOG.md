@@ -19,12 +19,34 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Approval prompts in `localm coder` take more answers.** `a` allows that tool for the rest of
   the session (for a shell command, that exact command only), `f` shows the full diff, and
   `n: <reason>` tells the agent why you said no.
+- **Ctrl-C in `localm pull` stops cleanly.** What has been downloaded is kept, and the message
+  says to run the same command again to continue from there.
+
+### Changed
+
+- **Download progress and speed follow the bytes received.** The progress bar, the speed and the
+  time left now come from the data arriving, so they move steadily instead of stalling for
+  seconds and jumping; the same line appears in a terminal `localm pull`, in the GUI and as MCP
+  `pull_model` progress. A full-repository download counts the files still downloading, not only
+  the finished ones.
 
 ### Fixed
 - **`localm coder` no longer floods the terminal.** A new file shows a short preview instead of
   every line, a reply is no longer printed twice, and a failed tool shows the end of its error
   output without needing `/verbose`. Warnings at the end of a task now appear in the terminal.
 
+- **The Hugging Face token saved in Settings is used for every download.** Model pulls, projector
+  and embedding-model downloads, speech-model downloads and the model-type lookup now send it, so
+  the "unauthenticated requests to the HF Hub" warning no longer appears when a token is saved,
+  and gated models and the higher rate limits apply.
+- **An interrupted download resumes from the partial file.** A partial file written by an older
+  localm or by Hugging Face's own tools was ignored and the download started again from zero,
+  leaving the old file behind; it is now continued, and a leftover from an older upload of the
+  file is removed.
+- **The coder's shell safety check now sees every line of a multi-line command.** A dangerous
+  command on the second line of a shell command (for example `rm -rf /` or `git reset --hard`
+  after a line break) was not checked and could run. Each line is now checked like a command
+  after `;`.
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
