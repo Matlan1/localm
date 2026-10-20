@@ -171,10 +171,13 @@ def test_separators_are_the_control_user_defined_and_unknown_tokens():
         ("[INST]", guard.TOKEN_ATTR_CONTROL),
         ("<unk>", guard.TOKEN_ATTR_UNKNOWN),
         ("<|tool|>", guard.TOKEN_ATTR_USER_DEFINED),
+        ("<EOT>", guard.TOKEN_ATTR_USER_DEFINED | guard.TOKEN_ATTR_CONTROL),
         ("", guard.TOKEN_ATTR_CONTROL),
     ])
     special, untrusted = guard.read_separators(None, api)
-    assert special == ("[INST]", "<unk>", "<|tool|>")
+    assert special == ("[INST]", "<unk>", "<|tool|>", "<EOT>")
+    # llama.cpp skips a control or unknown token when parse_special is off, even
+    # one that is also user-defined, so untrusted text is not cut there.
     assert untrusted == ("<|tool|>",)
 
 

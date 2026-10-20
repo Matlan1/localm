@@ -35,6 +35,9 @@ _MAX_DURABLE_NOTES = 20     # notes carried across compactions, newest kept
 _MAX_FLUSH_NOTES = 8        # notes one flush may add
 _MAX_NOTE_CHARS = 300
 _MAX_INPUT_FITS = 4         # pre-tokenizer refusals one LLM call may cut the history for
+_TYPED_MIN_MATCH = 32       # typed text this long protects any message containing it
+_REMOVED_TYPED_MESSAGE = ("[a message from the user was removed here: it was longer than "
+                          "this model can take in one message]")
 
 _NOTE_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+")
 
@@ -1559,15 +1562,20 @@ ws     ::= [ \t\n\r]*
         typed = [t for t in self.__dict__.get("_typed_requests", []) if t]
         protected = {i for i, m in enumerate(self._messages)
                      if m.get("role") == "user"
-                     and any(str(m.get("content", "")).startswith(t)
-                             or str(m.get("content", "")).endswith(t) for t in typed)}
+                     and any(str(m.get("content", "")) == t
+                             or (len(t) >= _TYPED_MIN_MATCH and t in str(m.get("content", "")))
+                             for t in typed)}
         reserve = len(str(getattr(self, "_system_prompt", "") or ""))
         changed, offenders = fit_messages(self._messages, refusal,
                                           protected=protected, reserve=reserve)
         if not changed:
             if offenders:
+                # Replace each oversized user message in the conversation with a notice.
+                for i in offenders:
+                    self._messages[i]["content"] = _REMOVED_TYPED_MESSAGE
                 raise InputTooLongForModel(
-                    user_message_refusal(refusal) or str(e)) from e
+                    (user_message_refusal(refusal) or str(e))
+                    + " That message was removed from this conversation.") from e
             return False
         note = (f"cut {len(changed)} earlier message(s) the agent built (tool "
                 "output, file contents) to fit this model's input limit")

@@ -59,7 +59,7 @@ def _calls(agent):
 
 def test_an_oversized_tool_result_is_cut_and_the_call_retried(tmp_path):
     agent = _make_agent(tmp_path)
-    agent._last_user_request = "read the big file"
+    agent._record_typed_request("read the big file")
     agent._add_user("read the big file")
     agent._add_assistant("<tool_call>...</tool_call>")
     agent._add_user(_tool_result(80000))
@@ -78,19 +78,48 @@ def test_an_oversized_tool_result_is_cut_and_the_call_retried(tmp_path):
 def test_the_users_own_oversized_message_is_reported_not_cut(tmp_path):
     agent = _make_agent(tmp_path)
     typed = "please review: " + "word " * 20000
-    agent._last_user_request = typed
+    agent._record_typed_request(typed)
     agent._add_user(typed)
     agent.backend.chat.side_effect = [CoderServerError(_PART_REFUSAL)]
     with pytest.raises(InputTooLongForModel) as exc:
         agent._call_llm(agent._build_messages(), interactive=False)
     assert "Your message is too long for this model" in str(exc.value)
     assert "65536" in str(exc.value)
-    assert str(agent._messages[-1]["content"]) == typed
+    assert "removed from this conversation" in str(exc.value)
+    assert "message from the user was removed" in str(agent._messages[-1]["content"])
+    # The next, smaller message goes through.
+    agent._record_typed_request("now a short one")
+    agent._add_user("now a short one")
+    agent.backend.chat.side_effect = ["fine"]
+    assert agent._call_llm(agent._build_messages(), interactive=False) == "fine"
+
+
+def test_typed_text_behind_a_lessons_preamble_is_still_the_users(tmp_path):
+    agent = _make_agent(tmp_path)
+    typed = "please review: " + "word " * 20000
+    agent._record_typed_request(typed)
+    agent._add_user("## Lessons\n- something learned\n\n## Task\n" + typed + "\n[plan note]")
+    agent.backend.chat.side_effect = [CoderServerError(_PART_REFUSAL)]
+    with pytest.raises(InputTooLongForModel):
+        agent._call_llm(agent._build_messages(), interactive=False)
+    assert len(_calls(agent)) == 1
+
+
+def test_text_the_agent_sent_itself_is_not_treated_as_typed(tmp_path):
+    agent = _make_agent(tmp_path)
+    agent._record_typed_request("fix the build")
+    agent._add_user("fix the build")
+    feedback = "[verify] the check failed:\n" + ("traceback line\n" * 5000)
+    agent._last_user_request = feedback
+    agent._add_user(feedback)
+    agent.backend.chat.side_effect = [CoderServerError(_PART_REFUSAL), "ok"]
+    assert agent._call_llm(agent._build_messages(), interactive=False) == "ok"
+    assert "characters omitted" in str(_calls(agent)[1].args[0][-1]["content"])
 
 
 def test_a_local_engine_refusal_is_fitted_the_same_way(tmp_path):
     agent = _make_agent(tmp_path)
-    agent._last_user_request = "go"
+    agent._record_typed_request("go")
     agent._add_user("go")
     agent._add_user(_tool_result(70000))
     agent.backend.chat.side_effect = [
@@ -100,7 +129,7 @@ def test_a_local_engine_refusal_is_fitted_the_same_way(tmp_path):
 
 def test_a_whole_input_refusal_shrinks_the_largest_built_messages(tmp_path):
     agent = _make_agent(tmp_path)
-    agent._last_user_request = "go"
+    agent._record_typed_request("go")
     agent._add_user("go")
     for _ in range(4):
         agent._add_user(_tool_result(20000))
@@ -112,7 +141,7 @@ def test_a_whole_input_refusal_shrinks_the_largest_built_messages(tmp_path):
 
 def test_a_long_run_in_tool_output_is_elided(tmp_path):
     agent = _make_agent(tmp_path)
-    agent._last_user_request = "go"
+    agent._record_typed_request("go")
     agent._add_user("go")
     agent._add_user(_tool_result(100) + GuardedText("a" * 200))
     agent.backend.chat.side_effect = [CoderServerError(_RUN_REFUSAL), "ok"]
@@ -131,7 +160,7 @@ def test_an_unrelated_server_error_still_propagates(tmp_path):
 
 def test_fitting_is_bounded(tmp_path):
     agent = _make_agent(tmp_path)
-    agent._last_user_request = "go"
+    agent._record_typed_request("go")
     agent._add_user("go")
     agent._add_user(_tool_result(200000))
     agent.backend.chat.side_effect = CoderServerError(_RUN_REFUSAL)

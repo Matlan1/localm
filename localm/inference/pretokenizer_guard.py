@@ -315,7 +315,8 @@ def read_separators(vocab, api) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """``(with_special, without_special)``: the texts of the tokens llama.cpp's
     tokenizer cuts a text at before running the pre-tokenizer on each piece,
     when the text is tokenized with ``parse_special`` true (control, user-defined
-    and unknown tokens) and false (user-defined tokens only).
+    and unknown tokens) and false (user-defined tokens that are neither control
+    nor unknown).
 
     Both are empty when the runtime cannot report token attributes, which leaves
     :func:`check_parts` checking the whole text. Never raises."""
@@ -334,7 +335,8 @@ def read_separators(vocab, api) -> tuple[tuple[str, ...], tuple[str, ...]]:
             if not text:
                 continue
             special.append(text)
-            if attr & TOKEN_ATTR_USER_DEFINED:
+            if attr & TOKEN_ATTR_USER_DEFINED and not attr & (
+                    TOKEN_ATTR_CONTROL | TOKEN_ATTR_UNKNOWN):
                 user_defined.append(text)
         return tuple(dict.fromkeys(special)), tuple(dict.fromkeys(user_defined))
     except Exception as exc:

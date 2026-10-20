@@ -915,6 +915,14 @@ class Agent(
             self._expire_active_skill_locked()
             return self._active_skill_tools
 
+    def _record_typed_request(self, text: str) -> None:
+        """Remember *text* as typed by the user (the input fit never cuts a
+        message that holds it). Keeps the last 64."""
+        if text:
+            typed = self.__dict__.setdefault("_typed_requests", [])
+            typed.append(text)
+            del typed[:-64]
+
     @property
     def _last_user_request(self) -> str:
         """The raw text of the most recent USER request (not a mid-run nudge).
@@ -935,10 +943,6 @@ class Agent(
     @_last_user_request.setter
     def _last_user_request(self, value: str) -> None:
         self.__dict__["_last_user_request_text"] = value
-        typed = self.__dict__.setdefault("_typed_requests", [])
-        if value:
-            typed.append(value)
-            del typed[:-64]
         # getattr default: a subclass or a restored checkpoint could conceivably
         # assign this before __init__ has run its state block.
         self._user_request_seq = getattr(self, "_user_request_seq", 0) + 1

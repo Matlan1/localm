@@ -286,6 +286,8 @@ class _LoopMixin:
             self._session_title = task   # resume-listing display title
         # The raw request, before _with_episodes can prepend a lessons preamble.
         self._last_user_request = task
+        if self.parent is None:
+            self._record_typed_request(task)
         message = self._with_episodes(task)
         self._add_user_with_plan_note(compose(message, attachments) if attachments else message)
         return self._loop(interactive=False)
@@ -321,6 +323,7 @@ class _LoopMixin:
         # Recall relevant past lessons on the first turn of a session (the turn
         # that sets the session's task); later turns keep the same context.
         self._last_user_request = user_input   # raw, see run_task
+        self._record_typed_request(user_input)
         if self._episodic and not self._episode_task:
             self._episode_task = user_input
             user_input = self._with_episodes(user_input)
