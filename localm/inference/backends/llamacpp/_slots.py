@@ -119,6 +119,7 @@ class SlotStream:
         self.scorer = scorer
         self.reserve = reserve
         self.finish_reason = "stop"
+        self.timed = False
         self.cancelled = threading.Event()
         self.waiting_heard_at: Optional[float] = None
         self._scheduler = scheduler
@@ -185,6 +186,10 @@ class _Slot:
         self.room_seen: Optional[tuple[int, int]] = None  # (others' cells, capacity) at the last try
         self.order = 0                    # admission order
         self.last_used = 0.0
+        self.rate_ok = False              # the reply's decode rate is reported when it ends
+        self.rate_steps = 0               # decode steps it ran alone
+        self.rate_s = 0.0                 # their native seconds
+        self.rate_depth = 0               # the sum of their positions
 
 
 _WAIT = object()
@@ -196,16 +201,21 @@ class SlotScheduler:
     *ops* is the native seam (:class:`LlamaSlotOps` for a loaded model):
     ``lock()``, ``stopped()``, ``capacity()``, ``max_capacity()``,
     ``target_ctx(n)``, ``vram_fit(n)``, ``recreate(n, offload_kqv)``,
-    ``rightsize(need, others)``,
+    ``rightsize(need, others)``, ``note_decode(steps, seconds, depth)``,
     ``n_batch()``, ``decode(entries)``, ``sample(sampler, row)``,
     ``is_eog(tok)``, ``seq_rm(seq, p0, p1)``, ``clear_memory()``,
     ``free_sampler(sampler)``, ``stderr_scope()``, and, for a reply submitted
     with a scorer, ``score(scorer, row, tok)``.
 
+    A reply submitted with ``timed`` that ran alone for its whole decode and
+    ended without an error reports its decode steps, their native seconds
+    (*timer*) and their mean position to ``note_decode``.
+
     Not reentrant from the scheduler thread. Thread-safe otherwise."""
 
     def __init__(self, ops: Any, n_slots: int, *,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 timer: Callable[[], float] = time.perf_counter) -> None:
         if n_slots < 1:
             raise ValueError("n_slots must be at least 1")
         self._ops = ops
@@ -220,6 +230,7 @@ class SlotScheduler:
         self._dirty = True      # the KV cache may hold tokens no slot records
         self._touched = False   # a slot decoded since the last exclusive section
         self._clock = clock
+        self._timer = timer
         self._admissions = itertools.count()
         self._in_scope = False  # the scheduler thread is inside its stderr scope
         self._native: tuple[Optional[float], bool] = (None, False)
@@ -236,11 +247,13 @@ class SlotScheduler:
     def submit(self, prompt: list[int], budget: int, sampler: Any, *,
                on_status: Optional[Callable[[str], None]] = None,
                stop_requested: Optional[Callable[[], bool]] = None,
-               scorer: Any = None) -> SlotStream:
+               scorer: Any = None, timed: bool = False) -> SlotStream:
         """Queue a reply to *prompt* of at most *budget* tokens (<= 0 for no
         budget), sampled with *sampler*. With *scorer* (a
         ``LogprobScorer``) every token the stream yields is the scorer's
-        ``ScoredToken`` for it. The scheduler owns *sampler* and *scorer* once
+        ``ScoredToken`` for it. With *timed* the reply's decode rate is
+        reported to ``ops.note_decode`` (see the class docstring). The
+        scheduler owns *sampler* and *scorer* once
         this returns and frees them when the reply ends; when this raises, the
         caller still owns them. Raises RuntimeError once the scheduler is
         closed."""
@@ -252,6 +265,7 @@ class SlotScheduler:
             reserve = min(reserve, ceiling)
         stream = SlotStream(self, list(prompt), budget, sampler, reserve,
                             on_status, stop_requested, scorer)
+        stream.timed = timed
         with self._cond:
             if self._closed:
                 raise RuntimeError(UNLOADED_MESSAGE)
@@ -424,6 +438,9 @@ class SlotScheduler:
                 return True
             self._touched = True
             entries = [e for part in plan.values() for e in part[0]]
+            solo = self._solo()
+            depth = len(solo.kv) if solo is not None else 0
+            t0 = self._timer() if solo is not None else 0.0
             rc = self._decode(entries, len(entries) > len(plan))
             if rc == 0:
                 offset = 0
@@ -434,9 +451,29 @@ class SlotScheduler:
                     offset += len(part)
                 self._commit(plan)
                 self._sample(rows)
+                if solo is not None and solo.stream is not None:
+                    solo.rate_steps += 1
+                    solo.rate_s += self._timer() - t0
+                    solo.rate_depth += depth
             else:
                 self._isolate(plan, rc)
         return True
+
+    def _solo(self) -> Optional[_Slot]:
+        """The one active slot when this step decodes only its pending token
+        and the slot is timed, else None. With several active replies none of
+        them is timed from then on."""
+        active = [s for s in self._slots if s.stream is not None]
+        if len(active) > 1:
+            for slot in active:
+                slot.rate_ok = False
+            return None
+        if not active:
+            return None
+        slot = active[0]
+        if slot.pending is None or slot.room_wait or not slot.rate_ok:
+            return None
+        return slot
 
     def _decode(self, entries: list[Entry], heavy: bool) -> int:
         """``ops.decode(entries)``, recorded for :meth:`_beat`. *heavy* marks a
@@ -613,6 +650,8 @@ class SlotScheduler:
         recreate ends every active reply with its exception and re-raises."""
         from localm.debuglog import logger
         active = [s for s in self._slots if s.stream is not None]
+        for slot in active:
+            slot.rate_ok = False
         logger.info("gguf slots: growing the context to %d tokens (%d active)",
                     target, len(active))
         try:
@@ -667,6 +706,10 @@ class SlotScheduler:
         slot.room_seen = None
         slot.reserve = stream.reserve
         slot.order = next(self._admissions)
+        slot.rate_ok = stream.timed and stream.scorer is None
+        slot.rate_steps = 0
+        slot.rate_s = 0.0
+        slot.rate_depth = 0
         logger.info("gguf slots: slot %d prefill starting, %d prompt token(s), %d reused",
                     slot.seq, len(stream.prompt), keep)
 
@@ -847,6 +890,8 @@ class SlotScheduler:
         from localm.debuglog import logger
         logger.warning("gguf slots: a decode of %d sequence(s) failed (code %d); "
                        "decoding them one at a time", len(plan), rc)
+        for seq in plan:
+            self._slots[seq].rate_ok = False
         for seq, (part, row) in plan.items():
             slot = self._slots[seq]
             if slot.stream is None:
@@ -874,6 +919,10 @@ class SlotScheduler:
             return
         if drop is None:
             drop = error is not None
+        if error is None and slot.rate_ok and slot.rate_steps:
+            self._ops.note_decode(slot.rate_steps, slot.rate_s,
+                                  slot.rate_depth / slot.rate_steps)
+        slot.rate_ok = False
         if drop:
             self._drop_cache(slot)
         slot.pending = None
@@ -952,6 +1001,9 @@ class LlamaSlotOps:
         if plan is not None:
             llm._log_rightsize(*plan)
         return plan
+
+    def note_decode(self, steps: int, seconds: float, depth: float) -> None:
+        self._llm._note_decode_rate(steps, seconds, depth)
 
     def n_batch(self) -> int:
         return min(self.capacity() or BATCH_CAP, BATCH_CAP)
