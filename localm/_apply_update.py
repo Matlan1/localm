@@ -385,6 +385,8 @@ def post_swap_command(klass: str, backend: Optional[str] = None) -> Optional[lis
         # refused by _clear_target_or_refuse before anything is deleted.
         # --yes: this runs as a detached subprocess with nothing on stdin, and
         # --force reaches a click.confirm() that would otherwise hang.
+        # --keep-choice: a user's recorded choice of a backend that could not
+        # be used here survives the re-provision of the installed one.
         return [sys.executable, "-m", "localm", "setup-llama",
-                "--backend", backend or "vulkan", "--force", "--yes"]
+                "--backend", backend or "vulkan", "--force", "--yes", "--keep-choice"]
     return None

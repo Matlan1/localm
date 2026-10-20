@@ -161,18 +161,18 @@ def test_unknown_driver_capability_never_blocks_even_on_blackwell():
 # --------------------------------------------------------------------------- #
 
 def test_dialogue_blackwell_old_driver_falls_back_to_vulkan_not_cuda13(monkeypatch):
-    # No confirm should be reachable - an old driver cannot be self-assembled.
-    monkeypatch.setattr(sl.click, "confirm",
-                        lambda *a, **k: pytest.fail("must not prompt - too-old-driver is automatic"))
+    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: True)
     info = sl.NvidiaInfo(present=True, gpu_name="RTX 5090", driver_version="552.22",
                          cuda_capability="12.4", compute_capability="12.0")
-    assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("vulkan", False)
+    backend, cudart, reason = sl._cuda_setup_dialogue(info, assume_yes=False)
+    assert (backend, cudart) == ("vulkan", False)
+    assert "cuda-13" in reason
 
 
 def test_dialogue_blackwell_new_driver_offers_cuda(monkeypatch):
     info = sl.NvidiaInfo(present=True, gpu_name="RTX 5090", driver_version="571.96",
                          cuda_capability="13.4", compute_capability="12.0")
-    assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("cuda", True)
+    assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("cuda", True, None)
 
 
 def test_dialogue_prints_detected_architecture_and_line(monkeypatch, capsys):
@@ -329,11 +329,10 @@ def test_full_matrix_resolves_a_real_pair_and_never_gives_old_driver_new_line(
     assert sha is not None
 
     if not expect_driver_ok:
-        # The dialogue never hands this driver the too-new line's asset: it falls
-        # back to vulkan regardless of why driver_ok is False.
-        monkeypatch.setattr(sl.click, "confirm",
-                            lambda *a, **k: pytest.fail("must not prompt when the driver is not ok"))
-        assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("vulkan", False)
+        # The dialogue never hands this driver the too-new line's asset: it
+        # offers vulkan regardless of why driver_ok is False.
+        monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: True)
+        assert sl._cuda_setup_dialogue(info, assume_yes=False)[:2] == ("vulkan", False)
 
 
 # --------------------------------------------------------------------------- #

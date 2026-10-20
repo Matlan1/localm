@@ -164,9 +164,12 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/backend", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def gui_backend():
-        """The llama.cpp runtime backend actually installed on this box, plus
-        enough hardware context for Settings to show it and, at most, offer a
-        dismissable hint - NEVER to auto-switch anything. An update must never
+        """The llama.cpp runtime backend actually installed on this box, the one
+        localm loads (``in_use``, ``in_use_source``: "provisioned", "binary_dir"
+        or "LLAMA_CPP_LIB"), the user's chosen backend when a different one is
+        installed (``requested``, ``requested_reason``), plus enough hardware
+        context for Settings to show it and, at most, offer a dismissable hint -
+        NEVER to auto-switch anything. An update must never
         silently re-provision a different backend than the one already
         running (see updater._installed_backend()); this route is purely
         informational.
@@ -184,6 +187,13 @@ def register(app: FastAPI, ctx) -> None:
                 installed = setup_llama.installed_backend()
             except Exception:
                 pass
+            choice = None
+            try:
+                choice = setup_llama.backend_choice()
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("/api/backend: the backend choice could not be read: %s", e)
+            use = setup_llama.runtime_in_use()
             vendor = recommended = None
             try:
                 det = hwdetect.detect()
@@ -192,6 +202,9 @@ def register(app: FastAPI, ctx) -> None:
             except Exception:
                 pass
             return {"installed": installed, "vendor": vendor, "recommended": recommended,
-                    "warning": _loader.last_runtime_resolution_warning()}
+                    "warning": _loader.last_runtime_resolution_warning(),
+                    "requested": choice["requested"] if choice else None,
+                    "requested_reason": choice["reason"] if choice else None,
+                    "in_use": use["backend"], "in_use_source": use["source"]}
 
         return await loop.run_in_executor(get_plugin_executor(), _read)

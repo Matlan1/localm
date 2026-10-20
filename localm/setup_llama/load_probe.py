@@ -124,6 +124,23 @@ devices = _loader.compute_devices()
 if any(kind == _loader.GGML_DEV_TYPE_GPU for _, kind in devices):
     sys.exit(0)
 sys.stdout.write(", ".join(name for name, _ in devices) or "none")
+import ctypes
+d = _loader.runtime_binary_dir()
+for p in sorted(d.glob(_loader._ggml_glob())) if d is not None else []:
+    kind = next((k for k in ("cuda", "hip", "sycl") if "ggml-" + k in p.name.lower()), None)
+    if kind is None:
+        continue
+    try:
+        ctypes.CDLL(str(p))
+    except OSError as e:
+        sys.stdout.write("\\n" + p.name + " did not load: " + str(e).splitlines()[0])
+    if kind == "cuda":
+        lib = "nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1"
+        try:
+            ctypes.CDLL(lib)
+        except OSError:
+            sys.stdout.write("\\n" + lib + " is missing: the NVIDIA driver provides it")
+    break
 sys.exit({_PROBE_NO_GPU_DEVICE})
 """
 
@@ -180,10 +197,11 @@ def _native_gpu_loads_ok() -> tuple:
     if r.returncode == 0:
         return True, ""
     if r.returncode == _PROBE_NO_GPU_DEVICE:
-        registered = (r.stdout or "").strip() or "none"
+        lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+        registered = lines[0] if lines else "none"
+        causes = "; ".join(lines[1:]) or "the GPU driver libraries may be missing"
         return False, ("the runtime loaded but registered no GPU device "
-                       f"(registered: {registered}); the NVIDIA driver libraries "
-                       "may be missing from the container")
+                       f"(registered: {registered}); {causes}")
     if r.returncode == _PROBE_ABI_MISMATCH:
         why = _informative_error_line((r.stderr or "").strip()) or "layout drift"
         return False, f"{_ABI_REJECT_PREFIX}: {why}"

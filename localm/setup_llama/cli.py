@@ -16,6 +16,7 @@ from localm.setup_llama.assets import _require_prebuilt
 from localm.setup_llama.pins import _ROCM_BUILD, _ROCM_TAG
 from localm.setup_llama.download import ArtifactError
 from localm.setup_llama.runtime_dir import (_exit_provisioning_busy, _exit_runtime_in_use,
+                                            _read_backend_choice, _record_backend_choice,
                                             _record_provisioned_backend,
                                             ProvisioningBusyError, RuntimeInUseError)
 from localm.setup_llama.versions import (_apply_version_request, _pin_note_for_backend,
@@ -74,13 +75,17 @@ BACKENDS: tuple[str, ...] = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
                    "ARM64 build. The driver check and the load "
                    "test are skipped, the runtime is recorded as not load-tested, and "
                    "the container's start check tests it on the GPU host.")
+@click.option("--keep-choice", "keep_choice", is_flag=True, hidden=True,
+              help="Re-provision without changing the recorded backend choice "
+                   "(used by 'localm update').")
 @click.option("--yes", "-y", "assume_yes", is_flag=True,
               help="Non-interactive: accept the recommended action at every prompt "
                    "(e.g. fetch the self-contained CUDA runtime). Used by the "
                    "one-click installer and for scripted setups.")
 def main(from_dir: Optional[str], backend: str, url: Optional[str],
          sha256: Optional[str], force: bool, tag: Optional[str],
-         rollback: bool, assume_yes: bool, cuda_line: Optional[str] = None) -> None:
+         rollback: bool, assume_yes: bool, cuda_line: Optional[str] = None,
+         keep_choice: bool = False) -> None:
     """Download or copy the native llama.cpp binaries into localm's own venv.
 
     The chosen backend is load-tested after provisioning. If it cannot load on
@@ -148,7 +153,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             elif url:
                 _provision_from_url(url, target, lib_name, sha256)
             else:
-                _provision_release(backend, target, sha256, assume_yes)
+                _provision_release(backend, target, sha256, assume_yes,
+                                   keep_choice=keep_choice)
 
             _refresh_install_record(target)
             _sl._verify()
@@ -203,6 +209,7 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
     _sl._bundle_missing_native_deps(target)
     _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
     _record_provisioned_backend(target, "cuda", build=used_tag)
+    _record_backend_choice(target, None)
     _record_runtime_history("cuda", used_tag)
     try:
         _sl.record_staged_cuda(target, cuda_line)
@@ -241,6 +248,10 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
                 force = True
                 console.print("[yellow]Replacing existing build...[/yellow]")
             else:
+                if want != "auto":
+                    _accept_installed_backend(target, have)
+                else:
+                    _print_pending_choice(target)
                 _sl._ensure_importable()
                 return True
         # Four distinct situations. Two of them need their own wording: the
@@ -287,6 +298,29 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
     return False
 
 
+def _accept_installed_backend(target: Path, installed: str) -> None:
+    """The user explicitly asked for the backend already installed: drop any
+    recorded choice of a different backend, and say so."""
+    rec = _read_backend_choice(target)
+    if rec and rec["requested"] != installed:
+        _record_backend_choice(target, None)
+        console.print(f"[green]Keeping {installed}.[/green] Your earlier choice "
+                      f"'{rec['requested']}' is no longer recorded.")
+
+
+def _print_pending_choice(target: Path) -> None:
+    """Say so when the recorded choice is not the installed backend."""
+    rec = _read_backend_choice(target)
+    have = _sl._provisioned_backend(target)
+    if not rec or not have or rec["requested"] == have:
+        return
+    why = f": {rec['reason']}" if rec.get("reason") else ""
+    console.print(f"[yellow]Your choice '{rec['requested']}' is not in use; {have} is"
+                  f"{why}[/yellow]")
+    console.print(f"[dim]Retry it: localm setup-llama --backend {rec['requested']} "
+                  f"--force  -  or keep {have}: localm setup-llama --backend {have}[/dim]")
+
+
 def _provision_from_dir(from_dir: str, target: Path, lib_name: str) -> None:
     """Install the libraries of a local build directory (``--from``)."""
     src = Path(from_dir)
@@ -306,6 +340,7 @@ def _provision_from_dir(from_dir: str, target: Path, lib_name: str) -> None:
     if loaded:
         console.print("[green]OK - the provided build loads on this machine.[/green]")
         _record_provisioned_backend(target, "custom")
+        _record_backend_choice(target, None)
     else:
         # The user pinned this build, so we do NOT fall back - but we must not
         # report success on a library that will not load. Exit non-zero with a
@@ -348,6 +383,7 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
     if loaded:
         console.print("[green]OK - the fetched build loads on this machine.[/green]")
         _record_provisioned_backend(target, "custom")
+        _record_backend_choice(target, None)
     else:
         # A user-pinned --url: do not fall back, but do not claim success on a
         # library that will not load. Exit non-zero with a clear reason.
@@ -369,9 +405,12 @@ def _refuse_without_prebuilt(chosen: str) -> None:
 
 
 def _provision_release(backend: str, target: Path, sha256: Optional[str],
-                       assume_yes: bool) -> None:
+                       assume_yes: bool, keep_choice: bool = False) -> None:
     """Install *backend* from its release asset, with the CUDA dialogue, the
-    load test and its fallbacks, then record the backend and build."""
+    load test and its fallbacks, then record the backend and build, and the
+    user's choice when a different backend ended up installed. *keep_choice*
+    leaves the recorded choice as it is."""
+    requested = None if backend == "auto" else backend
     chosen = _sl._auto_backend() if backend == "auto" else backend
     _refuse_without_prebuilt(chosen)
     # warn-once-then-comply: an explicit off-profile choice is the user's to
@@ -385,6 +424,7 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
     # fetch a self-contained runtime (no Toolkit) or fall back cleanly.
     with_cudart = False
     cuda_line = _CUDA_LINE
+    not_used_reason = None
     # NOT platform-gated to win32: nvidia_preflight() and _cuda_setup_dialogue()
     # are both fully platform-neutral (nvidia-smi runs on Linux too, and the
     # dialogue's text/branches reference no OS). Restricting this to win32 was
@@ -405,11 +445,17 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
         # hardware and pick a line the dialogue never actually displayed.
         info = _sl.nvidia_preflight()
         cuda_line = info.cuda_line
-        chosen, with_cudart = _sl._cuda_setup_dialogue(info, assume_yes, det)
+        chosen, with_cudart, not_used_reason = _sl._cuda_setup_dialogue(
+            info, assume_yes, det)
+        if chosen != "cuda" and not_used_reason is None:
+            requested = chosen
     _pin_note_for_backend(chosen)
+    failure: list = []
     result, used_tag = _provision_with_fallback(chosen, target, sha256,
                                                 with_cudart, assume_yes,
-                                                cuda_line)
+                                                cuda_line, failure=failure)
+    if failure and not not_used_reason:
+        not_used_reason = f"the {chosen} build could not be used here: {failure[0]}"
     # Record the build tag for EVERY backend now, not only amd-rocm. The old
     # restriction rested on "the upstream backends resolve theirs through
     # _latest_tag(), a NETWORK CALL, and recording a version is not worth
@@ -425,6 +471,36 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
     build = _sl.rocm_build(target) if result == "amd-rocm" else used_tag
     _record_provisioned_backend(target, result, build=build)
     _record_runtime_history(result, build)
+    if keep_choice:
+        if not_used_reason:
+            console.print(f"[yellow]{result} installed:[/yellow] {not_used_reason}")
+        _print_pending_choice(target)
+    else:
+        _settle_backend_choice(target, requested, result, not_used_reason)
+
+
+def _settle_backend_choice(target: Path, requested: Optional[str], result: str,
+                           reason: Optional[str]) -> None:
+    """Record or clear the user's backend choice after a provision installed
+    *result*. *requested* is the explicit backend asked for (None for auto).
+    When it differs from *result*, the choice and *reason* are recorded and the
+    user is told; otherwise any earlier record is cleared."""
+    if requested is None:
+        _record_backend_choice(target, None)
+        if reason:
+            console.print(f"[yellow]auto chose {result}:[/yellow] {reason}")
+        return
+    if requested == result:
+        _record_backend_choice(target, None)
+        return
+    _record_backend_choice(target, requested, reason)
+    console.print(f"[bold yellow]Your choice '{requested}' is kept, but '{result}' is "
+                  f"what is installed and in use now.[/bold yellow]")
+    if reason:
+        console.print(f"[yellow]Why:[/yellow] {reason}")
+    console.print(f"[dim]'localm doctor' and Settings show this until it changes. Retry "
+                  f"your choice: localm setup-llama --backend {requested} --force  -  or "
+                  f"keep {result}: localm setup-llama --backend {result}[/dim]")
 
 
 def _refresh_install_record(target: Path) -> None:
@@ -453,6 +529,22 @@ def _ensure_importable() -> None:
                           "[bold]localm doctor[/bold] will show what is missing.")
 
 
+def _warn_if_overridden() -> None:
+    """Say so when localm loads a runtime other than the one just provisioned,
+    because the binary_dir setting or LLAMA_CPP_LIB points elsewhere."""
+    use = _sl.runtime_in_use()
+    if use["source"] in (None, "provisioned"):
+        return
+    what = ("the LLAMA_CPP_LIB environment variable" if use["source"] == "LLAMA_CPP_LIB"
+            else "the binary_dir setting")
+    backend = f" ({use['backend']})" if use["backend"] else ""
+    console.print(f"[bold yellow]localm does not load this runtime:[/bold yellow] {what} "
+                  f"points at {use['dir']}{backend}, which is used instead.")
+    fix = ("unset LLAMA_CPP_LIB" if use["source"] == "LLAMA_CPP_LIB"
+           else "clear 'llama.cpp binary folder' in Settings (binary_dir in config.json)")
+    console.print(f"[dim]To use the runtime installed here, {fix}.[/dim]")
+
+
 def _verify() -> None:
     try:
         from localm.inference.backends.llamacpp._loader import runtime_binary_dir
@@ -460,6 +552,7 @@ def _verify() -> None:
         if d:
             console.print(f"[bold green]Native runtime ready[/bold green] -> {d}")
             console.print("Try it:  [bold]localm run <model>[/bold]")
+            _warn_if_overridden()
         else:
             console.print("[yellow]Binaries placed but not yet resolvable - "
                           "restart your shell so the new package is importable.[/yellow]")

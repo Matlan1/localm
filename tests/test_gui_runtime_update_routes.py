@@ -400,3 +400,55 @@ def test_rollback_refuses_when_already_running(app, runtime_dir, monkeypatch):
         r = client.post("/api/runtime/update", json={"rollback": True})
 
     assert r.status_code == 409, r.text
+
+
+# --------------------------------------------------------------------------- #
+#  The recorded backend choice                                                #
+# --------------------------------------------------------------------------- #
+
+def test_check_reports_a_recorded_choice_that_is_not_installed(app, runtime_dir):
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build=sl._PINNED_TAG)
+    sl._record_backend_choice(runtime_dir, "cuda", "the cuda build could not be used here")
+    with TestClient(app) as client:
+        body = client.get("/api/runtime/check").json()
+    assert body["backend"] == "vulkan"
+    assert body["requested"] == "cuda"
+    assert body["requested_reason"] == "the cuda build could not be used here"
+
+
+def test_check_reports_no_choice_when_the_choice_is_installed(app, runtime_dir):
+    sl._record_provisioned_backend(runtime_dir, "cuda", build=sl._PINNED_TAG)
+    sl._record_backend_choice(runtime_dir, "cuda", "stale")
+    with TestClient(app) as client:
+        body = client.get("/api/runtime/check").json()
+    assert body["requested"] is None
+    assert body["requested_reason"] is None
+
+
+def test_keep_drops_the_recorded_choice_and_touches_nothing_else(app, runtime_dir):
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b1")
+    (runtime_dir / sl._lib_name()).write_bytes(b"lib")
+    sl._record_backend_choice(runtime_dir, "cuda", "why")
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/keep")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"backend": "vulkan", "dropped": "cuda"}
+    assert not (runtime_dir / sl._CHOICE_MARKER).exists()
+    assert sl._provisioned_backend(runtime_dir) == "vulkan"
+    assert (runtime_dir / sl._lib_name()).read_bytes() == b"lib"
+
+
+def test_keep_with_nothing_installed_is_a_409(app, runtime_dir):
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/keep")
+    assert r.status_code == 409
+
+
+def test_keep_refuses_while_a_provision_holds_the_lock(app, runtime_dir):
+    sl._record_provisioned_backend(runtime_dir, "vulkan")
+    sl._record_backend_choice(runtime_dir, "cuda", "why")
+    with sl._provisioning_lock(runtime_dir):
+        with TestClient(app) as client:
+            r = client.post("/api/runtime/keep")
+    assert r.status_code == 409
+    assert sl._read_backend_choice(runtime_dir) is not None

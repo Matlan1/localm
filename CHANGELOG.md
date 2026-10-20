@@ -13,6 +13,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 
+- **A chosen llama.cpp backend is no longer replaced without your say.** Choosing CUDA in the
+  installer or in Settings could end with Vulkan installed and shown as if it were your pick. Now
+  CUDA is installed as asked; when it cannot be used (an old driver, no usable NVIDIA GPU, a
+  library that will not load, or a CUDA build that would only run on the CPU), setup says exactly
+  why and installs Vulkan only so localm keeps working. Your choice and the reason stay on record:
+  `localm doctor` and Settings show "you chose cuda, vulkan is installed", with buttons to retry
+  CUDA or keep Vulkan, and `localm update` keeps the record. An old NVIDIA driver now asks before
+  Vulkan is installed.
+- **Settings and `localm doctor` show the llama.cpp runtime that is actually loaded.** When the
+  llama.cpp binary folder setting or `LLAMA_CPP_LIB` points at another build, localm loads that
+  build instead of the one setup installed; setup, `localm doctor` and Settings now say so.
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.

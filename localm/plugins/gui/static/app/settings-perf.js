@@ -123,22 +123,53 @@ const BACKEND_HINT_DISMISSED_KEY = "localm.backendHintDismissed";
  *  Informational only - this never changes what backend is actually
  *  installed; only `localm setup-llama` (a user-run command) does that. */
 export function shouldShowBackendHint(data, dismissed) {
-  return !dismissed && !!data && data.vendor === "nvidia" && data.installed === "vulkan";
+  return !dismissed && !!data && data.vendor === "nvidia" && data.installed === "vulkan"
+    && !data.requested;
 }
 
-/** Read-only "Backend: <value>" row, plus the dismissable hint when an NVIDIA
- *  GPU is present but Vulkan (not CUDA) is what is actually installed. Never
+/** The notes under the "Backend:" row for an /api/backend payload, as an array
+ *  of strings (empty when the chosen, installed and loaded backends agree):
+ *  the runtime localm loads when an override supplies it instead of the
+ *  installed one, and the user's chosen backend when a different one is
+ *  installed. Pure, so the wording is testable without a DOM. */
+export function backendChoiceNotes(data) {
+  const notes = [];
+  if (!data) return notes;
+  if (data.in_use_source === "binary_dir" || data.in_use_source === "LLAMA_CPP_LIB") {
+    notes.push(t("settings.perf.backendOverride", {
+      backend: data.in_use || "?",
+      source: t(data.in_use_source === "binary_dir"
+        ? "settings.perf.backendOverrideBinaryDir" : "settings.perf.backendOverrideEnv"),
+      installed: data.installed || "?",
+    }));
+  }
+  if (data.requested && data.installed && data.requested !== data.installed) {
+    notes.push(data.requested_reason
+      ? t("settings.perf.backendChoice", { requested: data.requested,
+          installed: data.installed, reason: data.requested_reason })
+      : t("settings.perf.backendChoiceNoReason", { requested: data.requested,
+          installed: data.installed }));
+  }
+  return notes;
+}
+
+/** Read-only "Backend: <value>" row (the backend localm loads), the
+ *  backendChoiceNotes() line under it, plus the dismissable hint when an NVIDIA
+ *  GPU is present but Vulkan (not CUDA) is what is actually installed and no
+ *  other choice is recorded. Never
  *  auto-switches anything - localm never re-provisions a user's backend on
  *  its own (see updater._installed_backend()); this only ever informs. */
 export async function refreshBackendInfo() {
   const row = $("perf-backend-row"), valueEl = $("perf-backend-value"), hint = $("perf-backend-hint");
   const warnEl = $("perf-backend-warning");
+  const choiceEl = $("perf-backend-choice");
   if (!row || !valueEl || !hint) return;
   try {
     const r = await fetch("/api/backend", { headers: authHeaders() });
     if (!r.ok) {
       row.hidden = true; hint.hidden = true;
       if (warnEl) warnEl.hidden = true;
+      if (choiceEl) choiceEl.hidden = true;
       return;
     }
     const data = await r.json();
@@ -149,8 +180,13 @@ export async function refreshBackendInfo() {
       warnEl.textContent = data.warning || "";
       warnEl.hidden = !data.warning;
     }
-    if (!data.installed) { row.hidden = true; hint.hidden = true; return; }
-    valueEl.textContent = data.installed;
+    if (choiceEl) {
+      const notes = backendChoiceNotes(data);
+      choiceEl.textContent = notes.join(" ");
+      choiceEl.hidden = !notes.length;
+    }
+    if (!data.installed && !data.in_use) { row.hidden = true; hint.hidden = true; return; }
+    valueEl.textContent = data.in_use || data.installed;
     row.hidden = false;
     let dismissed = false;
     try { dismissed = localStorage.getItem(BACKEND_HINT_DISMISSED_KEY) === "1"; }
@@ -159,6 +195,7 @@ export async function refreshBackendInfo() {
   } catch {   // server unreachable - stay hidden, not broken
     row.hidden = true; hint.hidden = true;
     if (warnEl) warnEl.hidden = true;
+    if (choiceEl) choiceEl.hidden = true;
   }
 }
 

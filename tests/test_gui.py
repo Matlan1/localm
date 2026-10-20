@@ -1673,10 +1673,37 @@ class TestBackendEndpoint:
         """The runtime-resolution warning latches are module-level and process-
         global (no per-request reset), so a test asserting the field's DEFAULT
         must pin a clean baseline rather than trust whatever an earlier test in
-        the same process left behind."""
+        the same process left behind. Also pins "no recorded choice" and "no
+        runtime resolves", so the payload does not depend on this machine."""
+        from localm import setup_llama
         from localm.inference.backends.llamacpp import _loader
         monkeypatch.setattr(_loader, "_last_broken_runtime_warning", None, raising=False)
         monkeypatch.setattr(_loader, "_last_explicit_lib_warning", None, raising=False)
+        monkeypatch.setattr(setup_llama, "backend_choice", lambda: None)
+        monkeypatch.setattr(setup_llama, "runtime_in_use",
+                            lambda: {"dir": None, "source": None, "backend": None})
+
+    def test_reports_the_recorded_choice_and_the_loaded_runtime(self, gui_app, monkeypatch):
+        """A cuda choice that could not be used, and a binary_dir override
+        supplying the loaded runtime, both reach the payload."""
+        from localm import hwdetect, setup_llama
+        self._reset_loader_warnings(monkeypatch)
+        monkeypatch.setattr(setup_llama, "backend_choice", lambda: {
+            "requested": "cuda", "reason": "driver too old", "installed": "vulkan"})
+        monkeypatch.setattr(setup_llama, "runtime_in_use", lambda: {
+            "dir": "x", "source": "binary_dir", "backend": "hip"})
+        app, _ = gui_app
+        with patch("localm.setup_llama.installed_backend", return_value="vulkan"),              patch("localm.hwdetect.detect",
+                   return_value=hwdetect.Detection(vendors=["nvidia"])),              patch("localm.hwdetect.recommended_install_backend", return_value="cuda"):
+            with TestClient(app) as client:
+                r = client.get("/api/backend")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["requested"] == "cuda"
+        assert body["requested_reason"] == "driver too old"
+        assert body["in_use"] == "hip"
+        assert body["in_use_source"] == "binary_dir"
+        assert "dir" not in body, "the runtime path is not part of the payload"
 
     def test_reports_installed_separately_from_recommended(self, gui_app, monkeypatch):
         """The whole point of this route: "installed" and "recommended" can
@@ -1694,7 +1721,8 @@ class TestBackendEndpoint:
                 r = client.get("/api/backend")
         assert r.status_code == 200
         assert r.json() == {"installed": "amd-rocm", "vendor": "amd", "recommended": "vulkan",
-                            "warning": None}
+                            "warning": None, "requested": None,
+                            "requested_reason": None, "in_use": None, "in_use_source": None}
 
     def test_nothing_detected_reports_nulls_not_an_error(self, gui_app, monkeypatch):
         """A total detection failure (no marker, hwdetect raises) must still
@@ -1708,7 +1736,8 @@ class TestBackendEndpoint:
                 r = client.get("/api/backend")
         assert r.status_code == 200
         assert r.json() == {"installed": None, "vendor": None, "recommended": None,
-                            "warning": None}
+                            "warning": None, "requested": None,
+                            "requested_reason": None, "in_use": None, "in_use_source": None}
 
     def test_nvidia_vendor_reported_when_vulkan_installed(self, gui_app, monkeypatch):
         """The exact combination the Settings hint keys on (Part 3): an
@@ -1725,7 +1754,8 @@ class TestBackendEndpoint:
                 r = client.get("/api/backend")
         assert r.status_code == 200
         assert r.json() == {"installed": "vulkan", "vendor": "nvidia", "recommended": "cuda",
-                            "warning": None}
+                            "warning": None, "requested": None,
+                            "requested_reason": None, "in_use": None, "in_use_source": None}
 
     def test_reports_runtime_resolution_warning(self, gui_app, monkeypatch):
         """A latched _loader warning (a broken localm_llama_runtime install, or

@@ -51,6 +51,19 @@ def _lib_name() -> str:
 # library. A dotfile, like the venv's .localm-venv marker; never loaded as code.
 _BACKEND_MARKER = ".localm-backend"
 
+# The backend the user explicitly chose, written only while a DIFFERENT backend
+# is installed (the chosen one could not be used here), with the reason. JSON:
+# {"requested": "<backend>", "reason": "<text>"}. Kept across _clear_target, so a
+# re-provision of the installed fallback does not erase the user's choice.
+_CHOICE_MARKER = ".localm-backend-choice"
+
+# Backend names a choice record may carry: every explicit --backend value.
+_CHOOSABLE_BACKENDS = frozenset({"vulkan", "cuda", "sycl", "hip", "cpu", "metal",
+                                 "amd-rocm"})
+
+# Upper bound on the stored reason, in characters.
+_CHOICE_REASON_MAX = 600
+
 
 def _record_provisioned_backend(target: Path, backend: str,
                                 build: Optional[str] = None) -> None:
@@ -162,6 +175,114 @@ def installed_runtime_identity() -> list:
     return identity
 
 
+def _record_backend_choice(target: Path, requested: Optional[str],
+                           reason: Optional[str] = None) -> None:
+    """Record that the user chose *requested* and a different backend is
+    installed in *target* because of *reason*. *requested* None removes the
+    record (the installed backend is the user's choice, or no explicit choice
+    was made). Best-effort, like _record_provisioned_backend: a failed write is
+    logged at debug and leaves the previous state."""
+    path = target / _CHOICE_MARKER
+    try:
+        if not requested:
+            path.unlink(missing_ok=True)
+            return
+        why = " ".join(str(reason or "").split())[:_CHOICE_REASON_MAX] or None
+        path.write_text(json.dumps({"requested": requested, "reason": why}),
+                        encoding="utf-8")
+    except OSError as e:
+        logger.debug("could not update %s: %s", path, e)
+
+
+def _read_backend_choice(target: Path) -> Optional[dict]:
+    """The choice record in *target* as ``{"requested", "reason"}``, or None when
+    there is none or it is unreadable, not JSON, or names no known backend."""
+    try:
+        data = json.loads((target / _CHOICE_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    requested = data.get("requested")
+    if not isinstance(requested, str) or requested not in _CHOOSABLE_BACKENDS:
+        return None
+    reason = data.get("reason")
+    reason = " ".join(reason.split())[:_CHOICE_REASON_MAX] if isinstance(reason, str) else None
+    return {"requested": requested, "reason": reason or None}
+
+
+def backend_choice() -> Optional[dict]:
+    """The user's explicit backend choice when it is NOT the backend installed on
+    this box, as ``{"requested", "reason", "installed"}``; None when the installed
+    backend is the user's choice, no explicit choice is recorded, or nothing is
+    installed. *reason* says why the choice is not in use, or is None when it
+    was not recorded."""
+    target = _sl._repo_runtime_lib()
+    rec = _read_backend_choice(target)
+    if rec is None:
+        return None
+    installed = _sl._provisioned_backend(target)
+    if not installed or installed == rec["requested"]:
+        return None
+    return {**rec, "installed": installed}
+
+
+# ggml backend library name fragments, in the order a build is identified by.
+_GGML_BACKEND_FRAGMENTS = (("ggml-cuda", "cuda"), ("ggml-hip", "hip"),
+                           ("ggml-sycl", "sycl"), ("ggml-vulkan", "vulkan"),
+                           ("ggml-metal", "metal"))
+
+
+def _backend_from_files(d: Path) -> Optional[str]:
+    """The GPU backend a runtime dir ships, read from its ggml library names:
+    a GPU backend name, ``cpu`` when only CPU libraries are present, or None
+    when the dir cannot be read or holds no ggml library."""
+    try:
+        names = [p.name.lower() for p in d.iterdir() if p.is_file()]
+    except OSError:
+        return None
+    for fragment, backend in _GGML_BACKEND_FRAGMENTS:
+        if any(fragment in n for n in names):
+            return backend
+    return "cpu" if any("ggml" in n for n in names) else None
+
+
+def runtime_in_use() -> dict:
+    """The llama.cpp runtime localm loads right now, which can differ from the
+    provisioned one: ``{"dir", "source", "backend"}``.
+
+    *source* is ``"LLAMA_CPP_LIB"`` or ``"binary_dir"`` when that override
+    supplies the library, ``"provisioned"`` for the runtime setup-llama
+    installed, or None when no runtime resolves (then *dir* and *backend* are
+    None). *backend* is the provisioned marker for a provisioned or marked dir,
+    else read from the ggml library names (None when not identifiable). Never
+    raises."""
+    try:
+        from localm.inference.backends.llamacpp._loader import runtime_binary_dir
+        d = runtime_binary_dir()
+    except Exception as e:
+        logger.debug("runtime_in_use: could not resolve the runtime dir: %s", e)
+        d = None
+    if d is None:
+        return {"dir": None, "source": None, "backend": None}
+    source = "provisioned"
+    try:
+        target = _sl._repo_runtime_lib()
+        same_as_target = d.resolve() == target.resolve()
+    except OSError:
+        same_as_target = False
+    if not same_as_target:
+        explicit = os.environ.get("LLAMA_CPP_LIB")
+        explicit_dir = None
+        if explicit:
+            p = Path(explicit)
+            explicit_dir = p.parent if p.suffix else p
+        source = "LLAMA_CPP_LIB" if explicit_dir is not None and explicit_dir == d else "binary_dir"
+    marker = _sl._provisioned_backend(d)
+    backend = marker if marker not in (None, "custom") else (_backend_from_files(d) or marker)
+    return {"dir": str(d), "source": source, "backend": backend}
+
+
 def _repo_runtime_lib() -> Path:
     """The localm-llama-runtime wheel's lib/ dir."""
     try:
@@ -236,6 +357,9 @@ def _install_runtime_wheel(pkg_dir: Path) -> bool:
 # directory would stage the freshly-downloaded DLLs straight into git.
 _PRESERVED_TARGET_FILES = (".gitignore", ".gitkeep")
 
+# Files _clear_target never deletes: the git sentinels and the user's choice record.
+_KEPT_ON_CLEAR = frozenset((*_PRESERVED_TARGET_FILES, _CHOICE_MARKER))
+
 
 class RuntimeInUseError(Exception):
     """Something has the installed runtime open, so it cannot be replaced.
@@ -264,7 +388,7 @@ def _clearable_files(target: Path) -> list[Path]:
     try:
         for f in target.iterdir():
             if f.is_file():
-                if f.name in _PRESERVED_TARGET_FILES:
+                if f.name in _KEPT_ON_CLEAR:
                     continue
                 out.append(f)
             elif f.is_dir() and f.name in _BLAS_LIBRARY_DIRS:
@@ -311,7 +435,8 @@ def _clear_target(target: Path) -> list[Path]:
     a fallback to a different backend) never mixes DLLs from two builds. Only
     touches files in the dir, plus the _BLAS_LIBRARY_DIRS subdirectories
     _copy_blas_library_dirs may have created (never any OTHER subdirectory) -
-    and never _PRESERVED_TARGET_FILES, the tracked git sentinels.
+    and never _KEPT_ON_CLEAR (the tracked git sentinels and the choice
+    record).
 
     RETURNS THE FILES IT COULD NOT REMOVE, and the return value is load-bearing:
     every caller must treat a non-empty result as a failed provision. Swallowing
@@ -322,7 +447,7 @@ def _clear_target(target: Path) -> list[Path]:
     try:
         for f in target.iterdir():
             if f.is_file():
-                if f.name in _PRESERVED_TARGET_FILES:
+                if f.name in _KEPT_ON_CLEAR:
                     continue
                 try:
                     f.unlink()

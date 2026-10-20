@@ -471,3 +471,124 @@ test("Runtime: a failed rollback shows the job's reason and keeps the button", a
   assert.equal(btn.hidden, false, "the user has to be able to retry");
   assert.equal(btn.disabled, false);
 });
+
+// --------------------------------------------------------------------------- //
+//  A recorded backend choice that is not the installed backend                 //
+// --------------------------------------------------------------------------- //
+
+const CUDA_NOT_IN_USE = { ...INSTALLED_VULKAN, newer: false, current: "b10361",
+  requested: "cuda", requested_reason: "the cuda build could not be used here: no GPU device" };
+
+test("Runtime: a recorded choice that is not installed is shown with its reason", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", CUDA_NOT_IN_USE],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  const box = doc.getElementById("runtime-choice");
+  assert.equal(box.hidden, false);
+  const text = doc.getElementById("runtime-choice-text").textContent;
+  assert.match(text, /cuda/);
+  assert.match(text, /vulkan/);
+  assert.match(text, /no GPU device/);
+  assert.equal(doc.getElementById("runtime-choice-retry").textContent, "Retry cuda");
+  assert.equal(doc.getElementById("runtime-choice-keep").textContent, "Keep vulkan");
+});
+
+test("Runtime: no recorded choice keeps the choice row hidden", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", { ...INSTALLED_VULKAN, requested: null, requested_reason: null }],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  assert.equal(doc.getElementById("runtime-choice").hidden, true);
+});
+
+test("Runtime: Retry provisions the recorded choice", async () => {
+  const bodies = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", CUDA_NOT_IN_USE],
+    ["/api/runtime/update", (opts) => { bodies.push(opts.body); return { job_id: "j1" }; }],
+  ]) });
+  stubJobStream(window);
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  doc.getElementById("runtime-choice-retry").click();
+  await flush();
+  assert.deepEqual(JSON.parse(bodies[0]), { backend: "cuda" });
+});
+
+test("Runtime: Keep POSTs /api/runtime/keep and re-checks", async () => {
+  const keeps = [];
+  let checks = 0;
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", () => { checks += 1; return CUDA_NOT_IN_USE; }],
+    ["/api/runtime/keep", (opts) => { keeps.push(opts.method); return { backend: "vulkan", dropped: "cuda" }; }],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  const before = checks;
+  doc.getElementById("runtime-choice-keep").click();
+  await flush();
+  await flush();
+  assert.deepEqual(keeps, ["POST"]);
+  assert.ok(checks > before, "the card re-checks after keeping");
+});
+
+test("Runtime: a job that ends on a fallback says the choice was not used", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", CUDA_NOT_IN_USE],
+    ["/api/runtime/update", () => ({ job_id: "j1" })],
+  ]) });
+  stubJobStream(window, "done");
+  stubConfirm(window);
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  pick(doc, window, "cuda");
+  doc.getElementById("runtime-update-apply").click();
+  await flush();
+  await flush();
+  const status = doc.getElementById("runtime-update-status").textContent;
+  assert.match(status, /Your choice cuda is not in use/);
+  assert.doesNotMatch(status, /Runtime provisioned/);
+});
+
+test("Runtime: cuda on a machine with AMD graphics warns before installing", async () => {
+  const bodies = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", NOTHING_INSTALLED],
+    ["/api/backend", { installed: null, vendor: "amd", recommended: "amd-rocm" }],
+    ["/api/runtime/update", (opts) => { bodies.push(opts.body); return { job_id: "j1" }; }],
+  ]) });
+  stubJobStream(window);
+  stubConfirm(window, { accept: false });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  pick(doc, window, "cuda");
+  doc.getElementById("runtime-update-apply").click();
+  await flush();
+  await flush();
+  assert.ok(window.__confirmCall, "a vendor mismatch is confirmed first");
+  assert.match(window.__confirmCall.message, /AMD/);
+  assert.match(window.__confirmCall.message, /NVIDIA/);
+  assert.equal(bodies.length, 0, "declining sends nothing");
+});
+
+test("backendVendorMismatch: only a vendor backend on a different, known vendor", () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([]) });
+  const cases = [
+    ["cuda", "amd", true], ["cuda", "nvidia", false], ["cuda", null, false],
+    ["amd-rocm", "nvidia", true], ["hip", "amd", false], ["sycl", "amd", true],
+    ["vulkan", "amd", false], ["cpu", "nvidia", false], ["auto", "amd", false],
+  ];
+  for (const [wanted, vendor, expected] of cases) {
+    runScript(window, `window.__r = backendVendorMismatch(${JSON.stringify(wanted)}, ${JSON.stringify(vendor)});`);
+    assert.equal(window.__r, expected, `${wanted} on ${vendor}`);
+  }
+});

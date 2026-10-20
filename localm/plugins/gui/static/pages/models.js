@@ -9,7 +9,7 @@ import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
-import { refreshPerfEstimate } from "../app/settings-perf.js";
+import { refreshBackendInfo, refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Models page                                                      */
@@ -2187,6 +2187,88 @@ export function syncRuntimeApply() {
   btn.hidden = !runtimeCheckState.newer;
 }
 
+/** The runtime-card line for a /api/runtime/check payload whose recorded
+ *  choice is not the installed backend, or null when they agree. Pure. */
+export function runtimeChoiceText(d) {
+  if (!d || !d.installed || !d.requested || d.requested === d.backend) return null;
+  return d.requested_reason
+    ? t("settings.runtime.choiceNotInUse",
+        { requested: d.requested, installed: d.backend, reason: d.requested_reason })
+    : t("settings.runtime.choiceNotInUseNoReason",
+        { requested: d.requested, installed: d.backend });
+}
+
+/** Show or hide the "your choice is not in use" row and its Retry / Keep
+ *  buttons, from the last check. */
+export function syncRuntimeChoice() {
+  const box = $("runtime-choice");
+  if (!box) return;
+  const d = runtimeCheckState;
+  const text = runtimeChoiceText(d);
+  box.hidden = !text;
+  if (!text) return;
+  const textEl = $("runtime-choice-text");
+  if (textEl) textEl.textContent = text;
+  const retry = $("runtime-choice-retry"), keep = $("runtime-choice-keep");
+  if (retry) {
+    retry.textContent = t("settings.runtime.choiceRetry", { requested: d.requested });
+    retry.onclick = () => runtimeProvision(d.requested, "");
+  }
+  if (keep) {
+    keep.textContent = t("settings.runtime.choiceKeep", { installed: d.backend });
+    keep.onclick = () => runtimeKeepInstalled(d.backend);
+  }
+}
+
+/** POST /api/runtime/keep: keep the installed backend and forget the recorded
+ *  choice, then re-check. */
+export async function runtimeKeepInstalled(installed) {
+  const out = $("runtime-update-status");
+  try {
+    const r = await fetch("/api/runtime/keep", { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (out) { out.hidden = false; out.textContent = t("settings.runtime.choiceKept", { installed }); }
+  } catch (e) {
+    if (out) {
+      out.hidden = false;
+      out.textContent = t("settings.runtime.choiceKeepFailed", { installed, message: e.message });
+    }
+    return;
+  }
+  runtimeUpdateCheck();
+  refreshBackendInfo();
+}
+
+// What each vendor-specific backend needs, by detected GPU vendor.
+const BACKEND_VENDOR = { cuda: "nvidia", "amd-rocm": "amd", hip: "amd", sycl: "intel", metal: "apple" };
+const VENDOR_NAMES = { nvidia: "NVIDIA", amd: "AMD", intel: "Intel", apple: "Apple" };
+
+/** Whether installing *wanted* on a machine whose detected GPU vendor is
+ *  *vendor* needs a warning first: a vendor-specific backend for a different,
+ *  KNOWN vendor. Unknown hardware (no vendor) never warns. Pure. */
+export function backendVendorMismatch(wanted, vendor) {
+  const needs = BACKEND_VENDOR[wanted];
+  return !!(needs && vendor && vendor !== needs);
+}
+
+/** Run *proceed* after confirming a vendor mismatch, or straight away when
+ *  /api/backend shows none (or cannot be read). */
+async function confirmBackendHardware(wanted, proceed) {
+  let vendor = null;
+  try {
+    const r = await fetch("/api/backend", { headers: authHeaders() });
+    if (r.ok) vendor = (await r.json()).vendor || null;
+  } catch { /* unreadable: treated as unknown hardware */ }
+  if (!backendVendorMismatch(wanted, vendor)) { proceed(); return; }
+  confirmDanger(
+    t("settings.runtime.mismatchTitle", { wanted }),
+    t("settings.runtime.mismatchBody", {
+      wanted, vendor: VENDOR_NAMES[vendor] || vendor,
+      needs: VENDOR_NAMES[BACKEND_VENDOR[wanted]] + " graphics" }),
+    t("settings.runtime.mismatchConfirm", { wanted }), proceed);
+}
+
 export async function runtimeUpdateCheck() {
   const out = $("runtime-update-status");
   if (out) { out.hidden = false; out.textContent = t("settings.runtime.checking"); }
@@ -2210,6 +2292,7 @@ export async function runtimeUpdateCheck() {
   }
   syncRuntimeApply();
   syncRuntimeRollback();
+  syncRuntimeChoice();
 }
 
 /** Show or hide the Roll back button, from the last check's "previous" field. */
@@ -2273,7 +2356,10 @@ export async function runtimeProvision(backend, tag, rollback) {
     // The request has been carried out, so clear the selection.
     if ($("runtime-backend")) $("runtime-backend").value = "";
     if ($("runtime-tag")) $("runtime-tag").value = "";
-    runtimeUpdateCheck();   // re-checks; settles both the update and rollback buttons
+    await runtimeUpdateCheck();   // re-checks; settles the update, rollback and choice rows
+    const choice = runtimeChoiceText(runtimeCheckState);
+    if (out && choice) out.textContent = choice;
+    refreshBackendInfo();
   } else {
     syncRuntimeApply();     // failed: keep the retry affordance, correctly labelled
     syncRuntimeRollback();
@@ -2290,6 +2376,7 @@ export function runtimeUpdateApply() {
   // first install and a same-backend re-provision go straight through. "auto"
   // counts as different: it resolves from hardware detection and can land on
   // another backend.
+  const go = () => confirmBackendHardware(wanted, () => runtimeProvision(wanted, tag));
   if (installed && wanted && wanted !== installed) {
     const target = wanted === "auto"
       ? t("settings.runtime.switchTargetAuto")
@@ -2297,10 +2384,10 @@ export function runtimeUpdateApply() {
     confirmDanger(
       t("settings.runtime.switchTitle"),
       t("settings.runtime.switchBody", { installed, target }),
-      t("settings.runtime.switchConfirm"), () => runtimeProvision(wanted, tag));
+      t("settings.runtime.switchConfirm"), go);
     return;
   }
-  runtimeProvision(wanted, tag);
+  go();
 }
 /** Roll back the INSTALLED backend to its previous recorded build. Always
  *  confirms first. */

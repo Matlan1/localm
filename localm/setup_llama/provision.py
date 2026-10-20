@@ -293,9 +293,30 @@ def _sycl_backend_note() -> str:
     return "Intel oneAPI build (needs the oneAPI runtime present)"
 
 
+# Backends that only make sense on their GPU: a build that loads but registers
+# no GPU device runs on the CPU, which counts as not loading.
+_GPU_REQUIRED_BACKENDS = frozenset({"cuda", "hip", "sycl", "amd-rocm"})
+
+
+def _chosen_backend_loads(chosen: str) -> tuple:
+    """Load-test the provisioned runtime for *chosen*: :func:`_native_loads_ok`,
+    plus, for a backend in _GPU_REQUIRED_BACKENDS, a registered GPU device.
+    Returns (ok, detail)."""
+    loaded, detail = _sl._native_loads_ok()
+    if not loaded or chosen not in _GPU_REQUIRED_BACKENDS:
+        return loaded, detail
+    gpu_ok, gpu_detail = _sl._native_gpu_loads_ok()
+    if gpu_ok:
+        return True, ""
+    if _is_abi_rejection(gpu_detail):
+        return False, gpu_detail
+    return False, f"the {chosen} build loaded but cannot use the GPU: {gpu_detail}"
+
+
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                              with_cudart: bool, assume_yes: bool = False,
-                             cuda_line: str = _CUDA_LINE) -> tuple[str, Optional[str]]:
+                             cuda_line: str = _CUDA_LINE,
+                             failure: Optional[list] = None) -> tuple[str, Optional[str]]:
     """Provision *chosen* and prove it loads. If it does not load, NEVER swap the
     user's pick silently (the never-override rule): inform WHY, then OFFER the
     universal Vulkan build when interactive (or fall back with a LOUD warning when
@@ -312,6 +333,9 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
 
     *cuda_line* is the CUDA asset line to fetch when *chosen* is 'cuda' (see
     NvidiaInfo.cuda_line); irrelevant otherwise.
+
+    *failure*, when given, receives the reason *chosen* could not be used
+    whenever another backend is returned.
 
     vulkan and cpu are self-contained and treated as terminal: if the user
     explicitly chose one and it does not load, that is an environment problem we
@@ -369,9 +393,10 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         console.print(f"[red]Provisioning {chosen} failed:[/red] {e}")
         provisioned = False
 
-    loaded, detail = (_sl._native_loads_ok() if provisioned else (False, "not provisioned"))
+    loaded, detail = (_chosen_backend_loads(chosen) if provisioned
+                      else (False, "not provisioned"))
     if loaded and chosen == "amd-rocm" and _sl.install_rocm_simd_cpu(target) is None:
-        loaded, detail = _sl._native_loads_ok()
+        loaded, detail = _chosen_backend_loads(chosen)
     if loaded:
         console.print(f"[green]OK - {chosen} runtime loads on this machine.[/green]")
         return chosen, used_tag[0]
@@ -419,6 +444,8 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     if chosen in ("vulkan", "cpu"):
         return _universal_backend_failed(chosen, with_cudart, assume_yes, provisioned,
                                          detail, _try, used_tag)
+    if failure is not None:
+        failure.append(detail or "it did not load")
     return _fall_back_to_universal(chosen, detail, assume_yes, _try, used_tag)
 
 
@@ -521,7 +548,9 @@ def _fall_back_to_universal(chosen: str, detail: str, assume_yes: bool, try_fn,
                           f"localm setup-llama --backend {chosen} --force")
             sys.exit(1)
     else:
-        console.print("[yellow][!] Non-interactive: falling back to universal build.[/yellow]")
+        console.print(f"[yellow][!] Non-interactive: installing the universal build so "
+                      f"localm works; your '{chosen}' choice is kept and shown until it "
+                      f"can be used.[/yellow]")
     for fb in ("vulkan", "cpu"):
         console.print(f"[yellow]Trying {fb}...[/yellow]")
         try:
