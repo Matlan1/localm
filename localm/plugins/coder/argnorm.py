@@ -22,15 +22,24 @@ def _params(tool_def) -> dict:
     return params if isinstance(params, dict) else {}
 
 
-def normalize_args(tool_def, args: dict) -> tuple[dict, list[tuple[str, str]]]:
+def normalize_args(tool_def, args: dict,
+                   beside: Optional[dict] = None) -> tuple[dict, list[tuple[str, str]]]:
     """``(args, renamed)``: *args* with each alias renamed to the canonical name
     the tool declares, and the ``(alias, canonical)`` pairs that were renamed.
 
     An alias is renamed only when the tool declares the canonical name, does not
     declare the alias itself, and the call does not already carry the canonical
-    name. *args* is not modified."""
+    name. *beside* holds keys the call object carried next to its args; each one
+    the tool declares (directly or through an alias) and the args lack is added,
+    and the rest are dropped. Neither input is modified."""
     params = _params(tool_def)
     out = dict(args)
+    for key, value in (beside or {}).items():
+        canonical = key if key in params else next(
+            (c for c, aliases in _ALIASES.items()
+             if key in aliases and c in params), None)
+        if canonical is not None and canonical not in out:
+            out[canonical] = value
     renamed: list[tuple[str, str]] = []
     for canonical, aliases in _ALIASES.items():
         if canonical not in params or canonical in out:

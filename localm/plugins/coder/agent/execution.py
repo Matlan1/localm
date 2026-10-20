@@ -423,7 +423,8 @@ class _ExecutionMixin:
         # Rename argument aliases (old_str -> old, file_path -> path) to the
         # tool's own names.
         from ..argnorm import bad_args_message, normalize_args
-        call.args, _renamed = normalize_args(tool_def, call.args or {})
+        beside = call.beside if isinstance(call, ToolCall) else None
+        call.args, _renamed = normalize_args(tool_def, call.args or {}, beside)
 
         self._audit.tool_call(call.name, call.args)
         if interactive:

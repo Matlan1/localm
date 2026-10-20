@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -66,6 +66,9 @@ class ToolCall:
     # dialects like <|tool_call>. execution.py's confirmation gate keys on
     # this flag.
     lenient: bool = False
+    # Keys the call object carried beside its args instead of inside them.
+    # argnorm.normalize_args uses the ones the tool declares.
+    beside: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -295,11 +298,6 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
         # unhashable one would raise TypeError at the set/dict lookups downstream.
         if not isinstance(name, str) or not isinstance(args, dict):
             return None
-        # Keys written beside "args" instead of inside it are arguments too; a
-        # key present in both keeps the value from "args".
-        extra = {k: v for k, v in obj.items() if k not in _CALL_ENVELOPE_KEYS}
-        if extra:
-            args = {**extra, **args}
         return name, args
 
     # Args-only format: {"path": "..."} - requires name_attr
@@ -307,6 +305,16 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
         return name_attr, obj
 
     return None
+
+
+def _beside_args(body: str) -> dict:
+    """The keys of a full call object in *body* written beside its ``args``
+    (or ``arguments`` / ``parameters``) instead of inside it; ``{}`` for any
+    other body."""
+    obj = _lenient_json(body.strip())
+    if not isinstance(obj, dict) or "name" not in obj:
+        return {}
+    return {k: v for k, v in obj.items() if k not in _CALL_ENVELOPE_KEYS}
 
 
 def _pair_delimited(text: str, opener_re, closer_re, min_body: int = 1):
@@ -626,9 +634,10 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
         return any(s < end and e > start for s, e in seen_spans)
 
     def _accept(name: str, args: dict, raw: str, start: int, end: int,
-                lenient: bool = False) -> None:
+                lenient: bool = False, body: str = "") -> None:
         calls.append(ToolCall(name=name, args=args, raw=raw, start=start,
-                               end=end, lenient=lenient))
+                               end=end, lenient=lenient,
+                               beside=_beside_args(body) if body else {}))
         seen_spans.append((start, end))
 
     # 1. Canonical XML wrapper
@@ -637,7 +646,7 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
             continue
         parsed = _try_parse_body(body, name_attr)
         if parsed is not None:
-            _accept(parsed[0], parsed[1], text[start:end], start, end)
+            _accept(parsed[0], parsed[1], text[start:end], start, end, body=body)
 
     # Name-gated calls (a ```json / bare ``` fence, or a bare object) with
     # whether each body is an exact call object; resolved after pass 4.
@@ -654,7 +663,7 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
         explicit = (lang or "").lower() in _EXPLICIT_FENCE_LANGS
         if explicit or (tool_names is not None and parsed[0] in tool_names):
             _accept(parsed[0], parsed[1], text[start:end], start, end,
-                    lenient=not explicit)
+                    lenient=not explicit, body=body)
             if not explicit:
                 gated.append((calls[-1], _exact_call_object(body) is not None))
 
@@ -676,7 +685,7 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
             args = _parse_gemma_args(body)
             parsed = (prefix_name, args) if args is not None else None
         if parsed is not None:
-            _accept(parsed[0], parsed[1], text[start:end], start, end)
+            _accept(parsed[0], parsed[1], text[start:end], start, end, body=body)
 
     # 3b. Mistral [TOOL_CALLS] token followed by a JSON list or object. The
     #     calls after the first sit at the end of the wrapper with no span.
@@ -694,7 +703,8 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
                 continue
             parsed = _try_parse_body(chunk, None)
             if parsed is not None and parsed[0] in tool_names:
-                _accept(parsed[0], parsed[1], chunk, start, end, lenient=True)
+                _accept(parsed[0], parsed[1], chunk, start, end, lenient=True,
+                        body=chunk)
                 gated.append((calls[-1], _exact_call_object(chunk) is not None))
 
     # A name-gated call is trusted only when every name-gated call in the

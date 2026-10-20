@@ -252,13 +252,33 @@ _SHELL_FENCE_LANGS = frozenset({
     "pwsh", "cmd", "bat", "batch", "text", "txt", "plaintext", "output", "log",
 })
 _FILE_CODE_MIN_LINES = 4
+# Verbs of a step a tool would carry out.
+_STEP_VERBS = (
+    "run|rerun|re-run|execute|test|check|verify|create|write|rewrite|add|update|"
+    "modify|edit|change|fix|implement|read|open|inspect|search|grep|install|apply|"
+    "build|refactor|remove|delete|rename|move|commit|launch|compile|configure|"
+    "generate|replace|patch|insert|call")
 # A last line that announces a step instead of reporting one.
 _RE_ANNOUNCED_STEP = re.compile(
     r"^(?:(?:now|next|then|ok|okay|great|alright|first|finally)[,.!]?\s+)*"
     r"(?:let\s+me|let'?s|let\s+us|i'?ll|i\s+will|i'?m\s+going\s+to"
     r"|i\s+am\s+going\s+to|we'?ll|we\s+will)\s+"
-    r"(?!(?:know|be|leave|stop|wait|hear|keep\s+an\s+eye)\b)\w",
+    r"(?:(?:now|also|quickly|just|first|then|go\s+ahead\s+and)\s+)*"
+    r"(?:" + _STEP_VERBS + r")\b",
     re.IGNORECASE)
+# Words of a request that asks for the project to change.
+_RE_CHANGE_REQUEST = re.compile(
+    r"\b(?:implement|write|create|add|build|make|fix|change|update|modify|edit|"
+    r"refactor|rewrite|generate|code|develop|extend|replace|insert|apply|port|"
+    r"convert|finish|complete)(?:s|es|ed|d|ing)?\b",
+    re.IGNORECASE)
+
+
+def _may_write_files(tool_name: str) -> bool:
+    """True for a tool that can change files without the write tracker seeing
+    it: a shell command, search_replace, or an MCP or plugin tool."""
+    return (tool_name in ("run_shell", "run_shell_background", "search_replace")
+            or tool_name.startswith(("mcp_", "plugin_")))
 
 
 def _has_file_code_block(text: str) -> bool:
@@ -333,6 +353,7 @@ class _LoopMixin:
         def disabled_tools(self) -> frozenset: ...
 
         max_turns: int
+        patch_mode: bool
         _audit: Any
 
         def _add_user(self, content) -> None: ...
@@ -494,6 +515,7 @@ class _LoopMixin:
                              partial_notice_count=0, partial_notice_cap_announced=False,
                              nocall_escalation=0, nocall_declined=False, tool_calls_made=0,
                              nocall_response="", code_nudged=False, announce_nudged=False,
+                             called_tools=set(), announced_step="",
                              writes_at_start=self._write_total(),
                              files_at_start={f["path"]: f["writes"]
                                              for f in self.changed_files()},
@@ -652,6 +674,7 @@ class _LoopMixin:
                 # Recorded before execution: the escalation ladder asks whether
                 # the model can produce a CALL at all, not whether it succeeded.
                 st.tool_calls_made += len(calls)
+                st.called_tools.update(c.name for c in calls)
 
                 # Show the non-tool-call text parts when not already streamed
                 segments = split_response(response, parsed_calls)
@@ -906,13 +929,13 @@ class _LoopMixin:
         # request that needs a tool. Every branch above is reached only via
         # looks_like_tool_attempt().
         request = getattr(self, "_last_user_request", "") or ""
-        offered = st.nocall_escalation >= 1 or st.code_nudged or st.announce_nudged
+        offered = st.nocall_escalation >= 1 or st.code_nudged
         declined = _RE_NO_TOOL_NEEDED.match(response) if offered else None
         if declined is not None and not response[declined.end():].strip():
             # The marker with no answer after it: an imperative request keeps
             # climbing the ladder, anything else is answered by the reply the
             # nudge was sent for.
-            if demands_action(request) and not st.code_nudged and not st.announce_nudged:
+            if demands_action(request) and not st.code_nudged:
                 declined = None
             else:
                 st.nocall_declined = True
@@ -1058,9 +1081,11 @@ class _LoopMixin:
         the final answer when the same case recurs after its nudge (the run is
         then reported as not finished), or ``""``."""
         can_write = bool({"write_file", "edit_file", "patch_file"} - self.disabled_tools)
-        wrote = self._write_total() > st.writes_at_start
+        wrote = (self._write_total() > st.writes_at_start or self.patch_mode
+                 or any(_may_write_files(name) for name in st.called_tools))
         turns_left = self._turns < self.max_turns and not self.plan_mode
-        code = (can_write and not wrote and implies_action(request)
+        code = (can_write and not wrote and demands_action(request)
+                and _RE_CHANGE_REQUEST.search(request) is not None
                 and _has_file_code_block(response))
         if code:
             if not st.code_nudged and turns_left:
@@ -1087,9 +1112,15 @@ class _LoopMixin:
                 return ("\n\n[not finished: the code in this reply was not written "
                         "to any file - nothing on disk changed]")
         announced = _announced_step(response)
+        if st.announce_nudged and not announced and (
+                not response.strip() or _RE_NO_TOOL_NEEDED.fullmatch(response.strip())):
+            # A reply with nothing in it after the nudge leaves the announced
+            # step untaken.
+            announced = st.announced_step
         if announced and self._used_tools_this_task(st):
             if not st.announce_nudged and turns_left:
                 st.announce_nudged = True
+                st.announced_step = announced
                 st.nocall_response = response
                 why = (f'Your reply ends with "{announced}", but it made no tool '
                        "call, so that step did not happen.")

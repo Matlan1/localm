@@ -89,7 +89,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `edit_file`; if it still does not, the run ends as not finished instead of "Task finished". A
   reply of only `[no tool needed]` no longer leaves you with an empty answer.
 - **Coder edit tools are harder to get wrong.** `edit_file`, `edit_files` and `patch_file` no
-  longer apply an edit that would break a Python, JSON or TOML file that was valid (the file stays
+  longer apply an edit that would break a Python or TOML file that was valid (the file stays
   unchanged and the agent sees the region its edit would have produced), and a replacement written
   without the indentation of the line it lands on is re-indented when that keeps the file valid.
   Argument names other coding tools use (`old_str`, `new_str`, `file_path`) and arguments written

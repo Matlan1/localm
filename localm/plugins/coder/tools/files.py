@@ -483,7 +483,10 @@ def _numbered_region(text: str, first_line: int, last_line: int) -> str:
 
 
 def _broken_by_edit(p: Path, before: str, after: str) -> Optional[str]:
-    """The syntax error *after* has when *before* had none, else None."""
+    """The syntax error *after* has when *before* had none, else None. Only
+    ``.py`` and ``.toml`` files are judged; any other file returns None."""
+    if p.suffix.lower() not in (".py", ".toml"):
+        return None
     if _verify_syntax(p, before) is not None:
         return None
     return _verify_syntax(p, after)

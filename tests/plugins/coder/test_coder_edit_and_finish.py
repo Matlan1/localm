@@ -59,16 +59,39 @@ _METHOD_FILE = (
 
 def test_arguments_written_beside_args_are_kept():
     text = ('<tool_call>\n{"name": "edit_file", "args": {"path": "a.py"}, '
-            '"old": "x = 1", "new": "x = 2"}\n</tool_call>')
+            '"old_str": "x = 1", "new": "x = 2"}\n</tool_call>')
     (call,) = parse_tool_calls(text)
-    assert call.args == {"path": "a.py", "old": "x = 1", "new": "x = 2"}
+    assert call.args == {"path": "a.py"}
+    assert call.beside == {"old_str": "x = 1", "new": "x = 2"}
+    args, _ = normalize_args(TOOL_REGISTRY["edit_file"], call.args, call.beside)
+    assert args == {"path": "a.py", "old": "x = 1", "new": "x = 2"}
 
 
 def test_a_key_inside_args_wins_over_the_same_key_beside_it():
     text = ('<tool_call>\n{"name": "read_file", "args": {"path": "in.py"}, '
             '"path": "out.py"}\n</tool_call>')
     (call,) = parse_tool_calls(text)
-    assert call.args == {"path": "in.py"}
+    args, _ = normalize_args(TOOL_REGISTRY["read_file"], call.args, call.beside)
+    assert args == {"path": "in.py"}
+
+
+def test_a_key_beside_args_the_tool_does_not_take_is_dropped():
+    text = ('<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}, '
+            '"reason": "look at it"}\n</tool_call>')
+    (call,) = parse_tool_calls(text)
+    args, _ = normalize_args(TOOL_REGISTRY["read_file"], call.args, call.beside)
+    assert args == {"path": "a.py"}
+    assert bad_args_message("read_file", TOOL_REGISTRY["read_file"], args) is None
+
+
+def test_the_agent_runs_an_edit_written_beside_args(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    agent = _make_agent(tmp_path, max_turns=4)
+    reply = ('<tool_call>\n{"name": "edit_file", "args": {"path": "a.py"}, '
+             '"old": "x = 1", "new": "x = 2"}\n</tool_call>')
+    with _scripted(agent, [reply, "Changed x to 2."]):
+        agent.run_task("set x to 2 in a.py")
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 2\n"
 
 
 def test_other_harness_argument_names_map_onto_edit_file():
@@ -196,6 +219,15 @@ def test_a_file_type_without_a_syntax_check_is_edited_as_given(tmp_path):
     assert target.read_text(encoding="utf-8") == "    a: 2\nb: 3\n"
 
 
+def test_a_json_file_with_comments_is_edited_as_given(tmp_path):
+    target = tmp_path / "tsconfig.json"
+    target.write_text('{"compilerOptions": {"strict": true}}', encoding="utf-8")
+    result = tool_edit_file(tmp_path, "tsconfig.json", '{"compilerOptions"',
+                            '{\n  // compiler settings\n  "compilerOptions"')
+    assert result.ok, result.output
+    assert "// compiler settings" in target.read_text(encoding="utf-8")
+
+
 def test_edit_files_refuses_a_batch_that_breaks_a_file(tmp_path):
     (tmp_path / "ok.py").write_text("y = 1\n", encoding="utf-8")
     (tmp_path / "g.py").write_text(_METHOD_FILE, encoding="utf-8")
@@ -274,6 +306,31 @@ def test_code_in_an_answer_to_a_question_is_not_sent_back(tmp_path):
     assert agent.last_run_ok is True
 
 
+def test_quoting_a_file_to_answer_a_question_about_it_is_not_sent_back(tmp_path):
+    (tmp_path / "calc.py").write_text("# calc\n", encoding="utf-8")
+    agent = _make_agent(tmp_path, max_turns=6)
+    for request in ("How does add() in calc.py work?", "show me calc.py"):
+        with _scripted(agent, [_call("read_file", {"path": "calc.py"}), _CODE_REPLY]):
+            agent.run_task(request)
+        assert not any("[code not written]" in t for t in _user_texts(agent)), request
+        assert agent.last_run_ok is True, request
+
+
+def test_work_written_through_patch_mode_or_a_shell_is_not_sent_back(tmp_path):
+    (tmp_path / "calc.py").write_text("# calc\n", encoding="utf-8")
+    patched = _make_agent(tmp_path, max_turns=6, patch_mode=True)
+    with _scripted(patched, [
+        _call("write_file", {"path": "calc.py", "content": "def add(a, b):\n    return a + b\n"}),
+        _CODE_REPLY,
+    ]):
+        patched.run_task("implement add and sub in calc.py")
+    assert not any("[code not written]" in t for t in _user_texts(patched))
+    shell = _make_agent(tmp_path, max_turns=6)
+    with _scripted(shell, [_call("run_shell", {"command": "echo hi"}), _CODE_REPLY]):
+        shell.run_task("implement add and sub in calc.py")
+    assert not any("[code not written]" in t for t in _user_texts(shell))
+
+
 def test_a_shell_block_is_not_file_code():
     assert not _has_file_code_block("```bash\npip install x\npytest\nls\ncd src\n```")
     assert _has_file_code_block(_CODE_REPLY)
@@ -312,10 +369,26 @@ def test_a_run_that_still_stops_on_an_announced_step_is_not_finished(tmp_path):
     assert agent.last_run_ok is False
 
 
+def test_a_bare_decline_after_the_nudge_still_leaves_the_step_untaken(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    agent = _make_agent(tmp_path, max_turns=8)
+    with _scripted(agent, [
+        _call("edit_file", {"path": "a.py", "old": "x = 1", "new": "x = 2"}),
+        "Let me run the tests.",
+        "[no tool needed]",
+    ]):
+        result = agent.run_task("set x to 2 in a.py")
+    assert '[not finished: the run ended on "Let me run the tests."' in result
+    assert agent.last_run_ok is False
+
+
 def test_closing_courtesies_are_not_announced_steps():
     for text in ("Let me know if you need anything else.",
                  "I'll be happy to help further!",
                  "Would you like me to run the tests?",
+                 "Let me put it simply: it returns a + b.",
+                 "Let's see: the function returns the sum.",
+                 "I'll note that the tests already pass.",
                  "Done. The tests pass."):
         assert _announced_step(text) == "", text
     for text in ("Let me run the tests.", "Now I'll update main.py:",
