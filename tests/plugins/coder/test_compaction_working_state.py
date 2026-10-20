@@ -600,3 +600,30 @@ def test_line_ending_and_final_newline_changes_are_counted(proj, home):
     stats = {s["path"]: (s["added"], s["removed"]) for s in agent.changed_file_stats()}
     assert stats["crlf.txt"] == (2, 2)
     assert stats["eof.txt"] == (1, 1)
+
+
+def test_every_entry_point_carries_the_block(proj, home, monkeypatch):
+    agent = _agent(proj)
+    _write(agent, "a.py", "x = 1\n")
+    _history(agent)
+    assert agent.compact() is True
+    assert "- a.py (new, +1)" in _block(agent)
+
+    agent = _agent(proj)
+    _write(agent, "b.py", "y = 2\n")
+    _history(agent)
+    monkeypatch.setattr(type(agent), "_fill_ratio", lambda self: 0.99)
+    agent._maybe_compact(interactive=False)
+    assert "- b.py (new, +1)" in _block(agent)
+
+
+def test_binary_and_outside_project_files_get_counts_without_raising(proj, home, tmp_path):
+    agent = _agent(proj)
+    (proj / "blob.bin").write_bytes(b"\x00\xff\x10\n\x80\x81\n")
+    agent._record_changed_file("blob.bin", b"\x00\xff\n", "write_file")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"one\ntwo\n")
+    agent._record_changed_file(str(outside), b"one\n", "write_file")
+    stats = {s["path"]: (s["added"], s["removed"]) for s in agent.changed_file_stats()}
+    assert stats["blob.bin"] == (2, 1)
+    assert stats[str(outside.resolve())] == (1, 0)
