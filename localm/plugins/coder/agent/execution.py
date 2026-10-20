@@ -804,10 +804,9 @@ class _ExecutionMixin:
         """Whether a hook run needs more than trust in this session.
 
         When some enabled destructive tool other than the shell tools runs
-        without confirmation but run_shell
-        does not, a hook run gets run_shell's gate: "confirm" when run_shell
-        needs confirmation, "refuse" when it is disabled. None when trust is
-        enough."""
+        without confirmation but run_shell does not, a hook run gets
+        run_shell's gate: "confirm" when run_shell needs confirmation, "refuse"
+        when it is disabled. None when trust is enough."""
         if not self.auto_approve:
             return None
         disabled = self.disabled_tools
