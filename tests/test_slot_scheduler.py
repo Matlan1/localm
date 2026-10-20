@@ -11,6 +11,7 @@ scheduler changes the tokens.
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 import time
 
@@ -84,6 +85,9 @@ class _SimContext:
         self.stop = threading.Event()
         self.fail = None          # entries -> rc, or None to decode normally
         self.step_delay = 0.0
+        self.now = 0.0            # the scheduler's timer
+        self.step_cost = 0.0      # timer seconds one decode takes
+        self.notes = []
 
     # SlotScheduler's ops seam
     def lock(self):
@@ -106,6 +110,12 @@ class _SimContext:
     def vram_fit(self, target):
         return self.vram_fits
 
+    def timer(self):
+        return self.now
+
+    def note_decode(self, steps, seconds, depth):
+        self.notes.append((steps, seconds, depth))
+
     def rightsize(self, need, others):
         self.rightsize_calls.append((need, others))
         return self.rightsize_plan
@@ -124,6 +134,7 @@ class _SimContext:
 
     def decode(self, entries):
         self.calls.append(list(entries))
+        self.now += self.step_cost
         if self.step_delay:
             time.sleep(self.step_delay)
         if self.fail is not None:
@@ -208,7 +219,7 @@ def made():
     scheds = []
 
     def make(ctx, n_slots):
-        s = SlotScheduler(ctx, n_slots)
+        s = SlotScheduler(ctx, n_slots, timer=ctx.timer)
         scheds.append(s)
         return s
     yield make
@@ -1074,3 +1085,156 @@ def test_rightsize_counts_the_other_slots_cached_cells(made):
     ctx.rightsize_calls.clear()
     _collect(sched, PROMPTS[1], 20)
     assert ctx.rightsize_calls[0][1] == cached
+
+
+class _RateContext(_SimContext):
+    """A simulated context whose decode rate and refresh plan come from a real
+    LlamaCpp's _note_decode_rate and _rightsize_plan."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        from tests._bare_llama import make_bare_llama
+        self.llm = make_bare_llama(_model_ptr=111, _ctx_ptr=222, _n_ctx=self.base,
+                                   _ctx_capacity=self.cap, _offload_kqv=True)
+
+    def note_decode(self, steps, seconds, depth):
+        super().note_decode(steps, seconds, depth)
+        self.llm._note_decode_rate(steps, seconds, depth)
+
+    def rightsize(self, need, others):
+        self.rightsize_calls.append((need, others))
+        plan = self.llm._rightsize_plan(need, others)
+        if plan is not None:
+            self.llm._log_rightsize(*plan)
+        return plan
+
+    def recreate(self, target, offload_kqv):
+        super().recreate(target, offload_kqv)
+        self.llm._consume_decode_refresh()
+        self.llm._ctx_capacity = target
+
+
+def test_a_timed_reply_alone_reports_its_decode_steps(made):
+    ctx = _SimContext()
+    ctx.step_cost = 0.02
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 40, timed=True)
+    assert rec["out"] == _reference(PROMPTS[0], 40)[0]
+    assert len(ctx.notes) == 1
+    steps, seconds, depth = ctx.notes[0]
+    assert steps == 38
+    assert seconds == pytest.approx(38 * 0.02)
+    first = len(PROMPTS[0])
+    assert depth == pytest.approx(first + 37 / 2)
+
+
+def test_an_untimed_reply_reports_nothing(made):
+    ctx = _SimContext()
+    ctx.step_cost = 0.02
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], 40)
+    assert ctx.notes == []
+
+
+def test_a_scored_reply_reports_nothing(made):
+    ctx = _SimContext()
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], 40, scorer=_Scorer(), timed=True)
+    assert ctx.notes == []
+
+
+def test_two_concurrent_timed_replies_report_nothing(made):
+    ctx = _SimContext()
+    ctx.step_cost = 0.02
+    sched = made(ctx, 2)
+    budgets = [40, 120]
+    with ctx.lock():
+        streams = [sched.submit(PROMPTS[i], budgets[i], _Sampler(), timed=True) for i in range(2)]
+    results = {}
+    _run_threads([lambda i=i: results.__setitem__(i, _drain(streams[i])) for i in range(2)])
+    for i in range(2):
+        assert results[i] == _reference(PROMPTS[i], budgets[i])
+    assert any(len(call) == 1 and call[0][2] == 1 for call in ctx.calls), \
+        "the longer reply never decoded alone"
+    assert ctx.notes == []
+
+
+def test_the_depth_counts_the_cells_idle_slots_keep(made):
+    ctx = _SimContext()
+    ctx.step_cost = 0.02
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], 40, timed=True)
+    kept = sum(len(s.kv) for s in sched._slots)
+    assert kept > 0
+    _collect(sched, PROMPTS[1], 40, timed=True)
+    assert sum(1 for s in sched._slots if s.kv) == 2
+    _steps, _seconds, depth = ctx.notes[1]
+    assert depth == pytest.approx(kept + len(PROMPTS[1]) + 37 / 2)
+
+
+def test_a_reply_whose_context_grew_reports_nothing(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, base=256, grow=256)
+    ctx.step_cost = 0.02
+    sched = made(ctx, 1)
+    rec = _collect(sched, PROMPTS[0], 0, sampler=_Sampler(eog_at=700), timed=True)
+    assert len(rec["out"]) == 700
+    assert len(ctx.recreated) >= 2
+    assert ctx.notes == []
+
+
+def test_a_reply_that_overlapped_another_at_its_start_reports_nothing(made):
+    ctx = _SimContext()
+    ctx.step_cost = 0.02
+    sched = made(ctx, 2)
+    with ctx.lock():
+        short = sched.submit(PROMPTS[0], 3, _Sampler(), timed=True)
+        long = sched.submit(PROMPTS[1], 80, _Sampler(), timed=True)
+    assert _drain(short)[0] == _reference(PROMPTS[0], 3)[0]
+    assert _drain(long)[0] == _reference(PROMPTS[1], 80)[0]
+    assert ctx.notes == []
+
+
+def test_a_reply_ended_by_an_error_reports_nothing(made):
+    ctx = _SimContext()
+    ctx.step_cost = 0.02
+    sched = made(ctx, 2)
+    with pytest.raises(OSError):
+        _collect(sched, PROMPTS[0], 80, sampler=_Sampler(raise_at=50), timed=True)
+    assert ctx.notes == []
+
+
+def test_one_slow_solo_reply_refreshes_the_idle_context_once(made, caplog):
+    ctx = _RateContext(capacity=2048, n_ctx_max=4096, base=2048, grow=256)
+    sched = made(ctx, 2)
+    ctx.step_cost = 0.02
+    _collect(sched, PROMPTS[0], 40, timed=True)
+    ctx.step_cost = 0.2
+    _collect(sched, PROMPTS[0], 40, timed=True)
+    assert ctx.llm._decode_refresh is not None
+    assert ctx.recreated == []
+    ctx.step_cost = 0.02
+    with caplog.at_level(logging.INFO, logger="localm"):
+        rec = _collect(sched, PROMPTS[1], 40, timed=True)
+    assert rec["out"] == _reference(PROMPTS[1], 40)[0]
+    assert ctx.recreated == [(2048, True)]
+    assert ctx.llm._decode_refresh is None
+    assert sum("recreating the 2048-token context" in r.getMessage()
+               for r in caplog.records) == 1
+    _collect(sched, PROMPTS[2], 40, timed=True)
+    assert ctx.recreated == [(2048, True)]
+
+
+def test_a_due_refresh_waits_while_replies_run(made):
+    ctx = _RateContext(capacity=2048, n_ctx_max=4096, base=2048, grow=256)
+    ctx.step_delay = 0.002
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 150, _Sampler(), timed=True)
+    next(first)
+    ctx.llm._decode_refresh = (4.0, 40.0)
+    rec = _collect(sched, PROMPTS[1], 20, timed=True)
+    assert rec["out"] == _reference(PROMPTS[1], 20)[0]
+    assert ctx.recreated == []
+    _drain(first)
+    assert ctx.recreated == []
+    _collect(sched, PROMPTS[2], 20, timed=True)
+    assert ctx.recreated == [(2048, True)]
