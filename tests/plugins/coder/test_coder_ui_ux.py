@@ -178,7 +178,7 @@ class TestDiffPreviewAndConfirmationUX:
         assert agent._execute_tool(second, interactive=True).ok is True
         assert len(prompts) == 1
 
-        shell = ToolCall(name="run_shell", args={"command": "echo hi"},
+        shell = ToolCall(name="run_shell", args={"command": "mkdir out"},
                          raw="", start=0, end=0)
         res = agent._execute_tool(shell, interactive=True)
         assert len(prompts) == 2
@@ -531,7 +531,7 @@ class TestReviewFindings:
         assert "a=allow this session" in prompts[0]
         assert child._execute_tool(w2, interactive=False).ok is True
         assert len(prompts) == 1
-        sh = ToolCall(name="run_shell", args={"command": "echo hi"}, raw="", start=0, end=0)
+        sh = ToolCall(name="run_shell", args={"command": "mkdir out"}, raw="", start=0, end=0)
         res = child._execute_tool(sh, interactive=False)
         assert res.ok is False and "Rejected by user: use src/ instead" in res.output
 

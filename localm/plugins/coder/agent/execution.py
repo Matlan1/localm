@@ -603,8 +603,9 @@ class _ExecutionMixin:
             allow_key is not None and not shell_unchecked and not lenient_call
             and call.name not in self.always_confirm
         )
-        if (needs_confirm and call.name == "run_shell" and not shell_unchecked
-                and not lenient_call and call.name not in self.always_confirm
+        # session_allowable already excludes a failed shell check, a lenient
+        # call and always_confirm, which the read-only shortcut honours too.
+        if (needs_confirm and session_allowable and call.name == "run_shell"
                 and self._read_only_shell(call)):
             needs_confirm = False
             if interactive:
