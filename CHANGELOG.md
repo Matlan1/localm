@@ -41,6 +41,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   languages are scanned by pattern and labelled approximate), so the agent can read just the part it
   needs. On a project with more than 300 files the codebase map is now a directory summary of every
   file found plus detail for the shallowest files, instead of stopping after the first 300.
+- **Coder tool hooks.** `.localcoder/config.toml` can declare `pre_tool_use` and
+  `post_tool_use` commands that run around the agent's tool calls, matched by tool name. A pre
+  hook that exits 2 blocks the call and tells the agent why; a post hook that exits 2 sends its
+  output to the agent, for example a linter's complaints. A project's hooks run only after you
+  trust them, and never in a restricted session.
 - **`localm coder` keeps long tool output instead of cutting out the middle.** When a command or
   search prints more than the agent is shown, the full text is kept in memory for the session
   (never written to disk) and the agent can read any part of it back with the new `read_output`

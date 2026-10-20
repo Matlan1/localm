@@ -1866,6 +1866,77 @@ export async function openEpisodesModal(view = "live") {
   }
 }
 
+/** The project's tool hooks and whether they are trusted, with buttons to trust
+ *  or stop trusting them: the web form of the REPL's `/hooks`, `/hooks trust`
+ *  and `/hooks forget`. Trusting sends back the digest of the hooks shown, so
+ *  hooks that changed after they were shown are refused rather than trusted. */
+export async function openHooksModal() {
+  const cwd = ($("setup-cwd")?.value || "").trim();
+  if (!cwd) { toast(t("coder.episodes.enterDirectoryFirst"), true); return; }
+  try {
+    const r = await fetch("/api/coder/hooks?cwd=" + encodeURIComponent(cwd), { headers: authHeaders() });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    openModal(t("coder.hooks.title"), (body) => {
+      for (const w of data.warnings || []) body.appendChild(el("p", "sub", w));
+      if (!data.configured) {
+        body.appendChild(emptyState("book", t("coder.hooks.emptyTitle"), t("coder.hooks.emptyHint")));
+        return;
+      }
+      body.appendChild(el("p", "sub", t("coder.hooks.declaredIn", { path: data.config_path })));
+      for (const h of data.hooks || []) {
+        const card = el("div", "card");
+        card.appendChild(el("div", "row", h.command ? `${h.label}: ${h.command}` : h.label));
+        card.appendChild(el("div", "sub", h.error
+          ? t("coder.hooks.invalid", { error: h.error })
+          : t("coder.hooks.meta", { matcher: h.matcher, timeout: h.timeout })));
+        body.appendChild(card);
+      }
+      body.appendChild(el("p", "sub", data.trusted ? t("coder.hooks.trusted") : t("coder.hooks.untrusted")));
+      const foot = el("div", "actions");
+      if (!data.trusted) {
+        body.appendChild(el("p", "sub", t("coder.hooks.trustWarning")));
+        const trust = el("button", "btn-primary", t("coder.hooks.trustBtn"));
+        trust.onclick = async () => {
+          trust.disabled = true;
+          try {
+            const tr = await fetch("/api/coder/hooks/trust", {
+              method: "POST",
+              headers: authHeaders(),
+              body: JSON.stringify({ cwd, digest: data.digest }),
+            });
+            const out = await tr.json().catch(() => ({}));
+            if (!tr.ok) throw new Error(out.detail || tr.statusText);
+            toast(t("coder.hooks.trustedToast"));
+            openHooksModal();
+          } catch (e) {
+            toast(t("coder.hooks.trustFailed") + e.message, true);
+            trust.disabled = false;
+          }
+        };
+        foot.appendChild(trust);
+      } else {
+        const forget = el("button", "btn-secondary", t("coder.hooks.forgetBtn"));
+        forget.onclick = async () => {
+          forget.disabled = true;
+          try {
+            await episodeOp("POST", "/api/coder/hooks/forget", cwd);
+            toast(t("coder.hooks.forgottenToast"));
+            openHooksModal();
+          } catch (e) {
+            toast(t("coder.hooks.forgetFailed") + e.message, true);
+            forget.disabled = false;
+          }
+        };
+        foot.appendChild(forget);
+      }
+      body.appendChild(foot);
+    });
+  } catch (e) {
+    toast(t("coder.hooks.readFailed") + e.message, true);
+  }
+}
+
 /** Plan the composer's task without running it (the CLI's `--estimate`): one
  *  turn, no tools, nothing written. The plan arrives on the event stream, so
  *  every open tab sees it; this only has to fire the request. */
@@ -1897,6 +1968,7 @@ $("coder-files").onclick = openFilesModal;
 $("coder-patch").onclick = downloadCoderPatch;
 $("coder-estimate").onclick = estimateCoderTask;
 $("setup-episodes").onclick = openEpisodesModal;
+$("setup-hooks").onclick = openHooksModal;
 $("coder-export").onclick = () => openModal(t("coder.export.modalTitle"), (body) => {
   body.appendChild(el("p", "sub", t("coder.export.modalHint")));
   const row = el("div", "actions");

@@ -228,6 +228,11 @@ def _complete_model(ctx, param, incomplete):
                    "finishes, even if the project has an obvious one.")
 @click.option("--resume", "-r", "resume", default=None, is_flag=False, flag_value="",
               help="Resume the last saved session (or specify checkpoint ID) with the chosen model.")
+@click.option("--trust-hooks", "trust_hooks", is_flag=True,
+              help="Trust the tool hooks in this project's .localcoder/config.toml "
+                   "as they are now, and remember that until they change. "
+                   "Without it, untrusted hooks do not run; an interactive "
+                   "session asks.")
 def main(
     task, model, pin_model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens, seed,
@@ -235,7 +240,7 @@ def main(
     native_tools, provider, mode, scope, system_instructions,
     show_episodes, forget_episodes, forget_episode_id, show_archive,
     restore_episode_id, consolidate_episodes,
-    until_cmd, goal_max_iters, verify_cmd, no_verify, resume,
+    until_cmd, goal_max_iters, verify_cmd, no_verify, resume, trust_hooks,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -395,6 +400,12 @@ def main(
 
     if patch_mode:
         agent.patch_mode = True
+
+    from .hooks_cli import resolve_hook_trust
+    resolve_hook_trust(
+        agent, trust_flag=trust_hooks,
+        can_prompt=(not ci and output_format != "json"
+                    and sys.stdin.isatty() and sys.stdout.isatty()))
 
     try:
         if estimate:
