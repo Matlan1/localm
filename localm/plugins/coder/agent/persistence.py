@@ -11,7 +11,7 @@ import datetime
 import difflib
 import json
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import localm.plugins.coder.agent as _agent
 from localm.debuglog import logger
@@ -36,6 +36,11 @@ def _spawned_by(agent, job) -> bool:
 
 
 class _PersistenceMixin:
+    if TYPE_CHECKING:
+        # Set by Agent (core.py), which this class is mixed into.
+        @property
+        def disabled_tools(self) -> frozenset: ...
+
     def changed_files(self) -> list[dict]:
         """
         Files this session has written, with change counts.
