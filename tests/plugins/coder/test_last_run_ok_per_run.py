@@ -57,6 +57,13 @@ class _Scripted:
         self.calls = 0
         self.reflections: list = []
 
+    def context_capacity(self):
+        # A real server reports its window. Without one the agent budgets history
+        # against a 4096-token fallback, and the tool documentation alone
+        # approaches the 90% auto-compaction point, whose summary call also
+        # uses max_tokens=1024 and would be counted as a reflection.
+        return 32768
+
     def chat(self, messages, **kw):
         if kw.get("max_tokens") == 1024:
             self.reflections.append(kw)
