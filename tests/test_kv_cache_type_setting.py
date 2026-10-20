@@ -439,8 +439,15 @@ class TestSizing:
                  patch("localm.inference.backends.llamacpp._sizing."
                        "embedder_ctx_reservation_bytes", return_value=0):
                 ceilings[kind] = b._auto_ctx_max(capped=False)
-        assert ceilings["q8_0"] > ceilings["f16"]
-        assert ceilings["q8_0"] / ceilings["f16"] == pytest.approx(32 / 17, rel=0.02)
+        # Both ceilings are budget // per_token rounded down to whole 1024s, from
+        # one budget B: f16 <= B / 131072 < f16 + 1024, so q8_0 = B / 69632
+        # rounded down lies between these two bounds.
+        f16 = ceilings["f16"]
+        low = (f16 * 131072 // 69632) // 1024 * 1024
+        high = ((f16 + 1024) * 131072 // 69632) // 1024 * 1024
+        assert f16 > 4096
+        assert low <= ceilings["q8_0"] <= high
+        assert ceilings["q8_0"] > f16
 
     @pytest.mark.parametrize("kind,want", [("f16", 2048), ("q8_0", 1088)])
     def test_the_mtp_draft_charge(self, tmp_path, kind, want):
