@@ -1282,6 +1282,11 @@ export const I18N_EN = {
   "models.pull.browseButton": "Browse…",
   "models.pull.browseDialogTitle": "Pick a folder that holds the model(s)",
   "models.pull.browseTitle": "Pick a folder on this machine that holds the model(s)",
+  "models.pull.cancelButton": "Cancel",
+  "models.pull.cancelTitle": "Stop the download and delete what has been downloaded so far.",
+  "models.pull.cancelledStatus": "cancelled - partial download deleted",
+  "models.pull.cancelledToast": "Download cancelled",
+  "models.pull.discardFailed": "Could not delete the partial download: {message}",
   "models.pull.disconnectedStatus": "connection lost - it may still be running",
   "models.pull.disconnectedToast":
     "Lost connection to the pull - it may still be running in the background. Check the Models list in a moment.",
@@ -1301,6 +1306,10 @@ export const I18N_EN = {
   "models.pull.netOffHint":
     "(if this failed because network access is off: turn it on, or allow downloads only, in Settings → Network)",
   "models.pull.noVisionProjector": "No vision projector",
+  "models.pull.pauseButton": "Pause",
+  "models.pull.pauseTitle": "Stop the download and keep what has been downloaded so far. Resume continues from there.",
+  "models.pull.pausedStatus": "paused - the data saved so far is kept, Resume continues from it",
+  "models.pull.resumeButton": "Resume",
   "models.pull.sha256Placeholder": "sha256 (optional)",
   "models.pull.sha256Title":
     "Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.",
@@ -1311,6 +1320,7 @@ export const I18N_EN = {
     "A model spec can't start with '-'. Use owner/repo, owner/repo:file.gguf, or an https URL.",
   "models.pull.specPlaceholder":
     "owner/repo:file.gguf  ·  https://…  ·  a local folder or .gguf path",
+  "models.pull.stalled": "no data arriving",
   "models.pull.starting": "starting…",
   "models.pull.store.copy": "Copy into library",
   "models.pull.store.move": "Move into library",
@@ -1318,6 +1328,7 @@ export const I18N_EN = {
   "models.pull.storeTitle":
     "Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.",
   "models.pull.title": "Add a model",
+  "models.pull.verifying": "verifying… {pct}%",
   "models.relocate.failed": "Relocate failed",
   "models.relocate.prompt":
     "New location for '{name}' (a .gguf file, or a HuggingFace model folder):",
