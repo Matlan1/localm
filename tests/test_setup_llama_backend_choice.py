@@ -396,3 +396,19 @@ def test_pinned_floor_build_must_register_a_gpu(monkeypatch, tmp_path):
         "cuda", True, "b99999", lambda backend, cudart, tag=None: None,
         f"{sl._ABI_REJECT_PREFIX}: drift")
     assert (ok, tag) == (False, None)
+
+
+def test_bug_report_carries_the_choice_with_the_reason_scrubbed(monkeypatch):
+    from pathlib import Path
+    from localm.bugreport.diagnostics import collect_diagnostics
+    home = str(Path.home())
+    monkeypatch.setattr(sl, "backend_choice", lambda: {
+        "requested": "cuda", "installed": "vulkan",
+        "reason": f"ggml-cuda.dll did not load from {Path(home, 'x', 'lib')}"})
+    monkeypatch.setattr(sl, "runtime_in_use", lambda: {
+        "dir": str(Path(home, "own")), "source": "binary_dir", "backend": "hip"})
+    diag = collect_diagnostics({})
+    assert diag["native_runtime_requested"] == "cuda"
+    assert "ggml-cuda.dll did not load" in diag["native_runtime_requested_reason"]
+    assert home not in diag["native_runtime_requested_reason"]
+    assert diag["native_runtime_in_use"] == "hip (from binary_dir)"
