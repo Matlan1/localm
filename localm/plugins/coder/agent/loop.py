@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
@@ -252,6 +253,14 @@ def response_similarity(a: str, b: str) -> float:
 
 
 class _LoopMixin:
+    if TYPE_CHECKING:
+        # Set by Agent (core.py) through _PlanModeMixin.
+        @property
+        def plan_mode(self) -> bool: ...
+
+        def _add_user_with_plan_note(self, content) -> None: ...
+        def _end_plan_autorun(self) -> None: ...
+
     def run_task(self, task: str) -> str:
         """
         Run a single task to completion (non-interactive).

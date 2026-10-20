@@ -14,7 +14,8 @@ The mode is left by the user (``/plan off``) or by an approved
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional
 
 # The tools that can run in plan mode: they read the project, the session's own
 # state or a job's output, and none writes a file, runs a model-chosen command,
@@ -73,6 +74,16 @@ def plan_mode_refusal(name: str, tool_def: Any) -> Optional[str]:
 
 class _PlanModeMixin:
     """Plan-mode state on the Agent."""
+
+    if TYPE_CHECKING:
+        # Set by Agent (core.py), which this class is mixed into.
+        cwd: Path
+        restricted: bool
+        verify_cmd: Any
+        _auto_approve: bool
+
+        def _emit(self, event_type: str, **data) -> None: ...
+        def _add_user(self, content) -> None: ...
 
     _plan_mode: bool = False
     # (auto_approve, verify_cmd) as they were before an approved plan switched

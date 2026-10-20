@@ -94,6 +94,8 @@ class _ExecutionMixin:
         # Set by Agent (core.py), which this class is mixed into.
         cwd: Path
         restricted: bool
+        @property
+        def plan_mode(self) -> bool: ...
         _audit: AuditLogT
 
         def _emit(self, event_type: str, **data) -> None: ...

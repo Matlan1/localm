@@ -49,7 +49,7 @@ def _top_level_only(session: Any, tool: str) -> Optional[ToolResult]:
     return None
 
 
-def _read_answer(prompt: str) -> Optional[str]:
+def _read_answer(prompt: Any) -> Optional[str]:
     """One line from the terminal, or None on end of input. A Ctrl-C
     propagates and interrupts the turn."""
     from .. import display as _display
@@ -60,7 +60,7 @@ def _read_answer(prompt: str) -> Optional[str]:
 
 
 def tool_ask_user(cwd: Path, question=None, options=None,
-                  _session=None, _interactive: bool = False) -> ToolResult:
+                  _session: Any = None, _interactive: bool = False) -> ToolResult:
     """Ask the user *question*, optionally offering numbered *options*, and
     return the answer."""
     blocked = _top_level_only(_session, "ask_user")
@@ -123,7 +123,7 @@ def tool_ask_user(cwd: Path, question=None, options=None,
 
 
 def tool_enter_plan_mode(cwd: Path, reason=None,
-                         _session=None, _interactive: bool = False) -> ToolResult:
+                         _session: Any = None, _interactive: bool = False) -> ToolResult:
     """Switch plan mode on."""
     blocked = _top_level_only(_session, "enter_plan_mode")
     if blocked is not None:
@@ -177,7 +177,7 @@ def _approve_on_terminal(plan: str) -> tuple[str, str]:
 
 
 def tool_exit_plan_mode(cwd: Path, plan=None,
-                        _session=None, _interactive: bool = False) -> ToolResult:
+                        _session: Any = None, _interactive: bool = False) -> ToolResult:
     """Present *plan* for approval; leave plan mode when it is approved."""
     blocked = _top_level_only(_session, "exit_plan_mode")
     if blocked is not None:
@@ -223,6 +223,7 @@ def tool_exit_plan_mode(cwd: Path, plan=None,
     _session.set_plan_mode(False)
     if verdict == "autorun":
         cmd = _session._begin_plan_autorun()
+        label = ""
         if cmd is not None:
             from ..verify import command_text
             label = command_text(cmd)
