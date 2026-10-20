@@ -581,6 +581,7 @@ def test_line_ending_and_final_newline_changes_are_counted(proj, home):
     _write(agent, "crlf.txt", "a\nb\n")
     _write(agent, "eof.txt", "a\nb\n")
     (proj / "crlf.txt").write_bytes(b"a\nb\n")
+    (proj / "eof.txt").write_bytes(b"a\nb\n")
     stats = {s["path"]: (s["added"], s["removed"]) for s in agent.changed_file_stats()}
     assert stats["crlf.txt"] == (2, 2)
     assert stats["eof.txt"] == (1, 1)
