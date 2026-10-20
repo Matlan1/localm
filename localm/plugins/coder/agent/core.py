@@ -32,6 +32,7 @@ from .loop import _LoopMixin
 from .execution import _ExecutionMixin
 from .context import _ContextMixin
 from .persistence import _PersistenceMixin
+from .planmode import INTERACTION_TOOLS, _PlanModeMixin
 from .session import _SessionMixin
 from .tooldefs import _build_openai_tool_defs
 
@@ -69,6 +70,7 @@ class Agent(
     _ContextMixin,
     _PersistenceMixin,
     _SessionMixin,
+    _PlanModeMixin,
 ):
     """
     Stateful agentic loop.
@@ -98,6 +100,9 @@ class Agent(
         False: max_tokens was filled from harness_profiles.cli_max_tokens and
         set_model recomputes it for the new model. True: max_tokens was an
         explicit caller/project-config value and set_model leaves it alone.
+    interactive_tools:
+        Offer ask_user and the plan-mode tools. Only a session with a terminal
+        the user answers on sets it; otherwise they are disabled.
     gen_kwargs:
         Extra kwargs forwarded to every LLM call (temperature, max_tokens, …).
     """
@@ -130,6 +135,7 @@ class Agent(
         confirm_handler=None,
         custom_instructions: Optional[str] = None,
         max_tokens_explicit: Optional[bool] = None,
+        interactive_tools: bool = False,
         **gen_kwargs,
     ) -> None:
         # Live-attribute access, so a patched agent.load_memory /
@@ -192,6 +198,8 @@ class Agent(
         # mcp_* tool this agent did not register itself.
         self._mcp_tool_names: frozenset = frozenset()
         self.disabled_tools = expand_shell_disable(frozenset(disabled_tools or ()))
+        if not interactive_tools:
+            self.disabled_tools = self._disabled_tools | INTERACTION_TOOLS
         # Sub-agent role preset (reviewer / researcher / test-writer): a focused
         # mission plus a narrowed toolset. Resolved here so an unknown name fails
         # at construction rather than silently running a full-capability child.
@@ -867,6 +875,7 @@ class Agent(
             allowed = self._active_skill_tools
             names = ", ".join(self._active_skill_names)
         if (allowed is None or tool_name in allowed or tool_name in SKILL_META_TOOLS
+                or tool_name in INTERACTION_TOOLS
                 or tool_name == "search_tools"):
             return None
         return (

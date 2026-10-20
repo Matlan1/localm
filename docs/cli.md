@@ -823,9 +823,10 @@ The agent auto-starts `localm serve` when needed and plans with tool calls: read
 
 ### Built-in tools
 
-The agent ships 45 built-in tools. "Confirms" means the agent stops and asks
+The agent ships 48 built-in tools. "Confirms" means the agent stops and asks
 before running it by default; "Restricted" means a shared, non-owner session may
-use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
+use it at all. The GUI coder has the same set except `ask_user` and the plan-mode
+tools, which only the terminal offers (see [gui.md](gui.md)).
 
 | Tool | What it does | Confirms | Restricted |
 |---|---|---|---|
@@ -841,6 +842,9 @@ use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 | `git_log` | Recent commits, oneline | no | yes |
 | `read_todos` | Read back the task list written with `set_todos` | no | yes |
 | `set_todos` | Record the session task list (replaces the previous one) | no | yes |
+| `ask_user` | Ask the user a question, optionally with numbered options (REPL only) | no | no |
+| `enter_plan_mode` | Switch to plan mode: only read-only tools run until a plan is approved | no | no |
+| `exit_plan_mode` | Present the plan for approval and leave plan mode when approved | no | no |
 | `search_tools` | Return the full usage of tools the prompt lists by name only | no | no |
 | `write_file` | Write or overwrite a file | yes | yes |
 | `edit_file` | Replace the first occurrence of exact text | yes | yes |
@@ -931,6 +935,22 @@ attempts run out, the turn is reported as NOT verified rather than as done. Sess
 opened with a shared, scoped key never run a verify command - those sessions have no
 process execution at all. In the GUI the same three controls sit in the coder setup
 form: a verification command, a fix-attempt cap, and a skip-verification toggle.
+
+**Plan mode and questions.** `/plan` in the REPL (or the agent itself, through its
+`enter_plan_mode` tool) switches to plan mode: only read-only tools run - reading,
+searching, git status/diff/log, the task list - and every tool that writes a file, runs
+a command, uses the network or starts a sub-agent is refused by the harness, whatever
+the model emits. Background jobs started before plan mode keep running. When the agent
+has a plan it presents it with `exit_plan_mode`, and you answer `y` (approve; plan mode
+ends and edits ask as they did before), `a` (approve and auto-run: for the rest of that
+task gated tools run without asking, except what the shell safety gate or an
+always-confirm setting holds back, and the project's verification check runs before the
+task finishes, detected when none is set; if the fix attempts run out the task is
+reported as not verified), or `n` or any text (the agent stays in plan mode and gets
+your feedback). `/plan off` leaves plan mode without a plan. The agent can also ask you
+a question with `ask_user`, offering numbered options or taking a typed answer. Plan
+mode and `ask_user` are terminal features: the GUI coder and one-shot tasks do not offer
+them.
 
 **Lint after an edit.** When `ruff` is on your PATH (an activated virtualenv puts it
 there), a `write_file`, `edit_file`, `edit_files` or `patch_file` on a Python file runs

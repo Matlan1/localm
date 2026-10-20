@@ -12,7 +12,7 @@ import difflib
 import json
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import localm.plugins.coder.agent as _agent
 from localm.debuglog import logger
@@ -37,6 +37,11 @@ def _spawned_by(agent, job) -> bool:
 
 
 class _PersistenceMixin:
+    if TYPE_CHECKING:
+        # Set by Agent (core.py), which this class is mixed into.
+        @property
+        def disabled_tools(self) -> frozenset: ...
+
     _activated_tools: frozenset
     _activated_lock: threading.Lock
 
@@ -476,6 +481,9 @@ class _PersistenceMixin:
             # The model's own task list (tools/tasks.py). An older build ignores
             # the extra key, and an older checkpoint restores as no todos.
             "todos": self.get_todos(),
+            # Plan mode, so a resumed session is still read-only until its plan
+            # is approved. An older checkpoint restores as plan mode off.
+            "plan_mode": bool(self._plan_mode),
             # The tools search_tools activated, so a resumed native-tools session
             # declares the schemas its restored conversation already relies on.
             "activated_tools": sorted(getattr(self, "_activated_tools", ())),
@@ -596,6 +604,8 @@ class _PersistenceMixin:
         # load_checkpoint()'s migration path already backfills it.
         self._session_title = data.get("title") or _first_user_text(self._messages)
         self.set_todos(normalize_todos(data.get("todos")))
+        if data.get("plan_mode") is True and "exit_plan_mode" not in self.disabled_tools:
+            self._plan_mode = True
         self._restore_activated_tools(data.get("activated_tools"))
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))
