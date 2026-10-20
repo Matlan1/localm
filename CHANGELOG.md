@@ -129,6 +129,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   layers, a model that loaded partly on the CPU because another program held VRAM is reloaded
   on the GPU at a later request once enough VRAM is free. An explicit GPU layer count is never
   changed.
+- **Replies speed up again after Windows moved part of a model out of VRAM.** When another
+  program takes VRAM, Windows can move part of a loaded model to system memory, and replies
+  stayed several times slower even after that program closed. When a reply decodes far slower
+  than the model managed before at the same context length, localm now rebuilds the model's
+  context before the next request, which restores the speed without reloading the model. This
+  applies to models loaded fully on the GPU, never while other replies are running, and at most
+  once a minute.
 - **The Live tuning VRAM estimate counts the running model's own memory.** The VRAM the running
   model holds was counted as used, so settings that fit read "may not fit"; it is now shown
   beside the free VRAM and counted as available. Apply now reloads the running model with the
