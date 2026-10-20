@@ -65,6 +65,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 
+- **The coder starts a project's MCP servers only after you trust them.** A cloned repository
+  can declare MCP servers in `.localcoder/config.toml`, so they now need the same trust as tool
+  hooks: an interactive session lists them and asks, `--trust-hooks`, `/hooks trust` and the
+  GUI's hooks button trust them, and changing a server's command, arguments or environment
+  asks again. A project that already uses MCP servers asks once.
 - **The coder's system prompt is shorter.** Less frequent tools (git commit, branch and push,
   background jobs, notebooks, image generation, Knowledge search, the browser, and MCP and
   plugin tools) are listed by name and fetched with the new `search_tools` tool when needed,

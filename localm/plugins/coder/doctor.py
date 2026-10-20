@@ -18,7 +18,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, cast
+from typing import Callable, Optional, cast
 
 OK, INFO, WARN, FAIL, SKIP = "ok", "info", "warn", "fail", "skip"
 
@@ -218,19 +218,28 @@ def check_project_config(work_dir: Path) -> Check:
     return Check("config", OK, f"{path.name} readable")
 
 
-def check_mcp(work_dir: Path) -> list[Check]:
-    """Start each configured MCP server on its own throwaway process, count its
-    tools, and stop it. Never touches the session's pooled servers."""
-    from .mcp import MCPError, MCPServer, load_mcp_config
+def check_mcp(work_dir: Path, trusted_servers: Optional[dict] = None) -> list[Check]:
+    """Start each trusted MCP server on its own throwaway process, count its
+    tools, and stop it. Never touches the session's pooled servers.
+
+    *trusted_servers* are servers the caller knows the user trusts (a session's
+    own); without them only a config the trust store trusts as it is now is
+    started. Untrusted servers are not started and are reported as warnings."""
+    from .mcp import MCPError, MCPServer, load_mcp_config, load_trusted_mcp_config
     from .project_config import ProjectConfigUnreadable
     try:
         configured = load_mcp_config(work_dir)
+        trusted = (trusted_servers if trusted_servers is not None
+                   else load_trusted_mcp_config(work_dir)[0])
     except ProjectConfigUnreadable as exc:
         return [Check("mcp", FAIL, f"project config unreadable: {exc}")]
-    if not configured:
+    if not configured and not trusted:
         return [Check("mcp", SKIP, "no MCP servers configured")]
-    out: list[Check] = []
-    for name, spec in configured.items():
+    out: list[Check] = [
+        Check(f"mcp:{name}", WARN,
+              "not trusted, not started (/hooks trust or --trust-hooks)")
+        for name in configured if name not in trusted]
+    for name, spec in trusted.items():
         label = f"mcp:{name}"
         server = MCPServer(name=name, command=spec["command"],
                            args=spec.get("args", []), env=spec.get("env"),
@@ -254,8 +263,10 @@ def check_mcp(work_dir: Path) -> list[Check]:
 
 def run_doctor(work_dir: Path, backend, *, verify_cmd=None,
                verify_off: bool = False, project_map=None,
-               check_mcp_servers: bool = True) -> list[Check]:
-    """Run every check and return the results in a fixed order."""
+               check_mcp_servers: bool = True,
+               trusted_mcp_servers: Optional[dict] = None) -> list[Check]:
+    """Run every check and return the results in a fixed order.
+    *trusted_mcp_servers* as for check_mcp."""
     checks: list[Check] = []
     checks += _guard("model", lambda: check_model(backend))
     checks += _guard("tool-calls", lambda: check_tools(backend))
@@ -266,7 +277,7 @@ def run_doctor(work_dir: Path, backend, *, verify_cmd=None,
                                                  verify_off=verify_off))
     checks += _guard("config", lambda: check_project_config(work_dir))
     if check_mcp_servers:
-        checks += _guard("mcp", lambda: check_mcp(work_dir))
+        checks += _guard("mcp", lambda: check_mcp(work_dir, trusted_mcp_servers))
     return checks
 
 

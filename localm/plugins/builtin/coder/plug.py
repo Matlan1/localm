@@ -30,7 +30,7 @@ Routes (mounted by the engine, auto-scoped to the ``coder`` capability):
   DELETE /api/coder/checkpoints                 - delete one past session
   DELETE /api/coder/projects                    - forget a project, delete its past sessions
   GET    /api/coder/episodes                    - stored lessons for a project
-  GET    /api/coder/hooks                       - a project's tool hooks and their trust
+  GET    /api/coder/hooks                       - a project's tool hooks and MCP servers, and their trust
   POST   /api/coder/hooks/trust                 - trust and remember them
   POST   /api/coder/hooks/forget                - withdraw that trust
 
@@ -1952,8 +1952,8 @@ async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest
 
 
 class HooksTrustRequest(BaseModel):
-    """Trust the tool hooks of one project: its folder and the digest of the
-    hooks the user was shown, from GET /api/coder/hooks."""
+    """Trust the tool hooks and MCP servers of one project: its folder and the
+    digest of what the user was shown, from GET /api/coder/hooks."""
     cwd: str
     digest: str
 
@@ -1983,19 +1983,23 @@ def _load_hooks(root: Path):
 
 @_router.get("/api/coder/hooks")
 async def coder_hooks(request: Request, cwd: str = ""):
-    """The tool hooks the project config nearest *cwd* declares, and whether
-    they are trusted: the web form of the REPL's ``/hooks``.
+    """The tool hooks and MCP servers the project config nearest *cwd*
+    declares, and whether they are trusted: the web form of the REPL's
+    ``/hooks``.
 
-    Owner-only: trusting hooks lets them run commands on this machine. A
+    Owner-only: trusting them lets them run commands on this machine. A
     non-owner gets ``configured: false`` and nothing else. ``digest`` is what
-    POST /api/coder/hooks/trust must echo back."""
+    POST /api/coder/hooks/trust must echo back. ``mcp_servers`` lists each
+    server as ``{"name", "argv", "env", "trusted_calls", "line"}``, where
+    ``line`` is the one-line description the REPL shows."""
     if not _is_owner(request):
         return {"configured": False, "cwd": None}
     root = _episode_root(cwd)
 
     def _read():
+        from localm.plugins.coder.mcp import mcp_argv
         hooks = _load_hooks(root)
-        if hooks is None or not hooks.has_hooks():
+        if hooks is None or not hooks.has_commands():
             return {"configured": False, "cwd": str(root),
                     "warnings": list(hooks.warnings) if hooks else []}
         return {
@@ -2009,6 +2013,16 @@ async def coder_hooks(request: Request, cwd: str = ""):
                  "timeout": s.timeout, "error": s.error}
                 for s in (*hooks.pre, *hooks.post)
             ],
+            "mcp_servers": [
+                {"name": str(name),
+                 "argv": mcp_argv(spec),
+                 "env": ({str(k): str(v) for k, v in spec["env"].items()}
+                         if isinstance(spec.get("env"), dict) else {}),
+                 "trusted_calls": bool(spec.get("trusted", False)),
+                 "line": line}
+                for (name, spec), line in zip(hooks.mcp_servers.items(),
+                                              hooks.describe_mcp(), strict=True)
+            ],
         }
 
     return await _hooks_op(_read)
@@ -2016,12 +2030,13 @@ async def coder_hooks(request: Request, cwd: str = ""):
 
 @_router.post("/api/coder/hooks/trust")
 async def coder_hooks_trust(request: Request, req: HooksTrustRequest):
-    """Trust and remember the project's tool hooks: the web form of
-    ``--trust-hooks`` / ``/hooks trust``.
+    """Trust and remember the project's tool hooks and MCP servers: the web
+    form of ``--trust-hooks`` / ``/hooks trust``.
 
-    409 when the hooks no longer match ``digest`` (they changed after they
-    were shown), so only hooks the user saw are trusted. A running session
-    whose hooks were untrusted picks the trust up at its next matching call."""
+    409 when they no longer match ``digest`` (they changed after they were
+    shown), so only what the user saw is trusted. A running session whose
+    hooks were untrusted picks the trust up at its next matching call, and
+    starts MCP servers it held back when its next task starts."""
     if not _is_owner(request):
         raise HTTPException(404, "No tool hooks")
     root = _episode_root(req.cwd)
@@ -2029,12 +2044,13 @@ async def coder_hooks_trust(request: Request, req: HooksTrustRequest):
     def _trust():
         from localm.plugins.coder.hook_trust import TrustStoreUnreadable
         hooks = _load_hooks(root)
-        if hooks is None or not hooks.has_hooks():
-            raise HTTPException(404, "No tool hooks are configured for this project.")
+        if hooks is None or not hooks.has_commands():
+            raise HTTPException(
+                404, "No tool hooks or MCP servers are configured for this project.")
         if req.digest != hooks.digest:
             raise HTTPException(
-                409, "The tool hooks changed since they were shown. Review them "
-                     "again before trusting them.")
+                409, "The tool hooks or MCP servers changed since they were shown. "
+                     "Review them again before trusting them.")
         try:
             hooks.remember_trust()
         except TrustStoreUnreadable as e:
@@ -2046,9 +2062,11 @@ async def coder_hooks_trust(request: Request, req: HooksTrustRequest):
 
 @_router.post("/api/coder/hooks/forget")
 async def coder_hooks_forget(request: Request, req: EpisodeTargetRequest):
-    """Withdraw the remembered trust for the project's tool hooks: the web form
-    of ``/hooks forget``. Running sessions that trusted them through the store
-    stop at their next matching tool call."""
+    """Withdraw the remembered trust for the project's tool hooks and MCP
+    servers: the web form of ``/hooks forget``. Running sessions that trusted
+    the hooks through the store stop them at their next matching tool call;
+    MCP servers already started keep running until their session ends, and
+    later sessions start none."""
     if not _is_owner(request):
         raise HTTPException(404, "No tool hooks")
     root = _episode_root(req.cwd)

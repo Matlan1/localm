@@ -77,5 +77,28 @@ test("hooks: a project with none says so, and no cwd never reaches the server", 
   assert.equal(calls.filter((c) => c.url.startsWith("/api/coder/hooks")).length, 0);
   win.document.getElementById("setup-cwd").value = "/tmp/project";
   await win.openHooksModal();
-  assert.match(win.document.getElementById("modal-body").textContent, /No tool hooks in this project/);
+  assert.match(win.document.getElementById("modal-body").textContent,
+    /No tool hooks or MCP servers in this project/);
+});
+
+test("hooks: MCP servers are listed with the hooks and trusted with the same digest", async () => {
+  const calls = [];
+  const data = {
+    ...HOOKS, trusted: false, hooks: [],
+    mcp_servers: [{ name: "db", argv: ["npx", "-y", "server-sqlite"], env: {}, trusted_calls: true,
+                    line: 'MCP server "db": ["npx", "-y", "server-sqlite"] (trusted = true)' }],
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, data) });
+  win.document.getElementById("setup-cwd").value = "/tmp/project";
+  await win.openHooksModal();
+  const body = win.document.getElementById("modal-body").textContent;
+  assert.match(body, /MCP server "db": \["npx", "-y", "server-sqlite"\]/);
+  assert.match(body, /its tool calls are not confirmed/);
+  assert.match(body, /no MCP server is started/);
+  assert.equal(buttonByText(win, "trust these hooks"), undefined);
+  const trust = buttonByText(win, "trust these commands");
+  assert.ok(trust, "an untrusted MCP project offers a trust button");
+  await trust.onclick();
+  const post = calls.find((c) => c.url === "/api/coder/hooks/trust");
+  assert.deepEqual(post.body, { cwd: "/tmp/project", digest: "abc123" });
 });

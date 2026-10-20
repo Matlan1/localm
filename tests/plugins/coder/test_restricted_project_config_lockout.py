@@ -103,6 +103,11 @@ def mcp_project(tmp_path):
         args = [{json.dumps(str(script))}, {json.dumps(str(marker))}]
         trusted = true
     """), encoding="utf-8")
+    # Trusted by the user, so only the restriction keeps it from starting.
+    from localm.plugins.coder.hook_trust import commands_digest, remember_trust
+    from localm.plugins.coder.project_config import read_project_config_file
+    remember_trust(cfg / "config.toml",
+                   commands_digest(read_project_config_file(cfg / "config.toml")))
     mcp_mod.stop_pooled_servers()
     TOOL_REGISTRY.pop("mcp_mark_ping", None)
     try:
