@@ -9,6 +9,8 @@ Commands
   localcoder --model X           Specify model
   localcoder --url URL           Point at any OpenAI-compatible server
   localcoder --no-server         Don't start localm serve (connect to existing)
+  localcoder doctor              Check the model server, context window, tool
+                                 calls, git, verify command and MCP servers
 
 This module owns the ``main`` Click command (the localcoder entry point). The
 goal-mode loop, estimate mode, and the interactive REPL live in sibling modules
@@ -157,8 +159,11 @@ def _complete_model(ctx, param, incomplete):
                   "Exit 0 = success, 1 = task incomplete (max turns), 2 = startup error."
               ))
 @click.option("--output-format",    "output_format", default="text",
-              type=click.Choice(["text", "json"], case_sensitive=False),
-              help="Output format for non-interactive runs (text or json).")
+              type=click.Choice(["text", "json", "jsonl"], case_sensitive=False),
+              help="Output format for non-interactive runs: text, json (one "
+                   "result object at the end), or jsonl (each agent event as "
+                   "one JSON line on stdout as it happens, then a final line; "
+                   "all other output goes to stderr). Also formats `doctor`.")
 @click.option("--mode",             default=None,
               type=click.Choice(["privacy", "log", "full"], case_sensitive=False),
               help=(
@@ -268,6 +273,21 @@ def main(
                              forget_episode_id, show_archive, restore_episode_id):
         return
 
+    if task == "doctor":
+        _run_doctor(work_dir, model, url, api_key, native_tools, port, provider,
+                    verify_cmd, output_format)
+        return
+
+    if output_format == "jsonl" and not task:
+        click.echo("--output-format jsonl needs a TASK to run.", err=True)
+        sys.exit(2 if ci else 1)
+    # A machine-readable one-shot run owns stdout (the json document, or the
+    # jsonl event lines), so every other line the CLI prints goes to stderr.
+    if task and output_format in ("json", "jsonl"):
+        console.file = sys.stderr
+        click.get_current_context().call_on_close(
+            lambda: setattr(console, "file", None))
+
     # Goal mode needs a task to work on; fail fast before any server/model setup.
     if until_cmd and not task:
         print_error("--until requires a TASK to work on.")
@@ -347,6 +367,10 @@ def main(
     # ------------------------------------------------------------------ #
     #  Create agent
     # ------------------------------------------------------------------ #
+    events = None
+    if output_format == "jsonl":
+        from ..eventstream import JsonlEventWriter
+        events = JsonlEventWriter(sys.stdout)
     agent = build_agent(
         backend, work_dir,
         task=task,
@@ -362,7 +386,12 @@ def main(
         verify_cmd=session_verify,
         browser_enabled=_browser_enabled(),
         max_tokens_explicit=max_tokens_explicit,
+        on_event=events,
     )
+    if events is not None:
+        # The close-time reflection runs synchronously, so a one-shot process
+        # does not exit with it still in flight on a daemon thread.
+        agent.reflect_in_background = False
 
     if patch_mode:
         agent.patch_mode = True
@@ -423,7 +452,7 @@ def main(
             if denied:
                 print_warning(describe_denied(denied))
 
-            if output_format == "json":
+            if output_format in ("json", "jsonl"):
                 import json as _json
                 result = {
                     "success":      success,
@@ -432,7 +461,10 @@ def main(
                     "total_tokens": agent.total_tokens,
                     "denied":       [{"tool": n, "reason": r} for n, r in denied],
                 }
-                sys.stdout.write(_json.dumps(result, indent=2) + "\n")
+                if events is not None:
+                    events.write({"type": "final", **result})
+                else:
+                    sys.stdout.write(_json.dumps(result, indent=2) + "\n")
 
             # Goal mode: a failed verification is a real non-zero exit, not only
             # under --ci.
@@ -483,6 +515,28 @@ def main(
             print_info(f"Session transcript saved → {md_path}")
         if session_mode == SessionMode.PRIVACY:
             clear_shell_history_traces()
+
+
+def _run_doctor(work_dir: Path, model, url, api_key, native_tools, port,
+                provider, verify_cmd, output_format) -> None:
+    """``localm coder doctor``: print the report and exit 1 when a check fails.
+    Starts no model server; it reports on the one the session would use."""
+    from ..doctor import render, report_ok, run_doctor
+    try:
+        model = resolve_task_config(
+            work_dir, model=model, max_turns=None, max_tokens=None,
+            temperature=None, seed=None, yes=False, interactive_confirm=False,
+            mode=None).model
+    except (ProjectConfigUnreadable, InvalidSessionMode):
+        # The doctor's own "config" check reports an unreadable project config.
+        pass
+    backend = _build_backend(
+        provider, url, model or "localm", api_key, native_tools, port, True,
+        False, work_dir, False, probe_only=True)
+    checks = run_doctor(work_dir, backend, verify_cmd=verify_cmd)
+    click.echo(render(checks, output_format))
+    if not report_ok(checks):
+        sys.exit(1)
 
 
 def _handle_episode_flags(work_dir: Path, show_episodes: bool,
@@ -704,10 +758,14 @@ def _warn_if_url_leaves_machine(session_mode, provider, url) -> None:
 
 
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
-                   force_new, work_dir, ci):
+                   force_new, work_dir, ci, probe_only=False):
     """Build the LLM backend for the chosen provider / explicit URL / offline path.
     Returns backend. Split out of main; exits
-    (2 under --ci, else 1) on a missing required option or a failed server start."""
+    (2 under --ci, else 1) on a missing required option or a failed server start.
+
+    ``probe_only`` attaches to a localm server already running for the project
+    when there is one and otherwise points at the default (or ``port``) address
+    WITHOUT starting a server, so the caller can report whether it answers."""
     # Live-attribute access so a test patching cli.make_localm_backend is honoured.
     make_localm_backend = _cli.make_localm_backend
 
@@ -784,7 +842,7 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
         if attached is not None:
             backend = attached
         else:
-            if no_server:
+            if no_server or probe_only:
                 srv_port = port or 8642
                 # api_key's click default is the literal placeholder "localm"
                 # (always truthy), so forwarding it as-is would short-circuit
