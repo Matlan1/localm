@@ -235,7 +235,7 @@ class TestMaybeCompact:
         high, low = agent._compaction_bounds(16384)
         with patch.object(agent, "_prompt_tokens_estimate", side_effect=[high + 1, low]),              patch.object(agent, "_compact_to") as mock_compact:
             agent._maybe_compact(interactive=interactive)
-        mock_compact.assert_called_once_with(low, 16384)
+        mock_compact.assert_called_once_with(low, 16384, summarise=True)
 
     def test_high_bound_ratio(self):
         agent = _make_agent()

@@ -588,6 +588,7 @@ class _PersistenceMixin:
             },
             "durable_notes": list(getattr(self, "_durable_notes", [])),
             "pinned_requests": list(getattr(self, "_pinned_requests", [])),
+            "pinned_requests_dropped": int(getattr(self, "_pinned_requests_dropped", 0) or 0),
         }
         p = self._checkpoint_path
         try:
@@ -690,6 +691,10 @@ class _PersistenceMixin:
         self._restore_changed_files(data.get("changed_files"))
         self._durable_notes = _restore_durable_notes(data.get("durable_notes"))
         self._pinned_requests = _restore_pinned_requests(data.get("pinned_requests"))
+        dropped = data.get("pinned_requests_dropped")
+        self._pinned_requests_dropped = (dropped if isinstance(dropped, int)
+                                         and not isinstance(dropped, bool) and dropped > 0
+                                         else 0)
         self._usage_base = None
 
     def _restore_activated_tools(self, raw) -> None:

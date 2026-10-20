@@ -36,7 +36,8 @@ _WORKING_STATE_HEADER = "[Working state, recorded by the harness]"
 # Opening of the text that replaces a tool result dropped from the context.
 _DROPPED_OUTPUT_MARK = "[Output dropped from the context to save space"
 
-_TOOL_RESULT_HEAD_RE = re.compile(r'<tool_result name="([^"]{1,64})" status="(\w{1,16})"')
+_TOOL_RESULT_HEAD_RE = re.compile(
+    r'(?:\A|</tool_result>\n\n)<tool_result name="([^"]{1,64})" status="(\w{1,16})"')
 
 # Tool-call argument values longer than this are shortened in an old
 # assistant message once its turn is dropped from the context.
@@ -577,7 +578,7 @@ class _ContextMixin:
             if not self._is_tool_result(m):
                 continue
             content = str(m.get("content", ""))
-            if _DROPPED_OUTPUT_MARK in content[:400]:
+            if len(content) < 4000 and _DROPPED_OUTPUT_MARK in content[:400]:
                 continue
             size = measure(content)
             if kept == 0 or used + size <= keep_tokens:
@@ -623,12 +624,13 @@ class _ContextMixin:
             self._usage_base = None
         return dropped
 
-    def _compact_to(self, target_tokens: int, window: int) -> bool:
+    def _compact_to(self, target_tokens: int, window: int, *, summarise: bool = True) -> bool:
         """Bring the expected prompt down to *target_tokens* in a *window*-token
         context: first drop old tool output (keeping the newest that fits
         ``_COMPACT_KEEP_OUTPUT_RATIO`` of the window, then only the newest
         one), and summarise older turns (``_compact_history``) only when that
-        is not enough. Returns True when the history changed."""
+        is not enough and *summarise* is True. Returns True when the history
+        changed."""
         dropped = self._drop_old_tool_output(int(window * _COMPACT_KEEP_OUTPUT_RATIO))
         if self._prompt_tokens_estimate() > target_tokens:
             dropped += self._drop_old_tool_output(0)
@@ -638,6 +640,8 @@ class _ContextMixin:
                     f"Dropped the output of {dropped} earlier tool call(s) from the "
                     "context to free space; the model runs a tool again when it "
                     "needs that output.")
+            return bool(dropped)
+        if not summarise:
             return bool(dropped)
         return self._compact_history(target_tokens=target_tokens) or bool(dropped)
 
@@ -967,43 +971,62 @@ ws     ::= [ \t\n\r]*
             kept += 1
         return max(4, kept)
 
-    def _pin_requests(self, older: list[dict]) -> None:
-        """Add the user-written messages of *older* (not tool results, not a
-        summary) to ``_pinned_requests``, keeping the newest
-        ``_MAX_PINNED_REQUESTS``, each cut to ``_MAX_PINNED_REQUEST_CHARS``."""
-        pinned = list(getattr(self, "_pinned_requests", None) or [])
-        for m in older:
-            content = m.get("content", "")
-            if (m.get("role") != "user" or not isinstance(content, str)
-                    or self._is_tool_result(m) or content.startswith(_SUMMARY_TEXT_PREFIX)):
-                continue
-            text = content.strip()[:_MAX_PINNED_REQUEST_CHARS]
-            if text and text not in pinned:
-                pinned.append(text)
-        self._pinned_requests = pinned[-_MAX_PINNED_REQUESTS:]
+    def _note_typed_request(self, text) -> None:
+        """Record *text*, a request the user typed, in ``_pinned_requests``
+        (each cut to ``_MAX_PINNED_REQUEST_CHARS``; past
+        ``_MAX_PINNED_REQUESTS`` the first two and the newest are kept, and
+        ``_pinned_requests_dropped`` counts the others). Text that is not a
+        plain string, is empty, or carries untrusted ranges is not
+        recorded."""
+        from localm.textguard import untrusted_spans_of
+        if not isinstance(text, str) or untrusted_spans_of(text):
+            return
+        item = str(text).strip()[:_MAX_PINNED_REQUEST_CHARS]
+        if not item:
+            return
+        pinned = [r for r in (getattr(self, "_pinned_requests", None) or []) if r != item]
+        pinned.append(item)
+        if len(pinned) > _MAX_PINNED_REQUESTS:
+            self._pinned_requests_dropped = (
+                int(getattr(self, "_pinned_requests_dropped", 0) or 0)
+                + len(pinned) - _MAX_PINNED_REQUESTS)
+            pinned = pinned[:2] + pinned[len(pinned) - (_MAX_PINNED_REQUESTS - 2):]
+        self._pinned_requests = pinned
 
-    def _pinned_requests_block(self, exclude: str = ""):
+    def _pinned_requests_block(self, exclude: str = "", kept=()):
         """The section of a summary listing ``_pinned_requests`` except
-        *exclude*, newest last, within a twentieth of the context window (at
-        four characters per token, at least 600); older requests left out are
-        counted. ``""`` when there is nothing to list."""
+        *exclude* and any that is the whole text of a *kept* user message (or
+        its first or last line block), in order, within a twentieth of the
+        context window (at four characters per token, at least 600): the first
+        request, then the newest that fit; requests left out are counted.
+        ``""`` when there is nothing to list."""
         from localm.textguard import compose
         exclude = str(exclude or "").strip()[:_MAX_PINNED_REQUEST_CHARS]
-        items = [r for r in (getattr(self, "_pinned_requests", None) or []) if r != exclude]
+        kept_text = [str(m.get("content", "")).strip() for m in kept if m.get("role") == "user"]
+
+        def _in_tail(r: str) -> bool:
+            return any(t == r or t.startswith(r + "\n") or t.endswith("\n" + r)
+                       for t in kept_text)
+
+        items = [r for r in (getattr(self, "_pinned_requests", None) or [])
+                 if r != exclude and not _in_tail(r)]
         if not items:
             return ""
         budget = max(600, self._ctx_window_tokens() * 4 // 20)
-        shown: list[str] = []
-        used = 0
-        for r in reversed(items):
-            if shown and used + len(r) > budget:
+        first, rest = items[0], items[1:]
+        used = len(first) + 3
+        newest: list[str] = []
+        for r in reversed(rest):
+            if used + len(r) > budget:
                 break
-            shown.append(r)
+            newest.append(r)
             used += len(r) + 3
-        shown.reverse()
+        shown = [first, *reversed(newest)]
         parts: list = [_PINNED_REQUESTS_HEADER]
-        if len(shown) < len(items):
-            parts.append(f"\n({len(items) - len(shown)} older request(s) left out for space)")
+        left_out = (len(items) - len(shown)
+                    + int(getattr(self, "_pinned_requests_dropped", 0) or 0))
+        if left_out:
+            parts.append(f"\n({left_out} earlier request(s) left out for space)")
         for r in shown:
             parts.extend(["\n- ", r])
         return compose(*parts)
@@ -1036,7 +1059,6 @@ ws     ::= [ \t\n\r]*
 
         older  = self._messages[:cut]
         recent = self._messages[cut:]
-        self._pin_requests(older)
         request = self._latest_request()
         request_in_tail = bool(request) and any(
             str(m.get("content", "")) == str(request) or
@@ -1184,7 +1206,7 @@ ws     ::= [ \t\n\r]*
         if request and not request_in_tail:
             body = compose(body, "\n\nCurrent request (verbatim):\n", request)
 
-        pinned = self._pinned_requests_block(exclude=str(request or ""))
+        pinned = self._pinned_requests_block(exclude=str(request or ""), kept=recent)
         if pinned:
             body = compose(body, "\n\n", pinned)
 
@@ -1245,9 +1267,12 @@ ws     ::= [ \t\n\r]*
             return
         high, low = self._compaction_bounds(window)
         if self._prompt_tokens_estimate() <= high:
+            self._compact_futile = False
             return
-        self._compact_to(low, window)
+        self._compact_to(low, window,
+                         summarise=not getattr(self, "_compact_futile", False))
         expected = self._prompt_tokens_estimate()
+        self._compact_futile = expected > high
         if expected > high and not getattr(self, "_compact_warned", False):
             self._compact_warned = True
             text = (f"The model's context window ({window:,} tokens) is too small for "
@@ -1274,6 +1299,7 @@ ws     ::= [ \t\n\r]*
         window: down to the low bound of the reported window, else of the
         current expected prompt halved. Returns True when the history
         changed."""
+        self._usage_base = None
         window = self._known_ctx_window() or max(1, self._prompt_tokens_estimate() // 2)
         _high, low = self._compaction_bounds(window)
         return self._compact_to(low, window)
@@ -1718,6 +1744,7 @@ ws     ::= [ \t\n\r]*
         return full
 
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
+        from localm.inference.backends.base import ContextCapacityExceededError
         from ..backends.http import CoderAuthError, CoderServerError
         first_attempt = True
         overflow_retried = False
@@ -1814,6 +1841,12 @@ ws     ::= [ \t\n\r]*
                         raise
                 self.backend._api_key = new_key
                 print_info("Retrying with new API key...")
+            except ContextCapacityExceededError:
+                if overflow_retried or not self._compact_after_overflow():
+                    raise
+                overflow_retried = True
+                messages = self._build_messages()
+                continue
             except CoderServerError as e:
                 if (not overflow_retried and self._is_context_overflow(e)
                         and self._compact_after_overflow()):

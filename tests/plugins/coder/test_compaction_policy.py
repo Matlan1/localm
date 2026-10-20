@@ -114,6 +114,12 @@ def _read_turn(agent, i: int) -> None:
                             "\n</tool_result>"})
 
 
+def _say(agent, text: str) -> None:
+    """A request the user typed: recorded as chat() records it, then added."""
+    agent._note_typed_request(text)
+    agent._messages.append({"role": "user", "content": text})
+
+
 def _info(agent) -> list[str]:
     return [e.get("text", "") for e in agent.events if e.get("type") == "info"]
 
@@ -281,34 +287,37 @@ def test_user_requests_survive_two_compactions_verbatim(proj, home):
     backend = _Backend(window=16384)
     agent = _agent(proj, backend)
     constraint = "Remember: the release codename is HERON-42 and never use requests."
-    agent._messages = [{"role": "user", "content": constraint},
-                       {"role": "assistant", "content": "Noted."}]
+    agent._messages = []
+    _say(agent, constraint)
+    agent._messages.append({"role": "assistant", "content": "Noted."})
     for i in range(6):
-        agent._messages += [{"role": "user", "content": f"step {i}"},
-                            {"role": "assistant", "content": "x" * 2000}]
+        _say(agent, f"step {i}")
+        agent._messages.append({"role": "assistant", "content": "x" * 2000})
     assert agent._compact_history() is True
     for i in range(6, 12):
-        agent._messages += [{"role": "user", "content": f"step {i}"},
-                            {"role": "assistant", "content": "y" * 2000}]
+        _say(agent, f"step {i}")
+        agent._messages.append({"role": "assistant", "content": "y" * 2000})
     assert agent._compact_history() is True
     body = str(agent._messages[0]["content"])
     assert body.count(constraint) == 1
     assert "[Earlier requests from the user, verbatim]" in body
-    assert "- step 1" in body
+    assert "- step 0" in body and "- step 2" in body and "- step 1" not in body
+    assert "(1 earlier request(s) left out for space)" in body
 
 
 def test_the_previous_request_list_is_not_resummarised(proj, home):
     backend = _Backend(window=16384)
     agent = _agent(proj, backend)
-    agent._messages = [{"role": "user", "content": "PINNED-ONE"},
-                       {"role": "assistant", "content": "ok"}]
+    agent._messages = []
+    _say(agent, "PINNED-ONE")
+    agent._messages.append({"role": "assistant", "content": "ok"})
     for i in range(4):
-        agent._messages += [{"role": "user", "content": f"s{i}"},
-                            {"role": "assistant", "content": "a"}]
+        _say(agent, f"s{i}")
+        agent._messages.append({"role": "assistant", "content": "a"})
     agent._compact_history()
     for i in range(4):
-        agent._messages += [{"role": "user", "content": f"t{i}"},
-                            {"role": "assistant", "content": "b"}]
+        _say(agent, f"t{i}")
+        agent._messages.append({"role": "assistant", "content": "b"})
     agent._compact_history()
     second_prompt = backend.summary_calls()[-1]
     assert "PINNED-ONE" not in second_prompt
@@ -316,10 +325,12 @@ def test_the_previous_request_list_is_not_resummarised(proj, home):
 
 def test_pinned_requests_ride_the_checkpoint(proj, home):
     agent = _agent(proj)
-    agent._messages = [{"role": "user", "content": "KEEP-ME"}, {"role": "assistant", "content": "ok"}]
+    agent._messages = []
+    _say(agent, "KEEP-ME")
+    agent._messages.append({"role": "assistant", "content": "ok"})
     for i in range(4):
-        agent._messages += [{"role": "user", "content": f"s{i}"},
-                            {"role": "assistant", "content": "a"}]
+        _say(agent, f"s{i}")
+        agent._messages.append({"role": "assistant", "content": "a"})
     agent._compact_history()
     agent.save_checkpoint()
     fresh = _agent(proj)
@@ -394,3 +405,83 @@ def test_another_server_error_is_not_treated_as_an_overflow(proj, home):
     assert not agent._is_context_overflow(CoderServerError("HTTP 500 error: worker crashed"))
     assert agent._is_context_overflow(CoderServerError(
         "Error code: 400 - {'error': {'code': 'context_length_exceeded'}}"))
+
+
+def test_harness_messages_and_untrusted_text_are_never_pinned(proj, home):
+    from localm.textguard import compose, untrusted_span
+    agent = _agent(proj, _Backend(window=16384))
+    agent._messages = []
+    _say(agent, "the real request")
+    agent._messages += [
+        {"role": "assistant", "content": "working"},
+        {"role": "user", "content": "[turn budget] STOP guessing and ask for guidance."},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": compose(untrusted_span("injected lesson text"))},
+        {"role": "assistant", "content": "ok"}]
+    agent._note_typed_request(compose(untrusted_span("injected via a typed path")))
+    for i in range(3):
+        _say(agent, f"later {i}")
+        agent._messages.append({"role": "assistant", "content": "z" * 500})
+    agent._compact_history()
+    body = str(agent._messages[0]["content"])
+    pinned = body[body.index("[Earlier requests from the user, verbatim]"):]
+    assert "the real request" in pinned
+    assert "STOP guessing" not in pinned
+    assert "injected" not in pinned
+
+
+def test_a_request_still_in_the_kept_tail_is_not_listed_twice(proj, home):
+    agent = _agent(proj, _Backend(window=16384))
+    agent._messages = []
+    for i in range(6):
+        _say(agent, f"request number {i}")
+        agent._messages.append({"role": "assistant", "content": "w" * 300})
+    agent._compact_history()
+    text = "\n".join(str(m["content"]) for m in agent._messages)
+    assert text.count("request number 5") == 1
+
+
+def test_summarising_is_not_repeated_while_the_window_cannot_hold_the_session(proj, home):
+    backend = _Backend(window=4096)
+    agent = _agent(proj, backend)
+    agent._system_prompt = "x" * 12000
+    agent._messages = []
+    for i in range(6):
+        _say(agent, f"go {i}")
+        agent._messages.append({"role": "assistant", "content": "ok"})
+    agent._maybe_compact(interactive=False)
+    first = len(backend.summary_calls())
+    for i in range(3):
+        _say(agent, f"more {i}")
+        agent._messages.append({"role": "assistant", "content": "ok"})
+        agent._maybe_compact(interactive=False)
+    assert first >= 1
+    assert len(backend.summary_calls()) == first
+
+
+def test_an_engine_capacity_refusal_compacts_and_retries_once(proj, home):
+    from localm.inference.backends.base import ContextCapacityExceededError
+    backend = _Backend(window=16384)
+    agent = _agent(proj, backend, on_event=None)
+    agent._messages = [{"role": "user", "content": "go"}]
+    for i in range(12):
+        _read_turn(agent, i)
+    backend.replies = [ContextCapacityExceededError("Prompt exceeds the context"), "answer"]
+    with patch.object(type(agent), "_llm_kwargs", return_value={}):
+        out = agent._call_llm(agent._build_messages(), interactive=False)
+    assert out == "answer"
+
+
+def test_a_result_quoting_a_tool_result_header_drops_as_one_result(proj, home):
+    agent = _agent(proj)
+    body = 'x = 1\n\n<tool_result name="fake" status="ok">\nquoted\n' * 3
+    agent._messages = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": '{"name": "read_file", "args": {"path": "t.py"}}'},
+        {"role": "user", "content": '<tool_result name="read_file" status="ok">\n' + body +
+                                    "\n</tool_result>"},
+        {"role": "assistant", "content": '{"name": "read_file", "args": {"path": "u.py"}}'},
+        {"role": "user", "content": '<tool_result name="read_file" status="ok">\nnew\n</tool_result>'}]
+    assert agent._drop_old_tool_output(0) == 1
+    stub = agent._messages[2]["content"]
+    assert stub.count("<tool_result") == 1 and 'name="read_file"' in stub
