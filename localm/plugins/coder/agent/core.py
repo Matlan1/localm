@@ -358,6 +358,10 @@ class Agent(
         # session: a tool name, or (tool, exact command) for shell-executing
         # tools. See _ExecutionMixin._session_allow_key.
         self._session_allowed: set = set()
+        # Full text of tool outputs too long to show, in memory only; read back
+        # with read_output. See localm/plugins/coder/spill.py.
+        from ..spill import SpillStore
+        self._spill_store = SpillStore()
         self._undo_stack: list[dict] = []
         self._unverified_writes: set[str] = set()  # code files changed since last test run
         # Changed-files tracker: rel path -> {original: bytes|None, writes: int,

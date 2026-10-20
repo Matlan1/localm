@@ -62,6 +62,7 @@ from .rag import tool_rag_list_collections, tool_rag_search
 from .outline import tool_outline_file
 from .references import tool_find_references
 from .tasks import tool_read_todos, tool_set_todos
+from .outputs import tool_read_output
 from .toolsearch import tool_search_tools
 
 @dataclass
@@ -107,6 +108,9 @@ SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
     # no project file. Its only disk trace is a key in the checkpoint the session
     # already writes.
     "set_todos", "read_todos",
+    # Reads back this session's own tool output, kept in memory; it reaches
+    # nothing a restricted session could not already see.
+    "read_output",
 })
 # edit_files is edit_file's exact-string replacement applied to N files in one
 # call, each path put through the same _confine() check, so it grants no capability
@@ -735,6 +739,21 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "query": {"type": "string",
                       "description": "Keywords, or select:name1,name2 for exact tool names",
                       "required": True},
+        },
+    ),
+    "read_output": ToolDef(
+        name="read_output",
+        fn=tool_read_output,
+        description=(
+            "Read a tool output that was too long to show in full. A cut-short "
+            "result names its id (o1, o2, ...). Give offset and limit for a line "
+            "range, or pattern to list the matching lines, numbered."
+        ),
+        params={
+            "id":      {"type": "string", "description": "Output id, e.g. o1", "required": True},
+            "offset":  {"type": "int", "description": "1-based first line (optional)", "required": False},
+            "limit":   {"type": "int", "description": "Number of lines, max 400 (optional)", "required": False},
+            "pattern": {"type": "string", "description": "Regex; lists matching lines instead of a range", "required": False},
         },
     ),
     "dispatch_parallel": ToolDef(

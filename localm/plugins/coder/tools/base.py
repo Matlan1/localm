@@ -25,6 +25,10 @@ class ToolResult:
     output:  str
     summary: str = ""       # one-line display shown in the console
     truncated: bool = False
+    # True when this output is external content even though the tool that
+    # returned it is not an untrusted tool (read_output reading back a spilled
+    # fetch_url page). provenance frames it as untrusted either way.
+    untrusted_output: bool = False
     # For a tool whose target files are discovered at RUNTIME rather than
     # named in its call args (search_replace's glob+regex sweep has no
     # `path` arg to read ahead of time), the (relative_path, old_bytes,
@@ -79,13 +83,24 @@ _MAX_OUTPUT = 8_000   # chars - truncate large outputs to spare context
 
 
 def _truncate(text: str, max_chars: int = _MAX_OUTPUT) -> tuple[str, bool]:
+    """Head and tail of *text* within *max_chars*. Inside a running tool call
+    the whole text is also kept in memory (see ..spill) and the marker names
+    the id read_output reads it back by."""
     if len(text) <= max_chars:
         return text, False
     half = max_chars // 2
-    return (
-        text[:half] + f"\n\n... [{len(text) - max_chars} chars truncated] ...\n\n" + text[-half:],
-        True,
-    )
+    from ..spill import spill
+    sid = spill(text)
+    if sid is None:
+        marker = f"\n\n... [{len(text) - max_chars} chars truncated] ...\n\n"
+    else:
+        lines = text.count("\n") + 1
+        marker = (
+            f"\n\n... [{len(text) - max_chars} chars not shown. The full output "
+            f"({lines} lines) is kept as {sid}: read it with "
+            f'read_output(id="{sid}", offset=N, limit=N) or search it with '
+            f'read_output(id="{sid}", pattern="...")] ...\n\n')
+    return text[:half] + marker + text[-half:], True
 
 
 def _partial_on_timeout(exc) -> str:
