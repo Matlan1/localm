@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
@@ -26,6 +27,7 @@ from .constants import (
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
     _SKILL_STATE_TOOLS,
 )
+from .planmode import INTERACTION_TOOLS
 from localm.textguard import compose, compose_join
 
 _RE_CLAUSE_SPLIT = re.compile(r"[,!?:;\n]+|\.+(?=\s|$)")
@@ -251,6 +253,14 @@ def response_similarity(a: str, b: str) -> float:
 
 
 class _LoopMixin:
+    if TYPE_CHECKING:
+        # Set by Agent (core.py) through _PlanModeMixin.
+        @property
+        def plan_mode(self) -> bool: ...
+
+        def _add_user_with_plan_note(self, content) -> None: ...
+        def _end_plan_autorun(self) -> None: ...
+
     def run_task(self, task: str, attachments: str = "") -> str:
         """
         Run a single task to completion (non-interactive).
@@ -270,7 +280,7 @@ class _LoopMixin:
         # The raw request, before _with_episodes can prepend a lessons preamble.
         self._last_user_request = task
         message = self._with_episodes(task)
-        self._add_user(compose(message, attachments) if attachments else message)
+        self._add_user_with_plan_note(compose(message, attachments) if attachments else message)
         return self._loop(interactive=False)
 
     def continue_task(self, message: str) -> str:
@@ -283,7 +293,7 @@ class _LoopMixin:
         verification failure back to the agent for another fix attempt.
         """
         self._last_user_request = message
-        self._add_user(message)
+        self._add_user_with_plan_note(message)
         return self._loop(interactive=False)
 
     def chat(self, user_input: str, attachments: str = "") -> str:
@@ -309,7 +319,7 @@ class _LoopMixin:
             user_input = self._with_episodes(user_input)
         if not self._review_task:
             self._review_task = user_input
-        self._add_user(compose(user_input, attachments) if attachments else user_input)
+        self._add_user_with_plan_note(compose(user_input, attachments) if attachments else user_input)
         return self._loop(interactive=True)
 
     def _with_episodes(self, task: str) -> str:
@@ -679,6 +689,8 @@ class _LoopMixin:
             self.clear_checkpoint()
 
         finally:
+            # Auto-run from an approved plan lasts for this run only.
+            self._end_plan_autorun()
             # Fold this run's outcome into the session-level flag before the next
             # run re-arms the per-run one, so every failure path (max_turns,
             # either circuit breaker) is captured in one place. A user stop is
@@ -722,6 +734,7 @@ class _LoopMixin:
             self.self_verify
             and not st.verify_nudged
             and self._unverified_writes
+            and not self.plan_mode
             and self._turns < self.max_turns
         ):
             st.verify_nudged = True
@@ -840,6 +853,7 @@ class _LoopMixin:
         if (
             self._reviewer is not None
             and not st.review_done
+            and not self.plan_mode
             and self._turns < self.max_turns
         ):
             st.review_done = True
@@ -1162,7 +1176,7 @@ class _LoopMixin:
         iteration. A parent that dispatches an isolated child and ALSO has its
         own verify_cmd runs two independent gates on two independent trees,
         which is by design, not a double-count of one."""
-        if self.verify_cmd is None or st.verify_settled:
+        if self.verify_cmd is None or st.verify_settled or self.plan_mode:
             return None
         # Nothing written since the last passing check means nothing to verify.
         if self._write_total() <= st.verify_checked_at:
@@ -1337,7 +1351,7 @@ class _LoopMixin:
         for call in calls:
             td = TOOL_REGISTRY.get(call.name)
             destructive = td.destructive if td else True
-            solo = call.name in _SKILL_STATE_TOOLS
+            solo = call.name in _SKILL_STATE_TOOLS or call.name in INTERACTION_TOOLS
             if (extendable and not solo
                     and segments and segments[-1][0] == destructive):
                 segments[-1][1].append(call)
@@ -1356,7 +1370,20 @@ class _LoopMixin:
                                  if not f.done()]
         abandoned = self._abandoned_peers
 
+        after_plan_verdict = False
         for destructive, group in segments:
+            if after_plan_verdict:
+                # Calls emitted after exit_plan_mode in the same reply wait for
+                # the model to read the user's verdict.
+                for call in group:
+                    result = ToolResult.error(
+                        f"{call.name} was not run: it was in the same reply as "
+                        "exit_plan_mode. Read the user's verdict on the plan, "
+                        "then call it again if it still applies.")
+                    if interactive:
+                        print_tool_error(call.name, result.output)
+                    result_blocks.append(self._result_block(call, result))
+                continue
             still_live: list[tuple] = []
             if destructive and abandoned:
                 abandoned = self._await_abandoned_peers(abandoned)
@@ -1383,6 +1410,8 @@ class _LoopMixin:
                     else:
                         result = self._execute_tool(call, interactive=interactive)
                     result_blocks.append(self._result_block(call, result))
+                    if call.name == "exit_plan_mode":
+                        after_plan_verdict = True
             else:
                 # Parallel execution for a non-destructive batch. The pool is
                 # shut down without waiting, so one hung tool cannot block the

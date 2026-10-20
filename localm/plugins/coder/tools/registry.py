@@ -63,6 +63,7 @@ from .outline import tool_outline_file
 from .references import tool_find_references
 from .tasks import tool_read_todos, tool_set_todos
 from .outputs import tool_read_output
+from .interact import tool_ask_user, tool_enter_plan_mode, tool_exit_plan_mode
 from .toolsearch import tool_search_tools
 
 @dataclass
@@ -724,6 +725,47 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "resuming a session, or whenever you are unsure what is left to do."
         ),
         params={},
+    ),
+    # The interaction tools (tools/interact.py) are not destructive: they write
+    # nothing, and each runs alone in its batch (agent/planmode.INTERACTION_TOOLS).
+    "ask_user": ToolDef(
+        name="ask_user",
+        fn=tool_ask_user,
+        description=(
+            "Ask the user a question and wait for the answer. Use it only for a "
+            "decision you cannot settle from the code (a requirement, a choice "
+            "between approaches, a missing value). Offer short options when the "
+            "answer is one of a few; the user can still type their own. In an "
+            "unattended run there is nobody to ask: decide yourself."
+        ),
+        params={
+            "question": {"type": "string", "description": "The question, one or two sentences", "required": True},
+            "options":  {"type": "array",  "description": "Optional short answers to offer (at most 9)", "required": False},
+        },
+    ),
+    "enter_plan_mode": ToolDef(
+        name="enter_plan_mode",
+        fn=tool_enter_plan_mode,
+        description=(
+            "Switch to plan mode before a large or unclear change: only read-only "
+            "tools run until the user approves your plan via exit_plan_mode."
+        ),
+        params={
+            "reason": {"type": "string", "description": "Why a plan is needed first", "required": False},
+        },
+    ),
+    "exit_plan_mode": ToolDef(
+        name="exit_plan_mode",
+        fn=tool_exit_plan_mode,
+        description=(
+            "In plan mode, present your plan for approval. Pass the WHOLE plan in "
+            "markdown: the files to change, the changes, and how you will verify "
+            "them. If the user approves, plan mode ends and you carry it out; "
+            "otherwise you get their feedback and stay in plan mode."
+        ),
+        params={
+            "plan": {"type": "string", "description": "The complete plan in markdown", "required": True},
+        },
     ),
     "search_tools": ToolDef(
         name="search_tools",

@@ -208,6 +208,8 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
         browser_enabled=browser_enabled,
         max_tokens_explicit=max_tokens_explicit,
         on_event=on_event,
+        # Only the interactive REPL (no task) can answer a question or approve a plan.
+        interactive_tools=not task,
         **(gen_kw or {}),
     )
 

@@ -157,3 +157,10 @@ def test_kept_outputs_end_with_the_conversation(tmp_path):
 def test_read_output_is_available_to_a_restricted_session():
     from localm.plugins.coder.tools.registry import SAFE_RESTRICTED_TOOLS
     assert "read_output" in SAFE_RESTRICTED_TOOLS
+
+
+def test_read_output_runs_in_plan_mode():
+    from localm.plugins.coder.agent.planmode import plan_mode_refusal
+    from localm.plugins.coder.tools import TOOL_REGISTRY
+
+    assert plan_mode_refusal("read_output", TOOL_REGISTRY["read_output"]) is None
