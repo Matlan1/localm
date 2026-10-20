@@ -21,6 +21,7 @@ import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./ta
 export function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
 
 export let _perfEstTimer = null;
+const PERF_ESTIMATE_AFTER_RELOAD_MS = 4000;
 export async function refreshPerfEstimate() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
@@ -106,7 +107,8 @@ export function setupPerfCard() {
     } catch (e) {
       toast(t("settings.perf.reloadFailedToast", { model, message: e.message }), true);
     }
-    refreshPerfEstimate();
+    // Re-reads the estimate once the free-VRAM reading has caught up with the reload.
+    setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
   };
   // Seed slider positions from the current config, then estimate.
   fetch("/v1/config", { headers: authHeaders() })
