@@ -1016,8 +1016,8 @@ invalid `pre_tool_use` entry or an unknown event name under `[hooks]`, until it 
 its stderr to the tool result the agent sees (a linter's complaints, for example); any
 other failure is shown to you as a warning. Pre hooks run before the confirmation prompt,
 so a call a hook blocks is never offered for approval, and they do not run for a call
-`--dry-run` or `--patch-mode` skips. On Windows a string command runs through `cmd /C`;
-use the list form when the program path contains spaces.
+`--dry-run` or `--patch-mode` skips. The JSON is ASCII-only (other characters arrive as
+`\uXXXX` escapes), so a hook can read it whatever its console encoding.
 
 A cloned repository can ship hooks, so a project's hooks run only after you trust them.
 An interactive session lists them and asks: `y` trusts them for this session, `a` trusts
