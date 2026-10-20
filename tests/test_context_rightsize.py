@@ -168,3 +168,23 @@ class TestPlan:
         llm = _llm(32768, vram_check=lambda t, c: True)
         llm._ctx_ptr = None
         assert llm._rightsize_plan(100) is None
+
+
+class TestThreadsOnARecreatedContext:
+    def test_a_grown_context_keeps_the_configured_thread_count(self):
+        llm = _llm(4096, vram_check=lambda t, c: True)
+        llm._n_threads = 6
+        api, cp = _api()
+        with patch(API, api):
+            llm._prefill_fresh_context(list(range(100)), needed=5000)
+        assert cp.n_ctx == 8192
+        assert cp.n_threads == 6 and cp.n_threads_batch == 6
+
+    def test_no_thread_count_configured_leaves_the_runtime_default(self):
+        llm = _llm(4096, vram_check=lambda t, c: True)
+        api, cp = _api()
+        cp.n_threads = 4
+        cp.n_threads_batch = 4
+        with patch(API, api):
+            llm._prefill_fresh_context(list(range(100)), needed=5000)
+        assert cp.n_threads == 4 and cp.n_threads_batch == 4

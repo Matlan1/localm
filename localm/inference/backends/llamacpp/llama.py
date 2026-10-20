@@ -4717,6 +4717,9 @@ class LlamaCpp:
         cp.n_batch     = min(cp.n_ctx, 2048)
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = offload_kqv  # False -> KV cache in system RAM (VRAM was tight)
+        if self._n_threads is not None:
+            cp.n_threads = self._n_threads
+            cp.n_threads_batch = self._n_threads
         self._apply_parallel_params(cp)
         # The grown context must keep the rollback snapshots too, or speculation
         # stops working the moment a conversation outgrows its first context.

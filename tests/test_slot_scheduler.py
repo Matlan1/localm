@@ -1069,6 +1069,8 @@ def test_rightsize_counts_the_other_slots_cached_cells(made):
     ctx = _SimContext(capacity=2048, n_ctx_max=4096, base=256, grow=256)
     sched = made(ctx, 2)
     _collect(sched, PROMPTS[0], 20)
+    cached = sum(len(s.kv) for s in sched._slots)
+    assert cached > 0
     ctx.rightsize_calls.clear()
     _collect(sched, PROMPTS[1], 20)
-    assert ctx.rightsize_calls[0][1] == len(PROMPTS[0]) + 20 - 1
+    assert ctx.rightsize_calls[0][1] == cached
