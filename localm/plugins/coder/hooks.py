@@ -50,7 +50,6 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -239,13 +238,10 @@ def _drain(stream, sink: list, cap: int) -> None:
 
 
 def _shell_argv(command: str) -> Union[list, str]:
-    """*command* run through the platform shell. On Windows the whole command
-    is wrapped in one more pair of quotes for ``cmd /S /C``, which removes
-    exactly that pair, so a command that starts with a quoted program path
-    reaches cmd unchanged."""
-    if sys.platform == "win32":
-        return 'cmd /S /C "' + command + '"'
-    return ["/bin/sh", "-c", command]
+    """*command* run through the platform shell, in the form
+    ``subprocess.Popen`` receives it unchanged (see ``platform_shell``)."""
+    from .tools.base import platform_shell
+    return platform_shell(command)
 
 
 def _feed(stream, data: bytes) -> None:
