@@ -34,7 +34,7 @@ def _llm(capacity=4096, *, offload_kqv=True, n_ctx=4096, grow=4096):
     return llm
 
 
-def _api(llm, init=444):
+def _api(llm, init=444, sample_cost=0.0):
     api = MagicMock()
     cp = MagicMock()
     api.llama_context_default_params.return_value = cp
@@ -48,7 +48,10 @@ def _api(llm, init=444):
         return 0
     api.llama_decode.side_effect = decode
     api.llama_batch_init.side_effect = fake_batch_init
-    api.llama_sampler_sample.return_value = 42
+    def sample(sampler, ctx, row):
+        llm._clock.now += sample_cost
+        return 42
+    api.llama_sampler_sample.side_effect = sample
     api.llama_memory_seq_rm.return_value = True
     return api, cp
 
@@ -189,9 +192,28 @@ class TestSingleSlot:
         assert llm._ctx_capacity > 512
         assert llm._decode_refresh is None
 
+    def test_time_spent_waiting_in_the_next_sample_counts(self):
+        llm = _llm()
+        api, _cp = _api(llm, sample_cost=0.03)
+        llm._clock.cost = 0.0
+        llm._note_decode_rate = MagicMock()
+        _generate(llm, api)
+        steps, seconds, _depth = llm._note_decode_rate.call_args.args
+        assert steps == 39
+        assert seconds == pytest.approx(39 * 0.03)
+
+    def test_a_load_not_fully_on_a_gpu_is_never_judged(self):
+        llm = _llm()
+        llm._decode_judged = False
+        api, _cp = _api(llm)
+        _generate(llm, api, cost=0.02)
+        _generate(llm, api, cost=0.2)
+        assert llm._decode_refresh is None
+        assert llm._decode_samples is None
+
     def test_a_speculating_reply_counts_main_decodes_not_tokens(self):
         llm = _llm()
-        api, _cp = _api(llm)
+        api, _cp = _api(llm, sample_cost=0.005)
         llm._note_decode_rate = MagicMock()
         source = MagicMock()
         source.begin_call.return_value = False
@@ -211,7 +233,7 @@ class TestSingleSlot:
         assert len(out) == 161
         steps, seconds, _depth = llm._note_decode_rate.call_args.args
         assert steps == 40
-        assert seconds == pytest.approx(40 * 0.02)
+        assert seconds == pytest.approx(40 * (0.02 + 0.005 + 0.005))
 
 
 class TestExpectation:
@@ -274,14 +296,15 @@ class TestBackoff:
         llm = _llm()
         self._slow_then_refresh(llm)
         assert llm._decode_refresh_after > time.monotonic() + 50
-        assert llm._decode_refresh_backoff == 120.0
+        assert llm._decode_refresh_backoff == 60.0
         llm._note_decode_rate(100, 100 / 4.0, 300)
         assert llm._decode_refresh is None
         llm._decode_refresh_after = 0.0
         llm._note_decode_rate(100, 100 / 4.0, 300)
         assert llm._decode_refresh is not None
         llm._consume_decode_refresh()
-        assert llm._decode_refresh_backoff == 240.0
+        assert llm._decode_refresh_backoff == 120.0
+        assert llm._decode_refresh_after > time.monotonic() + 110
 
     def test_the_backoff_stops_at_its_maximum(self):
         llm = _llm()
@@ -290,10 +313,23 @@ class TestBackoff:
             llm._consume_decode_refresh()
         assert llm._decode_refresh_backoff == llm._DECODE_REFRESH_BACKOFF_MAX_S
 
-    def test_a_reply_at_the_expected_rate_resets_the_backoff(self):
+    def test_a_reply_at_the_expected_rate_keeps_the_backoff(self):
         llm = _llm()
         self._slow_then_refresh(llm)
+        llm._decode_refresh = (4.0, 40.0)
+        llm._consume_decode_refresh()
         llm._note_decode_rate(100, 100 / 39.0, 300)
+        llm._decode_refresh = (4.0, 40.0)
+        llm._consume_decode_refresh()
+        assert llm._decode_refresh_backoff == 240.0
+
+    def test_a_refresh_long_after_the_last_one_starts_at_the_base_backoff(self):
+        llm = _llm()
+        self._slow_then_refresh(llm)
+        llm._decode_refresh_backoff = 960.0
+        llm._decode_refresh_at = time.monotonic() - 2000
+        llm._decode_refresh = (4.0, 40.0)
+        llm._consume_decode_refresh()
         assert llm._decode_refresh_backoff == 60.0
 
     def test_any_recreated_context_clears_a_pending_refresh(self):

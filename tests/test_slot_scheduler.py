@@ -1147,12 +1147,38 @@ def test_two_concurrent_timed_replies_report_nothing(made):
     ctx = _SimContext()
     ctx.step_cost = 0.02
     sched = made(ctx, 2)
+    budgets = [40, 120]
     with ctx.lock():
-        streams = [sched.submit(PROMPTS[i], 40, _Sampler(), timed=True) for i in range(2)]
+        streams = [sched.submit(PROMPTS[i], budgets[i], _Sampler(), timed=True) for i in range(2)]
     results = {}
     _run_threads([lambda i=i: results.__setitem__(i, _drain(streams[i])) for i in range(2)])
     for i in range(2):
-        assert results[i] == _reference(PROMPTS[i], 40)
+        assert results[i] == _reference(PROMPTS[i], budgets[i])
+    assert any(len(call) == 1 and call[0][2] == 1 for call in ctx.calls), \
+        "the longer reply never decoded alone"
+    assert ctx.notes == []
+
+
+def test_the_depth_counts_the_cells_idle_slots_keep(made):
+    ctx = _SimContext()
+    ctx.step_cost = 0.02
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], 40, timed=True)
+    kept = sum(len(s.kv) for s in sched._slots)
+    assert kept > 0
+    _collect(sched, PROMPTS[1], 40, timed=True)
+    assert sum(1 for s in sched._slots if s.kv) == 2
+    _steps, _seconds, depth = ctx.notes[1]
+    assert depth == pytest.approx(kept + len(PROMPTS[1]) + 37 / 2)
+
+
+def test_a_reply_whose_context_grew_reports_nothing(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, base=256, grow=256)
+    ctx.step_cost = 0.02
+    sched = made(ctx, 1)
+    rec = _collect(sched, PROMPTS[0], 0, sampler=_Sampler(eog_at=700), timed=True)
+    assert len(rec["out"]) == 700
+    assert len(ctx.recreated) >= 2
     assert ctx.notes == []
 
 

@@ -189,7 +189,7 @@ class _Slot:
         self.rate_ok = False              # the reply's decode rate is reported when it ends
         self.rate_steps = 0               # decode steps it ran alone
         self.rate_s = 0.0                 # their native seconds
-        self.rate_depth = 0               # the sum of their positions
+        self.rate_depth = 0               # the sum of the cache's cells at them
 
 
 _WAIT = object()
@@ -209,7 +209,8 @@ class SlotScheduler:
 
     A reply submitted with ``timed`` that ran alone for its whole decode and
     ended without an error reports its decode steps, their native seconds
-    (*timer*) and their mean position to ``note_decode``.
+    (*timer*) and the mean count of cells the cache held at them, every
+    sequence's, to ``note_decode``.
 
     Not reentrant from the scheduler thread. Thread-safe otherwise."""
 
@@ -439,7 +440,7 @@ class SlotScheduler:
             self._touched = True
             entries = [e for part in plan.values() for e in part[0]]
             solo = self._solo()
-            depth = len(solo.kv) if solo is not None else 0
+            depth = sum(len(s.kv) for s in self._slots) if solo is not None else 0
             t0 = self._timer() if solo is not None else 0.0
             rc = self._decode(entries, len(entries) > len(plan))
             if rc == 0:

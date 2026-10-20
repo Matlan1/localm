@@ -1707,6 +1707,15 @@ class LlamaCpp:
                 "offloading all %d (the extra has no effect)",
                 n_gpu_layers, self.n_layers, self.n_layers)
 
+        # Decode rates are judged only when every layer and the output layer are
+        # on a GPU, no expert tensors were kept on the CPU, and the load placed
+        # weights in VRAM (or did not report where it placed them).
+        self._decode_judged = (
+            (n_gpu_layers < 0 or (self.n_layers is not None and n_gpu_layers > self.n_layers))
+            and self._moe_override_keepalive is None
+            and (not self.weight_placement
+                 or any(not b.get("is_ram") for b in self.weight_placement)))
+
         self.n_parallel, self.parallel_note = self._resolve_parallel(n_parallel, n_ctx)
 
         # --- create context ---
@@ -2583,8 +2592,11 @@ class LlamaCpp:
                                         # emitted: the matching drafts below, the
                                         # first mismatching token as pending_token.
                                         replacement = None
+                                        verify_s = 0.0
                                         for i, draft in enumerate(drafts):
                                             verified = api.llama_sampler_sample(sampler, self._ctx_ptr, i)
+                                            if i == 0:
+                                                verify_s = clock() - verify_t0
                                             emits.append(
                                                 verified if scorer is None
                                                 else scorer.score(self._ctx_ptr, i, verified))
@@ -2603,7 +2615,7 @@ class LlamaCpp:
                                         source.after_verify(accepted, pos)
                                         self._cached_tokens.extend([token] + accepted)
                                         rate_steps += 1
-                                        rate_s += clock() - verify_t0
+                                        rate_s += verify_s
                                         rate_depth += pos
                                         pos += n_acc + 1
                                         if not removed:
@@ -3573,9 +3585,11 @@ class LlamaCpp:
     # the maximum, back to the base after a reply at the expected rate.
     _DECODE_REFRESH_BACKOFF_S = 60.0
     _DECODE_REFRESH_BACKOFF_MAX_S = 960.0
+    _decode_judged = True                    # set at load, see __init__
     _decode_samples: Optional[dict] = None   # (kv in vram, depth bucket) -> (rate, depth)
     _decode_refresh: Optional[tuple[float, float]] = None  # (rate, expected) of the slow reply
-    _decode_refresh_after = 0.0
+    _decode_refresh_after = 0.0              # no refresh is marked before this time.monotonic()
+    _decode_refresh_at: Optional[float] = None  # time.monotonic() of the last refresh
     _decode_refresh_backoff = 60.0
 
     def _note_decode_rate(self, steps: int, seconds: float, depth: float) -> None:
@@ -3589,10 +3603,12 @@ class LlamaCpp:
         bucket, the fastest), a lower bound on a healthy rate while a step costs
         ``a + b * depth`` with ``a >= _DECODE_DEPTH_SLACK * b``. A reply under
         ``_DECODE_SLOW_RATIO`` of it marks the context for a refresh at the next
-        ``_rightsize_plan`` unless a refresh ran less than the backoff ago; a
-        reply at or above it resets the backoff. Replies with fewer than
-        ``_DECODE_MIN_STEPS`` steps are ignored. Caller holds ``_gen_lock``."""
-        if steps < self._DECODE_MIN_STEPS or seconds <= 0 or not self._ctx_ptr:
+        ``_rightsize_plan`` unless a refresh ran less than the backoff ago.
+        Replies with fewer than ``_DECODE_MIN_STEPS`` steps are ignored, and
+        every reply is ignored when ``_decode_judged`` is False (a load not
+        fully on a GPU). Caller holds ``_gen_lock``."""
+        if (not self._decode_judged or steps < self._DECODE_MIN_STEPS
+                or seconds <= 0 or not self._ctx_ptr):
             return
         rate = steps / seconds
         depth = max(0.0, float(depth))
@@ -3604,12 +3620,10 @@ class LlamaCpp:
         expected = max((r * min(1.0, (d + slack) / (depth + slack))
                         for (p, _b), (r, d) in samples.items() if p == placement),
                        default=0.0)
-        if expected and rate < self._DECODE_SLOW_RATIO * expected:
-            if (self._decode_refresh is None
-                    and time.monotonic() >= self._decode_refresh_after):
-                self._decode_refresh = (rate, expected)
-        elif expected:
-            self._decode_refresh_backoff = self._DECODE_REFRESH_BACKOFF_S
+        if (expected and rate < self._DECODE_SLOW_RATIO * expected
+                and self._decode_refresh is None
+                and time.monotonic() >= self._decode_refresh_after):
+            self._decode_refresh = (rate, expected)
         key = (placement, int(depth).bit_length())
         best = samples.get(key)
         if best is None or rate > best[0]:
@@ -3617,13 +3631,22 @@ class LlamaCpp:
 
     def _consume_decode_refresh(self) -> None:
         """Clear a pending refresh because the context is being recreated, and
-        start the backoff before the next one. Caller holds ``_gen_lock``."""
+        start the backoff before the next one: ``_DECODE_REFRESH_BACKOFF_S``
+        when the last refresh was longer than ``_DECODE_REFRESH_BACKOFF_MAX_S``
+        ago (or there was none), else double the last backoff, at most
+        ``_DECODE_REFRESH_BACKOFF_MAX_S``. Caller holds ``_gen_lock``."""
         if self._decode_refresh is None:
             return
         self._decode_refresh = None
-        backoff = self._decode_refresh_backoff
-        self._decode_refresh_after = time.monotonic() + backoff
-        self._decode_refresh_backoff = min(backoff * 2, self._DECODE_REFRESH_BACKOFF_MAX_S)
+        now = time.monotonic()
+        last = self._decode_refresh_at
+        if last is None or now - last > self._DECODE_REFRESH_BACKOFF_MAX_S:
+            backoff = self._DECODE_REFRESH_BACKOFF_S
+        else:
+            backoff = min(self._decode_refresh_backoff * 2, self._DECODE_REFRESH_BACKOFF_MAX_S)
+        self._decode_refresh_backoff = backoff
+        self._decode_refresh_at = now
+        self._decode_refresh_after = now + backoff
 
     def _rightsize_plan(self, needed: int, others: int = 0) -> Optional[tuple[int, bool]]:
         """``(n_ctx, offload_kqv)`` for a context to recreate before a request
