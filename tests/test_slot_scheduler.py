@@ -1094,7 +1094,7 @@ def test_a_budgeted_reply_reserves_one_step_and_still_reaches_its_budget(made):
     assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
     step = len(PROMPTS[0]) + UNLIMITED_STEP + RESERVE_PAD
     assert ctx.step_calls == [(len(PROMPTS[0]) + 1000 + RESERVE_PAD, step, 0)]
-    assert ctx.recreated == [(768, True), (1280, False)]
+    assert ctx.recreated == [(768, True), (1024, False)]
 
 
 def test_a_reply_whose_budget_fits_is_reserved_whole(made):
@@ -1197,7 +1197,7 @@ def test_a_reply_with_no_budget_waits_for_cells_promised_to_another(made):
 def test_a_promised_reply_whose_growth_fails_ends_with_the_error(made):
     ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=lambda t: t <= 768)
     ctx.step_choice = _take_step
-    ctx.recreate_fail = [(1280, False)]
+    ctx.recreate_fail = [(1024, False)]
     sched = made(ctx, 2)
     stream = sched.submit(PROMPTS[0], 1000, _Sampler())
     out = []
@@ -1206,3 +1206,37 @@ def test_a_promised_reply_whose_growth_fails_ends_with_the_error(made):
             out.append(tok)
     assert out == _reference(PROMPTS[0], len(out))[0]
     assert len(out) > UNLIMITED_STEP
+
+
+def test_a_step_context_that_vram_cannot_hold_is_created_in_system_ram(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=lambda t: t <= 768)
+    ctx.step_choice = _take_step
+    ctx.recreate_fail = [(768, True)]
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    assert ctx.recreated == [(768, True), (1280, False)]
+
+
+def test_a_promised_growth_that_vram_cannot_hold_continues_in_system_ram(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=lambda t: t <= 1024)
+    ctx.step_choice = _take_step
+    ctx.recreate_fail = [(1024, True)]
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    assert ctx.recreated == [(768, True), (1024, True), (1024, False)]
+
+
+def test_a_promised_reply_beside_another_without_a_ceiling(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=None, grow=256, vram_fits=lambda t: t <= 1536)
+    ctx.step_delay = 0.001
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 900, _Sampler())
+    got = [next(first)]
+    rec = _collect(sched, PROMPTS[1], 700)
+    rest, reason = _drain(first)
+    assert (got + rest, reason) == _reference(PROMPTS[0], 900)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[1], 700)
+    assert (1792, False) in ctx.recreated

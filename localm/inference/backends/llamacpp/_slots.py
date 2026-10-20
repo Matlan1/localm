@@ -186,7 +186,7 @@ class _Slot:
         self.pending: Optional[int] = None  # emitted token not yet decoded
         self.generated = 0
         self.reserve = 0
-        self.promise = 0                  # the whole reservation while reserve is below it, else 0
+        self.promise = 0                  # the stream's whole reservation when admitted with less, else 0
         self.first = False                # the next sample is the reply's first
         self.extend = False               # needs more reserved cells before its next decode
         self.room_wait = False            # paused until another reply frees cells
@@ -521,7 +521,7 @@ class SlotScheduler:
             if all(s.stream is None for s in self._slots):
                 need = self._step_need(stream, slot)
                 self._rightsize(need, slot)
-            fit = self._fit(need, slot)
+            fit = self._fit(need, slot, stream.reserve)
             if fit is _WAIT:
                 with self._cond:
                     self._heartbeat_queued()
@@ -578,10 +578,13 @@ class SlotScheduler:
         return sum(max(0, s.promise - s.reserve) for s in self._slots
                    if s.stream is not None and s is not but)
 
-    def _fit(self, need: int, slot: _Slot) -> Any:
+    def _fit(self, need: int, slot: _Slot, whole: Optional[int] = None) -> Any:
         """True when *need* cells fit beside the active replies (after dropping
         idle caches or growing the context), ``_WAIT`` when the request has to
-        wait for active replies, or the exception a failed growth raised."""
+        wait for active replies, or the exception a failed growth raised. When
+        *whole* (the request's whole reservation) is more than *need*, a growth
+        whose context cannot be created with the KV cache in VRAM is retried
+        with it in system RAM, sized for *whole*."""
         cap = self._ops.capacity()
         committed = self._committed()
         owed = self._owed()
@@ -606,8 +609,11 @@ class SlotScheduler:
         decision = self._ops.vram_fit(target)
         if busy and decision is False:
             return _WAIT
+        ram_target = None
+        if whole is not None and whole > need and decision is not False:
+            ram_target = self._ops.target_ctx(committed + whole)
         try:
-            self._grow(target, decision is not False)
+            self._grow(target, decision is not False, ram_target)
         except Exception as exc:
             return exc
         return True
@@ -645,16 +651,28 @@ class SlotScheduler:
                 logger.info("gguf slots: a %d-token context with the KV cache in system "
                             "RAM could not be created either: %s", target, exc)
 
-    def _grow(self, target: int, offload_kqv: bool) -> None:
+    def _grow(self, target: int, offload_kqv: bool,
+              ram_target: Optional[int] = None) -> None:
         """Recreate the context with *target* cells and re-decode the cached
-        tokens of every active reply into it. Idle caches are dropped. A failed
-        recreate ends every active reply with its exception and re-raises."""
+        tokens of every active reply into it. Idle caches are dropped. When
+        *ram_target* is given and the context cannot be created with the KV
+        cache in VRAM, one of *ram_target* cells is created with it in system
+        RAM instead. A failed recreate ends every active reply with its
+        exception and re-raises."""
         from localm.debuglog import logger
         active = [s for s in self._slots if s.stream is not None]
         logger.info("gguf slots: growing the context to %d tokens (%d active)",
                     target, len(active))
         try:
-            self._ops.recreate(target, offload_kqv)
+            try:
+                self._ops.recreate(target, offload_kqv)
+            except Exception as exc:
+                if ram_target is None or not offload_kqv:
+                    raise
+                logger.info("gguf slots: a %d-token context with the KV cache in VRAM "
+                            "could not be created (%s), creating a %d-token one with it "
+                            "in system RAM", target, exc, ram_target)
+                self._ops.recreate(ram_target, False)
         except Exception as exc:
             for slot in self._slots:
                 slot.kv = []
@@ -914,10 +932,15 @@ class SlotScheduler:
                 target = self._ops.target_ctx(total)
                 if target < total:
                     return False
+            ram_target = None
+            if decision is not False:
+                ram_target = self._ops.target_ctx(committed + slot.promise - slot.reserve)
             try:
-                self._grow(target, decision is not False)
+                self._grow(target, decision is not False, ram_target)
             except Exception:
                 return False
+            if ram_target is not None and self._ops.capacity() >= ram_target > target:
+                want = slot.promise
             if slot.stream is None:
                 return False
         elif committed + want - slot.reserve + sum(len(s.kv) for s in idle) > cap:

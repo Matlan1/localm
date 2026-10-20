@@ -2388,7 +2388,9 @@ class LlamaCpp:
                         elif reuse:
                             self._prefill_with_reuse(prompt_tokens, keep_prefix=cache_prompt)
                         else:
-                            self._prefill_fresh_context(prompt_tokens, needed)
+                            self._prefill_fresh_context(
+                                prompt_tokens, needed,
+                                ram_fallback=full_needed is not None and needed < full_needed)
 
                 logger.info("gguf generate: prefill complete in %.2fs (kv_reuse=%s)",
                             time.monotonic() - _t0, reuse and cache_prompt)
@@ -2669,7 +2671,10 @@ class LlamaCpp:
                                         # KV cache full or error.
                                         # Attempt mid-generation context growth if there is headroom.
                                         current_needed = pos + 512
-                                        if full_needed is not None:
+                                        stepped = (full_needed is not None
+                                                   and self._target_ctx(full_needed)
+                                                   > self._ctx_capacity)
+                                        if stepped:
                                             current_needed = self._step_reserve(
                                                 full_needed, current_needed)
                                         target = self._target_ctx(current_needed)
@@ -2686,7 +2691,9 @@ class LlamaCpp:
                                             api.llama_batch_free(batch)
                                             batch = None
                                             prompt_and_gen = self._cached_tokens.copy()
-                                            self._prefill_fresh_context(prompt_and_gen, current_needed)
+                                            self._prefill_fresh_context(
+                                                prompt_and_gen, current_needed,
+                                                ram_fallback=stepped)
                                             # Retry decode on the newly grown context.
                                             batch = self._create_batch([token], pos, logits_at_last_only=True)
                                             ret = api.llama_decode(self._ctx_ptr, batch)
@@ -3584,9 +3591,11 @@ class LlamaCpp:
             if check is None or now < self._kv_promote_after:
                 return None
             self._kv_promote_after = now + self._KV_PROMOTE_RETRY_S
-            if check(capacity, capacity) is True:
+            if target >= capacity:
+                return (capacity, True) if check(capacity, capacity) is True else None
+            if check(capacity, capacity, hint=False) is True:
                 return capacity, True
-            if target < capacity and check(target, capacity, hint=False) is True:
+            if check(target, capacity, hint=False) is True:
                 return target, True
             return None
         decision = check(target, capacity) if check is not None else None

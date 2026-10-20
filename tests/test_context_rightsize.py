@@ -344,10 +344,26 @@ class TestPromoteToASmallerContext:
         calls = []
         llm = _llm(12288, offload_kqv=False, vram_check=_vram_upto(8192, calls))
         assert llm._rightsize_plan(5000) == (8192, True)
-        assert calls == [(12288, 12288, True), (8192, 12288, False)]
+        assert calls == [(12288, 12288, False), (8192, 12288, False)]
 
     def test_nothing_smaller_fits_either(self):
         calls = []
         llm = _llm(12288, offload_kqv=False, vram_check=_vram_upto(4096, calls))
         assert llm._rightsize_plan(5000) is None
         assert len(calls) == 2
+
+
+class TestStepGrowthFallsBackToRam:
+    def test_a_step_growth_vram_cannot_create_continues_in_system_ram(self):
+        calls = []
+        llm = _llm(4096, vram_check=_vram_upto(8192, calls), cached=[])
+        api, _cp, created = _capacity_api(llm)
+
+        def init(_model, params):
+            created.append((params.n_ctx, params.offload_kqv))
+            return 0 if (params.n_ctx, params.offload_kqv) == (8192, True) else 444 + len(created)
+        api.llama_init_from_model.side_effect = init
+        out = _generate(llm, api, prompt=list(range(1, 301)), max_new_tokens=8192)
+        assert len(out) == 8192
+        assert llm.last_finish_reason == "length"
+        assert created == [(8192, True), (8192, False), (12288, False)]
