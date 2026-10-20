@@ -379,7 +379,7 @@ class TestGeneration:
         fake = FakeT5(llm)
         recreated = []
 
-        def fresh(tokens, needed):
+        def fresh(tokens, needed, **_kw):
             recreated.append((list(tokens), needed))
             fake.kv.clear()
         llm._prefill_fresh_context = fresh
