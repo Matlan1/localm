@@ -14,6 +14,7 @@ import importlib.util
 import re
 import tomllib
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -76,3 +77,25 @@ def test_the_uv_group_takes_no_dependency_with_a_cap_or_a_pin():
               if any(re.search(r"<|~=|==", req.split(";")[0]) for _, req in pairs)}
     assert not capped & members, (
         f"{sorted(capped & members)} carry a cap or a pin: add them to the uv group's exclude-patterns")
+
+
+def _uv_source_hosts(pyproject: dict) -> set[str]:
+    """Every host pyproject.toml's [tool.uv] indexes and sources fetch from."""
+    uv = pyproject.get("tool", {}).get("uv", {})
+    urls = [i["url"] for i in uv.get("index", []) if "url" in i]
+    for entries in uv.get("sources", {}).values():
+        for entry in entries if isinstance(entries, list) else [entries]:
+            if "url" in entry:
+                urls.append(entry["url"])
+    return {urlsplit(u).hostname for u in urls}
+
+
+def test_the_uv_update_job_declares_every_host_uv_lock_resolves_from():
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    hosts = _uv_source_hosts(pyproject)
+    assert "repo.amd.com" in hosts
+    config = _config()
+    uv = next(u for u in config["updates"] if u["package-ecosystem"] == "uv")
+    declared = {urlsplit(config["registries"][name]["url"]).hostname
+                for name in uv.get("registries", [])}
+    assert hosts <= declared, f"not declared as a registry for the uv job: {sorted(hosts - declared)}"

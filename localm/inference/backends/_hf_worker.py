@@ -204,7 +204,7 @@ FP8_KERNEL_REPO = "kernels-community/finegrained-fp8"
 # that version points at. The kernel is fetched at that commit; a transformers
 # that requests another version gets no native FP8 kernel until this is moved.
 FP8_KERNEL_VERSION = 4
-FP8_KERNEL_REVISION = "8c178950e8710e26a2210e4e909cd02dc16c8715"
+FP8_KERNEL_REVISION = "0e5764aa5c27d0f005117a92645156481540950a"
 
 
 def _fp8_kernel_cached() -> bool:

@@ -1130,7 +1130,7 @@ def llama_kv_cache_seq_rm(
 # Derived mechanically from upstream at MTP_ARCH_SOURCE_TAG, which must track
 # localm.setup_llama._PINNED_TAG. scripts/check_mtp_arch_allowlist.py is the gate
 # that fails when the two drift apart, and can re-derive this set from upstream.
-MTP_ARCH_SOURCE_TAG = "b11541"
+MTP_ARCH_SOURCE_TAG = "b11756"
 
 MTP_GRAPH_ARCHITECTURES = frozenset({
     "bailingmoe3",
@@ -1142,6 +1142,7 @@ MTP_GRAPH_ARCHITECTURES = frozenset({
     "glm4moe",
     "glm5-next",
     "hy_v3",
+    "mellum",
     "mimo2",
     "nemotron_h_moe",
     "qwen35",
