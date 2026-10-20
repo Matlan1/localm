@@ -62,7 +62,7 @@
   "chat.empty.tip": "Tippen Sie / für Befehle - /generate-image erzeugt Bilder lokal.",
   "chat.empty.yourModel": "Ihrem lokalen Modell",
   "chat.export": "exportieren",
-  "chat.exportTitle": "Diese Unterhaltung herunterladen",
+  "chat.exportTitle": "Diese Unterhaltung speichern",
   "chat.grammar": "GBNF-Grammatik (schränkt die Ausgabe ein; nur lokale Modelle)",
   "chat.image.close": "Schließen",
   "chat.image.copied": "Bild kopiert",

@@ -165,7 +165,7 @@ export const I18N_EN = {
   "chat.empty.tip": "Type / for commands - /generate-image creates images locally.",
   "chat.empty.yourModel": "your local model",
   "chat.export": "export",
-  "chat.exportTitle": "Download this conversation",
+  "chat.exportTitle": "Save this conversation",
   "chat.grammar": "GBNF grammar (constrains output; local models only)",
   "chat.image.close": "Close",
   "chat.image.copied": "Image copied",
