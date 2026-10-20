@@ -15,6 +15,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 - **Ctrl-C in `localm pull` stops cleanly.** What has been downloaded is kept, and the message
   says to run the same command again to continue from there.
+- **`localm coder doctor` and `/doctor`.** One command checks that the model server answers and accepts the key, whether the session uses native tool calls or grammar-constrained ones, the context window against the size of the repo map, the git state, whether the verify command resolves, and that each configured MCP server starts. It exits 1 when a check fails and prints `--output-format json` or `jsonl` for scripts.
+- **`--output-format jsonl` for unattended coder runs.** `localm coder TASK --output-format jsonl` writes every agent event (tool calls and results, tokens, turns) to stdout as one JSON object per line as it happens, then a closing `final` line with the outcome; everything else the CLI prints goes to stderr.
 
 ### Changed
 
@@ -38,6 +40,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   command on the second line of a shell command (for example `rm -rf /` or `git reset --hard`
   after a line break) was not checked and could run. Each line is now checked like a command
   after `;`.
+- **`localm coder TASK --output-format json` prints only the JSON document on stdout.** The reply text and the session record used to be printed on stdout ahead of the document, so parsing stdout failed; they now go to stderr.
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
