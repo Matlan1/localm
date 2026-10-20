@@ -529,12 +529,18 @@ class SlotScheduler:
             self._assign(slot, stream)
 
     def _pick(self, free: list[_Slot], prompt: list[int]) -> _Slot:
-        """The free slot whose cache shares the longest prefix with *prompt*;
-        among equals an empty slot, then the least recently used."""
+        """The free slot whose cache shares the longest prefix with *prompt*,
+        counting a shared prefix only when it covers at least half of that
+        slot's cache; among equals an empty slot, then the least recently
+        used. A request that shares only a little of a long cache (a short
+        side request beside a conversation) so goes to another slot and leaves
+        that cache whole."""
         best = None
         best_key = None
         for slot in free:
             prefix = _common_prefix_len(slot.kv, prompt)
+            if prefix * 2 < len(slot.kv):
+                prefix = 0
             key = (prefix, 1 if not slot.kv else 0, -slot.last_used)
             if best_key is None or key > best_key:
                 best, best_key = slot, key
