@@ -289,7 +289,7 @@ def run_hook(spec: HookSpec, payload: dict, project_dir: Path,
         drain_deadline = time.monotonic() + _DRAIN_SECONDS
         for t, stream in zip(threads[1:], (proc.stdout, proc.stderr), strict=True):
             t.join(max(0.0, drain_deadline - time.monotonic()))
-            if not t.is_alive():
+            if stream is not None and not t.is_alive():
                 try:
                     stream.close()
                 except (OSError, ValueError):
