@@ -823,7 +823,7 @@ The agent auto-starts `localm serve` when needed and plans with tool calls: read
 
 ### Built-in tools
 
-The agent ships 43 built-in tools. "Confirms" means the agent stops and asks
+The agent ships 46 built-in tools. "Confirms" means the agent stops and asks
 before running it by default; "Restricted" means a shared, non-owner session may
 use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 
@@ -840,6 +840,9 @@ use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 | `git_log` | Recent commits, oneline | no | yes |
 | `read_todos` | Read back the task list written with `set_todos` | no | yes |
 | `set_todos` | Record the session task list (replaces the previous one) | no | yes |
+| `ask_user` | Ask the user a question, optionally with numbered options (REPL only) | no | no |
+| `enter_plan_mode` | Switch to plan mode: only read-only tools run until a plan is approved | no | no |
+| `exit_plan_mode` | Present the plan for approval and leave plan mode when approved | no | no |
 | `write_file` | Write or overwrite a file | yes | yes |
 | `edit_file` | Replace the first occurrence of exact text | yes | yes |
 | `edit_files` | Apply the same exact-string edit across several files, all-or-nothing | yes | yes |
