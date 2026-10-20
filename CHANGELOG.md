@@ -30,6 +30,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   PATH, a write or edit to a `.py` file appends up to 10 `ruff` findings (unused imports,
   undefined names) to the result so the agent can fix them in the same turn. Off with
   `diagnostics = false` in `.localcoder/config.toml`.
+- **The coder sees the shape of a large project and of a large file.** A new `outline_file` tool lists a
+  source file's classes, functions and methods with their exact line spans (Python is parsed; other
+  languages are scanned by pattern and labelled approximate), so the agent can read just the part it
+  needs. On a project with more than 300 files the codebase map is now a directory summary of every
+  file found plus detail for the shallowest files, instead of stopping after the first 300.
 
 ### Changed
 
@@ -68,6 +73,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
+- **VRAM is given back and used again during a conversation.** A context that had grown for a
+  long conversation kept its size and its VRAM after the conversation was compacted; it now
+  shrinks once the conversation needs at most half of it. A context whose cache had to move to
+  system RAM because VRAM was short, where replies run several times slower, now moves back to
+  VRAM once there is room.
+- **A model loaded partly on the CPU moves onto the GPU once VRAM frees up.** With automatic GPU
+  layers, a model that loaded partly on the CPU because another program held VRAM is reloaded
+  on the GPU at a later request once enough VRAM is free. An explicit GPU layer count is never
+  changed.
+- **The Live tuning VRAM estimate counts the running model's own memory.** The VRAM the running
+  model holds was counted as used, so settings that fit read "may not fit"; it is now shown
+  beside the free VRAM and counted as available. Apply now reloads the running model with the
+  new settings instead of only saving them for the next load.
 - **A chat reply that was cut off says so.** A reply that stopped because the model was unloaded or
   replaced while it was writing, or because the reply stream ended before the model finished, used
   to look like a finished reply. It now carries a cut-off note in the chat, and API clients get

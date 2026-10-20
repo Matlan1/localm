@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Optional
 # reaches the network or starts an agent.
 PLAN_MODE_TOOLS: frozenset[str] = frozenset({
     "read_file", "list_dir", "tree", "grep", "search_files", "find_references",
+    "outline_file",
     "git_status", "git_diff", "git_log",
     "check_shell_job", "check_agent_job",
     "read_env",

@@ -461,7 +461,14 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     async def vram_estimate(model: str = "", n_ctx: int = 4096, n_gpu_layers: int = 99):
         """Approximate VRAM needed to load *model* (defaults to the active one)
         at the given context + GPU-offload, vs free/total VRAM. Powers the live
-        readout under the Settings performance sliders. Always 'approximate'."""
+        readout under the Settings performance sliders. Always 'approximate'.
+
+        When *model* is loaded, ``held`` is the VRAM its current load is
+        estimated to hold (its GPU layers, the KV cache of its live context
+        when that is in VRAM, and the overhead), ``available`` is ``free +
+        held`` and ``fits`` compares ``needed`` with ``available``: a reload at
+        the new settings frees what the current load holds first. Both are
+        None when nothing is loaded for *model*, or ``free`` is unknown."""
         from localm.config import load_config, load_registry
         from localm.discover import vram_capacity
         from localm.model_meta import cached_n_layers
@@ -482,6 +489,18 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         # the caller sends as the sliders' live positions), so it is read from the
         # saved config.
         n_cpu_moe = int(load_config().get("n_cpu_moe") or 0)
+        running = _hs._engines.get(name) if name else None
+        if not (running is not None and getattr(running, "loaded", False)
+                and getattr(running, "unloading", False) is not True):
+            running = None
+        held_placement = (getattr(running, "gpu_placement", None)
+                          if running is not None else None)
+        held_context = (getattr(running, "live_context", None)
+                        if running is not None else None)
+        held_sizing = (getattr(running, "gpu_sizing", None)
+                       if running is not None else None)
+        held_cpu_moe = int((held_sizing or {}).get("n_cpu_moe") or 0)
+        held_moe_pinned = 0
         # _entry_path returns None for a malformed entry (non-dict, or a null /
         # non-string / empty path). The guard below is except OSError and would not
         # catch the AttributeError / TypeError such an entry raises; model_bytes
@@ -535,17 +554,30 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                     "%s; the VRAM estimate charges the whole "
                                     "file (today's behavior)",
                                     type(exc).__name__, ep)
+                        held_pinned = moe_pinned
+                        if held_cpu_moe != n_cpu_moe:
+                            held_pinned = 0
+                            if held_cpu_moe > 0 and not known_dense:
+                                try:
+                                    held_pinned = int(gguf_moe_pinned_expert_bytes(
+                                        p, held_cpu_moe) or 0)
+                                except Exception as exc:  # contracted not to raise - surface if it does
+                                    logger.debug(
+                                        "gguf MoE expert-byte probe failed (%s) for "
+                                        "%s; the running load's estimate charges "
+                                        "the whole file", type(exc).__name__, ep)
                         kv = not gguf_is_diffusion_architecture(gguf_architecture(p))
                         return (gguf_file_bytes(p) or p.stat().st_size,
                                 cached_n_layers(str(p)), kv_bpt,
-                                moe_pinned, input_bytes, kv)
+                                moe_pinned, input_bytes, kv, held_pinned)
                 except (OSError, ValueError):
                     pass
                 return (model_bytes, n_layers, kv_bytes_per_token,
-                        moe_pinned_bytes, input_layer_bytes, keeps_kv)
+                        moe_pinned_bytes, input_layer_bytes, keeps_kv, held_moe_pinned)
 
             (model_bytes, n_layers, kv_bytes_per_token, moe_pinned_bytes,
-             input_layer_bytes, keeps_kv) = await asyncio.get_running_loop().run_in_executor(
+             input_layer_bytes, keeps_kv,
+             held_moe_pinned) = await asyncio.get_running_loop().run_in_executor(
                 get_plugin_executor(), _measure, epath)
         est = estimate_vram(model_bytes, n_ctx, n_gpu_layers, n_layers=n_layers,
                             kv_bytes_per_token=kv_bytes_per_token,
@@ -563,9 +595,26 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             get_plugin_executor(), lambda: vram_capacity(return_status=True))
         total = info.get("total")
         free = info.get("free") if _vram_reading_trusted(info, status) else None
-        fits = (est["needed"] <= free) if isinstance(free, int) else None
+        held = None
+        if isinstance(held_placement, dict) and model_bytes > 0:
+            offloaded = held_placement.get("gpu_layers_offloaded")
+            layers_total = held_placement.get("gpu_layers_total")
+            live_ctx = 0
+            if isinstance(held_context, dict) and held_context.get("kv_in_vram"):
+                live_ctx = int(held_context.get("n_ctx") or 0)
+            if isinstance(offloaded, int) and isinstance(layers_total, int) and layers_total > 0:
+                held = estimate_vram(model_bytes, live_ctx, offloaded, n_layers=layers_total,
+                                     kv_bytes_per_token=kv_bytes_per_token,
+                                     moe_pinned_bytes=held_moe_pinned,
+                                     input_layer_bytes=input_layer_bytes,
+                                     keeps_kv=keeps_kv)["needed"]
+        available = (free + held) if isinstance(free, int) and held is not None else None
+        budget = available if available is not None else free
+        fits = (est["needed"] <= budget) if isinstance(budget, int) else None
         return {"model": name, "model_bytes": model_bytes, **est,
-                "free": free, "total": total, "fits": fits, "approximate": True}
+                "free": free, "held": held if isinstance(free, int) else None,
+                "available": available, "total": total, "fits": fits,
+                "approximate": True}
 
     @app.get("/api/gpus", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def gui_gpus():

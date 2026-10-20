@@ -112,7 +112,7 @@ def _call_target_paths(tool_name: str, args: dict) -> list[str]:
 # _INTENTIONALLY_UNSCOPED).
 _SCOPED_TOOLS: frozenset[str] = frozenset({
     "read_file", "write_file", "edit_file", "edit_files", "patch_file",
-    "list_dir", "tree",
+    "list_dir", "tree", "outline_file",
     # The rest of the file-reading/writing tools.
     "grep", "search_files", "search_replace", "read_env",
     "edit_notebook_cell", "generate_image", "browser_screenshot",

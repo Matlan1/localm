@@ -823,7 +823,7 @@ The agent auto-starts `localm serve` when needed and plans with tool calls: read
 
 ### Built-in tools
 
-The agent ships 46 built-in tools. "Confirms" means the agent stops and asks
+The agent ships 47 built-in tools. "Confirms" means the agent stops and asks
 before running it by default; "Restricted" means a shared, non-owner session may
 use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 
@@ -834,6 +834,7 @@ use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 | `tree` | Recursive tree with sizes, skipping noise dirs | no | yes |
 | `search_files` | Find files matching a glob | no | yes |
 | `grep` | Regex search over file contents, skipping noise dirs | no | yes |
+| `outline_file` | List a source file's classes, functions and methods with exact line spans (Python parsed exactly; other languages by pattern, labelled approximate) | no | yes |
 | `find_references` | Find call sites of a symbol across the indexed project (best-effort, regex-based) | no | yes |
 | `git_status` | Working-tree status | no | yes |
 | `git_diff` | Unstaged diff, or staged with `staged=true` | no | yes |
