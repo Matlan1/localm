@@ -346,6 +346,21 @@ def test_a_failing_flush_still_compacts_and_logs(proj, home, caplog):
                and "model down" in r.getMessage() for r in caplog.records)
 
 
+def test_an_error_outside_the_model_call_still_compacts(proj, home, caplog, monkeypatch):
+    agent = _agent(proj, _Backend(flush="- never read"))
+
+    def _boom():
+        raise RuntimeError("config exploded")
+    monkeypatch.setattr(agent, "_compaction_flush_enabled", _boom)
+    _history(agent)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert agent._compact_history() is True
+    assert "SUMMARY-PROSE" in _summary_body(agent)
+    assert agent._durable_notes == []
+    assert any("pre-compaction flush failed" in r.getMessage()
+               and "config exploded" in r.getMessage() for r in caplog.records)
+
+
 def test_a_store_failure_is_logged_and_the_notes_are_kept(proj, home, caplog,
                                                           monkeypatch):
     agent = _agent(proj, _Backend(flush="- remember me"))
