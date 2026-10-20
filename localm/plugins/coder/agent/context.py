@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
@@ -429,6 +430,16 @@ def _advance_name_key_gate(g: _NameKeyGate, buf: str, tool_names) -> str | None:
 
 
 class _ContextMixin:
+    if TYPE_CHECKING:
+        # Set by Agent (core.py), which this class is mixed into.
+        cwd: Path
+        backend: Any
+        _episode_store: Any
+
+        def changed_files(self) -> list[dict]: ...
+
+        def changed_file_stats(self, limit: Optional[int] = None) -> list[dict]: ...
+
     def _ctx_window_tokens(self) -> int:
         """The context window to budget history against, in tokens.
 
@@ -565,7 +576,7 @@ ws     ::= [ \t\n\r]*
         """True when flush notes may be written to episodic memory: the gate
         the close-time reflection uses (episodic memory on, not privacy mode,
         not a restricted session), for a top-level agent only."""
-        from ..audit import SessionMode
+        from localm.audit import SessionMode
         return (bool(getattr(self, "_episodic", False))
                 and getattr(self, "_episode_store", None) is not None
                 and getattr(self, "mode", SessionMode.PRIVACY) != SessionMode.PRIVACY

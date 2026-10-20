@@ -57,6 +57,10 @@ class _PersistenceMixin:
     _activated_tools: frozenset
     _activated_lock: threading.Lock
 
+    if TYPE_CHECKING:
+        # Set by Agent (core.py), which this class is mixed into.
+        cwd: Path
+
     def changed_files(self) -> list[dict]:
         """
         Files this session has written, with change counts.
