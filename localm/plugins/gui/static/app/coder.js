@@ -1878,7 +1878,8 @@ export async function openHooksModal() {
     const r = await fetch("/api/coder/hooks?cwd=" + encodeURIComponent(cwd), { headers: authHeaders() });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    openModal(t("coder.hooks.title"), (body) => {
+    const mcpTitle = (data.mcp_servers || []).length > 0;
+    openModal(t(mcpTitle ? "coder.hooks.titleMcp" : "coder.hooks.title"), (body) => {
       for (const w of data.warnings || []) body.appendChild(el("p", "sub", w));
       if (!data.configured) {
         body.appendChild(emptyState("book", t("coder.hooks.emptyTitle"), t("coder.hooks.emptyHint")));
@@ -1918,7 +1919,7 @@ export async function openHooksModal() {
             });
             const out = await tr.json().catch(() => ({}));
             if (!tr.ok) throw new Error(out.detail || tr.statusText);
-            toast(t("coder.hooks.trustedToast"));
+            toast(t(mcp ? "coder.hooks.trustedToastMcp" : "coder.hooks.trustedToast"));
             openHooksModal();
           } catch (e) {
             toast(t("coder.hooks.trustFailed") + e.message, true);

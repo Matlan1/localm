@@ -344,8 +344,11 @@ def mcp_servers_from(raw: dict) -> dict[str, dict]:
 
 
 def mcp_argv(spec: dict) -> list[str]:
-    """The command line a server *spec* is started with, as strings."""
-    return [str(spec.get("command", "")), *(str(a) for a in (spec.get("args") or []))]
+    """The command line a server *spec* declares, as strings. An ``args``
+    value that is not a list, tuple or string counts as one argument."""
+    args = spec.get("args") or []
+    items = list(args) if isinstance(args, (list, tuple, str)) else [args]
+    return [str(spec.get("command", "")), *(str(a) for a in items)]
 
 
 def load_mcp_config(cwd: Path) -> dict[str, dict]:

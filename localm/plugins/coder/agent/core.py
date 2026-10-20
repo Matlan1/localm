@@ -714,10 +714,24 @@ class Agent(
         ``self._tool_hooks``.
 
         None for a restricted session, and when the project config declares no
-        hooks and no MCP server. A child shares its parent's hooks object, so the parent's trust
-        decision covers it. A project config that cannot be parsed but mentions
-        hooks loads ToolHooks.unreadable, which refuses every tool call; one
-        that does not mention them loads none. Either is reported."""
+        hooks and no MCP server. A child shares its parent's hooks object, so
+        the parent's trust decision covers it. A project config that cannot be
+        parsed but mentions hooks loads ToolHooks.unreadable, which refuses
+        every tool call; one that does not mention them loads none. Either is
+        reported. When MCP servers are held back for the config this loads
+        (a reload after /cd within the same project), the newly loaded object
+        replaces the held-back one, so trusting it starts them."""
+        try:
+            self._load_tool_hooks(cwd)
+        finally:
+            deferred = getattr(self, "_mcp_deferred", None)
+            hooks = self._tool_hooks
+            if deferred is not None and hooks is not None:
+                from ..hook_trust import config_key
+                if config_key(hooks.config_path) == config_key(deferred.config_path):
+                    self._mcp_deferred = hooks
+
+    def _load_tool_hooks(self, cwd: Path) -> None:
         self._tool_hooks = None
         if self.restricted:
             return

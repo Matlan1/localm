@@ -1073,8 +1073,8 @@ The same trust covers the project's MCP servers (`[mcp.servers.<name>]`, see
 [docs/mcp.md](mcp.md)): the prompt lists them with the hooks, and none is started until the
 file is trusted. `--trust-hooks`, `/hooks trust` and the GUI button trust both, and changing
 a server's command, arguments or environment needs trusting again. A session keeps the MCP
-servers of the folder it started in: trusting another folder's servers after `/cd` starts
-them in its next session.
+servers of the folder it started in: after `/cd` into another project, trusting its servers
+and remembering it (`a`, `--trust-hooks` or `/hooks trust`) starts them in the next session.
 
 Trust covers the hook commands, not the scripts they run, and the agent can edit those
 scripts. So when file writes run without confirmation but `run_shell` does not (a one-shot

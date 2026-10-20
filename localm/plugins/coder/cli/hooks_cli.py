@@ -39,17 +39,25 @@ def _remember(hooks) -> bool:
     return True
 
 
-def _start_mcp(agent) -> None:
+def _start_mcp(agent, *, remembered: bool) -> None:
     """Start the MCP servers the session held back, now that they are trusted,
     and say how many tools they registered. When the trusted config is not the
-    one the session took its MCP servers from (after /cd), say that they start
-    in the next session instead."""
+    one the session took its MCP servers from (after /cd), say instead that
+    they start in a later session if the trust was *remembered*, and that they
+    do not start otherwise."""
+    from ..hook_trust import config_key
     hooks = getattr(agent, "_tool_hooks", None)
     if hooks is None or not hooks.has_mcp():
         return
-    if getattr(agent, "_mcp_config", None) != hooks.config_path:
-        print_info("This session keeps the MCP servers of the folder it started "
-                   "in; the ones in this project start in its next session.")
+    started_from = getattr(agent, "_mcp_config", None)
+    if started_from is None or config_key(started_from) != config_key(hooks.config_path):
+        if remembered:
+            print_info("This session keeps the MCP servers of the folder it started "
+                       "in; the ones in this project start in its next session.")
+        else:
+            print_info("This session keeps the MCP servers of the folder it started "
+                       "in, so the ones in this project are not started; trust them "
+                       "with \"a\" (always) or /hooks trust to start them in later sessions.")
         return
     if getattr(agent, "_mcp_deferred", None) is not hooks:
         return
@@ -113,23 +121,25 @@ def resolve_hook_trust(agent, *, trust_flag: bool, can_prompt: bool) -> None:
     if hooks is None or not hooks.has_commands() or hooks.trusted:
         return
     if trust_flag:
-        if _remember(hooks):
+        remembered = _remember(hooks)
+        if remembered:
             print_success(f"{_noun(hooks)} in {hooks.config_path} trusted.")
-        _start_mcp(agent)
+        _start_mcp(agent, remembered=remembered)
         return
     if not can_prompt:
         if hooks.claim_untrusted_report():
-            print_warning(hooks.untrusted_message())
+            print_warning(hooks.untrusted_message(), to_stderr=True)
         return
     choice = ask_trust(hooks)
     if choice == "always":
-        if _remember(hooks):
+        remembered = _remember(hooks)
+        if remembered:
             print_success(f"{_noun(hooks)} trusted and remembered until they change.")
-        _start_mcp(agent)
+        _start_mcp(agent, remembered=remembered)
     elif choice == "session":
         hooks.trust_for_session()
         print_info(f"{_noun(hooks)} trusted for this session.")
-        _start_mcp(agent)
+        _start_mcp(agent, remembered=False)
     else:
         hooks.revoke()
         hooks.claim_untrusted_report()
@@ -154,9 +164,10 @@ def handle_hooks_command(arg: str, agent) -> None:
         return
     sub = arg.strip().lower()
     if sub == "trust":
-        if _remember(hooks):
+        remembered = _remember(hooks)
+        if remembered:
             print_success(f"{_noun(hooks)} trusted and remembered until they change.")
-        _start_mcp(agent)
+        _start_mcp(agent, remembered=remembered)
         return
     if sub == "forget":
         from ..hook_trust import TrustStoreUnreadable, forget_trust

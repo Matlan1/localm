@@ -336,6 +336,7 @@ def test_without_a_terminal_it_says_so_once_and_starts_nothing(proj):
         hooks_cli.resolve_hook_trust(agent, trust_flag=False, can_prompt=False)
         agent.report_deferred_mcp(interactive=False)
     assert warn.call_count == 1 and "--trust-hooks" in warn.call_args.args[0]
+    assert warn.call_args.kwargs.get("to_stderr") is True
     assert agent_warn.call_count == 0
     assert _spawned(marker) == 0
 
@@ -364,6 +365,49 @@ def test_trusting_another_folders_servers_after_cd_waits_for_the_next_session(pr
     assert _spawned(marker) == 0
     assert any("next session" in c.args[0] for c in info.call_args_list)
     assert ToolHooks.load(project).trusted
+
+
+@pytest.mark.parametrize("answer", ["a", "y"])
+def test_cd_within_the_project_after_declining_then_trusting_starts_them(proj, answer):
+    from localm.plugins.coder.cli import hooks_cli
+    project, marker, _ = proj
+    sub = project / "src"
+    sub.mkdir()
+    agent = _agent(project)
+    with patch.object(hooks_cli.console, "input", return_value="n"):
+        hooks_cli.resolve_hook_trust(agent, trust_flag=False, can_prompt=True)
+    agent.set_cwd(sub)
+    with patch.object(hooks_cli.console, "input", return_value=answer):
+        hooks_cli.resolve_hook_trust(agent, trust_flag=False, can_prompt=True)
+    assert _spawned(marker) == 1 and agent._mcp_tool_names == {TOOL}
+
+
+def test_session_trust_of_another_folders_servers_says_they_do_not_start(proj, tmp_path):
+    from localm.plugins.coder.cli import hooks_cli
+    project, marker, _ = proj
+    other = tmp_path / "plain"
+    other.mkdir()
+    agent = _agent(other)
+    agent.set_cwd(project)
+    with patch.object(hooks_cli.console, "input", return_value="y"), \
+         patch.object(hooks_cli, "print_info") as info:
+        hooks_cli.resolve_hook_trust(agent, trust_flag=False, can_prompt=True)
+    said = " ".join(c.args[0] for c in info.call_args_list)
+    assert "are not started" in said and "next session" not in said
+    assert _spawned(marker) == 0 and not ToolHooks.load(project).trusted
+
+
+@pytest.mark.parametrize("args_toml, argv_tail", [
+    ("5", ["5"]), ("true", ["True"]), ('"ab"', ["a", "b"]), ("[1, \"x\"]", ["1", "x"]),
+])
+def test_a_scalar_args_value_is_shown_not_a_crash(tmp_path, args_toml, argv_tail):
+    project = tmp_path / "p"
+    (project / ".localcoder").mkdir(parents=True)
+    _config_path(project).write_text(
+        f'[mcp.servers.s]\ncommand = "c"\nargs = {args_toml}\n', encoding="utf-8")
+    hooks = ToolHooks.load(project)
+    assert mcp_mod.mcp_argv(hooks.mcp_servers["s"]) == ["c", *argv_tail]
+    assert hooks.describe_mcp()[0].startswith('MCP server "s": ["c"')
 
 
 def test_the_server_line_escapes_control_characters(tmp_path):

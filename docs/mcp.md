@@ -258,6 +258,10 @@ server's `command`, `args`, `env` or `trusted`, or adding a server, needs
 trusting again. `localm coder doctor` and `/doctor` start only trusted
 servers.
 
+Trust covers the command line, not the files it runs: a server started as
+`python server.py` from the repository runs whatever that file holds when the
+next session starts it, and the agent can edit that file.
+
 Trusting the config is not the `trusted` flag below: trust decides whether a
 server is started at all, `trusted = true` only skips the per-call
 confirmation once it runs.
