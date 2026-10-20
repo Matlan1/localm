@@ -26,12 +26,12 @@ def register(app: FastAPI, ctx) -> None:
              dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def list_models():
         from localm.config import load_registry
-        from localm.model_manager.registry import is_projector_entry
+        from localm.model_manager.registry import is_unlisted_entry
         registry = load_registry()
 
         models = []
         now = int(time.time())
-        all_model_names = {n for n, e in registry.items() if not is_projector_entry(e)}
+        all_model_names = {n for n, e in registry.items() if not is_unlisted_entry(e)}
         if _hs._default_model_name and _hs._default_model_name not in all_model_names:
             all_model_names.add(_hs._default_model_name)
             
