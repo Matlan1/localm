@@ -314,7 +314,7 @@ class TestPackedSplit:
 # --------------------------------------------------------------------------- #
 
 class TestLoadFailureVramHint:
-    def _failed_load_message(self, tmp_path, *, free, layers=99):
+    def _failed_load_message(self, tmp_path, *, free, layers=99, fresh=None):
         first = _metadata_only_split(tmp_path)
         b = GgufBackend(str(first), n_ctx=256, n_gpu_layers=layers,
                         vram_overhead_bytes=OVERHEAD)
@@ -329,7 +329,8 @@ class TestLoadFailureVramHint:
                 patch.object(GgufBackend, "_check_vram", lambda self_b: None), \
                 patch.object(GgufBackend, "_requested_parallel_slots", lambda self_b: 1), \
                 patch.object(GgufBackend, "_split_free_total_bytes",
-                             return_value=(free, 10 * free, 2)), \
+                             return_value=(free if fresh is None else fresh,
+                                           10 * free, 2)), \
                 patch.object(GgufBackend, "_load_native",
                              side_effect=RuntimeError("worker died")):
             try:
@@ -350,6 +351,15 @@ class TestLoadFailureVramHint:
         assert "low on memory" not in msg
         assert "needed about" not in msg
         assert "-g 24" not in msg
+
+    def test_vram_taken_after_planning_still_gets_the_hint(self, tmp_path):
+        """The plan fit the reading it was made from, but a fresh reading after
+        the failure is short: the hint names the shortfall."""
+        first = _metadata_only_split(tmp_path)
+        b = _backend(first)
+        free = b._vram_model_bytes(0) + 128 * KB
+        msg, _b = self._failed_load_message(tmp_path, free=free, fresh=200 * KB)
+        assert "needed about" in msg
 
     def test_a_short_plan_names_both_figures_and_a_fitting_layer_count(self, tmp_path):
         msg, b = self._failed_load_message(tmp_path, free=600 * KB)
@@ -408,3 +418,42 @@ class TestNoTraceInPrivacyMode:
         with patch("localm.debuglog.logs_dir", return_value=tmp_path):
             detail = self._runner_death(allowed=True)
         assert detail == " No native fault trace was captured for this exit."
+
+
+class TestNoTraceInPrivacyModeHfRunner:
+    def _runner_death(self, allowed):
+        from localm.inference.backends import _hf_runner
+        r = _hf_runner.HFRunner()
+        with patch.object(_hf_runner.mp, "get_context", return_value=_FakeContext()), \
+                patch("localm.audit.diagnostics_allowed", return_value=allowed), \
+                patch("localm._mp_spawn.ensure_spawn_uses_venv_python"):
+            r._spawn()
+        return r._death_report()[1]
+
+    def test_privacy_mode_says_why_there_is_no_trace(self):
+        detail = self._runner_death(allowed=False)
+        assert "privacy mode keeps none" in detail
+        assert "keep_diagnostics" in detail
+
+    def test_without_privacy_mode_the_plain_sentence_stays(self, tmp_path):
+        with patch("localm.debuglog.logs_dir", return_value=tmp_path):
+            detail = self._runner_death(allowed=True)
+        assert detail == " No native fault trace was captured for this exit."
+
+
+class TestSplitNoticeWhenNoDeviceIsLeftOut:
+    def test_a_packed_plan_over_every_device_is_named_plainly(self, capsys):
+        from localm.inference.backends.llamacpp._split_fit import plan_split
+        GiB = 1024 ** 3
+        devices = [{"index": i, "free": 10 * GiB} for i in range(2)]
+        plan = plan_split(devices, layer_bytes=[50 * MB] * 10 + [int(2.5 * GiB)] * 6,
+                          layer_kv_bytes=[0] * 16, output_bytes=300 * MB,
+                          n_gpu_layers=99, logits_bytes=200 * MB,
+                          reserve_bytes=int(0.5 * GiB))
+        assert plan.excluded == [] and sorted(plan.tensor_split) == [0, 1]
+        b = GgufBackend.__new__(GgufBackend)
+        b._report_split_fit(plan)
+        out = " ".join(capsys.readouterr().out.split())
+        assert "sharing the layers out by size over devices 0, 1" in out
+        assert "leaving device  out" not in out
+        assert "device 1 would hold about" in out

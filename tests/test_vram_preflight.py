@@ -142,7 +142,8 @@ class TestVramPreflight:
             with pytest.raises(RuntimeError) as exc:
                 b.load()
         msg = str(exc.value)
-        assert "low on memory" in msg
+        assert "needed about" in msg and "0.0 GB free" in msg
+        assert "-g 24" not in msg
         assert "setup-llama" in msg
         assert b.loaded is False           # never claims to be loaded
 
@@ -153,7 +154,7 @@ class TestVramPreflight:
              patch.object(b, "_load_native", side_effect=RuntimeError("bad dll")):
             with pytest.raises(RuntimeError) as exc:
                 b.load()
-        assert "low on memory" not in str(exc.value)
+        assert "needed about" not in str(exc.value)
 
 
 class TestKvCacheAwarePreflight:

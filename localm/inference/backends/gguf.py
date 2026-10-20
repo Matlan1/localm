@@ -283,8 +283,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     def _report_split_fit(self, plan) -> None:
         """Tell the user what the implicit split's per-device fit decided:
         which devices were left out (and, for a single kept device, that the
-        load runs on it alone), or which device is short of memory when no
-        plan fits. Devices are named by their torch index
+        load runs on it alone), that the layers were shared out by size over
+        every device when none was left out, or which device is short of
+        memory when no plan fits. Devices are named by their torch index
         (``_fit_source_index``), the number ``localm gpus`` and the GUI show.
         Sets ``_split_fit_note`` for the unresolved case."""
         from localm.debuglog import logger as _dbg
@@ -321,6 +322,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             parts += [f"device {gpu(i)} would then be short of memory as well"
                       for i in plan.excluded if i not in short_ids]
             detail = "; ".join(parts)
+            if not plan.excluded:
+                short_detail = "; ".join(
+                    f"device {gpu(c.index)} would hold about {c.need / gb:.1f} GB "
+                    f"({_what(c)}) with {c.free / gb:.1f} GB free" for c in short)
+                _dbg.info("implicit GPU split fit: re-sharing the layers by size "
+                          "over device(s) %s", kept)
+                console.print(
+                    f"[yellow]  gpu split:[/yellow] sharing the layers out by size "
+                    f"over devices {kept} - with the default split by free memory "
+                    f"{short_detail}. Set gpu_split_indices to choose the devices "
+                    f"yourself.")
+                return
             if len(plan.tensor_split) == 1:
                 _dbg.info("implicit GPU split fit: leaving out device(s) %s, "
                           "loading on device %s only", left_out, kept)
@@ -603,9 +616,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         """The sentence a failed load adds about VRAM, or "".
 
         Non-empty only for a GPU load (``effective_gpu_layers`` above 0) whose
-        planned VRAM need (``_planned_vram``) exceeded the free VRAM: the free
-        reading auto-sizing planned from (``last_gpu_sizing``) when there is
-        one, else a fresh reading. It names both figures, where they were read
+        planned VRAM need (``_planned_vram``) exceeds the free VRAM: the lower
+        of a fresh reading and the reading auto-sizing planned from
+        (``last_gpu_sizing``), so memory another process took after planning
+        counts. It names both figures, where they were read
         (the GPU, or the N GPUs of a split) and the options
         ``_vram_fit_options`` gives for that free figure. Never raises."""
         layers = self.effective_gpu_layers
@@ -618,12 +632,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             need, free, _total, devices, kv_cache, overhead = planned
             sizing = getattr(self, "last_gpu_sizing", None) or {}
             if isinstance(sizing.get("free_bytes"), int):
-                free = sizing["free_bytes"]
+                free = min(free, sizing["free_bytes"])
             if free >= need:
                 return ""
             where = f"the {devices} GPUs" if devices >= 2 else "the GPU"
             options = "; ".join(
-                f"{label.lower()} ({command.split('  ')[0]})"
+                f"{label[:1].lower()}{label[1:]} ({command.split('  ')[0]})"
                 for label, command in self._vram_fit_options(
                     free, need, kv_cache, overhead, layers))
             return (f" This load needed about {need / 1024**3:.1f} GB of VRAM and "
