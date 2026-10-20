@@ -69,7 +69,7 @@ _PER_PAGE = 100
 
 # How many days upstream's newest release may postdate the pinned one before
 # --gate exits 1.
-DEFAULT_MAX_AGE_DAYS = 21
+DEFAULT_MAX_AGE_DAYS = 7
 
 # --gate exit codes.
 EXIT_CURRENT, EXIT_STALE, EXIT_UNKNOWN = 0, 1, 2

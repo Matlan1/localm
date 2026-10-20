@@ -495,7 +495,7 @@ def test_gate_default_max_age_matches_llama_pins_own_default():
     spec = importlib.util.spec_from_file_location("check_llama_pin_ref", llama_path)
     llama = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(llama)
-    assert pincheck.DEFAULT_MAX_AGE_DAYS == llama.DEFAULT_MAX_AGE_DAYS == 21
+    assert pincheck.DEFAULT_MAX_AGE_DAYS == llama.DEFAULT_MAX_AGE_DAYS == 7
 
 
 def test_gate_current_exits_zero_and_never_prints_behind(monkeypatch, capsys):
@@ -618,7 +618,7 @@ def test_gate_dates_a_release_less_pin_from_its_tag_commit_and_goes_stale(
 
 def test_gate_release_less_pin_within_tolerance_is_current(monkeypatch, capsys):
     _release_less_pin(monkeypatch, commit_body=_commit_body("2026-09-25T00:00:00Z"))
-    rc = pincheck.main(["--pinned", "v0.31.1", "--gate"])
+    rc = pincheck.main(["--pinned", "v0.31.1", "--gate", "--max-age-days", "21"])
     out = capsys.readouterr().out
     assert rc == pincheck.EXIT_CURRENT == 0
     assert "from its tag commit" in out
