@@ -151,6 +151,14 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
         backend = setup_llama.installed_backend()
         if backend:
             diag["native_runtime_backend"] = backend
+        choice = setup_llama.backend_choice()
+        if choice:
+            diag["native_runtime_requested"] = choice["requested"]
+            diag["native_runtime_requested_reason"] = (
+                _br._scrub_secrets(choice["reason"]) if choice["reason"] else "not recorded")
+        use = setup_llama.runtime_in_use()
+        if use["source"] not in (None, "provisioned"):
+            diag["native_runtime_in_use"] = f"{use['backend'] or 'unknown'} (from {use['source']})"
         # "not recorded" rather than an omitted field, so an install with no
         # recorded tag stays distinguishable from a failed collection.
         diag["native_runtime_build"] = build or "not recorded"

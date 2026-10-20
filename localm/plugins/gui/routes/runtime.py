@@ -5,7 +5,13 @@ NATIVE runtime `localm setup-llama` provisions, not the Python source tree.
 
   GET  /api/runtime/check   -> read-only: is a different build available for
                                the currently installed backend, per
-                               setup_llama.check_runtime_update().
+                               setup_llama.check_runtime_update(), plus the
+                               user's chosen backend when a different one is
+                               installed (requested, requested_reason), and
+                               the backend localm loads (in_use,
+                               in_use_source).
+  POST /api/runtime/keep    -> keep the installed backend: forget the recorded
+                               choice of a backend that could not be used.
   POST /api/runtime/update  -> dispatch `localm setup-llama --backend <b>
                                [--tag <t> | --rollback] --force --yes` as a
                                background JOB (a real download + native
@@ -65,11 +71,49 @@ def register(app: FastAPI, ctx) -> None:
         constant setup_llama.BACKENDS, which the Settings card carries in its
         own markup."""
         from localm import setup_llama
+
+        def _check():
+            out = dict(setup_llama.check_runtime_update())
+            choice = setup_llama.backend_choice()
+            out["requested"] = choice["requested"] if choice else None
+            out["requested_reason"] = choice["reason"] if choice else None
+            use = setup_llama.runtime_in_use()
+            out["in_use"] = use["backend"]
+            out["in_use_source"] = use["source"]
+            return out
         try:
-            return await run_in_threadpool_bounded(
-                setup_llama.check_runtime_update, timeout=_CHECK_TIMEOUT_S)
+            return await run_in_threadpool_bounded(_check, timeout=_CHECK_TIMEOUT_S)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Checking the runtime timed out: {e}") from e
+
+    @app.post("/api/runtime/keep",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def runtime_keep_ep():
+        """Keep the installed backend: forget a recorded choice of a different
+        backend that could not be used here. Changes no files but that record.
+        Returns ``{"backend": <installed>, "dropped": <the forgotten choice or
+        null>}``; 409 when no runtime is installed."""
+        from localm import setup_llama
+
+        def _keep():
+            target = setup_llama._repo_runtime_lib()
+            with setup_llama._provisioning_lock(target):
+                installed = setup_llama._provisioned_backend(target)
+                if not installed:
+                    return None
+                choice = setup_llama.backend_choice()
+                if not setup_llama._record_backend_choice(target, None):
+                    raise OSError("the recorded backend choice could not be removed")
+            return {"backend": installed, "dropped": choice["requested"] if choice else None}
+        try:
+            result = await run_in_threadpool_bounded(_keep, timeout=_CHECK_TIMEOUT_S)
+        except setup_llama.ProvisioningBusyError as e:
+            raise HTTPException(409, f"A runtime install is running: {e}") from e
+        except OSError as e:
+            raise HTTPException(500, str(e)) from e
+        if result is None:
+            raise HTTPException(409, "No llama.cpp runtime is installed.")
+        return result
 
     @app.post("/api/runtime/update",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
@@ -85,6 +129,10 @@ def register(app: FastAPI, ctx) -> None:
         `localm setup-llama` performs. `rollback` pins and installs the previous
         build recorded for that backend instead of `tag`'s explicit one; the two
         are mutually exclusive, same as the CLI.
+
+        A request that names no backend re-provisions the installed one with
+        --keep-choice, so a recorded choice of another backend survives a build
+        update or rollback.
 
         Refuses (409) only when a runtime job is already running. A concurrent
         `localm update` re-provision or a bare terminal `setup-llama` is refused
@@ -153,6 +201,8 @@ def register(app: FastAPI, ctx) -> None:
         elif tag:
             args += ["--tag", tag]
         args += ["--force", "--yes"]
+        if wanted is None:
+            args.append("--keep-choice")
         job = jobs.start_cli(
             "runtime-update", args,
             host_label=("llama.cpp runtime update" if installed

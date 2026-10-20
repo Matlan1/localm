@@ -261,7 +261,7 @@ def _floor_at_pinned_tag(chosen: str, with_cudart: bool, rejected_tag: str,
     except Exception as e:
         console.print(f"[red]{_PINNED_TAG} could not be provisioned:[/red] {e}")
         return False, None
-    ok, why = _sl._native_loads_ok()
+    ok, why = _chosen_backend_loads(chosen)
     if not ok:
         console.print(f"[red]{_PINNED_TAG} did not load either:[/red] "
                       f"{why or 'unknown'}")
@@ -293,9 +293,31 @@ def _sycl_backend_note() -> str:
     return "Intel oneAPI build (needs the oneAPI runtime present)"
 
 
+# Backends that only make sense on their GPU: a build that loads but registers
+# no GPU device runs on the CPU, which counts as not loading.
+_GPU_REQUIRED_BACKENDS = frozenset({"cuda", "hip", "sycl", "amd-rocm"})
+
+
+def _chosen_backend_loads(chosen: str) -> tuple:
+    """Load-test the provisioned runtime for *chosen*: :func:`_native_loads_ok`,
+    plus, for a backend in _GPU_REQUIRED_BACKENDS, a registered GPU device.
+    Returns (ok, detail)."""
+    loaded, detail = _sl._native_loads_ok()
+    if not loaded or chosen not in _GPU_REQUIRED_BACKENDS:
+        return loaded, detail
+    gpu_ok, gpu_detail = _sl._native_gpu_loads_ok()
+    if gpu_ok:
+        return True, ""
+    if _is_abi_rejection(gpu_detail):
+        return False, gpu_detail
+    return False, f"it loaded but {gpu_detail.removeprefix('the runtime loaded but ')}"
+
+
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                              with_cudart: bool, assume_yes: bool = False,
-                             cuda_line: str = _CUDA_LINE) -> tuple[str, Optional[str]]:
+                             cuda_line: str = _CUDA_LINE,
+                             failure: Optional[list] = None,
+                             explicit: bool = True) -> tuple[str, Optional[str]]:
     """Provision *chosen* and prove it loads. If it does not load, NEVER swap the
     user's pick silently (the never-override rule): inform WHY, then OFFER the
     universal Vulkan build when interactive (or fall back with a LOUD warning when
@@ -312,6 +334,10 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
 
     *cuda_line* is the CUDA asset line to fetch when *chosen* is 'cuda' (see
     NvidiaInfo.cuda_line); irrelevant otherwise.
+
+    *failure*, when given, receives the reason *chosen* could not be used
+    whenever another backend is returned. *explicit* False means auto picked
+    *chosen*, so the messages do not call it the user's choice.
 
     vulkan and cpu are self-contained and treated as terminal: if the user
     explicitly chose one and it does not load, that is an environment problem we
@@ -369,9 +395,10 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         console.print(f"[red]Provisioning {chosen} failed:[/red] {e}")
         provisioned = False
 
-    loaded, detail = (_sl._native_loads_ok() if provisioned else (False, "not provisioned"))
+    loaded, detail = (_chosen_backend_loads(chosen) if provisioned
+                      else (False, "not provisioned"))
     if loaded and chosen == "amd-rocm" and _sl.install_rocm_simd_cpu(target) is None:
-        loaded, detail = _sl._native_loads_ok()
+        loaded, detail = _chosen_backend_loads(chosen)
     if loaded:
         console.print(f"[green]OK - {chosen} runtime loads on this machine.[/green]")
         return chosen, used_tag[0]
@@ -419,7 +446,9 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     if chosen in ("vulkan", "cpu"):
         return _universal_backend_failed(chosen, with_cudart, assume_yes, provisioned,
                                          detail, _try, used_tag)
-    return _fall_back_to_universal(chosen, detail, assume_yes, _try, used_tag)
+    if failure is not None:
+        failure.append(detail or "it did not load")
+    return _fall_back_to_universal(chosen, detail, assume_yes, _try, used_tag, explicit)
 
 
 def _universal_backend_failed(chosen: str, with_cudart: bool, assume_yes: bool,
@@ -489,7 +518,7 @@ def _universal_backend_failed(chosen: str, with_cudart: bool, assume_yes: bool,
 
 
 def _fall_back_to_universal(chosen: str, detail: str, assume_yes: bool, try_fn,
-                            used_tag: list) -> tuple[str, Optional[str]]:
+                            used_tag: list, explicit: bool = True) -> tuple[str, Optional[str]]:
     """After *chosen* did not load, offer (interactive) or perform
     (non-interactive) the vulkan then cpu fallback. Returns ``(backend, tag)``
     of the first one that loads; exits non-zero when the user declines; raises
@@ -512,16 +541,20 @@ def _fall_back_to_universal(chosen: str, detail: str, assume_yes: bool, try_fn,
     interactive = (not assume_yes) and sys.stdin.isatty()
     if interactive:
         _sl._flush_stdin()
+        kept = f"your '{chosen}' pick is kept, not changed; " if explicit else ""
         if not click.confirm(
                 f"  Install the universal Vulkan build now so you have a working "
-                f"setup? (your '{chosen}' pick is kept, not changed; decline to stop "
-                f"and fix it yourself)", default=True):
-            console.print(f"[yellow]Keeping your '{chosen}' choice and stopping.[/yellow] "
-                          "It does not load here yet. Fix the cause, then re-run: "
+                f"setup? ({kept}decline to stop and fix it yourself)", default=True):
+            stop = f"Keeping your '{chosen}' choice and stopping." if explicit else "Stopping."
+            console.print(f"[yellow]{stop}[/yellow] "
+                          f"{chosen} does not load here yet. Fix the cause, then re-run: "
                           f"localm setup-llama --backend {chosen} --force")
             sys.exit(1)
     else:
-        console.print("[yellow][!] Non-interactive: falling back to universal build.[/yellow]")
+        kept = (f"; your '{chosen}' choice is kept and shown until it can be used"
+                if explicit else "")
+        console.print(f"[yellow][!] Non-interactive: installing the universal build so "
+                      f"localm works{kept}.[/yellow]")
     for fb in ("vulkan", "cpu"):
         console.print(f"[yellow]Trying {fb}...[/yellow]")
         try:

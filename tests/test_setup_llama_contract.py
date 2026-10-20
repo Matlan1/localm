@@ -190,6 +190,8 @@ class World:
         self.requests: list = []
         self.probes: list = []
         self.probe_calls = 0
+        self.gpu_probes: list = []
+        self.gpu_probe_calls = 0
         self.other_cmds: list = []
         self.nvidia = None
         self.vendors: list = []
@@ -228,6 +230,10 @@ class World:
     def marker(self) -> str | None:
         p = self.lib / ".localm-backend"
         return p.read_text(encoding="utf-8") if p.exists() else None
+
+    def choice(self) -> dict | None:
+        p = self.lib / ".localm-backend-choice"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
     @staticmethod
     def history() -> list:
@@ -283,6 +289,10 @@ class World:
             self.probe_calls += 1
             rc, err = self.probes.pop(0) if self.probes else (0, "")
             return subprocess.CompletedProcess(cmd, rc, "", err)
+        if len(cmd) >= 3 and cmd[1] == "-c" and cmd[2] == sl._GPU_LOAD_PROBE_CODE:
+            self.gpu_probe_calls += 1
+            rc, out = self.gpu_probes.pop(0) if self.gpu_probes else (0, "")
+            return subprocess.CompletedProcess(cmd, rc, out, "")
         if len(cmd) >= 3 and cmd[1] == "-c" and cmd[2] == cpu_backend_select._SCORE_PROBE:
             name = Path(kwargs["env"]["LOCALM_CPU_TIER_CANDIDATE"]).name
             score = self.cpu_scores.get(name)
@@ -443,6 +453,7 @@ def test_cli_surface_is_unchanged():
         ("tag", ("--tag",), "StringParamType", None, False),
         ("rollback", ("--rollback",), "BoolParamType", None, True),
         ("cuda_line", ("--cuda-line",), "Choice", ("cuda-12", "cuda-13"), False),
+        ("keep_choice", ("--keep-choice",), "BoolParamType", None, True),
         ("assume_yes", ("--yes", "-y"), "BoolParamType", None, True),
     ]
     result = CliRunner().invoke(sl.main, ["--help"], terminal_width=100)
@@ -934,11 +945,15 @@ def test_linux_arm64_cuda_12_line_gpu_gets_vulkan_without_downloading_cuda(world
     r = world.invoke("--backend", "cuda", "--yes")
     assert r.exit_code == 0, r.output
     _in_order(r.text, "Compute capability 9.0 -> cuda-12 line",
-              "This GPU needs the cuda-12 line, which has no ARM64 build",
-              "Using Vulkan now", "Backend: vulkan", "OK - vulkan runtime loads on this machine.")
+              "CUDA cannot be used here: this GPU needs the cuda-12 CUDA line, which has no "
+              "ARM64 build", "Using Vulkan for now; your CUDA choice is kept.",
+              "Backend: vulkan", "OK - vulkan runtime loads on this machine.",
+              "Your choice 'cuda' is kept")
     assert urls[build] not in world.requests and urls[cudart] not in world.requests
-    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libllama.so"]
+    assert world.files() == [".localm-backend", ".localm-backend-choice", "LICENSE.llama-cpp",
+                             "libllama.so"]
     assert world.marker() == f"vulkan {PIN}\n"
+    assert world.choice()["requested"] == "cuda"
 
 
 def test_linux_arm64_cuda_without_its_runtime_bundle_installs_no_cuda(world):
@@ -953,7 +968,8 @@ def test_linux_arm64_cuda_without_its_runtime_bundle_installs_no_cuda(world):
     assert r.exit_code == 0, r.output
     _in_order(r.text, f"llama.cpp release {PIN} has no Linux cuda-13 CUDA runtime bundle for arm64",
               "Trying vulkan...", "OK - vulkan runtime loads.")
-    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libllama.so"]
+    assert world.files() == [".localm-backend", ".localm-backend-choice", "LICENSE.llama-cpp",
+                             "libllama.so"]
     assert world.marker() == f"vulkan {PIN}\n"
 
 
@@ -1036,16 +1052,37 @@ def test_cuda_that_does_not_load_falls_back_to_vulkan_non_interactively(world):
               "'cuda' backend provisioned but failed to load: OSError: [WinError 126] The "
               "specified module could not be found",
               "To retry later: localm setup-llama --backend cuda --force",
-              "[!] Non-interactive: falling back to universal build.",
-              "Trying vulkan...", "OK - vulkan runtime loads.")
+              "[!] Non-interactive: installing the universal build so localm works; your "
+              "'cuda' choice is kept and shown until it can be used.",
+              "Trying vulkan...", "OK - vulkan runtime loads.",
+              "Your choice 'cuda' is kept, but 'vulkan' is what is installed and in use now.",
+              "Why: the cuda build could not be used here: OSError: [WinError 126]")
     assert "Trying cpu" not in r.text
     listing = f"{API}/{UPSTREAM}/releases/tags/{PIN}"
     assert world.requests == [listing, urls[f"llama-{PIN}-bin-win-cuda-12.4-x64.zip"],
                               urls["cudart-llama-bin-win-cuda-12.4-x64.zip"], listing,
                               urls[f"llama-{PIN}-bin-win-vulkan-x64.zip"]]
-    assert world.files() == WIN_VULKAN_FILES
+    assert world.files() == sorted([*WIN_VULKAN_FILES, ".localm-backend-choice"])
     assert world.marker() == f"vulkan {PIN}\n"
     assert world.history() == [("vulkan", PIN)]
+    assert world.choice() == {"requested": "cuda", "reason": (
+        "the cuda build could not be used here: OSError: [WinError 126] The specified "
+        "module could not be found")}
+
+
+def test_cuda_that_loads_without_a_gpu_device_falls_back_and_names_the_driver(world):
+    _windows_cuda_world(world)
+    world.probes = [(0, ""), (0, "")]
+    world.gpu_probes = [(sl._PROBE_NO_GPU_DEVICE,
+                         "CPU\nggml-cuda.dll did not load: it or a library it needs is missing\n"
+                         "nvcuda.dll is missing: the NVIDIA driver provides it")]
+    r = world.invoke("--backend", "cuda", "--yes")
+    assert r.exit_code == 0, r.output
+    assert world.gpu_probe_calls == 1
+    assert world.marker() == f"vulkan {PIN}\n"
+    reason = world.choice()["reason"]
+    assert "registered no GPU device (registered: CPU)" in reason
+    assert "nvcuda.dll is missing" in reason
 
 
 def test_fallback_continues_to_cpu_when_vulkan_does_not_load(world):
@@ -1056,7 +1093,7 @@ def test_fallback_continues_to_cpu_when_vulkan_does_not_load(world):
     _in_order(r.text, "Trying vulkan...",
               "vulkan provisioned but failed to load: OSError: vulkan broken",
               "Trying cpu...", "OK - cpu runtime loads.")
-    assert world.files() == WIN_CPU_FILES
+    assert world.files() == sorted([*WIN_CPU_FILES, ".localm-backend-choice"])
     assert world.marker() == f"cpu {PIN}\n"
 
 
@@ -1078,18 +1115,20 @@ def test_nothing_loading_raises_a_reportable_error_naming_every_attempt(world):
 
 @pytest.mark.parametrize("vendors, lines", [
     (["amd"], ["Heads up: Picked cuda but detected amd. Proceeding. Hardware must be present.",
-               "Could not run nvidia-smi - this machine looks like AMD, not NVIDIA.",
-               "--yes: using vulkan (AMD detected, not NVIDIA)."]),
-    ([], ["Could not run nvidia-smi - no NVIDIA driver detected here (or it is not on PATH).",
-          "--yes: using Vulkan (no NVIDIA GPU detected)."]),
+               "Could not run nvidia-smi - this machine looks like AMD, not NVIDIA."]),
+    ([], ["Could not run nvidia-smi - no NVIDIA driver detected here (or it is not on PATH)."]),
 ])
-def test_cuda_without_nvidia_uses_vulkan_under_yes(world, vendors, lines):
+def test_cuda_without_nvidia_is_attempted_under_yes_and_the_choice_kept(world, vendors, lines):
     world.vendors, world.recommended = vendors, "vulkan"
     _upstream_win_vulkan(world)
     r = world.invoke("--backend", "cuda", "--yes")
     assert r.exit_code == 0, r.output
-    _in_order(r.text, *lines, "Backend: vulkan", "OK - vulkan runtime loads on this machine.")
+    _in_order(r.text, *lines,
+              "--yes: installing CUDA as chosen; the load test decides whether it can run here.",
+              "Backend: cuda", "Trying vulkan...", "OK - vulkan runtime loads.",
+              "Your choice 'cuda' is kept")
     assert world.marker() == f"vulkan {PIN}\n"
+    assert world.choice()["requested"] == "cuda"
 
 
 def test_cuda_with_a_too_old_driver_uses_vulkan(world):
@@ -1099,10 +1138,12 @@ def test_cuda_with_a_too_old_driver_uses_vulkan(world):
     r = world.invoke("--backend", "cuda", "--yes")
     assert r.exit_code == 0, r.output
     _in_order(r.text, "no Driver 470.00 supports CUDA 11.8 (need >= 12.4 for the cuda-12 line)",
-              "GPU driver update required for CUDA (the cuda-12 line this GPU needs).",
-              "To enable later: update driver, reboot, run setup-llama --backend cuda",
-              "Using Vulkan now.", "Backend: vulkan")
+              "CUDA cannot be used here: NVIDIA driver 470.00 supports CUDA 11.8, but the "
+              "cuda-12 build needs CUDA 12.4 or newer.",
+              "Using Vulkan for now; your CUDA choice is kept.", "Backend: vulkan",
+              "Your choice 'cuda' is kept")
     assert world.marker() == f"vulkan {PIN}\n"
+    assert "470.00" in world.choice()["reason"]
 
 
 def test_a_universal_backend_that_does_not_load_names_the_missing_library(world):
