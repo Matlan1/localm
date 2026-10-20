@@ -505,6 +505,10 @@ class _ContextMixin:
         ``self._messages`` at that time), as the base of
         ``_prompt_tokens_estimate``. Forgets the base when no count was
         reported."""
+        if getattr(self.backend, "last_reply_compacted", False) is True:
+            self._usage_base = None
+            self._server_compacted = True
+            return
         usage = getattr(self.backend, "last_usage", None)
         tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
         count = len(messages) - 1
@@ -987,9 +991,9 @@ ws     ::= [ \t\n\r]*
         pinned = [r for r in (getattr(self, "_pinned_requests", None) or []) if r != item]
         pinned.append(item)
         if len(pinned) > _MAX_PINNED_REQUESTS:
-            self._pinned_requests_dropped = (
+            self._pinned_requests_dropped = min(10**6, (
                 int(getattr(self, "_pinned_requests_dropped", 0) or 0)
-                + len(pinned) - _MAX_PINNED_REQUESTS)
+                + len(pinned) - _MAX_PINNED_REQUESTS))
             pinned = pinned[:2] + pinned[len(pinned) - (_MAX_PINNED_REQUESTS - 2):]
         self._pinned_requests = pinned
 
@@ -1266,7 +1270,10 @@ ws     ::= [ \t\n\r]*
         if window is None:
             return
         high, low = self._compaction_bounds(window)
-        if self._prompt_tokens_estimate() <= high:
+        if getattr(self, "_server_compacted", False):
+            self._server_compacted = False
+            self._compact_futile = False
+        elif self._prompt_tokens_estimate() <= high:
             self._compact_futile = False
             return
         self._compact_to(low, window,

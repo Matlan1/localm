@@ -497,3 +497,63 @@ def test_a_sub_agent_task_is_not_pinned_as_a_user_request(proj, home):
         parent.run_task("a task the user typed")
     assert child._pinned_requests == []
     assert parent._pinned_requests == ["a task the user typed"]
+
+
+def test_a_reply_the_server_compacted_does_not_become_the_count_and_the_agent_compacts_next(proj, home):
+    backend = _Backend(window=16384)
+    agent = _agent(proj, backend)
+    agent._messages = [{"role": "user", "content": "go"}]
+    for i in range(4):
+        _read_turn(agent, i)
+    backend.last_usage = {"prompt_tokens": 4000}
+    backend.last_reply_compacted = True
+    agent._record_prompt_usage(agent._build_messages())
+    assert agent._usage_base is None
+    assert agent._prompt_tokens_estimate() > 4000
+    with patch.object(type(agent), "_compact_to", return_value=True) as compact_to:
+        agent._maybe_compact(interactive=False)
+    compact_to.assert_called_once()
+
+
+@pytest.mark.parametrize("header,expected", [("1", True), (None, False)])
+def test_the_http_backend_reports_a_server_compaction(header, expected):
+    from localm.plugins.coder.backends import http as http_mod
+
+    class _Resp:
+        status_code = 200
+        url = "http://127.0.0.1:9/v1/chat/completions"
+        headers = {"X-Localm-Context-Compacted": header} if header else {}
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "hi"}}],
+                    "usage": {"prompt_tokens": 10}}
+
+    b = http_mod.HTTPBackend("http://127.0.0.1:9/v1", model="m", localm_server=True)
+    with patch.object(http_mod, "_post_with_retry", return_value=_Resp()):
+        assert b.chat([{"role": "user", "content": "x"}]) == "hi"
+    assert b.last_reply_compacted is expected
+
+
+def test_resume_and_goal_text_are_not_pinned_but_the_goal_task_is(proj, home):
+    agent = _agent(proj, _Backend(window=16384))
+    with patch.object(type(agent), "_loop", return_value="done"):
+        agent.chat("Continue from where we left off.", record_request=False)
+        agent.run_task("wrapped goal text", record_request=False)
+    assert agent._pinned_requests == []
+
+    from localm.plugins.coder import cli as coder_cli
+    from localm.plugins.coder.cli import goal
+    with patch.object(type(agent), "_loop", return_value="done"),          patch.object(coder_cli, "_run_verify", return_value=(0, "ok")):
+        ok, _ = goal._run_goal_loop(agent, "the user's goal", "true", 1, proj)
+    assert ok is True
+    assert agent._pinned_requests == ["the user's goal"]
+
+
+def test_resume_clears_the_futile_latch(proj, home):
+    agent = _agent(proj)
+    agent._compact_futile = True
+    agent._server_compacted = True
+    agent.resume_checkpoint({"version": 1, "messages": [], "pinned_requests_dropped": 10**9})
+    assert agent._compact_futile is False and agent._server_compacted is False
+    assert agent._pinned_requests_dropped == 10**6

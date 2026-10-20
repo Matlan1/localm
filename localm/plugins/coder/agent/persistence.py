@@ -695,6 +695,9 @@ class _PersistenceMixin:
         self._pinned_requests_dropped = (dropped if isinstance(dropped, int)
                                          and not isinstance(dropped, bool) and dropped > 0
                                          else 0)
+        self._pinned_requests_dropped = min(10**6, self._pinned_requests_dropped)
+        self._compact_futile = False
+        self._server_compacted = False
         self._usage_base = None
 
     def _restore_activated_tools(self, raw) -> None:

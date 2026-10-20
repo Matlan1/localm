@@ -51,11 +51,12 @@ def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
     print_info(
         f"Goal mode: iterating on the task until `{until_cmd}` exits 0 "
         f"(max {max_iters} iteration(s)).")
+    agent._note_typed_request(task)
     if attachments:
         response = agent.run_task(_goal_task_wrap(task, until_cmd),
-                                  attachments=attachments)
+                                  attachments=attachments, record_request=False)
     else:
-        response = agent.run_task(_goal_task_wrap(task, until_cmd))
+        response = agent.run_task(_goal_task_wrap(task, until_cmd), record_request=False)
     for attempt in range(1, max_iters + 1):
         outcome = _run_verify(until_cmd, work_dir)
         code, output = outcome
