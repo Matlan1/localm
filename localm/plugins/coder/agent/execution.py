@@ -760,7 +760,7 @@ class _ExecutionMixin:
         from localm.console import markup_safe
 
         def _show(spec) -> None:
-            console.print(f"    [dim]hook {spec.label}: "
+            console.print(f"    [dim]running {spec.label}: "
                           f"{markup_safe(spec.command_text(80))}[/dim]")
         return _show
 

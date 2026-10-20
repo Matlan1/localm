@@ -37,9 +37,9 @@ def ask_trust(hooks) -> str:
                   "calls. Only trust hooks you have read.")
     try:
         answer = console.input(
-            "[yellow]Run them? [y] this session, [a] always (until they change), "
-            "[N] no (calls a pre_tool_use hook checks are then refused): "
-            "[/yellow]").strip().lower()
+            "[yellow]Run them? \\[y] this session, \\[a] always (until they "
+            "change), \\[N] no (calls a pre_tool_use hook checks are then "
+            "refused): [/yellow]").strip().lower()
     except (KeyboardInterrupt, EOFError):
         return "no"
     if answer in ("a", "always"):
