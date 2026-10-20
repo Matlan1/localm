@@ -237,6 +237,7 @@ def _requests_for(app):
         ("GET", "/api/gpus", None),
         ("POST", "/api/models/pull-token/redeem", {"spec": "owner/repo", "token": token}),
         ("POST", "/api/models/pull", {"spec": "owner/repo"}),
+        ("POST", "/api/models/pull/discard", {"spec": "owner/repo"}),
         ("POST", "/api/media/image/preflight", {}),
         ("POST", "/api/models/pull-comfy-source", {"filename": "not-curated.gguf"}),
         ("POST", "/api/models/comfy-source/lookup",
