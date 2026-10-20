@@ -318,6 +318,24 @@ slow from RAM by design. Has no effect on a normal (dense) model, and says so
 instead of silently doing nothing. The Settings page has the same field ("MoE
 expert layers on CPU").
 
+## KV cache type: more context in the same VRAM
+
+When the weights take most of the card, the context window is what runs short.
+`kv_cache_type q8_0` stores the KV cache at 1.0625 bytes per value instead of
+f16's 2, so about 1.9x the context fits in the VRAM that is left:
+
+```bash
+localm config kv_cache_type q8_0   # opt in
+localm config kv_cache_type f16    # the default
+```
+
+The automatic context ceiling (`ctx_auto`), the GPU-layer sizing and the
+Settings VRAM estimate all charge the KV cache at the chosen size. Decoding is
+slightly slower. A quantised KV cache needs flash attention: llama.cpp turns
+it on by itself, and a model or runtime that cannot use it refuses the context,
+so the load fails with an error that names the setting rather than falling back
+to f16. Applies at the next model load.
+
 ## Memory-mapping: models larger than system RAM
 
 A model whose weights do not fit in system RAM can still load when the file is

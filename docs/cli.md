@@ -620,6 +620,23 @@ layers on CPU"). See
 [docs/gpu-setup.md](gpu-setup.md#mixture-of-experts-reducing-vram-footprint)
 for measured numbers.
 
+### KV cache type: more context in the same VRAM
+
+`kv_cache_type` sets the element type of the KV cache (the per-token memory the
+context window uses).
+
+```bash
+localm config kv_cache_type f16    # llama.cpp's default - the default
+localm config kv_cache_type q8_0   # about half the KV memory, about 1.9x the context
+```
+
+`q8_0` stores 34 bytes per 32 values instead of 64, so the automatic context
+ceiling (`ctx_auto`) and the VRAM estimate grow by about 1.9x for the same free
+VRAM; decoding is slightly slower. It needs flash attention, which
+llama.cpp turns on by itself; a model or runtime that cannot use it fails to
+load and the error names `kv_cache_type`. Applies at the next model load. The
+Settings page has the same field ("KV cache type").
+
 ### Memory-mapping: models larger than system RAM
 
 `use_mmap` controls whether the model file is memory-mapped, so only the pages a

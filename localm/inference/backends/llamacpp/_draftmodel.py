@@ -13,6 +13,8 @@ import weakref
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from localm.kv_cache import apply_kv_cache_type
+
 from ._drafting import SPEC_DRAFT, CountedSource
 from ._stepcosts import UNBOUNDED_REPLY_TOKENS, expected_tokens
 
@@ -249,6 +251,8 @@ class DraftModelSource(CountedSource):
         cp.n_batch = min(n_ctx, DRAFT_CONTEXT_BATCH)
         cp.n_ubatch = cp.n_batch
         cp.offload_kqv = offload_kqv and self.on_gpu
+        llm = self._llm
+        apply_kv_cache_type(cp, getattr(llm, "_kv_cache_type", None) if llm is not None else None)
         if self._n_threads is not None:
             cp.n_threads = self._n_threads
             cp.n_threads_batch = self._n_threads

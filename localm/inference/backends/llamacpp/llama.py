@@ -29,6 +29,9 @@ from typing import (Any, Callable, Generator, Iterable, Iterator, Optional,
 
 from localm.inference import pretokenizer_guard
 from localm.inference.backends.base import PerThread
+from localm.kv_cache import (
+    apply_kv_cache_type, context_refused_note, ggml_type_id, kv_bytes_for_type,
+)
 from localm.textguard import (
     content_spans_via_sentinels, map_untrusted_ranges, split_by_trust,
     untrusted_spans_of,
@@ -1303,6 +1306,7 @@ class LlamaCpp:
     # stays off for the rest of the model's life.
     _mtp_usable = True
     _mtp_ctx_ptr = None          # the MTP draft context, None until created
+    _kv_cache_type: Optional[str] = None   # KV cache element type, None = f16
     _mtp_ctx_capacity = 0        # the draft context's own n_ctx, 0 until created
     _mtp_wants_h = False         # True once both contexts expose the next-n state
     mtp_active_this_call = False # whether THIS generation actually speculated
@@ -1396,9 +1400,15 @@ class LlamaCpp:
         diffusion_steps: Optional[int] = None,
         diffusion_max_tokens: Optional[int] = None,
         n_parallel: int = 1,
+        kv_cache_type: Optional[str] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
+        # Element type of every KV cache this model's contexts hold: a
+        # localm.kv_cache.KV_CACHE_TYPES value, None for llama.cpp's default (f16).
+        if kv_cache_type is not None:
+            ggml_type_id(kv_cache_type)
+        self._kv_cache_type = kv_cache_type
         self._diffusion_steps = diffusion_steps
         self._diffusion_max_tokens = diffusion_max_tokens
         # spec_source names the draft source (off, mtp, ngram, draft); None
@@ -1695,7 +1705,8 @@ class LlamaCpp:
         # it instead of a file-size heuristic that under-counted wide-KV models by
         # ~2.6x.
         self.kv_bytes_per_token: int = (
-            0 if self.is_diffusion else self._read_kv_bytes_per_token())
+            0 if self.is_diffusion
+            else kv_bytes_for_type(self._read_kv_bytes_per_token(), self._kv_cache_type))
 
         # llama.cpp already offloads min(n_gpu_layers, actual), so an over-large
         # value is harmless - but silently clamping a SPECIFIC number is
@@ -1726,6 +1737,7 @@ class LlamaCpp:
         # See test_recurrent_rollback_is_requested_when_mtp_is_enabled.
         self._apply_initial_spec_params(cp, spec_draft_tokens)
         cp.flash_attn_type   = -1  # keep default (unspecified)
+        apply_kv_cache_type(cp, self._kv_cache_type)
         if n_threads is not None:
             cp.n_threads       = n_threads
             cp.n_threads_batch = n_threads
@@ -1743,7 +1755,8 @@ class LlamaCpp:
         if not self._ctx_ptr:
             self._free_adapters()
             api.llama_free_model(self._model_ptr)
-            raise RuntimeError("Failed to create llama context")
+            raise RuntimeError("Failed to create llama context."
+                               + context_refused_note(self._kv_cache_type))
         if self._adapter_handles:
             try:
                 with _ctx():
@@ -3649,6 +3662,7 @@ class LlamaCpp:
         cp.n_ubatch = cp.n_batch
         cp.offload_kqv = offload_kqv
         self._apply_parallel_params(cp)
+        apply_kv_cache_type(cp, self._kv_cache_type)
         if self._n_threads is not None:
             cp.n_threads = self._n_threads
             cp.n_threads_batch = self._n_threads
@@ -3667,7 +3681,8 @@ class LlamaCpp:
                      else "even with the KV cache in system RAM")
             raise RuntimeError(
                 f"Not enough memory to create a {target:,}-token context, {where}. "
-                f"Start a new chat, lower n_ctx_max, or free some memory.")
+                f"Start a new chat, lower n_ctx_max, or free some memory."
+                + context_refused_note(self._kv_cache_type))
         self._ctx_capacity = target
         self._offload_kqv = offload_kqv
 
@@ -4397,6 +4412,7 @@ class LlamaCpp:
         cp_mtp.n_batch = min(n_ctx, _MTP_DRAFT_BATCH)
         cp_mtp.n_ubatch = cp_mtp.n_batch
         cp_mtp.offload_kqv = offload_kqv
+        apply_kv_cache_type(cp_mtp, self._kv_cache_type)
         if n_threads is not None:
             cp_mtp.n_threads = n_threads
             cp_mtp.n_threads_batch = n_threads
@@ -4745,6 +4761,7 @@ class LlamaCpp:
         cp.n_batch     = min(cp.n_ctx, 2048)
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = offload_kqv  # False -> KV cache in system RAM (VRAM was tight)
+        apply_kv_cache_type(cp, self._kv_cache_type)
         if self._n_threads is not None:
             cp.n_threads = self._n_threads
             cp.n_threads_batch = self._n_threads
@@ -4785,6 +4802,7 @@ class LlamaCpp:
             raise RuntimeError(
                 f"Not enough memory to create a {target:,}-token context, {where}. "
                 f"Start a new chat, lower n_ctx_max, or free some memory."
+                + context_refused_note(self._kv_cache_type)
             )
         self._ctx_capacity = cp.n_ctx
         self._offload_kqv = offload_kqv   # record the new context's KV placement
