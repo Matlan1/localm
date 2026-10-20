@@ -21,6 +21,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   says to run the same command again to continue from there.
 - **`localm coder doctor` and `/doctor`.** One command checks that the model server answers and accepts the key, whether the session uses native tool calls or grammar-constrained ones, the context window against the size of the repo map, the git state, whether the verify command resolves, and that each configured MCP server starts. It exits 1 when a check fails and prints `--output-format json` or `jsonl` for scripts.
 - **`--output-format jsonl` for unattended coder runs.** `localm coder TASK --output-format jsonl` writes every agent event (tool calls and results, tokens, turns) to stdout as one JSON object per line as it happens, then a closing `final` line with the outcome; everything else the CLI prints goes to stderr.
+- **Plan mode and questions in `localm coder`.** `/plan` (or the agent itself) switches to a
+  read-only mode where nothing can be written, run or fetched until you approve the agent's
+  plan: approve it, approve and let it run until the project's check passes, or send it back
+  with feedback. The agent can also ask you a question with numbered options mid-task.
 
 ### Changed
 

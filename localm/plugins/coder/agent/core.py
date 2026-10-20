@@ -32,6 +32,7 @@ from .loop import _LoopMixin
 from .execution import _ExecutionMixin
 from .context import _ContextMixin
 from .persistence import _PersistenceMixin
+from .planmode import _PlanModeMixin
 from .session import _SessionMixin
 from .tooldefs import _build_openai_tool_defs
 
@@ -53,6 +54,7 @@ class Agent(
     _ContextMixin,
     _PersistenceMixin,
     _SessionMixin,
+    _PlanModeMixin,
 ):
     """
     Stateful agentic loop.

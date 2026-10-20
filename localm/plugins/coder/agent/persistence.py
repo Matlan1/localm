@@ -469,6 +469,9 @@ class _PersistenceMixin:
             # The model's own task list (tools/tasks.py). An older build ignores
             # the extra key, and an older checkpoint restores as no todos.
             "todos": self.get_todos(),
+            # Plan mode, so a resumed session is still read-only until its plan
+            # is approved. An older checkpoint restores as plan mode off.
+            "plan_mode": bool(self._plan_mode),
             # Pointers to work delegated children COMMITTED on their own branches.
             # The branches are durable; this keeps the pointer to them durable too,
             # so a resumed session still shows the footer. The change-sets are
@@ -586,6 +589,7 @@ class _PersistenceMixin:
         # load_checkpoint()'s migration path already backfills it.
         self._session_title = data.get("title") or _first_user_text(self._messages)
         self.set_todos(normalize_todos(data.get("todos")))
+        self._plan_mode = data.get("plan_mode") is True
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))
 

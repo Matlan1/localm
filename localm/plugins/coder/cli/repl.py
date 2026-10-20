@@ -54,7 +54,7 @@ _SLASH_COMMANDS = (
     "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
     "/sessions", "/compact", "/memory", "/remember", "/forget", "/save",
     "/export", "/scope", "/changes", "/diff", "/bg", "/verify", "/goal",
-    "/review", "/doctor",
+    "/review", "/doctor", "/plan",
 )
 
 
@@ -170,7 +170,7 @@ def _repl(agent: Agent) -> None:
             # The saved checkpoint is not cleared before the turn; the turn
             # itself clears or rewrites it. See
             # test_a_failed_turn_after_an_interrupted_one_keeps_the_saved_progress.
-            if agent.goal_cmd is not None:
+            if agent.goal_cmd is not None and not agent.plan_mode:
                 before = {f["path"]: f["writes"] for f in agent.changed_files()}
                 try:
                     _run_goal_loop(agent, user_input, agent.goal_cmd,
@@ -263,6 +263,19 @@ def _handle_command(raw: str, agent: Agent) -> bool:
     elif cmd == "approve":
         agent.auto_approve = not agent.auto_approve
         print_info(f"Auto-approve: {'on' if agent.auto_approve else 'off'}")
+
+    elif cmd == "plan":
+        if arg not in ("", "on", "off"):
+            print_info("Usage: /plan, /plan on, /plan off")
+        else:
+            on = (not agent.plan_mode) if not arg else arg == "on"
+            agent.set_plan_mode(on)
+            if on:
+                print_info(
+                    "Plan mode on: the agent can only read and search until it "
+                    "proposes a plan and you approve it. /plan off leaves it.")
+            else:
+                print_info("Plan mode off.")
 
     elif cmd == "reindex":
         n = agent.reindex()

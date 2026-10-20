@@ -104,6 +104,11 @@ _TOOL_EXAMPLES: dict = {
     "set_todos":     {"items": ["[x] read the failing test",
                                 "[>] fix the parser",
                                 "[ ] run the suite"]},
+    "ask_user":      {"question": "Should the cache be per user or shared?",
+                      "options": ["per user", "shared"]},
+    "exit_plan_mode": {"plan": "1. Add a size limit to load_config in config.py\n"
+                               "2. Test it in tests/test_config.py\n"
+                               "3. Verify: pytest tests/test_config.py"},
 }
 
 _TYPE_PLACEHOLDERS = {"string": "...", "int": 1, "float": 1.0, "bool": False, "array": []}

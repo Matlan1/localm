@@ -40,6 +40,7 @@ from .constants import (
     _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
 )
+from .planmode import INTERACTION_TOOLS, plan_mode_refusal
 from .scope import _scope_pattern
 
 if TYPE_CHECKING:
@@ -386,6 +387,16 @@ class _ExecutionMixin:
 
         tool_def = TOOL_REGISTRY.get(call.name)
 
+        # Third hard gate: plan mode runs only read-only tools (agent/planmode.py).
+        if self.plan_mode:
+            plan_refusal = plan_mode_refusal(call.name, tool_def)
+            if plan_refusal is not None:
+                result = ToolResult.error(plan_refusal)
+                self._audit.notice("plan_mode_refused", plan_refusal)
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                return result
+
         if tool_def is None:
             result = ToolResult.error(
                 f"Unknown tool '{call.name}'. "
@@ -677,6 +688,12 @@ class _ExecutionMixin:
         # copy, so a model-supplied "_restricted" cannot win.
         if call.name == "search_replace":
             args["_restricted"] = self.restricted
+        # The interaction tools prompt this session's user (tools/interact.py).
+        # Injected after the copy, so a model-supplied "_session" or
+        # "_interactive" cannot win.
+        if call.name in INTERACTION_TOOLS:
+            args["_session"] = self
+            args["_interactive"] = interactive
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True

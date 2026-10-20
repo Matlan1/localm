@@ -26,6 +26,7 @@ from .constants import (
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
     _SKILL_STATE_TOOLS,
 )
+from .planmode import INTERACTION_TOOLS
 from localm.textguard import compose, compose_join
 
 _RE_CLAUSE_SPLIT = re.compile(r"[,!?:;\n]+|\.+(?=\s|$)")
@@ -266,7 +267,7 @@ class _LoopMixin:
             self._session_title = task   # resume-listing display title
         # The raw request, before _with_episodes can prepend a lessons preamble.
         self._last_user_request = task
-        self._add_user(self._with_episodes(task))
+        self._add_user_with_plan_note(self._with_episodes(task))
         return self._loop(interactive=False)
 
     def continue_task(self, message: str) -> str:
@@ -279,7 +280,7 @@ class _LoopMixin:
         verification failure back to the agent for another fix attempt.
         """
         self._last_user_request = message
-        self._add_user(message)
+        self._add_user_with_plan_note(message)
         return self._loop(interactive=False)
 
     def chat(self, user_input: str) -> str:
@@ -300,7 +301,7 @@ class _LoopMixin:
             user_input = self._with_episodes(user_input)
         if not self._review_task:
             self._review_task = user_input
-        self._add_user(user_input)
+        self._add_user_with_plan_note(user_input)
         return self._loop(interactive=True)
 
     def _with_episodes(self, task: str) -> str:
@@ -667,6 +668,8 @@ class _LoopMixin:
             self.clear_checkpoint()
 
         finally:
+            # Auto-run from an approved plan lasts for this run only.
+            self._end_plan_autorun()
             # Fold this run's outcome into the session-level flag before the next
             # run re-arms the per-run one, so every failure path (max_turns,
             # either circuit breaker) is captured in one place. A user stop is
@@ -1294,7 +1297,7 @@ class _LoopMixin:
         for call in calls:
             td = TOOL_REGISTRY.get(call.name)
             destructive = td.destructive if td else True
-            solo = call.name in _SKILL_STATE_TOOLS
+            solo = call.name in _SKILL_STATE_TOOLS or call.name in INTERACTION_TOOLS
             if (extendable and not solo
                     and segments and segments[-1][0] == destructive):
                 segments[-1][1].append(call)

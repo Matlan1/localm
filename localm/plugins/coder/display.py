@@ -364,6 +364,7 @@ HELP_TEXT = """\
   [bold]/reindex[/bold]              rebuild the codebase index
   [bold]/verbose[/bold]              toggle verbose tool output
   [bold]/approve[/bold]              toggle auto-approve for destructive tools
+  [bold]/plan \\[on|off][/bold]        plan mode: read-only until you approve the agent's plan
   [bold]/history[/bold]              show turn count, context usage, and index size
   [bold]/changes[/bold]              list every file this session has changed
   [bold]/diff \\[path][/bold]          cumulative diff of session changes (all or one file)
