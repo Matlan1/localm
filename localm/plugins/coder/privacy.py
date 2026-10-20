@@ -152,7 +152,7 @@ def subprocess_privacy_env() -> dict[str, str]:
     No env vars are set for fish or PowerShell:
       * fish: non-interactive fish sessions never save history regardless.
       * PowerShell: PSReadLine only runs in interactive sessions, and these
-        subprocesses use ``cmd.exe /C`` (Windows) or ``/bin/sh -c`` (Unix),
+        subprocesses use ``cmd.exe /S /C`` (Windows) or ``/bin/sh -c`` (Unix),
         neither of which loads PSReadLine.
     """
     env = dict(os.environ)

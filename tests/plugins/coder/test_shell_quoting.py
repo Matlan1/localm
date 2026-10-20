@@ -39,7 +39,7 @@ def _went_through_the_shell(launched) -> bool:
     tools/base.py:platform_shell.
     """
     if isinstance(launched, str):
-        return launched.startswith("cmd /C ")
+        return launched.startswith("cmd /S /C ")
     return launched[0] in ("cmd", "/bin/sh")
 
 
@@ -239,6 +239,41 @@ class TestTheQuotingDefectsFire:
         new_result = run_subprocess(_shell_argv(command), tmp_path, timeout=60)
         assert new_result.ok, new_result.stderr
         assert MARK in (new_result.stdout or "")
+
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="cmd.exe quote stripping is Windows-only")
+    def test_a_quoted_program_path_and_quoted_argument_reach_the_child(self, tmp_path):
+        """A command that STARTS with a quote and holds more than two reaches
+        cmd.exe with its first and last quote stripped under a plain /C. Run
+        for real through run_shell: a quoted interpreter path, a script path
+        with spaces and a quoted argument with spaces must arrive intact, and
+        the child's exit code must come back."""
+        from localm.plugins.coder.tools.shell import tool_run_shell
+
+        d = tmp_path / "a dir with spaces"
+        d.mkdir()
+        script = d / "arg script.py"
+        script.write_text(
+            "import sys\nprint('ARG=' + sys.argv[1])\nsys.exit(2)\n",
+            encoding="utf-8")
+        command = '"%s" "%s" "two words" 2>&1' % (sys.executable, script)
+
+        assert isinstance(_shell_argv(command), str)
+        result = tool_run_shell(tmp_path, command, timeout=60)
+        assert "ARG=two words" in result.output, result.output
+        assert "<exit_code>2</exit_code>" in result.output, result.output
+
+        raw = run_subprocess(command, tmp_path, timeout=60, shell_wrap=True)
+        assert raw.returncode == 2, (raw.returncode, raw.stdout, raw.stderr)
+        assert "ARG=two words" in raw.stdout
+
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="cmd.exe quote stripping is Windows-only")
+    def test_a_command_ending_in_a_quote_runs_unchanged(self, tmp_path):
+        result = run_subprocess('echo "a" & echo "b"', tmp_path, timeout=60,
+                                shell_wrap=True)
+        assert result.ok, result.stderr
+        assert '"a"' in result.stdout and '"b"' in result.stdout
 
     @pytest.mark.skipif(sys.platform != "win32",
                         reason="npm.CMD/WinError 2 is a Windows-only defect")

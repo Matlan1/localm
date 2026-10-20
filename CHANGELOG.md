@@ -66,6 +66,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the finished ones.
 
 ### Fixed
+- **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **`localm coder` no longer floods the terminal.** A new file shows a short preview instead of
   every line, a reply is no longer printed twice, and a failed tool shows the end of its error
   output without needing `/verbose`. Warnings at the end of a task now appear in the terminal.

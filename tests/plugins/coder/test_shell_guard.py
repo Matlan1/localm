@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -498,3 +499,39 @@ HOSTILE = [
 def test_the_classifier_never_raises_on_hostile_input(command):
     for cwd in (None, _CWD, "", "relative/dir"):
         shell_guard.classify(command, cwd)
+
+
+_WIN_PREFIX = 'cmd /S /C "'
+
+
+def _windows_launch_line(command):
+    """What platform_shell hands to CreateProcess for *command* on Windows."""
+    from localm.plugins.coder.tools import base
+    real = sys.platform
+    base.sys.platform = "win32"
+    try:
+        return base.platform_shell(command)
+    finally:
+        base.sys.platform = real
+
+
+@pytest.mark.parametrize("command", [
+    c for c, _ in BLOCKED[:6]
+] + [
+    r'"D:\Tools dir\git.exe" push --force origin main',
+    '"git" push --force origin "main"',
+    r'"D:\a b\p.exe" -c "import sys; sys.exit(2)"',
+    'echo "a" & echo "b"',
+    'rm -rf "/"',
+    'echo "x"',
+    '"',
+    '""',
+], ids=repr)
+def test_the_windows_shell_wrapper_leaves_the_classified_text_unchanged(command):
+    """cmd /S removes exactly the one outer pair of quotes, so the text cmd
+    executes is the text the guard classified."""
+    launched = _windows_launch_line(command)
+    assert launched.startswith(_WIN_PREFIX) and launched.endswith('"')
+    executed = launched[len(_WIN_PREFIX):-1]
+    assert executed == command
+    assert shell_guard.classify(executed, _CWD) == shell_guard.classify(command, _CWD)

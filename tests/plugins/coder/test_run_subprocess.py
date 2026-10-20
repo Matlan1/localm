@@ -62,7 +62,7 @@ class TestShellWrapMode:
         launched = captured["argv"]
         if sys.platform == "win32":
             # The command is passed as a raw command line, not an argv list.
-            assert launched == "cmd /C echo hi && echo bye"
+            assert launched == 'cmd /S /C "echo hi && echo bye"'
         else:
             assert launched[0] == "/bin/sh" and launched[1] == "-c"
             assert launched[-1] == "echo hi && echo bye"
@@ -82,7 +82,9 @@ class TestShellWrapMode:
 
         launched = captured["argv"]
         tail = launched if isinstance(launched, str) else launched[-1]
-        assert tail.endswith(command), tail
+        if isinstance(launched, str):
+            tail = tail[len('cmd /S /C "'):-1]
+        assert tail == command, launched
 
     def test_default_does_not_shell_wrap(self, tmp_path):
         captured = []

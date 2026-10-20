@@ -162,7 +162,9 @@ class TestRunShell:
         assert _launcher(launched) in ("cmd", "/bin/sh"), launched
         # The command text reaches the shell unchanged, not re-quoted.
         tail = launched if isinstance(launched, str) else launched[-1]
-        assert tail.endswith("echo hi | cat"), tail
+        if isinstance(launched, str):
+            tail = tail[len('cmd /S /C "'):-1]
+        assert tail == "echo hi | cat", launched
 
 
 # ---------------------------------------------------------------------------
