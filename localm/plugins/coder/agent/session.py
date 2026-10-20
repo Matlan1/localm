@@ -26,6 +26,9 @@ _CLI_REFLECTION_DEADLINE_S = 30.0
 
 
 class _SessionMixin:
+    _activated_tools: frozenset
+    _activated_lock: threading.Lock
+
     def reset(self) -> None:
         """Clear conversation history."""
         self._messages = []
@@ -88,7 +91,7 @@ class _SessionMixin:
             untrusted_provenance=self._untrusted_provenance,
             custom_instructions=self._custom_instructions,
             role_brief=self._role_brief(),
-            native_tools=self._native_tools_effective,
+            native_tools=getattr(self, "_native_tools_effective", False) is True,
         )
 
     def _role_brief(self) -> str:

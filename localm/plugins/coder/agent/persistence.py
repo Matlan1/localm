@@ -10,6 +10,7 @@ import dataclasses
 import datetime
 import difflib
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,9 @@ def _spawned_by(agent, job) -> bool:
 
 
 class _PersistenceMixin:
+    _activated_tools: frozenset
+    _activated_lock: threading.Lock
+
     def changed_files(self) -> list[dict]:
         """
         Files this session has written, with change counts.
