@@ -642,7 +642,7 @@ class TestReviewFindings:
         agent = MagicMock()
         seen = {}
 
-        def run_task(task, attachments=""):
+        def run_task(task, attachments="", **kw):
             seen["task"], seen["attachments"] = task, attachments
             return "done"
 
