@@ -299,7 +299,7 @@ def _regex_declarations(lines: list[str], lang: str) -> list[tuple[int, int, str
             if m is None:
                 continue
             name = m.group(2)
-            if name in _NOT_A_DECLARATION:
+            if name in _NOT_A_DECLARATION and (kind == "method" or lang in ("c", "cpp")):
                 continue
             indent = len(m.group(1).expandtabs(4))
             decl = stripped.rstrip().rstrip("{").rstrip(":").rstrip()

@@ -86,10 +86,10 @@ def test_python_outline_has_exact_spans_and_nesting():
     shape = by["Shape"]
     assert shape.kind == "class" and shape.depth == 0
     assert shape.start == 15, "a decorated class starts at its first decorator"
-    assert shape.end == 31
+    assert shape.end == 29
     assert shape.text == "class Shape(Base, metaclass=Meta)"
-    assert (by["area"].kind, by["area"].start, by["area"].end, by["area"].depth) == ("method", 19, 20, 1)
-    assert by["name"].start == 22, "a decorated method starts at its decorator"
+    assert (by["area"].kind, by["area"].start, by["area"].end, by["area"].depth) == ("method", 20, 21, 1)
+    assert by["name"].start == 23, "a decorated method starts at its decorator"
     assert by["helper"].depth == 2 and by["Meta"].depth == 1
     assert out.lines == _PY.count("\n") + 1
 
@@ -225,6 +225,13 @@ def test_go_and_rust_and_java_outlines():
     assert java.entries[1].text.startswith("public int f(")
 
 
+def test_a_method_named_like_a_keyword_is_still_declared():
+    rs = outline_source("impl P {\n    pub fn new() -> P {\n        P\n    }\n    fn try(&self) {\n    }\n}\n", ".rs")
+    assert [e.text for e in rs.entries] == ["impl P", "pub fn new() -> P", "fn try(&self)"]
+    rb = outline_source("class A\n  def when(x)\n  end\n  def self.new\n  end\nend\n", ".rb")
+    assert [e.text for e in rb.entries] == ["class A", "def when(x)", "def self.new"]
+
+
 def test_c_outline_does_not_mistake_statements_for_functions():
     src = "int add(int a, int b)\n{\n    return a + b;\n}\n\nreturn foo(1)\n"
     names = [e.text for e in outline_source(src, ".c").entries]
@@ -337,7 +344,7 @@ def test_tool_reports_spans_and_the_ast_label(tmp_path):
     assert '<path>m.py</path>' in r.output
     assert 'method="ast"' in r.output
     assert "class Shape(Base, metaclass=Meta)" in r.output
-    assert "L15-31" in r.output.replace(" ", "")
+    assert "L15-29" in r.output.replace(" ", "")
     assert "read_file(path, offset=" in r.output
     assert "(ast)" in r.summary
     assert f'lines="{_PY.count(chr(10)) + 1}"' in r.output, "the line total matches read_file's"
