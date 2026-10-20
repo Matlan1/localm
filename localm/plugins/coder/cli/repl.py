@@ -51,7 +51,18 @@ def _read_multiline() -> str:
     Read one user message, supporting backslash line continuation and
     coalescing multi-line terminal pastes into a single message.
     """
+    typed, pasted = _read_input()
+    return "\n".join([typed, *pasted])
+
+
+def _read_input() -> tuple[str, list[str]]:
+    """Read one message as (typed text, pasted lines that followed it).
+
+    The typed part is what the prompt returned, with backslash continuations
+    joined. Pasted lines arrive in the same read and are kept apart so a
+    /command is never built from them."""
     lines: list[str] = []
+    extra_lines: list[str] = []
     first = True
     while True:
         prompt = "\n[bold green]You[/bold green]: " if first else "[dim]...[/dim] "
@@ -65,11 +76,10 @@ def _read_multiline() -> str:
         else:
             lines.append(line)
             extra_lines = _drain_pasted_lines()
-            lines.extend(extra_lines)
             if len(extra_lines) >= 2:
                 print_info(f"  (pasted {len(extra_lines) + 1} lines)")
             break
-    return "\n".join(lines)
+    return "\n".join(lines), extra_lines
 
 
 def _drain_with_readline() -> list[str]:
@@ -269,12 +279,13 @@ def _repl(agent: Agent) -> None:
     _setup_readline(agent)
     while True:
         try:
-            user_input = _read_multiline().strip()
+            typed, pasted = _read_input()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Bye.[/dim]")
             break
 
-        if not user_input:
+        user_input = typed.strip()
+        if not user_input and not any(p.strip() for p in pasted):
             continue
 
         if user_input.lower() in ("exit", "quit", "q", "bye"):
@@ -282,6 +293,8 @@ def _repl(agent: Agent) -> None:
             break
 
         if user_input.startswith("/"):
+            if pasted:
+                print_info("  Lines pasted after a /command were not used.")
             stop = _handle_command(user_input, agent)
             if stop:
                 break
@@ -290,6 +303,7 @@ def _repl(agent: Agent) -> None:
         attachments = _at_attachments(
             user_input, agent.cwd,
             scope_allows=agent._scope_allows if agent.scope else None)
+        user_input = "\n".join([typed, *pasted]).strip()
 
         try:
             # The saved checkpoint is not cleared before the turn; the turn

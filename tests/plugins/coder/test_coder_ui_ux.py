@@ -433,6 +433,40 @@ class TestReplAtMentionsAndPaste:
         assert nxt.strip() == repr("after")
 
 
+class TestPastedLinesNeverBuildACommand:
+    def _drive(self, monkeypatch, agent, reads):
+        feed = iter(reads)
+
+        def fake_read_input():
+            nxt = next(feed)
+            if isinstance(nxt, BaseException):
+                raise nxt
+            return nxt
+
+        monkeypatch.setattr(repl_mod, "_read_input", fake_read_input)
+        monkeypatch.setattr(repl_mod, "_setup_readline", lambda agent: None)
+        repl_mod._repl(agent)
+
+    def test_lines_pasted_after_a_command_are_not_passed_to_it(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path)
+        commands, infos = [], []
+        monkeypatch.setattr(repl_mod, "_handle_command",
+                            lambda text, agent: commands.append(text) or False)
+        monkeypatch.setattr(repl_mod, "print_info", infos.append)
+        self._drive(monkeypatch, agent,
+                    [("/export notes.md", ["second line", "third line"]), EOFError()])
+        assert commands == ["/export notes.md"]
+        assert any("not used" in i for i in infos)
+
+    def test_pasted_lines_join_a_chat_message(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path)
+        sent = []
+        monkeypatch.setattr(agent, "chat", lambda msg: sent.append(msg) or "ok")
+        self._drive(monkeypatch, agent,
+                    [("Traceback (most recent call last):", ["  File x", "Error"]), EOFError()])
+        assert sent == ["Traceback (most recent call last):\n  File x\nError"]
+
+
 class TestReviewFindings:
     def test_full_diff_is_offered_only_for_this_files_preview(self, monkeypatch):
         big = "".join(f"line_{i} = {i}\n" for i in range(80))
