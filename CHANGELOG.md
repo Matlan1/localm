@@ -70,6 +70,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **The bundled stable-diffusion.cpp runtime moved from master-964-1d0a58a to master-982-0518b34.** An existing install picks it up the next time image generation starts.
+- **The bundled koboldcpp runtime (native music generation) moved from v1.123 to v1.123.1.** An existing install picks it up the next time music generation starts.
 - **The bundled llama.cpp runtime moved from b11541 to b11756.** An existing install picks it up with `localm setup-llama --force`.
 
 - **The coder starts a project's MCP servers only after you trust them.** A cloned repository
@@ -88,6 +90,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   seconds and jumping; the same line appears in a terminal `localm pull`, in the GUI and as MCP
   `pull_model` progress. A full-repository download counts the files still downloading, not only
   the finished ones.
+- **A reply no longer moves the KV cache to system RAM before it needs the room.** When the
+  whole reply budget (`max_tokens`) would not fit in free VRAM but the prompt plus the first 512
+  tokens of the reply does, the context is sized for that much with the KV cache in VRAM and
+  grows as the reply gets longer, so a short reply on a card with little free VRAM decodes at GPU
+  speed. A reply that does grow that long moves to system RAM at that point and is never cut
+  short. A KV cache already in system RAM also moves back to VRAM at a smaller size when the
+  next request fits in it.
 
 ### Fixed
 - **A short request no longer throws away a running conversation's cached prompt.** A summary, title or other small request sent to the same model between two turns used to take over the conversation's cache, so its next turn processed the whole prompt again. It now uses another slot, and the conversation continues from its cache.

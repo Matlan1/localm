@@ -316,6 +316,19 @@ class TestRamOffloadHintFiresOnce:
         assert len(hits) == 1, (
             f"RAM-offload hint should fire once, fired {len(hits)} times")
 
+    def test_a_check_without_the_hint_answers_the_same_and_stays_quiet(self, tmp_path, caplog):
+        import logging
+        b = _gguf_backend(tmp_path, size_bytes=2_000_000_000, n_ctx=4096)
+        b._llm = _StubLlm(300_000)
+        with patch.object(type(b), "_free_vram_bytes", return_value=100_000_000):
+            with caplog.at_level(logging.WARNING, logger="localm"):
+                assert b._check_context_fit(8192, current_ctx=4096, hint=False) is False
+                assert b._ram_kv_hint_shown is False
+                assert not [r for r in caplog.records if "large context" in r.getMessage()]
+                assert b._check_context_fit(8192, current_ctx=4096) is False
+        assert b._ram_kv_hint_shown is True
+        assert [r for r in caplog.records if "large context" in r.getMessage()]
+
     def test_load_resets_the_hint_for_a_reloaded_instance(self, tmp_path, monkeypatch):
         # The SAME backend instance can be reloaded (Engine.chat_stream auto-reload),
         # so load() must clear the guard - otherwise the hint would fire once EVER
