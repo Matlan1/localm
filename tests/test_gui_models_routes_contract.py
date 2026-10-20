@@ -42,6 +42,7 @@ EXPECTED_ROUTES = {
     ("GET", "/api/gpus"): S.MODELS_READ,
     ("POST", "/api/models/pull-token/redeem"): S.MODELS_WRITE,
     ("POST", "/api/models/pull"): S.MODELS_WRITE,
+    ("POST", "/api/models/pull/discard"): S.MODELS_WRITE,
     ("POST", "/api/media/{kind}/preflight"): S.MODELS_WRITE,
     ("POST", "/api/models/pull-comfy-source"): S.MODELS_WRITE,
     ("POST", "/api/models/comfy-source/lookup"): S.MODELS_WRITE,
@@ -334,6 +335,52 @@ class TestScopeEnforcement:
 # --------------------------------------------------------------------------- #
 #  Inventory and runtime                                                       #
 # --------------------------------------------------------------------------- #
+
+class TestPullDiscard:
+    def test_it_deletes_the_partial_data_of_the_spec_and_reports_the_bytes(
+            self, harness, monkeypatch):
+        seen = {}
+
+        def fake_discard(spec, name=None):
+            seen["args"] = (spec, name)
+            return 1234
+
+        monkeypatch.setattr("localm.model_manager.pull.discard_partial_download",
+                            fake_discard)
+        with TestClient(harness.app) as c:
+            r = c.post("/api/models/pull/discard",
+                       json={"spec": " owner/repo:m.gguf ", "name": "mine"})
+        assert r.status_code == 200 and r.json() == {"removed_bytes": 1234}
+        assert seen["args"] == ("owner/repo:m.gguf", "mine")
+
+    def test_it_refuses_while_a_pull_of_the_same_spec_runs(self, harness, monkeypatch):
+        harness.jobs.running = [{"kind": "pull", "status": "running",
+                                 "label": "Model pull owner/repo:m.gguf"}]
+        monkeypatch.setattr("localm.model_manager.pull.discard_partial_download",
+                            lambda *a, **k: pytest.fail("deleted under a running pull"))
+        with TestClient(harness.app) as c:
+            r = c.post("/api/models/pull/discard", json={"spec": "owner/repo:m.gguf"})
+        assert r.status_code == 409
+
+    def test_it_reports_a_download_that_holds_the_files_as_409(self, harness, monkeypatch):
+        from localm.model_manager.pull import PullInFlight
+
+        def busy(spec, name=None):
+            raise PullInFlight("a download of this file is running")
+
+        monkeypatch.setattr("localm.model_manager.pull.discard_partial_download", busy)
+        with TestClient(harness.app) as c:
+            r = c.post("/api/models/pull/discard", json={"spec": "owner/repo:m.gguf"})
+        assert r.status_code == 409
+
+    @pytest.mark.parametrize("spec", ["", "--", "Z:/models/x.gguf", "~user/x.gguf", "../x.gguf"])
+    def test_it_takes_remote_specs_only(self, harness, monkeypatch, spec):
+        monkeypatch.setattr("localm.model_manager.pull.discard_partial_download",
+                            lambda *a, **k: pytest.fail("a host path reached the delete"))
+        with TestClient(harness.app) as c:
+            r = c.post("/api/models/pull/discard", json={"spec": spec})
+        assert r.status_code == 400
+
 
 class TestModelsList:
     def test_shape_rows_and_missing_markers(self, harness):

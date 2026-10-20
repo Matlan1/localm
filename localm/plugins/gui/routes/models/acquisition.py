@@ -20,8 +20,9 @@ from localm.inference.http_server import (principal_id, require_fs_host,
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import ModelRouteContext
 from localm.plugins.gui.web import (ComfyPullRequest, ComfySourceLookupRequest,
-                                    MediaPreflightRequest, PullRequest,
-                                    PullTokenRedeemRequest, consume_pull_grant)
+                                    MediaPreflightRequest, PullDiscardRequest,
+                                    PullRequest, PullTokenRedeemRequest,
+                                    consume_pull_grant)
 
 # Longest filename, class_type or input_name a model-source request accepts.
 _MAX_SLOT_FIELD = 255
@@ -145,6 +146,34 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
         }, host_label=f"Model pull {spec}", owner=principal_id(request))
         return {"job_id": job.id}
+
+    @app.post("/api/models/pull/discard",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_pull_discard(req: PullDiscardRequest, request: Request):
+        """Delete the partially downloaded data of a pull that was stopped.
+        409 while a pull of the same spec is still running. Returns
+        {"removed_bytes": n}."""
+        spec = req.spec.strip()
+        if not spec or set(spec) <= {"-"} or _spec_names_a_host_path(spec):
+            raise HTTPException(400, "Enter a remote model spec.")
+        label = f"Model pull {spec}"
+        if any(j.get("kind") == "pull" and j.get("status") == "running"
+               and j.get("label") == label for j in jobs.snapshot()):
+            raise HTTPException(
+                409, f"{spec} is still downloading - stop it before deleting "
+                     "its partial data.")
+        from localm.model_manager.pull import PullInFlight, discard_partial_download
+
+        def _discard() -> int:
+            return discard_partial_download(spec, req.name)
+
+        try:
+            removed = await run_in_threadpool_bounded(_discard, timeout=60.0)
+        except PullInFlight as e:
+            raise HTTPException(409, str(e)) from e
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
+        return {"removed_bytes": removed}
 
     # --------------- ComfyUI missing-model pre-check + curated pull -------- #
     # Read-only pre-check the frontend calls before submitting a generate job: does
