@@ -34,7 +34,7 @@ Exit codes:
   not give a verdict does not pass. An invalid ``pre_tool_use`` entry blocks
   every tool call until it is fixed.
 * Untrusted hooks never run. A call an untrusted ``pre_tool_use`` hook matches
-  is refused, because its check cannot run; untrusted ``post_tool_use`` hooks
+  is refused; untrusted ``post_tool_use`` hooks
   are skipped.
 * ``post_tool_use``: 0 does nothing. 2 adds the hook's stderr to the tool result
   the model sees. Any other outcome is reported to the user as a warning and

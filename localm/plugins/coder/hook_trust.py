@@ -2,9 +2,8 @@
 """Which project tool hooks the user has trusted.
 
 A project's ``.localcoder/config.toml`` can declare commands that run around
-every tool call (hooks.py). A cloned repository can carry such a file, so its
-hooks run only once the user has trusted them. Trust is recorded per config
-file as a digest of the hooks it declares: editing, adding or removing a hook
+every tool call (hooks.py). Those hooks run only once the user has trusted
+them. Trust is recorded per config file as a digest of the hooks it declares: editing, adding or removing a hook
 changes the digest, and the changed hooks need trusting again.
 
 The store is ``<data dir>/coder-hook-trust.json``, a JSON object mapping a
