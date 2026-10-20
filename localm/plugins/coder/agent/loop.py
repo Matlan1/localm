@@ -268,6 +268,8 @@ class _LoopMixin:
 
         def report_deferred_mcp(self, interactive: bool) -> None: ...
 
+        def _record_typed_request(self, text: str) -> None: ...
+
     def run_task(self, task: str, attachments: str = "") -> str:
         """
         Run a single task to completion (non-interactive).
