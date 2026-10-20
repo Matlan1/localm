@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import localm.plugins.coder.agent as _agent
 from localm.textguard import GuardedText, compose, compose_join, untrusted_span
@@ -378,6 +378,9 @@ class Agent(
         # last_tool: str}. The first-seen original is kept so session_diff()
         # can show the cumulative change, not just the last edit.
         self._changed_files: dict[str, dict] = {}
+        # Notes the pre-compaction flush kept, oldest first; re-pinned into every
+        # compaction summary verbatim (see context._compact_history).
+        self._durable_notes: list[str] = []
         # Work done by ISOLATED children (their own git worktree), which is NOT
         # in _changed_files: it never touched this tree, and
         # merging its keys would fabricate diffs (keys are relative to the writing
@@ -460,11 +463,12 @@ class Agent(
         # system prompt is built so the model learns about them; each step warns and
         # continues on failure - external code must never break the agent. A
         # restricted session registers none of them: it starts no MCP server,
-        # imports no plugin module and discovers no skill.
+        # imports no plugin module and discovers no skill. The project's hooks
+        # and MCP servers load first: MCP servers start only once trusted.
+        self._init_tool_hooks(cwd)
         self._init_mcp_tools(cwd)
         self._init_plugin_tools()
         self._init_skill_tools(cwd)
-        self._init_tool_hooks(cwd)
         # Unconditional, unlike the narrowings below: browser automation is off
         # by default, so this runs for every session and only leaves the tools
         # in place when the capability was granted.
@@ -620,16 +624,19 @@ class Agent(
             self._reviewer = None
 
     def _init_mcp_tools(self, cwd: Path) -> None:
-        print_warning = _agent.print_warning
-        TOOL_REGISTRY = _agent.TOOL_REGISTRY
-        # MCP: start configured servers and register their tools BEFORE the
+        # MCP: start the project's servers and register their tools BEFORE the
         # system prompt is built so the model learns about them. Failures
         # warn and continue - external servers must never break the agent.
         # A child inherits its parent's servers and bindings rather than
         # spawning a second set. Every mcp_* name in the registry that this
         # agent did not register (another project's server) is disabled for it.
+        # The servers come from the session's ToolHooks, read in the same pass
+        # its trust digest covers; while they are not trusted none start, and
+        # _mcp_deferred holds them for start_deferred_mcp.
         self._mcp_docs: str = ""
         self._mcp_tool_names: frozenset = frozenset()
+        self._mcp_deferred = None
+        self._mcp_config: Optional[Path] = None
         if self.restricted:
             return
         try:
@@ -637,26 +644,94 @@ class Agent(
                 self._mcp_docs = getattr(self.parent, "_mcp_docs", "") or ""
                 mcp_names = list(getattr(self.parent, "_mcp_tool_names", ()))
             else:
-                from ..mcp import register_mcp_tools
-                mcp_names, mcp_warnings = register_mcp_tools(cwd)
-                for w in mcp_warnings:
-                    print_warning(w)
-                if mcp_names:
-                    self._mcp_docs = _foreign_tool_docs(
-                        "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
-                        mcp_names, TOOL_REGISTRY)
+                hooks = getattr(self, "_tool_hooks", None)
+                mcp_names = []
+                if hooks is not None and hooks.has_mcp():
+                    self._mcp_config = hooks.config_path
+                    if hooks.trusted:
+                        mcp_names = self._register_mcp_servers(hooks)
+                    else:
+                        self._mcp_deferred = hooks
+                        self._audit.notice("mcp_untrusted", hooks.untrusted_message())
             self._mcp_tool_names = frozenset(mcp_names)
         except Exception as e:
-            print_warning(f"MCP setup failed: {e}")
+            _agent.print_warning(f"MCP setup failed: {e}")
+
+    def _register_mcp_servers(self, hooks) -> list:
+        """Start *hooks*' MCP servers, register their tools and set
+        ``_mcp_docs``. Returns the registered tool names; start failures are
+        printed as warnings."""
+        from ..mcp import register_mcp_tools
+        mcp_names, mcp_warnings = register_mcp_tools(
+            hooks.project_dir, servers=hooks.mcp_servers)
+        for w in mcp_warnings:
+            _agent.print_warning(w)
+        if mcp_names:
+            self._mcp_docs = _foreign_tool_docs(
+                "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
+                mcp_names, _agent.TOOL_REGISTRY)
+        return mcp_names
+
+    def start_deferred_mcp(self) -> list:
+        """Start the MCP servers held back because they were not trusted, if
+        they are trusted now (for this session, or in the trust store, which is
+        re-read). Rebuilds the system prompt and the native tool list when tools
+        were registered. Returns the registered tool names; empty when nothing
+        was held back or it is still untrusted."""
+        hooks = getattr(self, "_mcp_deferred", None)
+        if hooks is None or self.restricted or not hooks.refresh_trust():
+            return []
+        self._mcp_deferred = None
+        try:
+            names = self._register_mcp_servers(hooks)
+        except Exception as e:
+            _agent.print_warning(f"MCP setup failed: {e}")
+            return []
+        self._mcp_tool_names = frozenset(names)
+        self._audit.notice("mcp_started", ", ".join(names) or "(no tools)")
+        if self._role_preset is not None:
+            self._apply_role_toolset()
+        if names:
+            self._rebuild_system_prompt()
+            backend: Any = self.backend
+            if getattr(backend, "native_tools", False):
+                backend.set_tools(self._native_tool_defs())
+        return names
+
+    def report_deferred_mcp(self, interactive: bool) -> None:
+        """Say, once per session, that the project's MCP servers were not
+        started because they are not trusted. Nothing when none were held back
+        or the session already reported its untrusted project commands."""
+        hooks = getattr(self, "_mcp_deferred", None)
+        if hooks is None or not hooks.claim_untrusted_report():
+            return
+        msg = hooks.untrusted_message()
+        _agent.print_warning(msg, to_stderr=not interactive)
+        self._emit("info", text=msg)
 
     def _init_tool_hooks(self, cwd: Path) -> None:
-        """Load the project's tool hooks (hooks.py) into ``self._tool_hooks``.
+        """Load the project's tool hooks and MCP servers (hooks.py) into
+        ``self._tool_hooks``.
 
         None for a restricted session, and when the project config declares no
-        hooks. A child shares its parent's hooks object, so the parent's trust
-        decision covers it. A project config that cannot be parsed but mentions
-        hooks loads ToolHooks.unreadable, which refuses every tool call; one
-        that does not mention them loads none. Either is reported."""
+        hooks and no MCP server. A child shares its parent's hooks object, so
+        the parent's trust decision covers it. A project config that cannot be
+        parsed but mentions hooks loads ToolHooks.unreadable, which refuses
+        every tool call; one that does not mention them loads none. Either is
+        reported. When MCP servers are held back for the config this loads
+        (a reload after /cd within the same project), the newly loaded object
+        replaces the held-back one, so trusting it starts them."""
+        try:
+            self._load_tool_hooks(cwd)
+        finally:
+            deferred = getattr(self, "_mcp_deferred", None)
+            hooks = self._tool_hooks
+            if deferred is not None and hooks is not None:
+                from ..hook_trust import config_key
+                if config_key(hooks.config_path) == config_key(deferred.config_path):
+                    self._mcp_deferred = hooks
+
+    def _load_tool_hooks(self, cwd: Path) -> None:
         self._tool_hooks = None
         if self.restricted:
             return
@@ -680,7 +755,7 @@ class Agent(
                 self._tool_hooks = ToolHooks.unreadable(Path(e.path), str(e))
             else:
                 _agent.print_warning(
-                    f"Tool hooks not loaded: project config unreadable ({e})",
+                    f"Tool hooks and MCP servers not loaded: project config unreadable ({e})",
                     to_stderr=True)
                 return
         if self._tool_hooks is not None:

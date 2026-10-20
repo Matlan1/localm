@@ -229,9 +229,10 @@ def _complete_model(ctx, param, incomplete):
 @click.option("--resume", "-r", "resume", default=None, is_flag=False, flag_value="",
               help="Resume the last saved session (or specify checkpoint ID) with the chosen model.")
 @click.option("--trust-hooks", "trust_hooks", is_flag=True,
-              help="Trust the tool hooks in this project's .localcoder/config.toml "
-                   "as they are now, and remember that until they change. "
-                   "Without it, untrusted hooks do not run; an interactive "
+              help="Trust the tool hooks and MCP servers in this project's "
+                   ".localcoder/config.toml as they are now, and remember that "
+                   "until they change. Without it, untrusted hooks do not run and "
+                   "untrusted MCP servers are not started; an interactive "
                    "session asks.")
 def main(
     task, model, pin_model, url, api_key, port, cwd,

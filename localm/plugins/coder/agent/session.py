@@ -63,6 +63,7 @@ class _SessionMixin:
         # goes with it and /clear leaves no close-time reflection armed.
         self._had_any_failure = False
         self._unverified_writes.clear()
+        self._durable_notes = []
         self._review_task = ""
         self._error_trace.clear()
         self._shell_baseline_captured = False

@@ -20,6 +20,14 @@ from localm.plugins.coder.agent import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_pre_compaction_flush():
+    """These tests count and inspect summariser calls only; the flush is
+    covered in test_compaction_working_state.py."""
+    with patch.object(Agent, "_compaction_flush_enabled", return_value=False):
+        yield
+
+
 # ---------------------------------------------------------------------------
 #  Minimal Agent factory
 # ---------------------------------------------------------------------------

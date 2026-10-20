@@ -309,6 +309,7 @@ def test_the_system_message_the_agent_sends_carries_both_ranges(tmp_path, action
     name, description = "mcp_srv_add", "[MCP:srv] Adds " + EXOTIC
     # Registered through the agent's own discovery step: an mcp_* name an
     # agent did not register itself is disabled for it (another project's).
+    _trusted_mcp_config(tmp_path)
     with patch.dict(TOOL_REGISTRY, {}, clear=False),          patch("localm.plugins.coder.mcp.register_mcp_tools",
                _register_one(name, description)):
         agent = _make_agent(tmp_path, disabled_tools=NO_SEARCH)
@@ -333,6 +334,18 @@ def _register_one(name, description):
     return fake
 
 
+def _trusted_mcp_config(project):
+    """Declare one MCP server in *project*'s config and trust it, so the
+    agent's discovery step registers MCP tools (patched in these tests)."""
+    from localm.plugins.coder.hook_trust import commands_digest, remember_trust
+    from localm.plugins.coder.project_config import read_project_config_file
+    cfg = project / ".localcoder"
+    cfg.mkdir(exist_ok=True)
+    path = cfg / "config.toml"
+    path.write_text('[mcp.servers.srv]\ncommand = "srv"\n', encoding="utf-8")
+    remember_trust(path, commands_digest(read_project_config_file(path)))
+
+
 @pytest.mark.parametrize("init_attr, name, heading", [
     ("localm.plugins.coder.mcp.register_mcp_tools",
      "mcp_srv_add", "EXTERNAL MCP TOOLS"),
@@ -344,6 +357,8 @@ def test_the_agent_s_own_discovery_builds_the_summary_list_with_ranges(
     """The summary lists are built by Agent.__init__'s discovery step, not by
     the tests that seed _mcp_docs by hand; this drives that real call site."""
     description = f"[{name.split('_')[0]}] Adds {EXOTIC}"
+    if name.startswith("mcp_"):
+        _trusted_mcp_config(tmp_path)
     with patch.dict(TOOL_REGISTRY, {}, clear=False), \
          patch(init_attr, _register_one(name, description)):
         agent = _make_agent(tmp_path)
@@ -356,6 +371,7 @@ def test_the_agent_s_own_discovery_builds_the_summary_list_with_ranges(
 
 def test_the_estimate_turn_sends_the_same_annotated_system_prompt(tmp_path):
     from localm.plugins.coder.estimate import estimate_task
+    _trusted_mcp_config(tmp_path)
     with patch.dict(TOOL_REGISTRY, {}, clear=False),          patch("localm.plugins.coder.mcp.register_mcp_tools",
                _register_one("mcp_srv_add", "[MCP:srv] Adds " + EXOTIC)):
         agent = _make_agent(tmp_path)
@@ -421,6 +437,10 @@ def test_a_real_mcp_servers_self_description_reaches_the_model_range_marked(tmp_
         command = {json.dumps(sys.executable)}
         args = [{json.dumps(str(script))}]
     """), encoding="utf-8")
+    from localm.plugins.coder.hook_trust import commands_digest, remember_trust
+    from localm.plugins.coder.project_config import read_project_config_file
+    remember_trust(cfg / "config.toml",
+                   commands_digest(read_project_config_file(cfg / "config.toml")))
 
     with patch.dict(TOOL_REGISTRY, {}, clear=False):
         names, warnings = register_mcp_tools(tmp_path)

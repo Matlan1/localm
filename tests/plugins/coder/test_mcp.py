@@ -25,6 +25,15 @@ from localm.plugins.coder.mcp import (
 from localm.plugins.coder.tools import TOOL_REGISTRY
 
 
+def _trust_project_config(project_dir):
+    """Record in the per-test trust store that the user trusts the project
+    config in *project_dir* as it is now (what --trust-hooks does)."""
+    from localm.plugins.coder.hook_trust import commands_digest, remember_trust
+    from localm.plugins.coder.project_config import read_project_config_file
+    path = project_dir / ".localcoder" / "config.toml"
+    remember_trust(path, commands_digest(read_project_config_file(path)))
+
+
 FAKE_SERVER = textwrap.dedent("""\
     import json, sys
 
@@ -255,6 +264,7 @@ class TestRegistration:
             command = {json.dumps(sys.executable)}
             args = [{json.dumps(str(fake_server_path))}]
         """), encoding="utf-8")
+        _trust_project_config(tmp_path)
 
         names, warnings = register_mcp_tools(tmp_path)
         try:
@@ -296,6 +306,7 @@ class TestRegistration:
             command = {json.dumps(sys.executable)}
             args = [{json.dumps(str(srv))}]
         """), encoding="utf-8")
+        _trust_project_config(tmp_path)
 
         names, warnings = register_mcp_tools(tmp_path)
         try:
@@ -315,6 +326,7 @@ class TestRegistration:
             [mcp.servers.ghost]
             command = "no-such-binary-zzz"
         """), encoding="utf-8")
+        _trust_project_config(tmp_path)
         names, warnings = register_mcp_tools(tmp_path)
         assert names == []
         assert len(warnings) == 1
@@ -363,6 +375,7 @@ class TestPooledServers:
             command = {json.dumps(sys.executable)}
             args = [{json.dumps(str(fake_server_path))}]
         """), encoding="utf-8")
+        _trust_project_config(tmp_path)
 
     def test_a_second_registration_reuses_the_live_server(self, tmp_path, fake_server_path):
         from localm.plugins.coder import mcp as mcp_mod
