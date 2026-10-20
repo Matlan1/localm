@@ -629,6 +629,27 @@ def test_record_kernel_version_ref_makes_an_offline_version_lookup_work(tmp_path
     assert after["value"] == "cached-kernel"
 
 
+def test_record_kernel_version_ref_skips_a_cached_snapshot_of_another_commit(tmp_path):
+    pytest.importorskip("torch")
+    pytest.importorskip("kernels")
+    hf = tmp_path / "hf"
+    _fake_cached_kernel(hf)
+    body = """
+        import json, kernels
+        from localm.inference.backends._hf_hub_gate import record_kernel_version_ref
+        repo = "kernels-community/finegrained-fp8"
+        kernels.get_kernel(repo, revision=%r)
+        other = record_kernel_version_ref(repo, 4, "f" * 40)
+        pinned = record_kernel_version_ref(repo, 4, %r)
+        print(json.dumps({"other": other, "pinned": str(pinned)}))
+    """ % (KERNEL_SHA, KERNEL_SHA)
+    r = _run_child(tmp_path, body, fake_kernels=False, env_extra={"HF_HUB_OFFLINE": "1"})
+    assert r["other"] is None
+    ref = Path(r["pinned"])
+    assert ref == hf / "hub" / "kernels--kernels-community--finegrained-fp8" / "refs" / "v4"
+    assert ref.read_text(encoding="utf-8") == KERNEL_SHA
+
+
 def test_record_kernel_version_ref_ignores_other_and_unknown_kernels(tmp_path):
     r = _run_child(tmp_path, """
         import json, types

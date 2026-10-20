@@ -34,10 +34,10 @@ from ..tools import TOOL_REGISTRY  # noqa: F401
 from .core import Agent
 from .checkpoint import checkpoint_info, _checkpoint_path_for
 from .constants import (
-    _COMPACT_AUTO_RATIO, _COMPACT_WARN_RATIO, _DEFAULT_CTX_TOKENS, _SCOPED_TOOLS,
+    _COMPACT_AUTO_RATIO, _COMPACT_TARGET_RATIO, _DEFAULT_CTX_TOKENS, _SCOPED_TOOLS,
 )
 
 __all__ = [
     "Agent", "checkpoint_info", "_checkpoint_path_for", "_SCOPED_TOOLS",
-    "_COMPACT_WARN_RATIO", "_COMPACT_AUTO_RATIO", "_DEFAULT_CTX_TOKENS",
+    "_COMPACT_TARGET_RATIO", "_COMPACT_AUTO_RATIO", "_DEFAULT_CTX_TOKENS",
 ]

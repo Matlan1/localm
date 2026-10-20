@@ -286,9 +286,11 @@ class TestContextWarningText:
         agent = _make_agent(tmp_path)
         warnings = []
         with patch("localm.plugins.coder.agent.print_warning", side_effect=warnings.append), \
-             patch.object(type(agent), "_fill_ratio", return_value=0.9):
+             patch.object(type(agent), "_known_ctx_window", return_value=4096), \
+             patch.object(type(agent), "_prompt_tokens_estimate", return_value=99_999), \
+             patch.object(type(agent), "_compact_to", return_value=False):
             agent._maybe_compact(interactive=True)
-        assert warnings and "/compact" in warnings[0]
+        assert warnings and "too small for this session" in warnings[0]
         assert "[bold]" not in warnings[0]
 
 
@@ -640,7 +642,7 @@ class TestReviewFindings:
         agent = MagicMock()
         seen = {}
 
-        def run_task(task, attachments=""):
+        def run_task(task, attachments="", **kw):
             seen["task"], seen["attachments"] = task, attachments
             return "done"
 

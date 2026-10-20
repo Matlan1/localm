@@ -73,7 +73,7 @@ class TestLoad:
         monkeypatch.setattr(hub_gate, "set_hub_offline",
                             lambda: setattr(state, "offline", state.offline + 1))
         monkeypatch.setattr(hub_gate, "record_kernel_version_ref",
-                            lambda repo, version: state.recorded.append((repo, version)))
+                            lambda repo, version, commit=None: state.recorded.append((repo, version, commit)))
         state.run = lambda offline=False: w._load_fp8_kernel(
             "model-dir", SimpleNamespace(offline=offline, native=True))
         return state
@@ -84,7 +84,7 @@ class TestLoad:
     def test_an_online_load_requests_the_pinned_commit_and_records_the_version(self, load):
         plan = load.run()
         assert load.seen == [self.PINNED] and plan.offline is False
-        assert load.recorded == [(w.FP8_KERNEL_REPO, w.FP8_KERNEL_VERSION)]
+        assert load.recorded == [(w.FP8_KERNEL_REPO, w.FP8_KERNEL_VERSION, w.FP8_KERNEL_REVISION)]
 
     def test_an_offline_load_with_the_pinned_commit_cached_requests_it(self, load):
         load.cached = True
