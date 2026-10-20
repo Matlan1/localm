@@ -36,9 +36,23 @@ def _spawned_by(agent, job) -> bool:
     return getattr(child, "parent", None) is agent
 
 
+def _restore_durable_notes(raw) -> list[str]:
+    """The durable-notes list from a checkpoint's ``durable_notes`` value:
+    string entries only, each defanged and cut to the note length cap, the
+    newest ``_MAX_DURABLE_NOTES`` kept. Anything else restores as ``[]``."""
+    from .context import _MAX_DURABLE_NOTES, _clean_note
+    if not isinstance(raw, list):
+        return []
+    notes = [n for n in (_clean_note(item, strip_marker=False)
+                         for item in raw if isinstance(item, str)) if n]
+    return notes[-_MAX_DURABLE_NOTES:]
+
+
 class _PersistenceMixin:
     if TYPE_CHECKING:
         # Set by Agent (core.py), which this class is mixed into.
+        cwd: Path
+
         @property
         def disabled_tools(self) -> frozenset: ...
 
@@ -55,7 +69,11 @@ class _PersistenceMixin:
         """
         # Snapshot first - the GUI reads this from another thread while the
         # agent loop may be inserting entries.
-        snapshot = dict(self._changed_files)
+        return self._changed_files_of(dict(self._changed_files))
+
+    def _changed_files_of(self, snapshot: dict) -> list[dict]:
+        """:meth:`changed_files` entries for *snapshot*, a copy of
+        ``_changed_files``."""
         out = []
         for key in sorted(snapshot):
             e = snapshot[key]
@@ -67,6 +85,54 @@ class _PersistenceMixin:
                 "exists": abs_path.is_file(),
                 "last_tool": e["last_tool"],
             })
+        return out
+
+    # A side larger than this is not diffed: its line counts are reported as None.
+    _STATS_MAX_BYTES = 2_000_000
+
+    def changed_file_stats(self, limit: Optional[int] = None) -> list[dict]:
+        """:meth:`changed_files` entries with line counts against each file's
+        first-seen original.
+
+        Each entry adds ``added`` and ``removed`` (ints: lines a cumulative
+        unified diff adds and removes; a created file counts every line as
+        added, a deleted one every original line as removed), or None for both
+        when either side is over ``_STATS_MAX_BYTES``, the current file cannot
+        be read, or the entry comes after the first *limit* entries (None: no
+        limit). Never raises."""
+        snapshot = dict(self._changed_files)   # cross-thread read safety
+        out = []
+        for n, entry in enumerate(self._changed_files_of(snapshot)):
+            raw = snapshot[entry["path"]]
+            added = removed = None
+            if limit is not None and n >= limit:
+                out.append({**entry, "added": None, "removed": None})
+                continue
+            try:
+                original = raw["original"]
+                abs_path = self.cwd / entry["path"]
+                if entry["exists"]:
+                    size = abs_path.stat().st_size
+                    new_text = (abs_path.read_bytes().decode("utf-8", errors="replace")
+                                if size <= self._STATS_MAX_BYTES else None)
+                else:
+                    new_text = ""
+                if new_text is not None and (
+                        original is None or len(original) <= self._STATS_MAX_BYTES):
+                    old_text = (original.decode("utf-8", errors="replace")
+                                if original is not None else "")
+                    added = removed = 0
+                    matcher = difflib.SequenceMatcher(
+                        None, old_text.splitlines(keepends=True),
+                        new_text.splitlines(keepends=True))
+                    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                        if tag in ("replace", "delete"):
+                            removed += i2 - i1
+                        if tag in ("replace", "insert"):
+                            added += j2 - j1
+            except Exception:
+                added = removed = None
+            out.append({**entry, "added": added, "removed": removed})
         return out
 
     def session_diff(self, path: Optional[str] = None) -> str:
@@ -509,6 +575,7 @@ class _PersistenceMixin:
                 }
                 for key, entry in self._changed_files.items()
             },
+            "durable_notes": list(getattr(self, "_durable_notes", [])),
         }
         p = self._checkpoint_path
         try:
@@ -609,6 +676,7 @@ class _PersistenceMixin:
         self._restore_activated_tools(data.get("activated_tools"))
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))
+        self._durable_notes = _restore_durable_notes(data.get("durable_notes"))
 
     def _restore_activated_tools(self, raw) -> None:
         """Restore the search_tools activations from a checkpoint: only string

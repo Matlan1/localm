@@ -41,6 +41,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   languages are scanned by pattern and labelled approximate), so the agent can read just the part it
   needs. On a project with more than 300 files the codebase map is now a directory summary of every
   file found plus detail for the shallowest files, instead of stopping after the first 300.
+- **Coder compaction keeps the working state.** A compacted coder session now carries the files
+  it changed (with added and removed line counts), the verification command's last result and
+  the code written since the last test run outside the summary, so they are never lost to
+  paraphrase. Before compacting, the agent also keeps durable notes from the condensed turns;
+  in `log` and `full` mode, with episodic memory on, they are saved as a lesson, and privacy
+  mode writes nothing. `compaction_flush = false` in `.localcoder/config.toml` turns the note
+  pass off.
 - **Coder tool hooks.** `.localcoder/config.toml` can declare `pre_tool_use` and
   `post_tool_use` commands that run around the agent's tool calls, matched by tool name. A pre
   hook that exits 2 blocks the call and tells the agent why; a post hook that exits 2 sends its
