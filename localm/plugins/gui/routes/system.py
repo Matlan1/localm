@@ -166,7 +166,8 @@ def register(app: FastAPI, ctx) -> None:
     async def gui_backend():
         """The llama.cpp runtime backend actually installed on this box, the one
         localm loads (``in_use``, ``in_use_source``: "provisioned", "binary_dir"
-        or "LLAMA_CPP_LIB"), the user's chosen backend when a different one is
+        or "LLAMA_CPP_LIB"), every detected GPU vendor (``vendors``; ``vendor``
+        is the first), the user's chosen backend when a different one is
         installed (``requested``, ``requested_reason``), plus enough hardware
         context for Settings to show it and, at most, offer a dismissable hint -
         NEVER to auto-switch anything. An update must never
@@ -195,13 +196,16 @@ def register(app: FastAPI, ctx) -> None:
                 _dbg.debug("/api/backend: the backend choice could not be read: %s", e)
             use = setup_llama.runtime_in_use()
             vendor = recommended = None
+            vendors: list = []
             try:
                 det = hwdetect.detect()
+                vendors = list(det.vendors)
                 vendor = det.vendors[0] if det.vendors else None
                 recommended = hwdetect.recommended_install_backend(det)
             except Exception:
                 pass
-            return {"installed": installed, "vendor": vendor, "recommended": recommended,
+            return {"installed": installed, "vendor": vendor, "vendors": vendors,
+                    "recommended": recommended,
                     "warning": _loader.last_runtime_resolution_warning(),
                     "requested": choice["requested"] if choice else None,
                     "requested_reason": choice["reason"] if choice else None,

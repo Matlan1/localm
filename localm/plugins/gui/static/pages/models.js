@@ -9,7 +9,7 @@ import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
-import { refreshBackendInfo, refreshPerfEstimate } from "../app/settings-perf.js";
+import { backendOverrideNote, refreshBackendInfo, refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Models page                                                      */
@@ -2244,27 +2244,32 @@ export async function runtimeKeepInstalled(installed) {
 const BACKEND_VENDOR = { cuda: "nvidia", "amd-rocm": "amd", hip: "amd", sycl: "intel", metal: "apple" };
 const VENDOR_NAMES = { nvidia: "NVIDIA", amd: "AMD", intel: "Intel", apple: "Apple" };
 
-/** Whether installing *wanted* on a machine whose detected GPU vendor is
- *  *vendor* needs a warning first: a vendor-specific backend for a different,
- *  KNOWN vendor. Unknown hardware (no vendor) never warns. Pure. */
-export function backendVendorMismatch(wanted, vendor) {
+/** Whether installing *wanted* on a machine whose detected GPU vendors are
+ *  *vendors* (an array, or one vendor string) needs a warning first: a
+ *  vendor-specific backend whose vendor is not among the detected ones.
+ *  Unknown hardware (no vendor) never warns. Pure. */
+export function backendVendorMismatch(wanted, vendors) {
   const needs = BACKEND_VENDOR[wanted];
-  return !!(needs && vendor && vendor !== needs);
+  const seen = (Array.isArray(vendors) ? vendors : [vendors]).filter(Boolean);
+  return !!(needs && seen.length && !seen.includes(needs));
 }
 
 /** Run *proceed* after confirming a vendor mismatch, or straight away when
  *  /api/backend shows none (or cannot be read). */
 async function confirmBackendHardware(wanted, proceed) {
-  let vendor = null;
+  let vendors = [];
   try {
     const r = await fetch("/api/backend", { headers: authHeaders() });
-    if (r.ok) vendor = (await r.json()).vendor || null;
+    if (r.ok) {
+      const d = await r.json();
+      vendors = Array.isArray(d.vendors) ? d.vendors : [d.vendor].filter(Boolean);
+    }
   } catch { /* unreadable: treated as unknown hardware */ }
-  if (!backendVendorMismatch(wanted, vendor)) { proceed(); return; }
+  if (!backendVendorMismatch(wanted, vendors)) { proceed(); return; }
   confirmDanger(
     t("settings.runtime.mismatchTitle", { wanted }),
     t("settings.runtime.mismatchBody", {
-      wanted, vendor: VENDOR_NAMES[vendor] || vendor,
+      wanted, vendor: vendors.map((v) => VENDOR_NAMES[v] || v).join(" + "),
       needs: VENDOR_NAMES[BACKEND_VENDOR[wanted]] + " graphics" }),
     t("settings.runtime.mismatchConfirm", { wanted }), proceed);
 }
@@ -2281,9 +2286,11 @@ export async function runtimeUpdateCheck() {
       } else {
         const current = d.current || t("settings.runtime.unrecordedBuild");
         const pinnedSuffix = d.pinned ? t("settings.runtime.pinnedSuffix", { pinned: d.pinned }) : "";
+        const override = backendOverrideNote(d.in_use, d.in_use_source, d.backend);
         out.textContent = (d.newer
           ? t("settings.runtime.availableBuild", { backend: d.backend, target: d.target, current })
-          : t("settings.runtime.upToDate", { backend: d.backend, current })) + pinnedSuffix;
+          : t("settings.runtime.upToDate", { backend: d.backend, current })) + pinnedSuffix
+          + (override ? " " + override : "");
       }
     }
   } catch (e) {

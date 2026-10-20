@@ -127,6 +127,19 @@ export function shouldShowBackendHint(data, dismissed) {
     && !data.requested;
 }
 
+/** The note saying localm loads backend *inUse* from an override (*source*
+ *  "binary_dir" or "LLAMA_CPP_LIB") instead of the *installed* runtime, or null
+ *  when the installed runtime is the one loaded. Pure. */
+export function backendOverrideNote(inUse, source, installed) {
+  if (source !== "binary_dir" && source !== "LLAMA_CPP_LIB") return null;
+  return t("settings.perf.backendOverride", {
+    backend: inUse || "?",
+    source: t(source === "binary_dir"
+      ? "settings.perf.backendOverrideBinaryDir" : "settings.perf.backendOverrideEnv"),
+    installed: installed || "?",
+  });
+}
+
 /** The notes under the "Backend:" row for an /api/backend payload, as an array
  *  of strings (empty when the chosen, installed and loaded backends agree):
  *  the runtime localm loads when an override supplies it instead of the
@@ -135,14 +148,8 @@ export function shouldShowBackendHint(data, dismissed) {
 export function backendChoiceNotes(data) {
   const notes = [];
   if (!data) return notes;
-  if (data.in_use_source === "binary_dir" || data.in_use_source === "LLAMA_CPP_LIB") {
-    notes.push(t("settings.perf.backendOverride", {
-      backend: data.in_use || "?",
-      source: t(data.in_use_source === "binary_dir"
-        ? "settings.perf.backendOverrideBinaryDir" : "settings.perf.backendOverrideEnv"),
-      installed: data.installed || "?",
-    }));
-  }
+  const override = backendOverrideNote(data.in_use, data.in_use_source, data.installed);
+  if (override) notes.push(override);
   if (data.requested && data.installed && data.requested !== data.installed) {
     notes.push(data.requested_reason
       ? t("settings.perf.backendChoice", { requested: data.requested,

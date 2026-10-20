@@ -592,3 +592,28 @@ test("backendVendorMismatch: only a vendor backend on a different, known vendor"
     assert.equal(window.__r, expected, `${wanted} on ${vendor}`);
   }
 });
+
+test("backendVendorMismatch: a hybrid machine with the needed vendor does not warn", () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([]) });
+  const cases = [
+    ["sycl", ["nvidia", "intel"], false], ["cuda", ["nvidia", "amd"], false],
+    ["hip", ["nvidia", "intel"], true], ["cuda", [], false],
+  ];
+  for (const [wanted, vendors, expected] of cases) {
+    runScript(window, `window.__r = backendVendorMismatch(${JSON.stringify(wanted)}, ${JSON.stringify(vendors)});`);
+    assert.equal(window.__r, expected, `${wanted} on ${vendors}`);
+  }
+});
+
+test("Runtime: the check names a runtime loaded from an override", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", { ...INSTALLED_VULKAN, newer: false, current: "b10361",
+      in_use: "hip", in_use_source: "binary_dir" }],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  const status = doc.getElementById("runtime-update-status").textContent;
+  assert.match(status, /Up to date/);
+  assert.match(status, /localm loads hip from the llama.cpp binary folder setting/);
+});

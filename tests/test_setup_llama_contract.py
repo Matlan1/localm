@@ -190,6 +190,8 @@ class World:
         self.requests: list = []
         self.probes: list = []
         self.probe_calls = 0
+        self.gpu_probes: list = []
+        self.gpu_probe_calls = 0
         self.other_cmds: list = []
         self.nvidia = None
         self.vendors: list = []
@@ -283,6 +285,10 @@ class World:
             self.probe_calls += 1
             rc, err = self.probes.pop(0) if self.probes else (0, "")
             return subprocess.CompletedProcess(cmd, rc, "", err)
+        if len(cmd) >= 3 and cmd[1] == "-c" and cmd[2] == sl._GPU_LOAD_PROBE_CODE:
+            self.gpu_probe_calls += 1
+            rc, out = self.gpu_probes.pop(0) if self.gpu_probes else (0, "")
+            return subprocess.CompletedProcess(cmd, rc, out, "")
         if len(cmd) >= 3 and cmd[1] == "-c" and cmd[2] == cpu_backend_select._SCORE_PROBE:
             name = Path(kwargs["env"]["LOCALM_CPU_TIER_CANDIDATE"]).name
             score = self.cpu_scores.get(name)

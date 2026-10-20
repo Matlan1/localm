@@ -133,6 +133,9 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     # the config and the disk would then disagree with no sign of it.
     if tag is not None or rollback:
         force = True
+        # A build change of the installed backend is not a backend choice.
+        if backend.lower() in ("auto", _sl._provisioned_backend(target) or ""):
+            keep_choice = True
     target.mkdir(parents=True, exist_ok=True)
 
     if _keeps_existing_install(target, lib_name, backend, force, assume_yes):
@@ -140,8 +143,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
 
     # Everything below actually MUTATES target (clear + refill), so it is guarded
     # by the cross-process provisioning lock: two processes provisioning the same
-    # target must not interleave. Nothing above this point (the "already
-    # provisioned" read and its short-circuit) touches disk, so it runs unlocked.
+    # target must not interleave. Above this point only the "already provisioned"
+    # short-circuit runs, which at most removes the choice record.
     try:
         with _sl._provisioning_lock(target):
             if cuda_line:
@@ -409,7 +412,8 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
     """Install *backend* from its release asset, with the CUDA dialogue, the
     load test and its fallbacks, then record the backend and build, and the
     user's choice when a different backend ended up installed. *keep_choice*
-    leaves the recorded choice as it is."""
+    never removes an existing choice record; it still records *backend* when
+    no record exists and a different backend ended up installed."""
     requested = None if backend == "auto" else backend
     chosen = _sl._auto_backend() if backend == "auto" else backend
     _refuse_without_prebuilt(chosen)
@@ -446,14 +450,15 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
         info = _sl.nvidia_preflight()
         cuda_line = info.cuda_line
         chosen, with_cudart, not_used_reason = _sl._cuda_setup_dialogue(
-            info, assume_yes, det)
+            info, assume_yes, det, explicit=requested is not None)
         if chosen != "cuda" and not_used_reason is None:
             requested = chosen
     _pin_note_for_backend(chosen)
     failure: list = []
     result, used_tag = _provision_with_fallback(chosen, target, sha256,
                                                 with_cudart, assume_yes,
-                                                cuda_line, failure=failure)
+                                                cuda_line, failure=failure,
+                                                explicit=requested is not None)
     if failure and not not_used_reason:
         not_used_reason = f"the {chosen} build could not be used here: {failure[0]}"
     # Record the build tag for EVERY backend now, not only amd-rocm. The old
@@ -471,10 +476,12 @@ def _provision_release(backend: str, target: Path, sha256: Optional[str],
     build = _sl.rocm_build(target) if result == "amd-rocm" else used_tag
     _record_provisioned_backend(target, result, build=build)
     _record_runtime_history(result, build)
-    if keep_choice:
+    if keep_choice and _read_backend_choice(target) is not None:
         if not_used_reason:
             console.print(f"[yellow]{result} installed:[/yellow] {not_used_reason}")
         _print_pending_choice(target)
+    elif keep_choice and requested == result:
+        return
     else:
         _settle_backend_choice(target, requested, result, not_used_reason)
 

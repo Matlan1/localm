@@ -322,3 +322,75 @@ def test_gpu_probe_detail_without_a_named_cause(monkeypatch):
         a, sl._PROBE_NO_GPU_DEVICE, stdout="CPU", stderr=""))
     ok, detail = sl._native_gpu_loads_ok()
     assert not ok and "GPU driver libraries may be missing" in detail
+
+
+# ------------------------- review follow-ups ------------------------------- #
+
+def test_update_that_has_to_fall_back_records_the_choice(box):
+    """cuda installed and in use, no record; the update's re-provision of cuda
+    cannot use the GPU: the cuda choice is recorded, not silently replaced."""
+    sl._record_provisioned_backend(box.target, "cuda")
+    box.gpu["cuda"] = _NO_GPU
+    from localm import _apply_update
+    argv = _apply_update.post_swap_command("runtime", backend="cuda")
+    result = _run(argv[argv.index("setup-llama") + 1:])
+    assert result.exit_code == 0, result.output
+    choice = sl.backend_choice()
+    assert choice and choice["requested"] == "cuda" and choice["installed"] == "vulkan"
+
+
+def test_update_of_the_chosen_backend_that_loads_writes_no_record(box):
+    sl._record_provisioned_backend(box.target, "cuda")
+    from localm import _apply_update
+    argv = _apply_update.post_swap_command("runtime", backend="cuda")
+    assert _run(argv[argv.index("setup-llama") + 1:]).exit_code == 0
+    assert not (box.target / sl._CHOICE_MARKER).exists()
+
+
+@pytest.mark.parametrize("version_args", [["--tag", "b1"], ["--rollback"]])
+def test_a_build_change_of_the_installed_backend_keeps_the_record(box, monkeypatch,
+                                                                  version_args):
+    box.gpu["cuda"] = _NO_GPU
+    assert _run(["--backend", "cuda", "--force", "--yes"]).exit_code == 0
+    monkeypatch.setattr(sl, "_apply_version_request", lambda *a, **k: None)
+    result = _run(["--backend", "vulkan", *version_args, "--yes"])
+    assert result.exit_code == 0, result.output
+    choice = sl.backend_choice()
+    assert choice and choice["requested"] == "cuda"
+
+
+def test_auto_on_an_old_driver_uses_vulkan_without_asking(box, monkeypatch):
+    monkeypatch.setattr(sl, "_auto_backend", lambda: "cuda")
+    monkeypatch.setattr(sl, "nvidia_preflight",
+                        lambda: sl.NvidiaInfo(present=True, driver_version="460.0",
+                                              cuda_capability="11.2"))
+    monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sl.click, "confirm",
+                        lambda *a, **k: pytest.fail("auto must not ask"))
+    result = _run(["--force"])
+    assert result.exit_code == 0, result.output
+    assert box.provisioned == ["vulkan"]
+    assert not (box.target / sl._CHOICE_MARKER).exists()
+    out = _flat(result.output)
+    assert "choice is kept" not in out
+    assert "auto chose vulkan" in out
+
+
+def test_auto_fallback_does_not_claim_a_kept_choice(box, monkeypatch):
+    monkeypatch.setattr(sl, "_auto_backend", lambda: "cuda")
+    box.gpu["cuda"] = _NO_GPU
+    result = _run(["--force", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "choice is kept" not in _flat(result.output)
+
+
+def test_pinned_floor_build_must_register_a_gpu(monkeypatch, tmp_path):
+    monkeypatch.setattr(sl, "tracks_latest", lambda: True)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
+    monkeypatch.setattr(sl, "_native_gpu_loads_ok", lambda: _NO_GPU)
+    from localm.setup_llama import provision
+    monkeypatch.setattr(provision, "tracks_latest", lambda: True)
+    ok, tag = provision._floor_at_pinned_tag(
+        "cuda", True, "b99999", lambda backend, cudart, tag=None: None,
+        f"{sl._ABI_REJECT_PREFIX}: drift")
+    assert (ok, tag) == (False, None)

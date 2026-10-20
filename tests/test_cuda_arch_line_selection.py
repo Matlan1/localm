@@ -22,6 +22,12 @@ import pytest
 from localm import setup_llama as sl
 
 
+@pytest.fixture(autouse=True)
+def _gpu_device_registers(monkeypatch):
+    """The GPU-device load probe registers a GPU in every test here."""
+    monkeypatch.setattr(sl, "_native_gpu_loads_ok", lambda: (True, ""))
+
+
 # --------------------------------------------------------------------------- #
 # NvidiaInfo.cuda_line: architecture -> asset line, independent of the driver. #
 # --------------------------------------------------------------------------- #

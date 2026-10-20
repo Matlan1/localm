@@ -26,6 +26,9 @@ from localm import setup_llama as sl
 def _x64_process(monkeypatch):
     from localm import hwdetect
     monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
+    # The GPU-device load probe registers a GPU; a test that fakes a load
+    # outcome fakes this one too.
+    monkeypatch.setattr(sl, "_native_gpu_loads_ok", lambda: (True, ""))
 from tests._fake_https import patch_https_transport
 
 
@@ -443,7 +446,7 @@ def test_dialogue_reprompts_then_declines(monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO("nope\nn\n"))
     info = sl.NvidiaInfo(present=False)
     result = sl._cuda_setup_dialogue(info, assume_yes=False)
-    assert result == ("vulkan", False)
+    assert result == ("vulkan", False, None)
     assert capsys.readouterr().out.count("Error: invalid input") == 1
 
 

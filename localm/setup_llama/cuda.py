@@ -366,11 +366,15 @@ def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
     return total
 
 
-def _keep_choice_and_use_vulkan(reason: str, assume_yes: bool) -> tuple:
-    """CUDA cannot be used here for *reason*: say so, then install Vulkan only
-    when the user agrees (or with *assume_yes*). The CUDA choice stays recorded.
-    Exits 1 with nothing changed when the user declines."""
+def _keep_choice_and_use_vulkan(reason: str, assume_yes: bool, explicit: bool = True) -> tuple:
+    """CUDA cannot be used here for *reason*: say so, then install Vulkan. For an
+    *explicit* cuda choice, only when the user agrees (or with *assume_yes*), and
+    the CUDA choice stays recorded; exits 1 with nothing changed when the user
+    declines. When auto picked cuda, Vulkan is used without asking."""
     console.print(f"  [yellow]CUDA cannot be used here:[/yellow] {reason}")
+    if not explicit:
+        console.print("  [green]Using Vulkan now[/green].")
+        return "vulkan", False, reason
     if not assume_yes:
         _sl._flush_stdin()
         if not click.confirm("  Install the Vulkan build now so localm works? Your CUDA "
@@ -384,7 +388,8 @@ def _keep_choice_and_use_vulkan(reason: str, assume_yes: bool) -> tuple:
     return "vulkan", False, reason
 
 
-def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
+def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
+                         explicit: bool = True) -> tuple:
     """Given the preflight, walk the user through making CUDA land. Returns
     ``(backend_to_provision, fetch_cudart_bundle, reason)``. *reason* is None
     when the user's CUDA choice is followed or the user switched to another
@@ -396,7 +401,8 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
         (default yes); declining installs vulkan and keeps the CUDA choice.
       * driver too old, or no build of the GPU's line for this CPU -> say why
         and install vulkan only when the user agrees (always with --yes); the
-        CUDA choice is kept. Declining exits 1 with nothing changed.
+        CUDA choice is kept. Declining exits 1 with nothing changed. When
+        *explicit* is False (auto picked cuda), vulkan is used without asking.
       * no NVIDIA detected, hardware unknown -> confirm-continue (No switches
         to vulkan). With --yes, CUDA is attempted and the load test decides.
       * no NVIDIA detected, but *det* (the SAME hwdetect.Detection
@@ -435,7 +441,7 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
             and info.cuda_line not in _ARM64_CUDA_LINES):
         return _keep_choice_and_use_vulkan(
             f"this GPU needs the {info.cuda_line} CUDA line, which has no ARM64 build "
-            "(only Blackwell-class and newer GPUs do)", assume_yes)
+            "(only Blackwell-class and newer GPUs do)", assume_yes, explicit)
 
     # Driver too old: the one thing we cannot fetch for the user.
     if info.present and info.cuda_capability and not info.driver_ok:
@@ -443,7 +449,7 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
         return _keep_choice_and_use_vulkan(
             f"NVIDIA driver {info.driver_version} supports CUDA {info.cuda_capability}, "
             f"but the {info.cuda_line} build needs CUDA {need[0]}.{need[1]} or newer. "
-            "Update the GPU driver and reboot", assume_yes)
+            "Update the GPU driver and reboot", assume_yes, explicit)
 
     # No NVIDIA detected, but the user explicitly asked for cuda: their call.
     if not info.present:
@@ -477,8 +483,9 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
     _sl._flush_stdin()
     if assume_yes or click.confirm("  Download the CUDA build + runtime now?", default=True):
         return "cuda", True, None
-    console.print("  [dim]Using Vulkan for now (works on your driver); your CUDA choice "
-                  "is kept. Retry later: localm setup-llama --backend cuda --force[/dim]")
+    kept = "; your CUDA choice is kept" if explicit else ""
+    console.print(f"  [dim]Using Vulkan for now (works on your driver){kept}. Retry "
+                  "later: localm setup-llama --backend cuda --force[/dim]")
     return "vulkan", False, "you declined the CUDA download"
 
 

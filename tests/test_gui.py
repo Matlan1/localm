@@ -1720,7 +1720,8 @@ class TestBackendEndpoint:
             with TestClient(app) as client:
                 r = client.get("/api/backend")
         assert r.status_code == 200
-        assert r.json() == {"installed": "amd-rocm", "vendor": "amd", "recommended": "vulkan",
+        assert r.json() == {"installed": "amd-rocm", "vendor": "amd", "vendors": ["amd"],
+                            "recommended": "vulkan",
                             "warning": None, "requested": None,
                             "requested_reason": None, "in_use": None, "in_use_source": None}
 
@@ -1735,7 +1736,8 @@ class TestBackendEndpoint:
             with TestClient(app) as client:
                 r = client.get("/api/backend")
         assert r.status_code == 200
-        assert r.json() == {"installed": None, "vendor": None, "recommended": None,
+        assert r.json() == {"installed": None, "vendor": None, "vendors": [],
+                            "recommended": None,
                             "warning": None, "requested": None,
                             "requested_reason": None, "in_use": None, "in_use_source": None}
 
@@ -1753,7 +1755,8 @@ class TestBackendEndpoint:
             with TestClient(app) as client:
                 r = client.get("/api/backend")
         assert r.status_code == 200
-        assert r.json() == {"installed": "vulkan", "vendor": "nvidia", "recommended": "cuda",
+        assert r.json() == {"installed": "vulkan", "vendor": "nvidia", "vendors": ["nvidia"],
+                            "recommended": "cuda",
                             "warning": None, "requested": None,
                             "requested_reason": None, "in_use": None, "in_use_source": None}
 

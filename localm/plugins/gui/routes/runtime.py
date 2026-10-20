@@ -7,7 +7,9 @@ NATIVE runtime `localm setup-llama` provisions, not the Python source tree.
                                the currently installed backend, per
                                setup_llama.check_runtime_update(), plus the
                                user's chosen backend when a different one is
-                               installed (requested, requested_reason).
+                               installed (requested, requested_reason), and
+                               the backend localm loads (in_use,
+                               in_use_source).
   POST /api/runtime/keep    -> keep the installed backend: forget the recorded
                                choice of a backend that could not be used.
   POST /api/runtime/update  -> dispatch `localm setup-llama --backend <b>
@@ -75,6 +77,9 @@ def register(app: FastAPI, ctx) -> None:
             choice = setup_llama.backend_choice()
             out["requested"] = choice["requested"] if choice else None
             out["requested_reason"] = choice["reason"] if choice else None
+            use = setup_llama.runtime_in_use()
+            out["in_use"] = use["backend"]
+            out["in_use_source"] = use["source"]
             return out
         try:
             return await run_in_threadpool_bounded(_check, timeout=_CHECK_TIMEOUT_S)
@@ -97,12 +102,15 @@ def register(app: FastAPI, ctx) -> None:
                 if not installed:
                     return None
                 choice = setup_llama.backend_choice()
-                setup_llama._record_backend_choice(target, None)
+                if not setup_llama._record_backend_choice(target, None):
+                    raise OSError("the recorded backend choice could not be removed")
             return {"backend": installed, "dropped": choice["requested"] if choice else None}
         try:
             result = await run_in_threadpool_bounded(_keep, timeout=_CHECK_TIMEOUT_S)
         except setup_llama.ProvisioningBusyError as e:
             raise HTTPException(409, f"A runtime install is running: {e}") from e
+        except OSError as e:
+            raise HTTPException(500, str(e)) from e
         if result is None:
             raise HTTPException(409, "No llama.cpp runtime is installed.")
         return result
@@ -121,6 +129,10 @@ def register(app: FastAPI, ctx) -> None:
         `localm setup-llama` performs. `rollback` pins and installs the previous
         build recorded for that backend instead of `tag`'s explicit one; the two
         are mutually exclusive, same as the CLI.
+
+        A request that names no backend re-provisions the installed one with
+        --keep-choice, so a recorded choice of another backend survives a build
+        update or rollback.
 
         Refuses (409) only when a runtime job is already running. A concurrent
         `localm update` re-provision or a bare terminal `setup-llama` is refused
@@ -189,6 +201,8 @@ def register(app: FastAPI, ctx) -> None:
         elif tag:
             args += ["--tag", tag]
         args += ["--force", "--yes"]
+        if wanted is None:
+            args.append("--keep-choice")
         job = jobs.start_cli(
             "runtime-update", args,
             host_label=("llama.cpp runtime update" if installed

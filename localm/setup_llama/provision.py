@@ -261,7 +261,7 @@ def _floor_at_pinned_tag(chosen: str, with_cudart: bool, rejected_tag: str,
     except Exception as e:
         console.print(f"[red]{_PINNED_TAG} could not be provisioned:[/red] {e}")
         return False, None
-    ok, why = _sl._native_loads_ok()
+    ok, why = _chosen_backend_loads(chosen)
     if not ok:
         console.print(f"[red]{_PINNED_TAG} did not load either:[/red] "
                       f"{why or 'unknown'}")
@@ -310,13 +310,14 @@ def _chosen_backend_loads(chosen: str) -> tuple:
         return True, ""
     if _is_abi_rejection(gpu_detail):
         return False, gpu_detail
-    return False, f"the {chosen} build loaded but cannot use the GPU: {gpu_detail}"
+    return False, f"it loaded but {gpu_detail.removeprefix('the runtime loaded but ')}"
 
 
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                              with_cudart: bool, assume_yes: bool = False,
                              cuda_line: str = _CUDA_LINE,
-                             failure: Optional[list] = None) -> tuple[str, Optional[str]]:
+                             failure: Optional[list] = None,
+                             explicit: bool = True) -> tuple[str, Optional[str]]:
     """Provision *chosen* and prove it loads. If it does not load, NEVER swap the
     user's pick silently (the never-override rule): inform WHY, then OFFER the
     universal Vulkan build when interactive (or fall back with a LOUD warning when
@@ -335,7 +336,8 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     NvidiaInfo.cuda_line); irrelevant otherwise.
 
     *failure*, when given, receives the reason *chosen* could not be used
-    whenever another backend is returned.
+    whenever another backend is returned. *explicit* False means auto picked
+    *chosen*, so the messages do not call it the user's choice.
 
     vulkan and cpu are self-contained and treated as terminal: if the user
     explicitly chose one and it does not load, that is an environment problem we
@@ -446,7 +448,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                                          detail, _try, used_tag)
     if failure is not None:
         failure.append(detail or "it did not load")
-    return _fall_back_to_universal(chosen, detail, assume_yes, _try, used_tag)
+    return _fall_back_to_universal(chosen, detail, assume_yes, _try, used_tag, explicit)
 
 
 def _universal_backend_failed(chosen: str, with_cudart: bool, assume_yes: bool,
@@ -516,7 +518,7 @@ def _universal_backend_failed(chosen: str, with_cudart: bool, assume_yes: bool,
 
 
 def _fall_back_to_universal(chosen: str, detail: str, assume_yes: bool, try_fn,
-                            used_tag: list) -> tuple[str, Optional[str]]:
+                            used_tag: list, explicit: bool = True) -> tuple[str, Optional[str]]:
     """After *chosen* did not load, offer (interactive) or perform
     (non-interactive) the vulkan then cpu fallback. Returns ``(backend, tag)``
     of the first one that loads; exits non-zero when the user declines; raises
@@ -539,18 +541,20 @@ def _fall_back_to_universal(chosen: str, detail: str, assume_yes: bool, try_fn,
     interactive = (not assume_yes) and sys.stdin.isatty()
     if interactive:
         _sl._flush_stdin()
+        kept = f"your '{chosen}' pick is kept, not changed; " if explicit else ""
         if not click.confirm(
                 f"  Install the universal Vulkan build now so you have a working "
-                f"setup? (your '{chosen}' pick is kept, not changed; decline to stop "
-                f"and fix it yourself)", default=True):
-            console.print(f"[yellow]Keeping your '{chosen}' choice and stopping.[/yellow] "
-                          "It does not load here yet. Fix the cause, then re-run: "
+                f"setup? ({kept}decline to stop and fix it yourself)", default=True):
+            stop = f"Keeping your '{chosen}' choice and stopping." if explicit else "Stopping."
+            console.print(f"[yellow]{stop}[/yellow] "
+                          f"{chosen} does not load here yet. Fix the cause, then re-run: "
                           f"localm setup-llama --backend {chosen} --force")
             sys.exit(1)
     else:
+        kept = (f"; your '{chosen}' choice is kept and shown until it can be used"
+                if explicit else "")
         console.print(f"[yellow][!] Non-interactive: installing the universal build so "
-                      f"localm works; your '{chosen}' choice is kept and shown until it "
-                      f"can be used.[/yellow]")
+                      f"localm works{kept}.[/yellow]")
     for fb in ("vulkan", "cpu"):
         console.print(f"[yellow]Trying {fb}...[/yellow]")
         try:

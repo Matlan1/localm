@@ -133,7 +133,10 @@ for p in sorted(d.glob(_loader._ggml_glob())) if d is not None else []:
     try:
         ctypes.CDLL(str(p))
     except OSError as e:
-        sys.stdout.write("\\n" + p.name + " did not load: " + str(e).splitlines()[0])
+        msg = str(e).splitlines()[0] if str(e) else type(e).__name__
+        if "Could not find module" in msg:
+            msg = "it or a library it needs is missing"
+        sys.stdout.write("\\n" + p.name + " did not load: " + msg)
     if kind == "cuda":
         lib = "nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1"
         try:

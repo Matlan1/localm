@@ -176,22 +176,24 @@ def installed_runtime_identity() -> list:
 
 
 def _record_backend_choice(target: Path, requested: Optional[str],
-                           reason: Optional[str] = None) -> None:
+                           reason: Optional[str] = None) -> bool:
     """Record that the user chose *requested* and a different backend is
     installed in *target* because of *reason*. *requested* None removes the
     record (the installed backend is the user's choice, or no explicit choice
-    was made). Best-effort, like _record_provisioned_backend: a failed write is
-    logged at debug and leaves the previous state."""
+    was made). Returns False when the file could not be written or removed
+    (logged at debug; the previous state is left as it was)."""
     path = target / _CHOICE_MARKER
     try:
         if not requested:
             path.unlink(missing_ok=True)
-            return
+            return True
         why = " ".join(str(reason or "").split())[:_CHOICE_REASON_MAX] or None
         path.write_text(json.dumps({"requested": requested, "reason": why}),
                         encoding="utf-8")
+        return True
     except OSError as e:
         logger.debug("could not update %s: %s", path, e)
+        return False
 
 
 def _read_backend_choice(target: Path) -> Optional[dict]:
