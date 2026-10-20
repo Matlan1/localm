@@ -1011,8 +1011,8 @@ ws     ::= [ \t\n\r]*
     def _compact_history(self, target_tokens: Optional[int] = None) -> bool:
         """Replace everything before the kept tail (see ``_compaction_cut``)
         with a summary exchange. With *target_tokens* the tail keeps as many
-        of the newest messages as fit it (see ``_keep_count``), else the last
-        4. The latest user request is carried verbatim
+        of the newest messages as fit it (see ``_keep_count``), or the last 4
+        when those would be every message; without it, the last 4. The latest user request is carried verbatim
         into the summary message when it is not in the tail, and every earlier
         user-written message is listed verbatim (see ``_pinned_requests_block``).
         When the
@@ -1027,6 +1027,8 @@ ws     ::= [ \t\n\r]*
         nothing to compact."""
         keep_n = self._keep_count(target_tokens) if target_tokens else 4
         cut = self._compaction_cut(keep_n)
+        if cut <= 0 and keep_n > 4:
+            cut = self._compaction_cut(4)
         if cut <= 0:
             return False
 

@@ -134,14 +134,18 @@ def test_a_codebase_read_file_by_file_is_not_summarised_every_turn(proj, home):
     backend = _Backend(window=16384)
     agent = _agent(proj, backend)
     agent._messages = [{"role": "user", "content": "Read every module and explain it."}]
-    compacted_turns = 0
+    compacted_turns = summarised_turns = 0
     for i in range(30):
         _read_turn(agent, i)
         agent.events.clear()
+        before = len(backend.summary_calls())
         agent._maybe_compact(interactive=False)
         compacted_turns += bool(_info(agent))
-    assert backend.summary_calls() == []
-    assert compacted_turns <= 10
+        summarised_turns += len(backend.summary_calls()) > before
+        if i < 10:
+            assert len(backend.summary_calls()) == before, f"summarised at read {i}"
+    assert summarised_turns <= 3
+    assert compacted_turns <= 12
     high, _low = agent._compaction_bounds(16384)
     assert agent._prompt_tokens_estimate() <= high
 
