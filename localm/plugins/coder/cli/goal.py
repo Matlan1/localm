@@ -38,7 +38,7 @@ def _goal_task_wrap(task: str, until_cmd: str) -> str:
 
 
 def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
-                   work_dir: Path) -> tuple[bool, str]:
+                   work_dir: Path, attachments: str = "") -> tuple[bool, str]:
     """Iterate: run the task, run the verify command, feed failures back, until it
     exits 0 or the iteration cap is hit. Returns (success, last_response).
 
@@ -51,7 +51,11 @@ def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
     print_info(
         f"Goal mode: iterating on the task until `{until_cmd}` exits 0 "
         f"(max {max_iters} iteration(s)).")
-    response = agent.run_task(_goal_task_wrap(task, until_cmd))
+    if attachments:
+        response = agent.run_task(_goal_task_wrap(task, until_cmd),
+                                  attachments=attachments)
+    else:
+        response = agent.run_task(_goal_task_wrap(task, until_cmd))
     for attempt in range(1, max_iters + 1):
         outcome = _run_verify(until_cmd, work_dir)
         code, output = outcome

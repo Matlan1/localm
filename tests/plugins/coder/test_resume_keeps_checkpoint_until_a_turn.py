@@ -149,7 +149,7 @@ def test_ctrl_c_at_the_first_prompt_after_resume_keeps_the_session(
     def _ctrl_c():
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(repl_mod, "_read_multiline", _ctrl_c)
+    monkeypatch.setattr(repl_mod, "_read_input", _ctrl_c)
 
     result, backend = _cli(proj, monkeypatch, "--resume")
 

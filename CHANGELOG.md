@@ -12,7 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
-
+- **`localm coder` shows what it is doing.** A live spinner runs while the model thinks, while
+  it writes a file (with the file name and line count) and while a tool runs. `set_todos` shows
+  the task list. Type `@path` or `@path:10-40` to attach a file to your message, and a
+  multi-line paste arrives as one message.
+- **Approval prompts in `localm coder` take more answers.** `a` allows that tool for the rest of
+  the session (for a shell command, that exact command only), `f` shows the full diff, and
+  `n: <reason>` tells the agent why you said no.
 - **Pause, resume and cancel a model download in the GUI.** The Add a model card has Pause (stops
   and keeps what is saved, Resume continues from it) and Cancel (stops and deletes the partial
   download), the download line shows the steady speed and time left, and the Activity list has a
@@ -46,6 +52,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the finished ones.
 
 ### Fixed
+- **`localm coder` no longer floods the terminal.** A new file shows a short preview instead of
+  every line, a reply is no longer printed twice, and a failed tool shows the end of its error
+  output without needing `/verbose`. Warnings at the end of a task now appear in the terminal.
 
 - **The Hugging Face token saved in Settings is used for every download.** Model pulls, projector
   and embedding-model downloads, speech-model downloads and the model-type lookup now send it, so

@@ -941,15 +941,17 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                         # flushes anything buffered before the early-exit read
                         # below.
                         child_log.close()
+                    from ..display import ActivitySpinner
                     _tgt = None
-                    for _ in range(40):
-                        time.sleep(0.5)
-                        if proc.poll() is not None:
-                            break
-                        _root = instances.resolve_root_dir(start=str(work_dir))
-                        _tgt = instances.attach_target(home_dir(), _root)
-                        if _tgt:
-                            break
+                    with ActivitySpinner("Waiting for localm server to start..."):
+                        for _ in range(40):
+                            time.sleep(0.5)
+                            if proc.poll() is not None:
+                                break
+                            _root = instances.resolve_root_dir(start=str(work_dir))
+                            _tgt = instances.attach_target(home_dir(), _root)
+                            if _tgt:
+                                break
                     if _tgt:
                         attach_key = api_key
                         if not _api_key_explicit:
