@@ -579,15 +579,32 @@ class _ExecutionMixin:
             lenient_call and gated and not shell_unchecked
             and self.auto_approve and call.name not in self.always_confirm
         )
+        # A session allow ("a" at an interactive prompt) never waives a
+        # shell-guard verdict, a lenient call or a configured always_confirm.
+        # See test_session_allow_never_waives_always_confirm_or_lenient.
+        allow_key = self._session_allow_key(call)
+        session_allowable = (
+            allow_key is not None and not shell_unchecked and not lenient_call
+            and call.name not in self.always_confirm
+        )
+        session_allowed = getattr(self, "_session_allowed", None)
+        if session_allowed is None:
+            session_allowed = self._session_allowed = set()
+        if needs_confirm and session_allowable and allow_key in session_allowed:
+            needs_confirm = False
         if needs_confirm:
             if self.confirm_handler is not None:
                 approved = invoke_confirm(self.confirm_handler, call,
                                           agent=self._confirm_agent_label())
             elif interactive:
                 approved = self._confirm_tool(call)
-                if approved and consume_confirm_always():
-                    self.auto_approve = True
-                    print_info("  ✓ Auto-approve enabled for the rest of this session.")
+                if consume_confirm_always() and approved:
+                    if session_allowable:
+                        session_allowed.add(allow_key)
+                        print_info("  " + self._session_allow_notice(call))
+                    else:
+                        print_info("  Approved once: this call cannot be "
+                                   "allowed for the whole session.")
             else:
                 # Fail CLOSED: this tool requires confirmation and there is no way
                 # to obtain it (non-interactive run, no approval handler), so deny
@@ -909,6 +926,25 @@ class _ExecutionMixin:
         if self.parent is None:
             return None
         return self.name or "sub-agent"
+
+    @staticmethod
+    def _session_allow_key(call: ToolCall):
+        """The key an "always" answer stores for *call*, or None if it cannot
+        be session-allowed. Shell-executing tools are keyed by the exact
+        command string, every other tool by its name."""
+        if call.name in _SHELL_GUARDED_TOOLS:
+            cmd = call.args.get("command") if isinstance(call.args, dict) else None
+            if not isinstance(cmd, str) or not cmd.strip():
+                return None
+            return (call.name, cmd.strip())
+        return call.name
+
+    @staticmethod
+    def _session_allow_notice(call: ToolCall) -> str:
+        if call.name in _SHELL_GUARDED_TOOLS:
+            return (f"Allowing this exact {call.name} command without asking "
+                    "for the rest of this session.")
+        return f"Allowing {call.name} without asking for the rest of this session."
 
     def _confirm_tool(self, call: ToolCall) -> bool:
         """

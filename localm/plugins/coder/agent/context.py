@@ -13,7 +13,7 @@ import localm.plugins.coder.agent as _agent
 from ..display import (
     ActivitySpinner, console, print_assistant_label, print_info,
     print_reasoning_token, print_status, print_streaming_done,
-    print_streaming_token, print_thinking,
+    print_streaming_token, print_thinking, spinner_available,
 )
 from ..parser import _EXPLICIT_FENCE_LANGS, _try_parse_body
 from .constants import _COMPACT_AUTO_RATIO, _COMPACT_WARN_RATIO, _DEFAULT_CTX_TOKENS
@@ -1091,13 +1091,16 @@ ws     ::= [ \t\n\r]*
                     )
                 if interactive:
                     if first_attempt:
-                        print_thinking()
+                        if spinner_available():
+                            console.print()
+                        else:
+                            print_thinking()
                         first_attempt = False
                     terminal = _TerminalReply(self.name)
 
                     interrupted = False
 
-                    def _on_interrupt() -> None:
+                    def _on_interrupt(terminal: _TerminalReply = terminal) -> None:
                         nonlocal interrupted
                         interrupted = True
                         terminal.finish()

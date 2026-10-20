@@ -74,7 +74,7 @@ class ActivitySpinner:
         is_term = getattr(c, "is_terminal", None)
         return isinstance(is_term, bool) and is_term
 
-    def start(self, label: str | None = None) -> "ActivitySpinner":
+    def start(self, label: str | None = None) -> ActivitySpinner:
         with self._lock:
             if label is not None:
                 self._label = label
@@ -147,11 +147,18 @@ class ActivitySpinner:
                 )
             self._last_len = 0
 
-    def __enter__(self) -> "ActivitySpinner":
+    def __enter__(self) -> ActivitySpinner:
         return self.start()
 
     def __exit__(self, *exc) -> None:
         self.stop()
+
+
+def spinner_available(console_obj: Console | None = None) -> bool:
+    """True when an ActivitySpinner would animate on *console_obj* (default:
+    the coder console), i.e. it is a real terminal."""
+    return ActivitySpinner(console_obj=console_obj)._is_interactive_tty(
+        console_obj if console_obj is not None else console)
 
 
 def _strip_esc(s: str) -> str:
@@ -605,7 +612,8 @@ def confirm_diff(path_label: str) -> bool:
     try:
         while True:
             has_full = bool(_last_diff_preview and _last_diff_preview[3])
-            opts = "[y/N/a=always/f=full] " if has_full else "[y/N/a=always] "
+            opts = ("[y/N/a=allow this session/f=full diff] " if has_full
+                    else "[y/N/a=allow this session] ")
             prompt = Text("Apply changes to ", style="yellow")
             prompt.append(_strip_esc(path_label), style="bold yellow")
             prompt.append(f"? {opts}", style="yellow")
@@ -635,7 +643,7 @@ def confirm(prompt: str) -> bool:
     _last_confirm_always = False
     _last_reject_reason = ""
     try:
-        line = _sanitized_text(f"{prompt} [y/N/a=always] ", style="yellow")
+        line = _sanitized_text(f"{prompt} [y/N/a=allow this session] ", style="yellow")
         raw = console.input(line)
         action, reason = _parse_confirm_answer(raw)
         if action == "always":

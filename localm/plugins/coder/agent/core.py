@@ -338,6 +338,10 @@ class Agent(
         # removed when the identical call later runs. _loop re-arms it.
         self._denied_unconfirmed: list[tuple[str, str, str]] = []
         self._denied_lock = threading.Lock()
+        # Keys the user answered "a" (always) for at an interactive prompt this
+        # session: a tool name, or (tool, exact command) for shell-executing
+        # tools. See _ExecutionMixin._session_allow_key.
+        self._session_allowed: set = set()
         self._undo_stack: list[dict] = []
         self._unverified_writes: set[str] = set()  # code files changed since last test run
         # Changed-files tracker: rel path -> {original: bytes|None, writes: int,

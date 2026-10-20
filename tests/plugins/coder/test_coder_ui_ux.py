@@ -151,20 +151,71 @@ class TestDiffPreviewAndConfirmationUX:
         assert "truncated" in printed_syntaxes[0]
         assert "line_79 = 79" in printed_syntaxes[1]
 
-    def test_confirm_always_enables_session_auto_approve(self, tmp_path, monkeypatch):
+    def test_session_allow_covers_only_that_tool(self, tmp_path, monkeypatch):
         agent = _make_agent(tmp_path, auto_approve=False)
-        monkeypatch.setattr(display.console, "input", lambda _prompt="": "a")
+        prompts = []
+        answers = iter(["a", "n"])
 
-        call = ToolCall(
-            name="write_file",
-            args={"path": "new.py", "content": "x = 1\n"},
-            raw="",
-            start=0,
-            end=0,
-        )
-        res = agent._execute_tool(call, interactive=True)
-        assert res.ok is True
-        assert agent.auto_approve is True
+        def fake_input(prompt=""):
+            prompts.append(str(prompt))
+            return next(answers)
+
+        monkeypatch.setattr(display.console, "input", fake_input)
+        first = ToolCall(name="write_file", args={"path": "new.py", "content": "x = 1\n"},
+                         raw="", start=0, end=0)
+        assert agent._execute_tool(first, interactive=True).ok is True
+        assert agent.auto_approve is False
+
+        second = ToolCall(name="write_file", args={"path": "other.py", "content": "y = 2\n"},
+                          raw="", start=0, end=0)
+        assert agent._execute_tool(second, interactive=True).ok is True
+        assert len(prompts) == 1
+
+        shell = ToolCall(name="run_shell", args={"command": "echo hi"},
+                         raw="", start=0, end=0)
+        res = agent._execute_tool(shell, interactive=True)
+        assert len(prompts) == 2
+        assert res.ok is False
+
+    def test_session_allow_for_shell_is_exact_command_only(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path, auto_approve=False)
+        prompts = []
+        answers = iter(["a", "n"])
+
+        def fake_input(prompt=""):
+            prompts.append(str(prompt))
+            return next(answers)
+
+        monkeypatch.setattr(display.console, "input", fake_input)
+
+        def call(cmd):
+            return ToolCall(name="run_shell", args={"command": cmd}, raw="", start=0, end=0)
+
+        agent._execute_tool(call("python --version"), interactive=True)
+        agent._execute_tool(call("python --version"), interactive=True)
+        assert len(prompts) == 1
+        agent._execute_tool(call("python --version && echo x"), interactive=True)
+        assert len(prompts) == 2
+
+    def test_session_allow_never_waives_always_confirm_or_lenient(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path, auto_approve=False)
+        agent.always_confirm = {"write_file"}
+        prompts = []
+        monkeypatch.setattr(display.console, "input",
+                            lambda prompt="": prompts.append(str(prompt)) or "a")
+        for name in ("a.py", "b.py"):
+            c = ToolCall(name="write_file", args={"path": name, "content": "z = 0\n"},
+                         raw="", start=0, end=0)
+            assert agent._execute_tool(c, interactive=True).ok is True
+        assert len(prompts) == 2
+
+        agent.always_confirm = set()
+        prompts.clear()
+        for name in ("c.py", "d.py"):
+            c = ToolCall(name="write_file", args={"path": name, "content": "z = 0\n"},
+                         raw="", start=0, end=0, lenient=True)
+            assert agent._execute_tool(c, interactive=True).ok is True
+        assert len(prompts) == 2
 
     def test_confirm_rejection_reason_is_passed_back_to_agent(self, tmp_path, monkeypatch):
         agent = _make_agent(tmp_path, auto_approve=False)
@@ -241,6 +292,20 @@ class TestReplAtMentionsAndPaste:
         expanded = _expand_at_mentions("Read @../secret.txt", sub)
         assert "top-secret" not in expanded
         assert "<attached_file" not in expanded
+
+    def test_expand_at_mentions_respects_session_scope(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "ok.py").write_text("inside = 1\n", encoding="utf-8")
+        (tmp_path / "other.py").write_text("outside = 1\n", encoding="utf-8")
+        expanded = _expand_at_mentions(
+            "see @src/ok.py and @other.py", tmp_path,
+            scope_allows=lambda p: p.replace("\\", "/").startswith("src/"))
+        assert "inside = 1" in expanded
+        assert "outside = 1" not in expanded
+
+    def test_expand_at_mentions_leaves_email_and_handles_alone(self, tmp_path):
+        text = "mail me@example.com or ping @nobody about it"
+        assert _expand_at_mentions(text, tmp_path) == text
 
     def test_read_multiline_coalesces_pasted_lines(self, monkeypatch):
         monkeypatch.setattr(display.console, "input", lambda _prompt="": "first line")

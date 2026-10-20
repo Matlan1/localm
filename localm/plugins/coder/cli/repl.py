@@ -5,6 +5,8 @@ loop, and the /command handler."""
 from __future__ import annotations
 
 import os
+import re
+import sys
 import time
 from pathlib import Path
 
@@ -24,13 +26,9 @@ from ..display import (
 from ..review_guard import classify_sensitive_changes, render_warning
 from .goal import _run_goal_loop
 
-import re
-import sys
-
 _AT_MENTION_RE = re.compile(
     r"(?:^|(?<=\s))@([A-Za-z0-9_./\\-]+(?::\d+(?:-\d+)?)?)(?=\s|$|[.,;!?])"
 )
-_MAX_AT_FILE_CHARS = 24_000
 
 
 def _stdin_has_buffered_data() -> bool:
@@ -79,59 +77,50 @@ def _read_multiline() -> str:
     return "\n".join(lines)
 
 
-def _expand_at_mentions(user_input: str, cwd: Path) -> str:
-    """Attach contents of existing workspace files referenced as @path[:start-end]."""
+def _expand_at_mentions(user_input: str, cwd: Path, scope_allows=None) -> str:
+    """Attach existing workspace files referenced as @path or @path:start-end.
+
+    Each file is read through the read_file tool, so confinement, notebook
+    rendering and size truncation match what the model would see from its own
+    read. A path outside *scope_allows* (the session's /scope) is not attached.
+    Tokens that name no file (a decorator, an @handle) are left alone."""
     if "@" not in user_input:
         return user_input
-    from ..tools.files import _confine
+    from ..tools.files import tool_read_file
 
     attachments: list[str] = []
     seen: set[str] = set()
     for match in _AT_MENTION_RE.finditer(user_input):
-        spec = match.group(1)
-        if spec in seen:
+        spec = match.group(1).rstrip(".")
+        if not spec or spec in seen:
             continue
         seen.add(spec)
-        path_part = spec
-        line_range: tuple[int, int] | None = None
+        path_part, offset, limit = spec, 0, 0
         if ":" in spec:
             base, rng = spec.rsplit(":", 1)
-            if re.fullmatch(r"\d+(?:-\d+)?", rng):
+            m = re.fullmatch(r"(\d+)(?:-(\d+))?", rng)
+            if m:
                 path_part = base
-                if "-" in rng:
-                    s_str, e_str = rng.split("-", 1)
-                    line_range = (max(1, int(s_str)), max(1, int(e_str)))
-                else:
-                    ln = max(1, int(rng))
-                    line_range = (ln, ln)
+                offset = max(1, int(m.group(1)))
+                end_ln = max(offset, int(m.group(2))) if m.group(2) else offset
+                limit = end_ln - offset + 1
+        candidate = cwd / path_part
         try:
-            resolved = _confine(cwd, path_part)
-        except PermissionError:
+            if not candidate.is_file():
+                continue
+        except OSError:
             continue
-        if not resolved.is_file():
+        if scope_allows is not None and not scope_allows(path_part):
+            print_info(f"  @{path_part} is outside this session's scope - not attached")
             continue
-        try:
-            raw = resolved.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+        result = tool_read_file(cwd, path_part, offset, limit)
+        if not result.ok:
+            print_info(f"  @{spec} not attached: {result.output}")
             continue
-        rel = resolved.relative_to(cwd) if resolved.is_relative_to(cwd) else resolved
-        all_lines = raw.splitlines()
-        if line_range is not None:
-            start_ln, end_ln = line_range
-            sliced = all_lines[start_ln - 1:end_ln]
-            body = "\n".join(sliced)
-            label = f"{rel}:{start_ln}-{end_ln}"
-            n_lines = len(sliced)
-        else:
-            body = raw
-            label = str(rel)
-            n_lines = len(all_lines)
-        trunc_note = ""
-        if len(body) > _MAX_AT_FILE_CHARS:
-            body = body[:_MAX_AT_FILE_CHARS] + "\n... [truncated]"
-            trunc_note = " (truncated)"
-        print_info(f"  📎 Attached {label} ({n_lines} lines{trunc_note})")
-        attachments.append(f'<attached_file path="{label}">\n{body}\n</attached_file>')
+        trunc_note = " (truncated)" if result.truncated else ""
+        print_info(f"  Attached {result.summary}{trunc_note}")
+        attachments.append(
+            f'<attached_file path="{spec}">\n{result.output}\n</attached_file>')
 
     if not attachments:
         return user_input
@@ -259,7 +248,9 @@ def _repl(agent: Agent) -> None:
                 break
             continue
 
-        expanded_input = _expand_at_mentions(user_input, agent.cwd)
+        expanded_input = _expand_at_mentions(
+            user_input, agent.cwd,
+            scope_allows=agent._scope_allows if agent.scope else None)
 
         try:
             # The saved checkpoint is not cleared before the turn; the turn
