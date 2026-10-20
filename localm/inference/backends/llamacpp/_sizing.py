@@ -1463,7 +1463,8 @@ class VramSizingMixin:
                 return n
         return None
 
-    def _check_context_fit(self, n_ctx: int, current_ctx: int = 0) -> Optional[bool]:
+    def _check_context_fit(self, n_ctx: int, current_ctx: int = 0,
+                           hint: bool = True) -> Optional[bool]:
         """Decide WHERE the KV cache for a context of *n_ctx* tokens must live -
         wired as LlamaCpp's ``vram_check`` hook, consulted by
         ``_prefill_fresh_context()`` before it (re)creates a bigger context.
@@ -1483,6 +1484,9 @@ class VramSizingMixin:
         is charged. Weights and the compute buffers are already resident and do
         not change with the context length (n_batch is unchanged), so neither is
         charged.
+
+        With *hint* False the once-per-session system-RAM warning is not
+        emitted; the answer is the same.
         """
         # Gate on the RESOLVED offload count, not the raw configured
         # n_gpu_layers: a CPU-only auto load (effective 0) still carries
@@ -1533,7 +1537,7 @@ class VramSizingMixin:
             return True                                # KV cache fits VRAM - keep it there
         # Does not fit VRAM: keep the FULL window and put the KV cache in system
         # RAM. The hint is emitted once per loaded-model session.
-        if not self._ram_kv_hint_shown:
+        if hint and not self._ram_kv_hint_shown:
             self._ram_kv_hint_shown = True
             from localm.debuglog import logger as _dbg
             # The quoted GB figure can still be the raw, cross-process-blind

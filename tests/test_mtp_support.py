@@ -446,7 +446,7 @@ def _arm_drafting(llm):
     """
     stub_mtp_native(llm)
     llm._prefill_fresh_context = MagicMock(
-        side_effect=lambda tokens, needed: prime_after_prefill(llm, tokens))
+        side_effect=lambda tokens, needed, **_kw: prime_after_prefill(llm, tokens))
     # Every step drafts: no plain probe step, so no pause decision either.
     llm._draft_pacer = LlamaCppModule._DraftPacer(probe_every=1 << 30, bootstrap_every=1 << 30)
     return llm

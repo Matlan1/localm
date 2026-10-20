@@ -81,6 +81,8 @@ class _SimContext:
         self.seq_rms = []
         self.rightsize_plan = None
         self.rightsize_calls = []
+        self.step_choice = None   # (need, step, others) -> cells, or None for need
+        self.step_calls = []
         self.recreate_fail = []
         self.stop = threading.Event()
         self.fail = None          # entries -> rc, or None to decode normally
@@ -108,7 +110,11 @@ class _SimContext:
         return min(t, self.max) if self.max else t
 
     def vram_fit(self, target):
-        return self.vram_fits
+        return self.vram_fits(target) if callable(self.vram_fits) else self.vram_fits
+
+    def step_reserve(self, need, step, others):
+        self.step_calls.append((need, step, others))
+        return need if self.step_choice is None else self.step_choice(need, step, others)
 
     def timer(self):
         return self.now
@@ -1087,6 +1093,83 @@ def test_rightsize_counts_the_other_slots_cached_cells(made):
     assert ctx.rightsize_calls[0][1] == cached
 
 
+def _conversation_then_side_request(made, n_slots):
+    """A 600-token conversation turn, a short side request that shares only its
+    first 3 tokens, then the conversation's next turn."""
+    ctx = _SimContext(capacity=2048, n_ctx_max=4096, base=256, grow=256)
+    sched = made(ctx, n_slots)
+    convo = [5, 3, 8] + [(i * 7) % 90 + 1 for i in range(600)]
+    first = _collect(sched, convo, 20)
+    side = [5, 3, 8, 44, 45, 46]
+    ctx.rightsize_calls.clear()
+    _collect(sched, side, 10)
+    side_others = ctx.rightsize_calls[0][1]
+    next_turn = convo + first["out"] + [11, 12, 13]
+    statuses = []
+    stream = sched.submit(next_turn, 10, _Sampler(), on_status=statuses.append)
+    out, _ = _drain(stream)
+    conv_slot = max(sched._slots, key=lambda s: len(s.kv))
+    return ctx, sched, side_others, out, next_turn, conv_slot
+
+
+def test_a_short_side_request_leaves_the_conversation_cache_whole(made, caplog):
+    import logging
+    with caplog.at_level(logging.INFO, logger="localm"):
+        ctx, sched, side_others, out, next_turn, _slot = _conversation_then_side_request(made, 4)
+    assert out == _reference(next_turn, 10)[0]
+    lines = [r.getMessage() for r in caplog.records if "prefill starting" in r.getMessage()]
+    reused = int(lines[-1].rsplit(", ", 1)[1].split()[0])
+    assert reused >= 600, lines[-1]
+
+
+def test_the_rightsize_beside_a_side_request_counts_the_conversation(made):
+    _ctx, _sched, side_others, *_ = _conversation_then_side_request(made, 4)
+    assert side_others >= 600
+
+
+def test_a_prompt_that_continues_a_cache_still_takes_that_slot(made):
+    ctx = _SimContext(capacity=2048, n_ctx_max=4096, base=256, grow=256)
+    sched = made(ctx, 4)
+    convo = [(i * 5) % 90 + 1 for i in range(300)]
+    first = _collect(sched, convo, 15)
+    seq = next(s.seq for s in sched._slots if s.kv)
+    _collect(sched, convo + first["out"] + [7, 8], 5)
+    assert max(sched._slots, key=lambda s: len(s.kv)).seq == seq
+
+
+def _last_reused(caplog) -> int:
+    lines = [r.getMessage() for r in caplog.records if "prefill starting" in r.getMessage()]
+    return int(lines[-1].rsplit(", ", 1)[1].split()[0])
+
+
+def test_a_follow_up_without_the_long_reply_keeps_its_slot(made, caplog):
+    import logging
+    ctx = _SimContext(capacity=4096, n_ctx_max=8192, base=256, grow=256)
+    sched = made(ctx, 4)
+    prompt = [(i * 3) % 90 + 1 for i in range(250)]
+    _collect(sched, prompt, 1500)
+    follow = prompt + [61, 62, 63]
+    with caplog.at_level(logging.INFO, logger="localm"):
+        rec = _collect(sched, follow, 10)
+    assert rec["out"] == _reference(follow, 10)[0]
+    assert _last_reused(caplog) == 250
+
+
+def test_a_shrink_before_a_side_request_keeps_the_conversation_cache(made, caplog):
+    import logging
+    ctx = _SimContext(capacity=4096, n_ctx_max=8192, base=256, grow=256)
+    sched = made(ctx, 4)
+    convo = [5, 3, 8] + [(i * 7) % 90 + 1 for i in range(600)]
+    first = _collect(sched, convo, 20)
+    ctx.rightsize_plan = (1024, True)
+    _collect(sched, [5, 3, 8, 44, 45, 46], 10)
+    assert ctx.recreated[-1] == (1024, True)
+    ctx.rightsize_plan = None
+    next_turn = convo + first["out"] + [11, 12, 13]
+    with caplog.at_level(logging.INFO, logger="localm"):
+        rec = _collect(sched, next_turn, 10)
+    assert rec["out"] == _reference(next_turn, 10)[0]
+    assert _last_reused(caplog) >= 600
 class _RateContext(_SimContext):
     """A simulated context whose decode rate and refresh plan come from a real
     LlamaCpp's _note_decode_rate and _rightsize_plan."""
@@ -1238,3 +1321,195 @@ def test_a_due_refresh_waits_while_replies_run(made):
     assert ctx.recreated == []
     _collect(sched, PROMPTS[2], 20, timed=True)
     assert ctx.recreated == [(2048, True)]
+
+
+def _take_step(need, step, others):
+    return step
+
+
+def test_a_budgeted_reply_reserves_one_step_and_still_reaches_its_budget(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=lambda t: t <= 768)
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    step = len(PROMPTS[0]) + UNLIMITED_STEP + RESERVE_PAD
+    assert ctx.step_calls == [(len(PROMPTS[0]) + 1000 + RESERVE_PAD, step, 0)]
+    assert ctx.recreated == [(768, True), (1280, False)]
+
+
+def test_a_reply_whose_budget_fits_is_reserved_whole(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=True)
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    assert ctx.recreated == [(1280, True)]
+
+
+def test_a_small_budget_never_asks_for_a_step(made):
+    ctx = _SimContext(capacity=4096)
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], UNLIMITED_STEP)
+    _collect(sched, PROMPTS[0], 0, sampler=_Sampler(eog_at=3))
+    assert ctx.step_calls == []
+
+
+def test_a_raising_step_check_reserves_the_whole_budget(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=True)
+
+    def boom(need, step, others):
+        raise RuntimeError("probe failed")
+    ctx.step_choice = boom
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    assert ctx.recreated == [(1280, True)]
+
+
+def test_a_request_admitted_beside_a_running_reply_reserves_its_whole_budget(made):
+    ctx = _SimContext(capacity=4096, n_ctx_max=4096)
+    ctx.step_delay = 0.005
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 100, _Sampler())
+    next(first)
+    rec = _collect(sched, PROMPTS[1], 1000)
+    _drain(first)
+    assert rec["out"] == _reference(PROMPTS[1], 1000)[0]
+    assert ctx.step_calls == []
+
+
+def test_a_promised_reply_grows_beside_another_reply_and_neither_is_cut(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=2048, grow=256, vram_fits=lambda t: t <= 1536)
+    ctx.step_delay = 0.001
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 900, _Sampler())
+    got = [next(first)]
+    rec = _collect(sched, PROMPTS[1], 700)
+    rest, reason = _drain(first)
+    assert (got + rest, reason) == _reference(PROMPTS[0], 900)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[1], 700)
+    assert ctx.recreated == [(768, True), (1536, True), (1792, False)]
+
+
+def test_a_request_waits_rather_than_take_cells_promised_below_the_ceiling(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=1300, grow=256, vram_fits=lambda t: t <= 1280)
+    ctx.step_delay = 0.001
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 900, _Sampler())
+    got = [next(first)]
+    results = {}
+    waiter = threading.Thread(
+        target=lambda: _collect(sched, PROMPTS[1], 600, results=results, key="b"),
+        daemon=True)
+    waiter.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and sched.counts()[1] == 0:
+        time.sleep(0.005)
+    assert sched.counts() == (1, 1)
+    rest, reason = _drain(first)
+    assert (got + rest, reason) == _reference(PROMPTS[0], 900)
+    waiter.join(30)
+    assert results["b"]["out"] == _reference(PROMPTS[1], 600)[0]
+
+
+def test_a_reply_with_no_budget_waits_for_cells_promised_to_another(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=1900, grow=256, vram_fits=True)
+    ctx.step_delay = 0.001
+    ctx.step_choice = lambda need, step, others: step + 200
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 900, _Sampler())
+    got = [next(first)]
+    unlimited = sched.submit(PROMPTS[1], 0, _Sampler())
+    results = {}
+    _run_threads([lambda: results.__setitem__("p", _drain(first)),
+                  lambda: results.__setitem__("u", _drain(unlimited))], timeout=60)
+    rest, reason = results["p"]
+    assert (got + rest, reason) == _reference(PROMPTS[0], 900)
+    out, reason = results["u"]
+    assert reason == "length"
+    assert out == _reference(PROMPTS[1], len(out))[0]
+    assert len(PROMPTS[1]) + len(out) >= 1900 - 1
+
+
+def test_a_promised_reply_whose_growth_fails_ends_with_the_error(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=lambda t: t <= 768)
+    ctx.step_choice = _take_step
+    ctx.recreate_fail = [(1280, False)]
+    sched = made(ctx, 2)
+    stream = sched.submit(PROMPTS[0], 1000, _Sampler())
+    out = []
+    with pytest.raises(RuntimeError, match="Not enough memory"):
+        for tok in stream:
+            out.append(tok)
+    assert out == _reference(PROMPTS[0], len(out))[0]
+    assert len(out) > UNLIMITED_STEP
+
+
+def test_a_step_context_that_vram_cannot_hold_is_created_in_system_ram(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=lambda t: t <= 768)
+    ctx.step_choice = _take_step
+    ctx.recreate_fail = [(768, True)]
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    assert ctx.recreated == [(768, True), (1280, False)]
+
+
+def test_a_promised_growth_that_vram_cannot_hold_continues_in_system_ram(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=lambda t: t <= 1280)
+    ctx.step_choice = _take_step
+    ctx.recreate_fail = [(1280, True)]
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    assert ctx.recreated == [(768, True), (1280, True), (1280, False)]
+
+
+def test_a_promised_reply_beside_another_without_a_ceiling(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=None, grow=256, vram_fits=lambda t: t <= 1536)
+    ctx.step_delay = 0.001
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 900, _Sampler())
+    got = [next(first)]
+    rec = _collect(sched, PROMPTS[1], 700)
+    rest, reason = _drain(first)
+    assert (got + rest, reason) == _reference(PROMPTS[0], 900)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[1], 700)
+    assert (1792, False) in ctx.recreated
+
+
+def test_a_promised_reply_cancelled_after_it_grew_frees_its_cells(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=1100, grow=256, vram_fits=lambda t: t <= 768)
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    stream = sched.submit(PROMPTS[0], 1000, _Sampler())
+    got = [next(stream) for _ in range(UNLIMITED_STEP + 100)]
+    assert got == _reference(PROMPTS[0], len(got))[0]
+    assert (1100, False) in ctx.recreated
+    stream.close()
+    rest, reason = _drain(stream)
+    assert reason == "stop"
+    rec = _collect(sched, PROMPTS[1], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[1], 1000)
+    assert sched.counts() == (0, 0)
+
+
+def test_two_requests_queued_while_idle_step_only_the_first(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=True)
+    ctx.step_choice = _take_step
+    ctx.step_delay = 0.001
+    sched = made(ctx, 2)
+    with ctx.lock():
+        first = sched.submit(PROMPTS[0], 900, _Sampler())
+        second = sched.submit(PROMPTS[1], 900, _Sampler())
+    results = {}
+    _run_threads([lambda: results.__setitem__("a", _drain(first)),
+                  lambda: results.__setitem__("b", _drain(second))], timeout=60)
+    assert results["a"] == _reference(PROMPTS[0], 900)
+    assert results["b"] == _reference(PROMPTS[1], 900)
+    assert len(ctx.step_calls) == 1
