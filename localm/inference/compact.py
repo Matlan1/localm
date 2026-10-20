@@ -19,6 +19,10 @@ client-side against /v1/chat/completions.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
+from collections import OrderedDict
 from typing import Callable, Optional
 
 from localm.textguard import (
@@ -27,6 +31,18 @@ from localm.textguard import (
 
 # Fraction of the context ceiling at which compaction kicks in
 COMPACT_RATIO = 0.70
+
+# Fraction of the context ceiling a compaction aims to bring the conversation
+# down to when the window is known.
+COMPACT_TARGET = 0.50
+
+# Smallest reply buffer, in tokens, kept free in the window, and the share of
+# the window used instead when that is larger.
+REPLY_RESERVE_MIN = 2048
+REPLY_RESERVE_SHARE = 0.10
+
+# Summaries a CompactionCache keeps.
+CACHE_ENTRIES = 64
 
 # Minimum number of most recent messages kept verbatim; the cut moves back to
 # the nearest user turn, so the tail can be longer.
@@ -127,10 +143,11 @@ def _is_users_own(message: dict) -> bool:
     return not (isinstance(content, str) and content.lstrip().startswith("<tool_result"))
 
 
-def _split(messages: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+def _split(messages: list[dict], keep_recent: int = KEEP_RECENT
+           ) -> tuple[list[dict], list[dict], list[dict]]:
     """(leading system messages, older middle, recent tail).
 
-    The tail holds at least the last KEEP_RECENT messages. Its first message
+    The tail holds at least the last *keep_recent* messages. Its first message
     is, in order of preference: the nearest user-written message at or before
     the default cut, else the next one after it; else the nearest user
     message of any kind at or before the default cut; else the nearest
@@ -140,9 +157,10 @@ def _split(messages: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     rest = list(messages)
     while rest and rest[0].get("role") == "system":
         head.append(rest.pop(0))
-    if len(rest) <= KEEP_RECENT:
+    keep_recent = max(KEEP_RECENT, keep_recent)
+    if len(rest) <= keep_recent:
         return head, [], rest
-    default = len(rest) - KEEP_RECENT
+    default = len(rest) - keep_recent
     backward = range(default, 0, -1)
     forward = range(default + 1, len(rest))
     for test, scan in (
@@ -290,9 +308,12 @@ def plan_summary_passes(
     reply_tokens: int,
     overhead_tokens: int,
     measure: Callable[[str], int],
+    has_earlier: bool = False,
 ) -> list[list]:
     """Split *entries* (one excerpt per removed message, oldest first) into
-    the excerpt groups of successive summariser requests.
+    the excerpt groups of successive summariser requests. With *has_earlier*
+    the first request also carries an earlier summary, so every group is
+    sized for a rolling pass.
 
     One group holding every entry when the window is unknown (0), when they
     fit one request (excerpt + *overhead_tokens* + *reply_tokens* + the
@@ -312,9 +333,9 @@ def plan_summary_passes(
     sep = measure("\n\n")
     room = limit_tokens - reply_tokens - template_margin(limit_tokens) - overhead_tokens
     sizes = [measure(e) for e in entries]
-    if sum(sizes) + sep * (len(entries) - 1) <= room:
-        return [list(entries)]
     chunk_room = room - earlier_summary_tokens(reply_tokens) - ROLLING_RESERVE_EXTRA
+    if sum(sizes) + sep * (len(entries) - 1) <= (chunk_room if has_earlier else room):
+        return [list(entries)]
     if chunk_room < MIN_CHUNK_TOKENS:
         return [list(entries)]
 
@@ -352,17 +373,20 @@ def summarise_in_passes(
     *,
     reply_tokens: int,
     measure: Callable[[str], int],
+    earlier: str = "",
 ) -> tuple[str, str]:
-    """Summarise *groups* (from ``plan_summary_passes``) oldest first.
+    """Summarise *groups* (from ``plan_summary_passes``) oldest first,
+    continuing from the summary *earlier* when one is given.
 
     *run_pass(earlier, excerpt)* makes one summariser request and returns its
-    text: *earlier* is None on the first pass, else the summary so far, cut to
+    text: *earlier* is None on the first pass when no earlier summary was
+    given, else the summary so far, cut to
     ``earlier_summary_tokens(reply_tokens)`` tokens; *excerpt* is the group's
     entries joined by blank lines. Returns ``(summary, "")`` with the last pass's visible text, or
     ``("", reason)`` when a pass raises or returns no visible text (the
     remaining passes are not made)."""
     from localm.textnorm import strip_think
-    summary = ""
+    summary = str(earlier or "")
     for group in groups:
         earlier = (fit_tokens(summary, earlier_summary_tokens(reply_tokens), measure)
                    if summary else None)
@@ -378,12 +402,118 @@ def summarise_in_passes(
     return summary, ""
 
 
+def reply_reserve(capacity) -> int:
+    """Tokens of a window of *capacity* tokens kept free for the reply:
+    REPLY_RESERVE_MIN, or REPLY_RESERVE_SHARE of the window when that is
+    larger. 0 for an unknown window."""
+    capacity = window_tokens(capacity)
+    if not capacity:
+        return 0
+    return max(REPLY_RESERVE_MIN, int(capacity * REPLY_RESERVE_SHARE))
+
+
+def _message_key(message: dict) -> str:
+    """Canonical JSON of the parts of *message* a model reads."""
+    keyed = {k: message.get(k) for k in ("role", "content", "name", "tool_calls",
+                                          "tool_call_id") if k in message}
+    return json.dumps(keyed, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def prefix_digests(messages: list[dict]) -> list[str]:
+    """``digests[i]`` identifies ``messages[:i]``: a SHA-256 chain over each
+    message's canonical JSON, so two lists share ``digests[i]`` exactly when
+    their first *i* messages are equal. ``len(messages) + 1`` entries."""
+    h = hashlib.sha256(b"localm-compaction-prefix")
+    out = [h.hexdigest()]
+    for m in messages:
+        h.update(b"\x00")
+        h.update(_message_key(m).encode("utf-8", "surrogatepass"))
+        out.append(h.copy().hexdigest())
+    return out
+
+
+class CompactionCache:
+    """Summaries of conversation prefixes, by ``(namespace, prefix digest)``.
+
+    A later request that starts with a summarised prefix reuses its summary
+    instead of summarising again. Held in memory only; the least recently used
+    entry is dropped past *max_entries*. Thread-safe."""
+
+    def __init__(self, max_entries: int = CACHE_ENTRIES) -> None:
+        self._max = max(1, int(max_entries))
+        self._lock = threading.Lock()
+        self._entries: OrderedDict = OrderedDict()
+
+    def get(self, namespace: str, digest: str) -> Optional[str]:
+        """The summary stored for *digest* under *namespace*, or None."""
+        key = (namespace, digest)
+        with self._lock:
+            summary = self._entries.get(key)
+            if summary is not None:
+                self._entries.move_to_end(key)
+            return summary
+
+    def put(self, namespace: str, digest: str, summary: str) -> None:
+        """Store *summary* for *digest* under *namespace*."""
+        key = (namespace, digest)
+        with self._lock:
+            self._entries[key] = summary
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max:
+                self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        """Drop every entry."""
+        with self._lock:
+            self._entries.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+
+def _bridge(summary, older: list[dict], recent: list[dict]) -> list[dict]:
+    """The bridge messages replacing *older*: the summary (or, with no
+    summary, a digest of *older*) plus the latest user-written request when
+    it is in *older* only, and an assistant acknowledgement when *recent*
+    starts with a user message."""
+    body = (compose("[Conversation summary]\n", summary) if summary
+            else digest_messages(older))
+    body = compose(body, _request_part(older, recent))
+    bridge = [{"role": "user", "content": body}]
+    if recent and recent[0].get("role") == "user":
+        bridge.append({
+            "role": "assistant",
+            "content": ("Understood. Continuing from this summary." if summary
+                        else "Understood. Continuing from these excerpts.")})
+    return bridge
+
+
+def _tail_count(rest: list[dict], keep_tokens: int,
+                measure: Callable[[str], int]) -> int:
+    """How many of the newest messages of *rest* fit *keep_tokens* (each
+    measured with a 4-token allowance for its role and delimiters), at least
+    KEEP_RECENT."""
+    used = kept = 0
+    for m in reversed(rest):
+        size = measure(_text_of(m)) + 4
+        if kept >= KEEP_RECENT and used + size > keep_tokens:
+            break
+        used += size
+        kept += 1
+    return max(KEEP_RECENT, kept)
+
+
 def compact_messages(
     messages: list[dict],
     generate: Callable[[list[dict], int], str],
     *,
     limit_tokens: int = 0,
     count_tokens: Optional[Callable[[str], int]] = None,
+    target_tokens: int = 0,
+    cache: Optional[CompactionCache] = None,
+    namespace: str = "",
+    fits: Optional[Callable[[list[dict]], bool]] = None,
 ) -> tuple[list[dict], bool]:
     """
     Summarise everything but the system prompt and the recent tail (see
@@ -399,20 +529,57 @@ def compact_messages(
     rolling pass. Any failure inside *generate*, or an empty or
     all-reasoning reply, makes the bridge carry a digest of the removed turns
     instead (logged at WARNING); this function never raises.
+
+    *target_tokens*, when positive, is the size the compacted conversation
+    aims for: the tail keeps as many of the newest messages (at least
+    KEEP_RECENT) as fit beside the system prompt and a summary of up to the
+    reply budget. Without it the tail is the last KEEP_RECENT messages.
+
+    With *cache*, a summary is stored under *namespace* for the prefix it
+    covers. A conversation that starts with a stored prefix reuses that
+    summary unchanged, with no model call, when the result passes *fits*
+    (always, when *fits* is None); otherwise only the messages after the
+    stored prefix are summarised, continuing from the stored summary. A digest
+    fallback is never stored.
     """
     head, older, recent = _split(messages)
     if not older:
         return messages, False
+    rest = messages[len(head):]
 
     limit_tokens = window_tokens(limit_tokens)
     measure = token_meter(count_tokens)
     reply_tokens = summary_reply_tokens(limit_tokens)
+
+    digests = prefix_digests(messages) if cache is not None else []
+    start, earlier = 0, ""
+    if cache is not None:
+        for i in range(len(rest) - 1, 0, -1):
+            hit = cache.get(namespace, digests[len(head) + i])
+            if hit is None:
+                continue
+            reused = [*head, *_bridge(hit, rest[:i], rest[i:]), *rest[i:]]
+            if fits is None or fits(reused):
+                return reused, True
+            start, earlier = i, hit
+            break
+
+    if target_tokens > 0:
+        head_tokens = sum(measure(_text_of(m)) + 4 for m in head)
+        keep = target_tokens - head_tokens - reply_tokens - template_margin(limit_tokens)
+        head, older, recent = _split(messages, _tail_count(rest, keep, measure))
+    cut = len(older)
+    if cut <= start:
+        return [*head, *_bridge(earlier, rest[:start], rest[start:]),
+                *rest[start:]], True
+    fresh = rest[start:cut]
+
     entries = [f"{m.get('role', 'user').upper()}: {_text_of(m)[:600]}"
-               for m in older]
+               for m in fresh]
     groups = plan_summary_passes(
         entries, limit_tokens=limit_tokens, reply_tokens=reply_tokens,
         overhead_tokens=measure(ROLLING_SUMMARY_INSTRUCTION + "\n\n"),
-        measure=measure)
+        measure=measure, has_earlier=bool(earlier))
 
     def _pass(earlier, excerpt) -> str:
         if earlier is None:
@@ -424,24 +591,20 @@ def compact_messages(
         return generate([{"role": "user", "content": prompt}], reply_tokens)
 
     summary, failure = summarise_in_passes(
-        groups, _pass, reply_tokens=reply_tokens, measure=measure)
+        groups, _pass, reply_tokens=reply_tokens, measure=measure,
+        earlier=earlier)
     if not summary:
         from localm.debuglog import logger
         logger.warning(
             "compaction: summarisation unavailable (%s); keeping a digest of "
-            "%d removed message(s)", failure, len(older))
+            "%d removed message(s)", failure, len(fresh))
+        if earlier:
+            return [*head, *_bridge(compose(earlier, "\n\n", digest_messages(fresh)),
+                                    older, recent), *recent], True
+    elif cache is not None:
+        cache.put(namespace, digests[len(head) + cut], summary)
 
-    body = (compose("[Conversation summary]\n", summary) if summary
-            else digest_messages(older))
-    body = compose(body, _request_part(older, recent))
-    bridge = [{"role": "user", "content": body}]
-    if recent and recent[0].get("role") == "user":
-        bridge.append({
-            "role": "assistant",
-            "content": ("Understood. Continuing from this summary." if summary
-                        else "Understood. Continuing from these excerpts.")})
-
-    return [*head, *bridge, *recent], True
+    return [*head, *_bridge(summary, older, recent), *recent], True
 
 
 def maybe_compact(

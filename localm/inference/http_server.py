@@ -52,6 +52,7 @@ from localm.inference.backends.base import (
     VisionInputError,
 )
 from localm.inference import residency, switch_admission
+from localm.inference.compact import CompactionCache
 from localm.inference.engine import Engine
 from localm.inference.inference_gate import InferenceGate, exclusively, set_capacity
 from localm.inference.routing_latch import RoutingLatch
@@ -6296,6 +6297,9 @@ async def _stream_sse_completion_body(
     yield "data: [DONE]\n\n"
 
 
+# Conversation summaries the server's compaction reuses across requests.
+_COMPACTION_CACHE = CompactionCache()
+
 COMPACTION_DISCONNECT_DETAIL = (
     "Client closed the request while the conversation was being compacted.")
 
@@ -6316,7 +6320,8 @@ def _needs_compaction(capacity, prompt_tokens, messages,
         return prompt_tokens > capacity
     if reply_reserve is not None:
         return capacity - prompt_tokens < reply_reserve
-    return capacity - prompt_tokens < max(2048, int(capacity * 0.10))
+    from localm.inference.compact import reply_reserve as _reserve
+    return capacity - prompt_tokens < _reserve(capacity)
 
 
 def _engine_is_encoder_decoder(engine) -> bool:
@@ -6387,7 +6392,7 @@ async def _compact_for_capacity(engine, messages: list, request=None
     Returns ``(messages, changed, disconnected)``; *disconnected* is True when
     a client disconnect was observed while compacting."""
     from localm.debuglog import logger as _dbg
-    from localm.inference.compact import compact_messages, window_tokens
+    from localm.inference.compact import COMPACT_TARGET, compact_messages, window_tokens
     _dbg.info("compacting conversation: %d message(s) for %s",
               len(messages), engine.display_name)
     loop = asyncio.get_running_loop()
@@ -6422,10 +6427,25 @@ async def _compact_for_capacity(engine, messages: list, request=None
         except PretokenizerUnsafeInputError:
             return 0
 
+    capacity = window_tokens(engine.context_capacity())
+    encoder_decoder = _engine_is_encoder_decoder(engine)
+    reserve = _engine_reply_reserve(engine)
+
+    def _fits(ms: list[dict]) -> bool:
+        try:
+            n = engine.count_messages_tokens(ms)
+        except PretokenizerUnsafeInputError:
+            return False
+        return not _needs_compaction(capacity, n, ms, encoder_decoder=encoder_decoder,
+                                     reply_reserve=reserve)
+
     fut = loop.run_in_executor(None, functools.partial(
         compact_messages, messages, _gen_for_compact,
-        limit_tokens=window_tokens(engine.context_capacity()),
-        count_tokens=_count_for_budget))
+        limit_tokens=capacity,
+        count_tokens=_count_for_budget,
+        target_tokens=int(capacity * COMPACT_TARGET),
+        cache=_COMPACTION_CACHE, namespace=str(engine.display_name),
+        fits=_fits))
 
     async def _watch() -> None:
         try:
