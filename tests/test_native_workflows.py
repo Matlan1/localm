@@ -94,6 +94,7 @@ class TestParse:
         _src(file="model.ckpt"),
         _src(file="model.pt"),
         _src(file="a\\b.gguf"),
+        _src(file="..\\..\\x.gguf"),
         _src(sha256="xyz"),
         _src(sha256="a" * 63),
         _src(size_bytes=-1),
@@ -276,8 +277,8 @@ class TestResolve:
         assert set(by_slot) == {"clip_l", "t5xxl", "lora 2"}
         clip = by_slot["clip_l"]
         assert clip["native"] is True and clip["filename"] == "clip_l_custom.safetensors"
-        assert clip["source"] == {"repo": "owner/repo", "file": "sub/clip_l_custom.safetensors",
-                                  "spec": "owner/repo:sub/clip_l_custom.safetensors",
+        assert clip["source"] == {"repo": "owner/repo", "file": "clip_l_custom.safetensors",
+                                  "spec": "owner/repo:clip_l_custom.safetensors",
                                   "sha256": SHA, "size_bytes": 10,
                                   "model_type": "text-encoder", "name": None,
                                   "origin": "workflow"}

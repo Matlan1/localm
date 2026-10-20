@@ -195,7 +195,9 @@ $("video-generate").onclick = async () => {
   }
   if (native && videoWorkflowCard.pending) {
     $("video-generate").disabled = true;
-    try { await videoWorkflowCard.prepare(); } finally { $("video-generate").disabled = false; }
+    let ready;
+    try { ready = await videoWorkflowCard.prepare(); } finally { $("video-generate").disabled = false; }
+    if (!ready) return;
   }
   const nativeChoice = native ? videoModelPicker.choice() : {};
   Object.assign(body, nativeChoice);

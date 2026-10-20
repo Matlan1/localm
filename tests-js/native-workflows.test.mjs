@@ -280,3 +280,38 @@ test("music: apply sets the ACE-Step parts and the shift field", async () => {
   assert.deepEqual(JSON.parse(win.eval("JSON.stringify(musicModelPicker.choice())")),
     { native_models: { dit: "acestep-dit" } });
 });
+
+test("generate stops when the workflow's main model is still not downloaded", async () => {
+  const stillMissing = { ...RESOLVED, native_models: {}, missing: [MISSING] };
+  const { win, $, calls } = app({ resolves: [stillMissing], preflightMissing: [MISSING] });
+  await settle(win, "await refreshImageBackend(); await imageWorkflowCard.refresh();");
+  const decline = async () => {
+    for (let i = 0; i < 50 && $("modal").style.display !== "flex"; i++) await tick(5);
+    [...$("modal-body").querySelectorAll("button")].find((b) => b.textContent === "Not now").click();
+  };
+  runScript(win, "globalThis.__a = imageWorkflowCard.apply('builtin:sd-turbo');");
+  await decline();
+  await win.__a;
+  $("img-prompt").value = "a fox";
+  $("img-generate").click();
+  await decline();
+  for (let i = 0; i < 50 && !win.document.body.textContent.includes("nothing was generated"); i++) await tick(5);
+  assert.ok(win.document.body.textContent.includes("'sd_turbo-f16-q8_0.gguf' is not downloaded"));
+  assert.ok(!calls.some((c) => c.url.endsWith("/api/imagine")), "no generate request");
+  assert.equal($("img-generate").disabled, false);
+});
+
+test("a main model picked by hand after apply lifts the stop", async () => {
+  const stillMissing = { ...RESOLVED, native_models: {}, missing: [MISSING] };
+  const { win, $, calls } = app({ resolves: [stillMissing], preflightMissing: [MISSING] });
+  await settle(win, "await refreshImageBackend(); await imageWorkflowCard.refresh();");
+  runScript(win, "globalThis.__a = imageWorkflowCard.apply('builtin:sd-turbo');");
+  for (let i = 0; i < 50 && $("modal").style.display !== "flex"; i++) await tick(5);
+  [...$("modal-body").querySelectorAll("button")].find((b) => b.textContent === "Not now").click();
+  await win.__a;
+  await settle(win, "await imageModelPicker.setModels({ model: 'sd-turbo' });");
+  const before = calls.filter((c) => c.url.includes("/preflight")).length;
+  assert.equal(await win.eval("imageWorkflowCard.prepare()"), true);
+  assert.equal(win.eval("imageWorkflowCard.pending"), null);
+  assert.equal(calls.filter((c) => c.url.includes("/preflight")).length, before, "no second offer");
+});

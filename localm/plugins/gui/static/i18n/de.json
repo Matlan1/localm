@@ -2347,6 +2347,7 @@
   "nativeWorkflows.report.notes": "Werte, die nicht übernommen wurden oder geprüft werden sollten:",
   "nativeWorkflows.flowShift": "Flow Shift",
   "nativeWorkflows.shift": "Shift",
+  "nativeWorkflows.mainMissing": "Das Modell '{filename}' des Workflows ist nicht heruntergeladen, daher wurde nichts generiert. Laden Sie es herunter oder wählen Sie oben ein anderes Modell.",
   "nativeWorkflows.modelDefault": "Standard des Modells",
   "nativeModels.needs": "{family}-Modell: verwendet {parts}.",
   "nativeModels.noLoras": "Keine LoRA registriert. Füge eine auf der Seite Modelle mit dem Typ LoRA hinzu.",

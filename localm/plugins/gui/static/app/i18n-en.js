@@ -2718,6 +2718,7 @@ export const I18N_EN = {
   "nativeWorkflows.report.notes": "Values that were not kept or need a look:",
   "nativeWorkflows.flowShift": "Flow shift",
   "nativeWorkflows.shift": "Shift",
+  "nativeWorkflows.mainMissing": "The workflow's model '{filename}' is not downloaded, so nothing was generated. Download it, or pick another model above.",
   "nativeWorkflows.modelDefault": "model default",
   "nativeModels.needs": "{family} model: uses {parts}.",
   "nativeModels.noLoras": "No LoRA is registered. Add one on the Models page with the type LoRA.",

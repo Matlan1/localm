@@ -214,9 +214,17 @@ export function createNativeWorkflowCard({ media, mountId, picker, fields, logId
 
   /** Before a generation: when the applied workflow still has models that are
    *  not registered, offer their download again and put the ones that are
-   *  registered now into the picker. Resolves true (never blocks). */
+   *  registered now into the picker. Resolves false when the workflow's main
+   *  model is still not registered and the picker names no other main model
+   *  (the generation must not run with another model), true otherwise. */
   async function prepare() {
     if (!pending) return true;
+    const chosen = picker.choice ? picker.choice().native_models || {} : {};
+    if (pending.missing.some((m) => m.slot === "model") && chosen.model) {
+      pending = null;
+      render(document.getElementById(mountId));
+      return true;
+    }
     try {
       const res = await offerDownloads(pending.id);
       const before = new Set(pending.missing.map((m) => m.slot));
@@ -233,6 +241,12 @@ export function createNativeWorkflowCard({ media, mountId, picker, fields, logId
       render(document.getElementById(mountId));
     } catch (e) {
       toast(t("nativeWorkflows.checkFailed", { message: e.message }), true);
+      return true;
+    }
+    const main = pending && pending.missing.find((m) => m.slot === "model");
+    if (main) {
+      toast(t("nativeWorkflows.mainMissing", { filename: main.filename }), true);
+      return false;
     }
     return true;
   }

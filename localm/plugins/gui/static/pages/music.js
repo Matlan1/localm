@@ -170,7 +170,9 @@ $("music-generate").onclick = async () => {
   }
   if (native && musicWorkflowCard.pending) {
     $("music-generate").disabled = true;
-    try { await musicWorkflowCard.prepare(); } finally { $("music-generate").disabled = false; }
+    let ready;
+    try { ready = await musicWorkflowCard.prepare(); } finally { $("music-generate").disabled = false; }
+    if (!ready) return;
   }
   const nativeChoice = native ? musicModelPicker.choice() : {};
   Object.assign(body, nativeChoice);

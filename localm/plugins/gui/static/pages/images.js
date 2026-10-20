@@ -394,7 +394,9 @@ $("img-generate").onclick = async () => {
   }
   if (native && imageWorkflowCard.pending) {
     $("img-generate").disabled = true;
-    try { await imageWorkflowCard.prepare(); } finally { $("img-generate").disabled = false; }
+    let ready;
+    try { ready = await imageWorkflowCard.prepare(); } finally { $("img-generate").disabled = false; }
+    if (!ready) return;
   }
   const nativeChoice = native ? imageModelPicker.choice() : {};
   Object.assign(body, nativeChoice);
