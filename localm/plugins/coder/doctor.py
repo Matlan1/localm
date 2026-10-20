@@ -18,7 +18,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, cast
 
 OK, INFO, WARN, FAIL, SKIP = "ok", "info", "warn", "fail", "skip"
 
@@ -62,7 +62,7 @@ def check_model(backend) -> Check:
     if not callable(probe):
         return Check("model", SKIP,
                      f"{model}: backend has no HTTP endpoint to probe")
-    res = probe()
+    res = cast(dict, probe())
     status = res.get("status")
     if status is None:
         return Check("model", FAIL,
