@@ -25,6 +25,7 @@ import secrets
 import sys
 import threading
 import time
+import weakref
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, AsyncIterator, Callable, NamedTuple, Optional
 
@@ -6297,8 +6298,23 @@ async def _stream_sse_completion_body(
     yield "data: [DONE]\n\n"
 
 
-# Conversation summaries the server's compaction reuses across requests.
-_COMPACTION_CACHE = CompactionCache()
+# Conversation summaries the server's compaction reuses across requests, one
+# cache per engine.
+_COMPACTION_CACHES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_COMPACTION_CACHES_LOCK = threading.Lock()
+
+
+def _compaction_cache(engine) -> Optional[CompactionCache]:
+    """The compaction cache of *engine*, created on first use; None when
+    *engine* cannot be weakly referenced."""
+    with _COMPACTION_CACHES_LOCK:
+        try:
+            cache = _COMPACTION_CACHES.get(engine)
+            if cache is None:
+                cache = _COMPACTION_CACHES[engine] = CompactionCache()
+        except TypeError:
+            return None
+        return cache
 
 COMPACTION_DISCONNECT_DETAIL = (
     "Client closed the request while the conversation was being compacted.")
@@ -6444,7 +6460,7 @@ async def _compact_for_capacity(engine, messages: list, request=None
         limit_tokens=capacity,
         count_tokens=_count_for_budget,
         target_tokens=int(capacity * COMPACT_TARGET),
-        cache=_COMPACTION_CACHE, namespace=str(engine.display_name),
+        cache=_compaction_cache(engine), namespace=str(engine.display_name),
         fits=_fits))
 
     async def _watch() -> None:
