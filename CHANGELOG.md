@@ -99,6 +99,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **"Delete saved data" also removes the coder's hook and MCP trust records** (`coder-hook-trust.json` in the data folder).
 - **A long conversation is no longer summarised again on every message.** When a chat client sends its whole history each turn and the server has to compact it to fit the context window, the server now reuses the summary it already wrote while the conversation still fits, and later only summarises the newly older messages. Each compaction also brings the conversation down to about half the window, so the next one is many turns away instead of one.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
