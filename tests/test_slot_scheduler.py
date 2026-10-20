@@ -1240,3 +1240,35 @@ def test_a_promised_reply_beside_another_without_a_ceiling(made):
     assert (got + rest, reason) == _reference(PROMPTS[0], 900)
     assert (rec["out"], rec["reason"]) == _reference(PROMPTS[1], 700)
     assert (1792, False) in ctx.recreated
+
+
+def test_a_promised_reply_cancelled_after_it_grew_frees_its_cells(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=1100, grow=256, vram_fits=lambda t: t <= 768)
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    stream = sched.submit(PROMPTS[0], 1000, _Sampler())
+    got = [next(stream) for _ in range(UNLIMITED_STEP + 100)]
+    assert got == _reference(PROMPTS[0], len(got))[0]
+    assert (1100, False) in ctx.recreated
+    stream.close()
+    rest, reason = _drain(stream)
+    assert reason == "stop"
+    rec = _collect(sched, PROMPTS[1], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[1], 1000)
+    assert sched.counts() == (0, 0)
+
+
+def test_two_requests_queued_while_idle_step_only_the_first(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=True)
+    ctx.step_choice = _take_step
+    ctx.step_delay = 0.001
+    sched = made(ctx, 2)
+    with ctx.lock():
+        first = sched.submit(PROMPTS[0], 900, _Sampler())
+        second = sched.submit(PROMPTS[1], 900, _Sampler())
+    results = {}
+    _run_threads([lambda: results.__setitem__("a", _drain(first)),
+                  lambda: results.__setitem__("b", _drain(second))], timeout=60)
+    assert results["a"] == _reference(PROMPTS[0], 900)
+    assert results["b"] == _reference(PROMPTS[1], 900)
+    assert len(ctx.step_calls) == 1
