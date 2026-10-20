@@ -570,3 +570,70 @@ def test_a_comfyui_job_refuses_native_image_inputs(media_app, addon_set, runner,
     lines = [e.get("text", "") for e in job._history if e.get("type") == "line"]
     assert any("apply to the native backend" in line for line in lines), lines
     assert job.status != "done"
+
+
+# --------------------------------------------------------------------------- #
+#  the Qwen LLM vision encoder (reference images for Qwen-Image-Edit)          #
+# --------------------------------------------------------------------------- #
+
+QWEN_MMPROJ = {"v.blk.0.attn_q.weight": (1280, 1280), "v.patch_embd.weight": (1280, 3, 14, 14),
+               "mm.0.weight": (5120, 5120), "mm.2.weight": (3584, 5120)}
+OTHER_MMPROJ = dict(QWEN_MMPROJ, **{"mm.2.weight": (2560, 5120)})
+QWEN25VL_GGUF = {"token_embd.weight": (152064, 3584), "blk.0.attn_q.weight": (3584, 3584)}
+QWEN_VAE = {"decoder.head.0.gamma": (96, 1, 1, 1), "decoder.upsamples.0.residual.0.gamma": (384,),
+            "encoder.downsamples.0.residual.0.gamma": (96,), "conv2.weight": (16, 16, 1, 1, 1)}
+
+
+@pytest.fixture
+def qwen_set(addon_set, tmp_path):
+    d = tmp_path / "qwen"
+    d.mkdir()
+    files = {
+        "qwen-edit": (write_safetensors(d / "qwen_image_edit.safetensors", QWEN_IMAGE),
+                      "diffusion-unet"),
+        "qwen25vl": (write_gguf(d / "Qwen2.5-VL-7B.gguf", QWEN25VL_GGUF, "qwen2vl"),
+                     "text-encoder"),
+        "qwen_vae": (write_safetensors(d / "qwen_image_vae.safetensors", QWEN_VAE), "vae"),
+    }
+    for name, (path, mtype) in files.items():
+        _register(name, path, mtype)
+    return {**addon_set, **{k: v[0] for k, v in files.items()}, "dir": d}
+
+
+def test_an_llm_mmproj_reads_as_a_vision_encoder_with_its_llm_width(tmp_path):
+    info = families.inspect_file(write_gguf(tmp_path / "mmproj.gguf", QWEN_MMPROJ, "clip"))
+    assert (info.kind, info.detail.get("hidden")) == ("llm_vision", 3584)
+    assert families.accepts("llm_vision", "qwen-image", info)
+    other = families.inspect_file(write_gguf(tmp_path / "o.gguf", OTHER_MMPROJ, "clip"))
+    assert not families.accepts("llm_vision", "qwen-image", other)
+
+
+def test_the_qwen_vision_encoder_is_optional_and_picked_when_registered(qwen_set):
+    without = image_native.resolve_models({"native": {"model": "qwen-edit"}})
+    assert "llm_vision_path" not in without["ctx"]
+    prev = pairing.preview("image", "qwen-edit")
+    assert "llm_vision" not in prev["needs"] and prev["optional"] == ["llm_vision"]
+    assert prev["error"] is None and prev["missing"] == []
+    _register("other-mmproj", write_gguf(qwen_set["dir"] / "o.gguf", OTHER_MMPROJ, "clip"),
+              "mmproj")
+    assert "llm_vision_path" not in image_native.resolve_models(
+        {"native": {"model": "qwen-edit"}})["ctx"]
+    mm = write_gguf(qwen_set["dir"] / "mmproj-qwen.gguf", QWEN_MMPROJ, "clip")
+    _register("qwen-mmproj", mm, "mmproj")
+    got = image_native.resolve_models({"native": {"model": "qwen-edit"}})
+    assert got["ctx"]["llm_vision_path"] == str(mm)
+    assert got["components"]["llm_vision"] == {"name": "qwen-mmproj", "auto": True}
+
+
+def test_qwen_reference_images_without_a_vision_encoder_say_so(qwen_set, runner, tmp_path):
+    ok, msg, lines, _ = _gen(runner, tmp_path, {"model": "qwen-edit"}, width=64, height=64,
+                             ref_images=[_png()])
+    assert ok, msg
+    assert image_native.NO_LLM_VISION in lines
+    _register("qwen-mmproj", write_gguf(qwen_set["dir"] / "mm.gguf", QWEN_MMPROJ, "clip"),
+              "mmproj")
+    ok, msg, lines, _ = _gen(runner, tmp_path, {"model": "qwen-edit"}, width=64, height=64,
+                             ref_images=[_png()])
+    assert ok, msg
+    assert image_native.NO_LLM_VISION not in lines
+    assert runner.loads[-1]["llm_vision_path"].endswith("mm.gguf")

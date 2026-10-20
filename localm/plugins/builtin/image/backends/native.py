@@ -67,7 +67,8 @@ NEGATIVE_AT_CFG_1 = ("The negative prompt has no effect at CFG 1. Raise CFG (for
                      "to 3) to apply it; generation then takes about twice as long per step.")
 
 _COMPONENT_FIELDS = (("clip_l", "clip_l_path"), ("clip_g", "clip_g_path"),
-                     ("t5xxl", "t5xxl_path"), ("llm", "llm_path"), ("vae", "vae_path"))
+                     ("t5xxl", "t5xxl_path"), ("llm", "llm_path"), ("vae", "vae_path"),
+                     ("llm_vision", "llm_vision_path"))
 
 def _native_block(s: dict) -> dict:
     blk = s.get("native")
@@ -357,6 +358,22 @@ NO_REFERENCES = ("{model} ({family}) does not take reference images. They work w
 
 
 CONTROL_STRENGTH = 0.9
+
+NO_LLM_VISION = ("The Qwen text encoder has no vision encoder, so the reference images reach the "
+                 "image model only and the edit follows them less closely. Register the "
+                 "matching Qwen2.5-VL mmproj file (type mmproj) and pick it as the LLM vision "
+                 "encoder.")
+
+
+def _lacks_llm_vision(models: dict) -> bool:
+    """Whether the Qwen-Image model set *models* has no vision encoder for its
+    LLM text encoder: no ``llm_vision`` file and an LLM file without vision
+    weights."""
+    ctx = models.get("ctx") or {}
+    if models.get("family") != "qwen-image" or ctx.get("llm_vision_path"):
+        return False
+    llm = ctx.get("llm_path")
+    return bool(llm) and not families.inspect_file(llm).detail.get("vision")
 
 
 def input_refusal(s: dict, *, input_image=None, ref_images=None, control_image=None,
@@ -674,6 +691,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         if unused:
             say("Not in the prompt or negative prompt, so they have no effect: "
                 + ", ".join(unused) + ".")
+    if ref_images and _lacks_llm_vision(models):
+        say(NO_LLM_VISION)
     if mask_image is not None and (models.get("capabilities") or {}).get("inpaint"):
         say("Inpainting with a dedicated inpainting model.")
     if any(c.get("auto") for c in (models.get("components") or {}).values()):

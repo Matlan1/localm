@@ -22,7 +22,7 @@ from .files import ModelFileError
 SLOT_LABELS = {
     "clip_l": "CLIP-L text encoder", "clip_g": "CLIP-G text encoder",
     "t5xxl": "T5 text encoder", "llm": "LLM text encoder", "vae": "VAE",
-    "clip_vision": "CLIP vision encoder",
+    "clip_vision": "CLIP vision encoder", "llm_vision": "LLM vision encoder",
 }
 
 
@@ -35,7 +35,7 @@ def slot_label(slot: str, family: Optional[str]) -> str:
 
 # Registry types whose entries can fill a native slot or be a native model.
 CANDIDATE_TYPES = ("diffusion-unet", "text-encoder", "vae", "lora", "llm", "unknown",
-                   "embedding", "controlnet", "textual-inversion")
+                   "embedding", "controlnet", "textual-inversion", "mmproj")
 
 
 @dataclass(frozen=True)
@@ -311,13 +311,15 @@ def pair_components(info: FileInfo, explicit: dict, cands: list[Candidate]) -> P
 
 
 CTX_FIELDS = {"clip_l": "clip_l_path", "clip_g": "clip_g_path", "t5xxl": "t5xxl_path",
-              "llm": "llm_path", "vae": "vae_path", "clip_vision": "clip_vision_path"}
+              "llm": "llm_path", "vae": "vae_path", "clip_vision": "clip_vision_path",
+              "llm_vision": "llm_vision_path"}
 
 KIND_WORDS = {"clip_l": "a CLIP-L text encoder", "clip_g": "a CLIP-G text encoder",
               "clip_h": "an OpenCLIP-H text encoder",
               "t5xxl": "a T5 text encoder", "umt5": "a UMT5 text encoder",
               "byt5": "a ByT5 text encoder", "llm": "an LLM text encoder", "vae": "a VAE",
-              "clip_vision": "a CLIP vision encoder", "lora": "a LoRA"}
+              "clip_vision": "a CLIP vision encoder", "lora": "a LoRA",
+              "llm_vision": "an LLM vision encoder"}
 
 ADDON_WORDS = {"controlnet": "a ControlNet", "textual_inversion": "a textual-inversion embedding"}
 
@@ -560,11 +562,12 @@ def addon_options(kind: str, cands: list, family: Optional[str]) -> list[dict]:
     return sorted(out, key=lambda o: (o.get("fits") is False, o["name"].lower()))
 
 
-MEDIA_SLOTS = {"image": ("clip_l", "clip_g", "t5xxl", "llm", "vae"),
+MEDIA_SLOTS = {"image": ("clip_l", "clip_g", "t5xxl", "llm", "vae", "llm_vision"),
                "video": ("t5xxl", "llm", "clip_vision", "vae")}
 
 _SLOT_KINDS = {"clip_l": ("clip_l",), "clip_g": ("clip_g",), "t5xxl": ("t5xxl", "umt5", "byt5"),
-               "llm": ("llm",), "vae": ("vae",), "clip_vision": ("clip_vision",)}
+               "llm": ("llm",), "vae": ("vae",), "clip_vision": ("clip_vision",),
+               "llm_vision": ("llm_vision",)}
 
 
 def _option(c: Candidate) -> dict:
@@ -642,8 +645,10 @@ def preview(media: str, model_name: str, explicit: Optional[dict] = None,
     """What a job would load for registered model *model_name* with the
     *explicit* ``{slot: registered name}`` choices, without loading anything:
     ``{"model", "family", "family_label", "variant", "kind", "needs",
-    "components", "missing", "notes", "defaults", "capabilities", "error"}``.
-    ``needs`` lists the slots the family needs; ``capabilities`` is
+    "optional", "components", "missing", "notes", "defaults", "capabilities",
+    "error"}``.
+    ``needs`` lists the slots the family needs and ``optional`` the ones it
+    can use; ``capabilities`` is
     ``families.capabilities`` of the model (None until it is read);
     ``defaults`` is ``{"steps", "cfg_scale",
     "width", "height"}`` the family works with, or None; ``error`` is a
@@ -652,7 +657,8 @@ def preview(media: str, model_name: str, explicit: Optional[dict] = None,
     from .files import display_name, resolve_model_file
     cands = registry_candidates() if cands is None else cands
     out = {"model": display_name(model_name), "family": None, "family_label": None,
-           "variant": None, "kind": None, "needs": [], "components": {}, "missing": [],
+           "variant": None, "kind": None, "needs": [], "optional": [], "components": {},
+           "missing": [],
            "notes": [], "defaults": None, "capabilities": None, "error": None}
     try:
         main = resolve_model_file(model_name, f"{media} model")
@@ -660,7 +666,8 @@ def preview(media: str, model_name: str, explicit: Optional[dict] = None,
         dflt = families.defaults_for(info)
         out.update(kind=info.kind, family=info.family, variant=info.detail.get("variant"),
                    family_label=families.FAMILY_LABELS.get(info.family or "", info.family),
-                   needs=[r.slot for r in families.requirements(info)],
+                   needs=[r.slot for r in families.requirements(info) if r.required],
+                   optional=[r.slot for r in families.requirements(info) if not r.required],
                    capabilities=families.capabilities(info),
                    defaults=None if dflt is None else {
                        "steps": dflt.steps, "cfg_scale": dflt.cfg_scale,

@@ -8,7 +8,8 @@ companion files a diffusion model needs.
 * ``kind``: ``checkpoint`` (a full model with its own text encoder and VAE),
   ``diffusion`` (a UNet/DiT alone), ``clip_l``, ``clip_g``, ``clip_h``
   (OpenCLIP-H, the SD 2.x text encoder), ``t5xxl``,
-  ``umt5``, ``llm``, ``vae``, ``clip_vision``, ``lora``, ``controlnet``,
+  ``umt5``, ``llm``, ``llm_vision`` (the vision tower of an LLM text encoder,
+  a llama.cpp mmproj file), ``vae``, ``clip_vision``, ``lora``, ``controlnet``,
   ``textual_inversion`` (an embedding a prompt names by its trigger word),
   ``music`` (a component of an ACE-Step music model, never an image or video
   file) or ``unknown``.
@@ -22,7 +23,8 @@ stable-diffusion.cpp, applied to names normalised to its
 ``model.diffusion_model.`` prefix.
 
 ``requirements(info)`` lists the component slots a diffusion model needs
-(``clip_l``, ``clip_g``, ``t5xxl``, ``llm``, ``vae``, ``clip_vision``) and
+(``clip_l``, ``clip_g``, ``t5xxl``, ``llm``, ``vae``, ``clip_vision``, and the
+optional ``llm_vision``) and
 ``accepts(slot, family, candidate)`` says whether a classified file fits one.
 ``capabilities(info)`` says which extra inputs (reference images, a
 ControlNet, embeddings) a model takes in stable-diffusion.cpp.
@@ -44,7 +46,7 @@ _GGUF_MAX_DIMS = 8
 
 DIFFUSION_PREFIX = "model.diffusion_model."
 
-SLOTS = ("clip_l", "clip_g", "t5xxl", "llm", "vae", "clip_vision")
+SLOTS = ("clip_l", "clip_g", "t5xxl", "llm", "vae", "clip_vision", "llm_vision")
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,10 @@ _FAMILY_SLOTS: dict[str, tuple[str, ...]] = {
     "wan2.2": ("t5xxl", "vae"),
     "hunyuan-video": ("llm", "t5xxl", "vae"),
 }
+
+# Optional companion slots: filled when a fitting file is registered, never
+# reported missing.
+_FAMILY_OPTIONAL_SLOTS: dict[str, tuple[str, ...]] = {"qwen-image": ("llm_vision",)}
 
 # The VAE latent layout each family decodes: ("2d", channels) or ("3d", z_dim).
 _FAMILY_VAE = {
@@ -180,14 +186,16 @@ def defaults_for(info: FileInfo) -> Optional[Defaults]:
 
 
 def requirements(info: FileInfo) -> list[Requirement]:
-    """The companion slots the diffusion model *info* needs. A full checkpoint
-    and a family localm does not know need none it can name."""
+    """The companion slots the diffusion model *info* needs, then the optional
+    ones (``required`` False). A full checkpoint and a family localm does not
+    know need none it can name."""
     if info.kind != "diffusion" or info.family is None:
         return []
     slots = list(_FAMILY_SLOTS.get(info.family, ()))
     if info.family == "wan2.1" and info.detail.get("i2v"):
         slots.append("clip_vision")
-    return [Requirement(s) for s in slots]
+    return ([Requirement(s) for s in slots]
+            + [Requirement(s, required=False) for s in _FAMILY_OPTIONAL_SLOTS.get(info.family, ())])
 
 
 def known_family(family: Optional[str]) -> bool:
@@ -204,6 +212,12 @@ def accepts(slot: str, family: Optional[str], cand: FileInfo,
         return cand.kind == "clip_g"
     if slot == "clip_vision":
         return cand.kind == "clip_vision"
+    if slot == "llm_vision":
+        if cand.kind != "llm_vision":
+            return False
+        hidden = _FAMILY_LLM_HIDDEN.get(family or "")
+        got = cand.detail.get("hidden")
+        return hidden is None or got is None or got in hidden
     if slot == "t5xxl":
         if family == "hunyuan-video":
             return cand.kind in ("t5xxl", "byt5")
@@ -548,6 +562,9 @@ def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:
     if arch in _LLM_GGUF_ARCHS:
         tok = _shape(t, "token_embd.weight") or ()
         return FileInfo("llm", detail={"arch": arch, "hidden": tok[1] if len(tok) > 1 else None})
+    if arch == "clip" and _has(names, "v.blk."):
+        proj = _shape(t, "mm.2.weight") or ()
+        return FileInfo("llm_vision", detail={"hidden": proj[0] if proj else None})
     for pre in ("", "text_encoders.t5xxl.transformer.", "t5xxl.transformer."):
         shared = _shape(t, pre + "shared.weight", pre + "encoder.embed_tokens.weight")
         if shared and _has(names, pre + "encoder.block."):
@@ -574,7 +591,8 @@ def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:
         emb = _shape(t, "model.embed_tokens.weight", "embed_tokens.weight",
                      "model.language_model.embed_tokens.weight") or ()
         return FileInfo("llm", detail={"arch": None,
-                                       "hidden": emb[1] if len(emb) > 1 else None})
+                                       "hidden": emb[1] if len(emb) > 1 else None,
+                                       "vision": _has(names, "visual.")})
     return None
 
 

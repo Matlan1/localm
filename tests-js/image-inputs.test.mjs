@@ -203,3 +203,32 @@ test("iinHasWord matches whole words only, ignoring case and regex characters", 
   assert.equal(has("x (emb) y", "(emb)"), true);
   assert.equal(has("", "a"), false);
 });
+
+test("an optional component slot (the Qwen vision encoder) gets its own picker", async () => {
+  const calls = [];
+  const opts = options(FLUX_CAPS);
+  opts.slots.llm_vision = [{ name: "qwen-mmproj", file: "mmproj.gguf", kind: "llm_vision", fits: true }];
+  opts.preview = { ...opts.preview, family: "qwen-image", family_label: "Qwen-Image",
+                   kind: "diffusion", needs: ["llm", "vae"], optional: ["llm_vision"],
+                   components: { llm_vision: { name: "qwen-mmproj", auto: true } } };
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    calls.push(u);
+    if (u.startsWith("/api/imagine/native-models")) return { ok: true, status: 200, json: async () => opts };
+    if (u === "/api/imagine/backend") {
+      return { ok: true, status: 200, json: async () => ({ choice: "auto", active: "native",
+        native: { model: "q", runtime: "rocm", recommended: {} } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ models: [], images: [] }), text: async () => "" };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  runScript(win, "globalThis.__p = refreshImageBackend();");
+  await win.__p;
+  for (let i = 0; i < 6; i++) await tick();
+  const sel = win.document.querySelector('#img-native-models select[data-slot="llm_vision"]');
+  assert.ok(sel, "the optional slot has a picker");
+  assert.match(sel.options[0].textContent, /qwen-mmproj/);
+  assert.match(win.document.getElementById("img-native-models").textContent, /LLM vision encoder/);
+  assert.doesNotMatch(win.document.getElementById("img-native-models").textContent,
+    /need[^.]*LLM vision/i, "the needs note lists required parts only");
+});

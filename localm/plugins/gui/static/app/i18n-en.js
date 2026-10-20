@@ -2749,6 +2749,7 @@ export const I18N_EN = {
   "nativeModels.slot.clipL": "CLIP-L text encoder",
   "nativeModels.slot.clipVision": "CLIP vision encoder",
   "nativeModels.slot.llm": "LLM text encoder",
+  "nativeModels.slot.llmVision": "LLM vision encoder (for reference images)",
   "nativeModels.slot.t5xxl": "T5 text encoder",
   "nativeModels.slot.vae": "VAE",
   "nativeModels.strength": "Strength",

@@ -2378,6 +2378,7 @@
   "nativeModels.slot.clipL": "CLIP-L-Text-Encoder",
   "nativeModels.slot.clipVision": "CLIP-Vision-Encoder",
   "nativeModels.slot.llm": "LLM-Text-Encoder",
+  "nativeModels.slot.llmVision": "LLM-Vision-Encoder (für Referenzbilder)",
   "nativeModels.slot.t5xxl": "T5-Text-Encoder",
   "nativeModels.slot.vae": "VAE",
   "nativeModels.strength": "Stärke",

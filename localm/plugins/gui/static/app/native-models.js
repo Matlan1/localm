@@ -18,6 +18,7 @@ const NM_SLOT_KEYS = {
   llm: "nativeModels.slot.llm",
   vae: "nativeModels.slot.vae",
   clip_vision: "nativeModels.slot.clipVision",
+  llm_vision: "nativeModels.slot.llmVision",
 };
 const NM_MUSIC_KEYS = {
   dit: "nativeModels.music.dit",
@@ -157,7 +158,7 @@ export function createNativeModelPicker({ media, prefix, mountId, onData }) {
     }
     if (note.textContent) box.appendChild(note);
 
-    const needs = new Set((prev && prev.needs) || []);
+    const needs = new Set([...((prev && prev.needs) || []), ...((prev && prev.optional) || [])]);
     const slots = data.slots || {};
     const unknown = prev && prev.kind === "unknown";
     const comps = (prev && prev.components) || {};
