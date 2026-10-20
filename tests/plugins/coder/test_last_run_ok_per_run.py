@@ -76,11 +76,6 @@ class _Scripted:
     def chat_stream(self, messages, **kw):
         yield self.chat(messages, **kw)
 
-    def context_capacity(self):
-        # Room enough that auto-compaction (whose summariser call also uses
-        # max_tokens=1024) never runs and is counted as a reflection.
-        return 32768
-
 
 def _tc(name: str, **args) -> str:
     return "<tool_call>" + json.dumps({"name": name, "args": args}) + "</tool_call>"
