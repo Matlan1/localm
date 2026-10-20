@@ -438,7 +438,8 @@ def test_a_request_still_in_the_kept_tail_is_not_listed_twice(proj, home):
         agent._messages.append({"role": "assistant", "content": "w" * 300})
     agent._compact_history()
     text = "\n".join(str(m["content"]) for m in agent._messages)
-    assert text.count("request number 5") == 1
+    assert "request number 4" in str(agent._messages[2]["content"])
+    assert text.count("request number 4") == 1
 
 
 def test_summarising_is_not_repeated_while_the_window_cannot_hold_the_session(proj, home):
