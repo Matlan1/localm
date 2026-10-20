@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import localm.plugins.coder.agent as _agent
 from localm.textguard import GuardedText, compose, compose_join, untrusted_span
@@ -693,8 +693,9 @@ class Agent(
             self._apply_role_toolset()
         if names:
             self._rebuild_system_prompt()
-            if getattr(self.backend, "native_tools", False):
-                getattr(self.backend, "set_tools")(self._native_tool_defs())
+            backend: Any = self.backend
+            if getattr(backend, "native_tools", False):
+                backend.set_tools(self._native_tool_defs())
         return names
 
     def report_deferred_mcp(self, interactive: bool) -> None:
