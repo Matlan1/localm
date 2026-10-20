@@ -498,6 +498,24 @@ def test_resolve_prompt_answers(tmp_path, answer, trusted, remembered):
     assert ToolHooks.load(agent.cwd).trusted is remembered
 
 
+def test_trust_prompt_renders_its_choice_keys(tmp_path):
+    from rich.console import Console
+    from localm.plugins.coder.cli import hooks_cli
+    agent = _agent_with_hooks(tmp_path)
+    seen = {}
+
+    def fake_input(prompt):
+        seen["prompt"] = prompt
+        return "n"
+
+    with patch.object(hooks_cli.console, "input", side_effect=fake_input):
+        assert hooks_cli.ask_trust(agent._tool_hooks) == "no"
+    rec = Console(record=True, width=300)
+    rec.print(seen["prompt"])
+    text = rec.export_text()
+    assert "[y] this session" in text and "[a] always" in text and "[N] no" in text
+
+
 def test_hooks_command_trust_and_forget(tmp_path):
     from localm.plugins.coder.cli.hooks_cli import handle_hooks_command
     agent = _agent_with_hooks(tmp_path)
