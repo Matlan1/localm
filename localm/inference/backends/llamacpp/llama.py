@@ -1719,6 +1719,15 @@ class LlamaCpp:
                 "offloading all %d (the extra has no effect)",
                 n_gpu_layers, self.n_layers, self.n_layers)
 
+        # Decode rates are judged only when every layer and the output layer are
+        # on a GPU, no expert tensors were kept on the CPU, and the load placed
+        # weights in VRAM (or did not report where it placed them).
+        self._decode_judged = (
+            (n_gpu_layers < 0 or (self.n_layers is not None and n_gpu_layers > self.n_layers))
+            and self._moe_override_keepalive is None
+            and (not self.weight_placement
+                 or any(not b.get("is_ram") for b in self.weight_placement)))
+
         self.n_parallel, self.parallel_note = self._resolve_parallel(n_parallel, n_ctx)
 
         # --- create context ---
@@ -2366,6 +2375,13 @@ class LlamaCpp:
             # loop iteration; set only by the reject branch below.
             pending_token = None
             pending_emit = None
+            # Native seconds and count of the main decode steps, and the sum of
+            # their positions, for _note_decode_rate.
+            rate_steps = 0
+            rate_s = 0.0
+            rate_depth = 0
+            rate_ok = grammar is None and logprobs is None
+            failed = False
             try:
                 # One contiguous suppression scope covering context work and
                 # prefill. The ROCm lazy-buffer verification messages fire
@@ -2457,6 +2473,7 @@ class LlamaCpp:
                                 # into the native library, which crashes the driver.
                                 self.last_finish_reason = "error"
                                 break
+                            sample_t0 = clock()
                             # llama_sampler_sample() already ACCEPTS the sampled token
                             # into every stateful sampler in the chain (documented
                             # upstream as "sample and accept"). A second explicit
@@ -2481,6 +2498,8 @@ class LlamaCpp:
                             if emit is None:
                                 emit = (token if scorer is None or eog
                                         else scorer.score(self._ctx_ptr, -1, token))
+                            if rate_steps:
+                                rate_s += clock() - sample_t0
 
                         if step is not None:
                             step_s = clock() - step[0] - consumer_s
@@ -2578,6 +2597,7 @@ class LlamaCpp:
                                 if self._stop.is_set() or self._ctx_ptr is None:
                                     self.last_finish_reason = "error"
                                     break
+                                verify_t0 = clock()
                                 batch = self._create_batch([token] + drafts, pos, logits_at_last_only=False)
                                 try:
                                     ret = api.llama_decode(self._ctx_ptr, batch)
@@ -2588,8 +2608,11 @@ class LlamaCpp:
                                         # emitted: the matching drafts below, the
                                         # first mismatching token as pending_token.
                                         replacement = None
+                                        verify_s = 0.0
                                         for i, draft in enumerate(drafts):
                                             verified = api.llama_sampler_sample(sampler, self._ctx_ptr, i)
+                                            if i == 0:
+                                                verify_s = clock() - verify_t0
                                             emits.append(
                                                 verified if scorer is None
                                                 else scorer.score(self._ctx_ptr, i, verified))
@@ -2607,8 +2630,12 @@ class LlamaCpp:
                                                 self._ctx_ptr, 0, pos + n_acc + 1, -1)
                                         source.after_verify(accepted, pos)
                                         self._cached_tokens.extend([token] + accepted)
+                                        rate_steps += 1
+                                        rate_s += verify_s
+                                        rate_depth += pos
                                         pos += n_acc + 1
                                         if not removed:
+                                            rate_ok = False
                                             # The rejected cells are still in the
                                             # cache and llama.cpp refuses every later
                                             # batch as having inconsistent sequence
@@ -2628,6 +2655,7 @@ class LlamaCpp:
                                             pending_emit = emits[-1]
                                     else:
                                         # Decode failed, fall back to single token
+                                        rate_ok = False
                                         api.llama_batch_free(batch)
                                         batch = self._create_batch([token], pos, logits_at_last_only=True)
                                         ret = api.llama_decode(self._ctx_ptr, batch)
@@ -2657,6 +2685,7 @@ class LlamaCpp:
                                 if self._stop.is_set() or self._ctx_ptr is None:
                                     self.last_finish_reason = "error"
                                     break
+                                decode_t0 = clock()
                                 batch = self._create_batch([token], pos, logits_at_last_only=True)
                                 try:
                                     ret = api.llama_decode(self._ctx_ptr, batch)
@@ -2692,6 +2721,12 @@ class LlamaCpp:
                                             break
                                     source.after_single_token(token, pos)
                                     self._cached_tokens.append(token)
+                                    if grew:
+                                        rate_ok = False
+                                    else:
+                                        rate_steps += 1
+                                        rate_s += clock() - decode_t0
+                                        rate_depth += pos
                                     pos += 1
                                     if timed or observed:
                                         step = (step_t0, speculate and not source.free_miss, 1,
@@ -2717,11 +2752,18 @@ class LlamaCpp:
                     "decode" if in_decode else "prefill", tokens_generated)
                 raise
             except Exception:
+                failed = True
                 logger.info(
                     "gguf generate: aborted (exception) during %s, %d token(s) generated",
                     "decode" if in_decode else "prefill", tokens_generated)
                 raise
             finally:
+                if (rate_ok and rate_steps and not failed
+                        and self.last_finish_reason != "error"):
+                    with self._gen_lock:
+                        if not self._stop.is_set():
+                            self._note_decode_rate(rate_steps, rate_s,
+                                                   rate_depth / rate_steps)
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
                 if scorer is not None:
@@ -3548,6 +3590,80 @@ class LlamaCpp:
     _KV_PROMOTE_RETRY_S = 20.0
     _kv_promote_after = 0.0
 
+    # A reply is judged slow when its main decode steps per second fall under
+    # this share of the rate expected at its KV depth and placement.
+    _DECODE_SLOW_RATIO = 0.4
+    # Fewest main decode steps a reply needs before its rate is judged.
+    _DECODE_MIN_STEPS = 32
+    # Depth offset of the expected-rate bound in _note_decode_rate.
+    _DECODE_DEPTH_SLACK = 2048
+    # Seconds after a refresh before the next one, doubling per refresh up to
+    # the maximum, back to the base after a reply at the expected rate.
+    _DECODE_REFRESH_BACKOFF_S = 60.0
+    _DECODE_REFRESH_BACKOFF_MAX_S = 960.0
+    _decode_judged = True                    # set at load, see __init__
+    _decode_samples: Optional[dict] = None   # (kv in vram, depth bucket) -> (rate, depth)
+    _decode_refresh: Optional[tuple[float, float]] = None  # (rate, expected) of the slow reply
+    _decode_refresh_after = 0.0              # no refresh is marked before this time.monotonic()
+    _decode_refresh_at: Optional[float] = None  # time.monotonic() of the last refresh
+    _decode_refresh_backoff = 60.0
+
+    def _note_decode_rate(self, steps: int, seconds: float, depth: float) -> None:
+        """Record a finished reply that ran *steps* main decode steps in
+        *seconds* of native time at a mean KV depth of *depth* cells, with the
+        live context's KV placement.
+
+        The expected rate at *depth* is the largest
+        ``rate * min(1, (d + _DECODE_DEPTH_SLACK) / (depth + _DECODE_DEPTH_SLACK))``
+        over the replies recorded at this placement (one per power-of-two depth
+        bucket, the fastest), a lower bound on a healthy rate while a step costs
+        ``a + b * depth`` with ``a >= _DECODE_DEPTH_SLACK * b``. A reply under
+        ``_DECODE_SLOW_RATIO`` of it marks the context for a refresh at the next
+        ``_rightsize_plan`` unless a refresh ran less than the backoff ago.
+        Replies with fewer than ``_DECODE_MIN_STEPS`` steps are ignored, and
+        every reply is ignored when ``_decode_judged`` is False (a load not
+        fully on a GPU). Caller holds ``_gen_lock``."""
+        if (not self._decode_judged or steps < self._DECODE_MIN_STEPS
+                or seconds <= 0 or not self._ctx_ptr):
+            return
+        rate = steps / seconds
+        depth = max(0.0, float(depth))
+        placement = self._offload_kqv is not False
+        samples = self._decode_samples
+        if samples is None:
+            samples = self._decode_samples = {}
+        slack = self._DECODE_DEPTH_SLACK
+        expected = max((r * min(1.0, (d + slack) / (depth + slack))
+                        for (p, _b), (r, d) in samples.items() if p == placement),
+                       default=0.0)
+        if (expected and rate < self._DECODE_SLOW_RATIO * expected
+                and self._decode_refresh is None
+                and time.monotonic() >= self._decode_refresh_after):
+            self._decode_refresh = (rate, expected)
+        key = (placement, int(depth).bit_length())
+        best = samples.get(key)
+        if best is None or rate > best[0]:
+            samples[key] = (rate, depth)
+
+    def _consume_decode_refresh(self) -> None:
+        """Clear a pending refresh because the context is being recreated, and
+        start the backoff before the next one: ``_DECODE_REFRESH_BACKOFF_S``
+        when the last refresh was longer than ``_DECODE_REFRESH_BACKOFF_MAX_S``
+        ago (or there was none), else double the last backoff, at most
+        ``_DECODE_REFRESH_BACKOFF_MAX_S``. Caller holds ``_gen_lock``."""
+        if self._decode_refresh is None:
+            return
+        self._decode_refresh = None
+        now = time.monotonic()
+        last = self._decode_refresh_at
+        if last is None or now - last > self._DECODE_REFRESH_BACKOFF_MAX_S:
+            backoff = self._DECODE_REFRESH_BACKOFF_S
+        else:
+            backoff = min(self._decode_refresh_backoff * 2, self._DECODE_REFRESH_BACKOFF_MAX_S)
+        self._decode_refresh_backoff = backoff
+        self._decode_refresh_at = now
+        self._decode_refresh_after = now + backoff
+
     def _rightsize_plan(self, needed: int, others: int = 0) -> Optional[tuple[int, bool]]:
         """``(n_ctx, offload_kqv)`` for a context to recreate before a request
         of *needed* cells that the live context can already hold, or None to
@@ -3559,7 +3675,8 @@ class LlamaCpp:
         answers False. Otherwise, when the live KV cache is in system RAM,
         moves it to VRAM at the same size once ``_vram_check`` answers True;
         the check is not asked again for ``_KV_PROMOTE_RETRY_S`` seconds after
-        it is asked.
+        it is asked. Otherwise, when ``_note_decode_rate`` marked the context
+        for a refresh, recreates it at the same size and KV placement.
         Caller holds ``_gen_lock``. ``_vram_check`` may raise."""
         if not self._ctx_ptr or needed > self._ctx_capacity:
             return None
@@ -3567,24 +3684,34 @@ class LlamaCpp:
         target = self._target_ctx(needed + max(0, others))
         shrink = target <= capacity // 2
         promote = self._offload_kqv is False
-        if not (shrink or promote):
+        refresh = self._decode_refresh is not None
+        if not (shrink or promote or refresh):
             return None
         check = getattr(self, "_vram_check", None)
         if not shrink:
             now = time.monotonic()
-            if check is None or now < self._kv_promote_after:
-                return None
-            self._kv_promote_after = now + self._KV_PROMOTE_RETRY_S
-            if check(capacity, capacity) is True:
-                return capacity, True
+            if promote and check is not None and now >= self._kv_promote_after:
+                self._kv_promote_after = now + self._KV_PROMOTE_RETRY_S
+                if check(capacity, capacity) is True:
+                    return capacity, True
+            if refresh:
+                return capacity, self._offload_kqv is not False
             return None
         decision = check(target, capacity) if check is not None else None
         return target, decision is not False
 
     def _log_rightsize(self, n_ctx: int, offload_kqv: bool) -> None:
         """Log at INFO that the live context is replaced by one of *n_ctx*
-        cells with its KV cache in VRAM (*offload_kqv*) or system RAM."""
+        cells with its KV cache in VRAM (*offload_kqv*) or system RAM; for a
+        refresh at the same size and placement, with the slow reply's rate."""
         from localm.debuglog import logger
+        slow = self._decode_refresh
+        if (slow is not None and n_ctx == self._ctx_capacity
+                and offload_kqv == (self._offload_kqv is not False)):
+            logger.info("gguf context: recreating the %d-token context (KV cache in %s): "
+                        "the last reply decoded at %.1f steps/s where %.1f was expected",
+                        n_ctx, "VRAM" if offload_kqv else "system RAM", slow[0], slow[1])
+            return
         logger.info("gguf context: replacing the %d-token context (KV cache in %s) "
                     "with a %d-token one (KV cache in %s)", self._ctx_capacity,
                     "VRAM" if self._offload_kqv else "system RAM", n_ctx,
@@ -3655,6 +3782,7 @@ class LlamaCpp:
         model = self._model_ptr
         if not model:
             raise RuntimeError("Model not loaded")
+        self._consume_decode_refresh()
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
@@ -3743,7 +3871,8 @@ class LlamaCpp:
             stream = slots.submit(prompt_tokens, max_new_tokens, sampler,
                                         on_status=on_status,
                                         stop_requested=stream_stop_requested,
-                                        scorer=scorer)
+                                        scorer=scorer,
+                                        timed=grammar is None and logprobs is None)
         except BaseException:
             api.llama_sampler_free(sampler)
             if scorer is not None:
@@ -4748,6 +4877,7 @@ class LlamaCpp:
             if decision is False:
                 offload_kqv = False
 
+        self._consume_decode_refresh()
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
