@@ -710,7 +710,7 @@ def test_hooks_get_run_shells_gate_when_writes_are_unconfirmed(tmp_path, handler
     else:
         assert not res.ok and not (proj / "out.txt").exists()
         assert _log(tmp_path, "pre") == []
-        expected = "--yes allows both" if handler_answer is None else "declined"
+        expected = "none can be asked for here" if handler_answer is None else "declined"
         assert expected in str(res.output)
 
 
@@ -884,3 +884,21 @@ def test_unreadable_config_mentioning_webhooks_only_is_not_hook_bearing(tmp_path
     proj = _project(tmp_path, 'webhooks_url = \n')
     agent = _make_agent(proj)
     assert agent._tool_hooks is None
+
+
+
+def test_string_command_with_a_quoted_program_path_with_spaces(tmp_path):
+    spaced = tmp_path / "dir with space"
+    spaced.mkdir()
+    script = spaced / "say no.py"
+    script.write_text("import sys\nsys.stderr.write('spaced-no ' + sys.argv[1])\nsys.exit(2)\n",
+                      encoding="utf-8")
+    cmd = f'"{sys.executable}" "{script}" "two words"'
+    out = run_hook(HookSpec(event=PRE, index=1, command=cmd), {"tool": "t"}, tmp_path)
+    assert out.returncode == 2 and "spaced-no two words" in out.stderr
+
+
+def test_payload_is_ascii_json(tmp_path):
+    from localm.plugins.coder.hooks import _json_payload
+    text = _json_payload({"args": {"path": "\u00e9\u4e2d.txt"}})
+    assert text.isascii() and json.loads(text)["args"]["path"] == "\u00e9\u4e2d.txt"

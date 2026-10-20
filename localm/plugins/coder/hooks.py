@@ -14,7 +14,8 @@ Declared in ``.localcoder/config.toml``::
     matcher = "write_file|edit_file|patch_file"
     command = ["ruff", "check", "--quiet", "."]
 
-Each hook gets one JSON object on stdin::
+Each hook gets one JSON object on stdin, ASCII-only (other characters are
+``\\uXXXX`` escapes)::
 
     {"event": "pre_tool_use", "tool": "write_file", "args": {...},
      "cwd": "<session folder>", "project_dir": "<folder holding .localcoder>"}
@@ -49,6 +50,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -218,7 +220,7 @@ def parse_hooks(table: Any) -> tuple[list[HookSpec], list[HookSpec], list[str]]:
 
 
 def _json_payload(payload: dict) -> str:
-    return json.dumps(payload, ensure_ascii=False, default=str)
+    return json.dumps(payload, ensure_ascii=True, default=str)
 
 
 def _drain(stream, sink: list, cap: int) -> None:
@@ -234,6 +236,16 @@ def _drain(stream, sink: list, cap: int) -> None:
                 kept += len(sink[-1])
     except (OSError, ValueError):
         pass
+
+
+def _shell_argv(command: str) -> Union[list, str]:
+    """*command* run through the platform shell. On Windows the whole command
+    is wrapped in one more pair of quotes for ``cmd /S /C``, which removes
+    exactly that pair, so a command that starts with a quoted program path
+    reaches cmd unchanged."""
+    if sys.platform == "win32":
+        return 'cmd /S /C "' + command + '"'
+    return ["/bin/sh", "-c", command]
 
 
 def _feed(stream, data: bytes) -> None:
@@ -261,10 +273,10 @@ def run_hook(spec: HookSpec, payload: dict, project_dir: Path,
     collected for at most _DRAIN_SECONDS more, so a process that escaped the
     kill and still holds a pipe cannot hold the call. Each stream keeps at most
     _OUTPUT_CAP bytes. Never raises for a failure of the command."""
-    from .tools.base import _kill_tree, platform_shell
+    from .tools.base import _kill_tree
     from localm.config import user_command_env
 
-    argv = (platform_shell(spec.command) if isinstance(spec.command, str)
+    argv = (_shell_argv(spec.command) if isinstance(spec.command, str)
             else list(spec.command))
     env = user_command_env()
     env["LOCALM_CODER_HOOK_EVENT"] = spec.event
