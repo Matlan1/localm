@@ -2639,8 +2639,9 @@ async function runPull(payload) {
       pendingPullTypeHint = null;
       setPullButtons("idle");
       refreshModelsPage();
-    } else if (end.status === "cancelled" && intent === "pause") {
-      // The partial download stays on disk; Resume sends the same request.
+    } else if (end.status === "cancelled" && intent !== "cancel") {
+      // Paused here, or stopped from the Activity list: the partial download stays
+      // on disk and Resume sends the same request.
       bar.classList.remove("indeterminate");
       if (last.pct != null) bar.style.width = last.pct + "%";
       pct.textContent = t("models.pull.pausedStatus");

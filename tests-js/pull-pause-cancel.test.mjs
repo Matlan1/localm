@@ -130,3 +130,21 @@ test("pull panel: a failed download shows no Pause, Resume or Cancel", async () 
   assert.equal($("pull-resume").hidden, true);
   assert.equal($("pull-cancel").hidden, true);
 });
+
+test("pull panel: a download stopped from the Activity list keeps its partial data and offers Resume", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls) });
+  runScript(win, WAITING_STREAM);
+  const $ = (id) => win.document.getElementById(id);
+
+  $("pull-spec").value = "owner/repo:m.gguf";
+  $("pull-start").click();
+  await settle();
+
+  win.__finishJob("cancelled");   // the job was cancelled by something other than this panel's buttons
+  await settle();
+
+  assert.ok(!calls.some((c) => c.url === "/api/models/pull/discard"),
+    "a stop that did not come from Cancel must not delete the partial data");
+  assert.equal($("pull-resume").hidden, false, "Resume shows after an outside stop");
+});
