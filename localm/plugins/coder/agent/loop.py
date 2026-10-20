@@ -329,6 +329,18 @@ class _LoopMixin:
 
         def report_deferred_mcp(self, interactive: bool) -> None: ...
 
+        @property
+        def disabled_tools(self) -> frozenset: ...
+
+        max_turns: int
+        _audit: Any
+
+        def _add_user(self, content) -> None: ...
+
+        def _add_assistant(self, content) -> None: ...
+
+        def _emit(self, event_type: str, **data) -> None: ...
+
     def run_task(self, task: str, attachments: str = "") -> str:
         """
         Run a single task to completion (non-interactive).
