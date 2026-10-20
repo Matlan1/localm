@@ -840,12 +840,64 @@ def test_cancel_all_stops_generate_full_without_a_disconnect():
         assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
 
         assert residency.cancel_all("lock-model") == 1
-        text = await asyncio.wait_for(task, timeout=3.0)
-        assert isinstance(text, str)
+        with pytest.raises(RuntimeError) as err:
+            await asyncio.wait_for(task, timeout=3.0)
+        assert str(err.value) == residency.SERVER_CANCEL_TEXT
         assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
             "inference lock still held after residency.cancel_all() (non-streaming path)"
 
     asyncio.run(scenario())
+
+
+def _finish_chunk(chunks):
+    """The parsed chunk of *chunks* that carries a finish_reason, or None."""
+    for c in chunks:
+        if not c.startswith("data: {"):
+            continue
+        body = json.loads(c[len("data: "):])
+        choices = body.get("choices") or []
+        if choices and choices[0].get("finish_reason"):
+            return body
+    return None
+
+
+async def _cancel_mid_stream_and_drain(producer, lead):
+    eng = _LockingEngine()
+    sem = asyncio.Semaphore(1)
+    agen = producer(eng, _MSG, "lock-model", sem)
+    chunks = [await agen.__anext__() for _ in range(lead)]
+    chunks.append(await agen.__anext__())
+    assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+    assert residency.cancel_all("lock-model") == 1
+    chunks += await asyncio.wait_for(_drain(agen), timeout=5.0)
+    return chunks
+
+
+@pytest.mark.parametrize("producer,lead", [(_stream_sse, 2), (_stream_sse_completion, 0)])
+def test_server_cancel_mid_stream_ends_as_error_not_stop(producer, lead):
+    """A reply that an unload or switch cut off ends with finish_reason
+    "error" and the visible reason, never a clean "stop"."""
+    chunks = asyncio.run(_cancel_mid_stream_and_drain(producer, lead))
+    joined = "".join(chunks)
+    assert "t0" in joined
+    done = _finish_chunk(chunks)
+    assert done is not None, "the stream ended without a finish chunk"
+    assert done["choices"][0]["finish_reason"] == "error"
+    assert residency.SERVER_CANCEL_TEXT in joined
+
+
+def test_client_disconnect_does_not_mark_the_cancel_as_the_servers():
+    """A cancel the request itself raises leaves by_server False; only
+    cancel_all marks it."""
+    event = residency.GenerationCancel()
+    residency.register_cancel("own-model", event)
+    try:
+        event.set()
+        assert event.by_server is False
+        assert residency.cancel_all("own-model") == 1
+        assert event.by_server is True
+    finally:
+        residency.unregister_cancel("own-model", event)
 
 
 def test_registration_is_removed_once_the_generation_ends():
@@ -924,8 +976,9 @@ def test_cancel_all_stops_a_non_streaming_generation_that_yields_nothing():
         assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
 
         assert residency.cancel_all("lock-model") == 1
-        text = await asyncio.wait_for(task, timeout=3.0)
-        assert text == ""
+        with pytest.raises(RuntimeError) as err:
+            await asyncio.wait_for(task, timeout=3.0)
+        assert str(err.value) == residency.SERVER_CANCEL_TEXT
         assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
             "a non-streaming generation that yields nothing ignored cancel_all"
         assert eng.cancelled is True

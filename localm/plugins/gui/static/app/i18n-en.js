@@ -326,6 +326,13 @@ export const I18N_EN = {
   "chat.tool.notice.skipped": "Not run: this message reached its limit of {limit} web lookups (Settings > Chat).",
   "chat.tool.notice.ignored": "Only the first web request in that reply ran.",
   "chat.web.unfinished": "the model asked for more web lookups; none were run",
+  "chat.reply.cut": "cut off - the reply stream ended before the model finished; reply “continue” to resume",
+  "chat.reply.cutToast": "The reply was cut off before the model finished - reply “continue” to resume",
+  "chat.reply.cutEmpty": "the reply stream ended before any text arrived",
+  "chat.export.pickTitle": "Save {name} in…",
+  "chat.export.saveHere": "Save here",
+  "chat.export.saved": "Saved to {path}",
+  "chat.export.failed": "Could not save {name}: {message}",
   "chat.web.noEvidence": "no web evidence was available for this answer",
   "chat.web": "Web access - the model may search and read pages",
   "chat.web.title":

@@ -529,6 +529,84 @@ class TestFsMkdir:
 
 
 # --------------------------------------------------------------------------- #
+#  POST /api/fs/save-text - save an export into a folder picked in the GUI     #
+# --------------------------------------------------------------------------- #
+
+class TestFsSaveText:
+
+    @pytest.fixture
+    def save_dir(self, tmp_path):
+        d = tmp_path / "exports"
+        d.mkdir()
+        return d
+
+    def _post(self, fs_app, body, key=None):
+        with TestClient(fs_app) as c:
+            return c.post("/api/fs/save-text", json=body,
+                          headers=_hdr(key or _cfgwrite_key()))
+
+    def test_writes_the_text_as_utf8(self, fs_app, save_dir):
+        text = "# Chat\n\n**You:**\n\nweiter, bitte - 继续\n"
+        r = self._post(fs_app, {"path": str(save_dir), "name": "My chat.md",
+                                "content": text})
+        assert r.status_code == 200, r.text
+        out = save_dir / "My chat.md"
+        assert out.read_bytes() == text.encode("utf-8")
+        assert Path(r.json()["path"]) == out.resolve()
+
+    def test_never_overwrites_and_numbers_the_next_name(self, fs_app, save_dir):
+        (save_dir / "chat.md").write_text("old export", encoding="utf-8")
+        r = self._post(fs_app, {"path": str(save_dir), "name": "chat.md",
+                                "content": "new export"})
+        assert r.status_code == 200, r.text
+        assert (save_dir / "chat.md").read_text(encoding="utf-8") == "old export"
+        assert (save_dir / "chat-2.md").read_text(encoding="utf-8") == "new export"
+        assert r.json()["name"] == "chat-2.md"
+
+    @pytest.mark.parametrize("bad_name", ["../evil.md", "a/b.md", "run.bat", "noext",
+                                          ".md", "evil:stream.md", ""])
+    def test_unsafe_or_non_text_name_rejected_and_nothing_written(
+            self, fs_app, save_dir, bad_name):
+        r = self._post(fs_app, {"path": str(save_dir), "name": bad_name, "content": "x"})
+        assert r.status_code == 400, r.text
+        assert list(save_dir.iterdir()) == []
+        assert not (save_dir.parent / "evil.md").exists()
+
+    def test_unc_folder_refused_without_touching_the_filesystem(self, fs_app, fs_spy):
+        key = _cfgwrite_key()
+        r = self._post(fs_app, {"path": UNC, "name": "a.md", "content": "x"}, key)
+        assert r.status_code == 400, r.text
+        assert _unc_calls(fs_spy) == []
+
+    def test_oversized_text_is_refused(self, fs_app, save_dir, monkeypatch):
+        from localm.plugins.gui.routes import admin
+        monkeypatch.setattr(admin, "_SAVE_TEXT_MAX_BYTES", 10)
+        r = self._post(fs_app, {"path": str(save_dir), "name": "a.md",
+                                "content": "x" * 11})
+        assert r.status_code == 413, r.text
+        assert list(save_dir.iterdir()) == []
+
+    def test_missing_folder_is_404(self, fs_app, save_dir):
+        r = self._post(fs_app, {"path": str(save_dir / "nope"), "name": "a.md",
+                                "content": "x"})
+        assert r.status_code == 404, r.text
+
+    def test_config_read_only_key_is_refused(self, fs_app, save_dir):
+        r = self._post(fs_app, {"path": str(save_dir), "name": "a.md", "content": "x"},
+                       _host_key())
+        assert r.status_code == 403, r.text
+        assert list(save_dir.iterdir()) == []
+
+    def test_config_write_without_host_fs_access_is_refused(self, fs_app, save_dir):
+        from localm import auth
+        key = auth.create_key("w-save", [S.CONFIG_WRITE], allow_privileged=True,
+                              fs_access="none")["key"]
+        r = self._post(fs_app, {"path": str(save_dir), "name": "a.md", "content": "x"}, key)
+        assert r.status_code == 403, r.text
+        assert list(save_dir.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- #
 #  POST /api/fs/rename - rename a file or folder in place                      #
 # --------------------------------------------------------------------------- #
 

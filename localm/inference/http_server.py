@@ -5709,7 +5709,7 @@ async def _stream_sse_body(
     # Also registered with residency's cancel broadcast so an unload/switch can
     # trigger the same stop proactively, instead of only reading active_requests
     # once and refusing.
-    cancel_event = threading.Event()
+    cancel_event = residency.GenerationCancel()
     residency.register_cancel(engine.display_name, cancel_event)
     call_outcome: dict = {}
 
@@ -5742,6 +5742,11 @@ async def _stream_sse_body(
                     if cancel_event.is_set():
                         break
                     loop.call_soon_threadsafe(token_queue.put_nowait, token)
+            # A cancel from an unload or switch ends the reply as an error.
+            # See test_server_cancel_mid_stream_ends_as_error_not_stop.
+            if cancel_event.by_server:
+                loop.call_soon_threadsafe(
+                    token_queue.put_nowait, RuntimeError(residency.SERVER_CANCEL_TEXT))
         except Exception as e:
             # Log (full traceback to the debug log) and surface to the client - a
             # silent thread death looks like an empty reply. NOT
@@ -6005,7 +6010,7 @@ async def _stream_sse_completion_body(
     # releases llama.py's per-model _inference_lock instead of running to
     # end-of-generation and blocking the next request to this model. Also
     # registered with residency's cancel broadcast - see _stream_sse.
-    cancel_event = threading.Event()
+    cancel_event = residency.GenerationCancel()
     residency.register_cancel(engine.display_name, cancel_event)
 
     class _StatusSignal:
@@ -6040,6 +6045,9 @@ async def _stream_sse_completion_body(
                     if cancel_event.is_set():
                         break
                     loop.call_soon_threadsafe(token_queue.put_nowait, token)
+            if cancel_event.by_server:
+                loop.call_soon_threadsafe(
+                    token_queue.put_nowait, RuntimeError(residency.SERVER_CANCEL_TEXT))
         except Exception as e:
             # Surface an inference failure to the client instead of letting this
             # daemon thread die (an uncaught death fires a crash report and looks
@@ -6543,7 +6551,7 @@ async def _generate_full(engine, messages: list, request=None, *,
     client is gone).
     """
     loop = asyncio.get_running_loop()
-    cancel_event = threading.Event()
+    cancel_event = residency.GenerationCancel()
     residency.register_cancel(engine.display_name, cancel_event)
     poll = _resolve_disconnect_poll(request)
     stop = gen_kwargs.pop("stop", None)
@@ -6581,6 +6589,8 @@ async def _generate_full(engine, messages: list, request=None, *,
                 _dbg.exception("closing non-stream generation stream failed")
             if timing is not None:
                 _snapshot_outcome(timing.setdefault("outcome", {}), engine)
+        if cancel_event.by_server:
+            raise RuntimeError(residency.SERVER_CANCEL_TEXT)
         return "".join(parts)
 
     fut = loop.run_in_executor(None, _run)
