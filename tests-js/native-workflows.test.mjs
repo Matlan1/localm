@@ -315,3 +315,41 @@ test("a main model picked by hand after apply lifts the stop", async () => {
   assert.equal(win.eval("imageWorkflowCard.pending"), null);
   assert.equal(calls.filter((c) => c.url.includes("/preflight")).length, before, "no second offer");
 });
+
+test("music: a missing diffusion part stops the generation", async () => {
+  const dit = { ...MISSING, slot: "dit", name: "acestep-v15-turbo-Q4_K_M",
+    filename: "acestep-v15-turbo-Q4_K_M.gguf" };
+  const stillMissing = { ...RESOLVED, native_models: { vae: "ace-vae" }, loras: [], params: {},
+    missing: [dit] };
+  const { win, $, calls } = app({ resolves: [stillMissing], preflightMissing: [dit] });
+  await settle(win, "await refreshMusicBackend();");
+  const decline = async () => {
+    for (let i = 0; i < 50 && $("modal").style.display !== "flex"; i++) await tick(5);
+    [...$("modal-body").querySelectorAll("button")].find((b) => b.textContent === "Not now").click();
+  };
+  runScript(win, "globalThis.__a = musicWorkflowCard.apply('builtin:ace');");
+  await decline();
+  await win.__a;
+  $("music-tags").value = "lofi";
+  $("music-generate").click();
+  await decline();
+  for (let i = 0; i < 50 && !win.document.body.textContent.includes("nothing was generated"); i++) await tick(5);
+  assert.ok(win.document.body.textContent.includes("acestep-v15-turbo-Q4_K_M.gguf' is not downloaded"));
+  assert.ok(!calls.some((c) => c.url.endsWith("/api/music") && c.method === "POST"));
+});
+
+test("a failed workflow check still stops a generation whose main model is missing", async () => {
+  const stillMissing = { ...RESOLVED, native_models: {}, missing: [MISSING] };
+  const { win, $ } = app({ resolves: [stillMissing], preflightMissing: [MISSING] });
+  await settle(win, "await refreshImageBackend(); await imageWorkflowCard.refresh();");
+  runScript(win, "globalThis.__a = imageWorkflowCard.apply('builtin:sd-turbo');");
+  for (let i = 0; i < 50 && $("modal").style.display !== "flex"; i++) await tick(5);
+  [...$("modal-body").querySelectorAll("button")].find((b) => b.textContent === "Not now").click();
+  await win.__a;
+  const real = win.fetch;
+  win.fetch = async (u, i) => (String(u).includes("/preflight") || String(u).endsWith("/resolve")
+    ? { ok: false, status: 404, statusText: "Not Found", json: async () => ({ detail: "gone" }) }
+    : real(u, i));
+  assert.equal(await win.eval("imageWorkflowCard.prepare()"), false);
+  assert.ok(win.document.body.textContent.includes("Could not check the workflow's models"));
+});

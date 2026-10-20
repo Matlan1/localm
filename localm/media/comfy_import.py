@@ -17,7 +17,6 @@ search for it.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Optional
 
@@ -118,13 +117,24 @@ def is_comfy_workflow(data) -> bool:
     return is_api_format(data) or is_ui_format(data)
 
 
-def _api_nodes(data: dict) -> dict:
+def _key(value):
+    """*value* when it can identify a node or link (an int or a str), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    return value
+
+
+def _api_nodes(data: dict, notes: list) -> dict:
     nodes = {}
     for nid, node in data.items():
         if not isinstance(node, dict) or not isinstance(node.get("class_type"), str):
             continue
+        raw_inputs = node.get("inputs") or {}
+        if not isinstance(raw_inputs, dict):
+            notes.append(f"{node['class_type']} #{nid}: its inputs are not readable.")
+            raw_inputs = {}
         inputs = {}
-        for name, value in (node.get("inputs") or {}).items():
+        for name, value in raw_inputs.items():
             if (isinstance(value, list) and len(value) == 2
                     and isinstance(value[0], (str, int)) and not isinstance(value[0], bool)
                     and isinstance(value[1], int)):
@@ -150,9 +160,16 @@ def _ui_nodes(data: dict, notes: list) -> dict:
     links = {}
     for link in data.get("links") or []:
         if isinstance(link, list) and len(link) >= 5:
-            links[link[0]] = _Link(str(link[1]), link[2] if isinstance(link[2], int) else 0)
-        elif isinstance(link, dict) and "id" in link:
-            links[link["id"]] = _Link(str(link.get("origin_id")), int(link.get("origin_slot") or 0))
+            lid, origin, slot = _key(link[0]), _key(link[1]), link[2]
+        elif isinstance(link, dict):
+            lid, origin, slot = _key(link.get("id")), _key(link.get("origin_id")), \
+                link.get("origin_slot")
+        else:
+            continue
+        if lid is None or origin is None:
+            continue
+        links[lid] = _Link(str(origin), slot if isinstance(slot, int)
+                           and not isinstance(slot, bool) else 0)
     nodes = {}
     skipped = []
     for node in data["nodes"]:
@@ -169,8 +186,10 @@ def _ui_nodes(data: dict, notes: list) -> dict:
         elif isinstance(values, list):
             for name, value in zip(_widget_names(node["type"], values), values, strict=False):
                 inputs[name] = value
-        for inp in node.get("inputs") or []:
-            if isinstance(inp, dict) and inp.get("link") is not None and inp.get("name"):
+        node_inputs = node.get("inputs") if isinstance(node.get("inputs"), list) else []
+        for inp in node_inputs:
+            if (isinstance(inp, dict) and _key(inp.get("link")) is not None
+                    and isinstance(inp.get("name"), str)):
                 link = links.get(inp["link"])
                 if link is not None:
                     inputs[inp["name"]] = link
@@ -189,7 +208,7 @@ def graph_nodes(data, notes: Optional[list] = None) -> dict:
     ``ValueError`` for anything else or more than ``MAX_NODES`` nodes."""
     notes = [] if notes is None else notes
     if is_api_format(data):
-        nodes = _api_nodes(data)
+        nodes = _api_nodes(data, notes)
     elif is_ui_format(data):
         nodes = _ui_nodes(data, notes)
     else:
@@ -304,9 +323,8 @@ def _model_ref(value, class_type: str, input_name: str, *, lora: bool,
 
 
 def _number(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        return None
-    return value
+    from localm.media.native_workflows import is_number
+    return value if is_number(value) else None
 
 
 def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
@@ -470,6 +488,10 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
             steps = params.get("steps")
             if (start or 0) > 0 or (end is not None and steps is not None and end < steps):
                 notes.append(f"{g.label(sampler)}: start/end steps {start}-{end} were not kept.")
+            for field, default in (("add_noise", "enable"), ("return_with_leftover_noise", "disable")):
+                value = node["inputs"].get(field)
+                if isinstance(value, str) and value != default:
+                    notes.append(f"{g.label(sampler)}: {field} '{value}' was not kept.")
         notes.append("The seed was not kept; each run picks one unless the page sets it.")
         _map(sampler, "steps, CFG, sampler, scheduler")
         for side, key in (("positive", "prompt"), ("negative", "negative_prompt")):
@@ -507,7 +529,11 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
             used.add(nid)
             notes.append(f"{g.label(nid)}: a prompt not connected to the sampler was not kept.")
 
-    for nid in g.of(("ModelSamplingSD3",)):
+    shifts = g.of(("ModelSamplingSD3",))
+    for nid in shifts[1:]:
+        used.add(nid)
+        notes.append(f"{g.label(nid)}: a second sampling shift was not used.")
+    for nid in shifts[:1]:
         shift = _number(g.value(nid, "shift", notes))
         key = {"video": "flow_shift", "music": "shift"}.get(media)
         if key is None:
@@ -550,16 +576,26 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
                     notes.append(f"{g.label(nid)}: a second latent was not used.")
 
     if media == "music":
-        for nid in g.of(("EmptyAceStepLatentAudio",)):
+        audio_latents = g.of(("EmptyAceStepLatentAudio",))
+        for nid in audio_latents[:1]:
             _set_param("duration_seconds", _number(g.value(nid, "seconds", notes)), nid)
             _map(nid, "duration")
-        for nid in g.of(("TextEncodeAceStepAudio", "TextEncodeAceStepAudio15")):
+        encoders = g.of(("TextEncodeAceStepAudio", "TextEncodeAceStepAudio15"))
+        for nid in audio_latents[1:] + encoders[1:]:
+            used.add(nid)
+            notes.append(f"{g.label(nid)}: a second one was not used.")
+        for nid in encoders[:1]:
             for field, key in (("tags", "tags"), ("lyrics", "lyrics")):
                 v = g.value(nid, field, notes)
                 if isinstance(v, str):
                     _set_param(key, v, nid)
             if g.nodes[nid]["class_type"] == "TextEncodeAceStepAudio15":
-                _set_param("duration_seconds", _number(g.value(nid, "duration", notes)), nid)
+                duration = _number(g.value(nid, "duration", notes))
+                if "duration_seconds" not in params:
+                    _set_param("duration_seconds", duration, nid)
+                elif duration is not None and abs(duration - params["duration_seconds"]) > 1e-6:
+                    notes.append(f"{g.label(nid)}: duration {duration:g} differs from the "
+                                 f"latent's {params['duration_seconds']:g}; the latent's was kept.")
             ls = _number(g.nodes[nid]["inputs"].get("lyrics_strength"))
             if ls is not None and abs(ls - 1.0) > 1e-6:
                 notes.append(f"{g.label(nid)}: lyrics strength {ls:g} has no native setting.")
@@ -581,7 +617,8 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
     if isinstance(data, dict):
         extra = data.get("extra") if isinstance(data.get("extra"), dict) else {}
         title = extra.get("title") if isinstance(extra.get("title"), str) else None
-    name = (title or "Imported ComfyUI workflow").strip()[:nw.MAX_NAME]
+    name = "".join(ch for ch in (title or "") if ord(ch) >= 32).strip()[:nw.MAX_NAME]
+    name = name or "Imported ComfyUI workflow"
     desc = f"Imported from a ComfyUI workflow ({len(g.nodes)} nodes)."
     if unsupported:
         desc += " Nodes without a native equivalent: " + ", ".join(

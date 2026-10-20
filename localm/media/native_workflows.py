@@ -50,6 +50,16 @@ def _num(kind: str, lo: float, hi: float) -> tuple:
     return (kind, lo, hi)
 
 
+def is_number(value) -> bool:
+    """True for an int or float that is finite as a float (not a bool)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 _COMMON = {"steps": _num("int", 1, 150), "cfg": _num("float", 0.0, 30.0),
            "sample_method": ("sampler",), "scheduler": ("scheduler",)}
 
@@ -200,8 +210,7 @@ def _model_ref(value, what: str, *, lora: bool = False) -> dict:
         out["comfy"] = comfy
     if lora:
         strength = value.get("strength", 1.0)
-        if (isinstance(strength, bool) or not isinstance(strength, (int, float))
-                or not math.isfinite(strength) or not -4.0 <= strength <= 4.0):
+        if not is_number(strength) or not -4.0 <= strength <= 4.0:
             raise ValueError(f"{what}: strength must be a number from -4 to 4.")
         out["strength"] = float(strength)
     return out
@@ -215,11 +224,12 @@ def _param(media: str, key: str, value):
     kind = spec[0]
     if kind == "str":
         return _text(value, f"Parameter '{key}'", spec[1])
-    if kind == "sampler":
-        return sampling.check_sample_method(value) if value else None
-    if kind == "scheduler":
-        return sampling.check_scheduler(value) if value else None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if kind in ("sampler", "scheduler"):
+        if not isinstance(value, str):
+            raise ValueError(f"Parameter '{key}' must be text.")
+        check = sampling.check_sample_method if kind == "sampler" else sampling.check_scheduler
+        return check(value) if value else None
+    if not is_number(value):
         raise ValueError(f"Parameter '{key}' must be a number.")
     if kind == "int":
         if value != int(value):
@@ -417,7 +427,10 @@ def _path_for(media: str, wid: str) -> Path:
 
 def _read_file(media: str, path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
-    wf = parse_workflow(load_json_text(text), media)
+    try:
+        wf = parse_workflow(load_json_text(text), media)
+    except (TypeError, AttributeError, KeyError, OverflowError, RecursionError) as e:
+        raise ValueError(f"The stored workflow is not valid: {e}") from e
     return dict(wf, id=path.stem, builtin=False)
 
 
@@ -441,7 +454,7 @@ def list_workflows(media: str) -> list[dict]:
                 continue
             except (OSError, UnicodeDecodeError, ValueError) as e:
                 user.append({"id": p.stem, "name": p.stem, "description": "",
-                             "builtin": False, "error": str(e)})
+                             "builtin": False, "error": str(e) or type(e).__name__})
     user.sort(key=lambda w: (w["name"].lower(), w["id"]))
     return items + user
 
@@ -471,9 +484,12 @@ def export_data(wf: dict) -> dict:
 
 
 def _new_id(media: str, name: str) -> str:
+    from localm.pathsafe import is_windows_device_name
     stem = _STEM_RE.sub("-", name).strip("-._")[:60].strip("-._") or "workflow"
     if not stem[0].isalnum():
         stem = "w" + stem
+    if is_windows_device_name(stem):
+        stem += "-workflow"
     d = native_dir(media)
     candidate, i = stem, 1
     while (d / f"{candidate}.json").exists():
@@ -574,7 +590,10 @@ def import_workflow(media: str, data, *, name: Optional[str] = None) -> tuple[st
     if isinstance(data, dict) and data.get("format") == FORMAT:
         wf = parse_workflow(data, media)
     elif comfy_import.is_comfy_workflow(data):
-        wf, report = comfy_import.convert(data, media)
+        try:
+            wf, report = comfy_import.convert(data, media)
+        except (TypeError, AttributeError, KeyError, OverflowError, RecursionError) as e:
+            raise ValueError(f"The ComfyUI workflow could not be read: {e}") from e
     else:
         raise ValueError("Not a localm native workflow or a ComfyUI workflow.")
     if name:
@@ -638,14 +657,16 @@ def _is_pinned(source: dict, known: dict) -> bool:
                 and source.get("sha256") and pin.get("sha256") == source["sha256"])
 
 
-def _missing_entry(slot: str, ref: dict, reg: dict, known: dict) -> dict:
+def _missing_entry(slot: str, ref: dict, reg: dict, known: dict, taken: set) -> dict:
     from localm.model_manager.comfy_resolve import search_refusal
     filename = ref.get("file") or ref["name"]
     out = {"slot": slot, "name": ref["name"], "filename": filename, "native": True,
            "searchable": False, "source": None}
     src = ref.get("source")
     pull_name = (ref["name"] if _PULL_NAME_RE.match(ref["name"]) and ref["name"] not in reg
-                 else None)
+                 and ref["name"] not in taken else None)
+    if pull_name:
+        taken.add(pull_name)
     if src is not None:
         out["source"] = {"repo": src["repo"], "file": src["file"],
                          "spec": f"{src['repo']}:{src['file']}", "sha256": src["sha256"],
@@ -667,9 +688,10 @@ def resolve(wf: dict, media: str, reg: Optional[dict] = None) -> dict:
     """What workflow *wf* sends with a *media* generate request, and what is
     missing: ``{"native_models", "loras", "params", "missing", "notes"}``.
 
-    A model resolves to its registered name when that entry's file exists,
-    else to the registered entry whose file has the workflow's file name
-    (a LoRA only to a ``lora`` entry). Every other model is listed in
+    A model resolves to its registered name when that entry's file exists
+    and has the workflow's file name (when the workflow names one), else to
+    the registered entry whose file has the workflow's file name (a LoRA only
+    to a ``lora`` entry). Every other model is listed in
     ``missing`` as ``{"slot", "name", "filename", "native", "searchable",
     "source"}``: ``source`` is the download (``spec``, ``sha256``,
     ``model_type``, the ``name`` to register it under or None, ``origin``
@@ -683,13 +705,19 @@ def resolve(wf: dict, media: str, reg: Optional[dict] = None) -> dict:
         reg = load_registry()
     known = known_sources()
     native_models, loras, missing, notes = {}, [], [], []
+    taken: set = set()
 
     def _one(slot: str, ref: dict, want_lora: bool) -> Optional[str]:
         entry = reg.get(ref["name"])
-        if isinstance(entry, dict) and _entry_file(entry) is not None:
-            if not want_lora or entry.get("model_type") == "lora":
+        path = _entry_file(entry) if isinstance(entry, dict) else None
+        if path is not None:
+            if want_lora and entry.get("model_type") != "lora":
+                notes.append(f"'{ref['name']}' is registered, but not as a LoRA.")
+            elif ref.get("file") and path.name != ref["file"]:
+                notes.append(f"{slot}: the registered '{ref['name']}' is {path.name}, "
+                             f"not the workflow's {ref['file']}.")
+            else:
                 return ref["name"]
-            notes.append(f"'{ref['name']}' is registered, but not as a LoRA.")
         if ref.get("file"):
             hit = _registered_by_file(reg, ref["file"], want_lora)
             if hit is not None:
@@ -697,7 +725,7 @@ def resolve(wf: dict, media: str, reg: Optional[dict] = None) -> dict:
                     notes.append(f"{slot}: using the registered model '{hit}' "
                                  f"({ref['file']}).")
                 return hit
-        missing.append(_missing_entry(slot, ref, reg, known))
+        missing.append(_missing_entry(slot, ref, reg, known, taken))
         return None
 
     for slot, ref in wf["models"].items():

@@ -433,3 +433,82 @@ def test_known_sources_cover_the_curated_comfy_files():
         assert known[name]["sha256"]
     assert known["flux1-schnell-Q4_K_S.gguf"] == nw.FLUX_SCHNELL_Q4
     assert Path(nw.FLUX_DEV_Q4["file"]).suffix == ".gguf"
+
+
+HUGE = 10 ** 400
+
+
+class TestCraftedInputIsA400:
+    @pytest.mark.parametrize("over", [
+        {"params": {"steps": HUGE}},
+        {"params": {"cfg": -HUGE}},
+        {"params": {"sample_method": 5}},
+        {"params": {"scheduler": ["karras"]}},
+        {"loras": [{"name": "l", "strength": HUGE}]},
+    ])
+    def test_save_route(self, over):
+        with _client() as c:
+            r = c.post("/api/image/native-workflows", json={"workflow": _wf(**over)})
+        assert r.status_code == 400, r.text
+
+    @pytest.mark.parametrize("data", [
+        {"nodes": [{"id": 1, "type": "KSampler", "inputs": [{"name": "steps", "link": [1]}],
+                    "widgets_values": [1, "fixed", 5]}], "links": [[[1], 2, 0, 1, 0]]},
+        {"nodes": [{"id": 1, "type": "KSampler", "inputs": [], "widgets_values": [1, 5]}],
+         "links": [{"id": [1], "origin_id": 2, "origin_slot": [1]}]},
+        {"nodes": [{"id": [1], "type": "KSampler", "inputs": "x", "widgets_values": [1, 5]}],
+         "links": "nope"},
+        {"1": {"class_type": "KSampler", "inputs": [["steps", 5]]},
+         "2": {"class_type": "KSampler", "inputs": {"steps": HUGE}}},
+    ])
+    def test_import_route(self, data):
+        with _client() as c:
+            r = c.post("/api/image/native-workflows/import", json={"data": data})
+        assert r.status_code in (200, 400), r.text
+
+    def test_one_bad_file_does_not_break_the_list(self):
+        d = nw.native_dir("image")
+        d.mkdir(parents=True)
+        bad = _wf(params={"steps": 1})
+        text = json.dumps(bad).replace('"steps": 1', '"steps": 1' + "0" * 400)
+        (d / "huge.json").write_text(text, encoding="utf-8")
+        nw.save_workflow("image", _wf(name="Fine"))
+        with _client() as c:
+            r = c.get("/api/image/native-workflows")
+            assert r.status_code == 200, r.text
+            user = {w["id"]: w for w in r.json()["workflows"] if not w["builtin"]}
+            assert "error" in user["huge"] and "error" not in user["Fine"]
+            assert c.get("/api/image/native-workflows/huge").status_code == 400
+
+
+@pytest.mark.parametrize("name", ["CON", "nul", "aux", "COM1", "lpt9"])
+def test_device_names_are_saved_under_another_id(name):
+    wid = nw.save_workflow("image", _wf(name=name))
+    assert wid.lower() == f"{name.lower()}-workflow"
+    assert nw.get_workflow("image", wid)["name"] == name
+
+
+def test_registered_name_with_another_file_is_not_used_silently(tmp_path):
+    other = _file(tmp_path, "other.gguf")
+    pinned = _file(tmp_path, "flux-q8.gguf")
+    wf = nw.parse_workflow(_wf(models={"model": {"name": "flux", "source": _src(
+        file="flux-q8.gguf")}}), "image")
+    res = nw.resolve(wf, "image", {"flux": {"path": str(other), "model_type": "diffusion-unet"}})
+    assert res["native_models"] == {} and res["missing"][0]["filename"] == "flux-q8.gguf"
+    assert any("other.gguf" in n and "flux-q8.gguf" in n for n in res["notes"])
+    res = nw.resolve(wf, "image", {"flux": {"path": str(other), "model_type": "diffusion-unet"},
+                                   "q8": {"path": str(pinned), "model_type": "diffusion-unet"}})
+    assert res["native_models"] == {"model": "q8"}
+    res = nw.resolve(nw.parse_workflow(_wf(models={"model": {"name": "flux"}}), "image"),
+                     "image", {"flux": {"path": str(other), "model_type": "diffusion-unet"}})
+    assert res["native_models"] == {"model": "flux"} and res["notes"] == []
+
+
+def test_two_missing_models_never_share_a_pull_name():
+    wf = nw.parse_workflow(_wf(models={
+        "vae": {"name": "ae", "source": _src(file="ae.safetensors", model_type="vae")},
+        "clip_l": {"name": "ae", "source": _src(repo="o/r2", file="x/ae.safetensors",
+                                                 model_type="text-encoder")}}), "image")
+    names = [m["source"]["name"] for m in nw.resolve(wf, "image", {})["missing"]]
+    assert sorted(names, key=str) == ["ae", None] or sorted(names, key=str) == [None, "ae"]
+    assert names.count("ae") == 1

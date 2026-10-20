@@ -283,3 +283,50 @@ def test_import_stores_the_converted_workflow():
     main = next(m for m in res["missing"] if m["slot"] == "model")
     assert main["source"]["origin"] == "curated"
     assert main["source"]["spec"] == "city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf"
+
+
+def test_title_with_a_control_character_still_imports():
+    ui = _ui(_flux_api())
+    ui["extra"]["title"] = "Fox\x07 graph"
+    wf, _ = ci.convert(ui, "image", reg={})
+    assert wf["name"] == "Fox graph"
+
+
+def test_more_dropped_values_are_reported():
+    api = _flux_api()
+    api["3"] = {"class_type": "KSamplerAdvanced",
+                "inputs": {"model": ["13", 0], "add_noise": "disable", "noise_seed": 1,
+                           "steps": 20, "cfg": 1.0, "sampler_name": "euler",
+                           "scheduler": "simple", "positive": ["26", 0], "negative": ["7", 0],
+                           "latent_image": ["27", 0], "start_at_step": 0, "end_at_step": 10000,
+                           "return_with_leftover_noise": "enable"}}
+    api["90"] = {"class_type": "ModelSamplingSD3", "inputs": {"shift": 2.0}}
+    api["91"] = {"class_type": "ModelSamplingSD3", "inputs": {"shift": 3.0}}
+    wf, report = ci.convert(api, "video", reg={})
+    notes = " ".join(report["notes"])
+    assert "add_noise 'disable'" in notes and "return_with_leftover_noise 'enable'" in notes
+    assert "ModelSamplingSD3 #91: a second sampling shift" in notes
+    assert wf["params"]["flow_shift"] == 2.0
+
+
+def test_music_duration_conflict_and_second_encoder_are_reported():
+    api = {
+        "1": {"class_type": "EmptyAceStepLatentAudio", "inputs": {"seconds": 60.0}},
+        "2": {"class_type": "TextEncodeAceStepAudio15",
+              "inputs": {"tags": "a", "lyrics": "", "duration": 90.0}},
+        "3": {"class_type": "TextEncodeAceStepAudio", "inputs": {"tags": "b", "lyrics": ""}},
+    }
+    wf, report = ci.convert(api, "music", reg={})
+    notes = " ".join(report["notes"])
+    assert wf["params"]["duration_seconds"] == 60.0 and wf["params"]["tags"] == "a"
+    assert "duration 90 differs" in notes and "#3: a second one was not used" in notes
+
+
+def test_huge_and_non_dict_values_are_notes_not_crashes():
+    api = _flux_api()
+    api["27"]["inputs"]["width"] = 10 ** 400
+    api["13"]["inputs"]["strength_model"] = 10 ** 400
+    api["50"] = {"class_type": "VAELoader", "inputs": ["ae.safetensors"]}
+    wf, report = ci.convert(api, "image", reg={})
+    assert "width" not in wf["params"] and wf["loras"][0]["strength"] == 1.0
+    assert any("VAELoader #50: its inputs are not readable" in n for n in report["notes"])

@@ -14,6 +14,7 @@ import { t } from "./i18n.js";
 import { saveTextFile } from "./settings-perf.js";
 
 const NWF_FORMAT = "localm-native-workflow";
+const NWF_MAIN_SLOT = { image: "model", video: "model", music: "dit" };
 
 /** The number in input *id*, or null when it is empty or not a number. */
 export function nwfNumber(id) {
@@ -54,6 +55,7 @@ async function nwfJSON(r) {
  *  page's job log. */
 export function createNativeWorkflowCard({ media, mountId, picker, fields, logId }) {
   const base = `/api/${media}/native-workflows`;
+  const mainSlot = NWF_MAIN_SLOT[media] || "model";
   const storeKey = `localm.nativeWorkflow.${media}`;
   let list = [];
   let selected = null;
@@ -220,7 +222,8 @@ export function createNativeWorkflowCard({ media, mountId, picker, fields, logId
   async function prepare() {
     if (!pending) return true;
     const chosen = picker.choice ? picker.choice().native_models || {} : {};
-    if (pending.missing.some((m) => m.slot === "model") && chosen.model) {
+    const mainPending = pending.missing.some((m) => m.slot === mainSlot);
+    if (mainPending && chosen[mainSlot]) {
       pending = null;
       render(document.getElementById(mountId));
       return true;
@@ -241,9 +244,9 @@ export function createNativeWorkflowCard({ media, mountId, picker, fields, logId
       render(document.getElementById(mountId));
     } catch (e) {
       toast(t("nativeWorkflows.checkFailed", { message: e.message }), true);
-      return true;
+      return !mainPending;
     }
-    const main = pending && pending.missing.find((m) => m.slot === "model");
+    const main = pending && pending.missing.find((m) => m.slot === mainSlot);
     if (main) {
       toast(t("nativeWorkflows.mainMissing", { filename: main.filename }), true);
       return false;
