@@ -61,6 +61,7 @@ from .browser import (
 from .rag import tool_rag_list_collections, tool_rag_search
 from .references import tool_find_references
 from .tasks import tool_read_todos, tool_set_todos
+from .toolsearch import tool_search_tools
 
 @dataclass
 class ToolDef:
@@ -108,6 +109,30 @@ SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
 # edit_files is edit_file's exact-string replacement applied to N files in one
 # call, each path put through the same _confine() check, so it grants no capability
 # the allowlist did not already grant; it only makes the same edit atomic.
+
+# Built-in tools the system prompt lists by name and one line only while
+# search_tools is enabled; search_tools returns their full usage on demand. Every
+# tool flagged untrusted_docs (MCP and plugin tools) is deferred the same way. A
+# deferred tool stays registered and callable.
+DEFERRED_TOOLS: frozenset[str] = frozenset({
+    "git_commit", "git_push", "git_create_branch",
+    "run_shell_background", "check_shell_job", "kill_shell_job",
+    "browser_navigate", "browser_read", "browser_click", "browser_fill",
+    "browser_screenshot", "browser_console", "browser_network", "browser_close",
+    "rag_list_collections", "rag_search",
+    "generate_image", "edit_notebook_cell", "read_env",
+    "spawn_agent_background", "check_agent_job", "dispatch_parallel",
+})
+
+# The tool that returns deferred tools' full usage.
+TOOL_SEARCH_TOOL = "search_tools"
+
+
+def is_deferred(name: str, tool) -> bool:
+    """True when *tool* (registered as *name*) is documented on demand rather
+    than in full in the system prompt: a built-in in ``DEFERRED_TOOLS`` or any
+    tool flagged ``untrusted_docs``."""
+    return name in DEFERRED_TOOLS or getattr(tool, "untrusted_docs", False) is True
 
 
 def _spawn_role_help() -> str:
@@ -677,6 +702,22 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "resuming a session, or whenever you are unsure what is left to do."
         ),
         params={},
+    ),
+    "search_tools": ToolDef(
+        name="search_tools",
+        fn=tool_search_tools,
+        description=(
+            "Get the full usage (arguments and an example call) of tools listed "
+            "under OTHER TOOLS or EXTERNAL tools, which are named there without "
+            "their arguments. Call it before the first use of such a tool. Pass "
+            "keywords (e.g. \"git commit\", \"browser\") or \"select:name1,name2\" "
+            "for exact names."
+        ),
+        params={
+            "query": {"type": "string",
+                      "description": "Keywords, or select:name1,name2 for exact tool names",
+                      "required": True},
+        },
     ),
     "dispatch_parallel": ToolDef(
         name="dispatch_parallel",

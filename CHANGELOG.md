@@ -11,6 +11,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Changed
+
+- **The coder's system prompt is shorter.** Less frequent tools (git commit, branch and push,
+  background jobs, notebooks, image generation, Knowledge search, the browser, and MCP and
+  plugin tools) are listed by name and fetched with the new `search_tools` tool when needed,
+  and with `--native-tools` the prompt no longer repeats the argument schemas the tools API
+  already carries. The prompt stays identical from turn to turn, so the server can reuse its
+  prompt cache.
+
 ### Fixed
 
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt

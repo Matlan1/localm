@@ -579,8 +579,11 @@ class HTTPBackend(BaseLLMBackend):
         # ``thinking`` is sent only to a localm server, as
         # chat_template_kwargs.enable_thinking; other servers do not receive it.
         thinking = kwargs.pop("thinking", None)
+        tool_defs = kwargs.pop("tool_defs", None)
+        if tool_defs is None:
+            tool_defs = self._tool_defs
         if self.anthropic:
-            return self._anthropic_body(messages, stream, **kwargs)
+            return self._anthropic_body(messages, stream, tool_defs=tool_defs, **kwargs)
         if thinking is not None and self._is_local_server:
             kwargs["chat_template_kwargs"] = {"enable_thinking": bool(thinking)}
         body = {
@@ -590,8 +593,8 @@ class HTTPBackend(BaseLLMBackend):
             **self._extra,
             **kwargs,
         }
-        if self.native_tools and self._tool_defs and not self._is_local_server:
-            body["tools"] = self._tool_defs
+        if self.native_tools and tool_defs and not self._is_local_server:
+            body["tools"] = tool_defs
             body["tool_choice"] = "auto"
         if self._is_local_server:
             if not self.model_pinned:
@@ -600,7 +603,8 @@ class HTTPBackend(BaseLLMBackend):
                 body["required_capabilities"] = list(self.required_capabilities)
         return {k: v for k, v in body.items() if v is not None}
 
-    def _anthropic_body(self, messages: list[dict], stream: bool, **kwargs) -> dict:
+    def _anthropic_body(self, messages: list[dict], stream: bool,
+                        tool_defs: list | None = None, **kwargs) -> dict:
         """
         Translate an OpenAI-style message list into the Anthropic Messages
         API request shape:
@@ -608,7 +612,12 @@ class HTTPBackend(BaseLLMBackend):
           - system-role messages are concatenated into a top-level ``system``
             field (Anthropic does not accept a ``system`` role in ``messages``).
           - ``max_tokens`` is required, so a default is supplied when absent.
+
+        *tool_defs* overrides the definitions registered with ``set_tools``
+        for this one request; None uses the registered ones.
         """
+        if tool_defs is None:
+            tool_defs = self._tool_defs
         system_parts: list[str] = []
         convo: list[dict] = []
         for m in messages:
@@ -634,10 +643,10 @@ class HTTPBackend(BaseLLMBackend):
             body["system"] = "\n\n".join(system_parts)
         if not body.get("max_tokens"):
             body["max_tokens"] = self._ANTHROPIC_DEFAULT_MAX_TOKENS
-        if self.native_tools and self._tool_defs:
+        if self.native_tools and tool_defs:
             # Anthropic's tool schema differs from OpenAI's nested form;
             # flatten {"function": {...}} entries to top-level name/schema.
-            body["tools"] = [self._anthropic_tool(t) for t in self._tool_defs]
+            body["tools"] = [self._anthropic_tool(t) for t in tool_defs]
         return {k: v for k, v in body.items() if v is not None}
 
     @staticmethod

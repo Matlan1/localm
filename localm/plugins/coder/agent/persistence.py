@@ -469,6 +469,9 @@ class _PersistenceMixin:
             # The model's own task list (tools/tasks.py). An older build ignores
             # the extra key, and an older checkpoint restores as no todos.
             "todos": self.get_todos(),
+            # The tools search_tools activated, so a resumed native-tools session
+            # declares the schemas its restored conversation already relies on.
+            "activated_tools": sorted(getattr(self, "_activated_tools", ())),
             # Pointers to work delegated children COMMITTED on their own branches.
             # The branches are durable; this keeps the pointer to them durable too,
             # so a resumed session still shows the footer. The change-sets are
@@ -586,8 +589,19 @@ class _PersistenceMixin:
         # load_checkpoint()'s migration path already backfills it.
         self._session_title = data.get("title") or _first_user_text(self._messages)
         self.set_todos(normalize_todos(data.get("todos")))
+        self._restore_activated_tools(data.get("activated_tools"))
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))
+
+    def _restore_activated_tools(self, raw) -> None:
+        """Restore the search_tools activations from a checkpoint: only string
+        names of tools registered now are kept; anything else (a missing key,
+        a non-list, an unknown name) restores as no activation."""
+        registry = _agent.TOOL_REGISTRY
+        names = raw if isinstance(raw, list) else []
+        with self._activated_lock:
+            self._activated_tools = frozenset(
+                n for n in names if isinstance(n, str) and n in registry)
 
     def _restore_changed_files(self, raw) -> None:
         """Rebuild the changed-files tracker from a checkpoint.

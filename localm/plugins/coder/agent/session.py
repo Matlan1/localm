@@ -54,6 +54,9 @@ class _SessionMixin:
         self._review_task = ""
         self._error_trace.clear()
         self._shell_baseline_captured = False
+        # The docs search_tools returned lived in the dropped conversation.
+        with self._activated_lock:
+            self._activated_tools = frozenset()
         self._git_baseline = None
         # A cleared conversation is a NEW session, not a continuation of whatever
         # this agent had resumed, so it gets its own checkpoint identity and title.
@@ -85,6 +88,7 @@ class _SessionMixin:
             untrusted_provenance=self._untrusted_provenance,
             custom_instructions=self._custom_instructions,
             role_brief=self._role_brief(),
+            native_tools=self._native_tools_effective,
         )
 
     def _role_brief(self) -> str:
