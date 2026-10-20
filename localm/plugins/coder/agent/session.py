@@ -64,6 +64,11 @@ class _SessionMixin:
         self._had_any_failure = False
         self._unverified_writes.clear()
         self._durable_notes = []
+        self._pinned_requests = []
+        self._pinned_requests_dropped = 0
+        self._usage_base = None
+        self._compact_futile = False
+        self._server_compacted = False
         self._review_task = ""
         self._error_trace.clear()
         self._shell_baseline_captured = False
@@ -168,6 +173,8 @@ class _SessionMixin:
         self.gen_kwargs = new_gen_kwargs
         self._grammar_confirmed_unsupported = False
         self._lazy_grammar_confirmed_unsupported = False
+        self._usage_base = None
+        self._compact_futile = False
         self._rebuild_system_prompt()
         self._audit.notice(
             "model_switch", f"switched model {old_model} -> {model} at turn {self.turns}")

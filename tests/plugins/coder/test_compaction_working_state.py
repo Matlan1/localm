@@ -612,7 +612,8 @@ def test_every_entry_point_carries_the_block(proj, home, monkeypatch):
     agent = _agent(proj)
     _write(agent, "b.py", "y = 2\n")
     _history(agent)
-    monkeypatch.setattr(type(agent), "_fill_ratio", lambda self: 0.99)
+    monkeypatch.setattr(type(agent), "_known_ctx_window", lambda self: 16384)
+    monkeypatch.setattr(type(agent), "_prompt_tokens_estimate", lambda self: 99_999)
     agent._maybe_compact(interactive=False)
     assert "- b.py (new, +1)" in _block(agent)
 

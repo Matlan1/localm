@@ -266,9 +266,13 @@ class _LoopMixin:
 
         def start_deferred_mcp(self) -> list: ...
 
+        # Set by Agent (core.py) through _ContextMixin.
+        def _note_typed_request(self, text) -> None: ...
+
         def report_deferred_mcp(self, interactive: bool) -> None: ...
 
-    def run_task(self, task: str, attachments: str = "") -> str:
+    def run_task(self, task: str, attachments: str = "", *,
+                 record_request: bool = True) -> str:
         """
         Run a single task to completion (non-interactive).
 
@@ -286,6 +290,8 @@ class _LoopMixin:
             self._session_title = task   # resume-listing display title
         # The raw request, before _with_episodes can prepend a lessons preamble.
         self._last_user_request = task
+        if record_request and getattr(self, "parent", None) is None:
+            self._note_typed_request(task)
         message = self._with_episodes(task)
         self._add_user_with_plan_note(compose(message, attachments) if attachments else message)
         return self._loop(interactive=False)
@@ -303,7 +309,8 @@ class _LoopMixin:
         self._add_user_with_plan_note(message)
         return self._loop(interactive=False)
 
-    def chat(self, user_input: str, attachments: str = "") -> str:
+    def chat(self, user_input: str, attachments: str = "", *,
+             record_request: bool = True) -> str:
         """
         Send one user message in an ongoing interactive session.
 
@@ -321,6 +328,8 @@ class _LoopMixin:
         # Recall relevant past lessons on the first turn of a session (the turn
         # that sets the session's task); later turns keep the same context.
         self._last_user_request = user_input   # raw, see run_task
+        if record_request:
+            self._note_typed_request(user_input)
         if self._episodic and not self._episode_task:
             self._episode_task = user_input
             user_input = self._with_episodes(user_input)
@@ -438,6 +447,7 @@ class _LoopMixin:
                 # Mid-task steering: deliver queued user messages before the
                 # next LLM call so the agent reads them this turn.
                 for queued in self._drain_queued():
+                    self._note_typed_request(queued)
                     self._add_user(
                         "[user steering note - read this before continuing, it "
                         f"overrides earlier instructions where they conflict]\n{queued}"

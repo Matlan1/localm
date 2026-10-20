@@ -103,6 +103,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **`localm coder` no longer compacts after every turn.** With a model that leaves little room for context, the coder used to be summarised again on nearly every request, and reading a codebase file by file triggered a summary per file. It now compacts only when a request would take most of the context window, brings the session down to about half of it, and first drops the output of older tool calls (the model reads a file again when it needs it) before summarising anything. Everything you typed is kept word for word across compactions, and summaries list facts instead of prose. A model server that reports no context window, such as an online API, is no longer compacted at 4096 tokens.
 - **A vision projector is no longer offered as a model.** A pulled vision model registers its
   projector (`...-mmproj`) as a separate entry, and `GET /v1/models` listed it as a chat model.
   A request naming it unloaded the working model and then failed to load the projector. The
