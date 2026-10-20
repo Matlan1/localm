@@ -33,6 +33,9 @@ class _SessionMixin:
         """Clear conversation history. Allows answered with "a" end with it."""
         self._messages = []
         self._session_allowed = set()
+        store = getattr(self, "_spill_store", None)
+        if store is not None:
+            store.clear()
         self._turns = 0
         self._total_tokens = 0
         self._last_turn_tokens = 0

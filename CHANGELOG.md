@@ -49,6 +49,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   mode writes nothing. `compaction_flush = false` in `.localcoder/config.toml` turns the note
   pass off.
 
+- **`localm coder` keeps long tool output instead of cutting out the middle.** When a command or
+  search prints more than the agent is shown, the full text is kept in memory for the session
+  (never written to disk) and the agent can read any part of it back with the new `read_output`
+  tool, by line range or by pattern.
+
 ### Changed
 
 - **The coder's system prompt is shorter.** Less frequent tools (git commit, branch and push,
