@@ -252,7 +252,7 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
                 console.print("[yellow]Replacing existing build...[/yellow]")
             else:
                 if want != "auto":
-                    _accept_installed_backend(target, have)
+                    _accept_installed_backend(target, want)
                 else:
                     _print_pending_choice(target)
                 _sl._ensure_importable()
