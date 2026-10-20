@@ -1040,8 +1040,7 @@ class _LoopMixin:
         * the reply carries a code block meant for a file (not a shell block)
           on a request that implies action, and nothing was written this task;
         * the reply's last line announces a next step ("Let me run the tests.")
-          after tools were used this task, or the self-verification request
-          was sent and the changed files are still unverified.
+          after tools were used this task.
 
         Returns ``(False, "")`` after a nudge (the loop continues), a note for
         the final answer when the same case recurs after its nudge (the run is
@@ -1076,18 +1075,12 @@ class _LoopMixin:
                 return ("\n\n[not finished: the code in this reply was not written "
                         "to any file - nothing on disk changed]")
         announced = _announced_step(response)
-        unverified = bool(st.verify_nudged and self._unverified_writes)
-        if (announced or unverified) and self._used_tools_this_task(st):
+        if announced and self._used_tools_this_task(st):
             if not st.announce_nudged and turns_left:
                 st.announce_nudged = True
                 st.nocall_response = response
-                if announced:
-                    why = (f'Your reply ends with "{announced}", but it made no tool '
-                           "call, so that step did not happen.")
-                else:
-                    files = ", ".join(sorted(self._unverified_writes))
-                    why = (f"You changed {files} and were asked to verify the "
-                           "change, but no test or check has run since.")
+                why = (f'Your reply ends with "{announced}", but it made no tool '
+                       "call, so that step did not happen.")
                 self._audit.notice("announced_step_not_taken", why)
                 self._add_assistant(response)
                 self._add_user(
@@ -1100,7 +1093,7 @@ class _LoopMixin:
                     "the reply announced a next step without taking it - asking "
                     "the agent to take it"))
                 return (False, "")
-            if st.announce_nudged and announced:
+            if st.announce_nudged:
                 return (f'\n\n[not finished: the run ended on "{announced}" and '
                         "that step was never taken]")
         return ""

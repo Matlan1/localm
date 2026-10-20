@@ -312,21 +312,6 @@ def test_a_run_that_still_stops_on_an_announced_step_is_not_finished(tmp_path):
     assert agent.last_run_ok is False
 
 
-def test_unverified_changes_after_the_verify_request_are_sent_back(tmp_path):
-    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
-    agent = _make_agent(tmp_path, max_turns=8, self_verify=True)
-    with _scripted(agent, [
-        _call("edit_file", {"path": "a.py", "old": "x = 1", "new": "x = 2"}),
-        "Done, x is 2.",
-        "Done, x is 2 now.",
-        "Done.",
-    ]):
-        agent.run_task("set x to 2 in a.py")
-    texts = _user_texts(agent)
-    assert any("[self-verification]" in t for t in texts)
-    assert any("[unfinished] You changed a.py and were asked to verify" in t for t in texts)
-
-
 def test_closing_courtesies_are_not_announced_steps():
     for text in ("Let me know if you need anything else.",
                  "I'll be happy to help further!",

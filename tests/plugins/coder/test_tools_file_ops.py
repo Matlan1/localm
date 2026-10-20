@@ -213,8 +213,9 @@ class TestEditFile:
         f = tmp_path / "code.py"
         f.write_text("def foo(): pass\n")
         r = tool_edit_file(tmp_path, "code.py", old="def foo(): pass", new="def foo(")
-        assert r.ok  # write still succeeds
+        assert not r.ok
         assert "syntax" in r.output.lower()
+        assert f.read_text() == "def foo(): pass\n"
 
 
 class TestEditFileWhitespaceTolerant:
