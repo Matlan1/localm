@@ -377,6 +377,8 @@ class _LoopMixin:
 
         max_turns: int
         patch_mode: bool
+        cwd: Path
+        _unverified_writes: set
         _audit: Any
 
         def _add_user(self, content) -> None: ...
