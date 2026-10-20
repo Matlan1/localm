@@ -1,4 +1,10 @@
 version: 2
+# The AMD wheel index the win32 torch, torchvision and ROCm SDK wheels in uv.lock
+# come from. Anonymous; declared so update jobs may reach the host.
+registries:
+  amd-rocm-wheels:
+    type: python-index
+    url: https://repo.amd.com/rocm/whl/gfx103X-all/
 updates:
   # "uv" (not "pip"): native support for pyproject.toml + uv.lock together, GA since
   # 2025-03. The generic "pip" ecosystem only bumps pyproject.toml's version pin and
@@ -6,6 +12,8 @@ updates:
   # lockfile was always left stale) - #430/#431/#432/#433/#434 all hit this.
   - package-ecosystem: "uv"
     directory: "/"
+    registries:
+      - amd-rocm-wheels
     schedule:
       interval: "weekly"
     # Minor and patch updates arrive as one pull request; major updates and the
