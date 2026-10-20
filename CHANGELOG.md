@@ -46,6 +46,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   hook that exits 2 blocks the call and tells the agent why; a post hook that exits 2 sends its
   output to the agent, for example a linter's complaints. A project's hooks run only after you
   trust them, and never in a restricted session.
+- **`localm coder` keeps long tool output instead of cutting out the middle.** When a command or
+  search prints more than the agent is shown, the full text is kept in memory for the session
+  (never written to disk) and the agent can read any part of it back with the new `read_output`
+  tool, by line range or by pattern.
 
 ### Changed
 
